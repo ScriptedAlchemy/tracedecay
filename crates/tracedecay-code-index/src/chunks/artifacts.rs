@@ -12,7 +12,7 @@ use tracedecay_domain::{
     RelationEdgeKindV1, SourceSpan, SymbolOccurrenceId,
 };
 
-use super::{ChunkingFailureV1, CodeFileChunksV1, canonical_edge_key};
+use super::{ChunkingFailureV1, CodeFileChunksV1, canonical_edge_key, symbol_occurrence_id};
 use crate::clones::CodeIndexCloneBodyV1;
 use crate::extract::ExtractionBatchV1;
 use crate::extract::parser_import_rows_digest;
@@ -379,16 +379,39 @@ impl CodeFileIndexArtifactsV1 {
             .collect::<std::collections::BTreeSet<_>>();
         if self.clone_bodies.windows(2).any(|pair| {
             pair[0].occurrence.symbol_occurrence_id >= pair[1].occurrence.symbol_occurrence_id
-        }) || self.clone_bodies.iter().any(|body| {
-            body.occurrence.path.is_empty()
-                || body.occurrence.body_span.is_empty()
-                || body.occurrence.payload_digest != body.payload.payload_digest
-                || (validate_payloads && body.payload.validate().is_err())
-                || !occurrences.contains(&body.occurrence.symbol_occurrence_id)
         }) {
             return Err(ChunkingFailureV1::NonCanonicalIdentity(
-                "clone body evidence is not canonically bound to file symbols".to_owned(),
+                "clone body evidence is not in strict symbol-occurrence order".to_owned(),
             ));
+        }
+        for body in &self.clone_bodies {
+            if body.occurrence.path.is_empty() {
+                return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                    "clone body evidence has an empty path".to_owned(),
+                ));
+            }
+            if body.occurrence.body_span.is_empty() {
+                return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                    "clone body evidence has an empty body span".to_owned(),
+                ));
+            }
+            if body.occurrence.payload_digest != body.payload.payload_digest {
+                return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                    "clone body evidence payload digest does not match its payload".to_owned(),
+                ));
+            }
+            if validate_payloads {
+                if let Err(detail) = body.payload.validate() {
+                    return Err(ChunkingFailureV1::NonCanonicalIdentity(format!(
+                        "clone body evidence payload is not canonical: {detail}"
+                    )));
+                }
+            }
+            if !occurrences.contains(&body.occurrence.symbol_occurrence_id) {
+                return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                    "clone body evidence is not bound to a file symbol".to_owned(),
+                ));
+            }
         }
         Ok(())
     }
@@ -548,41 +571,25 @@ impl CodeFileIndexArtifactsV1 {
         } else {
             self.validate_reusing_clone_payloads()?;
         }
-        let chunks = self
-            .chunks
-            .rematerialize_for_generation(generation_id.clone(), file_occurrence_id.clone())?;
         let mut occurrences = BTreeMap::new();
-        for (prior, current) in self.chunks.chunks.iter().zip(&chunks.chunks) {
-            if let Some(prior_occurrence) = &prior.anchor.symbol_occurrence_id {
-                let current_occurrence = current
-                    .anchor
-                    .symbol_occurrence_id
-                    .as_ref()
-                    .ok_or_else(|| {
-                        ChunkingFailureV1::NonCanonicalIdentity(
-                            "rematerialized symbol occurrence is missing".to_owned(),
-                        )
-                    })?
-                    .clone();
-                match occurrences.get(prior_occurrence) {
-                    Some(existing) if existing != &current_occurrence => {
-                        return Err(ChunkingFailureV1::NonCanonicalIdentity(
-                            "symbol occurrence rematerialized inconsistently".to_owned(),
-                        ));
-                    }
-                    _ => {
-                        occurrences.insert(prior_occurrence.clone(), current_occurrence);
-                    }
-                }
-            }
+        for symbol in &self.symbols {
+            occurrences.insert(
+                symbol.occurrence.clone(),
+                symbol_occurrence_id(&file_occurrence_id, &symbol.identity)?,
+            );
         }
+        let chunks = self.chunks.rematerialize_for_generation(
+            generation_id.clone(),
+            file_occurrence_id.clone(),
+            &occurrences,
+        )?;
 
         let mut symbols = self.symbols.clone();
         for symbol in &mut symbols {
-            // Carried records are shared with the prior generation; rebinding
-            // writes into this generation's own copy.
-            let symbol = Arc::make_mut(symbol);
-            symbol.occurrence = rematerialized_occurrence(&occurrences, &symbol.occurrence)?;
+            let occurrence = rematerialized_occurrence(&occurrences, &symbol.occurrence)?;
+            if occurrence != symbol.occurrence {
+                Arc::make_mut(symbol).occurrence = occurrence;
+            }
         }
         symbols.sort_by(|left, right| left.occurrence.cmp(&right.occurrence));
 

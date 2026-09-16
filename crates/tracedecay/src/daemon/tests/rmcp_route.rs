@@ -29,6 +29,18 @@ struct RmcpRouteFixture {
 }
 
 async fn rmcp_route_fixture(label: &str) -> RmcpRouteFixture {
+    rmcp_route_fixture_with_projects(label, &[]).await
+}
+
+/// Every project a test will mount is initialized here, before the engine
+/// exists. Initialization takes the profile's exclusive maintenance lease and
+/// writes the profile database; production never overlaps that with a live
+/// daemon, and an in-process engine writing the same file turns the fixture's
+/// `BEGIN IMMEDIATE` into a typed `database is locked` refusal under load.
+async fn rmcp_route_fixture_with_projects(
+    label: &str,
+    extra_projects: &[(&str, &str, &str)],
+) -> RmcpRouteFixture {
     let temp = TempDir::new().expect("route fixture");
     let project = temp.path().join("project");
     let profile_root = temp.path().join("profile");
@@ -36,6 +48,18 @@ async fn rmcp_route_fixture(label: &str) -> RmcpRouteFixture {
     std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("fixture source");
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&project, &client_identity).await;
+    for (directory, source_path, source) in extra_projects {
+        let extra = temp.path().join(directory);
+        let source_file = extra.join(source_path);
+        std::fs::create_dir_all(
+            source_file
+                .parent()
+                .expect("extra project source directory"),
+        )
+        .expect("extra project source directory");
+        std::fs::write(&source_file, source).expect("extra project source");
+        initialize_test_project(&extra, &client_identity).await;
+    }
     let _database_scope = enter_test_daemon_database_scope(&profile_root, label);
     let handshake = DaemonHandshake {
         project_path: Some(project),
@@ -623,17 +647,19 @@ async fn wait_for_count(counter: &AtomicUsize, expected: usize, message: &str) {
 }
 
 #[cfg(unix)]
+const RMCP_TARGET_PROJECT: (&str, &str, &str) = (
+    "target-project",
+    "src/target.rs",
+    "pub const RMCP_SELECTED_TARGET_MARKER: &str = \"target-beta\";\n",
+);
+
+/// Mounts the target project the fixture already initialized through
+/// [`RMCP_TARGET_PROJECT`].
+#[cfg(unix)]
 async fn mount_rmcp_target(
     fixture: &RmcpRouteFixture,
 ) -> (DaemonHandshake, String, ProjectServerKey, ProjectRouteKey) {
-    let project = fixture._temp.path().join("target-project");
-    std::fs::create_dir_all(project.join("src")).expect("target source directory");
-    std::fs::write(
-        project.join("src/target.rs"),
-        "pub const RMCP_SELECTED_TARGET_MARKER: &str = \"target-beta\";\n",
-    )
-    .expect("target source marker");
-    initialize_test_project(&project, &fixture.handshake.client_identity).await;
+    let project = fixture._temp.path().join(RMCP_TARGET_PROJECT.0);
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
         client_identity: fixture.handshake.client_identity.clone(),
@@ -670,7 +696,9 @@ fn response_text(response: &Value) -> &str {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn selected_target_rmcp_flushes_response_and_disconnect_cancels_selector_owner() {
-    let fixture = rmcp_route_fixture("rmcp-selected-target-disconnect").await;
+    let fixture =
+        rmcp_route_fixture_with_projects("rmcp-selected-target-disconnect", &[RMCP_TARGET_PROJECT])
+            .await;
     let (_target_handshake, target_project_id, target_key, _target_route) =
         mount_rmcp_target(&fixture).await;
     let target_server = {

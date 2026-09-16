@@ -27,13 +27,13 @@ export const CODE_VIEW_DEFINITIONS = {
   },
   'shared-code': {
     label: 'Shared Code',
-    note: 'exact and verified near-clone families',
-    status: 'pending',
+    note: 'verified exact and rename-normalized copies of the selected body',
+    status: 'mounted',
   },
   compare: {
     label: 'Compare',
-    note: 'two revisions in one stable union layout',
-    status: 'pending',
+    note: 'two exact revisions in one identity-stable union layout',
+    status: 'mounted',
   },
 } as const satisfies Record<
   CodeView,
@@ -93,6 +93,10 @@ export function writeCodeLocation(
   return next;
 }
 
+/** Whether a view's body may open: `null` when it may, otherwise the state a
+ * reader is told instead. Trace and Shared Code are both readings *of one
+ * selected symbol occurrence*, so they share the focus gate; Compare carries
+ * its own revision selection and Topology needs nothing. */
 export function codeViewBlocker(
   view: CodeView,
   focus: CodeFocusState,
@@ -105,49 +109,47 @@ export function codeViewBlocker(
         detail: 'The fixed structural treemap projection is not mounted.',
       };
     case 'topology':
-      return null;
-    case 'trace': {
-      switch (focus) {
-        case 'available':
-          return null;
-        case 'loading':
-          return {
-            kind: 'loading',
-            title: 'Resolving the selected symbol',
-            detail: 'Trace will open after the graph resolves the URL identity.',
-          };
-        case 'unavailable':
-          return {
-            kind: 'unavailable',
-            title: 'The selected symbol is unavailable',
-            detail: 'The current graph generation did not resolve the URL identity.',
-          };
-        case 'absent':
-          return {
-            kind: 'unavailable',
-            title: 'Trace needs a selected symbol',
-            detail: 'Select a symbol in Topology, then return to Trace.',
-          };
-        default: {
-          const unhandled: never = focus;
-          return unhandled;
-        }
-      }
-    }
-    case 'shared-code':
-      return {
-        kind: 'unavailable',
-        title: 'Shared Code is unavailable',
-        detail: 'Exact and near-clone family projections are not mounted.',
-      };
     case 'compare':
-      return {
-        kind: 'unavailable',
-        title: 'Compare is unavailable',
-        detail: 'Revision-pair identity and union-layout projections are not mounted.',
-      };
+      return null;
+    case 'trace':
+    case 'shared-code':
+      return focusBlocker(CODE_VIEW_DEFINITIONS[view].label, focus);
     default: {
       const unhandled: never = view;
+      return unhandled;
+    }
+  }
+}
+
+/** Is the selected view one that needs a symbol occurrence before it opens? */
+export function codeViewNeedsFocus(view: CodeView): boolean {
+  return view === 'trace' || view === 'shared-code';
+}
+
+function focusBlocker(label: string, focus: CodeFocusState): CodeViewBlocker | null {
+  switch (focus) {
+    case 'available':
+      return null;
+    case 'loading':
+      return {
+        kind: 'loading',
+        title: 'Resolving the selected symbol',
+        detail: `${label} will open after the graph resolves the URL identity.`,
+      };
+    case 'unavailable':
+      return {
+        kind: 'unavailable',
+        title: 'The selected symbol is unavailable',
+        detail: 'The current graph generation did not resolve the URL identity.',
+      };
+    case 'absent':
+      return {
+        kind: 'unavailable',
+        title: `${label} needs a selected symbol`,
+        detail: `Select a symbol in Topology, then return to ${label}.`,
+      };
+    default: {
+      const unhandled: never = focus;
       return unhandled;
     }
   }

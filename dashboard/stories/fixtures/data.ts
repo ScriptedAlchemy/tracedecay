@@ -1110,6 +1110,133 @@ function graphSearchPayload(query = ''): Record<string, unknown> {
  * `max_depth` is the route's own default (`coerce_limit(params.max_depth, 6,
  * 10)`), since the panel prints it verbatim in the negative case.
  */
+/** A sixty-four-hex content digest with a readable prefix, for the clone and
+ * revision fixtures whose identities are digests rather than names. */
+function hexDigest(label: string): string {
+  const hex = Array.from(label, (char) => char.charCodeAt(0).toString(16)).join('');
+  return `sha256:${hex.padEnd(64, '0').slice(0, 64)}`;
+}
+
+/** One verified occurrence for `SimilarResultV1` (code_read_api.rs). */
+function similarOccurrence(i: number, generation: string): Record<string, unknown> {
+  const file = pick(GRAPH_FILES, i);
+  return {
+    symbol_occurrence_id: `sym-${i}`,
+    project_id: 'tracedecay',
+    repository_id: 'repository.b41f2c9d',
+    worktree_id: i % 2 === 0 ? 'worktree.primary' : null,
+    source_generation: generation,
+    snapshot_digest: hexDigest(`snapshot-${i}`),
+    path: file,
+    body_span: { start_byte: 1_200 + i * 310, end_byte: 1_200 + i * 310 + 742 },
+  };
+}
+
+/**
+ * `GET /api/plugins/graph/shared-code/family` — wire-true against
+ * `code_reads.rs::shared_family_result`: one digest group per class (the route
+ * answers one class per request and a body has one exact key per class), the
+ * selected source (`sym-0`) never among the members (serving.rs skips it),
+ * `member_count` the count of authorized members on this page, and `coverage`
+ * `partial` whenever a family is incomplete. The conservative family pages
+ * (`complete: false`, cursor) so the "load more" journey has a cursor to
+ * follow; the rename family is whole.
+ */
+function sharedCodeFamilyPayload(matchClass: string, cursor: string | null): Record<string, unknown> {
+  const generation = 'generation.2f8c41ab';
+  const conservative = matchClass === 'conservative_exact';
+  // The serving read skips the selected source before grouping, so `sym-0`
+  // never appears among its own family's members.
+  const members = cursor === null
+    ? [similarOccurrence(7, generation), similarOccurrence(14, generation)]
+    : [similarOccurrence(21, generation), similarOccurrence(28, generation)];
+  const complete = !conservative || cursor !== null;
+  return {
+    source: similarOccurrence(0, generation),
+    source_generation: generation,
+    coverage: { status: complete ? 'complete' : 'partial' },
+    families: [
+      {
+        family_digest: hexDigest(`family-${matchClass}`),
+        representative_payload_digest: hexDigest(`payload-${matchClass}`),
+        match_class: matchClass,
+        normalization_revision: conservative ? 3 : 4,
+        member_count: members.length,
+        members,
+        complete,
+        next_cursor: complete ? null : 'cursor.family.page-2',
+      },
+    ],
+  };
+}
+
+/**
+ * `GET /api/plugins/graph/compare/union-layout` — wire-true against
+ * `code_read_api::RevisionPairUnionLayoutV1`: identity-sorted file and symbol
+ * regions across `main` and `feature`, one of each change class.
+ */
+function revisionPairUnionLayoutPayload(): Record<string, unknown> {
+  const revision = (side: 'base' | 'head') => ({
+    reference: side === 'base' ? 'refs/heads/main' : 'refs/heads/feature',
+    revision: (side === 'base' ? '1' : '2').repeat(40),
+    tree: (side === 'base' ? '3' : '4').repeat(40),
+    generation: `generation.compare.${side}`,
+  });
+  const file = (i: number, side: 'base' | 'head', symbols: string[]) => ({
+    file_occurrence_id: `file.${side}.${i}`,
+    path: pick(GRAPH_FILES, i),
+    content_digest: hexDigest(`${side}-file-${i}`),
+    disposition: 'present',
+    symbol_identities: symbols,
+  });
+  const symbol = (identity: string, i: number, side: 'base' | 'head', content: string) => ({
+    symbol_occurrence_id: `sym-${side}-${i}`,
+    file_identity: `file-identity-${i}`,
+    file_occurrence_id: `file.${side}.${i}`,
+    qualified_name: `crate::${pick(GRAPH_SYMBOL_NAMES, i)}`,
+    name: pick(GRAPH_SYMBOL_NAMES, i),
+    kind: pick(GRAPH_KINDS, i),
+    file: pick(GRAPH_FILES, i),
+    content_digest: hexDigest(content),
+  });
+  return {
+    base: revision('base'),
+    head: revision('head'),
+    files: [
+      {
+        file_identity: 'file-identity-0',
+        change: 'unchanged',
+        base: file(0, 'base', ['symbol-identity-0']),
+        head: file(0, 'head', ['symbol-identity-0']),
+      },
+      {
+        file_identity: 'file-identity-1',
+        change: 'changed',
+        base: file(1, 'base', ['symbol-identity-1']),
+        head: file(1, 'head', ['symbol-identity-1']),
+      },
+      { file_identity: 'file-identity-2', change: 'added', base: null, head: file(2, 'head', ['symbol-identity-2']) },
+      { file_identity: 'file-identity-3', change: 'removed', base: file(3, 'base', ['symbol-identity-3']), head: null },
+    ],
+    symbols: [
+      {
+        symbol_identity: 'symbol-identity-0',
+        change: 'unchanged',
+        base: symbol('symbol-identity-0', 0, 'base', 'stable'),
+        head: symbol('symbol-identity-0', 0, 'head', 'stable'),
+      },
+      {
+        symbol_identity: 'symbol-identity-1',
+        change: 'changed',
+        base: symbol('symbol-identity-1', 1, 'base', 'before'),
+        head: symbol('symbol-identity-1', 1, 'head', 'after'),
+      },
+      { symbol_identity: 'symbol-identity-2', change: 'added', base: null, head: symbol('symbol-identity-2', 2, 'head', 'new') },
+      { symbol_identity: 'symbol-identity-3', change: 'removed', base: symbol('symbol-identity-3', 3, 'base', 'old'), head: null },
+    ],
+  };
+}
+
 function graphPathPayload(): Record<string, unknown> {
   const nodes = [graphNode(3, 'match', 118), graphNode(11, 'match', 96), graphNode(24, 'match', 71)];
   const ids = nodes.map((node) => node['id'] as string);
@@ -3149,6 +3276,7 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/plugins/graph/subgraph': envelope(subgraphPayload(null)),
   '/api/plugins/graph/path': envelope(graphPathPayload()),
   '/api/plugins/graph/strata': envelope(strataPayload()),
+  '/api/plugins/graph/compare/union-layout': envelope(revisionPairUnionLayoutPayload()),
   // Loom's canonical temporal read.
   '/api/loom/temporal': envelope(loomTemporalPayload()),
   // Delivery's pipeline overview: local git stages measured, forge-authority
@@ -4363,6 +4491,18 @@ export function resolveFixture(pathname: string, search = ''): unknown {
   if (pathname === '/api/plugins/graph/subgraph') {
     const nodeId = new URLSearchParams(search).get('node_id');
     return envelope(subgraphPayload(nodeId));
+  }
+  // Must also precede the prefix sweep: the family read is keyed by match class
+  // and cursor, and each class is a separate digest group on the wire.
+  if (pathname === '/api/plugins/graph/shared-code/family') {
+    const params = new URLSearchParams(search);
+    const payload = sharedCodeFamilyPayload(
+      params.get('match_class') ?? 'conservative_exact',
+      params.get('cursor'),
+    );
+    // `family_response` answers `partial` whenever the result's coverage is.
+    const coverage = payload['coverage'] as { status: string };
+    return envelope(payload, coverage.status === 'partial' ? 'partial' : 'ready');
   }
   // Must precede the FIXTURE_PREFIXES sweep: `/api/plugins/graph` is a prefix
   // fixture, so without this branch every neighbors read would resolve to the

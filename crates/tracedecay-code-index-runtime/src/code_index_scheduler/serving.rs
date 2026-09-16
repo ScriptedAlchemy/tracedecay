@@ -18,6 +18,10 @@ use std::{
 use same_file::Handle;
 use sha2::{Digest, Sha256};
 use tracedecay_application::code_index::DaemonCodeIndexControlV1;
+use tracedecay_code_extraction::{
+    CONSERVATIVE_CLONE_NORMALIZATION_REVISION_V1, MIN_AUTOMATIC_CLONE_BODY_TOKENS_V1,
+    RENAME_CLONE_NORMALIZATION_REVISION_V1,
+};
 use tracedecay_code_index_retention::code_index_generations::{
     DurableCodeTextArtifactDescriptorV1, DurablePublicationPointerV1,
     DurableSealedCodeGenerationIdentityV1, acquire_code_generation_store_lock,
@@ -26,7 +30,9 @@ use tracedecay_code_index_retention::code_index_generations::{
 };
 use tracedecay_contracts::{
     code_index_freshness::{
-        CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1, CodeIndexBuildProgressV1,
+        CodeCloneIndexBudgetsV1, CodeCloneIndexCoverageV1, CodeCloneIndexObservationV1,
+        CodeCloneIndexResourcesV1, CodeCloneIndexStatusV1, CodeIndexBuildBlockedReasonV1,
+        CodeIndexBuildPhaseV1, CodeIndexBuildProgressV1,
     },
     now_micros,
 };
@@ -64,14 +70,18 @@ use crate::{
         },
         graph::{GraphLane, production_code_index_freshness},
         lexical::{
+            CLONE_FINGERPRINT_CANDIDATE_BODY_BUDGET_V1, CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1,
+            CLONE_FINGERPRINT_POSTING_ROW_BUDGET_V1, CLONE_NEAR_MATCH_BODY_COMPARISON_BUDGET_V1,
+            CLONE_NEAR_MATCH_MINIMUM_COVERAGE_MILLIONTHS_V1, CLONE_NEAR_MATCH_TOKEN_WORK_BUDGET_V1,
             CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
             CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeExactLexicalArtifactReaderV1,
             CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
             CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,
             CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactReaderV1,
-            CodeLexicalArtifactWriterRevisionV1, CodeLexicalCloneSuccessorV1,
-            CodeLexicalProjectionMetadataV1, LexicalLane, LexicalLaneEvidence, LexicalLaneRequest,
-            LexicalLaneRetriever, code_lexical_artifact_build_memory_budget_for,
+            CodeLexicalArtifactWriterRevisionV1, CodeLexicalCloneIndexCensusV1,
+            CodeLexicalCloneSuccessorV1, CodeLexicalProjectionMetadataV1, LexicalLane,
+            LexicalLaneEvidence, LexicalLaneRequest, LexicalLaneRetriever,
+            code_lexical_artifact_build_memory_budget_for,
         },
         ports::RetrievalPortError,
     },
@@ -301,6 +311,7 @@ pub(super) struct CodeIndexCommittedProgressSampleV1 {
     pub(super) observed_at: Instant,
     pub(super) completed_files: u64,
     pub(super) completed_lexical_units: u64,
+    pub(super) clone_peak_scratch_memory_bytes: Option<u64>,
 }
 
 pub(super) struct CodeIndexBuildProgressStateV1 {
@@ -313,6 +324,16 @@ impl CodeIndexBuildProgressStateV1 {
         Self {
             started_at: Instant::now(),
             committed_samples: VecDeque::with_capacity(2),
+        }
+    }
+
+    fn observe_clone_scratch(&mut self, bytes: u64) {
+        if let Some(sample) = self.committed_samples.back_mut() {
+            sample.clone_peak_scratch_memory_bytes = Some(
+                sample
+                    .clone_peak_scratch_memory_bytes
+                    .map_or(bytes, |peak| peak.max(bytes)),
+            );
         }
     }
 
@@ -455,6 +476,14 @@ pub struct ProductionCodeIndexQueryOwnersV1 {
     _reader_reservation: Arc<ResidentMemoryReservationV1>,
 }
 
+struct CloneIndexArtifactSnapshotV1 {
+    census: Option<CodeLexicalCloneIndexCensusV1>,
+    format_revision: u32,
+    bytes_on_disk: u64,
+    source_pages: u64,
+    has_fingerprints: bool,
+}
+
 impl ProductionCodeIndexQueryOwnersV1 {
     pub fn retrieve_exact(
         &self,
@@ -478,6 +507,20 @@ impl ProductionCodeIndexQueryOwnersV1 {
             hydration,
             _reader_reservation: Arc::new(reader_reservation),
         }
+    }
+
+    fn clone_index_artifact(&self) -> Result<CloneIndexArtifactSnapshotV1, RetrievalPortError> {
+        Ok(CloneIndexArtifactSnapshotV1 {
+            census: self
+                .hydration
+                .clone_index_census()
+                .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?
+                .map(|census| census.as_ref().clone()),
+            format_revision: self.hydration.artifact_format_revision(),
+            bytes_on_disk: self.hydration.verified_artifact().file_size_bytes(),
+            source_pages: self.hydration.verified_artifact().page_count(),
+            has_fingerprints: self.hydration.has_clone_fingerprints(),
+        })
     }
 
     pub(super) fn occurrence_by_binding(
@@ -1468,6 +1511,118 @@ impl LatestCodeTextGenerationV1 {
                 ))
     }
 
+    pub(super) fn clone_index_status(
+        &self,
+        source_is_stale: bool,
+        update: Option<super::cadence::CodeIndexCloneUpdateV1>,
+    ) -> CodeCloneIndexStatusV1 {
+        if self.text_projection_failed.load(Ordering::Acquire) {
+            return CodeCloneIndexStatusV1::Unavailable {
+                reason: "the sealed lexical artifact could not be opened".to_owned(),
+            };
+        }
+        let owners = match self.query_owner_readiness() {
+            CodeTextQueryOwnerReadinessV1::Ready(owners) => owners,
+            CodeTextQueryOwnerReadinessV1::Pending => {
+                return CodeCloneIndexStatusV1::Unavailable {
+                    reason: "the sealed lexical artifact is still building".to_owned(),
+                };
+            }
+            CodeTextQueryOwnerReadinessV1::Invalid => {
+                return CodeCloneIndexStatusV1::Unavailable {
+                    reason: "the sealed lexical artifact is unreadable".to_owned(),
+                };
+            }
+        };
+        let artifact = match owners.clone_index_artifact() {
+            Ok(artifact) => artifact,
+            Err(error) => {
+                return CodeCloneIndexStatusV1::Unavailable {
+                    reason: format!("clone-index census is unavailable: {error}"),
+                };
+            }
+        };
+        let successor = self.clone_successor_progress();
+        let (completed_source_pages, total_source_pages, bytes_on_disk) = successor.map_or(
+            (
+                artifact.source_pages,
+                artifact.source_pages,
+                Some(artifact.bytes_on_disk),
+            ),
+            |progress| {
+                (
+                    progress.completed_source_pages,
+                    progress.total_source_pages,
+                    progress.bytes_on_disk.or(Some(artifact.bytes_on_disk)),
+                )
+            },
+        );
+        let observation = clone_index_observation(
+            self,
+            &artifact,
+            update,
+            completed_source_pages,
+            total_source_pages,
+            bytes_on_disk,
+        );
+        if source_is_stale {
+            return CodeCloneIndexStatusV1::Stale {
+                observation,
+                reason: "the clone artifact belongs to the last sealed source generation"
+                    .to_owned(),
+            };
+        }
+        if successor.is_some() {
+            return CodeCloneIndexStatusV1::Backfilling { observation };
+        }
+        let omission_reasons = clone_index_omission_reasons(&artifact);
+        if omission_reasons.is_empty() {
+            CodeCloneIndexStatusV1::Ready { observation }
+        } else {
+            CodeCloneIndexStatusV1::Partial {
+                observation,
+                omission_reasons,
+            }
+        }
+    }
+
+    fn clone_successor_progress(&self) -> Option<CloneSuccessorProgressV1> {
+        let slot = self.text_projection_build.lock_slot();
+        match &*slot {
+            CodeTextProjectionSlotV1::CloneSuccessorPending => {
+                let owners = match self.query_owner_readiness() {
+                    CodeTextQueryOwnerReadinessV1::Ready(owners) => owners,
+                    CodeTextQueryOwnerReadinessV1::Pending
+                    | CodeTextQueryOwnerReadinessV1::Invalid => return None,
+                };
+                Some(CloneSuccessorProgressV1 {
+                    completed_source_pages: 0,
+                    total_source_pages: owners.hydration.verified_artifact().page_count(),
+                    bytes_on_disk: None,
+                })
+            }
+            CodeTextProjectionSlotV1::BuildingCloneSuccessor(build) => {
+                let completed_source_pages = build
+                    .builder
+                    .as_ref()
+                    .and_then(|builder| builder.next_cursor().ok().flatten())
+                    .map_or(0, |cursor| cursor.next_page_ordinal());
+                Some(CloneSuccessorProgressV1 {
+                    completed_source_pages,
+                    total_source_pages: build.prior.page_count(),
+                    bytes_on_disk: build
+                        .staging_path
+                        .metadata()
+                        .ok()
+                        .map(|metadata| metadata.len()),
+                })
+            }
+            CodeTextProjectionSlotV1::Idle
+            | CodeTextProjectionSlotV1::HeadOpening
+            | CodeTextProjectionSlotV1::Building(_) => None,
+        }
+    }
+
     pub(super) fn same_text_owner(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.text_projection_build, &other.text_projection_build)
     }
@@ -1475,6 +1630,115 @@ impl LatestCodeTextGenerationV1 {
     pub(super) fn mark_text_serving_failed(&self) {
         self.text_projection_failed.store(true, Ordering::Release);
     }
+}
+
+#[derive(Clone, Copy)]
+struct CloneSuccessorProgressV1 {
+    completed_source_pages: u64,
+    total_source_pages: u64,
+    bytes_on_disk: Option<u64>,
+}
+
+fn clone_index_observation(
+    text: &LatestCodeTextGenerationV1,
+    artifact: &CloneIndexArtifactSnapshotV1,
+    update: Option<super::cadence::CodeIndexCloneUpdateV1>,
+    completed_source_pages: u64,
+    total_source_pages: u64,
+    bytes_on_disk: Option<u64>,
+) -> CodeCloneIndexObservationV1 {
+    let census = artifact.census.as_ref();
+    let peak_scratch_memory_bytes = text
+        .text_progress_state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .committed_samples
+        .iter()
+        .filter_map(|sample| sample.clone_peak_scratch_memory_bytes)
+        .max();
+    CodeCloneIndexObservationV1 {
+        generation_id: text.metadata.manifest().generation_id.as_str().to_owned(),
+        source_revision: text
+            .metadata
+            .snapshot()
+            .source_revision
+            .as_ref()
+            .map(|revision| revision.as_str().to_owned()),
+        artifact_format_revision: Some(artifact.format_revision),
+        conservative_normalization_revision: CONSERVATIVE_CLONE_NORMALIZATION_REVISION_V1,
+        rename_normalization_revision: RENAME_CLONE_NORMALIZATION_REVISION_V1,
+        coverage: CodeCloneIndexCoverageV1 {
+            source_bodies: census.map(|census| census.source_bodies),
+            eligible_source_bodies: census.map(|census| census.eligible_source_bodies),
+            conservative_normalized_bodies: census
+                .map(|census| census.conservative_normalized_bodies),
+            rename_normalized_bodies: census.map(|census| census.rename_normalized_bodies),
+            unique_payloads: census.map(|census| census.unique_payloads),
+            payloads_reused: update.and_then(|update| update.payloads_reused),
+            exact_postings: census.map(|census| census.exact_postings),
+            near_fingerprint_bodies: artifact
+                .has_fingerprints
+                .then(|| census.map(|census| census.near_fingerprint_bodies))
+                .flatten(),
+            near_fingerprint_postings: artifact
+                .has_fingerprints
+                .then(|| census.map(|census| census.near_fingerprint_postings))
+                .flatten(),
+            hot_postings_skipped: artifact
+                .has_fingerprints
+                .then(|| census.map(|census| census.hot_postings))
+                .flatten(),
+            hot_posting_rows_skipped: artifact
+                .has_fingerprints
+                .then(|| census.map(|census| census.hot_posting_rows))
+                .flatten(),
+            excluded_too_small_bodies: census.map(|census| census.excluded_too_small_bodies),
+            excluded_incomplete_tokenization_bodies: census
+                .map(|census| census.excluded_incomplete_tokenization_bodies),
+            rename_partial_bodies: census.map(|census| census.rename_partial_bodies),
+            rename_unsupported_bodies: census.map(|census| census.rename_unsupported_bodies),
+            completed_source_pages,
+            total_source_pages,
+        },
+        budgets: CodeCloneIndexBudgetsV1 {
+            posting_rows: CLONE_FINGERPRINT_POSTING_ROW_BUDGET_V1,
+            candidate_bodies: u64::try_from(CLONE_FINGERPRINT_CANDIDATE_BODY_BUDGET_V1)
+                .unwrap_or(u64::MAX),
+            verification_bodies: CLONE_NEAR_MATCH_BODY_COMPARISON_BUDGET_V1,
+            verification_token_work: CLONE_NEAR_MATCH_TOKEN_WORK_BUDGET_V1,
+            hot_posting_rows: CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1,
+            minimum_body_tokens: u64::from(MIN_AUTOMATIC_CLONE_BODY_TOKENS_V1),
+            minimum_directional_coverage_millionths: u64::from(
+                CLONE_NEAR_MATCH_MINIMUM_COVERAGE_MILLIONTHS_V1,
+            ),
+        },
+        resources: CodeCloneIndexResourcesV1 {
+            bytes_on_disk,
+            peak_scratch_memory_bytes,
+            changed_symbol_update_micros: update
+                .and_then(|update| update.changed_symbol_update_micros),
+            stale_invalidations: update.and_then(|update| update.stale_invalidations),
+        },
+    }
+}
+
+fn clone_index_omission_reasons(artifact: &CloneIndexArtifactSnapshotV1) -> Vec<String> {
+    let mut reasons = Vec::new();
+    let Some(census) = artifact.census.as_ref() else {
+        reasons.push("clone rows are missing from the sealed lexical artifact".to_owned());
+        return reasons;
+    };
+    if census.conservative_normalized_bodies != census.eligible_source_bodies {
+        reasons.push(
+            "conservative normalization postings do not cover every eligible body".to_owned(),
+        );
+    }
+    if !artifact.has_fingerprints {
+        reasons.push("positional fingerprint backfill is not active".to_owned());
+    } else if census.near_fingerprint_bodies != census.eligible_source_bodies {
+        reasons.push("positional fingerprints do not cover every eligible body".to_owned());
+    }
+    reasons
 }
 
 impl LatestCompleteCodeIndexV1 {
@@ -1845,6 +2109,7 @@ impl LatestCodeTextGenerationV1 {
                 observed_at,
                 completed_files,
                 completed_lexical_units,
+                clone_peak_scratch_memory_bytes: None,
             });
             #[cfg(feature = "hotpath")]
             {
@@ -2364,10 +2629,14 @@ impl LatestCodeTextGenerationV1 {
                 Err(VerifiedSealedLexicalCursorRestoreErrorV1::IncompatiblePosition) => {
                     drop(builder);
                     store.discard_incompatible_staging(&staging_path, control)?;
-                    builder = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+                    // Keep the same V14 admission writer as the cold create path.
+                    // Defaulting to V16 here would admit clone fingerprints on the
+                    // rebuild lane and diverge from the successor-backed cutover.
+                    builder = CodeLexicalArtifactBuilderV1::create_with_memory_budget_and_format_revision(
                         &staging_path,
                         metadata,
                         builder_budget,
+                        CodeLexicalArtifactWriterRevisionV1::V14,
                     )
                     .map_err(map_text_artifact_error)?;
                     progress = builder.progress().map_err(map_text_artifact_error)?;
@@ -2801,16 +3070,19 @@ impl LatestCodeTextGenerationV1 {
         .map_err(map_text_artifact_error)?;
         let needs_clone_successor = !reader.has_clone_fingerprints();
         let prior = reader.verified_artifact().clone();
+        // Match the cold-open path: install owners first, then publish Ready.
+        // Publishing Ready before a failed install (admission ceiling / shrink)
+        // would leave dashboard/MCP progress claiming a ready generation that
+        // cannot serve queries.
         self.install_artifact_owners(reader, reader_reservation)?;
+        self.publish_text_progress_phase(CodeIndexBuildPhaseV1::Ready, 0, 0);
         if needs_clone_successor {
             let source = store.open_sealed_source(&sealed_identity, control)?;
             let build =
                 self.begin_clone_successor(descriptor, prior, sealed_identity, source, control)?;
             drop(publish_claim.install(TextHeadOpenBuildV1::CloneSuccessor(build)));
-            self.publish_text_progress_phase(CodeIndexBuildPhaseV1::Ready, 0, 0);
             return Ok(false);
         }
-        self.publish_text_progress_phase(CodeIndexBuildPhaseV1::Ready, 0, 0);
         Ok(true)
     }
 
@@ -2897,6 +3169,19 @@ impl LatestCodeTextGenerationV1 {
         page: &VerifiedSealedLexicalPageV1,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<bool, RetrievalPortError> {
+        let scratch_bytes = page.clone_bodies().iter().try_fold(0_u64, |peak, body| {
+            let payload = serde_json::to_vec(&body.payload)
+                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            let occurrence = serde_json::to_vec(&body.occurrence)
+                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            let bytes = u64::try_from(payload.len().saturating_add(occurrence.len()))
+                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            Ok::<_, RetrievalPortError>(peak.max(bytes))
+        })?;
+        self.text_progress_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .observe_clone_scratch(scratch_bytes);
         let CloneSuccessorSourcePositionV1::Revalidating(target) = &build.source_position else {
             build
                 .builder

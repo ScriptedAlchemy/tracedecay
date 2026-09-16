@@ -656,6 +656,91 @@ export type CapabilityId = z.infer<typeof CapabilityIdSchema>;
 export const CatalogGenerationIdSchema = z.string();
 export type CatalogGenerationId = z.infer<typeof CatalogGenerationIdSchema>;
 
+/** Fixed per-request clone candidate and verification budgets. */
+export const CodeCloneIndexBudgetsV1Schema = z.object({
+  candidate_bodies: z.number().int().safe().min(0),
+  hot_posting_rows: z.number().int().safe().min(0),
+  minimum_body_tokens: z.number().int().safe().min(0),
+  minimum_directional_coverage_millionths: z.number().int().safe().min(0),
+  posting_rows: z.number().int().safe().min(0),
+  verification_bodies: z.number().int().safe().min(0),
+  verification_token_work: z.number().int().safe().min(0),
+});
+export type CodeCloneIndexBudgetsV1 = z.infer<typeof CodeCloneIndexBudgetsV1Schema>;
+
+/** Coverage retained by one clone-index artifact or in-progress successor.
+
+Counts are `None` until the clone artifact has observed the corresponding
+denominator. A complete empty repository reports `Some(0)`, which keeps a
+designed zero distinct from unavailable coverage. */
+export const CodeCloneIndexCoverageV1Schema = z.object({
+  completed_source_pages: z.number().int().safe().min(0),
+  conservative_normalized_bodies: z.number().int().safe().min(0).nullable(),
+  eligible_source_bodies: z.number().int().safe().min(0).nullable(),
+  exact_postings: z.number().int().safe().min(0).nullable(),
+  excluded_incomplete_tokenization_bodies: z.number().int().safe().min(0).nullable(),
+  excluded_too_small_bodies: z.number().int().safe().min(0).nullable(),
+  hot_posting_rows_skipped: z.number().int().safe().min(0).nullable(),
+  hot_postings_skipped: z.number().int().safe().min(0).nullable(),
+  near_fingerprint_bodies: z.number().int().safe().min(0).nullable(),
+  near_fingerprint_postings: z.number().int().safe().min(0).nullable(),
+  payloads_reused: z.number().int().safe().min(0).nullable(),
+  rename_normalized_bodies: z.number().int().safe().min(0).nullable(),
+  rename_partial_bodies: z.number().int().safe().min(0).nullable(),
+  rename_unsupported_bodies: z.number().int().safe().min(0).nullable(),
+  source_bodies: z.number().int().safe().min(0).nullable(),
+  total_source_pages: z.number().int().safe().min(0),
+  unique_payloads: z.number().int().safe().min(0).nullable(),
+});
+export type CodeCloneIndexCoverageV1 = z.infer<typeof CodeCloneIndexCoverageV1Schema>;
+
+/** Generation-pinned clone-index evidence shared by non-error readiness states. */
+export const CodeCloneIndexObservationV1Schema = z.object({
+  artifact_format_revision: z.number().int().min(0).nullable(),
+  budgets: z.lazy(() => CodeCloneIndexBudgetsV1Schema),
+  conservative_normalization_revision: z.number().int().min(0).max(65535),
+  coverage: z.lazy(() => CodeCloneIndexCoverageV1Schema),
+  generation_id: z.string(),
+  rename_normalization_revision: z.number().int().min(0).max(65535),
+  resources: z.lazy(() => CodeCloneIndexResourcesV1Schema),
+  source_revision: z.string().nullable(),
+});
+export type CodeCloneIndexObservationV1 = z.infer<typeof CodeCloneIndexObservationV1Schema>;
+
+/** Measured resources and update accounting for one clone-index generation. */
+export const CodeCloneIndexResourcesV1Schema = z.object({
+  bytes_on_disk: z.number().int().safe().min(0).nullable(),
+  changed_symbol_update_micros: z.number().int().safe().min(0).nullable(),
+  peak_scratch_memory_bytes: z.number().int().safe().min(0).nullable(),
+  stale_invalidations: z.number().int().safe().min(0).nullable(),
+});
+export type CodeCloneIndexResourcesV1 = z.infer<typeof CodeCloneIndexResourcesV1Schema>;
+
+/** Clone readiness, independent from lexical and graph serving. */
+export const CodeCloneIndexStatusV1Schema = z.discriminatedUnion("state", [z.object({
+  observation: z.lazy(() => CodeCloneIndexObservationV1Schema),
+  state: z.literal("backfilling"),
+}), z.object({
+  observation: z.lazy(() => CodeCloneIndexObservationV1Schema),
+  omission_reasons: z.array(z.string()),
+  state: z.literal("partial"),
+}), z.object({
+  observation: z.lazy(() => CodeCloneIndexObservationV1Schema),
+  state: z.literal("ready"),
+}), z.object({
+  observation: z.lazy(() => CodeCloneIndexObservationV1Schema),
+  reason: z.string(),
+  state: z.literal("stale"),
+}), z.object({
+  reason: z.string(),
+  state: z.literal("unavailable"),
+})]);
+export type CodeCloneIndexStatusV1 = z.infer<typeof CodeCloneIndexStatusV1Schema>;
+
+/** Strongly typed canonical identity: `CodeGenerationId`. */
+export const CodeGenerationIdSchema = z.string();
+export type CodeGenerationId = z.infer<typeof CodeGenerationIdSchema>;
+
 /** Interactive graph-serving state for the latest sealed generation.
 
 A sealed generation can expose truthful census statistics before its graph
@@ -789,6 +874,7 @@ export type CodeIndexWorkerStatusV1 = z.infer<typeof CodeIndexWorkerStatusV1Sche
 exactly this type back out of the daemon's `tracedecay_status` response,
 keeping one authority for the freshness shape. */
 export const CodeIndexWorktreeFreshnessV1Schema = z.object({
+  clone_index: z.union([z.lazy(() => CodeCloneIndexStatusV1Schema), z.null()]).optional(),
   code_graph_serving: z.union([z.lazy(() => CodeGraphServingReadinessV1Schema), z.null()]).optional(),
   coverage: z.string(),
   generation_recovery: z.union([z.lazy(() => CodeIndexGenerationRecoveryV1Schema), z.null()]).optional(),
@@ -837,6 +923,10 @@ export type ConfigurationRevisionId = z.infer<typeof ConfigurationRevisionIdSche
 /** Strongly typed canonical identity: `ConfigurationSnapshotId`. */
 export const ConfigurationSnapshotIdSchema = z.string();
 export type ConfigurationSnapshotId = z.infer<typeof ConfigurationSnapshotIdSchema>;
+
+/** Strongly typed algorithm-tagged integrity digest: `ContentDigest`. */
+export const ContentDigestSchema = z.string();
+export type ContentDigest = z.infer<typeof ContentDigestSchema>;
 
 export const CostsReadModelV1Schema = z.object({
   authorized_scope_ref: z.string(),
@@ -2373,6 +2463,10 @@ export const FeedbackSystemQualityReadModelV1Schema = z.object({
 }).strict();
 export type FeedbackSystemQualityReadModelV1 = z.infer<typeof FeedbackSystemQualityReadModelV1Schema>;
 
+/** Strongly typed canonical identity: `FileOccurrenceId`. */
+export const FileOccurrenceIdSchema = z.string();
+export type FileOccurrenceId = z.infer<typeof FileOccurrenceIdSchema>;
+
 /** A canonical product proposal and the exact verified graph that licensed it.
 
 `proposal` can be moved directly into a `DecideWorkProposalRequestV1`;
@@ -2397,6 +2491,12 @@ export type GenerateProposalRequest = z.infer<typeof GenerateProposalRequestSche
 
 export const GitHubStackedPullRequestPolicyV1Schema = z.enum(["disabled", "probe_private_preview"]);
 export type GitHubStackedPullRequestPolicyV1 = z.infer<typeof GitHubStackedPullRequestPolicyV1Schema>;
+
+/** A native Git object id (commit, tree, or blob), lowercase hex, SHA-1 or
+SHA-256 length. This is identity evidence only; it never authorizes
+object reconstruction or traversal outside native Git. */
+export const GitOidV1Schema = z.string();
+export type GitOidV1 = z.infer<typeof GitOidV1Schema>;
 
 export const GraphCappedV1Schema = z.object({
   edges: z.boolean(),
@@ -4154,6 +4254,65 @@ export const ReviewWorkProposalRequestV1Schema = z.object({
 }).strict();
 export type ReviewWorkProposalRequestV1 = z.infer<typeof ReviewWorkProposalRequestV1Schema>;
 
+export const RevisionPairChangeV1Schema = z.enum(["added", "changed", "removed", "unchanged"]);
+export type RevisionPairChangeV1 = z.infer<typeof RevisionPairChangeV1Schema>;
+
+export const RevisionPairFileDispositionV1Schema = z.enum(["binary", "deleted", "generated", "ignored", "present", "renamed", "unsupported_language"]);
+export type RevisionPairFileDispositionV1 = z.infer<typeof RevisionPairFileDispositionV1Schema>;
+
+export const RevisionPairFileRegionV1Schema = z.object({
+  base: z.union([z.lazy(() => RevisionPairFileV1Schema), z.null()]),
+  change: z.lazy(() => RevisionPairChangeV1Schema),
+  file_identity: z.string(),
+  head: z.union([z.lazy(() => RevisionPairFileV1Schema), z.null()]),
+}).strict();
+export type RevisionPairFileRegionV1 = z.infer<typeof RevisionPairFileRegionV1Schema>;
+
+export const RevisionPairFileV1Schema = z.object({
+  content_digest: z.lazy(() => ContentDigestSchema),
+  disposition: z.lazy(() => RevisionPairFileDispositionV1Schema),
+  file_occurrence_id: z.lazy(() => FileOccurrenceIdSchema),
+  path: z.string(),
+  symbol_identities: z.array(z.string()),
+}).strict();
+export type RevisionPairFileV1 = z.infer<typeof RevisionPairFileV1Schema>;
+
+export const RevisionPairRevisionV1Schema = z.object({
+  generation: z.lazy(() => CodeGenerationIdSchema),
+  reference: z.lazy(() => RefIdSchema),
+  revision: z.lazy(() => GitOidV1Schema),
+  tree: z.lazy(() => GitOidV1Schema),
+}).strict();
+export type RevisionPairRevisionV1 = z.infer<typeof RevisionPairRevisionV1Schema>;
+
+export const RevisionPairSymbolRegionV1Schema = z.object({
+  base: z.union([z.lazy(() => RevisionPairSymbolV1Schema), z.null()]),
+  change: z.lazy(() => RevisionPairChangeV1Schema),
+  head: z.union([z.lazy(() => RevisionPairSymbolV1Schema), z.null()]),
+  symbol_identity: z.string(),
+}).strict();
+export type RevisionPairSymbolRegionV1 = z.infer<typeof RevisionPairSymbolRegionV1Schema>;
+
+export const RevisionPairSymbolV1Schema = z.object({
+  content_digest: z.string(),
+  file: z.string(),
+  file_identity: z.string(),
+  file_occurrence_id: z.lazy(() => FileOccurrenceIdSchema),
+  kind: z.string(),
+  name: z.string(),
+  qualified_name: z.string(),
+  symbol_occurrence_id: z.lazy(() => SymbolOccurrenceIdSchema),
+}).strict();
+export type RevisionPairSymbolV1 = z.infer<typeof RevisionPairSymbolV1Schema>;
+
+export const RevisionPairUnionLayoutV1Schema = z.object({
+  base: z.lazy(() => RevisionPairRevisionV1Schema),
+  files: z.array(z.lazy(() => RevisionPairFileRegionV1Schema)),
+  head: z.lazy(() => RevisionPairRevisionV1Schema),
+  symbols: z.array(z.lazy(() => RevisionPairSymbolRegionV1Schema)),
+}).strict();
+export type RevisionPairUnionLayoutV1 = z.infer<typeof RevisionPairUnionLayoutV1Schema>;
+
 /** Immutable collection and stack revisions for one exact resolved root. */
 export const RootGenerationV1Schema = z.object({
   collection_revision: z.lazy(() => ManifestDigestSchema),
@@ -4559,6 +4718,61 @@ export const SignificantTableGrowthSampleV1Schema = z.object({
 });
 export type SignificantTableGrowthSampleV1 = z.infer<typeof SignificantTableGrowthSampleV1Schema>;
 
+export const SimilarCoverageV1Schema = z.discriminatedUnion("status", [z.object({
+  status: z.literal("complete"),
+}).strict(), z.object({
+  status: z.literal("excluded_incomplete_tokenization"),
+}).strict(), z.object({
+  minimum_tokens: z.number().int().min(0),
+  status: z.literal("excluded_too_small"),
+}).strict(), z.object({
+  status: z.literal("partial"),
+}).strict()]);
+export type SimilarCoverageV1 = z.infer<typeof SimilarCoverageV1Schema>;
+
+export const SimilarFamilyV1Schema = z.object({
+  complete: z.boolean(),
+  family_digest: z.lazy(() => ManifestDigestSchema),
+  match_class: z.lazy(() => SimilarMatchClassV1Schema),
+  member_count: z.number().int().safe().min(0),
+  members: z.array(z.lazy(() => SimilarOccurrenceV1Schema)),
+  next_cursor: z.string().nullable(),
+  normalization_revision: z.number().int().min(0).max(65535),
+  representative_payload_digest: z.lazy(() => ManifestDigestSchema),
+}).strict();
+export type SimilarFamilyV1 = z.infer<typeof SimilarFamilyV1Schema>;
+
+export const SimilarMatchClassV1Schema = z.enum(["conservative_exact", "rename_normalized_exact"]);
+export type SimilarMatchClassV1 = z.infer<typeof SimilarMatchClassV1Schema>;
+
+export const SimilarOccurrenceV1Schema = z.object({
+  body_span: z.lazy(() => SourceSpanSchema),
+  path: z.string(),
+  project_id: z.lazy(() => ProjectIdSchema),
+  repository_id: z.lazy(() => RepositoryIdSchema),
+  snapshot_digest: z.lazy(() => ManifestDigestSchema),
+  source_generation: z.lazy(() => CodeGenerationIdSchema),
+  symbol_occurrence_id: z.lazy(() => SymbolOccurrenceIdSchema),
+  worktree_id: z.union([z.lazy(() => WorktreeIdSchema), z.null()]),
+}).strict();
+export type SimilarOccurrenceV1 = z.infer<typeof SimilarOccurrenceV1Schema>;
+
+export const SimilarResultV1Schema = z.object({
+  coverage: z.lazy(() => SimilarCoverageV1Schema),
+  families: z.array(z.lazy(() => SimilarFamilyV1Schema)),
+  source: z.lazy(() => SimilarOccurrenceV1Schema),
+  source_generation: z.lazy(() => CodeGenerationIdSchema),
+}).strict();
+export type SimilarResultV1 = z.infer<typeof SimilarResultV1Schema>;
+
+/** Byte range inside one sanitized source file. Mutable line numbers are
+never part of identity. */
+export const SourceSpanSchema = z.object({
+  end_byte: z.number().int().safe().min(0),
+  start_byte: z.number().int().safe().min(0),
+}).strict();
+export type SourceSpan = z.infer<typeof SourceSpanSchema>;
+
 /** Strongly typed canonical identity: `SourceStoreId`. */
 export const SourceStoreIdSchema = z.string();
 export type SourceStoreId = z.infer<typeof SourceStoreIdSchema>;
@@ -4861,6 +5075,10 @@ export const StructureReadV15Schema = z.discriminatedUnion("status", [z.object({
   status: z.literal("unmeasured"),
 })]);
 export type StructureReadV15 = z.infer<typeof StructureReadV15Schema>;
+
+/** Strongly typed canonical identity: `SymbolOccurrenceId`. */
+export const SymbolOccurrenceIdSchema = z.string();
+export type SymbolOccurrenceId = z.infer<typeof SymbolOccurrenceIdSchema>;
 
 /** Nested synchronization settings patch. */
 export const SyncSettingsPatchSchema = z.object({

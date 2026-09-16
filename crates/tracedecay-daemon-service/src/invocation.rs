@@ -82,6 +82,9 @@ use tracedecay_agent_hosts::agents::context_scout::ports::{
 use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner;
 use tracedecay_application::CallableCodeAuthorizationSourcePort;
 use tracedecay_application::ProjectSourceAccessSnapshot;
+use tracedecay_code_index_runtime::code_index_branch_diff::{
+    CodeIndexRevisionPairRequestV1, CodeIndexRevisionPairV1, revision_pair_layout_inputs,
+};
 use tracedecay_code_index_runtime::git_transactions::{
     DaemonGitAuthorityStateV1, DaemonGitInvocationOwner, DaemonProjectGitIndexTransactionService,
     capture_exact_snapshot,
@@ -101,6 +104,7 @@ use tracedecay_global_db::configuration::contracts::types::{
     AuthorizedActor, ConfigurationAuditQuery, ConfigurationError, ConfigurationMutationAuthority,
     ConfigurationRollbackRequest, DirectConfigurationMutation, configuration_layer_scope_digest,
 };
+use tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1;
 
 use tracedecay_application::advisory::{
     AdvisoryDaemonStartupErrorV1, AdvisoryProductionOpenErrorV1, AdvisoryProductionOpenV1,
@@ -409,6 +413,15 @@ impl DaemonInvocationService {
             #[cfg(any(test, feature = "test-helpers"))]
             configuration_runtime_registration_pause: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Reads both immutable generations through this daemon's scheduler owner.
+    pub async fn code_index_revision_pair_layout_inputs(
+        &self,
+        scope: &ResolvedScope,
+        request: CodeIndexRevisionPairRequestV1,
+    ) -> Result<CodeIndexRevisionPairV1, CodeIndexSearchUnavailableReasonV1> {
+        revision_pair_layout_inputs(&self.code_index_schedulers, scope, request).await
     }
 
     #[cfg(any(test, feature = "test-helpers"))]

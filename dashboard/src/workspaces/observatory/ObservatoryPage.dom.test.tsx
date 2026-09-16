@@ -255,7 +255,7 @@ describe('ObservatoryPage store telemetry', () => {
     ).toBeTruthy();
     // Nothing may announce a measured free-page share for pages nobody sampled.
     expect(screen.queryByRole('img', { name: /free pages/ })).toBeNull();
-    expect(screen.queryByText(/0\.0%/)).toBeNull();
+    expect(screen.queryByText(/^0\.0%$/)).toBeNull();
   });
 
   it('renders every finding producer source state without treating partial as clean', async () => {
@@ -280,6 +280,139 @@ describe('ObservatoryPage store telemetry', () => {
       'partial',
     );
     expect(screen.queryByText(/all storage checks clean/i)).toBeNull();
+  });
+
+  it('renders clone coverage, budgets, resources, and a designed zero', async () => {
+    const ready = readyCodeIndexFreshnessEnvelope();
+    const emptyObservation = {
+      ...cloneIndexObservation(),
+      generation_id: 'generation.empty',
+      coverage: {
+        ...cloneIndexObservation().coverage,
+        source_bodies: 0,
+        eligible_source_bodies: 0,
+        conservative_normalized_bodies: 0,
+        rename_normalized_bodies: 0,
+        unique_payloads: 0,
+        payloads_reused: 0,
+        exact_postings: 0,
+        near_fingerprint_bodies: 0,
+        near_fingerprint_postings: 0,
+        hot_postings_skipped: 0,
+        hot_posting_rows_skipped: 0,
+        excluded_too_small_bodies: 0,
+        excluded_incomplete_tokenization_bodies: 0,
+        rename_partial_bodies: 0,
+        rename_unsupported_bodies: 0,
+      },
+    };
+    stubTelemetry(telemetryPayload(), emptyStorageFindingsPayload(), {
+      ...ready,
+      payload: {
+        ...ready.payload,
+        worktrees: [
+          ready.payload.worktrees[0],
+          {
+            ...ready.payload.worktrees[0],
+            worktree_root: '/worktrees/empty',
+            clone_index: { state: 'ready', observation: emptyObservation },
+          },
+        ],
+      },
+    });
+    renderObservatory();
+
+    await screen.findByText('5 occurrences');
+    const panel = await screen.findByLabelText('Clone index');
+    expect(panel.textContent).toContain('6 / 8');
+    expect(panel.textContent).toContain('6 / 6');
+    expect(panel.textContent).toContain('4 / 6');
+    expect(panel.textContent).toContain('prior payload reuse5 occurrences');
+    expect(panel.textContent).toContain('unique payloads5');
+    expect(panel.textContent).toContain('16,384 posting rows');
+    expect(panel.textContent).toContain('64 body comparisons');
+    expect(panel.textContent).toContain('minimum directional coverage · 70.0%');
+    expect(panel.textContent).toContain('2.0 MiB on disk');
+    expect(panel.textContent).toContain('2.40ms');
+    expect(panel.textContent).toContain('generation.empty');
+    expect(panel.textContent).toContain('0 / 0');
+  });
+
+  it('keeps partial, backfilling, stale, and unavailable clone states distinct', async () => {
+    const ready = readyCodeIndexFreshnessEnvelope();
+    const observation = cloneIndexObservation();
+    stubTelemetry(telemetryPayload(), emptyStorageFindingsPayload(), {
+      ...ready,
+      payload: {
+        ...ready.payload,
+        worktrees: [
+          {
+            ...ready.payload.worktrees[0],
+            worktree_root: '/worktrees/partial',
+            code_graph_serving: {
+              state: 'unavailable',
+              reason: 'graph artifact unreadable',
+            },
+            clone_index: {
+              state: 'partial',
+              observation: {
+                ...observation,
+                coverage: {
+                  ...observation.coverage,
+                  near_fingerprint_bodies: null,
+                  near_fingerprint_postings: null,
+                },
+              },
+              omission_reasons: ['positional fingerprint successor is missing'],
+            },
+          },
+          {
+            ...ready.payload.worktrees[0],
+            worktree_root: '/worktrees/backfilling',
+            clone_index: {
+              state: 'backfilling',
+              observation: {
+                ...observation,
+                coverage: {
+                  ...observation.coverage,
+                  completed_source_pages: 2,
+                  total_source_pages: 5,
+                  near_fingerprint_bodies: null,
+                  near_fingerprint_postings: null,
+                },
+              },
+            },
+          },
+          {
+            ...ready.payload.worktrees[0],
+            worktree_root: '/worktrees/stale',
+            clone_index: {
+              state: 'stale',
+              observation,
+              reason: 'the clone artifact belongs to the last sealed source generation',
+            },
+          },
+          {
+            ...ready.payload.worktrees[0],
+            worktree_root: '/worktrees/unavailable',
+            clone_index: {
+              state: 'unavailable',
+              reason: 'the sealed lexical artifact is unreadable',
+            },
+          },
+        ],
+      },
+    });
+    renderObservatory();
+
+    await screen.findByText('positional fingerprint successor is missing');
+    for (const state of ['partial', 'backfilling', 'stale', 'unavailable']) {
+      expect(document.querySelector(`[data-clone-index-state="${state}"]`)).toBeTruthy();
+    }
+    expect(screen.getByText('positional fingerprint successor is missing')).toBeTruthy();
+    expect(screen.getByText('2 / 5 sealed pages')).toBeTruthy();
+    expect(screen.getByText('the sealed lexical artifact is unreadable')).toBeTruthy();
+    expect(screen.getByText('unavailable · graph artifact unreadable')).toBeTruthy();
   });
 });
 
@@ -439,6 +572,8 @@ function codeIndexWorktree() {
     source_reference: 'refs/heads/main',
     source_revision: null,
     latest_generation_id: 'generation.2f8c41ab',
+    code_graph_serving: { state: 'ready' },
+    clone_index: { state: 'ready', observation: cloneIndexObservation() },
     snapshot_content_identity: 'sha256:9c1f4a2e7b05',
     sealed_at_micros: SAMPLE_CURRENT_MICROS - 214_000_000,
     last_reconcile_micros: SAMPLE_CURRENT_MICROS - 8_400_000,
@@ -447,6 +582,50 @@ function codeIndexWorktree() {
     hook_hint_count: 0,
     coverage: 'complete',
     parked: null,
+  };
+}
+
+function cloneIndexObservation() {
+  return {
+    generation_id: 'generation.2f8c41ab',
+    source_revision: 'commit.2f8c41ab',
+    artifact_format_revision: 16,
+    conservative_normalization_revision: 1,
+    rename_normalization_revision: 1,
+    coverage: {
+      source_bodies: 8,
+      eligible_source_bodies: 6,
+      conservative_normalized_bodies: 6,
+      rename_normalized_bodies: 4,
+      unique_payloads: 5,
+      payloads_reused: 5,
+      exact_postings: 10,
+      near_fingerprint_bodies: 6,
+      near_fingerprint_postings: 72,
+      hot_postings_skipped: 1,
+      hot_posting_rows_skipped: 1_025,
+      excluded_too_small_bodies: 1,
+      excluded_incomplete_tokenization_bodies: 1,
+      rename_partial_bodies: 1,
+      rename_unsupported_bodies: 1,
+      completed_source_pages: 2,
+      total_source_pages: 2,
+    },
+    budgets: {
+      posting_rows: 16_384,
+      candidate_bodies: 256,
+      verification_bodies: 64,
+      verification_token_work: 2_000_000,
+      hot_posting_rows: 1_024,
+      minimum_body_tokens: 30,
+      minimum_directional_coverage_millionths: 700_000,
+    },
+    resources: {
+      bytes_on_disk: 2_097_152,
+      peak_scratch_memory_bytes: 32_768,
+      changed_symbol_update_micros: 2_400,
+      stale_invalidations: 1,
+    },
   };
 }
 

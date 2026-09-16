@@ -15,16 +15,18 @@
 //! 3. build and seal an incremental generation over a deterministic edited
 //!    subset, which is where `code_index.build.plan_increment` and the
 //!    retained-parse reuse spans live;
-//! 4. build one more generation after a single generated function changes,
-//!    recording clone payload recomputation and reuse;
+//! 4. with `--clone-envelope`, build one more generation after a single
+//!    generated function changes, recording clone payload recomputation and
+//!    reuse;
 //! 5. drain the sealed generation through
 //!    [`VerifiedSealedLexicalPageSourceV1::next_page_batch_if`], which is
 //!    `code_index.lexical_source.batch_stage`;
 //! 6. ingest those pages into an isolated SQLite lexical artifact in bounded
 //!    batches and finalize it, which is `query.artifact.append_pages` and
 //!    `query.artifact.finalization.advance_wake`;
-//! 7. reopen the artifact, time cold and warm exact-clone reads, record
-//!    fingerprint accounting, cancel one read, and reopen again.
+//! 7. with `--clone-envelope`, reopen the artifact, time first-reader and warm
+//!    exact-clone reads, record fingerprint accounting, cancel one read, and
+//!    reopen again.
 //!
 //! Hermeticity is a hard requirement, not a nicety: a profiling run that
 //! touches a socket, the network, or the operator profile measures the
@@ -73,7 +75,7 @@ use tracedecay_code_index::projection::{
     ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
 };
 use tracedecay_domain::{
-    ChunkerRevision, CodeGenerationId, ComponentRevision, FileOccurrenceId,
+    ChunkerRevision, CodeGenerationId, ComponentRevision, ContentDigest, FileOccurrenceId,
     FreshnessCompatibilityV1, LanguageId, ManifestDigest, PolicyRevisionId, PrivacyDomainId,
     ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
     ProjectionOutcomeV1, RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId,
@@ -199,7 +201,7 @@ const HOTPATH_OUTPUT_PATH_ENV: &str = "HOTPATH_OUTPUT_PATH";
 const HOTPATH_OUTPUT_FORMAT_ENV: &str = "HOTPATH_OUTPUT_FORMAT";
 
 const USAGE: &str = "\
-usage: tracedecay-index-bench [--corpus DIR] [--replicas N] [--format-revision 14|15|16]
+usage: tracedecay-index-bench [--corpus DIR] [--replicas N] [--format-revision 14|15|16] [--clone-envelope]
 
   --corpus DIR   committed fixture corpus to index
                  (default: $TRACEDECAY_INDEX_BENCH_CORPUS, else
@@ -207,6 +209,7 @@ usage: tracedecay-index-bench [--corpus DIR] [--replicas N] [--format-revision 1
   --replicas N   index the corpus N times under distinct logical path
                  prefixes (default: $TRACEDECAY_INDEX_BENCH_REPLICAS, else 1)
   --format-revision  lexical artifact revision (default: 16)
+  --clone-envelope  measure one-body refresh and clone query behavior
   -h, --help     print this message
 
 Profiling: build with `--features hotpath` and set HOTPATH_OUTPUT_FORMAT and
@@ -218,6 +221,7 @@ struct Options {
     replicas: usize,
     writer_revision: CodeLexicalArtifactWriterRevisionV1,
     format_revision: u32,
+    clone_envelope: bool,
 }
 
 impl Options {
@@ -226,6 +230,7 @@ impl Options {
         let mut replicas: Option<usize> = None;
         let mut writer_revision = CodeLexicalArtifactWriterRevisionV1::default();
         let mut format_revision = 16;
+        let mut clone_envelope = false;
         let mut arguments = arguments.peekable();
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
@@ -256,6 +261,7 @@ impl Options {
                         .parse()
                         .map_err(|error| format!("invalid artifact revision: {error}"))?;
                 }
+                "--clone-envelope" => clone_envelope = true,
                 other => return Err(format!("unrecognized argument {other:?}")),
             }
         }
@@ -274,6 +280,7 @@ impl Options {
             replicas,
             writer_revision,
             format_revision,
+            clone_envelope,
         }))
     }
 }
@@ -486,7 +493,6 @@ fn build_body_refresh(
         sanitizer_revision,
         &refresh_files,
         refresh_paths,
-        "refresh",
         "tree.index-bench.refresh",
         REFRESH_SEALED_AT,
     );
@@ -673,6 +679,7 @@ fn build_generations(
     repository: &RepositoryId,
     sanitizer_revision: &SanitizerRevision,
     files: &[AdmittedFile],
+    clone_envelope: bool,
     control: &ActiveControl,
 ) -> Result<GenerationRun, String> {
     let mut owner = CodeIndexProductionOwnerV1::new(
@@ -686,7 +693,6 @@ fn build_generations(
         sanitizer_revision,
         files,
         files.iter().map(|file| file.logical_path.clone()).collect(),
-        "clean",
         "tree.index-bench.clean",
         CLEAN_SEALED_AT,
     );
@@ -705,7 +711,6 @@ fn build_generations(
         sanitizer_revision,
         &edited,
         edited_paths,
-        "increment",
         "tree.index-bench.increment",
         INCREMENT_SEALED_AT,
     );
@@ -715,14 +720,28 @@ fn build_generations(
         .map_err(|error| format!("build incremental generation: {error}"))?;
     let increment_wall = increment_started.elapsed();
     let increment_pool_stats = owner.physical_artifact_pool_stats();
-    let (generation, body_refresh) = build_body_refresh(
-        &mut owner,
-        repository,
-        sanitizer_revision,
-        &edited,
-        &increment,
-        &increment_pool_stats,
-    )?;
+    let (generation, body_refresh) = if clone_envelope {
+        build_body_refresh(
+            &mut owner,
+            repository,
+            sanitizer_revision,
+            &edited,
+            &increment,
+            &increment_pool_stats,
+        )?
+    } else {
+        (
+            increment,
+            BodyRefreshMetrics {
+                state: "disabled",
+                changed_path: None,
+                changed_files: None,
+                payloads_computed: None,
+                payloads_reused: None,
+                wall: None,
+            },
+        )
+    };
     Ok(GenerationRun {
         generation,
         edited_files,
@@ -764,8 +783,15 @@ fn run(options: &Options) -> Result<String, String> {
         privacy_key_epoch: 1,
         max_snapshot_age_micros: None,
     };
-    let generations = build_generations(config, &repository, &sanitizer_revision, &files, &control)
-        .map_err(|error| format!("build benchmark generations: {error}"))?;
+    let generations = build_generations(
+        config,
+        &repository,
+        &sanitizer_revision,
+        &files,
+        options.clone_envelope,
+        &control,
+    )
+    .map_err(|error| format!("build benchmark generations: {error}"))?;
     let generation_statistics = generations
         .generation
         .generation_statistics()
@@ -799,14 +825,21 @@ fn run(options: &Options) -> Result<String, String> {
         &control,
     )?;
     let ingest_wall = ingest_started.elapsed();
-    let clone_queries = measure_clone_queries(
-        &artifact_path,
-        &artifact.receipt,
-        options.format_revision,
-        &pages,
-        generations.body_refresh.changed_path.as_deref(),
-        &control,
-    )?;
+    let clone_queries = if options.clone_envelope {
+        measure_clone_queries(
+            &artifact_path,
+            &artifact.receipt,
+            options.format_revision,
+            &pages,
+            generations.body_refresh.changed_path.as_deref(),
+            &control,
+        )?
+    } else {
+        serde_json::json!({
+            "state": "disabled",
+            "reason": "clone_envelope_not_requested",
+        })
+    };
     let clone_census = clone_census(&pages);
     scratch.remove()?;
 
@@ -853,18 +886,16 @@ fn build_request(
     sanitizer_revision: &SanitizerRevision,
     files: &[AdmittedFile],
     changed_files: BTreeSet<String>,
-    occurrence_generation: &str,
     tree: &str,
     sealed_at: i64,
 ) -> CodeIndexBuildRequestV1 {
     let mut snapshot_files = Vec::with_capacity(files.len());
-    let mut captured_files = Vec::with_capacity(files.len());
+    let mut captured_files = Vec::with_capacity(changed_files.len());
     let mut identity_hash = Vec::new();
-    for (ordinal, file) in files.iter().enumerate() {
+    for file in files {
         let digest = content_digest(&file.bytes);
         identity_hash.extend_from_slice(digest.as_str().as_bytes());
-        let file_occurrence_id =
-            identity::<FileOccurrenceId>(&format!("file.{occurrence_generation}.{ordinal:06}"));
+        let file_occurrence_id = benchmark_file_occurrence_id(file, &digest);
         snapshot_files.push(SanitizedCodeFileV1 {
             file_occurrence_id: file_occurrence_id.clone(),
             logical_path: file.logical_path.clone(),
@@ -872,11 +903,13 @@ fn build_request(
             content_digest: digest,
             disposition: SnapshotFileDispositionV1::Present,
         });
-        captured_files.push(CodeIndexCapturedFileV1 {
-            file_occurrence_id,
-            sanitized_bytes: Arc::clone(&file.bytes),
-            sensitivity_level: SensitivityLevelV1::Public,
-        });
+        if changed_files.contains(&file.logical_path) {
+            captured_files.push(CodeIndexCapturedFileV1 {
+                file_occurrence_id,
+                sanitized_bytes: Arc::clone(&file.bytes),
+                sensitivity_level: SensitivityLevelV1::Public,
+            });
+        }
     }
     let snapshot = SanitizedCodeSnapshotV1 {
         repository: repository.clone(),
@@ -906,6 +939,15 @@ fn build_request(
             profile_digest: identity::<ManifestDigest>(&format!("sha256:{}", "e".repeat(64))),
         },
     }
+}
+
+fn benchmark_file_occurrence_id(file: &AdmittedFile, digest: &ContentDigest) -> FileOccurrenceId {
+    let occurrence =
+        content_digest(format!("{}\0{}", file.logical_path, digest.as_str()).as_bytes());
+    identity(&format!(
+        "file.index-bench.{}",
+        occurrence.as_str().trim_start_matches("sha256:")
+    ))
 }
 
 fn sealed_state_digest(sealed: &[u8]) -> Result<ManifestDigest, String> {
@@ -1099,7 +1141,7 @@ fn measure_clone_queries(
             "reason": "artifact_has_no_clone_index",
         }));
     }
-    let source = pages
+    let Some(source) = pages
         .iter()
         .flat_map(VerifiedSealedLexicalPageV1::clone_bodies)
         .find(|body| {
@@ -1110,7 +1152,12 @@ fn measure_clone_queries(
                     .iter()
                     .any(|key| key.class == CloneNormalizationClassV1::Conservative)
         })
-        .ok_or_else(|| "clone envelope has no eligible source body".to_owned())?;
+    else {
+        return Ok(serde_json::json!({
+            "state": "unavailable",
+            "reason": "no_eligible_clone_body",
+        }));
+    };
     let open_started = Instant::now();
     let reader = CodeLexicalArtifactReaderV1::open_with_control(
         artifact_path,
@@ -1119,11 +1166,12 @@ fn measure_clone_queries(
         control,
     )
     .map_err(|error| format!("open clone artifact reader: {error}"))?;
-    let cold_open_micros = elapsed_micros(open_started.elapsed());
+    let first_reader_open_micros = elapsed_micros(open_started.elapsed());
 
-    let cold_started = Instant::now();
-    let cold = exact_clone_lookup(&reader, &source.occurrence.symbol_occurrence_id, 1, control)?;
-    let cold_lookup_micros = elapsed_micros(cold_started.elapsed());
+    let first_reader_started = Instant::now();
+    let first_reader =
+        exact_clone_lookup(&reader, &source.occurrence.symbol_occurrence_id, 1, control)?;
+    let first_reader_lookup_micros = elapsed_micros(first_reader_started.elapsed());
     let mut warm_lookup_micros = Vec::with_capacity(100);
     for _ in 0..100 {
         let warm_started = Instant::now();
@@ -1236,9 +1284,10 @@ fn measure_clone_queries(
             "token_count": source.payload.token_count,
         },
         "exact": {
-            "cold_open_micros": cold_open_micros,
-            "cold_lookup_micros": cold_lookup_micros,
-            "cold_members": cold.members.len(),
+            "first_reader_open_micros": first_reader_open_micros,
+            "first_reader_lookup_micros": first_reader_lookup_micros,
+            "first_reader_members": first_reader.members.len(),
+            "first_reader_cache_state": "same_process_after_artifact_write",
             "warm_lookup_micros": warm_lookup_micros,
             "warm_lookup_p95_micros": warm_lookup_p95_micros,
             "family_members": family.members.len(),
@@ -1489,4 +1538,71 @@ where
     T::try_from(value.to_owned()).unwrap_or_else(|error| {
         panic!("deterministic benchmark identity {value:?} must be valid: {error:?}")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn incremental_request_captures_only_changed_files() {
+        let files = vec![
+            AdmittedFile {
+                logical_path: "src/changed.rs".to_owned(),
+                language: identity("rust"),
+                bytes: Arc::from(b"fn changed() {}".as_slice()),
+            },
+            AdmittedFile {
+                logical_path: "src/unchanged.rs".to_owned(),
+                language: identity("rust"),
+                bytes: Arc::from(b"fn unchanged() {}".as_slice()),
+            },
+        ];
+        let request = build_request(
+            &identity("repository.test"),
+            &identity("sanitizer.test"),
+            &files,
+            BTreeSet::from(["src/changed.rs".to_owned()]),
+            "tree.test",
+            INCREMENT_SEALED_AT,
+        );
+
+        assert_eq!(request.snapshot.files.len(), 2);
+        assert_eq!(request.captured_files.len(), 1);
+        assert_eq!(
+            request.captured_files[0].file_occurrence_id,
+            request.snapshot.files[0].file_occurrence_id
+        );
+    }
+
+    #[test]
+    fn file_occurrence_identity_changes_with_content_not_generation() {
+        let file = |source: &'static [u8]| AdmittedFile {
+            logical_path: "src/lib.rs".to_owned(),
+            language: identity("rust"),
+            bytes: Arc::from(source),
+        };
+        let request = |file, tree| {
+            build_request(
+                &identity("repository.test"),
+                &identity("sanitizer.test"),
+                &[file],
+                BTreeSet::from(["src/lib.rs".to_owned()]),
+                tree,
+                INCREMENT_SEALED_AT,
+            )
+        };
+        let first = request(file(b"fn value() -> u8 { 1 }"), "tree.first");
+        let next = request(file(b"fn value() -> u8 { 1 }"), "tree.next");
+        let changed = request(file(b"fn value() -> u8 { 2 }"), "tree.changed");
+
+        assert_eq!(
+            first.snapshot.files[0].file_occurrence_id,
+            next.snapshot.files[0].file_occurrence_id
+        );
+        assert_ne!(
+            first.snapshot.files[0].file_occurrence_id,
+            changed.snapshot.files[0].file_occurrence_id
+        );
+    }
 }

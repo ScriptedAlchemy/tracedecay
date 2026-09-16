@@ -171,6 +171,121 @@ pub enum CodeGraphServingReadinessV1 {
     Ready,
 }
 
+/// Coverage retained by one clone-index artifact or in-progress successor.
+///
+/// Counts are `None` until the clone artifact has observed the corresponding
+/// denominator. A complete empty repository reports `Some(0)`, which keeps a
+/// designed zero distinct from unavailable coverage.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CodeCloneIndexCoverageV1 {
+    /// Clone body occurrences observed in the sealed lexical source.
+    pub source_bodies: Option<u64>,
+    /// Source bodies admitted for automatic clone discovery.
+    pub eligible_source_bodies: Option<u64>,
+    /// Eligible bodies with a conservative exact posting.
+    pub conservative_normalized_bodies: Option<u64>,
+    /// Eligible bodies with a complete rename-normalized exact posting.
+    pub rename_normalized_bodies: Option<u64>,
+    /// Distinct content-addressed payloads retained by the artifact.
+    pub unique_payloads: Option<u64>,
+    /// Current payload occurrences reused from the preceding generation.
+    pub payloads_reused: Option<u64>,
+    /// Conservative and rename-normalized exact posting rows.
+    pub exact_postings: Option<u64>,
+    /// Eligible bodies represented by positional fingerprints.
+    pub near_fingerprint_bodies: Option<u64>,
+    /// Positional fingerprint posting rows retained by the artifact.
+    pub near_fingerprint_postings: Option<u64>,
+    /// Fingerprint posting lists above the interactive read threshold.
+    pub hot_postings_skipped: Option<u64>,
+    /// Positional rows omitted when those hot posting lists are skipped.
+    pub hot_posting_rows_skipped: Option<u64>,
+    /// Bodies excluded because they are below the automatic-discovery minimum.
+    pub excluded_too_small_bodies: Option<u64>,
+    /// Bodies excluded because conservative tokenization was incomplete.
+    pub excluded_incomplete_tokenization_bodies: Option<u64>,
+    /// Eligible bodies whose rename normalization is partial.
+    pub rename_partial_bodies: Option<u64>,
+    /// Eligible bodies whose language has no rename normalization.
+    pub rename_unsupported_bodies: Option<u64>,
+    /// Sealed source pages committed to clone indexing.
+    pub completed_source_pages: u64,
+    /// Sealed source pages in the generation.
+    pub total_source_pages: u64,
+}
+
+/// Fixed per-request clone candidate and verification budgets.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CodeCloneIndexBudgetsV1 {
+    pub posting_rows: u64,
+    pub candidate_bodies: u64,
+    pub verification_bodies: u64,
+    pub verification_token_work: u64,
+    pub hot_posting_rows: u64,
+    pub minimum_body_tokens: u64,
+    pub minimum_directional_coverage_millionths: u64,
+}
+
+/// Measured resources and update accounting for one clone-index generation.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CodeCloneIndexResourcesV1 {
+    /// Current durable artifact or staging-file bytes.
+    pub bytes_on_disk: Option<u64>,
+    /// Largest measured clone-row serialization scratch during the build.
+    pub peak_scratch_memory_bytes: Option<u64>,
+    /// Latest observed source-edit arrival through clone-ready publication.
+    pub changed_symbol_update_micros: Option<u64>,
+    /// Prior clone payload bindings invalidated by the latest publication.
+    pub stale_invalidations: Option<u64>,
+}
+
+/// Generation-pinned clone-index evidence shared by non-error readiness states.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CodeCloneIndexObservationV1 {
+    pub generation_id: String,
+    pub source_revision: Option<String>,
+    pub artifact_format_revision: Option<u32>,
+    pub conservative_normalization_revision: u16,
+    pub rename_normalization_revision: u16,
+    pub coverage: CodeCloneIndexCoverageV1,
+    pub budgets: CodeCloneIndexBudgetsV1,
+    pub resources: CodeCloneIndexResourcesV1,
+}
+
+/// Clone readiness, independent from lexical and graph serving.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CodeCloneIndexStatusV1 {
+    /// The sealed lexical artifact or its clone rows cannot be read.
+    Unavailable { reason: String },
+    /// A restartable clone successor is consuming sealed source pages.
+    Backfilling {
+        observation: CodeCloneIndexObservationV1,
+    },
+    /// Some clone evidence is readable, but required postings are missing.
+    Partial {
+        observation: CodeCloneIndexObservationV1,
+        omission_reasons: Vec<String>,
+    },
+    /// Required exact and fingerprint postings cover every eligible body.
+    Ready {
+        observation: CodeCloneIndexObservationV1,
+    },
+    /// The artifact is readable but belongs to a superseded source generation.
+    Stale {
+        observation: CodeCloneIndexObservationV1,
+        reason: String,
+    },
+}
+
+impl Default for CodeCloneIndexStatusV1 {
+    fn default() -> Self {
+        Self::Unavailable {
+            reason: "clone index authority is unavailable".to_owned(),
+        }
+    }
+}
+
 /// Freshness/generation state for one mounted worktree.
 ///
 /// `Deserialize` is part of the wire contract: the CLI status command decodes
@@ -194,6 +309,10 @@ pub struct CodeIndexWorktreeFreshnessV1 {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code_graph_serving: Option<CodeGraphServingReadinessV1>,
+    /// Clone readiness from the same sealed lexical artifact.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clone_index: Option<CodeCloneIndexStatusV1>,
     /// Content identity of the complete source snapshot.
     pub snapshot_content_identity: Option<String>,
     /// Time the complete generation was durably sealed.
@@ -281,6 +400,9 @@ impl CodeIndexFreshnessPayloadV1 {
         }
     }
 }
+
+#[cfg(test)]
+mod clone_status_tests;
 
 #[cfg(test)]
 mod tests {

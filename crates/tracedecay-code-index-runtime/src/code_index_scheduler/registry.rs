@@ -45,6 +45,7 @@ use super::{
 mod cold_read_wake_tests;
 #[cfg(all(test, unix))]
 mod convergence_park_tests;
+pub(super) mod graph_cursor_retention;
 mod ignored_dependencies;
 mod lsp_projection;
 mod mount;
@@ -709,6 +710,9 @@ pub struct MountedCodeIndexWorktreeV1 {
     /// It is paired with `serving_generation_epoch` under the slot CAS.
     serving_generation_installation: Arc<Mutex<Option<ServingGenerationInstallationClaimV1>>>,
     graph_activation: CodeGraphActivationAuthorityV1,
+    /// Superseded graph generations still pinned by an unexpired graph
+    /// cursor. Holding the owner keeps its replay retained across pages.
+    graph_cursor_retention: Arc<graph_cursor_retention::GraphCursorRetentionV1>,
     ignored_dependency_admissions: Arc<
         Mutex<
             BTreeMap<
@@ -923,11 +927,7 @@ fn dashboard_generation_is_ready(
         text_ready
             && matches!(
                 code_graph_serving,
-                Some(
-                    CodeGraphServingReadinessV1::Ready
-                        | CodeGraphServingReadinessV1::Refused { .. }
-                        | CodeGraphServingReadinessV1::Unavailable { .. }
-                )
+                Some(CodeGraphServingReadinessV1::Ready)
             )
     } else {
         latest.is_some() || text_ready
@@ -2161,6 +2161,9 @@ impl CodeIndexSchedulerRegistryV1 {
                     reextracted_files: evidence.reextracted_files,
                     changed_chunks: evidence.changed_chunks,
                     reused_chunks: evidence.reused_chunks,
+                    clone_payloads_reused: evidence.clone_payloads_reused,
+                    clone_stale_invalidations: evidence.clone_stale_invalidations,
+                    clone_body_changes_observed: evidence.clone_body_changes_observed,
                 },
                 evidence.overflow_reconciled,
             ),

@@ -665,6 +665,62 @@ async fn registry_feeds_publications_and_bounded_freshness_reads() {
     assert_ne!(changed.generation_id, initial.generation_id);
 }
 
+#[tokio::test]
+async fn registry_clone_freshness_reports_coverage_and_update_accounting() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount worktree");
+    let initial = wait_for_initial_generation(&registry, fixture.path()).await;
+    wait_for_dashboard_ready(&registry, fixture.path()).await;
+    let initial_status = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("initial clone freshness");
+    let Some(tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Ready {
+        observation,
+    }) = initial_status.clone_index
+    else {
+        panic!("a complete V16 artifact must report ready clone coverage");
+    };
+    assert_eq!(observation.coverage.source_bodies, Some(1));
+    assert_eq!(observation.coverage.eligible_source_bodies, Some(0));
+    assert_eq!(observation.coverage.conservative_normalized_bodies, Some(0));
+    assert_eq!(observation.coverage.near_fingerprint_bodies, Some(0));
+    assert_eq!(observation.budgets.posting_rows, 16_384);
+    assert!(observation.resources.bytes_on_disk.is_some());
+    assert!(observation.resources.peak_scratch_memory_bytes.is_some());
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    assert!(
+        registry
+            .notify_hook_paths(fixture.path(), &["src/lib.rs".to_owned()])
+            .await
+    );
+    let _ = wait_for_generation_change(&registry, fixture.path(), &initial).await;
+    wait_for_dashboard_ready(&registry, fixture.path()).await;
+    let changed = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("changed clone freshness");
+    let Some(tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Ready {
+        observation,
+    }) = changed.clone_index
+    else {
+        panic!("the changed V16 artifact must return to ready");
+    };
+    assert_eq!(observation.coverage.payloads_reused, Some(0));
+    assert_eq!(observation.resources.stale_invalidations, Some(1));
+    assert!(observation.resources.changed_symbol_update_micros.is_some());
+}
+
 /// The generation-publication broadcast carries only verified publishes —
 /// generations that crossed the durable publication compare-and-swap, the
 /// verified graph snapshot publish, and the serving swap. A restart that
@@ -1773,6 +1829,17 @@ fn one_symbol_unrelated_work_skip() {
         changed.reused_chunks > 0,
         "unrelated symbol chunks must skip projection work"
     );
+    assert_eq!(
+        changed.clone_payloads_reused,
+        Some(1),
+        "the unchanged symbol keeps its content-addressed clone payload"
+    );
+    assert_eq!(
+        changed.clone_stale_invalidations,
+        Some(1),
+        "the changed symbol invalidates its prior clone payload binding"
+    );
+    assert_eq!(changed.clone_body_changes_observed, Some(true));
     let mut clean = scheduler(&fixture, store.path().join("clean"), bytes);
     let rebuilt = published(clean.reconcile_now().expect("clean rebuild"));
     assert_eq!(
@@ -3918,6 +3985,10 @@ async fn dashboard_freshness_reports_pending_rebuild_liveness() {
         projected.rebuild_in_flight,
         "a pending scheduler wake must keep stale serving typed as rebuilding"
     );
+    assert!(matches!(
+        projected.clone_index,
+        Some(tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Stale { .. })
+    ));
     drop(admission);
     registry.shutdown().await;
 }
@@ -8547,28 +8618,41 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
         let scheduler = scheduler
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let active = scheduler
+        // Seal releases the decoded active generation so text projection does
+        // not keep a whole-generation owner. Inspect the durable pointer — do
+        // not call load_active_shared here or the probe itself would decode.
+        assert_eq!(
+            scheduler.sealed_decode_count(),
+            0,
+            "graph-off A-to-C publication must not decode a sealed generation"
+        );
+        let pointer = scheduler
             .publication
-            .load_active_shared()
-            .expect("load generation C from the in-memory publication authority")
-            .expect("generation C is active");
+            .read_publication_pointer()
+            .expect("read generation C pointer")
+            .expect("generation C is durable");
         let current = scheduler
             .capture_authoritative_snapshot_without_active_generation_reuse(None)
             .expect("capture current generation C revision");
         assert_ne!(
-            active.manifest().generation_id,
-            unpublished_b_generation,
+            pointer.generation_id,
+            unpublished_b_generation.as_str(),
             "generation B must never become active after generation C is observed"
         );
         assert_eq!(
-            active.snapshot().source_revision,
-            current.snapshot.source_revision,
+            pointer.generation_id,
+            generation_c.as_str(),
+            "the durable pointer must name generation C"
+        );
+        assert_eq!(
+            pointer.snapshot_content_identity,
+            current.snapshot.content_identity.as_str(),
             "the successor must record the allow-empty generation C revision"
         );
         assert_eq!(
             scheduler.sealed_decode_count(),
             0,
-            "graph-off A-to-C publication must not decode a sealed generation"
+            "pointer and snapshot inspection must not decode a sealed generation"
         );
     }
     registry.shutdown().await;

@@ -29,7 +29,9 @@ import {
   codeViewControlId,
   codeViewNote,
 } from './CodeViewSwitcher.tsx';
+import { CompareView } from './CompareView.tsx';
 import { IndexFreshness } from './IndexFreshness.tsx';
+import { SharedCodeView } from './SharedCodeView.tsx';
 import { Strata } from './Strata.tsx';
 import { SymbolPath } from './SymbolPath.tsx';
 import type { TraceFocus } from './TraceView.tsx';
@@ -40,6 +42,7 @@ import {
   writeCodeLocation,
   type CodeView,
 } from './codeView.ts';
+import { readCompareSelection, writeCompareSelection } from './compareLayout.ts';
 import {
   type GraphNodeV1,
   type GraphOverviewPayloadV1,
@@ -179,6 +182,21 @@ export function CodePage() {
           ? 'loading'
           : 'unavailable';
   const viewBlocker = codeViewBlocker(location.view, focusState);
+  // A copy listed in Shared Code is itself a symbol occurrence in the graph, so
+  // re-centring on it is the same URL write every other selection makes: the
+  // identity moves, the view stays, and the in-memory row is dropped so the
+  // subgraph read resolves the new identity rather than an older row.
+  const focusOccurrence = useCallback(
+    (view: CodeView, symbolOccurrenceId: string) => {
+      setSelected(null);
+      setSearchParams(
+        writeCodeLocation(searchParams, { view, focusId: symbolOccurrenceId }),
+        { replace: true },
+      );
+    },
+    [searchParams, setSearchParams],
+  );
+  const compareSelection = readCompareSelection(searchParams);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -189,7 +207,7 @@ export function CodePage() {
       />
       <CodeViewSwitcher
         active={location.view}
-        traceAvailable={focusState === 'available'}
+        focusAvailable={focusState === 'available'}
         onSelect={navigateView}
       />
       <p className="border-b border-edge-subtle px-3 py-1.5 text-3xs text-text-muted">
@@ -310,7 +328,22 @@ export function CodePage() {
       }
       list={
         <div className="flex h-full min-h-0 flex-col">
-          {location.view === 'trace' && resolvedFocus !== null ? (
+          {location.view === 'shared-code' && resolvedFocus !== null ? (
+            <SharedCodeView
+              focus={resolvedFocus}
+              onFocusMember={(id) => focusOccurrence('shared-code', id)}
+              onTraceMember={(id) => focusOccurrence('trace', id)}
+            />
+          ) : location.view === 'compare' ? (
+            <CompareView
+              selection={compareSelection}
+              onSelectionChange={(selection) =>
+                setSearchParams(writeCompareSelection(searchParams, selection), {
+                  replace: true,
+                })
+              }
+            />
+          ) : location.view === 'trace' && resolvedFocus !== null ? (
             <Suspense
               fallback={
                 <TraceChunkFallback

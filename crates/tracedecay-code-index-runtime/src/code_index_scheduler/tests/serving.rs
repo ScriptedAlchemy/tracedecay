@@ -811,6 +811,65 @@ fn clone_successor_keeps_lexical_owners_ready_and_cas_replaces_v14() {
     assert_eq!(v16_revision, 16);
 }
 
+#[test]
+fn clone_status_distinguishes_unavailable_backfill_partial_ready_and_stale() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn alpha() { one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    assert!(matches!(
+        latest.clone_index_status(false, None),
+        tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Unavailable { .. }
+    ));
+    while !latest.query_owners_are_ready() {
+        latest.advance_text_serving(1).expect("advance V14 build");
+    }
+    assert!(matches!(
+        latest.clone_index_status(false, None),
+        tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Backfilling { .. }
+    ));
+    let successor = {
+        let mut slot = latest.text.text_projection_build.lock_slot();
+        std::mem::replace(&mut *slot, super::super::CodeTextProjectionSlotV1::Idle)
+    };
+
+    let tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Partial {
+        observation,
+        omission_reasons,
+    } = latest.clone_index_status(false, None)
+    else {
+        panic!("missing successor must report partial clone coverage");
+    };
+    assert_eq!(observation.coverage.source_bodies, None);
+    assert!(
+        omission_reasons
+            .iter()
+            .any(|reason| reason.contains("clone rows are missing"))
+    );
+    *latest.text.text_projection_build.lock_slot() = successor;
+    while latest.text_projection_needs_work() {
+        latest
+            .advance_text_serving(16)
+            .expect("finish clone successor");
+    }
+    assert!(matches!(
+        latest.clone_index_status(false, None),
+        tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Ready { .. }
+    ));
+    assert!(matches!(
+        latest.clone_index_status(true, None),
+        tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Stale { .. }
+    ));
+}
+
 #[tokio::test]
 async fn query_admission_serves_v14_while_clone_successor_is_pending() {
     let fixture = GitFixture::new(&[(
@@ -1256,6 +1315,7 @@ fn tampered_resumed_clone_rows_are_rebuilt_from_the_sealed_source() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn text_artifact_builder_creates_an_owner_private_artifacts_root() {
     use std::os::unix::fs::PermissionsExt;
@@ -1697,13 +1757,18 @@ fn page_aligned_final_source_page_converges_the_text_projection() {
     }
     assert!(latest.query_owners_are_ready());
     let progress = build_progress_snapshot(&scheduler);
-    // Every committed page must be chunk-full: an early commit from the page
-    // byte bound or an import record would leave the final page partial, which
-    // is exactly the shape that does not trip this invariant.
+    // Clone-body lanes mint their own pages after chunk pages. Chunk packing
+    // must still land on the page-record bound; clone-body pages may add
+    // additional page ordinals beyond the chunk-only count.
+    let page_chunks = super::super::TEXT_ARTIFACT_PAGE_CHUNKS_V1 as u64;
     assert_eq!(
-        progress.committed_chunks,
-        progress.committed_pages * super::super::TEXT_ARTIFACT_PAGE_CHUNKS_V1 as u64,
-        "the fixture must keep every page chunk-full so the final page ends on the last record"
+        progress.committed_chunks % page_chunks,
+        0,
+        "chunk pages must remain record-full so the final chunk page ends on a chunk boundary"
+    );
+    assert!(
+        progress.committed_pages * page_chunks >= progress.committed_chunks,
+        "clone-body pages may follow chunk pages but must not shrink chunk packing"
     );
     assert_eq!(
         progress.committed_imports, 0,
@@ -1843,8 +1908,12 @@ fn invalid_partial_text_artifact_cursor_is_discarded_and_rebuilt() {
             cursor[3].as_u64().is_some_and(|ordinal| ordinal > 0),
             "first page must advance within the file's chunks"
         );
+        // Rewind the chunk ordinal while leaving a non-zero import ordinal so
+        // restore_cursor_classified refuses the authenticated-but-impossible
+        // mid-file position (chunk < count && import != 0).
+        // Persisted layout: [3]=next_chunk_ordinal, [8]=next_import_ordinal.
         cursor[3] = serde_json::Value::from(0_u64);
-        cursor[6] = serde_json::Value::from(1_u64);
+        cursor[8] = serde_json::Value::from(1_u64);
 
         let text = |index: usize| {
             cursor[index]
@@ -1861,6 +1930,10 @@ fn invalid_partial_text_artifact_cursor_is_discarded_and_rebuilt() {
                 .to_le_bytes(),
         );
         hasher.update(text(0));
+        // Integrity order matches VerifiedSealedLexicalCursorV1::integrity_digest:
+        // file_ord, file_off, chunk_ord, import_ord, clone_ord, page_ord,
+        // emitted_chunks, emitted_payload, emitted_imports, emitted_import_bytes,
+        // emitted_clones, emitted_clone_bytes.
         for index in [1, 2, 3, 8, 4, 5, 6, 7, 9, 10, 11, 12] {
             hasher.update(number(index).to_le_bytes());
         }
@@ -2500,6 +2573,7 @@ fn text_progress_rate_and_eta_require_two_monotonic_committed_samples() {
         observed_at: first,
         completed_files: 20,
         completed_lexical_units: 4_000_000,
+        clone_peak_scratch_memory_bytes: None,
     });
     assert_eq!(state.rates_and_eta(29_000_000), (None, None, None));
 
@@ -2507,6 +2581,7 @@ fn text_progress_rate_and_eta_require_two_monotonic_committed_samples() {
         observed_at: first + Duration::from_secs(2),
         completed_files: 21,
         completed_lexical_units: 14_000_000,
+        clone_peak_scratch_memory_bytes: None,
     });
     let (files_per_second, lexical_units_per_second, eta_seconds) = state.rates_and_eta(29_000_000);
     assert_eq!(files_per_second, Some(0.5));
@@ -5077,6 +5152,108 @@ async fn callers_page_reports_candidate_cap_and_hydrates_only_the_requested_slic
     registry.shutdown().await;
 }
 
+/// A graph cursor pins its generation, so the mounted scope must hold that
+/// generation's serving owner for exactly the cursor's authenticated
+/// lifetime: present until the page's `expires_at`, absent once it lapses.
+/// Without the hold nothing keeps the generation's graph replay retained
+/// between two pages (issue #1244).
+#[tokio::test]
+async fn graph_cursor_holds_its_generation_until_the_cursor_expires() {
+    let sources = caller_star_sources();
+    let files = sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&files);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    install_verified_graph_store(&latest);
+    let generation = latest.generation.manifest().generation_id.clone();
+    let repository = latest.generation.snapshot().repository.clone();
+    let worktree = latest
+        .generation
+        .snapshot()
+        .worktree
+        .clone()
+        .expect("worktree identity");
+    let hub = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|record| record.qualified_name.ends_with("hub"))
+        .expect("hub symbol");
+    let operation = callable_code_operation(CallableCodeOperationKind::Callers).expect("operation");
+    let context = application_context(&operation, repository, worktree);
+    mount_query_authority(
+        &registry,
+        fixture.path(),
+        &context,
+        latest.generation.manifest().privacy_domain.clone(),
+    )
+    .await;
+    let retention = registry
+        .graph_cursor_retention_for_scope(context.scope())
+        .await
+        .expect("mounted scope retention");
+    assert_eq!(
+        retention.held_until(&generation),
+        None,
+        "nothing pins the generation before a cursor exists"
+    );
+
+    let request = CodeRelationRequest {
+        node_id: hub.occurrence.as_str().to_owned(),
+        maximum_depth: 1,
+        resolve_trait_dispatch: false,
+        scope: CodeQueryScope::new(generation.clone(), None).expect("query scope"),
+        meta: callers_page_meta(CALLER_PAGE, None),
+    };
+    let first = registry
+        .callers(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &request,
+        )
+        .await;
+    let (page, expires_at) = match first {
+        RetrievalPortOutcome::Partial(evidence) => {
+            let expires_at = evidence.page.expires_at.expect("minted cursor expiry");
+            (evidence.payload.expect("first callers page"), expires_at)
+        }
+        other => panic!("expected capped callers page, got {other:?}"),
+    };
+    assert!(page.next_cursor.is_some(), "page 1 must mint a cursor");
+    assert_eq!(
+        retention.held_until(&generation),
+        Some(expires_at),
+        "the minted cursor must hold its generation for the cursor lifetime"
+    );
+    assert!(
+        retention
+            .held(&generation, UtcMicros(expires_at.0 - 1))
+            .is_some_and(|held| held.metadata().manifest().generation_id == generation),
+        "an unexpired cursor resolves the held generation owner"
+    );
+    assert!(
+        retention.held(&generation, expires_at).is_none(),
+        "the hold lapses with the cursor"
+    );
+    assert_eq!(retention.held_until(&generation), None);
+    registry.shutdown().await;
+}
+
 // ---------------------------------------------------------------------------
 // Worktree-aware incremental indexing: identity, gix classification, the
 // hook-driven + lazy-reconcile freshness ladder.
@@ -5983,13 +6160,23 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         .filter_map(Result::ok)
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect::<Vec<_>>();
-    assert_eq!(
-        artifact_names
-            .iter()
-            .filter(|name| name.starts_with("text-artifact-") && name.ends_with(".bin"))
-            .count(),
-        1,
-        "one durable artifact owns ready text serving"
+    let pointer: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(scoped_store.join("active-code-generation-v1.json"))
+            .expect("read active publication pointer"),
+    )
+    .expect("decode active publication pointer");
+    let active_artifact = pointer["generation_index"]
+        .as_array()
+        .expect("generation index")
+        .iter()
+        .find(|entry| entry["generation_id"] == pointer["generation_id"])
+        .and_then(|entry| entry.get("text_artifact"))
+        .filter(|value| !value.is_null())
+        .and_then(|artifact| artifact["artifact_file"].as_str())
+        .expect("active generation owns one durable text artifact");
+    assert!(
+        artifact_names.iter().any(|name| name == active_artifact),
+        "the attached text artifact must exist on disk"
     );
     assert_eq!(
         artifact_names

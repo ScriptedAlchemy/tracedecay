@@ -627,6 +627,7 @@ const FORMAT_CAPABLE_NON_APPLICATION_TOOL_NAMES: &[&str] = &[
     "tracedecay_impact",
     "tracedecay_node",
     "tracedecay_similar",
+    "tracedecay_redundancy",
     "tracedecay_rename_preview",
     "tracedecay_implementations",
     "tracedecay_callers_for",

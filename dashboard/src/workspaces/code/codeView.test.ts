@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   codeViewBlocker,
+  codeViewNeedsFocus,
   readCodeLocation,
   writeCodeLocation,
 } from './codeView.ts';
@@ -76,15 +77,32 @@ describe('Code view availability', () => {
     });
   });
 
-  it('states the unmounted projection each pending view needs', () => {
+  it('states the unmounted projection Atlas still needs', () => {
     expect(codeViewBlocker('atlas', 'absent')?.detail).toMatch(
       /structural treemap/i,
     );
-    expect(codeViewBlocker('shared-code', 'absent')?.detail).toMatch(
-      /clone family/i,
+  });
+
+  it('gates Shared Code on the same selected symbol as Trace', () => {
+    expect(codeViewBlocker('shared-code', 'absent')).toEqual({
+      kind: 'unavailable',
+      title: 'Shared Code needs a selected symbol',
+      detail: 'Select a symbol in Topology, then return to Shared Code.',
+    });
+    expect(codeViewBlocker('shared-code', 'loading')?.kind).toBe('loading');
+    expect(codeViewBlocker('shared-code', 'unavailable')?.title).toBe(
+      'The selected symbol is unavailable',
     );
-    expect(codeViewBlocker('compare', 'absent')?.detail).toMatch(
-      /revision-pair/i,
-    );
+    expect(codeViewBlocker('shared-code', 'available')).toBeNull();
+    expect(codeViewNeedsFocus('shared-code')).toBe(true);
+    expect(codeViewNeedsFocus('trace')).toBe(true);
+  });
+
+  it('opens Compare without a symbol: its selection is its own', () => {
+    for (const focus of ['absent', 'loading', 'available', 'unavailable'] as const) {
+      expect(codeViewBlocker('compare', focus)).toBeNull();
+    }
+    expect(codeViewNeedsFocus('compare')).toBe(false);
+    expect(codeViewNeedsFocus('topology')).toBe(false);
   });
 });

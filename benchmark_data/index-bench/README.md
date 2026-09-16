@@ -25,7 +25,8 @@ every instrumentation macro compiles to nothing.
 
 ## What it measures
 
-Six phases against the real production pipeline, no daemon involved:
+Four default phases run against the real production pipeline with no daemon.
+`--clone-envelope` adds the one-body refresh and clone-read phases:
 
 | phase | entrypoint | spans it covers |
 | --- | --- | --- |
@@ -34,7 +35,7 @@ Six phases against the real production pipeline, no daemon involved:
 | one-body refresh | the same, after one generated Java body changes structurally | clone payload recomputation and reuse |
 | sealed page drain | `VerifiedSealedLexicalPageSourceV1::next_page_batch_if` | `code_index.lexical_source.batch_stage` |
 | artifact ingest | `CodeLexicalArtifactBuilderV1::append_pages` | `query.artifact.append_pages`, `query.artifact.batch.*`, `query.artifact.finalization.advance_wake` |
-| clone reads | `CodeLexicalArtifactReaderV1` | cold and warm exact lookup, fingerprint accounting, cancellation, and reopen |
+| clone reads | `CodeLexicalArtifactReaderV1` | first-reader and warm exact lookup, fingerprint accounting, cancellation, and reopen |
 
 Read the report as service demand, not wall time: extraction runs on the
 rayon pool, so `code_index.extract.parser_artifact` totals CPU across
@@ -103,6 +104,7 @@ commit as incomparable.
 | `--corpus DIR` | `TRACEDECAY_INDEX_BENCH_CORPUS` | `benchmark_data/index-bench/corpus` |
 | `--replicas N` | `TRACEDECAY_INDEX_BENCH_REPLICAS` | `1` |
 | `--format-revision 14\|15\|16` | none | `16` |
+| `--clone-envelope` | none | disabled |
 
 `--replicas` indexes the corpus N times under distinct logical-path prefixes.
 It is for local investigation of scaling behaviour; CI runs at 1, because the
@@ -119,14 +121,16 @@ Run the 5,200-file workload through Cargo Hauler:
 ```text
 hauler exec -- cargo run --release -p tracedecay-query \
   --features production --bin tracedecay-index-bench -- \
-  --replicas 20 --format-revision 16
+  --clone-envelope --replicas 20 --format-revision 16
 ```
 
 The JSON result records source bytes, symbols, clone bodies, body tokens,
 language counts, artifact bytes, wall times, peak RSS, exact lookup samples,
-fingerprint accounting, cancellation, and restart. The one-body refresh is
-available for the committed generated corpus. A custom corpus without the
-generated Java body reports that measurement as unavailable.
+fingerprint accounting, cancellation, and restart. First-reader latency runs
+in the artifact writer process after finalization, so it does not claim a cold
+OS page cache. The one-body refresh is available for the committed generated
+corpus. A custom corpus without the generated Java body reports that
+measurement as unavailable.
 
 The Java subset has 20 normalized members per replica. Fifty replicas exercise
 one exact family with 1,000 members:
@@ -134,6 +138,24 @@ one exact family with 1,000 members:
 ```text
 hauler exec -- cargo run --release -p tracedecay-query \
   --features production --bin tracedecay-index-bench -- \
-  --corpus benchmark_data/index-bench/corpus/java \
+  --clone-envelope --corpus benchmark_data/index-bench/corpus/java \
   --replicas 50 --format-revision 16
 ```
+
+### Receipts
+
+`clone-envelope-20260915.json` is the first envelope receipt. Its 101,154-symbol
+sample failed the 60 s clone-work target (+68.8 s of artifact ingest over the
+revision-14 control). Hotpath put the wait in `query.artifact.batch.sqlite`:
+`clone_fingerprint_postings` was filled row by row in document order into its
+hash-keyed tree, so every batch commit rewrote and journaled leaves across the
+whole tree (27× write amplification on the fingerprint table alone).
+
+`clone-envelope-20260915-fingerprint-staging.json` re-measures the same corpus
+after revision 16 started staging fingerprint postings in arrival order and
+sorting them into the keyed tree once at finalization. It names its own host
+and harness commit, records process write volume, and flags the 23-replica
+samples as swap-assisted because that host has less memory than the run's peak
+RSS. The one-body refresh target still fails there; the receipt attributes the
+wall to the generation-wide `code_index.build.assemble` pass, which costs the
+same without clone tables.

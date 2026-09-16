@@ -2216,6 +2216,435 @@
       "description": "Strongly typed canonical identity: `CatalogGenerationId`.",
       "type": "string"
     },
+    "CodeCloneIndexBudgetsV1": {
+      "description": "Fixed per-request clone candidate and verification budgets.",
+      "properties": {
+        "candidate_bodies": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "hot_posting_rows": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minimum_body_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minimum_directional_coverage_millionths": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "posting_rows": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "verification_bodies": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "verification_token_work": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "posting_rows",
+        "candidate_bodies",
+        "verification_bodies",
+        "verification_token_work",
+        "hot_posting_rows",
+        "minimum_body_tokens",
+        "minimum_directional_coverage_millionths"
+      ],
+      "type": "object"
+    },
+    "CodeCloneIndexCoverageV1": {
+      "description": "Coverage retained by one clone-index artifact or in-progress successor.\n\nCounts are `None` until the clone artifact has observed the corresponding\ndenominator. A complete empty repository reports `Some(0)`, which keeps a\ndesigned zero distinct from unavailable coverage.",
+      "properties": {
+        "completed_source_pages": {
+          "description": "Sealed source pages committed to clone indexing.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "conservative_normalized_bodies": {
+          "description": "Eligible bodies with a conservative exact posting.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "eligible_source_bodies": {
+          "description": "Source bodies admitted for automatic clone discovery.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "exact_postings": {
+          "description": "Conservative and rename-normalized exact posting rows.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "excluded_incomplete_tokenization_bodies": {
+          "description": "Bodies excluded because conservative tokenization was incomplete.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "excluded_too_small_bodies": {
+          "description": "Bodies excluded because they are below the automatic-discovery minimum.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "hot_posting_rows_skipped": {
+          "description": "Positional rows omitted when those hot posting lists are skipped.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "hot_postings_skipped": {
+          "description": "Fingerprint posting lists above the interactive read threshold.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "near_fingerprint_bodies": {
+          "description": "Eligible bodies represented by positional fingerprints.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "near_fingerprint_postings": {
+          "description": "Positional fingerprint posting rows retained by the artifact.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "payloads_reused": {
+          "description": "Current payload occurrences reused from the preceding generation.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "rename_normalized_bodies": {
+          "description": "Eligible bodies with a complete rename-normalized exact posting.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "rename_partial_bodies": {
+          "description": "Eligible bodies whose rename normalization is partial.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "rename_unsupported_bodies": {
+          "description": "Eligible bodies whose language has no rename normalization.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "source_bodies": {
+          "description": "Clone body occurrences observed in the sealed lexical source.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "total_source_pages": {
+          "description": "Sealed source pages in the generation.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unique_payloads": {
+          "description": "Distinct content-addressed payloads retained by the artifact.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "source_bodies",
+        "eligible_source_bodies",
+        "conservative_normalized_bodies",
+        "rename_normalized_bodies",
+        "unique_payloads",
+        "payloads_reused",
+        "exact_postings",
+        "near_fingerprint_bodies",
+        "near_fingerprint_postings",
+        "hot_postings_skipped",
+        "hot_posting_rows_skipped",
+        "excluded_too_small_bodies",
+        "excluded_incomplete_tokenization_bodies",
+        "rename_partial_bodies",
+        "rename_unsupported_bodies",
+        "completed_source_pages",
+        "total_source_pages"
+      ],
+      "type": "object"
+    },
+    "CodeCloneIndexObservationV1": {
+      "description": "Generation-pinned clone-index evidence shared by non-error readiness states.",
+      "properties": {
+        "artifact_format_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "budgets": {
+          "$ref": "#/$defs/CodeCloneIndexBudgetsV1"
+        },
+        "conservative_normalization_revision": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "coverage": {
+          "$ref": "#/$defs/CodeCloneIndexCoverageV1"
+        },
+        "generation_id": {
+          "type": "string"
+        },
+        "rename_normalization_revision": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "resources": {
+          "$ref": "#/$defs/CodeCloneIndexResourcesV1"
+        },
+        "source_revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "generation_id",
+        "source_revision",
+        "artifact_format_revision",
+        "conservative_normalization_revision",
+        "rename_normalization_revision",
+        "coverage",
+        "budgets",
+        "resources"
+      ],
+      "type": "object"
+    },
+    "CodeCloneIndexResourcesV1": {
+      "description": "Measured resources and update accounting for one clone-index generation.",
+      "properties": {
+        "bytes_on_disk": {
+          "description": "Current durable artifact or staging-file bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "changed_symbol_update_micros": {
+          "description": "Latest observed source-edit arrival through clone-ready publication.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "peak_scratch_memory_bytes": {
+          "description": "Largest measured clone-row serialization scratch during the build.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "stale_invalidations": {
+          "description": "Prior clone payload bindings invalidated by the latest publication.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "bytes_on_disk",
+        "peak_scratch_memory_bytes",
+        "changed_symbol_update_micros",
+        "stale_invalidations"
+      ],
+      "type": "object"
+    },
+    "CodeCloneIndexStatusV1": {
+      "description": "Clone readiness, independent from lexical and graph serving.",
+      "oneOf": [
+        {
+          "description": "The sealed lexical artifact or its clone rows cannot be read.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A restartable clone successor is consuming sealed source pages.",
+          "properties": {
+            "observation": {
+              "$ref": "#/$defs/CodeCloneIndexObservationV1"
+            },
+            "state": {
+              "const": "backfilling",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "observation"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Some clone evidence is readable, but required postings are missing.",
+          "properties": {
+            "observation": {
+              "$ref": "#/$defs/CodeCloneIndexObservationV1"
+            },
+            "omission_reasons": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "state": {
+              "const": "partial",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "observation",
+            "omission_reasons"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Required exact and fingerprint postings cover every eligible body.",
+          "properties": {
+            "observation": {
+              "$ref": "#/$defs/CodeCloneIndexObservationV1"
+            },
+            "state": {
+              "const": "ready",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "observation"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The artifact is readable but belongs to a superseded source generation.",
+          "properties": {
+            "observation": {
+              "$ref": "#/$defs/CodeCloneIndexObservationV1"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "stale",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "observation",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "CodeGenerationId": {
+      "description": "Strongly typed canonical identity: `CodeGenerationId`.",
+      "type": "string"
+    },
     "CodeGraphServingReadinessV1": {
       "description": "Interactive graph-serving state for the latest sealed generation.\n\nA sealed generation can expose truthful census statistics before its graph\nprojection is ready to serve queries, so readiness is reported separately.",
       "oneOf": [
@@ -2687,6 +3116,17 @@
     "CodeIndexWorktreeFreshnessV1": {
       "description": "Freshness/generation state for one mounted worktree.\n\n`Deserialize` is part of the wire contract: the CLI status command decodes\nexactly this type back out of the daemon's `tracedecay_status` response,\nkeeping one authority for the freshness shape.",
       "properties": {
+        "clone_index": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeCloneIndexStatusV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Clone readiness from the same sealed lexical artifact."
+        },
         "code_graph_serving": {
           "anyOf": [
             {
@@ -2876,6 +3316,10 @@
     },
     "ConfigurationSnapshotId": {
       "description": "Strongly typed canonical identity: `ConfigurationSnapshotId`.",
+      "type": "string"
+    },
+    "ContentDigest": {
+      "description": "Strongly typed algorithm-tagged integrity digest: `ContentDigest`.",
       "type": "string"
     },
     "CostsReadModelV1": {
@@ -3504,7 +3948,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/MemoryOverviewPayloadV1"
+              "$ref": "#/$defs/SimilarResultV1"
             },
             {
               "type": "null"
@@ -3575,7 +4019,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/MemoryStatusPayloadV1"
+              "$ref": "#/$defs/RevisionPairUnionLayoutV1"
             },
             {
               "type": "null"
@@ -3646,7 +4090,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/MemoryFactDetailPayloadV1"
+              "$ref": "#/$defs/MemoryOverviewPayloadV1"
             },
             {
               "type": "null"
@@ -3717,7 +4161,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/AnalyticsOverviewPayloadV1"
+              "$ref": "#/$defs/MemoryStatusPayloadV1"
             },
             {
               "type": "null"
@@ -3788,7 +4232,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/AnalyticsUsageSummaryV1"
+              "$ref": "#/$defs/MemoryFactDetailPayloadV1"
             },
             {
               "type": "null"
@@ -3859,7 +4303,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/AnalyticsAgentsPayloadV1"
+              "$ref": "#/$defs/AnalyticsOverviewPayloadV1"
             },
             {
               "type": "null"
@@ -3930,7 +4374,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/AnalyticsSubagentTreePayloadV1"
+              "$ref": "#/$defs/AnalyticsUsageSummaryV1"
             },
             {
               "type": "null"
@@ -4001,7 +4445,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/AnalyticsHintsPayloadV1"
+              "$ref": "#/$defs/AnalyticsAgentsPayloadV1"
             },
             {
               "type": "null"
@@ -4143,7 +4587,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/AnalyticsUnderusedPayloadV1"
+              "$ref": "#/$defs/AnalyticsSubagentTreePayloadV1"
             },
             {
               "type": "null"
@@ -4214,7 +4658,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/AnalyticsDiagnosticsPayloadV1"
+              "$ref": "#/$defs/AnalyticsHintsPayloadV1"
             },
             {
               "type": "null"
@@ -4285,7 +4729,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/SavingsOverviewPayloadV1"
+              "$ref": "#/$defs/AnalyticsUnderusedPayloadV1"
             },
             {
               "type": "null"
@@ -4356,7 +4800,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/LcmSessionPayloadV1"
+              "$ref": "#/$defs/AnalyticsDiagnosticsPayloadV1"
             },
             {
               "type": "null"
@@ -4427,7 +4871,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/LcmTimelinePayloadV1"
+              "$ref": "#/$defs/SavingsOverviewPayloadV1"
             },
             {
               "type": "null"
@@ -4498,7 +4942,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/LcmOverviewPayloadV1"
+              "$ref": "#/$defs/LcmSessionPayloadV1"
             },
             {
               "type": "null"
@@ -4569,7 +5013,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/LcmSearchPayloadV1"
+              "$ref": "#/$defs/LcmTimelinePayloadV1"
             },
             {
               "type": "null"
@@ -4617,6 +5061,148 @@
       "type": "object"
     },
     "DashboardEnvelopeV127": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LcmOverviewPayloadV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardEnvelopeV128": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LcmSearchPayloadV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardEnvelopeV129": {
       "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
       "properties": {
         "authorization": {
@@ -10708,6 +11294,10 @@
       ],
       "type": "object"
     },
+    "FileOccurrenceId": {
+      "description": "Strongly typed canonical identity: `FileOccurrenceId`.",
+      "type": "string"
+    },
     "GenerateProposalRequest": {
       "additionalProperties": false,
       "description": "Read-only proposal generation over one exact current product graph.",
@@ -10775,6 +11365,10 @@
         "disabled",
         "probe_private_preview"
       ],
+      "type": "string"
+    },
+    "GitOidV1": {
+      "description": "A native Git object id (commit, tree, or blob), lowercase hex, SHA-1 or\nSHA-256 length. This is identity evidence only; it never authorizes\nobject reconstruction or traversal outside native Git.",
       "type": "string"
     },
     "GraphCappedV1": {
@@ -17394,6 +17988,228 @@
       ],
       "type": "object"
     },
+    "RevisionPairChangeV1": {
+      "enum": [
+        "unchanged",
+        "added",
+        "removed",
+        "changed"
+      ],
+      "type": "string"
+    },
+    "RevisionPairFileDispositionV1": {
+      "enum": [
+        "present",
+        "deleted",
+        "renamed",
+        "ignored",
+        "binary",
+        "generated",
+        "unsupported_language"
+      ],
+      "type": "string"
+    },
+    "RevisionPairFileRegionV1": {
+      "additionalProperties": false,
+      "properties": {
+        "base": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RevisionPairFileV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "change": {
+          "$ref": "#/$defs/RevisionPairChangeV1"
+        },
+        "file_identity": {
+          "type": "string"
+        },
+        "head": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RevisionPairFileV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "file_identity",
+        "change",
+        "base",
+        "head"
+      ],
+      "type": "object"
+    },
+    "RevisionPairFileV1": {
+      "additionalProperties": false,
+      "properties": {
+        "content_digest": {
+          "$ref": "#/$defs/ContentDigest"
+        },
+        "disposition": {
+          "$ref": "#/$defs/RevisionPairFileDispositionV1"
+        },
+        "file_occurrence_id": {
+          "$ref": "#/$defs/FileOccurrenceId"
+        },
+        "path": {
+          "type": "string"
+        },
+        "symbol_identities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "file_occurrence_id",
+        "path",
+        "content_digest",
+        "disposition",
+        "symbol_identities"
+      ],
+      "type": "object"
+    },
+    "RevisionPairRevisionV1": {
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "$ref": "#/$defs/CodeGenerationId"
+        },
+        "reference": {
+          "$ref": "#/$defs/RefId"
+        },
+        "revision": {
+          "$ref": "#/$defs/GitOidV1"
+        },
+        "tree": {
+          "$ref": "#/$defs/GitOidV1"
+        }
+      },
+      "required": [
+        "reference",
+        "revision",
+        "tree",
+        "generation"
+      ],
+      "type": "object"
+    },
+    "RevisionPairSymbolRegionV1": {
+      "additionalProperties": false,
+      "properties": {
+        "base": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RevisionPairSymbolV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "change": {
+          "$ref": "#/$defs/RevisionPairChangeV1"
+        },
+        "head": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RevisionPairSymbolV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "symbol_identity": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol_identity",
+        "change",
+        "base",
+        "head"
+      ],
+      "type": "object"
+    },
+    "RevisionPairSymbolV1": {
+      "additionalProperties": false,
+      "properties": {
+        "content_digest": {
+          "type": "string"
+        },
+        "file": {
+          "type": "string"
+        },
+        "file_identity": {
+          "type": "string"
+        },
+        "file_occurrence_id": {
+          "$ref": "#/$defs/FileOccurrenceId"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "qualified_name": {
+          "type": "string"
+        },
+        "symbol_occurrence_id": {
+          "$ref": "#/$defs/SymbolOccurrenceId"
+        }
+      },
+      "required": [
+        "symbol_occurrence_id",
+        "file_identity",
+        "file_occurrence_id",
+        "qualified_name",
+        "name",
+        "kind",
+        "file",
+        "content_digest"
+      ],
+      "type": "object"
+    },
+    "RevisionPairUnionLayoutV1": {
+      "additionalProperties": false,
+      "properties": {
+        "base": {
+          "$ref": "#/$defs/RevisionPairRevisionV1"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/RevisionPairFileRegionV1"
+          },
+          "type": "array"
+        },
+        "head": {
+          "$ref": "#/$defs/RevisionPairRevisionV1"
+        },
+        "symbols": {
+          "items": {
+            "$ref": "#/$defs/RevisionPairSymbolRegionV1"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "base",
+        "head",
+        "files",
+        "symbols"
+      ],
+      "type": "object"
+    },
     "RootGenerationV1": {
       "additionalProperties": false,
       "description": "Immutable collection and stack revisions for one exact resolved root.",
@@ -18804,6 +19620,221 @@
       ],
       "type": "object"
     },
+    "SimilarCoverageV1": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "const": "complete",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "const": "partial",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "minimum_tokens": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "status": {
+              "const": "excluded_too_small",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "minimum_tokens"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "const": "excluded_incomplete_tokenization",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SimilarFamilyV1": {
+      "additionalProperties": false,
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "family_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "match_class": {
+          "$ref": "#/$defs/SimilarMatchClassV1"
+        },
+        "member_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "members": {
+          "items": {
+            "$ref": "#/$defs/SimilarOccurrenceV1"
+          },
+          "type": "array"
+        },
+        "next_cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "normalization_revision": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "representative_payload_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        }
+      },
+      "required": [
+        "match_class",
+        "normalization_revision",
+        "family_digest",
+        "representative_payload_digest",
+        "member_count",
+        "members",
+        "complete",
+        "next_cursor"
+      ],
+      "type": "object"
+    },
+    "SimilarMatchClassV1": {
+      "enum": [
+        "conservative_exact",
+        "rename_normalized_exact"
+      ],
+      "type": "string"
+    },
+    "SimilarOccurrenceV1": {
+      "additionalProperties": false,
+      "properties": {
+        "body_span": {
+          "$ref": "#/$defs/SourceSpan"
+        },
+        "path": {
+          "type": "string"
+        },
+        "project_id": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "repository_id": {
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "snapshot_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "source_generation": {
+          "$ref": "#/$defs/CodeGenerationId"
+        },
+        "symbol_occurrence_id": {
+          "$ref": "#/$defs/SymbolOccurrenceId"
+        },
+        "worktree_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorktreeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "project_id",
+        "repository_id",
+        "worktree_id",
+        "source_generation",
+        "snapshot_digest",
+        "symbol_occurrence_id",
+        "path",
+        "body_span"
+      ],
+      "type": "object"
+    },
+    "SimilarResultV1": {
+      "additionalProperties": false,
+      "properties": {
+        "coverage": {
+          "$ref": "#/$defs/SimilarCoverageV1"
+        },
+        "families": {
+          "items": {
+            "$ref": "#/$defs/SimilarFamilyV1"
+          },
+          "type": "array"
+        },
+        "source": {
+          "$ref": "#/$defs/SimilarOccurrenceV1"
+        },
+        "source_generation": {
+          "$ref": "#/$defs/CodeGenerationId"
+        }
+      },
+      "required": [
+        "source",
+        "families",
+        "source_generation",
+        "coverage"
+      ],
+      "type": "object"
+    },
+    "SourceSpan": {
+      "additionalProperties": false,
+      "description": "Byte range inside one sanitized source file. Mutable line numbers are\nnever part of identity.",
+      "properties": {
+        "end_byte": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "start_byte": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start_byte",
+        "end_byte"
+      ],
+      "type": "object"
+    },
     "SourceStoreId": {
       "description": "Strongly typed canonical identity: `SourceStoreId`.",
       "type": "string"
@@ -19912,6 +20943,10 @@
           "type": "object"
         }
       ]
+    },
+    "SymbolOccurrenceId": {
+      "description": "Strongly typed canonical identity: `SymbolOccurrenceId`.",
+      "type": "string"
     },
     "SyncSettingsPatch": {
       "additionalProperties": false,
@@ -29701,25 +30736,25 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
     "analytics_agents": {
-      "$ref": "#/$defs/DashboardEnvelopeV117"
-    },
-    "analytics_diagnostics": {
-      "$ref": "#/$defs/DashboardEnvelopeV121"
-    },
-    "analytics_hints": {
       "$ref": "#/$defs/DashboardEnvelopeV119"
     },
+    "analytics_diagnostics": {
+      "$ref": "#/$defs/DashboardEnvelopeV123"
+    },
+    "analytics_hints": {
+      "$ref": "#/$defs/DashboardEnvelopeV121"
+    },
     "analytics_overview": {
-      "$ref": "#/$defs/DashboardEnvelopeV115"
+      "$ref": "#/$defs/DashboardEnvelopeV117"
     },
     "analytics_subagent_tree": {
-      "$ref": "#/$defs/DashboardEnvelopeV118"
-    },
-    "analytics_underused": {
       "$ref": "#/$defs/DashboardEnvelopeV120"
     },
+    "analytics_underused": {
+      "$ref": "#/$defs/DashboardEnvelopeV122"
+    },
     "analytics_usage": {
-      "$ref": "#/$defs/DashboardEnvelopeV116"
+      "$ref": "#/$defs/DashboardEnvelopeV118"
     },
     "automation_problem": {
       "$ref": "#/$defs/AutomationRunProblemV1"
@@ -29759,7 +30794,7 @@
       "$ref": "#/$defs/FactStoreCurateRequestV1"
     },
     "feedback_status": {
-      "$ref": "#/$defs/DashboardEnvelopeV127"
+      "$ref": "#/$defs/DashboardEnvelopeV129"
     },
     "graph_call_chain": {
       "$ref": "#/$defs/StructureReadV1"
@@ -29802,28 +30837,28 @@
       "description": "The handoff-token frontier. Contracted here because the Agents surface\nreads it directly off the mounted application route; the two `open_*`\noperations stay uncontracted for the dashboard because it never redeems\na bearer and must not grow a client that could."
     },
     "lcm_overview": {
-      "$ref": "#/$defs/DashboardEnvelopeV125"
+      "$ref": "#/$defs/DashboardEnvelopeV127"
     },
     "lcm_search": {
-      "$ref": "#/$defs/DashboardEnvelopeV126"
+      "$ref": "#/$defs/DashboardEnvelopeV128"
     },
     "lcm_session": {
-      "$ref": "#/$defs/DashboardEnvelopeV123"
+      "$ref": "#/$defs/DashboardEnvelopeV125"
     },
     "lcm_timeline": {
-      "$ref": "#/$defs/DashboardEnvelopeV124"
+      "$ref": "#/$defs/DashboardEnvelopeV126"
     },
     "loom_temporal": {
       "$ref": "#/$defs/LoomTemporalPayloadV1"
     },
     "memory_fact_detail": {
-      "$ref": "#/$defs/DashboardEnvelopeV114"
+      "$ref": "#/$defs/DashboardEnvelopeV116"
     },
     "memory_overview": {
-      "$ref": "#/$defs/DashboardEnvelopeV112"
+      "$ref": "#/$defs/DashboardEnvelopeV114"
     },
     "memory_status": {
-      "$ref": "#/$defs/DashboardEnvelopeV113"
+      "$ref": "#/$defs/DashboardEnvelopeV115"
     },
     "multi_root_capability": {
       "$ref": "#/$defs/MultiRootCapabilityV1"
@@ -29865,8 +30900,11 @@
     "remote_operational_status": {
       "$ref": "#/$defs/RemoteOperationalStatusPayloadV1"
     },
+    "revision_pair_union_layout": {
+      "$ref": "#/$defs/DashboardEnvelopeV113"
+    },
     "savings_overview": {
-      "$ref": "#/$defs/DashboardEnvelopeV122"
+      "$ref": "#/$defs/DashboardEnvelopeV124"
     },
     "savings_sessions": {
       "$ref": "#/$defs/SavingsSessionsPayloadV1"
@@ -29882,6 +30920,9 @@
     },
     "settings_user_patch": {
       "$ref": "#/$defs/UserSettingsPatch"
+    },
+    "shared_code_family": {
+      "$ref": "#/$defs/DashboardEnvelopeV112"
     },
     "storage_findings": {
       "$ref": "#/$defs/StorageFindingsPayloadV1"
@@ -30100,6 +31141,8 @@
     "graph_neighbors",
     "graph_subgraph",
     "graph_path",
+    "shared_code_family",
+    "revision_pair_union_layout",
     "memory_overview",
     "memory_status",
     "memory_fact_detail",

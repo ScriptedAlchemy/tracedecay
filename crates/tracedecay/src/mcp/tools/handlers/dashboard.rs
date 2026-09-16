@@ -9,6 +9,8 @@
 //! server. Supports optional `stop` action to shut down the calling project's
 //! previously-started instance.
 
+mod code_reads;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -32,6 +34,7 @@ use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::handlers::dashboard_lcm::DashboardLcmReadAdapter;
 use tracedecay_mcp::handlers::generic_tool_result;
 
+use code_reads::DashboardCodeReadAdapter;
 use tracedecay_dashboard_api::{
     AutomationSchedulerReconciler, DEFAULT_PORT, DashboardApplicationRouters,
     DashboardApplicationRuntime, DashboardAutomationWriter,
@@ -913,7 +916,24 @@ pub(super) async fn handle_dashboard(
                     )
                         as Arc<dyn tracedecay_dashboard_api::DashboardGitCorrelationReadPortV1>
                 });
-            let delivery_read_authority = daemon_invocation_service.map(|service| {
+            let code_read_authority = retained_server
+                .admitted_project_scope()
+                .zip(retained_server.code_index_search_authority())
+                .zip(retained_server.code_index_similar_executor())
+                .zip(daemon_invocation_service.clone())
+                .map(
+                    |(((scope, search_authority), similar_executor), invocation_service)| {
+                        Arc::new(DashboardCodeReadAdapter::new(
+                            retained_cg.store_layout.project_root.clone(),
+                            scope,
+                            search_authority,
+                            similar_executor,
+                            invocation_service,
+                        ))
+                            as tracedecay_dashboard_api::code_read_api::DashboardCodeReadAuthorityV1
+                    },
+                );
+            let delivery_read_authority = daemon_invocation_service.clone().map(|service| {
                 let adapter =
                     tracedecay_mcp::handlers::dashboard_delivery::DashboardDeliveryReadAdapter::new(
                         service,
@@ -932,6 +952,7 @@ pub(super) async fn handle_dashboard(
                     project_graph_resolver: dashboard_project_graph_resolver,
                     code_graph_read_admission,
                     code_graph_projection_read_port,
+                    code_read_authority,
                     registered_project_session_db,
                     profile_code_index_worker_settings,
                     lcm_read_authority,

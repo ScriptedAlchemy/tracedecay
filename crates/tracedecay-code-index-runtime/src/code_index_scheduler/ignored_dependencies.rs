@@ -879,6 +879,8 @@ fn publication_evidence(
         generation.edges(),
     ))
     .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+    let (clone_payloads_reused, clone_stale_invalidations, clone_body_changes_observed) =
+        generation.clone_update_statistics();
     Ok(CodeIndexPublishEvidenceV1 {
         generation_id: generation.manifest().generation_id.clone(),
         repository_id: generation.snapshot().repository.clone(),
@@ -893,6 +895,9 @@ fn publication_evidence(
         reextracted_files,
         changed_chunks: changes.added_or_changed.len() + changes.deleted.len(),
         reused_chunks: changes.reused.len(),
+        clone_payloads_reused: Some(clone_payloads_reused),
+        clone_stale_invalidations: Some(clone_stale_invalidations),
+        clone_body_changes_observed: Some(clone_body_changes_observed),
         overflow_reconciled: false,
     })
 }
