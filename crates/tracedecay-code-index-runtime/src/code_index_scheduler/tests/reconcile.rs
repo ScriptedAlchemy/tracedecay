@@ -2614,6 +2614,9 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
     })
     .await;
     let generation = ready.generation().manifest().generation_id.clone();
+    // The seat precedes the clone-fingerprint backfill; settle it so the pass
+    // observed below is the source-verification Noop alone.
+    drain_clone_backfill(&registry, fixture.path()).await;
 
     // Exercise the ordinary expiry path too: one readiness request starts a
     // real Noop, and a read during that owner pass records one BusyFollowUp.
