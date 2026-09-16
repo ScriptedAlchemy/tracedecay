@@ -483,7 +483,10 @@ pub(crate) fn plan_chunk_increment_arc_shared(
     }
     if shared_occurrences.is_empty() {
         return Err(ChunkIncrementErrorV1::NonCanonical(
-            "arc-share increment requires shared file pages".to_owned(),
+            crate::noncanonical::noncanonical_detail(
+                crate::noncanonical::NonCanonicalReasonCodeV1::IdentityValidation,
+                "arc-share increment requires shared file pages",
+            ),
         ));
     }
 
