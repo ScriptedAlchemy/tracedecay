@@ -35,7 +35,7 @@ fn a_git_repository_at_the_system_temp_root_is_not_project_like() {
     let temp = tempfile::tempdir().expect("temporary root");
     let _temp_env = redirect_temp_dir(temp.path());
     let git = tracedecay_runtime_core::git::try_git_program().expect("resolve the git program");
-    let status = std::process::Command::new(&git)
+    let status = std::process::Command::new(git)
         .args(["init", "--initial-branch=main"])
         .current_dir(temp.path())
         .status()
