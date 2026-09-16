@@ -195,10 +195,9 @@ impl CodeIndexActivationV1 {
     }
 
     fn accepts_root(&self, project_root: &Path) -> bool {
-        self.identity.is_some()
-            && project_root
-                .canonicalize()
-                .is_ok_and(|root| root == self.project_root)
+        project_root
+            .canonicalize()
+            .is_ok_and(|root| root == self.project_root)
     }
 
     pub fn identity(&self) -> Option<&IndexingIdentityV1> {
@@ -378,6 +377,9 @@ impl CodeIndexActivationV1 {
             return CodeIndexDemandAdmissionV1::Unavailable(
                 CodeIndexDemandUnavailableV1::ForeignRoot,
             );
+        }
+        if self.identity.is_none() {
+            return CodeIndexDemandAdmissionV1::Queued;
         }
         let overflow = !matches!(demand, CodeIndexDemandV1::HookPaths(_));
         let rel_paths = match demand {
@@ -578,6 +580,26 @@ mod tests {
         );
         assert_eq!(mount_attempts.load(Ordering::SeqCst), 0);
         assert!(!activation.is_mounted());
+    }
+
+    #[tokio::test]
+    async fn operator_reconcile_admits_a_non_git_project_root() {
+        let project = TempDir::new().expect("project root");
+        let mount_attempts = Arc::new(AtomicUsize::new(0));
+        let activation = activation(
+            project.path(),
+            Arc::clone(&mount_attempts),
+            None,
+            Arc::new(Mutex::new(Vec::new())),
+        );
+
+        assert_eq!(
+            activation
+                .admit(project.path(), CodeIndexDemandV1::OperatorReconcile)
+                .await,
+            CodeIndexDemandAdmissionV1::Queued
+        );
+        assert_eq!(mount_attempts.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
