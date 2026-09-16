@@ -34,10 +34,11 @@ atlas remains accessible in recorded Brain, including churn and exact duplicates
 - Dense Loom: `?surface=loom&state=04&data=fixture&loom_source=design&loom_page=full`.
 - Proximity: add `&loom_lens=proximity` to the dense Loom URL.
 
-`profile-pack/`, `src/structure/snapshot.json` and other imported JSON retain the
-app's recorded data. They are not a live daemon connection. Delivery admits only
-tracked/indexed evidence, not the broad offline GitHub audit. Original source
-paths inside captures are provenance, not new filesystem dependencies.
+`profile-pack/` is intentionally absent from the tree (operator-profile data
+exposure; gitignored). Do not re-commit a live `~/.tracedecay` export there.
+`src/structure/snapshot.json` and other in-repo JSON are concept fixtures only,
+not a live daemon connection. Delivery admits only tracked/indexed evidence, not
+the broad offline GitHub audit.
 
 ## Images and checks
 
