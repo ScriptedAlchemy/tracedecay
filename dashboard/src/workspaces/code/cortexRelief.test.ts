@@ -14,7 +14,13 @@ import type {
   StrataFileV1,
   StrataMeasurementV1,
 } from '../../contracts/generated.ts';
-import { CONTOUR_INTERVAL, MAX_DRAWN_REGIONS, buildCortexModel } from './cortexRelief.ts';
+import {
+  CONTOUR_INTERVAL,
+  MAX_DRAWN_REGIONS,
+  buildCortexModel,
+  cortexDescription,
+  cortexLegendPanels,
+} from './cortexRelief.ts';
 
 function cluster(
   directory: string,
@@ -118,6 +124,55 @@ describe('elevation', () => {
     expect(deep.y!).toBeGreaterThan(shallow.y!);
     expect(model.strata.map((band) => band.depth)).toEqual([0, 4]);
     expect(model.strata.every((band) => band.regions === 1)).toBe(true);
+    // One row per stratum: the stratum is its line, and the region sits on it.
+    for (const band of model.strata) {
+      expect(band.rows).toBe(1);
+      expect(band.top).toBe(band.y);
+      expect(band.bottom).toBe(band.y);
+    }
+    expect(deep.y).toBe(model.strata[0]!.y);
+    expect(shallow.y).toBe(model.strata[1]!.y);
+  });
+
+  it('wraps a crowded stratum into rows inside its own span and says so', () => {
+    // ripgrep's shape: depth 0–1, every drawn region at the same median depth.
+    const clusters = Array.from({ length: MAX_DRAWN_REGIONS }, (_, index) =>
+      cluster(`crates/mod${index}`, { order: index, file_count: 3 }),
+    );
+    const files = clusters.map((entry) => file(`${entry.directory}/a.rs`, 0));
+    const model = buildCortexModel(measurement(clusters, files, { max_depth: 1 }));
+
+    expect(model.strata).toHaveLength(1);
+    const [band] = model.strata;
+    expect(band!.depth).toBe(0);
+    expect(band!.rows).toBeGreaterThan(1);
+    expect(band!.top).toBeLessThan(band!.bottom);
+    // Every region keeps depth 0 and stays inside the stratum's drawn span; the
+    // rows exist, so at least two distinct y values are used within that span.
+    const drawn = model.drawnRegions;
+    expect(drawn).toHaveLength(MAX_DRAWN_REGIONS);
+    expect(drawn.every((region) => region.depth === 0)).toBe(true);
+    for (const region of drawn) {
+      expect(region.y!).toBeGreaterThanOrEqual(band!.top);
+      expect(region.y!).toBeLessThanOrEqual(band!.bottom);
+    }
+    expect(new Set(drawn.map((region) => region.y)).size).toBe(band!.rows);
+    // The contract is printed where the reader looks for it.
+    const elevation = cortexLegendPanels(model).find((panel) => panel.label === 'elevation')!;
+    expect(elevation.teach).toContain(`stratum 0 wraps ${MAX_DRAWN_REGIONS} regions into ${band!.rows} rows`);
+    expect(elevation.teach).toContain('layout, not depth');
+    expect(cortexDescription(model)).toContain(
+      `stratum 0 holds ${MAX_DRAWN_REGIONS} in ${band!.rows} rows, where the row carries no depth`,
+    );
+  });
+
+  it('does not mention rows when no stratum wrapped', () => {
+    const model = buildCortexModel(
+      measurement([cluster('a', { order: 0 })], [file('a/x.rs', 2)]),
+    );
+    const elevation = cortexLegendPanels(model).find((panel) => panel.label === 'elevation')!;
+    expect(elevation.teach).not.toContain('rows');
+    expect(cortexDescription(model)).not.toContain('rows');
   });
 });
 

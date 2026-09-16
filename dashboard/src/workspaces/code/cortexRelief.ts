@@ -97,12 +97,27 @@ export interface CortexRegion {
   readonly radius: number | null;
 }
 
+/**
+ * One populated stratum. `y` is the depth's own line. A stratum too crowded for
+ * one row wraps into `rows` rows between `top` and `bottom`; the renderer then
+ * draws the stratum as that span, because a region's row inside it is layout
+ * relief and carries no depth. When `rows` is 1, `top` and `bottom` equal `y`.
+ */
+export interface CortexStratum {
+  readonly depth: number;
+  readonly y: number;
+  readonly top: number;
+  readonly bottom: number;
+  readonly rows: number;
+  readonly regions: number;
+}
+
 export interface CortexModel {
   readonly regions: readonly CortexRegion[];
   readonly drawnRegions: readonly CortexRegion[];
   readonly world: { readonly width: number; readonly height: number };
   /** Strata actually laid out, bedrock first. */
-  readonly strata: readonly { readonly depth: number; readonly y: number; readonly regions: number }[];
+  readonly strata: readonly CortexStratum[];
   readonly maxDepth: number;
   readonly idealDepth: number;
   readonly totalRegions: number;
@@ -235,6 +250,7 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
       : PAD.top + usableHeight / 2;
 
   const placed = new Map<string, { x: number; y: number; radius: number }>();
+  const spans = new Map<number, { top: number; bottom: number; rows: number }>();
   for (const [depth, band] of byBand) {
     const inBand = [...band].sort((a, b) => a.cluster.order - b.cluster.order);
     const rows = bandRows.get(depth) ?? 1;
@@ -248,6 +264,10 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
       ? PAD.top + usableHeight
       : Math.min(PAD.top + usableHeight, line + bandSpan / 2);
     const pitch = (bandBottom - bandTop) / rows;
+    spans.set(
+      depth,
+      rows === 1 ? { top: line, bottom: line, rows } : { top: bandTop, bottom: bandBottom, rows },
+    );
     inBand.forEach((draft, index) => {
       const row = Math.floor(index / perRow);
       const rowStart = row * perRow;
@@ -295,13 +315,20 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
     null,
   );
 
-  const strata = [...byBand.keys()]
+  const strata: CortexStratum[] = [...byBand.keys()]
     .sort((a, b) => a - b)
-    .map((depth) => ({
-      depth,
-      y: bandY(depth),
-      regions: byBand.get(depth)?.length ?? 0,
-    }));
+    .map((depth) => {
+      const line = bandY(depth);
+      const span = spans.get(depth) ?? { top: line, bottom: line, rows: 1 };
+      return {
+        depth,
+        y: line,
+        top: span.top,
+        bottom: span.bottom,
+        rows: span.rows,
+        regions: byBand.get(depth)?.length ?? 0,
+      };
+    });
 
   return {
     regions,
@@ -342,11 +369,18 @@ export interface CortexPanel {
 /** The key below the field, counted from the model rather than typed by hand,
  * so the legend and the picture cannot drift apart. */
 export function cortexLegendPanels(model: CortexModel): readonly CortexPanel[] {
+  const wrapped = model.strata.filter((band) => band.rows > 1);
   return [
     {
       label: 'elevation',
       reading: `0 – ${model.maxDepth}`,
-      teach: `${model.granularity}-level dependency depth (${model.algorithm}) over ${model.dependencyEdgeKinds.join(', ')} edges. Stratum 0 is bedrock; a region sits at the median depth of its own files, and its full range is in the table.`,
+      teach: `${model.granularity}-level dependency depth (${model.algorithm}) over ${model.dependencyEdgeKinds.join(', ')} edges. Stratum 0 is bedrock; a region sits in the stratum of the median depth of its own files, and its full range is in the table.${
+        wrapped.length > 0
+          ? ` ${wrapped
+              .map((band) => `stratum ${band.depth} wraps ${band.regions} regions into ${band.rows} rows`)
+              .join('; ')}: the stratum is drawn as that span, and a region's row inside it is layout, not depth.`
+          : ''
+      }`,
     },
     {
       label: 'area',
@@ -420,7 +454,12 @@ export function cortexAbsences(model: CortexModel): readonly CortexPanel[] {
  * also printed as text on the surface, and the table is the equivalent. */
 export function cortexDescription(model: CortexModel): string {
   const bands = model.strata
-    .map((band) => `stratum ${band.depth} holds ${band.regions}`)
+    .map(
+      (band) =>
+        `stratum ${band.depth} holds ${band.regions}${
+          band.rows > 1 ? ` in ${band.rows} rows, where the row carries no depth` : ''
+        }`,
+    )
     .join(', ');
   return [
     `Relief terrain of ${model.drawnRegions.length} module regions aggregating ${model.drawnFiles.toLocaleString()} files,`,

@@ -206,29 +206,50 @@ export function createCortexRenderer(
     ctx!.lineWidth = 1 / scale;
     ctx!.font = mono(13);
     ctx!.textBaseline = 'middle';
+    const left = 96;
+    const right = model.world.width - 24;
     for (const band of model.strata) {
+      // A stratum that wrapped into rows is drawn as the span those rows
+      // occupy, edged top and bottom, so the axis says where one depth starts
+      // and ends instead of drawing a line the regions visibly do not sit on.
+      const wrapped = band.rows > 1;
+      const axisY = wrapped ? (band.top + band.bottom) / 2 : band.y;
       ctx!.strokeStyle = palette.grid;
       ctx!.setLineDash([3 / scale, 5 / scale]);
-      ctx!.beginPath();
-      ctx!.moveTo(96, band.y);
-      ctx!.lineTo(model.world.width - 24, band.y);
-      ctx!.stroke();
+      if (wrapped) {
+        ctx!.fillStyle = palette.surface1;
+        ctx!.globalAlpha = 0.28;
+        ctx!.fillRect(left, band.top, right - left, band.bottom - band.top);
+        ctx!.globalAlpha = 1;
+        ctx!.beginPath();
+        ctx!.moveTo(left, band.top);
+        ctx!.lineTo(right, band.top);
+        ctx!.moveTo(left, band.bottom);
+        ctx!.lineTo(right, band.bottom);
+        ctx!.stroke();
+      } else {
+        ctx!.beginPath();
+        ctx!.moveTo(left, band.y);
+        ctx!.lineTo(right, band.y);
+        ctx!.stroke();
+      }
       ctx!.setLineDash([]);
       ctx!.fillStyle = palette.textMuted;
       ctx!.textAlign = 'left';
-      ctx!.fillText(`depth ${band.depth}`, 12, band.y - 8);
+      ctx!.fillText(`depth ${band.depth}`, 12, axisY - 8);
       ctx!.fillStyle = palette.edgeStrong;
       ctx!.fillText(
         band.depth === 0 ? 'BEDROCK' : band.depth === model.maxDepth ? 'RIDGE' : '',
         12,
-        band.y + 8,
+        axisY + 8,
       );
       // The plan's own second-order note: the strata are drawn evenly spaced
       // while their population is not. Printing the population on the axis is
       // how a reader sees that without an area-preserving scale.
       ctx!.fillStyle = palette.textMuted;
       ctx!.textAlign = 'right';
-      ctx!.fillText(`${band.regions}`, 92, band.y + 8);
+      ctx!.fillText(`${band.regions}`, 92, axisY + 8);
+      if (wrapped) ctx!.fillText(`${band.rows} rows`, 92, axisY + 24);
     }
     ctx!.restore();
   }
