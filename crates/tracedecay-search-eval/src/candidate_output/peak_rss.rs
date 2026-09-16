@@ -3,74 +3,19 @@
 use std::fs;
 
 use tracedecay_query::search_quality::candidate_output::{
-    ResourceMeasurementStatusV1, ResourceSampleV1,
+    ResourceMeasurementPendingReasonV1, ResourceMeasurementStatusV1, ResourceSampleV1,
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
+/// A peak resident-set observation: either a measured high-water mark or the
+/// typed reason this host could not report one.
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum PeakRssObservation {
     Measured(u64),
-    Pending(PeakRssPendingReason),
-}
-
-#[derive(Debug, Eq, PartialEq)]
-pub(super) enum PeakRssPendingReason {
-    #[cfg(any(target_os = "linux", test))]
-    LinuxStatusReadFailure(String),
-    #[cfg(any(target_os = "linux", test))]
-    LinuxMissingNonzeroVmHwm,
-    #[cfg(any(target_os = "macos", test))]
-    MacOsGetrusageFailure(String),
-    #[cfg(any(target_os = "macos", test))]
-    MacOsNonPositiveMaxRss,
-    #[cfg(any(windows, test))]
-    WindowsK32GetProcessMemoryInfoFailure(String),
-    #[cfg(any(windows, test))]
-    WindowsZeroPeakWorkingSetSize,
-    #[cfg(any(not(any(target_os = "linux", target_os = "macos", windows)), test))]
-    UnsupportedPlatform(&'static str),
-}
-
-impl std::fmt::Display for PeakRssPendingReason {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            #[cfg(any(target_os = "linux", test))]
-            Self::LinuxStatusReadFailure(error) => write!(
-                formatter,
-                "Linux peak_rss_bytes is unavailable because /proc/self/status could not be read: {error}"
-            ),
-            #[cfg(any(target_os = "linux", test))]
-            Self::LinuxMissingNonzeroVmHwm => formatter.write_str(
-                "Linux peak_rss_bytes is unavailable because /proc/self/status has no nonzero VmHWM value",
-            ),
-            #[cfg(any(target_os = "macos", test))]
-            Self::MacOsGetrusageFailure(error) => write!(
-                formatter,
-                "macOS peak_rss_bytes is unavailable because getrusage(RUSAGE_SELF) failed: {error}"
-            ),
-            #[cfg(any(target_os = "macos", test))]
-            Self::MacOsNonPositiveMaxRss => formatter.write_str(
-                "macOS peak_rss_bytes is unavailable because getrusage(RUSAGE_SELF) returned a non-positive ru_maxrss",
-            ),
-            #[cfg(any(windows, test))]
-            Self::WindowsK32GetProcessMemoryInfoFailure(error) => write!(
-                formatter,
-                "Windows peak_rss_bytes is unavailable because K32GetProcessMemoryInfo failed before PeakWorkingSetSize could be read: {error}"
-            ),
-            #[cfg(any(windows, test))]
-            Self::WindowsZeroPeakWorkingSetSize => formatter.write_str(
-                "Windows peak_rss_bytes is unavailable because K32GetProcessMemoryInfo returned zero PeakWorkingSetSize",
-            ),
-            #[cfg(any(not(any(target_os = "linux", target_os = "macos", windows)), test))]
-            Self::UnsupportedPlatform(platform) => write!(
-                formatter,
-                "{platform} peak_rss_bytes is unavailable because the platform is unsupported"
-            ),
-        }
-    }
+    Pending(ResourceMeasurementPendingReasonV1),
 }
 
 impl PeakRssObservation {
@@ -99,11 +44,9 @@ pub(super) fn completed_resource_sample(
         PeakRssObservation::Measured(bytes) => {
             (ResourceMeasurementStatusV1::Measured, Some(bytes), None)
         }
-        PeakRssObservation::Pending(reason) => (
-            ResourceMeasurementStatusV1::Pending,
-            None,
-            Some(reason.to_string()),
-        ),
+        PeakRssObservation::Pending(reason) => {
+            (ResourceMeasurementStatusV1::Pending, None, Some(reason))
+        }
     };
     ResourceSampleV1 {
         status,
@@ -120,14 +63,18 @@ pub(super) fn peak_rss_bytes() -> PeakRssObservation {
     let status = match fs::read_to_string("/proc/self/status") {
         Ok(status) => status,
         Err(error) => {
-            return PeakRssObservation::Pending(PeakRssPendingReason::LinuxStatusReadFailure(
-                error.to_string(),
-            ));
+            return PeakRssObservation::Pending(
+                ResourceMeasurementPendingReasonV1::LinuxStatusReadFailure {
+                    error: error.to_string(),
+                },
+            );
         }
     };
     match peak_rss_bytes_from_status(&status) {
         Some(bytes) => PeakRssObservation::Measured(bytes),
-        None => PeakRssObservation::Pending(PeakRssPendingReason::LinuxMissingNonzeroVmHwm),
+        None => PeakRssObservation::Pending(
+            ResourceMeasurementPendingReasonV1::LinuxMissingNonzeroVmHwm,
+        ),
     }
 }
 
@@ -139,9 +86,11 @@ pub(super) fn peak_rss_bytes() -> PeakRssObservation {
     // SAFETY: `getrusage` fully initialises the out-parameter when it returns 0.
     let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
     if rc != 0 {
-        return PeakRssObservation::Pending(PeakRssPendingReason::MacOsGetrusageFailure(
-            std::io::Error::last_os_error().to_string(),
-        ));
+        return PeakRssObservation::Pending(
+            ResourceMeasurementPendingReasonV1::MacOsGetrusageFailure {
+                error: std::io::Error::last_os_error().to_string(),
+            },
+        );
     }
     // SAFETY: checked above that the call succeeded and wrote the struct.
     let usage = unsafe { usage.assume_init() };
@@ -150,7 +99,9 @@ pub(super) fn peak_rss_bytes() -> PeakRssObservation {
         .filter(|bytes| *bytes > 0)
     {
         Some(bytes) => PeakRssObservation::Measured(bytes),
-        None => PeakRssObservation::Pending(PeakRssPendingReason::MacOsNonPositiveMaxRss),
+        None => {
+            PeakRssObservation::Pending(ResourceMeasurementPendingReasonV1::MacOsNonPositiveMaxRss)
+        }
     }
 }
 
@@ -176,7 +127,7 @@ pub(super) fn windows_peak_rss_observation(
 ) -> PeakRssObservation {
     if let Some(error) = api_error {
         return PeakRssObservation::Pending(
-            PeakRssPendingReason::WindowsK32GetProcessMemoryInfoFailure(error),
+            ResourceMeasurementPendingReasonV1::WindowsProcessMemoryInfoFailure { error },
         );
     }
     match u64::try_from(peak_working_set_size)
@@ -184,15 +135,17 @@ pub(super) fn windows_peak_rss_observation(
         .filter(|bytes| *bytes > 0)
     {
         Some(bytes) => PeakRssObservation::Measured(bytes),
-        None => PeakRssObservation::Pending(PeakRssPendingReason::WindowsZeroPeakWorkingSetSize),
+        None => PeakRssObservation::Pending(
+            ResourceMeasurementPendingReasonV1::WindowsZeroPeakWorkingSetSize,
+        ),
     }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub(super) fn peak_rss_bytes() -> PeakRssObservation {
-    PeakRssObservation::Pending(PeakRssPendingReason::UnsupportedPlatform(
-        std::env::consts::OS,
-    ))
+    PeakRssObservation::Pending(ResourceMeasurementPendingReasonV1::UnsupportedPlatform {
+        platform: std::env::consts::OS.to_owned(),
+    })
 }
 
 #[cfg(any(target_os = "linux", test))]

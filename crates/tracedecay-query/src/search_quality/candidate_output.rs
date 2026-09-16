@@ -27,8 +27,6 @@ use crate::retrieval::lexical::LexicalAliasV1;
 pub const WORKLOAD_RELATIVE: &str =
     "tests/fixtures/search_quality/query-lexical-graph-workload-v1.json";
 pub const PRODUCTION_BOUNDARY: &str = "CompositionKernel::compose";
-pub const REQUIRED_CANCELLATION: &str = "bounded_typed_cancelled";
-pub const REQUIRED_OFFLINE: &str = "no_network_and_query_fallback_available";
 pub const EVALUATION_SEED: &str = "not_applicable_deterministic_no_rng";
 pub const EVALUATION_CACHE_STATE: &str = "cold_empty_in_memory_publication";
 /// The stratum whose queries are conceptual needs rather than technical
@@ -62,6 +60,11 @@ pub enum CandidateOutputError {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CandidateWorkloadV1 {
+    /// Always 1: the schema of the checked-in workload fixture, owned by this
+    /// contract and pinned by `packaged::WORKLOAD_SHA256`. It is unrelated to
+    /// the candidate-output schema an evaluator run emits
+    /// ([`ProductionCandidateOutputV1::schema_version`]), and a schema-1
+    /// document is never a candidate output or a qualification record.
     pub schema_version: u32,
     pub workload_id: String,
     pub source_repository_commit: String,
@@ -156,9 +159,28 @@ pub struct ProfileSpecV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DecisionPolicySliceV1 {
-    pub required_cancellation: String,
-    pub required_offline: String,
+    pub required_cancellation: RequiredCancellationV1,
+    pub required_offline: RequiredOfflineV1,
     pub required_fallback_byte_stability: bool,
+}
+
+/// The cancellation discipline a candidate run must demonstrate. Closed: a run
+/// either bounded its cancellation through the typed path or it is not evidence.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RequiredCancellationV1 {
+    /// Every query settled through a bounded, typed cancellation.
+    BoundedTypedCancelled,
+}
+
+/// The offline discipline a candidate run must demonstrate. Closed: retrieval
+/// under evaluation never reaches the network, and the query fallback stays
+/// available without it.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RequiredOfflineV1 {
+    /// No network was reachable and the query fallback remained available.
+    NoNetworkAndQueryFallbackAvailable,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -215,6 +237,32 @@ pub enum ResourceMeasurementStatusV1 {
     Pending,
 }
 
+/// Why a resource sample carries no peak resident-set observation.
+///
+/// Closed beside [`ResourceMeasurementStatusV1`]: a pending sample names the
+/// sampler that could not report a high-water mark, so "pending" stays a typed
+/// observation instead of free prose. The failure detail remains a string
+/// because it is an operating-system message, never a decision input.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum ResourceMeasurementPendingReasonV1 {
+    /// Linux `/proc/self/status` could not be read.
+    LinuxStatusReadFailure { error: String },
+    /// Linux `/proc/self/status` carried no nonzero `VmHWM`.
+    LinuxMissingNonzeroVmHwm,
+    /// macOS `getrusage(RUSAGE_SELF)` failed.
+    MacOsGetrusageFailure { error: String },
+    /// macOS `getrusage(RUSAGE_SELF)` reported a non-positive `ru_maxrss`.
+    MacOsNonPositiveMaxRss,
+    /// Windows `K32GetProcessMemoryInfo` failed before `PeakWorkingSetSize`
+    /// could be read.
+    WindowsProcessMemoryInfoFailure { error: String },
+    /// Windows `K32GetProcessMemoryInfo` reported a zero `PeakWorkingSetSize`.
+    WindowsZeroPeakWorkingSetSize,
+    /// The host platform has no supported peak resident-set sampler.
+    UnsupportedPlatform { platform: String },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceSampleV1 {
@@ -225,12 +273,16 @@ pub struct ResourceSampleV1 {
     pub latency_samples_us: Vec<u64>,
     pub measured_queries: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_reason: Option<String>,
+    pub pending_reason: Option<ResourceMeasurementPendingReasonV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProductionCandidateOutputV1 {
+    /// Always 2: the schema of candidate evidence produced by an evaluator run,
+    /// owned by the producer in `tracedecay-search-eval`. The direct evaluator
+    /// refuses any other version, so workload documents (schema 1) cannot be
+    /// re-read as candidate evidence.
     pub schema_version: u32,
     pub workload_digest: String,
     pub profile_id: String,
@@ -248,8 +300,8 @@ pub struct ProductionCandidateOutputV1 {
     pub query_fallback_digest: String,
     pub expected_query_fallback_digest: String,
     pub query_fallback_matches_expected: bool,
-    pub cancellation: String,
-    pub offline: String,
+    pub cancellation: RequiredCancellationV1,
+    pub offline: RequiredOfflineV1,
     pub resources: BTreeMap<String, ResourceSampleV1>,
     pub queries: Vec<QueryCandidateRowV1>,
 }
@@ -314,6 +366,10 @@ pub fn compute_corpus_digest(
 /// so this refuses a fabricated citation instead of trusting the workload's own
 /// claim about itself. Comment markers and line wrapping are normalized away:
 /// the quote is prose, not a byte-exact source line.
+///
+/// Verified provenance means the needs are sourced, not that retrieval is
+/// qualified: it bounds what the measurement is worth, and grants no activation
+/// authority.
 pub fn validate_need_provenance_against_embedded_corpus(
     workload: &CandidateWorkloadV1,
     files: &[(&str, &[u8])],
@@ -494,6 +550,13 @@ fn validate_source_bindings(
     Ok(())
 }
 
+/// Refuse a workload that cannot honestly be measured on.
+///
+/// This attests the fitness of measurement *inputs*: schema, execution
+/// contract, corpus identity, partitions, labels, and need provenance. It is
+/// not a qualification verdict — there is no held-out methodology in schema 1
+/// to qualify against — so a workload passing here still says nothing about
+/// whether any retrieval profile may be activated.
 pub fn validate_workload_for_tuning(
     workload: &CandidateWorkloadV1,
 ) -> Result<(), CandidateOutputError> {
