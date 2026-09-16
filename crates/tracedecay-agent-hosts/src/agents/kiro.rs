@@ -407,6 +407,7 @@ impl AgentIntegration for KiroIntegration {
             &ctx.project_path,
             global_server.as_ref(),
         );
+        doctor_check_steering(dc, &ctx.home);
     }
 
     fn reports_absence_to_doctor(&self) -> bool {
@@ -1000,11 +1001,10 @@ fn doctor_check_workspace_mcp_override(
     }
 }
 
-#[cfg(test)]
 fn doctor_check_steering(dc: &mut DoctorCounters, home: &Path) {
     let path = steering_path(home);
     if !path.exists() {
-        dc.warn("~/.kiro/steering/tracedecay.md does not exist");
+        // Catalog-native global install is MCP-only; absence is not a defect.
         return;
     }
     let contents = match std::fs::read_to_string(&path) {

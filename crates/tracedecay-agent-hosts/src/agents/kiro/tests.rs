@@ -238,6 +238,76 @@ fn steering_doctor_judges_sentinels_and_bytes_not_prose() {
 }
 
 #[test]
+fn healthcheck_skips_steering_when_legacy_file_is_absent() {
+    let home = tempfile::tempdir().unwrap();
+    let mcp_path = mcp_config_path(home.path());
+    std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &mcp_path,
+        br#"{"mcpServers":{"tracedecay":{"command":"/bin/tracedecay","args":["serve"],"disabled":false}}}"#,
+    )
+    .unwrap();
+
+    let mut counters = DoctorCounters::new();
+    KiroIntegration.healthcheck(
+        &mut counters,
+        &HealthcheckContext {
+            home: home.path().to_path_buf(),
+            project_path: home.path().to_path_buf(),
+        },
+    );
+
+    assert_eq!(
+        counters.issues, 0,
+        "MCP-only global install must not fail doctor for missing legacy steering"
+    );
+}
+
+#[test]
+fn healthcheck_flags_shipped_heading_steering_until_convergence() {
+    let home = tempfile::tempdir().unwrap();
+    let mcp_path = mcp_config_path(home.path());
+    std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &mcp_path,
+        br#"{"mcpServers":{"tracedecay":{"command":"/bin/tracedecay","args":["serve"],"disabled":false}}}"#,
+    )
+    .unwrap();
+    let steering = steering_path(home.path());
+    std::fs::create_dir_all(steering.parent().unwrap()).unwrap();
+    std::fs::write(
+        &steering,
+        shipped_block(SHIPPED_HEADING, "You MUST use tracedecay."),
+    )
+    .unwrap();
+
+    let mut counters = DoctorCounters::new();
+    KiroIntegration.healthcheck(
+        &mut counters,
+        &HealthcheckContext {
+            home: home.path().to_path_buf(),
+            project_path: home.path().to_path_buf(),
+        },
+    );
+
+    assert_eq!(
+        counters.issues, 1,
+        "legacy heading-marked steering must surface as outdated until install converges it"
+    );
+
+    install_steering_rules(&steering).unwrap();
+    let mut counters = DoctorCounters::new();
+    KiroIntegration.healthcheck(
+        &mut counters,
+        &HealthcheckContext {
+            home: home.path().to_path_buf(),
+            project_path: home.path().to_path_buf(),
+        },
+    );
+    assert_eq!(counters.issues, 0);
+}
+
+#[test]
 fn every_steering_mutation_branch_refuses_a_stale_target() {
     for (case, original) in steering_mutation_cases() {
         let root = tempfile::tempdir().unwrap();
