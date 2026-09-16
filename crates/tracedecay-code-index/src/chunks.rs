@@ -2792,7 +2792,14 @@ mod tests {
 
         let mut wrong_membership = file_chunks();
         wrong_membership.document.chunk_ids[0] = id("chunk.other");
-        assert!(wrong_membership.validate().is_err());
+        assert_eq!(
+            wrong_membership.validate(),
+            Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::DocumentChunkMembershipMismatch,
+                )
+            ))
+        );
     }
 
     const ADMISSION_STEP_DEADLINE: Duration = Duration::from_secs(10);

@@ -807,6 +807,14 @@ mod schema_evidence_tests {
             facts: Vec::new(),
         });
 
-        assert!(validate_schema_evidence_language("rust", &evidence).is_err());
+        assert_eq!(
+            validate_schema_evidence_language("rust", &evidence),
+            Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::SchemaLanguageMismatch,
+                )
+            ))
+        );
+        assert_eq!(validate_schema_evidence_language("sql", &evidence), Ok(()));
     }
 }
