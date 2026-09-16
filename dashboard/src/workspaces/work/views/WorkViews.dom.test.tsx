@@ -195,10 +195,28 @@ function serveWork(
   },
   views: { status: number; body: unknown } = viewsBody(),
   topology: { status: number; body: unknown } = topologyBody(),
+  executionHistory: { status: number; body: unknown } = {
+    status: 503,
+    body: { kind: 'problem' },
+  },
+  proximity: { status: number; body: unknown } = {
+    status: 503,
+    body: { kind: 'problem' },
+  },
+  evidence: { status: number; body: unknown } = {
+    status: 503,
+    body: { kind: 'problem' },
+  },
 ) {
   serve((url) =>
     url.includes('/work/list-attempts')
       ? attempts
+      : url.includes('/work/execution-history')
+        ? executionHistory
+        : url.includes('/work/retrieve-evidence')
+          ? evidence
+          : url.includes('/feedback/proximity')
+            ? proximity
       : url.includes('/work/views')
         ? views
         : url.includes('/work/topology')
@@ -292,6 +310,31 @@ describe('the projection switcher', () => {
       'Topology',
     ]);
     expect(within(tablist).getByRole('tab', { selected: true }).textContent).toBe('Board');
+  });
+
+  it('hides concurrent attempts when the selected task has one observed attempt', async () => {
+    renderPage('/work?task=middle');
+
+    await screen.findByRole('tablist', { name: 'Work projection' });
+    expect(screen.queryByRole('tab', { name: 'Concurrent Attempts' })).toBeNull();
+  });
+
+  it('shows and restores concurrent attempts for two observed attempts', async () => {
+    serveWork(
+      undefined,
+      viewsBody({
+        ...VIEWS_GRAPH,
+        runtimeAttempts: [
+          { attemptId: 'attempt-1', taskId: 'middle', runId: 'run-1' },
+          { attemptId: 'attempt-2', taskId: 'middle', runId: 'run-1' },
+        ],
+      }),
+    );
+    renderPage('/work?task=middle&view=concurrent-attempts');
+
+    const tab = await screen.findByRole('tab', { name: 'Concurrent Attempts' });
+    await waitFor(() => expect(tab.getAttribute('aria-selected')).toBe('true'));
+    expect(screen.getByRole('tabpanel').getAttribute('aria-labelledby')).toBe(tab.id);
   });
 
   it('moves the camera between projections with the arrow keys', async () => {

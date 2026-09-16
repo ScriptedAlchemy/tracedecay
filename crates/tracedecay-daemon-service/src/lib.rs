@@ -98,7 +98,8 @@ pub use invocation::{
     DaemonAdvisoryRuntimeRegistrar, DaemonAdvisoryRuntimeRegistrationError,
     DaemonConfigurationGrantAuthority, DaemonConfigurationRuntimeRegistrar,
     DaemonContextScoutRuntimeRegistrar, DaemonContextScoutRuntimeRegistrationError,
-    DaemonFeedbackInvocationOwner, DaemonFeedbackRuntimeRegistrar,
+    DaemonFeedbackInvocationOwner, DaemonFeedbackProximityInvocationFuture,
+    DaemonFeedbackProximityInvocationRequest, DaemonFeedbackRuntimeRegistrar,
     DaemonFeedbackRuntimeRegistrationError, DaemonInvocationService, DaemonLspInvocationOwner,
     DaemonLspOwnerRegistrar, DaemonNativeIntegrationRuntimeRegistrar,
     DaemonPrimitiveRuntimeRegistrar, DaemonPrimitiveRuntimeRegistrationError,
@@ -112,7 +113,8 @@ pub use invocation::{
     SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
     admit_registered_hook_orchestration, advisory_cycle_invocation_result,
     callable_code_request_context, daemon_operation_event_authority,
-    register_hook_orchestration_runtime, unregister_hook_orchestration_runtime,
+    feedback_proximity_invocation_result, register_hook_orchestration_runtime,
+    unregister_hook_orchestration_runtime,
 };
 pub use mcp_project_registry::DaemonProjectRegistryReadService;
 pub use mcp_workflow_index::DaemonWorkflowIndexReadService;

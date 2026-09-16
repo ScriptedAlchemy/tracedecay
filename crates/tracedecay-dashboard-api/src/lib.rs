@@ -1958,7 +1958,7 @@ fn selected_project_application_read(
         return None;
     }
     match tail {
-        "feedback/get" | "feedback/expand" | "feedback/list" => {
+        "feedback/get" | "feedback/expand" | "feedback/list" | "feedback/proximity" => {
             Some(SelectedProjectApplicationRead::Feedback)
         }
         _ => {
@@ -3568,7 +3568,12 @@ mod authority_tests {
             &Method::GET,
             "events/delivery-ack"
         ));
-        for tail in ["feedback/get", "feedback/expand", "feedback/list"] {
+        for tail in [
+            "feedback/get",
+            "feedback/expand",
+            "feedback/list",
+            "feedback/proximity",
+        ] {
             assert_eq!(
                 selected_project_application_read(&Method::POST, tail),
                 Some(SelectedProjectApplicationRead::Feedback)

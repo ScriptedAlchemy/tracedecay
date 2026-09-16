@@ -335,6 +335,91 @@ function readyEnvelope(payload: unknown) {
   return { ...TEMPORAL, domain_state: 'ready', payload };
 }
 
+function applicationEnvelope(payload: unknown) {
+  return {
+    kind: 'success',
+    value: {
+      binding_id: 'binding.dashboard.feedback_proximity.v1',
+      contract: { schema_id: 'schema.application.feedback.proximity.result', schema_revision: 1 },
+      request_id: 'request-proximity',
+      scope: {
+        project_id: 'project-loom',
+        repository_id: 'repository-loom',
+        worktree_id: 'worktree-loom',
+        reference: 'refs/heads/main',
+        scope_digest: 'sha256:scope',
+      },
+      outcome: { outcome: 'evidence', value: { payload } },
+    },
+  };
+}
+
+const PROXIMITY_SCOPE = {
+  project_id: 'project-loom',
+  repository_id: 'repository-loom',
+  worktree_id: 'worktree-loom',
+  branch_ref: 'refs/heads/main',
+  head_commit_id: 'commit-main',
+};
+
+const PROXIMITY = {
+  state: 'complete',
+  page: {
+    scope: PROXIMITY_SCOPE,
+    source_generation: 'generation-proximity',
+    observed_at: 1_784_700_000_000_000,
+    expires_at: 1_784_700_030_000_000,
+    encounters: [
+      {
+        encounter_id: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        scope: PROXIMITY_SCOPE,
+        interval: {
+          start: (NOW - 10_500) * 1_000_000,
+          end: (NOW - 9_500) * 1_000_000,
+        },
+        participants: [
+          {
+            source: { provider: 'cursor', session_id: 'sess-open', source_key: null },
+            agent_id: 'agent-open',
+            worktree_id: 'worktree-loom',
+            worktree_root: '/tmp/loom-open',
+            branch_ref: 'refs/heads/main',
+            head_revision: 'commit-open',
+            access: 'write',
+            activity: { start: (NOW - 10_800) * 1_000_000, end: (NOW - 9_000) * 1_000_000 },
+            address: {
+              scope: PROXIMITY_SCOPE,
+              file: 'file-open',
+              span: { start_byte: 4, end_byte: 12 },
+              symbol: 'symbol-open',
+            },
+          },
+          {
+            source: { provider: 'claude', session_id: 'sess-closed', source_key: null },
+            agent_id: 'agent-closed',
+            worktree_id: 'worktree-loom',
+            worktree_root: '/tmp/loom-closed',
+            branch_ref: 'refs/heads/main',
+            head_revision: 'commit-closed',
+            access: 'write',
+            activity: { start: (NOW - 10_800) * 1_000_000, end: (NOW - 9_000) * 1_000_000 },
+            address: {
+              scope: PROXIMITY_SCOPE,
+              file: 'file-open',
+              span: { start_byte: 4, end_byte: 12 },
+              symbol: 'symbol-open',
+            },
+          },
+        ],
+        relation: { relation_kind: 'overlapping_edit', warning_class: 'same_file' },
+        observed_at: 1_784_700_000_000_000,
+        expires_at: 1_784_700_030_000_000,
+        coverage: 'complete',
+      },
+    ],
+  },
+};
+
 function serve(routes: Record<string, { status: number; body: unknown }>) {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
@@ -353,6 +438,7 @@ function serve(routes: Record<string, { status: number; body: unknown }>) {
 
 const HAPPY = {
   '/api/loom/temporal': { status: 200, body: TEMPORAL },
+  '/api/feedback/proximity': { status: 200, body: applicationEnvelope(PROXIMITY) },
   '/api/plugins/hermes-lcm/session/': { status: 200, body: TEMPORAL_RETRIEVAL_UNAVAILABLE },
   '/api/plugins/hermes-lcm/timeline': { status: 200, body: TEMPORAL_RETRIEVAL_UNAVAILABLE },
 };
@@ -394,6 +480,28 @@ beforeEach(() => {
 });
 
 describe('LoomPage', () => {
+  it('restores encounter selection without clearing thread or replay URL state', async () => {
+    const thread = encodeURIComponent(JSON.stringify(['cursor', 'sess-open']));
+    const encounter = PROXIMITY.page.encounters[0]!.encounter_id;
+    renderLoom(
+      HAPPY,
+      `/loom?scope=project-loom&loomSession=${thread}&loomEvent=m0&loomEncounter=${encodeURIComponent(encounter)}`,
+    );
+
+    expect(await screen.findByText(/Encounter evidence/)).toBeTruthy();
+    const before = screen.getByTestId('loom-url').textContent ?? '';
+    expect(before).toContain('loomSession=');
+    expect(before).toContain('loomEvent=m0');
+    expect(before).toContain('loomEncounter=');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Return to encounters' }));
+
+    const after = screen.getByTestId('loom-url').textContent ?? '';
+    expect(after).toContain('loomSession=');
+    expect(after).toContain('loomEvent=m0');
+    expect(after).not.toContain('loomEncounter=');
+  });
+
   it('projects only admitted same-provider parent relations and keeps replay scoped to the selected page', async () => {
     const temporal = structuredClone(TEMPORAL);
     temporal.payload.sessions[1]!.provider = 'cursor';

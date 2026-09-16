@@ -24,6 +24,7 @@ pub(super) fn is_observable_operation(operation: DaemonInvocationOperation) -> b
             | DaemonInvocationOperation::FeedbackExpand
             | DaemonInvocationOperation::FeedbackList
             | DaemonInvocationOperation::FeedbackAdvisoryCycle
+            | DaemonInvocationOperation::FeedbackProximity
             | DaemonInvocationOperation::FeedbackImpact
             | DaemonInvocationOperation::AffectedTests
             | DaemonInvocationOperation::PrimitiveImpact
@@ -42,6 +43,7 @@ pub(super) fn feedback_observation_operation(
         DaemonInvocationOperation::FeedbackExpand => FeedbackOperationV1::FeedbackExpand,
         DaemonInvocationOperation::FeedbackList => FeedbackOperationV1::FeedbackList,
         DaemonInvocationOperation::FeedbackAdvisoryCycle => FeedbackOperationV1::FeedbackCycle,
+        DaemonInvocationOperation::FeedbackProximity => FeedbackOperationV1::Proximity,
         DaemonInvocationOperation::FeedbackImpact => FeedbackOperationV1::PrimitiveImpact,
         DaemonInvocationOperation::AffectedTests => FeedbackOperationV1::PrimitiveAffectedTests,
         DaemonInvocationOperation::PrimitiveImpact => FeedbackOperationV1::PrimitiveImpact,

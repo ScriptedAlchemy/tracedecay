@@ -5,6 +5,7 @@ import type {
   ExecutionTopologyViewV1,
   ResolvedScope,
   WorkAttemptListV1,
+  WorkExecutionHistoryV1,
   WorkGraphReadV1,
 } from '../../contracts/index.ts';
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
@@ -12,6 +13,7 @@ import { workQueryKey } from '../../data/query/work.ts';
 import { callWork, type WorkResult } from './workApi.ts';
 import {
   WORK_LIST_ATTEMPTS_ROUTE,
+  WORK_EXECUTION_HISTORY_ROUTE,
   WORK_EXECUTION_TOPOLOGY_METRICS_ROUTE,
   WORK_TOPOLOGY_ROUTE,
   WORK_VIEWS_ROUTE,
@@ -87,6 +89,24 @@ export function useWorkAttempts(enabled: boolean, pageSize: number = WORK_ATTEMP
         // cursor invented here would name a generation the daemon never minted.
         { cursor: null, page_size: pageSize },
         scopedUrl(scope, WORK_LIST_ATTEMPTS_ROUTE.path),
+      ),
+  });
+}
+
+export function useWorkExecutionHistory(
+  enabled: boolean,
+  pageSize: number = WORK_ATTEMPT_PAGE_SIZE,
+) {
+  const scope = useScope((state) => state.scope);
+  const key = scopeKey(scope);
+  return useQuery<WorkResult<WorkExecutionHistoryV1>>({
+    queryKey: workQueryKey(key, 'list-attempts', 'execution-history', pageSize),
+    enabled,
+    queryFn: () =>
+      callWork(
+        WORK_EXECUTION_HISTORY_ROUTE,
+        { cursor: null, page_size: pageSize },
+        scopedUrl(scope, WORK_EXECUTION_HISTORY_ROUTE.path),
       ),
   });
 }

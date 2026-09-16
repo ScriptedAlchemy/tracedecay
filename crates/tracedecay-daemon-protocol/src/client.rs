@@ -1090,6 +1090,16 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
                             )
                             .with_resolved_scope(scope)
                         }
+                        ApplicationSurfaceOperation::FeedbackProximity => {
+                            let request = serde_json::from_value(payload)
+                                .map_err(|_| InvocationError::InvalidRequest)?;
+                            crate::contract::DaemonInvocationRequest::feedback_proximity(
+                                request_id.as_str(),
+                                request,
+                                deadline.clone(),
+                                cancellation_context,
+                            )
+                        }
                         _ => return Err(InvocationError::InvalidRequest),
                     }
                     .with_delivery_route(application_delivery_route(surface));

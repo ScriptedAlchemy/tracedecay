@@ -144,6 +144,7 @@ application_surface_operations! {
     FeedbackList => "feedback_list";
     FeedbackImpact => "feedback_impact";
     FeedbackAdvisoryCycle => "feedback_advisory_cycle";
+    FeedbackProximity => "feedback_proximity";
     AffectedTests => "affected_tests";
     TestResults => "test_results";
     CodeExactOccurrence => "code_exact_occurrence";

@@ -26,6 +26,9 @@ use tracedecay_application::advisory::{
     open_advisory_production_authorities, register_advisory_daemon_startup,
     register_advisory_hook_notice_queue, unregister_advisory_hook_notice_queue,
 };
+use tracedecay_application::advisory::{
+    FeedbackProximityReadRuntimeV1, production_feedback_proximity_read_runtime_v1,
+};
 use tracedecay_application::delivery::{
     ProjectDeliveryProviderMountGateV1, ProjectDeliveryReadAuthorityOpenOutcomeV1,
     ProjectDeliveryReadOpenV1, ProjectDeliveryReviewBodySourceV1,
@@ -46,7 +49,8 @@ use tracedecay_contracts::feedback::observations::{
 };
 use tracedecay_contracts::feedback::{
     FeedbackRuntimeStatePort, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
-    GITHUB_REVIEW_INGEST_USE_CASE_ID_V1, GitHubReviewReadRequestV1, ProximityEvaluationRequestV1,
+    GITHUB_REVIEW_INGEST_USE_CASE_ID_V1, GitHubReviewReadRequestV1, PROXIMITY_CAPABILITY_ID_V1,
+    PROXIMITY_USE_CASE_ID_V1, ProximityEvaluationRequestV1,
 };
 use tracedecay_contracts::{
     ApplicationProblem, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
@@ -93,10 +97,12 @@ use tracedecay_daemon_service::{
     BoundedHookOrchestratorV1, ConfigurationRuntimeRefreshFuture, ConfigurationRuntimeRefreshPort,
     DaemonAdvisoryCycleInvocationFuture, DaemonAdvisoryCycleInvocationOwner,
     DaemonAdvisoryCycleInvocationPort, DaemonAdvisoryCycleInvocationRequest,
+    DaemonFeedbackProximityInvocationFuture, DaemonFeedbackProximityInvocationRequest,
     HookOrchestrationRequestV1, HookOrchestrationTriggerV1, HookOrchestrationWorkOutcomeV1,
     advisory_cycle_invocation_result, daemon_operation_event_authority,
-    daemon_owned_project_source_access_at, project_open_source_access_authority,
-    register_hook_orchestration_runtime, unregister_hook_orchestration_runtime,
+    daemon_owned_project_source_access_at, feedback_proximity_invocation_result,
+    project_open_source_access_authority, register_hook_orchestration_runtime,
+    unregister_hook_orchestration_runtime,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::handlers::hook_runtime::daemon_mint_hook_v2_file_id;
@@ -117,6 +123,7 @@ struct ProjectOpenAdvisoryFeedbackCycleV1 {
     feedback_scope: FeedbackScopeV1,
     github_pull_request_id: Option<GitHubPullRequestIdV1>,
     ci_discovery_config: Option<ProductionCiProviderConfigV1>,
+    proximity_read: FeedbackProximityReadRuntimeV1,
     hook_config_root: std::path::PathBuf,
     hook_worktree_id: [u8; 16],
 }
@@ -467,6 +474,136 @@ impl DaemonAdvisoryCycleInvocationPort for ProjectOpenAdvisoryFeedbackCycleV1 {
             )
         })
     }
+
+    fn invoke_proximity(
+        &self,
+        request: DaemonFeedbackProximityInvocationRequest,
+    ) -> DaemonFeedbackProximityInvocationFuture<'_> {
+        let owner = self.clone();
+        Box::pin(async move {
+            if request.cancellation.is_cancelled() {
+                return Err(ApplicationProblem::cancelled_before_admission());
+            }
+            if request.deadline.is_elapsed_at(request.request.observed_at)
+                || request.deadline.is_elapsed_at(now_micros())
+            {
+                return Err(ApplicationProblem::timed_out_before_admission());
+            }
+            let configuration = owner
+                .producer
+                .graph
+                .configuration_runtime()
+                .client()
+                .current()
+                .await
+                .map_err(|_| {
+                    ApplicationProblem::unavailable(SafeDiagnostic {
+                        code: "feedback.proximity.configuration".to_owned(),
+                        message: "The feedback proximity configuration is unavailable".to_owned(),
+                    })
+                })?;
+            let access = daemon_owned_project_source_access_at(
+                &owner.producer.scope,
+                &owner.producer.project_root,
+                &configuration,
+                request.request.observed_at,
+            )
+            .map_err(|_| {
+                ApplicationProblem::not_found_or_not_authorized(
+                    tracedecay_contracts::RetryDirective::Never,
+                )
+            })?;
+            let context = proximity_authorization_context(
+                &access,
+                &owner.feedback_scope,
+                request.request.observed_at,
+                request.request_id,
+                request.deadline.clone(),
+                request.cancellation.clone(),
+            )
+            .ok_or_else(|| {
+                ApplicationProblem::not_found_or_not_authorized(
+                    tracedecay_contracts::RetryDirective::Never,
+                )
+            })?;
+            let result = owner.proximity_read.read(&context, &request.request).await;
+            feedback_proximity_invocation_result(
+                &context,
+                request.request.observed_at,
+                request.deadline,
+                request.cancellation,
+                result,
+            )
+        })
+    }
+}
+
+fn proximity_authorization_context(
+    access: &tracedecay_application::source_authorization::ProjectSourceAccessSnapshot,
+    feedback_scope: &FeedbackScopeV1,
+    observed_at: UtcMicros,
+    request_id: tracedecay_contracts::RequestId,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> Option<RequestContext> {
+    if feedback_scope.validate().is_err()
+        || access.scope.project_id != feedback_scope.project_id
+        || access.scope.repository_id != feedback_scope.repository_id
+        || access.scope.worktree_id != feedback_scope.worktree_id
+        || access
+            .scope
+            .reference
+            .as_ref()
+            .map(tracedecay_domain::RefId::as_str)
+            != Some(feedback_scope.branch_ref.as_str())
+        || observed_at >= access.grant_expires_at
+    {
+        return None;
+    }
+    let capability =
+        tracedecay_tool_catalog::CapabilityId::new(PROXIMITY_CAPABILITY_ID_V1.to_owned()).ok()?;
+    let use_case =
+        tracedecay_tool_catalog::UseCaseId::new(PROXIMITY_USE_CASE_ID_V1.to_owned()).ok()?;
+    if !access.effective_capabilities.contains(&capability) {
+        return None;
+    }
+    let expires_at = std::cmp::min(deadline.expires_at, access.grant_expires_at);
+    let grant_digest = canonical_sha256(&(
+        "tracedecay.project-open.feedback-proximity-grant.v1",
+        &access.scope,
+        &access.requester,
+        &access.configuration_digest,
+        &feedback_scope.head_commit_id,
+        observed_at,
+        expires_at,
+    ))
+    .ok()?;
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new(format!(
+            "grant.tracedecay-daemon.feedback-proximity.{}",
+            grant_digest.as_str().trim_start_matches("sha256:")
+        ))
+        .ok()?,
+        POLICY_REVISION_V1,
+        grant_digest,
+        access.requester.clone(),
+        observed_at,
+        expires_at,
+        access.scope.clone(),
+        std::collections::BTreeSet::from([capability]),
+        std::collections::BTreeSet::from([use_case]),
+        DisclosureClass::Evidence,
+    )
+    .ok()?;
+    RequestContext::new(
+        access.requester.clone(),
+        access.scope.clone(),
+        grant,
+        request_id,
+        Deadline::new(expires_at).ok()?,
+        cancellation,
+    )
+    .ok()
 }
 
 struct ProjectOpenFeedbackCycleAuthorizationV1 {
@@ -1518,6 +1655,16 @@ async fn register_production_advisory_owner(
         hook_v2: hook_notices.sink(),
         legacy_hook: unavailable_advisory_hook_sink(),
     };
+    let proximity_read = production_feedback_proximity_read_runtime_v1(
+        production.project_runtime_db.clone(),
+        Arc::clone(&production.code_graph),
+        production.feedback_scope.clone(),
+        production.project_root.clone(),
+        Arc::clone(&production.code_index_identity),
+    )
+    .ok_or_else(|| TraceDecayError::Config {
+        message: "project-open feedback proximity read authority is unavailable".to_owned(),
+    })?;
     let registration = invocation
         .advisory_runtime_registrar()
         .build_production(
@@ -1573,6 +1720,7 @@ async fn register_production_advisory_owner(
         feedback_scope: feedback_scope.clone(),
         github_pull_request_id,
         ci_discovery_config,
+        proximity_read,
         hook_config_root: state.graph.hook_store_layout().data_root.clone(),
         hook_worktree_id,
     });

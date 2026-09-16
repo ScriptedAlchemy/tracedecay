@@ -31,6 +31,7 @@ pub(super) fn feedback_surface_operation(
         ApplicationSurfaceOperation::FeedbackExpand => FeedbackOperationV1::FeedbackExpand,
         ApplicationSurfaceOperation::FeedbackList => FeedbackOperationV1::FeedbackList,
         ApplicationSurfaceOperation::FeedbackAdvisoryCycle => FeedbackOperationV1::FeedbackCycle,
+        ApplicationSurfaceOperation::FeedbackProximity => FeedbackOperationV1::Proximity,
         ApplicationSurfaceOperation::FeedbackImpact => FeedbackOperationV1::PrimitiveImpact,
         ApplicationSurfaceOperation::AffectedTests => FeedbackOperationV1::PrimitiveAffectedTests,
         ApplicationSurfaceOperation::TestResults => FeedbackOperationV1::PrimitiveTestResults,
@@ -112,6 +113,7 @@ pub(super) fn feedback_surface_is_observable(operation: ApplicationSurfaceOperat
             | ApplicationSurfaceOperation::FeedbackExpand
             | ApplicationSurfaceOperation::FeedbackList
             | ApplicationSurfaceOperation::FeedbackAdvisoryCycle
+            | ApplicationSurfaceOperation::FeedbackProximity
             | ApplicationSurfaceOperation::FeedbackImpact
             | ApplicationSurfaceOperation::AffectedTests
             | ApplicationSurfaceOperation::TestResults

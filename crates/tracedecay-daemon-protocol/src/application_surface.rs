@@ -13,7 +13,8 @@ use serde_json::Value;
 use thiserror::Error;
 use tracedecay_contracts::catalog_composition::CatalogCompositionError;
 use tracedecay_contracts::feedback::{
-    FeedbackAdvisoryCycleSurfaceRequestV1, TestResultsSurfaceRequestV1,
+    FeedbackAdvisoryCycleSurfaceRequestV1, FeedbackProximityReadRequestV1,
+    TestResultsSurfaceRequestV1,
 };
 use tracedecay_contracts::git::{
     GitApplySurfaceRequest, GitHubStackSignalExpandSurfaceRequest, GitPreviewSurfaceRequest,
@@ -167,6 +168,7 @@ pub enum ApplicationSurfaceRequest {
     /// tests: the operation selects the daemon route, the handle is the body.
     Feedback(FeedbackSurfaceRequest),
     FeedbackAdvisoryCycle(FeedbackAdvisoryCycleSurfaceRequestV1),
+    FeedbackProximity(FeedbackProximityReadRequestV1),
     TestResults(TestResultsSurfaceRequestV1),
     CallableCode(CallableCodeSurfaceRequest),
     PrimitiveCode(PrimitiveCodeSurfaceRequest),
@@ -229,6 +231,10 @@ impl ApplicationSurfaceRequest {
                 | (
                     Self::FeedbackAdvisoryCycle(_),
                     ApplicationSurfaceOperation::FeedbackAdvisoryCycle
+                )
+                | (
+                    Self::FeedbackProximity(_),
+                    ApplicationSurfaceOperation::FeedbackProximity
                 )
                 | (
                     Self::TestResults(_),
@@ -767,6 +773,9 @@ pub fn parse_application_surface_request(
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
             Ok(ApplicationSurfaceRequest::FeedbackAdvisoryCycle(request))
         }
+        ApplicationSurfaceOperation::FeedbackProximity => serde_json::from_value(value)
+            .map(ApplicationSurfaceRequest::FeedbackProximity)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
     }
 }
 

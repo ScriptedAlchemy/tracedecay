@@ -35,6 +35,7 @@ pub const fn http_application_owner_kind(
         | ApplicationSurfaceOperation::FeedbackList
         | ApplicationSurfaceOperation::FeedbackImpact
         | ApplicationSurfaceOperation::FeedbackAdvisoryCycle
+        | ApplicationSurfaceOperation::FeedbackProximity
         | ApplicationSurfaceOperation::AffectedTests => HttpApplicationOwnerKind::Feedback,
         ApplicationSurfaceOperation::CodeExactOccurrence
         | ApplicationSurfaceOperation::CodePhraseSearch

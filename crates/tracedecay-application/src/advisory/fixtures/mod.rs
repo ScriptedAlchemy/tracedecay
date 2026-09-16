@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tracedecay_contracts::feedback::FeedbackProximityEncounterV1;
 use tracedecay_domain::feedback::{
     CiFailureCallerEvidenceV1, CiFailureCoverageV1, CiFailureGenerationEvidenceV1, CiFailureKindV1,
     CiFailureLocalizationStateV1, CiFailureParserIdentityV1, CiFailureRunIdentityV1,
@@ -132,6 +133,7 @@ pub struct AdvisoryCiFixtureEvidenceV1 {
 pub struct AdvisoryProximityFixtureEvidenceV1 {
     pub observations: Vec<CanonicalObservationEnvelopeV1>,
     pub retrieval_anchor_ids: Vec<RetrievalAnchorId>,
+    pub encounter: FeedbackProximityEncounterV1,
     pub address: ProximityAddressV1,
     pub relation_paths: Vec<ProximityRelationPathV1>,
     pub risk_inputs: ProximityRiskInputsV1,
@@ -172,6 +174,7 @@ impl AdvisorySourceBackedCompositeFixtureV1 {
         Some(CanonicalProximityEvidenceV1 {
             observations: evidence.observations,
             retrieval_anchor_ids: evidence.retrieval_anchor_ids,
+            encounter: evidence.encounter,
             address: evidence.address,
             relation_paths: evidence.relation_paths,
             risk_inputs: evidence.risk_inputs,

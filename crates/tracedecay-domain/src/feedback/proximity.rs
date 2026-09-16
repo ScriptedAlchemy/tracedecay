@@ -5,6 +5,7 @@
 
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::code_intelligence::identity::{FileOccurrenceId, SourceSpan, SymbolOccurrenceId};
@@ -23,7 +24,7 @@ crate::canonical_text::validated_string_newtype!(
     ProximityObservationIdV1 => "proximity observation id",
 );
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProximityTierV1 {
     /// Exact same-file/range/symbol conflicts emit without a risk threshold.
@@ -32,7 +33,7 @@ pub enum ProximityTierV1 {
     Configured,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProximityWarningClassV1 {
     SameFile,
@@ -47,7 +48,7 @@ pub enum ProximityWarningClassV1 {
     IncompatibleBranchWorktree,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProximityRelationPathKindV1 {
     DirectCaller,
@@ -60,14 +61,14 @@ pub enum ProximityRelationPathKindV1 {
     NeighborhoodMembership,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProximityRelationStrengthV1 {
     Direct,
     Transitive,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProximityBranchWorktreeIncompatibilityV1 {
     Compatible,
@@ -76,7 +77,7 @@ pub enum ProximityBranchWorktreeIncompatibilityV1 {
     Incompatible,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProximityCoverageV1 {
     Complete,
@@ -87,7 +88,7 @@ pub enum ProximityCoverageV1 {
     Private,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProximityInclusionV1 {
     Included,
@@ -100,7 +101,7 @@ pub enum ProximityInclusionV1 {
 
 /// A privacy-scoped code address. It identifies the coarse changed-code shape
 /// but carries no other actor, session, or private-source content.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProximityAddressV1 {
     pub scope: FeedbackScopeV1,
@@ -120,7 +121,7 @@ impl ProximityAddressV1 {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProximityRelationPathV1 {
     pub kind: ProximityRelationPathKindV1,
@@ -137,7 +138,7 @@ impl ProximityRelationPathV1 {
 
 /// Explicit threshold inputs. Scores use basis points to preserve equality and
 /// persistence semantics without encoding a local scoring implementation.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProximityRiskInputsV1 {
     pub overlap_size: u32,

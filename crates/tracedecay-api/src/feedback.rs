@@ -27,7 +27,7 @@ pub struct DashboardFeedbackReadRouteV1 {
     pub operation: ApplicationSurfaceOperation,
 }
 
-const DASHBOARD_FEEDBACK_READ_ROUTES: [DashboardFeedbackReadRouteV1; 3] = [
+const DASHBOARD_FEEDBACK_READ_ROUTES: [DashboardFeedbackReadRouteV1; 4] = [
     DashboardFeedbackReadRouteV1 {
         method: "POST",
         dashboard_tail: "feedback/get",
@@ -45,6 +45,12 @@ const DASHBOARD_FEEDBACK_READ_ROUTES: [DashboardFeedbackReadRouteV1; 3] = [
         dashboard_tail: "feedback/list",
         application_path: "/list",
         operation: ApplicationSurfaceOperation::FeedbackList,
+    },
+    DashboardFeedbackReadRouteV1 {
+        method: "POST",
+        dashboard_tail: "feedback/proximity",
+        application_path: "/proximity",
+        operation: ApplicationSurfaceOperation::FeedbackProximity,
     },
 ];
 

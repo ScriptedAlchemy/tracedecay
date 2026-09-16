@@ -4,8 +4,12 @@ import { useSearchParams } from 'react-router';
 import { axisTicks, clampWindow, fittedWindow, formatMoment, zoomWindow, type LoomWindow } from './tracks.ts';
 import type { Weave } from './weave.ts';
 import type { LoomPlaybackFrame } from './playback.ts';
-import type { AnalyticsSubagentTreePayloadV1 } from '../../contracts/generated.ts';
+import type {
+  AnalyticsSubagentTreePayloadV1,
+  FeedbackProximityEncounterV1,
+} from '../../contracts/generated.ts';
 import { kindColorVars } from '../../viz/graph/kindColor.ts';
+import { proximityColor, proximityThreadId } from '../../viz/proximity/index.ts';
 
 // Packing scale for the bounded session overview. This is presentation geometry,
 // not an event time or a claim that sessions have parent/child relations.
@@ -14,11 +18,12 @@ export const MARK_PITCH_PX = 24;
 const WIDTH = 960;
 const RIGHT = 28;
 
-export function WeaveCanvas({ weave, selectedId, onSelect, ariaLabel, hierarchy, initialWindow, onWindowChange }: {
+export function WeaveCanvas({ weave, selectedId, onSelect, ariaLabel, hierarchy, initialWindow, onWindowChange, proximityEncounters = [] }: {
   weave: Weave;
   hierarchy?: AnalyticsSubagentTreePayloadV1;
   initialWindow?: LoomWindow | null;
   onWindowChange?: (window: LoomWindow | null) => void;
+  proximityEncounters?: readonly FeedbackProximityEncounterV1[];
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   ariaLabel: string;
@@ -122,7 +127,10 @@ export function WeaveCanvas({ weave, selectedId, onSelect, ariaLabel, hierarchy,
         {view && axisTicks(view, span).map((tick) => <text key={tick.time} x={left + tick.x} y={22} textAnchor="middle" fill="var(--raw-graph-text)" fontSize={11}>{tick.label}</text>)}
       </svg>
       <svg role="group" aria-label={ariaLabel} width="100%" style={{ minWidth: 720 }} viewBox={`0 0 ${WIDTH} ${height}`}>
-        <defs><clipPath id={clipId}><rect x={left} y={35} width={span} height={height - 40} /></clipPath></defs>
+        <defs>
+          <clipPath id={clipId}><rect x={left} y={35} width={span} height={height - 40} /></clipPath>
+          {view && <ProximityGradients encounters={proximityEncounters} id={clipId} projectX={x} />}
+        </defs>
         {view && axisTicks(view, span).map((tick) => <g key={tick.time}>
           <line x1={left + tick.x} x2={left + tick.x} y1={35} y2={height - 20} stroke="var(--raw-graph-edge)" opacity={.3} />
         </g>)}
@@ -162,6 +170,7 @@ export function WeaveCanvas({ weave, selectedId, onSelect, ariaLabel, hierarchy,
               <rect x={start - 8} y={middle - 14} width={Math.max(end - start + 16, 24)} height={28} fill="transparent" />
             </g>;
           })}
+          {view && <ProximityLines encounters={proximityEncounters} id={clipId} rows={rowById} projectX={x} projectY={y} view={view} minimap={false} />}
         </g>
       </svg>
     </div>
@@ -179,8 +188,12 @@ export function WeaveCanvas({ weave, selectedId, onSelect, ariaLabel, hierarchy,
           }
         }}>
         <title>Click to locate session lanes; Up and Down scroll the lane viewport.</title>
+        <defs>
+          <ProximityGradients encounters={proximityEncounters} id={`${clipId}-minimap`} projectX={miniX} />
+        </defs>
         {links.map(({ parent, child }) => <path key={child.id} data-minimap-parent={parent.sessionId} d={linkPath(parent, child, miniX, miniY)} fill="none" stroke="var(--raw-graph-text)" strokeDasharray="4 3" strokeWidth={1} />)}
         {visible.map((thread) => <line key={thread.id} data-minimap-session={thread.sessionId} style={kindColorVars(thread.host)} x1={miniX(thread.start)} x2={thread.end == null ? miniX(thread.start) + 3 : miniX(thread.end)} y1={miniY(thread.id)} y2={miniY(thread.id)} stroke="var(--kind-dark)" strokeDasharray={extentPattern(thread)} />)}
+        <ProximityLines encounters={proximityEncounters} id={`${clipId}-minimap`} rows={rowById} projectX={miniX} projectY={miniY} view={full} minimap />
         <rect data-session-viewport x={miniX(view.start)} y={8 + vertical.start * 64} width={miniX(view.end) - miniX(view.start)} height={Math.max(1, vertical.fraction * 64)} fill="none" stroke="var(--raw-graph-text)" />
       </svg>
       <label className="flex items-center gap-2 text-3xs text-text-muted">Session window
@@ -188,6 +201,76 @@ export function WeaveCanvas({ weave, selectedId, onSelect, ariaLabel, hierarchy,
       </label>
     </div>}
   </div>;
+}
+
+function ProximityGradients({
+  encounters,
+  id,
+  projectX,
+}: {
+  encounters: readonly FeedbackProximityEncounterV1[];
+  id: string;
+  projectX: (time: number) => number;
+}) {
+  return encounters.map((encounter, index) => (
+    <linearGradient
+      key={encounter.encounter_id}
+      id={`${id}-proximity-${index}`}
+      gradientUnits="userSpaceOnUse"
+      x1={projectX(encounter.interval.start / 1_000_000)}
+      x2={projectX(encounter.interval.end / 1_000_000)}
+    >
+      <stop offset="0%" stopColor={proximityColor(encounter.relation)} stopOpacity="0" />
+      <stop offset="28%" stopColor={proximityColor(encounter.relation)} />
+      <stop offset="72%" stopColor={proximityColor(encounter.relation)} />
+      <stop offset="100%" stopColor={proximityColor(encounter.relation)} stopOpacity="0" />
+    </linearGradient>
+  ));
+}
+
+function ProximityLines({
+  encounters,
+  id,
+  rows,
+  projectX,
+  projectY,
+  view,
+  minimap,
+}: {
+  encounters: readonly FeedbackProximityEncounterV1[];
+  id: string;
+  rows: ReadonlyMap<string, number>;
+  projectX: (time: number) => number;
+  projectY: (threadId: string) => number;
+  view: LoomWindow;
+  minimap: boolean;
+}) {
+  return encounters.flatMap((encounter, encounterIndex) =>
+    encounter.participants.flatMap((participant, participantIndex) => {
+      const threadId = proximityThreadId(encounter, participantIndex);
+      const start = encounter.interval.start / 1_000_000;
+      const end = encounter.interval.end / 1_000_000;
+      if (threadId === null || !rows.has(threadId) || start > view.end || end < view.start) {
+        return [];
+      }
+      return [(
+        <line
+          key={`${encounter.encounter_id}:${threadId}`}
+          data-proximity-encounter={minimap ? undefined : encounter.encounter_id}
+          data-proximity-session={minimap ? undefined : participant.source.session_id}
+          data-minimap-proximity-encounter={minimap ? encounter.encounter_id : undefined}
+          data-minimap-proximity-session={minimap ? participant.source.session_id : undefined}
+          x1={projectX(start)}
+          x2={Math.max(projectX(start) + (minimap ? 2 : 4), projectX(end))}
+          y1={projectY(threadId)}
+          y2={projectY(threadId)}
+          stroke={`url(#${id}-proximity-${encounterIndex})`}
+          strokeWidth={minimap ? 2 : 5}
+          strokeLinecap="round"
+        />
+      )];
+    }),
+  );
 }
 
 /** Canonical source positions; both the field and minimap use this projection. */

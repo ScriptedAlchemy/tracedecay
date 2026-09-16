@@ -18,8 +18,10 @@ import {
 import { cn } from '../../ui/cn';
 import { formatCount } from '../../ui/format.ts';
 import { kindColorVars } from '../../viz/graph/kindColor.ts';
+import { ProximityPanel } from '../../viz/proximity/index.ts';
 import { MARK_PITCH_PX, PLOT_WIDTH, WeaveCanvas } from './WeaveCanvas.tsx';
 import { ThreadChain } from './ThreadChain.tsx';
+import { useLoomProximity, type LoomProximityState } from './loomProximity.ts';
 import { formatDurationSeconds, formatMoment } from './tracks.ts';
 import {
   composeWeave,
@@ -72,6 +74,7 @@ export function LoomPage() {
     LcmTimelinePayloadV1Schema,
   );
   const hierarchy = useEnvelope(['loom', 'hierarchy'], '/api/plugins/analytics/subagent-tree', AnalyticsSubagentTreePayloadV1Schema);
+  const proximity = useLoomProximity();
   const [params, setParams] = useSearchParams();
   const selectedId = params.get('loomSession');
   const setSelectedId = (id: string | null) => {
@@ -108,7 +111,11 @@ export function LoomPage() {
             timelinePending={timeline.isPending}
             timelineServed={timeline.data?.outcome === 'envelope'}
             selectedId={selectedId}
+            selectedEncounterId={proximity.selectedEncounterId}
+            proximity={proximity.result}
+            proximityEncounters={proximity.encounters}
             onSelect={setSelectedId}
+            onSelectEncounter={proximity.selectEncounter}
           />
         )}
       </TemporalBoundary>
@@ -129,7 +136,11 @@ function TemporalBody({
   timelinePending,
   timelineServed,
   selectedId,
+  selectedEncounterId,
+  proximity,
+  proximityEncounters,
   onSelect,
+  onSelectEncounter,
 }: {
   envelope: DashboardEnvelopeV1<LoomTemporalPayloadV1>;
   hierarchy: AnalyticsSubagentTreePayloadV1 | undefined;
@@ -138,7 +149,11 @@ function TemporalBody({
   timelinePending: boolean;
   timelineServed: boolean;
   selectedId: string | null;
+  selectedEncounterId: string | null;
+  proximity: LoomProximityState['result'];
+  proximityEncounters: LoomProximityState['encounters'];
   onSelect: (id: string | null) => void;
+  onSelectEncounter: (id: string | null) => void;
 }) {
   const [params, setParams] = useSearchParams();
   const rawWindow = params.get('loomOverviewWindow')?.split(',').map(Number);
@@ -277,7 +292,13 @@ function TemporalBody({
       >
         <div className="flex min-w-0 flex-1 flex-col gap-2">
           {selectedId && !selected ? <StateChip kind="unavailable" detail="Selected session is outside this loaded page; choose a retained session." /> : null}
-          {selected ? (
+          {selectedEncounterId !== null ? (
+            <ProximityPanel
+              result={proximity}
+              selectedId={selectedEncounterId}
+              onSelect={onSelectEncounter}
+            />
+          ) : selected ? (
             <>
               <ThreadChain onReturn={() => onSelect(null)} thread={selected} relations={{ commits: selectedCommits, editedFiles: selectedFiles, branchSpans: selectedSpans, commitStatus, branchStatus }} />
             </>
@@ -298,6 +319,12 @@ function TemporalBody({
                 selectedId={selectedId}
                 onSelect={onSelect}
                 ariaLabel={weaveDescription(weave)}
+                proximityEncounters={proximityEncounters}
+              />
+              <ProximityPanel
+                result={proximity}
+                selectedId={selectedEncounterId}
+                onSelect={onSelectEncounter}
               />
               <p className="text-3xs text-text-muted">Session hierarchy: {hierarchyPending ? "loading" : !hierarchy?.available || hierarchy.error ? "unavailable" : `${hierarchy.truncated ? "partial" : "loaded"} · ${hierarchy.missing_parent_count} missing parents · ${hierarchy.cycle_count} cycles`}. Curved links express recorded parent identity between session bounds, not timed spawn or rejoin. Only this temporal page is drawn.</p>
               <WeaveAxis weave={weave} />

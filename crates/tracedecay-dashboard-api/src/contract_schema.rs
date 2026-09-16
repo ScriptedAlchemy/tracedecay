@@ -3,6 +3,9 @@
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
 use tracedecay_api::read_model::multi_root::{MultiRootCapabilityV1, MultiRootQueryReadModelV1};
+use tracedecay_contracts::feedback::{
+    FeedbackProximityReadRequestV1, FeedbackProximityReadResultV1,
+};
 use tracedecay_contracts::retained_surfaces::{
     AutomationRunProblemV1, AutomationRunResultV1, FactStoreCurateRequestV1,
 };
@@ -120,6 +123,8 @@ struct DashboardContractCatalogV1 {
     loom_temporal: LoomTemporalPayloadV1,
     delivery_overview: DeliveryOverviewV1,
     feedback_status: DashboardEnvelopeV1<FeedbackObservationReadModelV1>,
+    feedback_proximity_request: FeedbackProximityReadRequestV1,
+    feedback_proximity: FeedbackProximityReadResultV1,
     code_index_freshness: CodeIndexFreshnessPayloadV1,
     settings: SettingsPayloadV1,
     settings_project_patch: ProjectSettingsPatch,
