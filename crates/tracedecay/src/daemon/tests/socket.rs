@@ -801,6 +801,120 @@ async fn projectless_project_list_reads_the_empty_profile_registry() {
         .expect("projectless client shutdown should be clean");
 }
 
+/// A fresh MCP host discovers tools through `tools/list` before `tools/call`.
+/// After a projectless session is admitted, `tools/list` must advertise the
+/// registry reads that dispatcher can serve and must not advertise
+/// project-mounted graph tools that still refuse without a project.
+#[cfg(unix)]
+#[tokio::test]
+async fn projectless_tools_list_advertises_registry_tools() {
+    let home = TempDir::new().expect("home");
+    let home = home.path().canonicalize().expect("canonical home");
+    let client_identity = test_client_identity_for(home.join("client"));
+    let engine = test_daemon_engine_for_profile(&client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &client_identity.profile_root,
+        "projectless-tools-list-test",
+    );
+
+    let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
+    let server_task = tokio::spawn(Box::pin(super::super::serve_socket_client(server, engine)));
+    let (reader, mut writer) = client.into_split();
+    let handshake = DaemonHandshake {
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    writer
+        .write_all(handshake.to_line().expect("handshake").as_bytes())
+        .await
+        .expect("write handshake");
+    writer.write_all(b"\n").await.expect("newline");
+    // First request must not be bootstrap-handled (`initialize` / `tools/list`),
+    // or the connection never enters the projectless session loop Codex named.
+    writer
+        .write_all(
+            serde_json::to_string(&json!({
+                "jsonrpc": "2.0",
+                "id": 8,
+                "method": "tools/call",
+                "params": {
+                    "name": "tracedecay_project_list",
+                    "arguments": {"format": "json", "limit": 5}
+                }
+            }))
+            .expect("tools/call json")
+            .as_bytes(),
+        )
+        .await
+        .expect("write tools/call");
+    writer.write_all(b"\n").await.expect("newline");
+    writer
+        .write_all(
+            serde_json::to_string(&json!({
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "tools/list"
+            }))
+            .expect("tools/list json")
+            .as_bytes(),
+        )
+        .await
+        .expect("write tools/list");
+    writer.write_all(b"\n").await.expect("newline");
+    writer.shutdown().await.expect("shutdown writer");
+
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+    let call_line = tokio::time::timeout(HALF_CLOSE_ROUND_TRIP_BOUND, lines.next_line())
+        .await
+        .expect("projectless tools/call should not time out")
+        .expect("read tools/call response")
+        .expect("tools/call response");
+    let call_response: Value = serde_json::from_str(&call_line).expect("tools/call json");
+    assert_eq!(call_response["id"], json!(8));
+    assert!(
+        call_response.get("error").is_none(),
+        "projectless tools/call must admit the session: {call_response}"
+    );
+
+    let list_line = tokio::time::timeout(HALF_CLOSE_ROUND_TRIP_BOUND, lines.next_line())
+        .await
+        .expect("projectless tools/list should not time out")
+        .expect("read tools/list response")
+        .expect("tools/list response");
+    let response: Value = serde_json::from_str(&list_line).expect("tools/list json");
+    assert_eq!(response["id"], json!(9));
+    assert!(
+        response.get("error").is_none(),
+        "projectless tools/list must not return MethodNotFound: {response}"
+    );
+    let tools = response["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tools/list must carry a tool array: {response}"));
+    let names: std::collections::BTreeSet<&str> = tools
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .collect();
+    for required in [
+        "tracedecay_project_list",
+        "tracedecay_project_search",
+        "tracedecay_project_context",
+    ] {
+        assert!(
+            names.contains(required),
+            "projectless tools/list must advertise {required}; got {names:?}"
+        );
+    }
+    assert!(
+        !names.contains("tracedecay_search"),
+        "projectless tools/list must not advertise project-mounted graph tools: {names:?}"
+    );
+
+    server_task
+        .await
+        .expect("server task should complete")
+        .expect("projectless client shutdown should be clean");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn user_session_read_bypasses_unregistered_project_route() {

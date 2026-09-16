@@ -8,8 +8,12 @@ use tracedecay_daemon_protocol::DaemonClientIdentity;
 use tracedecay_daemon_service::DaemonProjectRegistryReadService;
 use tracedecay_domain::errors::Result;
 use tracedecay_mcp::server::{LiveTranscriptRefreshJoin, join_required_live_transcript_refresh};
+use tracedecay_mcp::tools::catalog_discovery::{
+    catalog_discovery_tools_list_payload, default_catalog_discovery_authority,
+};
 use tracedecay_mcp::{
-    ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, tool_error_response,
+    ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, ToolRegistryMode,
+    explore_call_budget, project_catalog_discovery_scope, tool_error_response,
     tool_result_has_semantic_error,
 };
 use tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalRoot;
@@ -181,6 +185,7 @@ async fn projectless_response(
             ),
             Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
         }),
+        "tools/list" => Some(projectless_tools_list_response(id)),
         "tools/call" => {
             let started = timings_enabled.then(std::time::Instant::now);
             let mut response =
@@ -203,6 +208,63 @@ async fn projectless_response(
             ErrorCode::MethodNotFound,
             format!("Method not found: {}", request.method),
         )),
+    }
+}
+
+/// Whether projectless dispatch can serve this tool without a mounted project.
+///
+/// Discovery and call admission share this predicate so `tools/list` never
+/// advertises a name that still answers "requires an initialized code project".
+fn projectless_tool_is_discoverable(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "tracedecay_admin_project"
+            | "tracedecay_hook_runtime"
+            | "tracedecay_admin_cli"
+            | "tracedecay_project_list"
+            | "tracedecay_project_search"
+            | "tracedecay_project_context"
+    ) || tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name).is_some()
+}
+
+/// Projectless `tools/list`: the host-available catalog, reduced to tools the
+/// projectless dispatcher can actually call. An empty or uncomposable catalog
+/// is a typed error, never a successful empty listing.
+fn projectless_tools_list_payload() -> std::result::Result<serde_json::Value, String> {
+    let profile_id = tracedecay_tool_catalog::ProfileId::new(
+        tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID,
+    )
+    .map_err(|error| format!("invalid MCP discovery profile: {error}"))?;
+    let authority = default_catalog_discovery_authority()
+        .map_err(|error| format!("MCP catalog discovery unavailable: {error}"))?;
+    let mut payload = catalog_discovery_tools_list_payload(
+        None,
+        explore_call_budget(0),
+        &profile_id,
+        &authority,
+        &project_catalog_discovery_scope(),
+        ToolRegistryMode::HostAvailable,
+    )
+    .map_err(|error| format!("MCP catalog discovery unavailable: {error}"))?;
+    let tools = payload
+        .get_mut("tools")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| "MCP catalog discovery unavailable".to_owned())?;
+    tools.retain(|tool| {
+        tool.get("name")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(projectless_tool_is_discoverable)
+    });
+    if tools.is_empty() {
+        return Err("MCP projectless catalog discovery produced no tools".to_owned());
+    }
+    Ok(payload)
+}
+
+fn projectless_tools_list_response(id: serde_json::Value) -> JsonRpcResponse {
+    match projectless_tools_list_payload() {
+        Ok(payload) => JsonRpcResponse::success(id, payload),
+        Err(message) => JsonRpcResponse::error(id, ErrorCode::InternalError, message),
     }
 }
 
