@@ -1528,6 +1528,69 @@ fn cold_owner_warmup_seats_query_owners_before_clone_backfill() {
     }
 }
 
+/// `query_owners_are_ready` is the sole exact/lexical bit for the published
+/// seat gate and the full graph-replay skip — both directions.
+///
+/// Owners-ready with clone backfill still unfinished must admit seat/replay;
+/// lexical-incomplete (owners absent) must refuse both. Clone completeness is
+/// `text_projection_needs_work`, not a fork of this predicate.
+#[test]
+fn query_owners_ready_admits_seat_and_replay_both_directions() {
+    use super::super::registry::GraphSeatGateV1;
+
+    let fixture = GitFixture::new(&[
+        ("src/lib.rs", "pub fn cold_activation() {}\n"),
+        ("src/second.rs", "pub fn second_unit() -> usize { 2 }\n"),
+        ("src/third.rs", "pub fn third_unit() -> usize { 3 }\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+
+    // Direction: lexical-incomplete → owners not ready → seat denies, replay waits.
+    assert!(
+        !latest.query_owners_are_ready(),
+        "a freshly published generation has no exact/lexical owners yet"
+    );
+    assert_eq!(
+        GraphSeatGateV1::decide(true, false, true, true, latest.query_owners_are_ready()),
+        GraphSeatGateV1::PublishedTextOwnerUnavailable,
+        "published seat gate must refuse while exact/lexical owners are absent"
+    );
+    assert!(
+        !latest.query_owners_are_ready(),
+        "full graph replay skip uses the same owners-ready bit and must wait"
+    );
+
+    latest
+        .production_query_owners()
+        .expect("cold owner warmup must install exact/lexical owners");
+
+    // Direction: owners-ready while clone backfill remains → seat admits, replay admits.
+    assert!(
+        latest.query_owners_are_ready(),
+        "exact/lexical owners ready"
+    );
+    assert!(
+        latest.text_projection_needs_work(),
+        "clone backfill must still be unfinished so the two predicates stay distinct"
+    );
+    assert_eq!(
+        GraphSeatGateV1::decide(true, false, true, true, latest.query_owners_are_ready()),
+        GraphSeatGateV1::Prepare,
+        "published seat gate admits on owners-ready without waiting for clone backfill"
+    );
+    assert!(
+        latest.query_owners_are_ready(),
+        "full graph replay skip clears on the same owners-ready bit; clone backfill is not a wait"
+    );
+}
+
 #[test]
 fn corrupt_durable_text_artifact_is_quarantined_and_rebuilt() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn repaired() {}\n")]);

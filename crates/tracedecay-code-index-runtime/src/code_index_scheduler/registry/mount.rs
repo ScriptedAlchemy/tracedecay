@@ -1171,9 +1171,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     matches!(&source_result, Ok(Ok(_))),
                     published_pass,
                     if published_pass {
-                        graph_text
-                            .as_ref()
-                            .is_some_and(LatestCodeTextGenerationV1::query_owners_are_ready)
+                        exact_and_lexical_ready_for_graph(graph_text.as_ref())
                     } else {
                         graph_text.is_some()
                     },
@@ -1434,11 +1432,10 @@ impl CodeIndexSchedulerRegistryV1 {
                 // decode and replay below. Otherwise a failed fresh text pass
                 // becomes a retained pass on its next wake and recreates the
                 // same source and resident-memory contention we avoid above.
+                // Same named predicate as the published seat gate above.
                 if prepare_graph
                     && !graph_already_serves
-                    && graph_text
-                        .as_ref()
-                        .is_none_or(|text| !text.query_owners_are_ready())
+                    && !exact_and_lexical_ready_for_graph(graph_text.as_ref())
                 {
                     prepare_graph = false;
                     tracing::debug!(
@@ -2331,4 +2328,13 @@ impl CodeIndexSchedulerRegistryV1 {
         Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::Mount);
         Ok(true)
     }
+}
+
+/// Sole exact/lexical-ready bit for the published graph seat gate and the
+/// full sealed-generation replay skip. Delegates to
+/// [`LatestCodeTextGenerationV1::query_owners_are_ready`] so those two sites
+/// cannot fork; clone backfill is not part of this bit.
+#[inline]
+fn exact_and_lexical_ready_for_graph(text: Option<&LatestCodeTextGenerationV1>) -> bool {
+    text.is_some_and(LatestCodeTextGenerationV1::query_owners_are_ready)
 }
