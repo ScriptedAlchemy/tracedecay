@@ -478,6 +478,7 @@ pub struct DaemonCodeIndexPublicationStoreV1 {
     /// Test-only: observes each batched `segments_root` directory fsync so a
     /// test can assert a single publish syncs the directory once regardless
     /// of how many new file segments it wrote.
+    /// CI retrigger marker (no behavior).
     #[cfg(test)]
     segments_dir_sync_observer: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Last generation handed to `publish_atomically`. A transient store
