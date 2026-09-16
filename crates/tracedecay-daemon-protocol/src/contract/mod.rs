@@ -1502,17 +1502,29 @@ impl DaemonInvocationRequest {
         self
     }
 
-    #[must_use]
-    pub fn with_resolved_scope(mut self, scope: Option<ResolvedScope>) -> Self {
-        match &mut self.payload {
-            DaemonInvocationPayload::FeedbackGet { resolved_scope, .. }
-            | DaemonInvocationPayload::Configuration { resolved_scope, .. }
-            | DaemonInvocationPayload::ObservatoryRead { resolved_scope, .. } => {
+    /// Apply a resolved cross-project scope to payloads that carry one.
+    ///
+    /// `None` is always accepted (current-project / no selector). `Some` is
+    /// preserved only on payloads that own a `resolved_scope` field; every
+    /// other payload fails closed so a cross-project selector can never
+    /// silently alias the active project.
+    pub fn with_resolved_scope(
+        mut self,
+        scope: Option<ResolvedScope>,
+    ) -> Result<Self, DaemonInvocationProblem> {
+        match (&mut self.payload, scope) {
+            (
+                DaemonInvocationPayload::FeedbackGet { resolved_scope, .. }
+                | DaemonInvocationPayload::Configuration { resolved_scope, .. }
+                | DaemonInvocationPayload::ObservatoryRead { resolved_scope, .. },
+                scope,
+            ) => {
                 *resolved_scope = scope;
+                Ok(self)
             }
-            _ => {}
+            (_, None) => Ok(self),
+            (_, Some(_)) => Err(DaemonInvocationProblem::InvalidRequest),
         }
-        self
     }
 
     pub fn lsp_workspace_folders(&self) -> Option<&[String]> {
@@ -1536,61 +1548,70 @@ impl DaemonInvocationRequest {
     }
 
     pub fn operation(&self) -> DaemonInvocationOperation {
-        match self.payload {
-            DaemonInvocationPayload::GitRead {
-                surface_operation, ..
-            } => match surface_operation {
-                ApplicationSurfaceOperation::GitStatus => DaemonInvocationOperation::GitStatus,
-                ApplicationSurfaceOperation::GitDiff => DaemonInvocationOperation::GitDiff,
-                ApplicationSurfaceOperation::GitHistory => DaemonInvocationOperation::GitHistory,
-                ApplicationSurfaceOperation::GitBlame => DaemonInvocationOperation::GitBlame,
-                ApplicationSurfaceOperation::GitHunks => DaemonInvocationOperation::GitHunks,
-                _ => unreachable!("Git read payloads use a Git read surface operation"),
+        match &self.payload {
+            // Derive from the typed body, not `surface_operation`. A foreign
+            // wire `surface_operation` is rejected by `validate()`; labeling
+            // must stay total so the connection task never panics on input.
+            DaemonInvocationPayload::GitRead { request, .. } => match &request.request {
+                tracedecay_contracts::git::GitReadRequestV1::Status => {
+                    DaemonInvocationOperation::GitStatus
+                }
+                tracedecay_contracts::git::GitReadRequestV1::Diff { .. } => {
+                    DaemonInvocationOperation::GitDiff
+                }
+                tracedecay_contracts::git::GitReadRequestV1::History { .. } => {
+                    DaemonInvocationOperation::GitHistory
+                }
+                tracedecay_contracts::git::GitReadRequestV1::Blame { .. } => {
+                    DaemonInvocationOperation::GitBlame
+                }
+                tracedecay_contracts::git::GitReadRequestV1::Hunks { .. } => {
+                    DaemonInvocationOperation::GitHunks
+                }
             },
             DaemonInvocationPayload::GitPreview { .. } => DaemonInvocationOperation::GitPreview,
             DaemonInvocationPayload::GitHubStackSignalExpand { .. } => {
                 DaemonInvocationOperation::GitHubStackSignalExpand
             }
             DaemonInvocationPayload::GitApply { .. } => DaemonInvocationOperation::GitApply,
-            DaemonInvocationPayload::NativeIntegration {
-                surface_operation, ..
-            } => match surface_operation {
-                ApplicationSurfaceOperation::NativeIntegrationStackSnapshot => {
+            DaemonInvocationPayload::NativeIntegration { request, .. } => match request {
+                tracedecay_contracts::NativeIntegrationSurfaceRequest::StackSnapshot(_) => {
                     DaemonInvocationOperation::NativeIntegrationStackSnapshot
                 }
-                ApplicationSurfaceOperation::NativeIntegrationPreflight => {
+                tracedecay_contracts::NativeIntegrationSurfaceRequest::Preflight(_) => {
                     DaemonInvocationOperation::NativeIntegrationPreflight
                 }
-                ApplicationSurfaceOperation::NativeIntegrationApprove => {
+                tracedecay_contracts::NativeIntegrationSurfaceRequest::Approve(_) => {
                     DaemonInvocationOperation::NativeIntegrationApprove
                 }
-                ApplicationSurfaceOperation::NativeIntegrationApply => {
+                tracedecay_contracts::NativeIntegrationSurfaceRequest::Apply(_) => {
                     DaemonInvocationOperation::NativeIntegrationApply
                 }
-                ApplicationSurfaceOperation::NativeIntegrationStatus => {
+                tracedecay_contracts::NativeIntegrationSurfaceRequest::Status(_) => {
                     DaemonInvocationOperation::NativeIntegrationStatus
                 }
-                ApplicationSurfaceOperation::NativeIntegrationCancel => {
+                tracedecay_contracts::NativeIntegrationSurfaceRequest::Cancel(_) => {
                     DaemonInvocationOperation::NativeIntegrationCancel
                 }
-                ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory => {
-                    DaemonInvocationOperation::NativeIntegrationWorktreeInventory
+                tracedecay_contracts::NativeIntegrationSurfaceRequest::Worktree(request) => {
+                    match request {
+                        tracedecay_contracts::git::NativeWorktreeSurfaceRequest::Inventory(_) => {
+                            DaemonInvocationOperation::NativeIntegrationWorktreeInventory
+                        }
+                        tracedecay_contracts::git::NativeWorktreeSurfaceRequest::Inspect(_) => {
+                            DaemonInvocationOperation::NativeIntegrationWorktreeInspect
+                        }
+                        tracedecay_contracts::git::NativeWorktreeSurfaceRequest::Confirm(_) => {
+                            DaemonInvocationOperation::NativeIntegrationWorktreeConfirm
+                        }
+                        tracedecay_contracts::git::NativeWorktreeSurfaceRequest::Remove(_) => {
+                            DaemonInvocationOperation::NativeIntegrationWorktreeRemove
+                        }
+                        tracedecay_contracts::git::NativeWorktreeSurfaceRequest::Reconcile(_) => {
+                            DaemonInvocationOperation::NativeIntegrationWorktreeReconcile
+                        }
+                    }
                 }
-                ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect => {
-                    DaemonInvocationOperation::NativeIntegrationWorktreeInspect
-                }
-                ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm => {
-                    DaemonInvocationOperation::NativeIntegrationWorktreeConfirm
-                }
-                ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove => {
-                    DaemonInvocationOperation::NativeIntegrationWorktreeRemove
-                }
-                ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile => {
-                    DaemonInvocationOperation::NativeIntegrationWorktreeReconcile
-                }
-                _ => unreachable!(
-                    "native integration payloads use a native integration surface operation"
-                ),
             },
             DaemonInvocationPayload::FeedbackDiagnostics { .. } => {
                 DaemonInvocationOperation::FeedbackDiagnostics
@@ -1839,12 +1860,96 @@ impl DaemonInvocationRequest {
                 }
             }
             DaemonInvocationPayload::GitRead {
+                surface_operation,
+                request,
                 observed_at,
                 deadline,
                 cancellation,
-                ..
+            } => {
+                if observed_at.0 <= 0
+                    || deadline.expires_at.0 <= 0
+                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+                let expected = match &request.request {
+                    tracedecay_contracts::git::GitReadRequestV1::Status => {
+                        ApplicationSurfaceOperation::GitStatus
+                    }
+                    tracedecay_contracts::git::GitReadRequestV1::Diff { .. } => {
+                        ApplicationSurfaceOperation::GitDiff
+                    }
+                    tracedecay_contracts::git::GitReadRequestV1::History { .. } => {
+                        ApplicationSurfaceOperation::GitHistory
+                    }
+                    tracedecay_contracts::git::GitReadRequestV1::Blame { .. } => {
+                        ApplicationSurfaceOperation::GitBlame
+                    }
+                    tracedecay_contracts::git::GitReadRequestV1::Hunks { .. } => {
+                        ApplicationSurfaceOperation::GitHunks
+                    }
+                };
+                if *surface_operation != expected {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
             }
-            | DaemonInvocationPayload::GitPreview {
+            DaemonInvocationPayload::NativeIntegration {
+                surface_operation,
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                if observed_at.0 <= 0
+                    || deadline.expires_at.0 <= 0
+                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+                let expected = match request {
+                    tracedecay_contracts::NativeIntegrationSurfaceRequest::StackSnapshot(_) => {
+                        ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
+                    }
+                    tracedecay_contracts::NativeIntegrationSurfaceRequest::Preflight(_) => {
+                        ApplicationSurfaceOperation::NativeIntegrationPreflight
+                    }
+                    tracedecay_contracts::NativeIntegrationSurfaceRequest::Approve(_) => {
+                        ApplicationSurfaceOperation::NativeIntegrationApprove
+                    }
+                    tracedecay_contracts::NativeIntegrationSurfaceRequest::Apply(_) => {
+                        ApplicationSurfaceOperation::NativeIntegrationApply
+                    }
+                    tracedecay_contracts::NativeIntegrationSurfaceRequest::Status(_) => {
+                        ApplicationSurfaceOperation::NativeIntegrationStatus
+                    }
+                    tracedecay_contracts::NativeIntegrationSurfaceRequest::Cancel(_) => {
+                        ApplicationSurfaceOperation::NativeIntegrationCancel
+                    }
+                    tracedecay_contracts::NativeIntegrationSurfaceRequest::Worktree(request) => {
+                        match request {
+                            tracedecay_contracts::git::NativeWorktreeSurfaceRequest::Inventory(
+                                _,
+                            ) => ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory,
+                            tracedecay_contracts::git::NativeWorktreeSurfaceRequest::Inspect(_) => {
+                                ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect
+                            }
+                            tracedecay_contracts::git::NativeWorktreeSurfaceRequest::Confirm(_) => {
+                                ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm
+                            }
+                            tracedecay_contracts::git::NativeWorktreeSurfaceRequest::Remove(_) => {
+                                ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove
+                            }
+                            tracedecay_contracts::git::NativeWorktreeSurfaceRequest::Reconcile(
+                                _,
+                            ) => ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile,
+                        }
+                    }
+                };
+                if *surface_operation != expected {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::GitPreview {
                 observed_at,
                 deadline,
                 cancellation,
@@ -1857,12 +1962,6 @@ impl DaemonInvocationRequest {
                 ..
             }
             | DaemonInvocationPayload::GitApply {
-                observed_at,
-                deadline,
-                cancellation,
-                ..
-            }
-            | DaemonInvocationPayload::NativeIntegration {
                 observed_at,
                 deadline,
                 cancellation,
@@ -2406,6 +2505,140 @@ mod invocation_problem_tests {
                 .outcome,
             response.outcome
         );
+    }
+}
+
+#[cfg(test)]
+mod wire_input_fail_closed_tests {
+    use super::{
+        DaemonInvocationOperation, DaemonInvocationPayload, DaemonInvocationProblem,
+        DaemonInvocationRequest,
+    };
+    use crate::surface::GitReadSurfaceRequest;
+    use tracedecay_contracts::git::GitReadRequestV1;
+    use tracedecay_contracts::{
+        CancellationContext, Deadline, ObservatoryReadRequestV1, ResolvedScope,
+    };
+    use tracedecay_domain::{ProjectId, RepositoryId, UtcMicros, WorktreeId};
+    use tracedecay_tool_catalog::ApplicationSurfaceOperation;
+
+    fn deadline() -> Deadline {
+        Deadline::new(UtcMicros(5_000_000)).expect("deadline")
+    }
+
+    fn cancellation() -> CancellationContext {
+        CancellationContext::active("cancel.wire-fail-closed").expect("cancellation")
+    }
+
+    fn test_scope(suffix: &str) -> ResolvedScope {
+        ResolvedScope::new(
+            ProjectId::new(format!("project.{suffix}")).expect("project id"),
+            RepositoryId::new(format!("repository.{suffix}")).expect("repository id"),
+            WorktreeId::new(format!("worktree.{suffix}")).expect("worktree id"),
+            None,
+        )
+        .expect("resolved scope")
+    }
+
+    fn git_status_read(surface_operation: ApplicationSurfaceOperation) -> DaemonInvocationRequest {
+        DaemonInvocationRequest::git_read(
+            "request.git-wire-fail-closed",
+            surface_operation,
+            GitReadSurfaceRequest {
+                request: GitReadRequestV1::Status,
+                max_entries: 32,
+                max_bytes: 64 * 1024,
+            },
+            UtcMicros(1),
+            deadline(),
+            cancellation(),
+        )
+    }
+
+    #[test]
+    fn foreign_surface_operation_on_git_read_validates_as_invalid_request() {
+        let request = git_status_read(ApplicationSurfaceOperation::FeedbackGet);
+        assert_eq!(
+            request.validate(),
+            Err(DaemonInvocationProblem::InvalidRequest),
+            "a GitRead frame with a foreign surface_operation must fail closed"
+        );
+        // Labeling must stay total: deriving the operation from the typed body
+        // must not panic even when surface_operation is foreign.
+        assert_eq!(request.operation(), DaemonInvocationOperation::GitStatus);
+    }
+
+    #[test]
+    fn matching_git_read_surface_operation_validates() {
+        let request = git_status_read(ApplicationSurfaceOperation::GitStatus);
+        assert_eq!(request.validate(), Ok(()));
+        assert_eq!(request.operation(), DaemonInvocationOperation::GitStatus);
+    }
+
+    #[test]
+    fn with_resolved_scope_preserves_scope_on_payloads_that_carry_it() {
+        let scope = test_scope("preserve");
+        for (label, request) in [
+            (
+                "observatory",
+                DaemonInvocationRequest::observatory_read(
+                    "request.observatory.scope",
+                    ObservatoryReadRequestV1::default(),
+                    UtcMicros(1),
+                    deadline(),
+                    cancellation(),
+                ),
+            ),
+            (
+                "feedback_get",
+                DaemonInvocationRequest::feedback(
+                    "request.feedback.scope",
+                    ApplicationSurfaceOperation::FeedbackGet,
+                    "feedback.handle.scope".to_owned(),
+                    UtcMicros(1),
+                    deadline(),
+                    cancellation(),
+                ),
+            ),
+        ] {
+            let request = request
+                .with_resolved_scope(Some(scope.clone()))
+                .unwrap_or_else(|_| panic!("{label} must carry resolved_scope"));
+            let carried = match &request.payload {
+                DaemonInvocationPayload::ObservatoryRead {
+                    resolved_scope: Some(carried),
+                    ..
+                }
+                | DaemonInvocationPayload::FeedbackGet {
+                    resolved_scope: Some(carried),
+                    ..
+                } => carried,
+                other => panic!("{label}: expected payload with preserved scope, got {other:?}"),
+            };
+            assert_eq!(carried, &scope, "{label} must preserve the cross-project selector");
+        }
+    }
+
+    #[test]
+    fn with_resolved_scope_refuses_payloads_that_cannot_carry_it() {
+        let scope = test_scope("refuse");
+        let request = git_status_read(ApplicationSurfaceOperation::GitStatus);
+        assert_eq!(
+            request
+                .with_resolved_scope(Some(scope))
+                .map(|_| ())
+                .expect_err("GitRead cannot carry resolved_scope"),
+            DaemonInvocationProblem::InvalidRequest,
+            "cross-project selectors must not silently alias the active project"
+        );
+    }
+
+    #[test]
+    fn with_resolved_scope_none_is_accepted_for_all_payloads() {
+        let request = git_status_read(ApplicationSurfaceOperation::GitStatus);
+        request
+            .with_resolved_scope(None)
+            .expect("CurrentProject (None) applies to every payload");
     }
 }
 

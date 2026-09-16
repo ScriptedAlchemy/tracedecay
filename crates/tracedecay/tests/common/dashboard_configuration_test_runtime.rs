@@ -108,6 +108,7 @@ impl DashboardApplicationRuntime for DashboardConfigurationRuntimeForTestV1 {
                 cancellation.context(),
             )
             .with_resolved_scope(Some(self.scope.clone()))
+            .expect("configuration payloads carry resolved_scope")
             .with_delivery_route(
                 tracedecay_contracts::feedback::observations::FeedbackDeliveryRouteV1::Http,
             );

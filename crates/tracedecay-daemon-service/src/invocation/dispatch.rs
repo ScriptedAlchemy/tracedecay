@@ -214,7 +214,6 @@ impl DaemonInvocationService {
                 );
             }
         };
-        let operation = request.operation();
         let delivery_route = request.delivery_route;
         // Every per-project component this request may need, taken in one pass
         // so dispatch sees one consistent view of the project. A pre-admitted
@@ -240,11 +239,15 @@ impl DaemonInvocationService {
         let observations = feedback_runtime
             .as_ref()
             .map(|runtime| runtime.source_observation_port());
-        let observation_subject =
-            invocation_observation_subject(&request_id, operation, delivery_route);
+        // Validate before deriving an operation label. Wire frames with a
+        // foreign `surface_operation` must fail closed as InvalidRequest —
+        // never reach a panic path while labeling the request.
         let validated =
             hotpath::measure_block!("daemon.service.invocation.validate", request.validate());
         if let Err(problem) = validated {
+            let operation = request.operation();
+            let observation_subject =
+                invocation_observation_subject(&request_id, operation, delivery_route);
             if is_observable_operation(operation)
                 && let Some((argument, rejection)) = invocation_problem_rejected_argument(problem)
             {
@@ -265,6 +268,9 @@ impl DaemonInvocationService {
             observe_front_door_denial(problem);
             return DaemonInvocationResponse::problem(request_id, problem);
         }
+        let operation = request.operation();
+        let observation_subject =
+            invocation_observation_subject(&request_id, operation, delivery_route);
         let pre_admission_response = match &request.payload {
             DaemonInvocationPayload::LspOpen {
                 deadline,
