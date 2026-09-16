@@ -1,4 +1,9 @@
-//! Direct-evaluation scoring and packaged-profile activation inputs.
+//! Direct-evaluation scoring over packaged-profile measurement inputs.
+//!
+//! The statuses here are evidence about the checked-in labels. No status
+//! qualifies or activates a retrieval profile; see the module documentation in
+//! [`crate::search_quality`] for why no qualification gate survives the dense
+//! lane's retirement.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -726,10 +731,7 @@ fn resource_sample_verdict(
         ResourceMeasurementStatusV1::Pending => {
             if sample.peak_rss_bytes.is_some()
                 || (sample.measured_queries != 0 && sample.measured_queries != expected_queries)
-                || sample
-                    .pending_reason
-                    .as_deref()
-                    .is_none_or(|reason| reason.trim().is_empty())
+                || sample.pending_reason.is_none()
             {
                 return None;
             }
@@ -767,7 +769,8 @@ mod tests {
     use super::{aggregate_quality, evaluate_query};
     use crate::search_quality::candidate_output::{
         HistoricalQueryExecutionV1, QueryCandidateRowV1, RankedCandidateRowV1,
-        ResourceMeasurementStatusV1, ResourceSampleV1, WorkloadQueryV1,
+        ResourceMeasurementPendingReasonV1, ResourceMeasurementStatusV1, ResourceSampleV1,
+        WorkloadQueryV1,
     };
 
     fn ranked(anchor: &str) -> RankedCandidateRowV1 {
@@ -932,7 +935,7 @@ mod tests {
         status: ResourceMeasurementStatusV1,
         peak_rss_bytes: Option<u64>,
         latency_samples_us: Vec<u64>,
-        pending_reason: Option<&str>,
+        pending_reason: Option<ResourceMeasurementPendingReasonV1>,
     ) -> ResourceSampleV1 {
         ResourceSampleV1 {
             status,
@@ -940,8 +943,12 @@ mod tests {
             peak_rss_bytes,
             measured_queries: latency_samples_us.len() as u64,
             latency_samples_us,
-            pending_reason: pending_reason.map(str::to_owned),
+            pending_reason,
         }
+    }
+
+    fn linux_peak_rss_unavailable() -> Option<ResourceMeasurementPendingReasonV1> {
+        Some(ResourceMeasurementPendingReasonV1::LinuxMissingNonzeroVmHwm)
     }
 
     #[test]
@@ -952,7 +959,7 @@ mod tests {
             ResourceMeasurementStatusV1::Pending,
             None,
             vec![10, 20, 30],
-            Some("Linux peak RSS measurement is unavailable"),
+            linux_peak_rss_unavailable(),
         );
         assert_eq!(
             super::resource_sample_verdict(&sample, 3),
@@ -962,7 +969,7 @@ mod tests {
             ResourceMeasurementStatusV1::Pending,
             None,
             Vec::new(),
-            Some("resource measurement pending"),
+            linux_peak_rss_unavailable(),
         );
         assert_eq!(
             super::resource_sample_verdict(&not_run, 3),
@@ -976,7 +983,7 @@ mod tests {
             ResourceMeasurementStatusV1::Pending,
             None,
             vec![10, 20],
-            Some("Linux peak RSS measurement is unavailable"),
+            linux_peak_rss_unavailable(),
         );
         assert_eq!(
             super::resource_sample_verdict(&partial_pending, 3),
@@ -987,14 +994,16 @@ mod tests {
             ResourceMeasurementStatusV1::Pending,
             Some(4096),
             vec![10, 20, 30],
-            Some("Linux peak RSS measurement is unavailable"),
+            linux_peak_rss_unavailable(),
         );
         assert_eq!(super::resource_sample_verdict(&pending_with_rss, 3), None);
+        // Pending is only evidence when it names why: the typed reason is
+        // required, so an unexplained pending sample stays inconsistent.
         let unexplained = resource_sample(
             ResourceMeasurementStatusV1::Pending,
             None,
             vec![10, 20, 30],
-            Some("  "),
+            None,
         );
         assert_eq!(super::resource_sample_verdict(&unexplained, 3), None);
         let mut miscounted = resource_sample(
@@ -1040,10 +1049,7 @@ mod tests {
             ResourceMeasurementStatusV1::Pending,
             None,
             vec![10, 20, 30],
-            Some(
-                "Windows peak_rss_bytes is unavailable because K32GetProcessMemoryInfo returned \
-                 zero PeakWorkingSetSize",
-            ),
+            Some(ResourceMeasurementPendingReasonV1::WindowsZeroPeakWorkingSetSize),
         );
         assert_eq!(
             super::resource_sample_verdict(&honest, 3),
