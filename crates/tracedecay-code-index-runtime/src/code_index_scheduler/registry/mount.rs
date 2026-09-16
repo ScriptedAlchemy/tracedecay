@@ -406,6 +406,10 @@ impl CodeIndexSchedulerRegistryV1 {
             // late complete-generation request starts a successor pass; that
             // successor must neither detach nor duplicate the text owner.
             let mut retained_text_projection = None;
+            // Whether the retained projection in flight started with exact
+            // and lexical owners already serving, so it only backfills clone
+            // fingerprints and its finish owes the worker no successor pass.
+            let mut retained_projection_successor_only = false;
             loop {
                 hotpath::future!(
                     worker_wake.notified(),
@@ -593,8 +597,27 @@ impl CodeIndexSchedulerRegistryV1 {
                     let installed = Arc::clone(&worker_text_generation);
                     #[cfg(any(test, feature = "test-helpers"))]
                     let gated_root = worker_project_root.clone();
-                    let projection_pass =
-                        super::super::ReconcilePassGuard::enter(&worker_reconcile_in_progress);
+                    // The pass guard is what `rebuild_in_flight` and the
+                    // `verifying` freshness state read. It belongs to a
+                    // projection that is still producing exact or lexical
+                    // serving. An owner whose query owners already serve has
+                    // only the clone-fingerprint backfill left; holding the
+                    // guard for that reported a complete current generation
+                    // as `verifying` / `partial_source_verification` for the
+                    // whole backfill (#1103).
+                    // The pass guard is what `rebuild_in_flight`, the
+                    // `verifying` freshness state and a read's busy fence
+                    // consult: it means exact or lexical serving is still
+                    // being produced. An owner whose query owners already
+                    // serve has only the clone-fingerprint backfill left, and
+                    // holding the guard for that reported a complete current
+                    // generation as verifying / partial_source_verification
+                    // for the whole backfill (#1103). The worker still owns
+                    // and joins the task, so shutdown sees the work.
+                    retained_projection_successor_only = latest.query_owners_are_ready();
+                    let projection_pass = (!retained_projection_successor_only).then(|| {
+                        super::super::ReconcilePassGuard::enter(&worker_reconcile_in_progress)
+                    });
                     let projection_pending_wake = Arc::clone(&worker_pending_wake);
                     let projection_wake = Arc::clone(&worker_wake);
                     retained_text_projection = Some(tokio::spawn(async move {
@@ -1654,6 +1677,13 @@ impl CodeIndexSchedulerRegistryV1 {
                 if let Some(outcome) = published_text_projection_outcome.take() {
                     match outcome {
                         PublishedTextProjectionOutcomeV1::Finished => {
+                            // The seat needs only the ready exact/lexical
+                            // owners. A clone-fingerprint successor left in
+                            // the slot is retained-owner work: the next wake
+                            // (a query over pending clone work requests one,
+                            // as does the ordinary cadence) drives it on the
+                            // retained path, so the worker is idle after the
+                            // seat exactly as before.
                             // Large text projections can outlive the bounded
                             // source proof established before publication. The
                             // serving swap must bind to source truth observed
@@ -1891,7 +1921,18 @@ impl CodeIndexSchedulerRegistryV1 {
                                 ),
                                 ServingSwapOutcomeV1::Offered => {}
                             }
-                            if text_latest.text_projection_needs_work() {
+                            // A seated owner whose exact and lexical serving
+                            // are ready has at most the clone-fingerprint
+                            // backfill left. That is demand-driven work: a
+                            // query over pending clone work requests the
+                            // background pass that drives it (see
+                            // `query_admission_serves_v14_while_clone_successor_is_pending`),
+                            // as does the ordinary cadence, so the worker
+                            // stays idle after the seat. Only an owner still
+                            // short of ready owners needs the follow-up now.
+                            if text_latest.text_projection_needs_work()
+                                && !text_latest.query_owners_are_ready()
+                            {
                                 Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
                             }
                         }
@@ -2167,12 +2208,15 @@ impl CodeIndexSchedulerRegistryV1 {
                     drop(reconcile_pass.take());
                     match outcome {
                         PublishedTextProjectionOutcomeV1::Finished
-                            if !retained_head_recovered_without_complete_replay =>
+                            if !retained_head_recovered_without_complete_replay
+                                && !retained_projection_successor_only =>
                         {
                             // Graph head recovery may have abstained while the
                             // retained text task was still running. Give the
                             // now-ready owner one bounded successor pass so a
                             // full replay can proceed without overlapping it.
+                            // A clone-fingerprint backfill changed no owner
+                            // the seat reads, so it owes no such pass.
                             Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
                         }
                         PublishedTextProjectionOutcomeV1::Finished => {}

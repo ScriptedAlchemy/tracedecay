@@ -1201,6 +1201,43 @@ async fn wait_for_quiescent_owner_pass(
     }
 }
 
+/// Drive the seated owner's clone-fingerprint backfill to completion.
+///
+/// The seat no longer waits for that successor: exact and lexical serve as
+/// soon as the admission artifact is ready and the backfill runs on a later
+/// pass. A query over pending clone work requests that pass, so a test that
+/// pins query admission or wake accounting against a *settled* seat drains
+/// the backfill first with plain wakes.
+async fn drain_clone_backfill(registry: &CodeIndexSchedulerRegistryV1, path: &Path) {
+    let canonical = path.canonicalize().expect("canonical project");
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    loop {
+        let text = {
+            let mounted = registry.mounted.lock().await;
+            mounted
+                .get(&canonical)
+                .expect("mounted worktree")
+                .text_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        };
+        if text.is_none_or(|text| !text.text_projection_needs_work()) {
+            wait_for_quiescent_owner_pass(registry, path).await;
+            return;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "the clone backfill for {} never finished",
+            path.display()
+        );
+        // Complete-generation demand is an ordinary wake; the pass it starts
+        // drives the pending successor on the retained path.
+        registry.request_complete_generation(path).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 /// Hold the background worker out of a new pass, then wait for the in-flight
 /// pass to finish, and keep the admission permit.
 ///
