@@ -813,6 +813,12 @@ struct CodeReusedPartitionDigestInput<'a> {
     chunks: &'a [(CodeSearchChunkId, ContentDigest)],
 }
 
+#[derive(Serialize)]
+struct CodeReusedPartitionDigestInputRefs<'a> {
+    domain: &'static str,
+    chunks: &'a [(&'a CodeSearchChunkId, &'a ContentDigest)],
+}
+
 /// Digest an ordered reused partition without retaining the rows.
 pub fn code_reused_partition_digest(
     chunks: &[(CodeSearchChunkId, ContentDigest)],
@@ -827,6 +833,35 @@ pub fn code_reused_partition_digest(
         });
     }
     canonical_sha256(&CodeReusedPartitionDigestInput {
+        domain: CODE_REUSED_PARTITION_DIGEST_DOMAIN,
+        chunks,
+    })
+}
+
+/// Digest an ordered reused partition from borrowed ids/digests.
+///
+/// Serialization matches [`code_reused_partition_digest`] so Arc-shared
+/// publish paths can seal without cloning the complement.
+pub fn code_reused_partition_digest_refs(
+    chunks: &[(&CodeSearchChunkId, &ContentDigest)],
+) -> Result<ManifestDigest, DomainError> {
+    for (chunk, digest) in chunks {
+        chunk.validate()?;
+        digest.validate()?;
+    }
+    code_reused_partition_digest_refs_trusted(chunks)
+}
+
+/// Digest borrowed reused rows without re-validating each identity.
+pub fn code_reused_partition_digest_refs_trusted(
+    chunks: &[(&CodeSearchChunkId, &ContentDigest)],
+) -> Result<ManifestDigest, DomainError> {
+    if chunks.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+        return Err(DomainError::NonCanonical {
+            field: "reused partition chunk order",
+        });
+    }
+    canonical_sha256(&CodeReusedPartitionDigestInputRefs {
         domain: CODE_REUSED_PARTITION_DIGEST_DOMAIN,
         chunks,
     })
@@ -966,6 +1001,24 @@ impl ChangedCodeChunkSetV1 {
         reused: &[(CodeSearchChunkId, ContentDigest)],
     ) -> Result<(u64, ManifestDigest), DomainError> {
         let reused_digest = code_reused_partition_digest(reused)?;
+        Ok((reused.len() as u64, reused_digest))
+    }
+
+    /// Seal the reused complement from borrowed `(chunk_id, content_digest)`
+    /// pairs without cloning the rows.
+    pub fn seal_reused_partition_refs(
+        reused: &[(&CodeSearchChunkId, &ContentDigest)],
+    ) -> Result<(u64, ManifestDigest), DomainError> {
+        let reused_digest = code_reused_partition_digest_refs(reused)?;
+        Ok((reused.len() as u64, reused_digest))
+    }
+
+    /// Like [`Self::seal_reused_partition_refs`], but skips per-row identity
+    /// validation. Callers must pass already-validated manifest rows.
+    pub fn seal_reused_partition_refs_trusted(
+        reused: &[(&CodeSearchChunkId, &ContentDigest)],
+    ) -> Result<(u64, ManifestDigest), DomainError> {
+        let reused_digest = code_reused_partition_digest_refs_trusted(reused)?;
         Ok((reused.len() as u64, reused_digest))
     }
 
@@ -1414,6 +1467,18 @@ mod tests {
             prior_digest: prior.map(|byte| id(&digest(byte))),
             current_digest: current.map(|byte| id(&digest(byte))),
         }
+    }
+
+    #[test]
+    fn reused_partition_digest_refs_match_owned_pairs() {
+        let owned = [(
+            id::<CodeSearchChunkId>("chunk.reused"),
+            id::<ContentDigest>(&digest('c')),
+        )];
+        let refs: Vec<_> = owned.iter().map(|(id, digest)| (id, digest)).collect();
+        let owned_digest = code_reused_partition_digest(&owned).expect("owned");
+        let refs_digest = code_reused_partition_digest_refs(&refs).expect("refs");
+        assert_eq!(owned_digest, refs_digest);
     }
 
     fn changed_set() -> ChangedCodeChunkSetV1 {

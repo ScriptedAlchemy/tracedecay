@@ -17,7 +17,7 @@
 //! mismatch inside a qualified-structure group abstains with
 //! [`ABSTAIN_CANDIDATE_COUNT_MISMATCH`] rather than guessing one.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -254,6 +254,34 @@ impl GenerationSymbolIndexV1 {
             symbols,
         })
     }
+
+    /// Wrap an already-sorted, duplicate-free Arc symbol list under a serving
+    /// generation id.
+    pub(crate) fn from_sorted_arcs(
+        generation_id: CodeGenerationId,
+        symbols: Vec<Arc<LineageSymbolRecordV1>>,
+    ) -> Result<Self, LineageResolutionErrorV1> {
+        generation_id
+            .validate()
+            .map_err(|error| LineageResolutionErrorV1::Contract(error.to_string()))?;
+        if symbols
+            .windows(2)
+            .any(|pair| pair[0].occurrence >= pair[1].occurrence)
+        {
+            return Err(LineageResolutionErrorV1::DuplicateOccurrence);
+        }
+        let mut identities = std::collections::BTreeSet::new();
+        if symbols
+            .iter()
+            .any(|symbol| !identities.insert(symbol.identity.clone()))
+        {
+            return Err(LineageResolutionErrorV1::DuplicateIdentity);
+        }
+        Ok(Self {
+            generation_id,
+            symbols,
+        })
+    }
 }
 
 /// Lineage-resolution failures.
@@ -309,6 +337,145 @@ impl SymbolLineageResolver {
         let mut consumed = vec![false; prior.symbols.len()];
         let mut candidates = Vec::new();
         for symbol in &current.symbols {
+            let resolution = self.resolve_one(
+                prior,
+                current,
+                symbol,
+                &by_identity,
+                &by_content,
+                &by_group,
+                &current_group_sizes,
+                &mut consumed,
+            )?;
+            if let Some(candidate) = resolution {
+                candidates.push(candidate);
+            }
+        }
+        Ok(candidates)
+    }
+
+    /// Resolve lineage only for fresh (non-Arc-shared) current symbols.
+    ///
+    /// Shared page symbols keep extraction provenance and need no Unchanged
+    /// candidate rows; continuity is the Arc identity itself.
+    pub fn resolve_fresh_symbol_ptrs(
+        &self,
+        prior: &GenerationSymbolIndexV1,
+        current: &GenerationSymbolIndexV1,
+        fresh_symbol_ptrs: &HashSet<*const LineageSymbolRecordV1>,
+    ) -> Result<Vec<SymbolLineageCandidateV1>, LineageResolutionErrorV1> {
+        if prior.generation_id == current.generation_id {
+            return Err(LineageResolutionErrorV1::SameGeneration);
+        }
+        if fresh_symbol_ptrs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // ponytail: tiny fresh sets — prefer identity scan. Large fresh sets
+        // fall through to the indexed resolver (scan is O(fresh × prior)).
+        let fresh_symbols = current
+            .symbols
+            .iter()
+            .filter(|symbol| fresh_symbol_ptrs.contains(&Arc::as_ptr(symbol)))
+            .cloned()
+            .collect::<Vec<_>>();
+        let scan_cost = fresh_symbols
+            .len()
+            .saturating_mul(prior.symbols.len());
+        if scan_cost > 1_000_000 {
+            let fresh_ptrs = fresh_symbol_ptrs;
+            let mut by_identity: BTreeMap<&str, usize> = BTreeMap::new();
+            let mut by_content: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+            let mut by_group: BTreeMap<(&str, &str, &str), Vec<usize>> = BTreeMap::new();
+            for (index, symbol) in prior.symbols.iter().enumerate() {
+                by_identity.insert(symbol.identity.as_str(), index);
+                by_content
+                    .entry(symbol.content_digest.as_str())
+                    .or_default()
+                    .push(index);
+                by_group.entry(symbol.group_key()).or_default().push(index);
+            }
+            let mut current_group_sizes: BTreeMap<(&str, &str, &str), usize> = BTreeMap::new();
+            for symbol in &fresh_symbols {
+                *current_group_sizes.entry(symbol.group_key()).or_insert(0) += 1;
+            }
+            let mut consumed = vec![false; prior.symbols.len()];
+            let mut candidates = Vec::with_capacity(fresh_symbols.len());
+            for symbol in &fresh_symbols {
+                let resolution = self.resolve_one(
+                    prior,
+                    current,
+                    symbol,
+                    &by_identity,
+                    &by_content,
+                    &by_group,
+                    &current_group_sizes,
+                    &mut consumed,
+                )?;
+                if let Some(candidate) = resolution {
+                    candidates.push(candidate);
+                }
+            }
+            let _ = fresh_ptrs;
+            return Ok(candidates);
+        }
+        let mut consumed = vec![false; prior.symbols.len()];
+        let mut candidates = Vec::with_capacity(fresh_symbols.len());
+        let mut unresolved = Vec::new();
+        for symbol in &fresh_symbols {
+            let mut matched = None;
+            for (index, ancestor) in prior.symbols.iter().enumerate() {
+                if consumed[index] || ancestor.identity != symbol.identity {
+                    continue;
+                }
+                consumed[index] = true;
+                matched = Some(ancestor);
+                break;
+            }
+            match matched {
+                Some(ancestor) => {
+                    let kind = if ancestor.content_digest == symbol.content_digest {
+                        LineageKindV1::Unchanged
+                    } else {
+                        LineageKindV1::StructuralContinuity
+                    };
+                    if let Some(candidate) = self.candidate(
+                        prior,
+                        current,
+                        symbol,
+                        ancestor,
+                        kind,
+                        LineageMethodV1::ExactIdentityTuple,
+                        LineageConfidenceKindV1::Exact,
+                        vec![],
+                        None,
+                    )? {
+                        candidates.push(candidate);
+                    }
+                }
+                None => unresolved.push(Arc::clone(symbol)),
+            }
+        }
+        if unresolved.is_empty() {
+            return Ok(candidates);
+        }
+
+        let mut by_identity: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut by_content: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+        let mut by_group: BTreeMap<(&str, &str, &str), Vec<usize>> = BTreeMap::new();
+        for (index, symbol) in prior.symbols.iter().enumerate() {
+            by_identity.insert(symbol.identity.as_str(), index);
+            by_content
+                .entry(symbol.content_digest.as_str())
+                .or_default()
+                .push(index);
+            by_group.entry(symbol.group_key()).or_default().push(index);
+        }
+        let mut current_group_sizes: BTreeMap<(&str, &str, &str), usize> = BTreeMap::new();
+        for symbol in &unresolved {
+            *current_group_sizes.entry(symbol.group_key()).or_insert(0) += 1;
+        }
+        for symbol in &unresolved {
             let resolution = self.resolve_one(
                 prior,
                 current,
