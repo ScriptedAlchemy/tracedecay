@@ -40,6 +40,8 @@ pub enum ChunkIncrementErrorV1 {
     DuplicateReextractedSymbol(SymbolOccurrenceId),
     #[error("a chunk manifest is not canonical: {0}")]
     NonCanonical(crate::noncanonical::NonCanonicalCauseV1),
+    #[error("code-index parallel worker runtime failed: {0}")]
+    Parallelism(#[from] crate::parallelism::CodeIndexParallelismErrorV1),
     #[error("the increment plan does not match the supplied prior generation")]
     PriorGenerationMismatch,
     #[error("the increment plan references missing prior file occurrence {0}")]
@@ -110,13 +112,7 @@ impl GenerationChunkManifestV1 {
             }
             chunks.extend(file.chunks);
         }
-        crate::parallelism::install(|| chunks.par_sort_by(|left, right| left.id.cmp(&right.id)))
-            .map_err(|error| {
-                ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_detail(
-                    crate::noncanonical::NonCanonicalReasonCodeV1::IdentityValidation,
-                    error,
-                ))
-            })?;
+        crate::parallelism::install(|| chunks.par_sort_by(|left, right| left.id.cmp(&right.id)))?;
         if let Some(duplicate) = chunks
             .windows(2)
             .find(|pair| pair[0].id == pair[1].id)
@@ -182,12 +178,6 @@ impl GenerationChunkManifestV1 {
                     })
                 })
                 .collect::<Vec<_>>()
-        })
-        .map_err(|error| {
-            ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_detail(
-                crate::noncanonical::NonCanonicalReasonCodeV1::IdentityValidation,
-                error,
-            ))
         })?;
         validated.into_iter().collect::<Result<(), _>>()?;
 
