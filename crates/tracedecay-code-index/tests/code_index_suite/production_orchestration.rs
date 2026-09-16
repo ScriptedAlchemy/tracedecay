@@ -4058,7 +4058,14 @@ fn partitioned_descriptor_readers_share_validation_without_sharing_authenticatio
     let mut unauthenticated = original;
     unauthenticated["state_digest"] = serde_json::json!(format!("sha256:{}", "0".repeat(64)));
     let bytes = serde_json::to_vec(&unauthenticated).expect("unauthenticated envelope");
-    assert!(CodeIndexPublishedGenerationV1::partitioned_segment_identities(&bytes).is_err());
+    assert!(
+        matches!(
+            CodeIndexPublishedGenerationV1::partitioned_segment_identities(&bytes),
+            Err(CodeIndexProductionErrorV1::Contract(message))
+                if message == "sealed generation manifest state digest does not match its payload"
+        ),
+        "an unauthenticated envelope must be refused as a digest mismatch"
+    );
     assert_eq!(
         CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
             bytes.as_slice()
