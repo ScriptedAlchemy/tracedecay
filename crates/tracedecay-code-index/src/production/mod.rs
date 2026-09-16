@@ -1371,14 +1371,20 @@ impl CodeIndexPublishedGenerationV1 {
                     .collect::<HashSet<_>>()
             })
             .unwrap_or_default();
-        if let Some(parent) = parent {
+        if let Some(parent) = parent.filter(|_| !shared_occurrences.is_empty()) {
             validate_arc_shared_reused_complement(
                 &self.projection.request().changes,
                 parent.chunks.chunks(),
                 self.chunks.chunks(),
                 &shared_occurrences,
             )?;
-        } else {
+        } else if let Some(parent) = parent {
+            let prior_source = parent
+                .chunks
+                .chunks()
+                .iter()
+                .map(|chunk| (chunk.id.clone(), chunk.content_digest.clone()))
+                .collect::<Vec<_>>();
             let full_source = self
                 .chunks
                 .chunks()
@@ -1388,7 +1394,25 @@ impl CodeIndexPublishedGenerationV1 {
             self.projection
                 .request()
                 .changes
-                .validate_reused_complement(None, &full_source)
+                .validate_reused_complement(Some(&prior_source), &full_source)
+                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        } else {
+            let full_source = self
+                .chunks
+                .chunks()
+                .iter()
+                .map(|chunk| (chunk.id.clone(), chunk.content_digest.clone()))
+                .collect::<Vec<_>>();
+            // Parentless restore cannot hold live parent pages. Arc-share seals
+            // authenticate against persisted parent_full_replay; pair-list seals
+            // still rehash the ordered complement.
+            self.projection
+                .request()
+                .changes
+                .validate_reused_complement_for_restore(
+                    commitments.parent_full_replay_digest.as_ref(),
+                    &full_source,
+                )
                 .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
         }
         commitments
@@ -2036,7 +2060,7 @@ where
                 active.as_ref(),
                 staged.parent_shared_occurrences.as_ref(),
             ) {
-                (Some(active), Some(shared)) => {
+                (Some(active), Some(shared)) if !shared.is_empty() => {
                     let parent_full_replay = active
                         .manifest
                         .source_commitments

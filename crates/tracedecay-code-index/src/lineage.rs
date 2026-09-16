@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     CodeGenerationId, ComplexityAnalysisV1, ContentDigest, FileIdentityDigest, ManifestDigest,
-    ManifestDigestHasher, SymbolIdentityDigest, SymbolOccurrenceId, canonical_sha256,
+    SymbolIdentityDigest, SymbolOccurrenceId, canonical_sha256,
 };
 
 /// One lineage candidate for a symbol across generations. Record rename,
@@ -98,14 +98,6 @@ pub struct LineageAbstentionV1 {
 
 /// Domain separator for canonical lineage evidence digests.
 pub const LINEAGE_EVIDENCE_SEPARATOR: &str = "tracedecay.code-lineage-evidence.v1";
-
-/// Domain separator for one sealed Arc-shared Unchanged set attestation.
-///
-/// Commits `(prior_gen, current_gen, shared_count)` only. The sealed symbol
-/// index binds which occurrences are carried; per-symbol Unchanged rows are
-/// O(generation) to allocate and seal.
-pub const SHARED_UNCHANGED_SET_SEPARATOR: &str =
-    "tracedecay.code-lineage-shared-unchanged-set.v1";
 
 /// Abstention reason: several prior symbols share the current symbol's
 /// content digest and no unique qualified-name match disambiguates them.
@@ -364,12 +356,11 @@ impl SymbolLineageResolver {
 
     /// Resolve lineage for an Arc-shared increment.
     ///
-    /// Shared continuity is one O(1) [`SHARED_UNCHANGED_SET_SEPARATOR`]
-    /// attestation `(prior_gen, current_gen, shared_count)`. The sealed symbol
-    /// index binds which occurrences are carried. Shared ancestors are
-    /// reserved via a pointer set consulted only while resolving fresh
-    /// symbols (no per-symbol Unchanged vector, no full prior HashMap).
-    /// Fresh resolution keeps the pre-P1 fresh-only scan/indexed hot path.
+    /// Every Arc-shared symbol emits its own [`LineageKindV1::Unchanged`]
+    /// candidate (current occurrence order among shared rows, then fresh).
+    /// Fresh ancestors exclude only symbols whose prior file is still
+    /// Arc-shared; deleted or renamed prior files stay eligible so moves
+    /// across file identity can resolve.
     pub fn resolve_fresh_symbol_ptrs(
         &self,
         prior: &GenerationSymbolIndexV1,
@@ -386,72 +377,44 @@ impl SymbolLineageResolver {
             .filter(|symbol| fresh_symbol_ptrs.contains(&Arc::as_ptr(symbol)))
             .cloned()
             .collect::<Vec<_>>();
-        let shared_count = u64::try_from(
-            current
-                .symbols
-                .len()
-                .saturating_sub(fresh_symbols.len()),
-        )
-        .map_err(|_| {
-            LineageResolutionErrorV1::Contract(
-                "shared unchanged symbol count exceeds u64".to_owned(),
-            )
-        })?;
-
-        let mut candidates = Vec::with_capacity(fresh_symbols.len().saturating_add(1));
-        if shared_count > 0 {
-            let Some(anchor) = current
-                .symbols
-                .iter()
-                .find(|symbol| !fresh_symbol_ptrs.contains(&Arc::as_ptr(symbol)))
-            else {
-                return Err(LineageResolutionErrorV1::Contract(
-                    "shared unchanged count is non-zero but no shared symbol was found"
-                        .to_owned(),
-                ));
-            };
-            let mut hasher = ManifestDigestHasher::new();
-            hasher.update(SHARED_UNCHANGED_SET_SEPARATOR.as_bytes());
-            hasher.update(prior.generation_id.as_str().as_bytes());
-            hasher.update([0xff]);
-            hasher.update(current.generation_id.as_str().as_bytes());
-            hasher.update([0xff]);
-            hasher.update(shared_count.to_le_bytes());
-            let evidence_digest = hasher
-                .finalize()
-                .map_err(|error| LineageResolutionErrorV1::Contract(error.to_string()))?;
-            candidates.push(SymbolLineageCandidateV1 {
-                prior_occurrence: anchor.occurrence.clone(),
-                current_occurrence: anchor.occurrence.clone(),
-                kind: LineageKindV1::Unchanged,
-                method: LineageMethodV1::ExactIdentityTuple,
-                evidence: LineageEvidenceV1 {
-                    prior_generation: prior.generation_id.clone(),
-                    current_generation: current.generation_id.clone(),
-                    prior_digest: Some(anchor.content_digest.clone()),
-                    current_digest: Some(anchor.content_digest.clone()),
-                    evidence_digest,
-                },
-                confidence: LineageConfidenceKindV1::Exact,
-                alternatives: Vec::new(),
-                abstention: None,
-            });
+        let shared_count = current.symbols.len().saturating_sub(fresh_symbols.len());
+        let mut candidates = Vec::with_capacity(current.symbols.len());
+        for symbol in &current.symbols {
+            if fresh_symbol_ptrs.contains(&Arc::as_ptr(symbol)) {
+                continue;
+            }
+            // Arc-shared page: same record is prior and current.
+            if let Some(candidate) = self.candidate(
+                prior,
+                current,
+                symbol,
+                symbol,
+                LineageKindV1::Unchanged,
+                LineageMethodV1::ExactIdentityTuple,
+                LineageConfidenceKindV1::Exact,
+                vec![],
+                None,
+            )? {
+                candidates.push(candidate);
+            }
         }
 
         if fresh_symbols.is_empty() {
+            debug_assert_eq!(candidates.len(), shared_count);
             return Ok(candidates);
         }
 
-        // Fresh pages are whole-file. Only prior symbols from those files are
-        // eligible ancestors; every other prior symbol stays Arc-shared and is
-        // reserved by omission from the lookup indexes (P1b).
-        let fresh_files = fresh_symbols
+        // Exclude only ancestors whose file is still Arc-shared. Renamed or
+        // deleted prior files remain eligible for Moved / content matches.
+        let shared_files = current
+            .symbols
             .iter()
+            .filter(|symbol| !fresh_symbol_ptrs.contains(&Arc::as_ptr(symbol)))
             .map(|symbol| symbol.file_identity.as_str())
             .collect::<HashSet<_>>();
         let mut available_prior = Vec::new();
         for (index, symbol) in prior.symbols.iter().enumerate() {
-            if fresh_files.contains(symbol.file_identity.as_str()) {
+            if !shared_files.contains(symbol.file_identity.as_str()) {
                 available_prior.push(index);
             }
         }
@@ -1486,17 +1449,45 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].kind, LineageKindV1::Unchanged);
         assert_eq!(candidates[0].prior_occurrence.as_str(), "sym.s1");
-        let mut hasher = ManifestDigestHasher::new();
-        hasher.update(SHARED_UNCHANGED_SET_SEPARATOR.as_bytes());
-        hasher.update(prior.generation_id.as_str().as_bytes());
-        hasher.update([0xff]);
-        hasher.update(current.generation_id.as_str().as_bytes());
-        hasher.update([0xff]);
-        hasher.update(1u64.to_le_bytes());
         assert_eq!(
             candidates[0].evidence.evidence_digest,
-            hasher.finalize().expect("digest")
+            evidence(
+                &prior.generation_id,
+                &current.generation_id,
+                &shared,
+                Some(&shared),
+                LineageKindV1::Unchanged,
+                LineageMethodV1::ExactIdentityTuple,
+            )
+            .expect("evidence")
+            .evidence_digest
         );
+    }
+
+    #[test]
+    fn arc_share_persists_unchanged_for_every_shared_symbol() {
+        let shared_a = Arc::new(record("sym.a", 'a', "crate::alpha", "function", 'f', '0'));
+        let shared_b = Arc::new(record("sym.b", 'b', "crate::beta", "function", 'f', '1'));
+        let prior = GenerationSymbolIndexV1::from_sorted_arcs(
+            generation(1),
+            vec![Arc::clone(&shared_a), Arc::clone(&shared_b)],
+        )
+        .expect("prior");
+        let current = GenerationSymbolIndexV1::from_sorted_arcs(
+            generation(2),
+            vec![Arc::clone(&shared_a), Arc::clone(&shared_b)],
+        )
+        .expect("current");
+        let candidates = resolver()
+            .resolve_fresh_symbol_ptrs(&prior, &current, &HashSet::new())
+            .expect("per-symbol continuity");
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().all(|c| c.kind == LineageKindV1::Unchanged));
+        let order: Vec<_> = candidates
+            .iter()
+            .map(|c| c.current_occurrence.as_str())
+            .collect();
+        assert_eq!(order, vec!["sym.a", "sym.b"]);
     }
 
     #[test]
@@ -1517,7 +1508,7 @@ mod tests {
         let candidates = resolver()
             .resolve_fresh_symbol_ptrs(&prior, &current, &fresh_ptrs)
             .expect("reserved resolve");
-        // Set attestation + no fresh claim (shared reserved).
+        // Shared Unchanged + no fresh claim (shared file reserved from lookup).
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].kind, LineageKindV1::Unchanged);
         assert_eq!(candidates[0].prior_occurrence.as_str(), "sym.s1");
@@ -1527,6 +1518,33 @@ mod tests {
                 .all(|candidate| candidate.current_occurrence.as_str() != "sym.t1"),
             "fresh must not consume the Arc-shared ancestor"
         );
+    }
+
+    #[test]
+    fn arc_share_rename_emits_moved_from_deleted_prior_file() {
+        let prior_in_a =
+            Arc::new(record("sym.old", 'a', "crate::alpha", "function", 'e', 'c'));
+        let prior = GenerationSymbolIndexV1::from_sorted_arcs(
+            generation(1),
+            vec![Arc::clone(&prior_in_a)],
+        )
+        .expect("prior");
+        // New file identity, same content + qualified name → Moved.
+        let fresh_in_b =
+            Arc::new(record("sym.new", 'b', "crate::alpha", "function", 'f', 'c'));
+        let current = GenerationSymbolIndexV1::from_sorted_arcs(
+            generation(2),
+            vec![Arc::clone(&fresh_in_b)],
+        )
+        .expect("current");
+        let fresh_ptrs = HashSet::from([Arc::as_ptr(&fresh_in_b)]);
+        let candidates = resolver()
+            .resolve_fresh_symbol_ptrs(&prior, &current, &fresh_ptrs)
+            .expect("rename resolve");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].kind, LineageKindV1::Moved);
+        assert_eq!(candidates[0].prior_occurrence.as_str(), "sym.old");
+        assert_eq!(candidates[0].current_occurrence.as_str(), "sym.new");
     }
 
     #[test]
@@ -1558,22 +1576,14 @@ mod tests {
         let candidates = resolver()
             .resolve_fresh_symbol_ptrs(&prior, &current, &fresh_ptrs)
             .expect("ordered resolve");
-        // Attestation first (anchor = first shared in current order), then fresh.
+        // Shared Unchanged rows first (current shared order), then fresh.
         let order: Vec<_> = candidates
             .iter()
             .map(|candidate| candidate.current_occurrence.as_str())
             .collect();
-        assert_eq!(order, vec!["sym.a", "sym.af"]);
-        let mut hasher = ManifestDigestHasher::new();
-        hasher.update(SHARED_UNCHANGED_SET_SEPARATOR.as_bytes());
-        hasher.update(prior.generation_id.as_str().as_bytes());
-        hasher.update([0xff]);
-        hasher.update(current.generation_id.as_str().as_bytes());
-        hasher.update([0xff]);
-        hasher.update(2u64.to_le_bytes());
-        assert_eq!(
-            candidates[0].evidence.evidence_digest,
-            hasher.finalize().expect("digest")
-        );
+        assert_eq!(order, vec!["sym.a", "sym.b", "sym.af"]);
+        assert_eq!(candidates[0].kind, LineageKindV1::Unchanged);
+        assert_eq!(candidates[1].kind, LineageKindV1::Unchanged);
+        assert_eq!(candidates[2].kind, LineageKindV1::StructuralContinuity);
     }
 }
