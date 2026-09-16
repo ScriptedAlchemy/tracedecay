@@ -9,6 +9,7 @@
 //! crate reuses this policy instead of restating it.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ignore::overrides::{Override, OverrideBuilder};
 use ignore::{Walk, WalkBuilder};
@@ -122,6 +123,17 @@ pub fn source_walk(project_root: &Path, path_glob: Option<&str>) -> Result<Walk,
         builder.overrides(overrides);
     }
     Ok(builder.build())
+}
+
+/// Project-relative path rendered with forward slashes.
+///
+/// Grep and ast-grep share this so each walk entry normalizes once into an
+/// [`Arc<str>`] that hits can clone cheaply instead of re-allocating the path
+/// string per match (including on zero-hit files when callers skip this until
+/// the first hit).
+#[must_use]
+pub fn forward_slash_relative(relative: &Path) -> Arc<str> {
+    relative.to_string_lossy().replace('\\', "/").into()
 }
 
 fn build_overrides(
