@@ -151,6 +151,15 @@ revision-14 control). Hotpath put the wait in `query.artifact.batch.sqlite`:
 hash-keyed tree, so every batch commit rewrote and journaled leaves across the
 whole tree (27× write amplification on the fingerprint table alone).
 
+A tip qualifies only when `harness_commit` equals the measured HEAD and the
+receipt's `target_results` pass. Older commits in that field do not qualify the
+current tip. Re-check with:
+
+```text
+python3 scripts/check-clone-envelope-receipt.py \
+  --receipt benchmark_data/index-bench/clone-envelope-20260915.json
+```
+
 `clone-envelope-20260915-fingerprint-staging.json` re-measures the same corpus
 after revision 16 started staging fingerprint postings in arrival order and
 sorting them into the keyed tree once at finalization. It names its own host

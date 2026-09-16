@@ -1031,9 +1031,10 @@ pub struct CodeChunkProjectionReceiptV1 {
     pub output_digest: Option<ContentDigest>,
 }
 
-/// The complete receipt for one projection batch. Failed or
-/// partial receipt sets remain inspectable but cannot activate a projection
-/// generation.
+/// The complete receipt for one projection batch. Affected chunks carry
+/// explicit rows; unchanged chunks are authenticated by the request digest
+/// and summarized by `reused_count`. Failed or partial affected rows remain
+/// inspectable but cannot activate a projection generation.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectionBatchReceiptV1 {
@@ -1042,6 +1043,7 @@ pub struct ProjectionBatchReceiptV1 {
     pub source_generation: CodeGenerationId,
     pub source_manifest_digest: ManifestDigest,
     pub receipts: Vec<CodeChunkProjectionReceiptV1>,
+    /// Request-authenticated unchanged chunks that required no projector work.
     pub reused_count: u64,
     pub publication_digest: ManifestDigest,
 }

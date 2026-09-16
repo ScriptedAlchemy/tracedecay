@@ -204,6 +204,17 @@ fn receipt_construction_rejects_tampered_request_digest_and_invalid_reuse_outcom
 }
 
 #[test]
+fn source_edit_receipt_authenticates_reuse_without_per_chunk_rows() {
+    let request = request();
+    let receipt = build_batch_receipt(&request, &decisions()).expect("receipt builds");
+
+    assert_eq!(receipt.reused_count, 1);
+    assert_eq!(receipt.receipts.len(), 1);
+    assert_eq!(receipt.receipts[0].chunk_id, chunk("updated"));
+    verify_batch_receipt(&request, &receipt).expect("compact reuse remains verified");
+}
+
+#[test]
 fn invalid_or_failed_receipts_never_cross_the_publication_handoff() {
     let request = request();
     let valid = build_batch_receipt(&request, &decisions()).expect("receipt builds");
