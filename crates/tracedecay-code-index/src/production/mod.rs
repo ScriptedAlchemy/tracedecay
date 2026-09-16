@@ -1349,32 +1349,42 @@ impl CodeIndexPublishedGenerationV1 {
         }
         let shared_occurrences = parent
             .map(|parent| {
+                // O(files) pointer membership — not nested scans.
+                let current_by_ptr = self
+                    .files
+                    .iter()
+                    .map(|file| (Arc::as_ptr(file), file))
+                    .collect::<HashMap<_, _>>();
                 parent
                     .files
                     .iter()
                     .filter_map(|prior| {
-                        self.files.iter().find_map(|current| {
-                            Arc::ptr_eq(prior, current).then(|| {
-                                current
-                                    .artifacts
-                                    .chunks
-                                    .document
-                                    .file_occurrence_id
-                                    .clone()
-                            })
+                        current_by_ptr.get(&Arc::as_ptr(prior)).map(|current| {
+                            current
+                                .artifacts
+                                .chunks
+                                .document
+                                .file_occurrence_id
+                                .clone()
                         })
                     })
                     .collect::<HashSet<_>>()
             })
             .unwrap_or_default();
-        if let Some(parent) = parent {
+        if let Some(parent) = parent.filter(|_| !shared_occurrences.is_empty()) {
             validate_arc_shared_reused_complement(
                 &self.projection.request().changes,
                 parent.chunks.chunks(),
                 self.chunks.chunks(),
                 &shared_occurrences,
             )?;
-        } else {
+        } else if let Some(parent) = parent {
+            let prior_source = parent
+                .chunks
+                .chunks()
+                .iter()
+                .map(|chunk| (chunk.id.clone(), chunk.content_digest.clone()))
+                .collect::<Vec<_>>();
             let full_source = self
                 .chunks
                 .chunks()
@@ -1384,7 +1394,25 @@ impl CodeIndexPublishedGenerationV1 {
             self.projection
                 .request()
                 .changes
-                .validate_reused_complement(None, &full_source)
+                .validate_reused_complement(Some(&prior_source), &full_source)
+                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        } else {
+            let full_source = self
+                .chunks
+                .chunks()
+                .iter()
+                .map(|chunk| (chunk.id.clone(), chunk.content_digest.clone()))
+                .collect::<Vec<_>>();
+            // Parentless restore cannot hold live parent pages. Arc-share seals
+            // authenticate against persisted parent_full_replay; pair-list seals
+            // still rehash the ordered complement.
+            self.projection
+                .request()
+                .changes
+                .validate_reused_complement_for_restore(
+                    commitments.parent_full_replay_digest.as_ref(),
+                    &full_source,
+                )
                 .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
         }
         commitments
@@ -1600,9 +1628,13 @@ impl CodeIndexPublishedGenerationV1 {
 
 /// Prove reused complement against the current corpus before publication.
 ///
-/// `changes.validate()` only seals the public manifest digest; the reused
-/// partition is not self-authenticating. Rebuild the ordered complement from
-/// corpus digests and require the same count+digest the plan claimed.
+/// `changes.validate()` seals the public manifest digest but not the reused
+/// partition against the corpus. On the Arc-share path the plan sealed
+/// `reused_digest` from Arc-identical file pages; publish authenticates with
+/// O(changed) membership checks plus a non-empty shared-file set when reuse
+/// is claimed. A full O(generation) rehash is reserved for the mixed path
+/// where reuse exists without shared file pages (should not happen on the
+/// Arc-share planner).
 fn validate_arc_shared_reused_complement(
     changes: &tracedecay_domain::ChangedCodeChunkSetV1,
     _prior: &[Arc<tracedecay_domain::CodeSearchChunkV1>],
@@ -1612,59 +1644,53 @@ fn validate_arc_shared_reused_complement(
     changes
         .validate()
         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-    let mut added = BTreeMap::new();
+    let expected_reused = current
+        .len()
+        .saturating_sub(changes.added_or_changed.len()) as u64;
+    if changes.reused_count != expected_reused {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "reused complement count mismatch".to_owned(),
+        ));
+    }
+    if changes.reused_count > 0 && shared_occurrences.is_empty() {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "arc-share reuse claimed without shared file pages".to_owned(),
+        ));
+    }
     for change in &changes.added_or_changed {
         let Some(digest) = change.current_digest.as_ref() else {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "added or changed current digest".to_owned(),
             ));
         };
-        if added.insert(&change.chunk_id, digest).is_some() {
+        let index = current
+            .binary_search_by(|chunk| chunk.id.cmp(&change.chunk_id))
+            .map_err(|_| {
+                CodeIndexProductionErrorV1::Contract(
+                    "added or changed chunk missing from current corpus".to_owned(),
+                )
+            })?;
+        let chunk = &current[index];
+        if &chunk.content_digest != digest {
             return Err(CodeIndexProductionErrorV1::Contract(
-                "duplicate added or changed chunk".to_owned(),
+                "added or changed digest mismatch".to_owned(),
+            ));
+        }
+        if shared_occurrences.contains(&chunk.anchor.file_occurrence_id) {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "shared chunk also listed as added or changed".to_owned(),
             ));
         }
     }
-    let deleted = changes
-        .deleted
-        .iter()
-        .map(|change| &change.chunk_id)
-        .collect::<BTreeSet<_>>();
-    let mut reused_refs = Vec::with_capacity(current.len().saturating_sub(added.len()));
-    for chunk in current {
-        if deleted.contains(&chunk.id) {
+    for change in &changes.deleted {
+        if current
+            .binary_search_by(|chunk| chunk.id.cmp(&change.chunk_id))
+            .is_ok()
+        {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "deleted chunk still present in current corpus".to_owned(),
             ));
         }
-        match added.remove(&chunk.id) {
-            Some(expected) if expected == &chunk.content_digest => {
-                if shared_occurrences.contains(&chunk.anchor.file_occurrence_id) {
-                    return Err(CodeIndexProductionErrorV1::Contract(
-                        "shared chunk also listed as added or changed".to_owned(),
-                    ));
-                }
-            }
-            Some(_) => {
-                return Err(CodeIndexProductionErrorV1::Contract(
-                    "added or changed digest mismatch".to_owned(),
-                ));
-            }
-            None => reused_refs.push((&chunk.id, &chunk.content_digest)),
-        }
-    }
-    if !added.is_empty() {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "added or changed chunk missing from current corpus".to_owned(),
-        ));
-    }
-    let (reused_count, reused_digest) =
-        tracedecay_domain::ChangedCodeChunkSetV1::seal_reused_partition_refs_trusted(&reused_refs)
-            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-    if reused_count != changes.reused_count || reused_digest != changes.reused_digest {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "reused complement seal mismatch".to_owned(),
-        ));
     }
     Ok(())
 }
@@ -2034,12 +2060,26 @@ where
                 active.as_ref(),
                 staged.parent_shared_occurrences.as_ref(),
             ) {
-                (Some(active), Some(shared)) => plan_chunk_increment_arc_shared(
-                    &active.chunks,
-                    &staged.chunks,
-                    shared,
-                )
-                .map_err(CodeIndexProductionErrorV1::Increment)?,
+                (Some(active), Some(shared)) if !shared.is_empty() => {
+                    let parent_full_replay = active
+                        .manifest
+                        .source_commitments
+                        .as_ref()
+                        .ok_or_else(|| {
+                            CodeIndexProductionErrorV1::Contract(
+                                "arc-share increment requires parent source commitments".to_owned(),
+                            )
+                        })?
+                        .full_replay_digest
+                        .clone();
+                    plan_chunk_increment_arc_shared(
+                        &active.chunks,
+                        &staged.chunks,
+                        shared,
+                        &parent_full_replay,
+                    )
+                    .map_err(CodeIndexProductionErrorV1::Increment)?
+                }
                 _ => plan_chunk_increment(
                     active.as_ref().map(|active| &active.chunks),
                     &staged.chunks,

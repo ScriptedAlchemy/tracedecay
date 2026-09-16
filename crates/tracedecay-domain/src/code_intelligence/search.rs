@@ -34,6 +34,8 @@ pub const MAX_EPHEMERAL_QUERY_VIEW_BYTES: usize = 4 * 1024;
 const CHANGED_CODE_CHUNK_SET_DIGEST_DOMAIN: &str = "tracedecay.changed-code-chunks.v2";
 const CODE_SOURCE_PARENT_DELTA_DIGEST_DOMAIN: &str = "tracedecay.code-source-parent-delta.v1";
 const CODE_REUSED_PARTITION_DIGEST_DOMAIN: &str = "tracedecay.code-reused-partition.v1";
+const CODE_REUSED_PARTITION_ARC_SHARE_DIGEST_DOMAIN: &str =
+    "tracedecay.code-reused-partition.arc-share.v1";
 const CODE_INDEX_CAPABILITY_MANIFEST_DIGEST_DOMAIN: &str = "tracedecay.code-index-capability.v1";
 pub const PROJECTION_PUBLICATION_SEPARATOR: &str = "tracedecay.projection-batch-receipt.v1";
 
@@ -867,6 +869,43 @@ pub fn code_reused_partition_digest_refs_trusted(
     })
 }
 
+#[derive(Serialize)]
+struct CodeReusedPartitionArcShareDigestInput<'a> {
+    domain: &'static str,
+    parent_full_replay_digest: &'a ManifestDigest,
+    prior_generation: &'a CodeGenerationId,
+    current_generation: &'a CodeGenerationId,
+    reused_count: u64,
+}
+
+/// Seal Arc-shared reuse without enumerating the complement.
+///
+/// Parent `full_replay_digest` already authenticated the corpus at parent
+/// publish. Shared file pages stay byte-identical by Arc pointer identity, so
+/// child publish binds that parent seal plus reused cardinality instead of
+/// re-hashing every unchanged `(chunk_id, content_digest)` pair.
+///
+/// `shared_file_count` is a publish-time gate only (must be non-zero when
+/// reuse is claimed). It is not hashed so parentless restore can recompute
+/// this seal from persisted source commitments without live parent pages.
+pub fn code_reused_partition_arc_share_digest(
+    parent_full_replay_digest: &ManifestDigest,
+    prior_generation: &CodeGenerationId,
+    current_generation: &CodeGenerationId,
+    reused_count: u64,
+) -> Result<ManifestDigest, DomainError> {
+    parent_full_replay_digest.validate()?;
+    prior_generation.validate()?;
+    current_generation.validate()?;
+    canonical_sha256(&CodeReusedPartitionArcShareDigestInput {
+        domain: CODE_REUSED_PARTITION_ARC_SHARE_DIGEST_DOMAIN,
+        parent_full_replay_digest,
+        prior_generation,
+        current_generation,
+        reused_count,
+    })
+}
+
 /// The two source identities sealed by one code generation.
 ///
 /// The incremental digest authenticates the physical generation transition
@@ -1022,6 +1061,33 @@ impl ChangedCodeChunkSetV1 {
         Ok((reused.len() as u64, reused_digest))
     }
 
+    /// Seal Arc-shared reuse from the parent full-replay commitment.
+    ///
+    /// Use at Arc-share publish only. Pair-list sealing stays on the mixed /
+    /// non-shared path. See [`code_reused_partition_arc_share_digest`].
+    /// `shared_file_count` must be non-zero when `reused_count > 0`; it gates
+    /// publish authenticity and is not part of the digest.
+    pub fn seal_arc_shared_reused_partition(
+        parent_full_replay_digest: &ManifestDigest,
+        prior_generation: &CodeGenerationId,
+        current_generation: &CodeGenerationId,
+        reused_count: u64,
+        shared_file_count: u64,
+    ) -> Result<(u64, ManifestDigest), DomainError> {
+        if shared_file_count == 0 && reused_count > 0 {
+            return Err(DomainError::NonCanonical {
+                field: "arc-share reused partition without shared files",
+            });
+        }
+        let reused_digest = code_reused_partition_arc_share_digest(
+            parent_full_replay_digest,
+            prior_generation,
+            current_generation,
+            reused_count,
+        )?;
+        Ok((reused_count, reused_digest))
+    }
+
     /// Structural request checks only. `reused_count` / `reused_digest` are
     /// sealed into `manifest_digest`, but this does not reconstruct the
     /// complement — call [`Self::validate_reused_complement`] at the
@@ -1155,6 +1221,93 @@ impl ChangedCodeChunkSetV1 {
 
         let (reused_count, reused_digest) = Self::seal_reused_partition(&reused)?;
         if reused_count != self.reused_count || reused_digest != self.reused_digest {
+            return Err(DomainError::DigestMismatch);
+        }
+        Ok(())
+    }
+
+    /// Prove `reused_count` / `reused_digest` on a parentless restore path.
+    ///
+    /// When the persisted seal matches the Arc-share domain under
+    /// `parent_full_replay`, authenticate cardinality and the changed
+    /// partitions against `current` without rehashing a pair-list complement
+    /// (live parent pages are unavailable after restart). Otherwise fall
+    /// through to [`Self::validate_reused_complement`].
+    pub fn validate_reused_complement_for_restore(
+        &self,
+        parent_full_replay: Option<&ManifestDigest>,
+        current: &[(CodeSearchChunkId, ContentDigest)],
+    ) -> Result<(), DomainError> {
+        if let (Some(parent), Some(from_generation)) =
+            (parent_full_replay, self.from_generation.as_ref())
+        {
+            let arc_share = code_reused_partition_arc_share_digest(
+                parent,
+                from_generation,
+                &self.to_generation,
+                self.reused_count,
+            )?;
+            if arc_share == self.reused_digest {
+                return self.validate_arc_shared_reused_corpus(current);
+            }
+        }
+        self.validate_reused_complement(None, current)
+    }
+
+    /// Corpus membership proof for an Arc-share reused seal (no pair-list).
+    fn validate_arc_shared_reused_corpus(
+        &self,
+        current: &[(CodeSearchChunkId, ContentDigest)],
+    ) -> Result<(), DomainError> {
+        self.validate()?;
+        for (chunk_id, digest) in current {
+            chunk_id.validate()?;
+            digest.validate()?;
+        }
+        if current.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+            return Err(DomainError::NonCanonical {
+                field: "reused complement current chunk order",
+            });
+        }
+
+        let mut added = BTreeMap::new();
+        for change in &self.added_or_changed {
+            let Some(current_digest) = change.current_digest.as_ref() else {
+                return Err(DomainError::NonCanonical {
+                    field: "added or changed current digest",
+                });
+            };
+            if added.insert(&change.chunk_id, current_digest).is_some() {
+                return Err(DomainError::DuplicateId {
+                    field: "added or changed chunk partitions",
+                });
+            }
+        }
+        let deleted = self
+            .deleted
+            .iter()
+            .map(|change| &change.chunk_id)
+            .collect::<BTreeSet<_>>();
+
+        let mut reused = 0_u64;
+        for (chunk_id, digest) in current {
+            if deleted.contains(chunk_id) {
+                return Err(DomainError::NonCanonical {
+                    field: "deleted chunk still present in current corpus",
+                });
+            }
+            match added.remove(chunk_id) {
+                Some(expected) if expected == digest => {}
+                Some(_) => return Err(DomainError::DigestMismatch),
+                None => reused = reused.saturating_add(1),
+            }
+        }
+        if !added.is_empty() {
+            return Err(DomainError::NonCanonical {
+                field: "added or changed chunk missing from current corpus",
+            });
+        }
+        if reused != self.reused_count {
             return Err(DomainError::DigestMismatch);
         }
         Ok(())
@@ -1479,6 +1632,80 @@ mod tests {
         let owned_digest = code_reused_partition_digest(&owned).expect("owned");
         let refs_digest = code_reused_partition_digest_refs(&refs).expect("refs");
         assert_eq!(owned_digest, refs_digest);
+    }
+
+    #[test]
+    fn arc_share_reused_digest_binds_parent_seal_not_pair_list() {
+        let parent = id::<ManifestDigest>(&digest('a'));
+        let prior = id::<CodeGenerationId>("generation.1");
+        let current = id::<CodeGenerationId>("generation.2");
+        let (count, sealed) = ChangedCodeChunkSetV1::seal_arc_shared_reused_partition(
+            &parent, &prior, &current, 9, 3,
+        )
+        .expect("arc-share seal");
+        assert_eq!(count, 9);
+        let again = code_reused_partition_arc_share_digest(&parent, &prior, &current, 9)
+            .expect("again");
+        assert_eq!(sealed, again);
+        let pair_list = code_reused_partition_digest(&[(
+            id::<CodeSearchChunkId>("chunk.reused"),
+            id::<ContentDigest>(&digest('c')),
+        )])
+        .expect("pair list");
+        assert_ne!(
+            sealed, pair_list,
+            "arc-share attestation must not collide with pair-list reused seals"
+        );
+        assert!(
+            ChangedCodeChunkSetV1::seal_arc_shared_reused_partition(
+                &parent, &prior, &current, 9, 0,
+            )
+            .is_err(),
+            "reuse without shared files must fail closed"
+        );
+        // Shared-file count is a publish gate only; digest ignores it.
+        let same_digest = code_reused_partition_arc_share_digest(&parent, &prior, &current, 9)
+            .expect("digest without shared count");
+        assert_eq!(sealed, same_digest);
+    }
+
+    #[test]
+    fn arc_share_reused_complement_restores_without_pair_list() {
+        let parent = id::<ManifestDigest>(&digest('a'));
+        let prior = id::<CodeGenerationId>("generation.1");
+        let current_gen = id::<CodeGenerationId>("generation.2");
+        let reused_chunk = id::<CodeSearchChunkId>("chunk.reused");
+        let reused_digest_content = id::<ContentDigest>(&digest('c'));
+        let (reused_count, reused_digest) = ChangedCodeChunkSetV1::seal_arc_shared_reused_partition(
+            &parent, &prior, &current_gen, 1, 1,
+        )
+        .expect("arc-share seal");
+        let mut changes = ChangedCodeChunkSetV1 {
+            from_generation: Some(prior),
+            to_generation: current_gen,
+            manifest_digest: id(&digest('0')),
+            added_or_changed: vec![change("chunk.added", None, Some('a'))],
+            deleted: Vec::new(),
+            reused_count,
+            reused_digest,
+        };
+        changes.manifest_digest = changes.compute_digest().expect("digest");
+        let current = [
+            (
+                id::<CodeSearchChunkId>("chunk.added"),
+                id::<ContentDigest>(&digest('a')),
+            ),
+            (reused_chunk, reused_digest_content),
+        ];
+        changes
+            .validate_reused_complement_for_restore(Some(&parent), &current)
+            .expect("arc-share restore proves corpus without pair-list");
+        assert!(
+            changes
+                .validate_reused_complement(None, &current)
+                .is_err(),
+            "pair-list path must still reject an arc-share seal"
+        );
     }
 
     fn changed_set() -> ChangedCodeChunkSetV1 {
