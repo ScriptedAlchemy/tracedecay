@@ -88,6 +88,7 @@ async fn execute_refresh(
             configuration_digest: connection.configuration_digest().clone(),
             lcm_authority: None,
             session_refresh: refresh,
+            refresh_status: None,
             memory: None,
         },
         connection,

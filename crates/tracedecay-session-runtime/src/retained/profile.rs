@@ -39,6 +39,11 @@ pub struct ProfileRetainedAuthoritiesV1<'a> {
     /// Daemon-wide profile session refresh service; refresh handles it issues
     /// stay valid across every connection that reaches the same profile store.
     pub session_refresh: Option<&'a dyn RetainedSessionRefreshPortV1>,
+    /// Serving-status port of the mounted profile refresh worker. Retrieval
+    /// with `RequireFresh` reads this instead of assuming the worker is
+    /// missing when only the wake was retained.
+    pub refresh_status:
+        Option<Arc<dyn tracedecay_sessions::serving::SessionProjectionServingStatusPort>>,
     pub memory: Option<Arc<dyn RetainedMemoryExecutionPortV1 + 'a>>,
 }
 
@@ -354,12 +359,14 @@ fn profile_retained_surface_ports<'a>(
             session_database.clone(),
             authorities.session_identity.clone(),
             authorities.lcm_authority,
+            authorities.refresh_status.clone(),
         )));
         ports = ports.with_session(Arc::new(DirectRetainedSessionPortV1::profile(
             session_database,
             authorities.session_identity.clone(),
             authorities.configuration_digest.clone(),
             authorities.session_refresh,
+            authorities.refresh_status.clone(),
         )));
     }
     Ok(ports)
@@ -674,6 +681,7 @@ mod tests {
             configuration_digest: connection.configuration_digest().clone(),
             lcm_authority: None,
             session_refresh: None,
+            refresh_status: None,
             memory: Some(Arc::new(
                 tracedecay_store_runtime::retained_memory::DirectRetainedMemoryPortV1::profile(
                     &registry,
@@ -757,6 +765,7 @@ mod tests {
                 configuration_digest: connection.configuration_digest().clone(),
                 lcm_authority: None,
                 session_refresh: None,
+                refresh_status: None,
             },
             &connection,
             "request.profile-retained-scope-denial",
@@ -777,6 +786,7 @@ mod tests {
                 configuration_digest: digest('c'),
                 lcm_authority: None,
                 session_refresh: None,
+                refresh_status: None,
             },
             &connection,
             "request.profile-retained-stale-configuration",
@@ -853,6 +863,7 @@ mod tests {
                 configuration_digest: connection.configuration_digest().clone(),
                 lcm_authority: None,
                 session_refresh: None,
+                refresh_status: None,
                 memory: None,
             },
             &connection,
@@ -921,6 +932,7 @@ mod tests {
                 configuration_digest: connection.configuration_digest().clone(),
                 lcm_authority: None,
                 session_refresh: None,
+                refresh_status: None,
                 memory: None,
             },
             &connection,
@@ -980,6 +992,7 @@ mod tests {
                 configuration_digest: connection.configuration_digest().clone(),
                 lcm_authority: None,
                 session_refresh: None,
+                refresh_status: None,
                 memory: None,
             },
             &connection,

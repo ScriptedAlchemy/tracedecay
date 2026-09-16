@@ -172,6 +172,10 @@ pub(super) async fn dispatch_profile_retained_application_tool(
         authority,
         options.session_authorities.profile_lcm,
         options.session_authorities.profile_session_refresh,
+        options
+            .session_authorities
+            .profile_session_refresh_serving
+            .cloned(),
         options.application_request_id,
         options.application_deadline,
         options.application_cancellation,
@@ -190,6 +194,9 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
     lcm_authority: Option<&dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
     session_refresh: Option<
         &dyn tracedecay_session_runtime::retained::RetainedSessionRefreshPortV1,
+    >,
+    refresh_status: Option<
+        std::sync::Arc<dyn tracedecay_sessions::serving::SessionProjectionServingStatusPort>,
     >,
     protocol_request_id: Option<tracedecay_contracts::RequestId>,
     protocol_deadline: Option<tracedecay_contracts::Deadline>,
@@ -247,6 +254,7 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
                 configuration_digest: authority.configuration_digest().clone(),
                 lcm_authority,
                 session_refresh,
+                refresh_status,
                 memory: Some(Arc::new(
                     tracedecay_store_runtime::retained_memory::DirectRetainedMemoryPortV1::profile(
                         runtime_registry,

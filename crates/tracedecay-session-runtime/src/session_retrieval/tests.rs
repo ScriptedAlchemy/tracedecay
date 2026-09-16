@@ -336,10 +336,9 @@ async fn fifty_real_page_results_use_one_registered_frozen_snapshot() {
     for rank in 0..RESULTS {
         fixtures.push(seed_real_page_fixture(harness.registered.as_ref(), &root, rank).await);
     }
-    let service = DaemonSessionRetrievalService::new(
+    let service = DaemonSessionRetrievalService::new_without_refresh_worker(
         harness.registered.clone(),
         registered_profile_retrieval_root(&harness.registered),
-        None,
     )
     .expect("registered retrieval service");
     let before = harness
@@ -492,10 +491,9 @@ async fn real_page_rejects_mixed_roots_and_honors_cancellation_checkpoints() {
         tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("page-scope").await;
     let root = real_page_root("root.page");
     let fixture = seed_real_page_fixture(harness.registered.as_ref(), &root, 0).await;
-    let service = DaemonSessionRetrievalService::new(
+    let service = DaemonSessionRetrievalService::new_without_refresh_worker(
         harness.registered.clone(),
         registered_profile_retrieval_root(&harness.registered),
-        None,
     )
     .expect("registered retrieval service");
     let hydrated = || {
@@ -685,7 +683,10 @@ async fn service_rejects_foreign_shard_before_read_admission() {
     )
     .expect("foreign profile retrieval root");
 
-    assert!(DaemonSessionRetrievalService::new(harness.registered.clone(), root, None).is_none());
+    assert!(
+        DaemonSessionRetrievalService::new_without_refresh_worker(harness.registered.clone(), root)
+            .is_none()
+    );
     assert_eq!(
         harness
             .registered
@@ -888,10 +889,9 @@ fn cursor_stale_lcm_retrieval_requires_cursorless_restart() {
 async fn cursor_stale_session_retrieval_remains_typed_at_daemon_boundary() {
     let harness =
         tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("cursor-stale").await;
-    let service = DaemonSessionRetrievalService::new(
+    let service = DaemonSessionRetrievalService::new_without_refresh_worker(
         harness.registered.clone(),
         registered_profile_retrieval_root(&harness.registered),
-        None,
     )
     .expect("registered retrieval service");
 
@@ -1038,7 +1038,7 @@ async fn admitted_session_lookup(
         .session_request_scope()
         .expect("profile session scope");
     let service: Arc<dyn SessionApplicationRetrievalPortV1> = Arc::new(
-        DaemonSessionRetrievalService::new(harness.registered.clone(), root, None)
+        DaemonSessionRetrievalService::new_without_refresh_worker(harness.registered.clone(), root)
             .expect("registered retrieval service"),
     );
     let context = admitted_lookup_context(scope);
@@ -1112,6 +1112,145 @@ async fn advertised_minimum_session_lookup_request_passes_budget_admission() {
 /// larger than that window must still answer a small page and its cursor must
 /// advance the storage keyset rather than re-reading the same window: every
 /// page returns a full `LIMIT`, no message is served twice, and the walk keeps
+/// A service mounted without a refresh worker cannot know whether the
+/// projection is current. `RequireFresh` must therefore be refused with the
+/// worker-missing reason, never served as if the projection were fresh.
+#[tokio::test]
+async fn require_fresh_without_a_refresh_worker_is_refused_as_worker_missing() {
+    let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "session-lookup-refresh-worker-missing",
+    )
+    .await;
+    let root = real_page_root("root.page");
+    let session_id = "session.page.worker-missing".to_owned();
+    seed_real_page_fixture_in_session(
+        harness.registered.as_ref(),
+        &root,
+        0,
+        "codex".to_owned(),
+        session_id.clone(),
+        true,
+    )
+    .await;
+    let root = registered_profile_retrieval_root(&harness.registered);
+    let scope = root
+        .identity()
+        .session_request_scope()
+        .expect("profile session scope");
+    let service =
+        DaemonSessionRetrievalService::new_without_refresh_worker(harness.registered.clone(), root)
+            .expect("registered retrieval service");
+    let context = admitted_lookup_context(scope);
+    let query = SessionTemporalQuery::new(
+        SessionId::new(&session_id).expect("session identity"),
+        None,
+        "",
+        None,
+        TemporalModeV1::Current,
+        tracedecay_domain::RetrievalGrainV1::Occurrence,
+        1,
+        DiversityLimits::unbounded(),
+        ContextBudget {
+            max_bytes: APPLICATION_RETRIEVAL_MAX_BYTES,
+            max_tokens: APPLICATION_RETRIEVAL_MAX_BYTES / 4,
+            estimator_version: "words-v1".to_owned(),
+        },
+    )
+    .expect("temporal query")
+    .with_execution_limits(admitted_execution_limits(1))
+    .with_freshness_policy(SessionFreshnessPolicy::RequireFresh);
+
+    let outcome = service.retrieve_admitted(&context, query).await;
+
+    match outcome {
+        SessionRetrievalServiceOutcome::Unavailable(unavailable) => assert_eq!(
+            unavailable.reason,
+            SessionRetrievalUnavailableReason::RefreshWorkerMissing
+        ),
+        other => panic!("RequireFresh without a worker must be refused, got {other:?}"),
+    }
+}
+
+struct CurrentRefreshServing;
+
+impl tracedecay_sessions::serving::SessionProjectionServingStatusPort for CurrentRefreshServing {
+    fn serving_status(&self) -> tracedecay_sessions::serving::SessionProjectionServingStatus {
+        tracedecay_sessions::serving::SessionProjectionServingStatus {
+            state: tracedecay_sessions::serving::SessionProjectionServingState::Current,
+            last_progress_at_unix_micros: None,
+            backlog: 0,
+            blocker: None,
+            retry_class: None,
+        }
+    }
+}
+
+/// Profile catch-up mounts the real refresh worker's serving-status port. When
+/// that port reports current, `RequireFresh` must not be refused as
+/// `RefreshWorkerMissing`.
+#[tokio::test]
+async fn require_fresh_with_a_current_refresh_worker_is_not_refused_as_worker_missing() {
+    let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "session-lookup-refresh-worker-current",
+    )
+    .await;
+    let root = real_page_root("root.page");
+    let session_id = "session.page.worker-current".to_owned();
+    seed_real_page_fixture_in_session(
+        harness.registered.as_ref(),
+        &root,
+        0,
+        "codex".to_owned(),
+        session_id.clone(),
+        true,
+    )
+    .await;
+    let root = registered_profile_retrieval_root(&harness.registered);
+    let scope = root
+        .identity()
+        .session_request_scope()
+        .expect("profile session scope");
+    let service = DaemonSessionRetrievalService::new_admitted_profile(
+        harness.registered.clone(),
+        root.identity().clone(),
+        Some(std::sync::Arc::new(CurrentRefreshServing)),
+    )
+    .expect("registered retrieval service");
+    let context = admitted_lookup_context(scope);
+    let query = SessionTemporalQuery::new(
+        SessionId::new(&session_id).expect("session identity"),
+        None,
+        "",
+        None,
+        TemporalModeV1::Current,
+        tracedecay_domain::RetrievalGrainV1::Occurrence,
+        1,
+        DiversityLimits::unbounded(),
+        ContextBudget {
+            max_bytes: APPLICATION_RETRIEVAL_MAX_BYTES,
+            max_tokens: APPLICATION_RETRIEVAL_MAX_BYTES / 4,
+            estimator_version: "words-v1".to_owned(),
+        },
+    )
+    .expect("temporal query")
+    .with_execution_limits(admitted_execution_limits(1))
+    .with_freshness_policy(SessionFreshnessPolicy::RequireFresh);
+
+    let outcome = service.retrieve_admitted(&context, query).await;
+
+    match outcome {
+        SessionRetrievalServiceOutcome::Unavailable(unavailable) => assert_ne!(
+            unavailable.reason,
+            SessionRetrievalUnavailableReason::RefreshWorkerMissing,
+            "a mounted current worker must not report RefreshWorkerMissing: {unavailable:?}"
+        ),
+        SessionRetrievalServiceOutcome::Complete { .. }
+        | SessionRetrievalServiceOutcome::CompleteZero { .. }
+        | SessionRetrievalServiceOutcome::Partial { .. } => {}
+        other => panic!("unexpected RequireFresh outcome with a current worker: {other:?}"),
+    }
+}
+
 /// yielding a continuation while records remain.
 #[tokio::test]
 async fn small_lookup_reads_a_session_larger_than_the_response_budget() {
@@ -1142,8 +1281,9 @@ async fn small_lookup_reads_a_session_larger_than_the_response_budget() {
         .identity()
         .session_request_scope()
         .expect("profile session scope");
-    let service = DaemonSessionRetrievalService::new(harness.registered.clone(), root, None)
-        .expect("registered retrieval service");
+    let service =
+        DaemonSessionRetrievalService::new_without_refresh_worker(harness.registered.clone(), root)
+            .expect("registered retrieval service");
     let context = admitted_lookup_context(scope);
     let session = SessionId::new(session_id).expect("large session identity");
     let page_query = |limit: usize, cursor: Option<String>| {
@@ -1298,8 +1438,9 @@ async fn session_lookup_cursor_walk_is_exact_at_the_page_boundaries() {
         .identity()
         .session_request_scope()
         .expect("profile session scope");
-    let service = DaemonSessionRetrievalService::new(harness.registered.clone(), root, None)
-        .expect("registered retrieval service");
+    let service =
+        DaemonSessionRetrievalService::new_without_refresh_worker(harness.registered.clone(), root)
+            .expect("registered retrieval service");
     let context = admitted_lookup_context(scope);
     let session = SessionId::new(session_id).expect("walked session identity");
 
@@ -1457,7 +1598,10 @@ async fn project_retrieval_mounts_each_branch_of_a_shared_graph_store() {
             )
             .is_some()
         );
-        assert!(DaemonSessionRetrievalService::new(database.clone(), root, None).is_some());
+        assert!(
+            DaemonSessionRetrievalService::new_without_refresh_worker(database.clone(), root)
+                .is_some()
+        );
     }
     assert_ne!(
         roots[0], roots[1],

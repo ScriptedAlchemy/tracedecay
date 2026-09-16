@@ -101,9 +101,7 @@ async fn registered_project_session_hydrates_provider_qualified_task_evidence() 
         .session_request_scope()
         .expect("resolved Work scope");
     let retrieval =
-        tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalService::new(
-            database, root, None,
-        )
+        tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalService::new_without_refresh_worker(database, root)
         .expect("mounted project retrieval service");
     let privacy_domain = id::<PrivacyDomainId>("privacy.work-task-session");
     let adapter = WorkTaskSessionEvidenceRetrievalV1::new(Arc::new(retrieval))

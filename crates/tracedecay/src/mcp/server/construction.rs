@@ -133,6 +133,7 @@ pub(crate) struct McpServerConstructionContext {
     /// servers, where profile-scoped refresh answers typed unavailable.
     pub(crate) profile_session_refresh: Option<Arc<dyn SessionRefreshServicePort>>,
     pub(crate) project_session_refresh_serving: Option<Arc<dyn SessionProjectionServingStatusPort>>,
+    pub(crate) user_session_refresh_serving: Option<Arc<dyn SessionProjectionServingStatusPort>>,
     /// When true (daemon-owned project servers), spawn a cancellable worker that
     /// continues bounded host-admission replay passes until idle.
     pub(crate) own_project_host_admission_replay: bool,
@@ -270,6 +271,7 @@ impl McpServerConstructionContext {
             user_session_refresh_wake: None,
             profile_session_refresh: None,
             project_session_refresh_serving: None,
+            user_session_refresh_serving: None,
             own_project_host_admission_replay: false,
             startup_catch_up_enabled: true,
             automation_scheduler_reconciler: None,
@@ -360,8 +362,8 @@ impl McpServerConstructionContext {
         let registry = databases.registry;
         let (project_session_refresh_wake, project_session_refresh_serving) =
             wrap_refresh_wake(project_session_refresh_wake);
-        let user_session_refresh_wake: Arc<dyn SessionTemporalRefreshWakePort> =
-            Arc::new(user_session_refresh_wake);
+        let (user_session_refresh_wake, user_session_refresh_serving) =
+            wrap_refresh_wake(user_session_refresh_wake);
         Self {
             cg: cg.into(),
             scope_prefix,
@@ -379,6 +381,7 @@ impl McpServerConstructionContext {
             user_session_refresh_wake: Some(user_session_refresh_wake),
             profile_session_refresh: Some(profile_session_refresh),
             project_session_refresh_serving: Some(project_session_refresh_serving),
+            user_session_refresh_serving: Some(user_session_refresh_serving),
             own_project_host_admission_replay: true,
             startup_catch_up_enabled: true,
             automation_scheduler_reconciler: None,
@@ -448,6 +451,7 @@ impl McpServerConstructionContext {
             user_session_refresh_wake: None,
             profile_session_refresh: None,
             project_session_refresh_serving: None,
+            user_session_refresh_serving: None,
             own_project_host_admission_replay: false,
             startup_catch_up_enabled: false,
             automation_scheduler_reconciler: None,
