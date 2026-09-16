@@ -187,7 +187,7 @@ impl HookSpoolV1 {
         hotpath::measure_block!("hooks.spool.fsync.directory", {
             shared_sync_directory(&root, DIRECTORY_POLICY).map_err(|_| HookSpoolError::Io)
         })?;
-        drop(lease_file);
+        lease_file.unlock().map_err(|_| HookSpoolError::Io)?;
         Ok(())
     }
 

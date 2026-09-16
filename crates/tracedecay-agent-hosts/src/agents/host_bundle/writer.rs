@@ -54,6 +54,14 @@ pub struct HostBundleWriterV1 {
     _writer_lock: fs::File,
 }
 
+impl Drop for HostBundleWriterV1 {
+    fn drop(&mut self) {
+        if let Err(error) = self._writer_lock.unlock() {
+            tracing::warn!(error = %error, "host bundle writer lock could not be released");
+        }
+    }
+}
+
 impl HostBundleWriterV1 {
     pub fn open(root_path: impl Into<PathBuf>) -> Result<Self, HostBundleError> {
         let root_path = root_path.into();
