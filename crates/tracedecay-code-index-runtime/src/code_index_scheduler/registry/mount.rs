@@ -2003,18 +2003,18 @@ impl CodeIndexSchedulerRegistryV1 {
                             );
                             if publication_corruption {
                                 capacity_retry.record_progress();
-                                worker_build_progress
-                                    .write()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .block_current(
-                                        CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt,
-                                    );
                                 park_convergence(
                                     &worker_convergence_park,
                                     error.to_string(),
                                     CONVERGENCE_PARK_PUBLICATION_CORRUPTION_REMEDIATION_V1,
                                     false,
                                 );
+                                worker_build_progress
+                                    .write()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .block_current(
+                                        CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt,
+                                    );
                                 publication_authority_terminal = true;
                             } else if transient_capacity {
                                 // Shared process capacity was held by another
