@@ -348,6 +348,15 @@ impl CodeIndexSchedulerErrorV1 {
         }
     }
 
+    pub fn is_publication_authority_corruption(&self) -> bool {
+        matches!(
+            self,
+            Self::Production(CodeIndexProductionErrorV1::Publication(
+                CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_),
+            ))
+        )
+    }
+
     pub fn is_graph_activation_refusal(&self) -> bool {
         matches!(self, Self::GraphActivationRefused(_))
             || matches!(

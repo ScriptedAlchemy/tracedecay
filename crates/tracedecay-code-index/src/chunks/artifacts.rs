@@ -377,12 +377,20 @@ impl CodeFileIndexArtifactsV1 {
             .iter()
             .map(|symbol| &symbol.occurrence)
             .collect::<std::collections::BTreeSet<_>>();
-        if self.clone_bodies.windows(2).any(|pair| {
+        if let Some(pair) = self.clone_bodies.windows(2).find(|pair| {
             pair[0].occurrence.symbol_occurrence_id >= pair[1].occurrence.symbol_occurrence_id
         }) {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(
-                "clone body evidence is not in strict symbol-occurrence order".to_owned(),
-            ));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(format!(
+                "clone body evidence is not in strict symbol-occurrence order: file={} file_occurrence={} left_payload={} left_symbol={} left_bound={} right_payload={} right_symbol={} right_bound={}",
+                pair[0].occurrence.path,
+                self.chunks.document.file_occurrence_id.as_str(),
+                pair[0].occurrence.payload_digest.as_str(),
+                pair[0].occurrence.symbol_occurrence_id.as_str(),
+                occurrences.contains(&pair[0].occurrence.symbol_occurrence_id),
+                pair[1].occurrence.payload_digest.as_str(),
+                pair[1].occurrence.symbol_occurrence_id.as_str(),
+                occurrences.contains(&pair[1].occurrence.symbol_occurrence_id),
+            )));
         }
         for body in &self.clone_bodies {
             if body.occurrence.path.is_empty() {

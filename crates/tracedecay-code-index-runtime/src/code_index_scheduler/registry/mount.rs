@@ -12,7 +12,7 @@ use std::{
 
 use tracedecay_code_index::production::CodeIndexInterruptionV1;
 use tracedecay_contracts::code_index_freshness::{
-    CodeGraphServingReadinessV1, CodeIndexConvergenceParkedV1,
+    CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexConvergenceParkedV1,
 };
 use tracedecay_domain::ProjectId;
 
@@ -28,10 +28,12 @@ use super::super::{
 };
 use super::{
     ACTIVATION_RETRY_BACKOFF_CEILING, ACTIVATION_RETRY_BACKOFF_FLOOR,
-    CONVERGENCE_PARK_CONTRACT_REMEDIATION_V1, CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1,
-    CodeIndexSchedulerRegistryV1, ColdMountAdmissionV1, GraphActivationGateV1, GraphSeatGateV1,
-    MountedCodeIndexWorktreeV1, PendingWakeV1, PublishedTextProjectionOutcomeV1,
-    ServingSwapOutcomeV1, TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1, clear_convergence_park,
+    CONVERGENCE_PARK_CONTRACT_REMEDIATION_V1,
+    CONVERGENCE_PARK_PUBLICATION_CORRUPTION_REMEDIATION_V1,
+    CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1, CodeIndexSchedulerRegistryV1,
+    ColdMountAdmissionV1, GraphActivationGateV1, GraphSeatGateV1, MountedCodeIndexWorktreeV1,
+    PendingWakeV1, PublishedTextProjectionOutcomeV1, ServingSwapOutcomeV1,
+    TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1, clear_convergence_park,
     convergence_park_retries_on_wake, is_repeated_conflict_verdict, park_convergence,
     retained_noop_requires_follow_up_wake,
 };
@@ -266,6 +268,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let worker_index_observability = Arc::clone(&index_observability);
         let worker_scheduler = Arc::clone(&scheduler);
         let worker_reconcile_in_progress = Arc::clone(&reconcile_in_progress);
+        let worker_build_progress = Arc::clone(&build_progress);
         let worker_serving_generation = Arc::clone(&serving_generation);
         let worker_complete_generation_requested = Arc::clone(&complete_generation_requested);
         let worker_text_generation = Arc::clone(&text_generation);
@@ -382,6 +385,7 @@ impl CodeIndexSchedulerRegistryV1 {
             // artifact build. Releasing that capacity emits no wake, so this
             // worker must schedule its own.
             let mut capacity_retry = ReconcileCapacityRetryV1::new();
+            let mut publication_authority_terminal = false;
             // The last arrival this worker restored for a nothing-seated
             // warming outcome. A quiet remount's seat pass restores its
             // arrival exactly once so the next pass can restore and warm the
@@ -419,6 +423,18 @@ impl CodeIndexSchedulerRegistryV1 {
                     )
                     .await;
                     return;
+                }
+                if publication_authority_terminal {
+                    let _ = Self::take_pending_arrival(
+                        &worker_pending_wake,
+                        CodeIndexCadenceTriggerV1::Mount,
+                    );
+                    tracing::debug!(
+                        event = "code_index_reconcile_terminal_suppressed",
+                        path = "background_worker",
+                        "code-index reconcile is blocked until the publication authority is reset"
+                    );
+                    continue;
                 }
                 // This aggregate starts when the wake is observed and ends
                 // when the pass holds every admission/publication gate it
@@ -1973,16 +1989,34 @@ impl CodeIndexSchedulerRegistryV1 {
                             // The pass completed; whatever refused it was not an
                             // unwind, so panic accounting restarts.
                             panic_guard.record_progress();
+                            let publication_corruption =
+                                error.is_publication_authority_corruption();
                             let transient_capacity = error.is_transient_capacity_failure();
                             tracing::warn!(
                                 event = "code_index_reconcile_failed",
                                 path = "background_worker",
+                                terminal = publication_corruption,
                                 transient_capacity,
                                 trigger = trigger.label(),
                                 error = %error,
                                 "code-index background reconcile failed; the served generation stays stale"
                             );
-                            if transient_capacity {
+                            if publication_corruption {
+                                capacity_retry.record_progress();
+                                park_convergence(
+                                    &worker_convergence_park,
+                                    error.to_string(),
+                                    CONVERGENCE_PARK_PUBLICATION_CORRUPTION_REMEDIATION_V1,
+                                    false,
+                                );
+                                worker_build_progress
+                                    .write()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .block_current(
+                                        CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt,
+                                    );
+                                publication_authority_terminal = true;
+                            } else if transient_capacity {
                                 // Shared process capacity was held by another
                                 // holder when this pass asked for it. Releasing
                                 // it emits no wake, so without a self-scheduled
@@ -2053,8 +2087,10 @@ impl CodeIndexSchedulerRegistryV1 {
                         ),
                         Ok((Ok(_), _, _)) => {}
                     }
-                    // Restore arrival so the next pass measures this wake's full queue wait.
-                    Self::restore_pending_arrival(&worker_pending_wake, arrival, trigger);
+                    if !publication_authority_terminal {
+                        // Restore arrival so the next pass measures this wake's full queue wait.
+                        Self::restore_pending_arrival(&worker_pending_wake, arrival, trigger);
+                    }
                 }
                 // The retained owner's projection is joined after the seat, not
                 // before it: the graph this pass recovered already serves, and

@@ -24,7 +24,8 @@ use tracedecay_domain::sha256_hex_suffix;
 use crate::code_index_journey::{
     ExactIndexIdentity, RECEIPT_TIMEOUT, assert_exact_identity, assert_project_identity,
     commit_all, daemon_log_for_failure, deliver_save, exact_identity, exact_symbol, git,
-    initialize_tracedecay, result_paths, search, status, tool, wait_for_terminal_generation,
+    initialize_tracedecay, result_paths, search, status, stop_daemon_gracefully, tool,
+    wait_for_terminal_generation,
 };
 use crate::common::{EnvVarGuard, IsolatedEnv, daemon_socket_path, spawn_tracedecay_daemon_with};
 
@@ -412,6 +413,92 @@ async fn ignored_dependency_admission_survives_physical_daemon_restart_without_w
             .expect("restarted daemon exits after SIGTERM")
             .success()
     );
+}
+
+#[tokio::test]
+async fn one_line_append_publishes_fresh_generation_with_carried_clone_bodies() {
+    let (environment, project) = IsolatedEnv::acquire().await;
+    let project = project.canonicalize().expect("canonical fixture project");
+    fs::create_dir_all(project.join("src")).expect("fixture source directory");
+    fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"incremental-clone-carry\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("fixture manifest");
+    let mut carried_source = String::new();
+    for index in 0..16 {
+        writeln!(
+            carried_source,
+            "pub fn carried_clone_{index:02}(value: usize) -> usize {{ value + {index} }}"
+        )
+        .expect("carried clone source");
+    }
+    fs::write(project.join("src/carried.rs"), carried_source).expect("carried source");
+    fs::write(
+        project.join("src/edited.rs"),
+        "pub fn append_anchor() -> usize { 1 }\n",
+    )
+    .expect("edited source");
+    git(&project, &["init", "--quiet", "--initial-branch=main"]);
+    let revision = commit_all(&project, "initial clone carry fixture");
+
+    let socket = daemon_socket_path(environment.home());
+    let log_path = environment.scratch().join("incremental-clone-carry.log");
+    let _daemon_log = EnvVarGuard::set("TRACEDECAY_TEST_DAEMON_LOG", &log_path);
+    let mut daemon = spawn_tracedecay_daemon_with(environment.home(), |command| {
+        command.env(
+            "RUST_LOG",
+            "tracedecay_code_index_runtime::code_index_scheduler::registry=debug",
+        );
+    });
+    let project_id = initialize_tracedecay(environment.home(), &project);
+    let identity = exact_identity(&project, project_id);
+    tracedecay::product_runtime::register_fixture_product_runtime();
+    let handshake =
+        tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
+            .expect("production daemon handshake");
+
+    let initial = wait_for_terminal_generation(
+        &socket,
+        &handshake,
+        &project,
+        &identity,
+        "refs/heads/main",
+        Some(&revision),
+        None,
+        "carried_clone_00",
+        Some("src/carried.rs"),
+    )
+    .await;
+
+    let mut edited = fs::read_to_string(project.join("src/edited.rs")).expect("edited source");
+    writeln!(edited, "pub fn appended_once() -> usize {{ 2 }}").expect("append source line");
+    fs::write(project.join("src/edited.rs"), edited).expect("write appended source");
+    deliver_save(&project, &["src/edited.rs"]).await;
+    let refreshed = wait_for_terminal_generation(
+        &socket,
+        &handshake,
+        &project,
+        &identity,
+        "refs/heads/main",
+        None,
+        Some(&initial.generation_id),
+        "appended_once",
+        Some("src/edited.rs"),
+    )
+    .await;
+
+    assert_ne!(refreshed.generation_id, initial.generation_id);
+    let carried = search(&socket, &handshake, "carried_clone_00").await;
+    assert_eq!(
+        carried["code_generation"], refreshed.generation_id,
+        "carried clone did not rebind to the fresh generation: {carried}"
+    );
+    assert!(
+        result_paths(&carried).contains(&"src/carried.rs"),
+        "the unchanged carried source stopped serving: {carried}"
+    );
+    stop_daemon_gracefully(&mut daemon);
 }
 
 #[tokio::test]
