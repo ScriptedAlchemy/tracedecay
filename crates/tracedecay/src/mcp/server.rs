@@ -14,7 +14,7 @@ use crate::mcp::project_route::{
 };
 use crate::project::TraceDecay;
 pub(crate) use tracedecay_code_index_runtime::code_index_scheduler::{
-    CodeIndexDemandAdmissionV1, CodeIndexDemandV1,
+    CodeIndexDemandAdmissionV1, CodeIndexDemandUnavailableV1, CodeIndexDemandV1,
 };
 use tracedecay_contracts::code_index_freshness::{
     CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT, CodeIndexConvergenceParkedV1,
@@ -127,6 +127,12 @@ pub(crate) const CODE_INDEX_LINKED_WORKTREE_DISABLED: &str = "linked_worktree_di
 
 pub(crate) const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
 
+pub(crate) const CODE_INDEX_ROUTE_RETIRED: &str = "code_index_route_retired";
+
+pub(crate) const CODE_INDEX_FOREIGN_ROOT: &str = "code_index_foreign_root";
+
+pub(crate) const CODE_INDEX_NO_PROVEN_CHANGE: &str = "code_index_no_proven_change";
+
 pub(crate) fn code_index_publication_corrupt(
     parked: CodeIndexConvergenceParkedV1,
 ) -> TraceDecayError {
@@ -145,11 +151,60 @@ pub(crate) fn code_index_linked_worktree_disabled() -> TraceDecayError {
     )
 }
 
+/// Wire one typed unavailable cause without collapsing siblings into scheduler
+/// pressure. Only a missing mount invites a retry; foreign-root, retired-route,
+/// and no-proven-change refusals stay non-retryable.
+pub(crate) fn code_index_unavailable_host_outcome(
+    cause: CodeIndexDemandUnavailableV1,
+) -> HostAdmissionOutcome {
+    match cause {
+        CodeIndexDemandUnavailableV1::SchedulerUnmounted => {
+            HostAdmissionOutcome::retained_unavailable(CODE_INDEX_SCHEDULER_UNAVAILABLE)
+        }
+        CodeIndexDemandUnavailableV1::RouteRetired => {
+            HostAdmissionOutcome::terminal_unavailable(CODE_INDEX_ROUTE_RETIRED)
+        }
+        CodeIndexDemandUnavailableV1::ForeignRoot => {
+            HostAdmissionOutcome::terminal_unavailable(CODE_INDEX_FOREIGN_ROOT)
+        }
+        CodeIndexDemandUnavailableV1::NoProvenChange => {
+            HostAdmissionOutcome::terminal_unavailable(CODE_INDEX_NO_PROVEN_CHANGE)
+        }
+    }
+}
+
+pub(crate) fn code_index_unavailable_error(cause: CodeIndexDemandUnavailableV1) -> TraceDecayError {
+    match cause {
+        CodeIndexDemandUnavailableV1::SchedulerUnmounted => TraceDecayError::project_route(
+            CODE_INDEX_SCHEDULER_UNAVAILABLE,
+            true,
+            "code-index scheduler is not mounted for this route",
+        ),
+        CodeIndexDemandUnavailableV1::RouteRetired => TraceDecayError::project_route(
+            CODE_INDEX_ROUTE_RETIRED,
+            false,
+            "code-index route was retired before the demand could be admitted",
+        ),
+        CodeIndexDemandUnavailableV1::ForeignRoot => TraceDecayError::project_route(
+            CODE_INDEX_FOREIGN_ROOT,
+            false,
+            "code-index demand named a root this activation does not own",
+        ),
+        CodeIndexDemandUnavailableV1::NoProvenChange => TraceDecayError::project_route(
+            CODE_INDEX_NO_PROVEN_CHANGE,
+            false,
+            "code-index demand carried no proven change to admit",
+        ),
+    }
+}
+
 /// Report one code-index demand verdict to the host-admission boundary.
 ///
 /// The mapping is the whole reason the verdict is typed: a terminal park is
 /// unavailable and non-retryable, a watcher-policy refusal is a decision (not
-/// pressure), and only genuine unavailability invites a retry.
+/// pressure), and each unavailable cause keeps its own pinned reason so a
+/// foreign-root or no-proven-change refusal cannot look like scheduler
+/// pressure.
 pub(crate) fn code_index_host_outcome(
     admission: &CodeIndexDemandAdmissionV1,
 ) -> HostAdmissionOutcome {
@@ -161,8 +216,8 @@ pub(crate) fn code_index_host_outcome(
         CodeIndexDemandAdmissionV1::Terminal(_) => {
             HostAdmissionOutcome::terminal_unavailable(CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT)
         }
-        CodeIndexDemandAdmissionV1::Unavailable(_) => {
-            HostAdmissionOutcome::retained_unavailable(CODE_INDEX_SCHEDULER_UNAVAILABLE)
+        CodeIndexDemandAdmissionV1::Unavailable(cause) => {
+            code_index_unavailable_host_outcome(*cause)
         }
     }
 }
