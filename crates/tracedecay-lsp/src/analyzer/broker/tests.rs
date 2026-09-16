@@ -172,7 +172,10 @@ fn absent_analyzer_keeps_an_admitted_graph_fallback_provider() {
 mod rustup_proxy {
     use super::*;
     use crate::analyzer::launch::fake_rustup;
-    use crate::analyzer::launch::{NOT_INSTALLED_FOR_TOOLCHAIN_MESSAGE, RUSTUP_AUTO_INSTALL_ENV};
+    use crate::analyzer::launch::{
+        NOT_INSTALLED_FOR_TOOLCHAIN_MESSAGE, RUSTUP_AUTO_INSTALL_ENV,
+        TOOLCHAIN_NOT_INSTALLED_MESSAGE,
+    };
 
     fn rust_project() -> tempfile::TempDir {
         let project = tempfile::tempdir().expect("project");
@@ -475,6 +478,109 @@ mod rustup_proxy {
             2,
             "a resolved root is retained, not probed again"
         );
+    }
+
+    /// The toolchain itself being absent is a different refusal from a
+    /// missing component and must not advise `rustup component add`.
+    #[test]
+    fn absent_toolchain_is_typed_toolchain_not_installed_in_the_snapshot() {
+        let rustup = fake_rustup::install_with(
+            fake_rustup::CURRENT_VERSION,
+            fake_rustup::Which::ToolchainMissing,
+        );
+        let project = rust_project();
+        let command = rustup.path().join("rust-analyzer");
+        let mut broker = DiagnosticBroker::new_for_test(
+            project.path(),
+            vec![adapter(
+                "rust",
+                command.to_string_lossy(),
+                "rs",
+                "Cargo.toml",
+            )],
+        );
+
+        broker.admitted_providers_for_files(&["src/lib.rs".to_owned()]);
+
+        let engine = broker.snapshot().engines.remove(0);
+        assert_eq!(engine.state, EngineState::Unavailable);
+        let last_error = engine.last_error.expect("typed engine error");
+        assert!(
+            last_error.starts_with(TOOLCHAIN_NOT_INSTALLED_MESSAGE),
+            "{last_error}"
+        );
+        assert!(last_error.contains("rustup toolchain install"));
+        assert!(!last_error.contains("component add"));
+        assert!(!last_error.contains('\n') && !last_error.contains("syncing channel"));
+    }
+
+    /// A rustup older than 1.28.1 ignores `RUSTUP_AUTO_INSTALL`, so its
+    /// `rustup which` could install. The broker refuses on the version alone.
+    #[test]
+    fn old_rustup_is_typed_unavailable_without_a_which_probe() {
+        let rustup = fake_rustup::install_with(
+            "1.27.1",
+            fake_rustup::Which::Resolved(PathBuf::from("/never/consulted")),
+        );
+        let project = rust_project();
+        let command = rustup.path().join("rust-analyzer");
+        let mut broker = DiagnosticBroker::new_for_test(
+            project.path(),
+            vec![adapter(
+                "rust",
+                command.to_string_lossy(),
+                "rs",
+                "Cargo.toml",
+            )],
+        );
+
+        let admitted = broker.admitted_providers_for_files(&["src/lib.rs".to_owned()]);
+        assert!(admitted.iter().all(|provider| !provider.analyzer_available));
+        let error = broker
+            .prepare_refresh("rust", vec![rust_document()])
+            .err()
+            .expect("an old rustup must refuse the refresh");
+        let TraceDecayError::Config { message } = &error else {
+            panic!("old rustup is a typed configuration refusal, got {error:?}");
+        };
+        assert!(message.contains("rustup 1.27.1"), "{message}");
+        assert!(message.contains("1.28.1"), "{message}");
+
+        let engine = broker.snapshot().engines.remove(0);
+        assert_eq!(engine.state, EngineState::Unavailable);
+        assert_eq!(fake_rustup::which_probes(rustup.path()), 0);
+        assert_eq!(
+            fake_rustup::version_probes(rustup.path()),
+            1,
+            "the version is probed once per rustup binary, then remembered"
+        );
+    }
+
+    /// A probe that never answers is refused at the deadline and typed; the
+    /// panel gets one line, not a hung request.
+    #[test]
+    fn hanging_probe_is_typed_unavailable_at_the_deadline() {
+        let rustup =
+            fake_rustup::install_with(fake_rustup::CURRENT_VERSION, fake_rustup::Which::Hang);
+        let project = rust_project();
+        let command = rustup.path().join("rust-analyzer");
+        let mut broker = DiagnosticBroker::new_for_test(
+            project.path(),
+            vec![adapter(
+                "rust",
+                command.to_string_lossy(),
+                "rs",
+                "Cargo.toml",
+            )],
+        );
+
+        broker.admitted_providers_for_files(&["src/lib.rs".to_owned()]);
+
+        let engine = broker.snapshot().engines.remove(0);
+        assert_eq!(engine.state, EngineState::Unavailable);
+        let last_error = engine.last_error.expect("typed engine error");
+        assert!(last_error.contains("did not answer within"), "{last_error}");
+        assert!(!last_error.contains('\n'));
     }
 }
 

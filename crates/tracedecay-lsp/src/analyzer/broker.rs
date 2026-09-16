@@ -12,7 +12,7 @@ use super::client::{LspDocument, LspRefreshTimeouts, file_uri};
 use super::error::{AnalyzerResult as Result, AnalyzerRuntimeError as TraceDecayError};
 use super::host_ownership::HostAnalyzerOwnership;
 pub use super::launch::command_available;
-use super::launch::{AnalyzerLaunch, AnalyzerLaunchError, resolve_analyzer_launch};
+use super::launch::{AnalyzerLaunch, AnalyzerLaunchError, AnalyzerLaunchResolver};
 use super::settings::CodeDiagnosticsSettings;
 use crate::AdmittedRoot;
 mod refresh;
@@ -206,6 +206,9 @@ pub struct DiagnosticBroker {
     /// refused root is probed again so an operator's `rustup component add`
     /// is seen without a restart.
     launches: BTreeMap<(String, PathBuf), AnalyzerLaunch>,
+    /// Probes rustup and remembers each rustup binary's version for as long
+    /// as `launches` is retained.
+    launch_resolver: AnalyzerLaunchResolver,
     engine_overrides: BTreeMap<String, EngineState>,
     engine_errors: BTreeMap<String, String>,
     refresh_epochs: BTreeMap<String, u64>,
@@ -236,6 +239,7 @@ impl DiagnosticBroker {
             diagnostics: Vec::new(),
             clients: BTreeMap::new(),
             launches: BTreeMap::new(),
+            launch_resolver: AnalyzerLaunchResolver::new(),
             engine_overrides: BTreeMap::new(),
             engine_errors: BTreeMap::new(),
             refresh_epochs: BTreeMap::new(),
@@ -418,7 +422,14 @@ impl DiagnosticBroker {
     pub fn update_adapters(&mut self, adapters: Vec<LspAdapterDefinition>) {
         self.adapters = adapters;
         self.clients.clear();
+        self.clear_launches();
+    }
+
+    /// Forgets every retained launch and rustup version; the next spawn
+    /// re-probes.
+    fn clear_launches(&mut self) {
         self.launches.clear();
+        self.launch_resolver.clear();
     }
 
     pub fn update_project_languages(&mut self, languages: BTreeSet<String>) {
@@ -669,7 +680,8 @@ impl DiagnosticBroker {
         if let Some(launch) = self.launches.get(&key) {
             return Ok(launch.clone());
         }
-        resolve_analyzer_launch(command, workspace_root)
+        self.launch_resolver
+            .resolve(command, workspace_root)
             .inspect(|launch| {
                 self.launches.insert(key, launch.clone());
             })
@@ -763,7 +775,7 @@ impl DiagnosticBroker {
         // read at mount time is no longer what it is serving.
         self.settings_unavailable = None;
         self.clients.clear();
-        self.launches.clear();
+        self.clear_launches();
         self.engine_overrides.clear();
         let disabled_languages: Vec<String> = self
             .settings
