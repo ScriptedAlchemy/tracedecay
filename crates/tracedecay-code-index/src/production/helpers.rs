@@ -1094,13 +1094,24 @@ where
                 ImportModuleKindV1::BareModule => false,
             });
     }
-    // `crate_name::…::Type::method`
+    // `crate_name::…::Type::method` — crate root plus the intermediate module
+    // path must match; otherwise sibling modules with the same Type::method
+    // collide or cross-bind.
     let crate_name = parts[0];
     let Some(root_index) = rust.files.crate_root(crate_name) else {
         return false;
     };
     let root_path = files[root_index].as_ref().authority.logical_path.as_str();
-    rust_source_root(target_path) == rust_source_root(root_path)
+    if rust_source_root(target_path) != rust_source_root(root_path) {
+        return false;
+    }
+    let module_prefix = parts[1..parts.len().saturating_sub(1)].join("::");
+    let expected_relative = if module_prefix.is_empty() {
+        expected
+    } else {
+        format!("{module_prefix}::{expected}")
+    };
+    relative == expected_relative || relative.ends_with(&format!("::{expected_relative}"))
 }
 
 /// Map an extracted Rust symbol back to the path used by a `crate::...`

@@ -921,6 +921,83 @@ fn use_foo() {
 }
 
 #[test]
+fn test_rust_factory_method_does_not_qualify_as_owner_type() {
+    let source = r#"
+struct Client;
+struct ClientBuilder;
+impl Client {
+    fn builder() -> ClientBuilder { ClientBuilder }
+    fn build(&self) {}
+}
+impl ClientBuilder {
+    fn build(self) -> Client { Client }
+}
+
+fn use_client() {
+    let builder = Client::builder();
+    let _ = builder.build();
+}
+"#;
+    let result = RustExtractor.extract("src/lib.rs", source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let use_fn = result
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::Function && n.name == "use_client")
+        .expect("use_client function");
+    let ref_names: Vec<&str> = result
+        .unresolved_refs
+        .iter()
+        .filter(|r| r.from_node_id == use_fn.id && r.reference_kind == EdgeKind::Calls)
+        .map(|r| r.reference_name.as_str())
+        .collect();
+    assert!(
+        !ref_names.contains(&"Client::build"),
+        "Client::builder() must not invent Client::build, got: {ref_names:?}"
+    );
+}
+
+#[test]
+fn test_rust_rebinding_withholds_typed_method_qualification() {
+    let source = r#"
+struct A;
+struct B;
+impl A {
+    fn new() -> Self { A }
+    fn build(&self) {}
+}
+impl B {
+    fn new() -> Self { B }
+    fn build(&self) {}
+}
+
+fn use_shadow() {
+    let b = A::new();
+    let _ = b.build();
+    let b = B::new();
+    let _ = b.build();
+}
+"#;
+    let result = RustExtractor.extract("src/lib.rs", source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let use_fn = result
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::Function && n.name == "use_shadow")
+        .expect("use_shadow function");
+    let ref_names: Vec<&str> = result
+        .unresolved_refs
+        .iter()
+        .filter(|r| r.from_node_id == use_fn.id && r.reference_kind == EdgeKind::Calls)
+        .map(|r| r.reference_name.as_str())
+        .collect();
+    assert!(
+        !ref_names.iter().any(|name| *name == "A::build" || *name == "B::build"),
+        "rebinding must withhold Type::build qualification, got: {ref_names:?}"
+    );
+}
+
+#[test]
 fn wildcard_imports_retain_unresolved_dependencies_alongside_named_bindings() {
     let result = RustExtractor.extract(
         "src/lib.rs",

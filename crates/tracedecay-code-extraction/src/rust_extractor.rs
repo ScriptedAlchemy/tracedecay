@@ -26,6 +26,39 @@ struct ShadowedCallNames {
     names: Vec<String>,
 }
 
+/// Lexical `local → Type` bindings walked in source order.
+///
+/// Each frame is one Rust block (or the function parameter scope). Lookups
+/// search innermost-first so nested `let` bindings shadow outer ones without
+/// poisoning call sites that precede a later rebinding.
+#[derive(Default)]
+struct LocalTypeScopes {
+    frames: Vec<HashMap<String, String>>,
+}
+
+impl LocalTypeScopes {
+    fn push(&mut self) {
+        self.frames.push(HashMap::new());
+    }
+
+    fn pop(&mut self) {
+        self.frames.pop();
+    }
+
+    fn insert(&mut self, name: String, type_path: String) {
+        if let Some(frame) = self.frames.last_mut() {
+            frame.insert(name, type_path);
+        }
+    }
+
+    fn get(&self, name: &str) -> Option<&str> {
+        self.frames
+            .iter()
+            .rev()
+            .find_map(|frame| frame.get(name).map(String::as_str))
+    }
+}
+
 /// Internal state used during AST traversal.
 ///
 /// Borrows the caller's source for the lifetime of the walk: copying the
@@ -1575,15 +1608,44 @@ impl RustExtractor {
     }
 
     /// Collect simple `local → Type` bindings for one function: typed parameters
-    /// / `let` annotations, and `let x = Type::…` / `path::Type::…` constructor
-    /// calls. Nested field receivers (`foo.bar.baz`) are out of scope.
+    /// / `let` annotations, and `let x = Type::new()` / `Type::default()` /
+    /// `Type::try_new()` constructor calls. Nested field receivers
+    /// (`foo.bar.baz`) are out of scope.
+    ///
+    /// A name rebound anywhere in the function is withheld: this map is
+    /// function-wide (not scope-aware), so shadowing must fail closed rather
+    /// than let a later binding poison an earlier call site.
     fn collect_local_type_bindings(
         state: &ExtractionState<'_>,
         function: TsNode<'_>,
     ) -> HashMap<String, String> {
         let mut local_types = HashMap::new();
-        Self::collect_local_type_bindings_walk(state, function, function, &mut local_types);
+        let mut withheld = HashSet::new();
+        Self::collect_local_type_bindings_walk(
+            state,
+            function,
+            function,
+            &mut local_types,
+            &mut withheld,
+        );
         local_types
+    }
+
+    fn record_local_type_binding(
+        local_types: &mut HashMap<String, String>,
+        withheld: &mut HashSet<String>,
+        name: String,
+        type_path: String,
+    ) {
+        if withheld.contains(&name) {
+            return;
+        }
+        if local_types.contains_key(&name) {
+            local_types.remove(&name);
+            withheld.insert(name);
+            return;
+        }
+        local_types.insert(name, type_path);
     }
 
     fn collect_local_type_bindings_walk(
@@ -1591,6 +1653,7 @@ impl RustExtractor {
         node: TsNode<'_>,
         function: TsNode<'_>,
         local_types: &mut HashMap<String, String>,
+        withheld: &mut HashSet<String>,
     ) {
         if node != function && node.kind() == "function_item" {
             return;
@@ -1603,7 +1666,12 @@ impl RustExtractor {
                 ) && pattern.kind() == "identifier"
                     && let Some(type_path) = Self::simple_type_path(state, ty)
                 {
-                    local_types.insert(state.node_text(pattern).to_owned(), type_path);
+                    Self::record_local_type_binding(
+                        local_types,
+                        withheld,
+                        state.node_text(pattern).to_owned(),
+                        type_path,
+                    );
                 }
             }
             "let_declaration" => {
@@ -1614,11 +1682,11 @@ impl RustExtractor {
                     if let Some(ty) = node.child_by_field_name("type")
                         && let Some(type_path) = Self::simple_type_path(state, ty)
                     {
-                        local_types.insert(name, type_path);
+                        Self::record_local_type_binding(local_types, withheld, name, type_path);
                     } else if let Some(value) = node.child_by_field_name("value")
                         && let Some(type_path) = Self::constructor_type_path(state, value)
                     {
-                        local_types.insert(name, type_path);
+                        Self::record_local_type_binding(local_types, withheld, name, type_path);
                     }
                 }
             }
@@ -1632,6 +1700,7 @@ impl RustExtractor {
                     cursor.node(),
                     function,
                     local_types,
+                    withheld,
                 );
                 if !cursor.goto_next_sibling() {
                     break;
@@ -1662,6 +1731,10 @@ impl RustExtractor {
 
     /// From `WalkBuilder::new(...)` or `ignore::WalkBuilder::new(...)`, the
     /// type path is everything before the final `::` segment.
+    ///
+    /// Only associated functions conventionally returning `Self` qualify:
+    /// `new`, `default`, `try_new`. `Client::builder()`-style factories that
+    /// return a different type must not invent `Client::method` callers.
     fn constructor_type_path(state: &ExtractionState<'_>, value: TsNode<'_>) -> Option<String> {
         let call = match value.kind() {
             "call_expression" => value,
@@ -1679,10 +1752,11 @@ impl RustExtractor {
         if callee_name.contains('.') {
             return None;
         }
-        callee_name
-            .rsplit_once("::")
-            .map(|(type_path, _)| type_path.to_owned())
-            .filter(|type_path| !type_path.is_empty())
+        let (type_path, ctor) = callee_name.rsplit_once("::")?;
+        if type_path.is_empty() || !matches!(ctor, "new" | "default" | "try_new") {
+            return None;
+        }
+        Some(type_path.to_owned())
     }
 
     /// Import rows are file-scoped, so a local binding makes the same bare
