@@ -2197,9 +2197,13 @@ fn resolve_file_references(
 
 /// The retained cross-file form of one reference the file could not bind, or
 /// `None` when the reference can never bind cross-file: receiver-dotted
-/// paths (unknown receiver type), blocklisted ubiquitous names, relation
-/// kinds outside the canonical graph contract, and references whose
+/// paths (unknown receiver type), blocklisted ubiquitous *unqualified* names,
+/// relation kinds outside the canonical graph contract, and references whose
 /// enclosing symbol is not uniquely identified.
+///
+/// Qualified names (`Type::method`, `path::Type::method`) keep their simple
+/// segment even when that segment is on the ubiquitous-method blocklist: the
+/// path is the authority, and sealing binds through it.
 fn cross_file_reference_candidate(
     source: &str,
     offsets: &[u64],
@@ -2210,12 +2214,15 @@ fn cross_file_reference_candidate(
     if reference.reference_name.contains('.') {
         return None;
     }
+    let qualified = reference.reference_name.contains("::");
     let simple_name = reference
         .reference_name
         .rsplit("::")
         .next()
         .unwrap_or(reference.reference_name.as_str());
-    if simple_name.is_empty() || CROSS_FILE_REFERENCE_BLOCKLIST.contains(&simple_name) {
+    if simple_name.is_empty()
+        || (!qualified && CROSS_FILE_REFERENCE_BLOCKLIST.contains(&simple_name))
+    {
         return None;
     }
     let kind = canonical_relation_kind(&reference.reference_kind)?;

@@ -437,8 +437,12 @@ where
         .or_else(|| reference.reference_name.rsplit("::").next())
         .unwrap_or(reference.reference_name.as_str());
     // Retention already narrows names, but carried artifacts outlive policy
-    // revisions; apply the current blocklist to every retained reference.
-    if simple_name.is_empty() || CROSS_FILE_REFERENCE_BLOCKLIST.contains(&simple_name) {
+    // revisions; apply the current blocklist to every retained *unqualified*
+    // reference. Qualified `Type::method` paths keep the method segment even
+    // when it is ubiquitous — the type path is the binding authority.
+    if simple_name.is_empty()
+        || (!qualified && CROSS_FILE_REFERENCE_BLOCKLIST.contains(&simple_name))
+    {
         return None;
     }
     let candidates = by_simple_name.get(simple_name)?;
@@ -483,10 +487,20 @@ where
                         {
                             return true;
                         }
-                        file_qualified_name_matches(
+                        if file_qualified_name_matches(
                             &reference.reference_name,
                             &files[*candidate_index].as_ref().authority.logical_path,
                             &symbol.qualified_name,
+                        ) {
+                            return true;
+                        }
+                        associated_type_method_matches(
+                            files,
+                            &mut rust,
+                            file,
+                            &reference.reference_name,
+                            *candidate_index,
+                            symbol,
                         )
                     },
                     |qualified| {
@@ -995,6 +1009,156 @@ fn file_qualified_name_matches(
         .strip_prefix(file_stem)
         .and_then(|path| path.strip_prefix("::"))
         == Some(symbol_path)
+}
+
+/// Bind `Type::method` / `path::Type::method` to an associated method whose
+/// file-relative qualified name is `Type::method`.
+///
+/// Ubiquitous method names (`build`, `new`, …) are blocklisted when bare; the
+/// type path is what makes them bindable. A simple `Type::method` with an
+/// import for `Type` must land in that import's module; a `crate_name::Type::…`
+/// path must land under that crate's source root. Uniqueness of the filtered
+/// candidate set still applies in the caller.
+fn associated_type_method_matches<T>(
+    files: &[T],
+    rust: &mut RustResolutionContextV1<'_>,
+    source_file: &FileGenerationArtifactsV1,
+    reference_name: &str,
+    target_index: usize,
+    target_symbol: &LineageSymbolRecordV1,
+) -> bool
+where
+    T: AsRef<FileGenerationArtifactsV1>,
+{
+    let mut parts = reference_name.split("::").collect::<Vec<_>>();
+    if parts.len() < 2 {
+        return false;
+    }
+    let method = parts.pop().expect("len >= 2");
+    let type_name = *parts.last().expect("len >= 1 after pop");
+    if method.is_empty() || type_name.is_empty() {
+        return false;
+    }
+    let target_path = files[target_index].as_ref().authority.logical_path.as_str();
+    let Some(relative) = target_symbol
+        .qualified_name
+        .strip_prefix(target_path)
+        .and_then(|path| path.strip_prefix("::"))
+    else {
+        return false;
+    };
+    // Bare `Type::method` only: `use path::WalkBuilder as Builder` emits
+    // `Builder::build`, so resolve the alias's imported_name before matching.
+    // Path-qualified refs (`dep::WalkBuilder::build`) keep the path segment.
+    let (owner_name, binding) = if parts.len() == 1 {
+        let binding = unique_import(source_file, type_name, RelationEdgeKindV1::TypeOf)
+            .or_else(|| unique_import(source_file, type_name, RelationEdgeKindV1::Calls));
+        let owner = binding
+            .and_then(|row| row.imported_name.as_deref())
+            .filter(|name| !name.is_empty() && *name != "*")
+            .unwrap_or(type_name);
+        (owner, binding)
+    } else {
+        (type_name, None)
+    };
+    let expected = format!("{owner_name}::{method}");
+    if relative != expected && !relative.ends_with(&format!("::{expected}")) {
+        return false;
+    }
+    if parts.len() == 1 {
+        // `Type::method` — when the type is imported, require that import.
+        let Some(binding) = binding else {
+            // No import evidence: allow and rely on candidate uniqueness.
+            return true;
+        };
+        return files[target_index]
+            .as_ref()
+            .artifacts
+            .symbols
+            .iter()
+            .filter(|symbol| {
+                symbol.simple_name == owner_name
+                    && relation_target_kind_is_compatible(
+                        RelationEdgeKindV1::TypeOf,
+                        &symbol.kind,
+                    )
+            })
+            .any(|type_symbol| match binding.module_kind {
+                ImportModuleKindV1::ProjectRelative => project_import_matches(
+                    binding,
+                    &binding.logical_path,
+                    target_path,
+                    &type_symbol.qualified_name,
+                ),
+                ImportModuleKindV1::BareModule
+                    if source_file.extraction.language.as_str() == "rust" =>
+                {
+                    rust_bare_import_matches(
+                        files,
+                        rust,
+                        binding,
+                        RustSymbolTargetV1 {
+                            index: target_index,
+                            symbol: type_symbol,
+                        },
+                    )
+                }
+                ImportModuleKindV1::BareModule => false,
+            });
+    }
+
+    // `path::Type::method` — resolve every module segment, not just a crate root.
+    let module_prefix = &parts[..parts.len() - 1];
+    let module_path = module_prefix.join("/");
+
+    // Crate-qualified: `dep::a::Builder::method` must land under `dep` *and*
+    // under module `a` (not a sibling `dep::b::Builder`).
+    if let Some(root_index) = rust.files.crate_root(module_prefix[0]) {
+        let root_path = files[root_index].as_ref().authority.logical_path.as_str();
+        let Some(crate_source_root) = rust_source_root(root_path) else {
+            return false;
+        };
+        if rust_source_root(target_path) != Some(crate_source_root) {
+            return false;
+        }
+        let Some(relative_file) = target_path
+            .strip_prefix(crate_source_root)
+            .and_then(|path| path.strip_prefix('/'))
+        else {
+            return false;
+        };
+        let Some(target_module) = rust_file_module(relative_file) else {
+            return false;
+        };
+        let module_after_crate = module_prefix[1..].join("/");
+        return if module_after_crate.is_empty() {
+            target_module.is_empty()
+        } else if target_module == module_after_crate
+            || target_module.starts_with(&format!("{module_after_crate}/"))
+        {
+            true
+        } else if target_module.is_empty() {
+            // Inline `mod a { struct Builder; … }` in the crate root file: the
+            // file module is empty but the symbol path carries the segments.
+            let inline = format!(
+                "{}::{type_name}::{method}",
+                module_after_crate.replace('/', "::")
+            );
+            relative == inline || relative.ends_with(&format!("::{inline}"))
+        } else {
+            false
+        };
+    }
+
+    // Same-crate module path: `walk::WalkBuilder::method` from `src/lib.rs`.
+    if let Some(module_index) = rust
+        .files
+        .module(&source_file.authority.logical_path, &module_path)
+    {
+        return module_index == target_index;
+    }
+
+    false
 }
 
 /// Map an extracted Rust symbol back to the path used by a `crate::...`
