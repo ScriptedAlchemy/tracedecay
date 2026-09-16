@@ -69,17 +69,24 @@ export function reliefBodyRx(radius: number): number {
   return radius * RELIEF_ASPECT.x;
 }
 
-export function reliefLabelHalfWidth(label: string, directory: string): number {
-  return Math.max(label.length * LABEL_EM_14, directory.length * LABEL_EM_10) / 2;
+export function reliefLabelHalfWidth(label: string): number {
+  return (label.length * LABEL_EM_14) / 2;
+}
+
+/** On-field directory, elided to the body so the full path stays in the table. */
+export function reliefFieldDirectory(directory: string, radius: number): string {
+  const maxChars = Math.max(1, Math.floor((2 * reliefBodyRx(radius)) / LABEL_EM_10));
+  if (directory.length <= maxChars) return directory;
+  return `…${directory.slice(directory.length - (maxChars - 1))}`;
 }
 
 export function maxRegionsWithoutOverlap(
   usableWidth: number,
-  labels: ReadonlyArray<{ readonly label: string; readonly directory: string }> = [],
+  labels: readonly string[] = [],
 ): number {
   const bodyGap = 2 * reliefBodyRx(READABLE_RADIUS);
   const widestLabel = labels.reduce(
-    (max, item) => Math.max(max, 2 * reliefLabelHalfWidth(item.label, item.directory)),
+    (max, label) => Math.max(max, 2 * reliefLabelHalfWidth(label)),
     0,
   );
   return Math.max(1, Math.floor(usableWidth / Math.max(bodyGap, widestLabel)));
@@ -130,6 +137,10 @@ export interface CortexModel {
   readonly drawnFiles: number;
   readonly foldedRegions: number;
   readonly foldedFiles: number;
+  /** Placeable regions left off because their stratum would collide. */
+  readonly readabilityFoldedRegions: number;
+  /** Placeable regions left off after the global drawing budget. */
+  readonly capFoldedRegions: number;
   /** Regions whose files carried no depth row: real, counted, never placed. */
   readonly unplacedRegions: number;
   /** Drawn regions with zero internal dependency edges. */
@@ -152,10 +163,53 @@ export function directoryOf(path: string): string {
   return cut < 0 ? '.' : path.slice(0, cut);
 }
 
+interface Draft {
+  readonly cluster: StrataClusterV1;
+  readonly depths: readonly number[];
+  readonly depth: number | null;
+}
+
 function labelOf(directory: string): string {
   if (directory === '.' || directory === '') return './';
   const cut = directory.lastIndexOf('/');
   return `${cut < 0 ? directory : directory.slice(cut + 1)}/`;
+}
+
+function applyGlobalDrawCap(readableByBand: Map<number, Draft[]>): {
+  drawnByBand: Map<number, Draft[]>;
+  capFoldedRegions: number;
+} {
+  const readable = [...readableByBand.values()].flat();
+  if (readable.length <= MAX_DRAWN_REGIONS) {
+    return { drawnByBand: readableByBand, capFoldedRegions: 0 };
+  }
+  const reserved: Draft[] = [];
+  const reservedKeys = new Set<string>();
+  for (const band of readableByBand.values()) {
+    const first = band[0];
+    if (first === undefined) continue;
+    reserved.push(first);
+    reservedKeys.add(first.cluster.directory);
+  }
+  reserved.sort((a, b) => a.cluster.order - b.cluster.order);
+  const keptReserved = reserved.slice(0, MAX_DRAWN_REGIONS);
+  const extra = Math.max(0, MAX_DRAWN_REGIONS - keptReserved.length);
+  const rest = readable
+    .filter((draft) => !reservedKeys.has(draft.cluster.directory))
+    .sort((a, b) => a.cluster.order - b.cluster.order)
+    .slice(0, extra);
+  const chosen = [...keptReserved, ...rest];
+  const drawnByBand = new Map<number, Draft[]>();
+  for (const draft of chosen) {
+    const depth = draft.depth ?? 0;
+    const bucket = drawnByBand.get(depth);
+    if (bucket) bucket.push(draft);
+    else drawnByBand.set(depth, [draft]);
+  }
+  for (const band of drawnByBand.values()) {
+    band.sort((a, b) => a.cluster.order - b.cluster.order);
+  }
+  return { drawnByBand, capFoldedRegions: readable.length - chosen.length };
 }
 
 /** Lower median: deterministic, and an actual observed depth rather than a
@@ -179,47 +233,41 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
   }
   for (const depths of depthsByDirectory.values()) depths.sort((a, b) => a - b);
 
-  // The measurement's own ordering is the selection rule, so the cap is
-  // "the first N in the order the producer already published", not a
-  // preference this module invented.
+  // Producer order still ranks regions inside a band. The drawing set is every
+  // placeable region, folded per stratum for readability, then filled across
+  // bands so a crowded bedrock cannot erase a representable ridge.
   const ordered = [...measurement.clusters].sort((a, b) => a.order - b.order);
 
-  interface Draft {
-    readonly cluster: StrataClusterV1;
-    readonly depths: readonly number[];
-    readonly depth: number | null;
-  }
   const drafts: Draft[] = ordered.map((cluster) => {
     const depths = depthsByDirectory.get(cluster.directory) ?? [];
     return { cluster, depths, depth: lowerMedian(depths) };
   });
 
   const placeable = drafts.filter((draft) => draft.depth !== null);
-  const chosen = placeable.slice(0, MAX_DRAWN_REGIONS);
   const maxDepth = Math.max(measurement.max_depth, 0);
   const usableWidth = CORTEX_WORLD.width - PAD.left - PAD.right;
   const usableHeight = CORTEX_WORLD.height - PAD.top - PAD.bottom;
   const bandGap = maxDepth > 0 ? usableHeight / maxDepth : usableHeight;
 
   const byBand = new Map<number, Draft[]>();
-  for (const draft of chosen) {
+  for (const draft of placeable) {
     const depth = draft.depth ?? 0;
     const bucket = byBand.get(depth);
     if (bucket) bucket.push(draft);
     else byBand.set(depth, [draft]);
   }
-  const drawnByBand = new Map<number, Draft[]>();
+  const readableByBand = new Map<number, Draft[]>();
+  let readabilityFoldedRegions = 0;
   for (const [depth, band] of byBand) {
     const inBand = [...band].sort((a, b) => a.cluster.order - b.cluster.order);
     const bandCapacity = maxRegionsWithoutOverlap(
       usableWidth,
-      inBand.map((draft) => ({
-        label: labelOf(draft.cluster.directory),
-        directory: draft.cluster.directory,
-      })),
+      inBand.map((draft) => labelOf(draft.cluster.directory)),
     );
-    drawnByBand.set(depth, inBand.slice(0, bandCapacity));
+    readableByBand.set(depth, inBand.slice(0, bandCapacity));
+    readabilityFoldedRegions += Math.max(0, inBand.length - bandCapacity);
   }
+  const { drawnByBand, capFoldedRegions } = applyGlobalDrawCap(readableByBand);
   const widestBand = [...drawnByBand.values()].reduce((max, band) => Math.max(max, band.length), 1);
   const drawnKeys = new Set(
     [...drawnByBand.values()].flatMap((band) => band.map((draft) => draft.cluster.directory)),
@@ -227,7 +275,7 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
 
   // ONE global scale, so the √-area law holds between every pair of regions
   // on the field rather than being bent per body by a clamp.
-  const widestFileCount = chosen.reduce(
+  const widestFileCount = placeable.reduce(
     (max, draft) =>
       drawnKeys.has(draft.cluster.directory)
         ? Math.max(max, draft.cluster.file_count)
@@ -237,7 +285,7 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
   const slotWidth = usableWidth / Math.max(widestBand, 1);
   const allowedRadius = Math.max(
     MIN_RADIUS,
-    Math.min(slotWidth * 0.42, bandGap * 0.40, READABLE_RADIUS),
+    Math.min(slotWidth * 0.42, bandGap * 0.40),
   );
   const areaScale =
     widestFileCount > 0 ? (allowedRadius - MIN_RADIUS) / Math.sqrt(widestFileCount) : 0;
@@ -313,6 +361,8 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
     drawnFiles,
     foldedRegions: regions.length - drawnRegions.length,
     foldedFiles: totalFiles - drawnFiles,
+    readabilityFoldedRegions,
+    capFoldedRegions,
     unplacedRegions: regions.filter((region) => region.depth === null).length,
     relieflessRegions: drawnRegions.filter((region) => region.contours === 0).length,
     widestFileCount,
@@ -381,7 +431,7 @@ export function cortexLegendPanels(model: CortexModel): readonly CortexPanel[] {
     {
       label: 'scale',
       reading: `${model.drawnRegions.length} regions ⟵ ${model.drawnFiles.toLocaleString()} files`,
-      teach: `an aggregate surface: ${model.totalFiles.toLocaleString()} files cannot be drawn as bodies, so they are drawn as mass. The cap is ${MAX_DRAWN_REGIONS} regions; every region the cap folds out is in the table below.`,
+      teach: foldTeach(model),
     },
   ];
 }
@@ -428,8 +478,53 @@ export function cortexDescription(model: CortexModel): string {
     model.relieflessRegions > 0
       ? `${model.relieflessRegions} regions measured zero internal edges and are drawn hollow.`
       : '',
-    `The table below carries the same regions as text, including the ${model.foldedRegions} the drawing cap folds out.`,
+    foldDescription(model),
   ]
     .filter((part) => part.length > 0)
     .join(' ');
+}
+
+export function foldNote(model: CortexModel): string {
+  if (model.foldedRegions === 0) return 'the whole clustering is drawn';
+  const bits: string[] = [];
+  if (model.readabilityFoldedRegions > 0) {
+    bits.push(`${model.readabilityFoldedRegions} for readability`);
+  }
+  if (model.capFoldedRegions > 0) {
+    bits.push(`${model.capFoldedRegions} at the ${MAX_DRAWN_REGIONS}-region cap`);
+  }
+  if (bits.length === 0) return `${model.foldedFiles.toLocaleString()} files, all in the table`;
+  return `${bits.join(', ')}; all in the table`;
+}
+
+function foldTeach(model: CortexModel): string {
+  const mass = `an aggregate surface: ${model.totalFiles.toLocaleString()} files cannot be drawn as bodies, so they are drawn as mass.`;
+  if (model.readabilityFoldedRegions === 0 && model.capFoldedRegions === 0) {
+    return `${mass} The whole clustering is drawn.`;
+  }
+  const bits: string[] = [];
+  if (model.readabilityFoldedRegions > 0) {
+    bits.push(
+      `${model.readabilityFoldedRegions} folded so labels and bodies stay readable on their stratum`,
+    );
+  }
+  if (model.capFoldedRegions > 0) {
+    bits.push(
+      `${model.capFoldedRegions} folded by the ${MAX_DRAWN_REGIONS}-region drawing cap`,
+    );
+  }
+  return `${mass} ${bits.join('. ')}. Every folded region is in the table below.`;
+}
+
+function foldDescription(model: CortexModel): string {
+  const bits: string[] = [
+    `The table below carries the same regions as text, including the ${model.foldedRegions} folded out.`,
+  ];
+  if (model.readabilityFoldedRegions > 0) {
+    bits.push(`${model.readabilityFoldedRegions} folded for stratum readability.`);
+  }
+  if (model.capFoldedRegions > 0) {
+    bits.push(`${model.capFoldedRegions} folded by the ${MAX_DRAWN_REGIONS}-region drawing cap.`);
+  }
+  return bits.join(' ');
 }
