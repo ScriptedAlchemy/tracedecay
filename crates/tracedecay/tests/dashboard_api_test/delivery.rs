@@ -4,23 +4,28 @@ use std::sync::Arc;
 use tracedecay_application::delivery::{
     ProjectDeliveryCiSourceV1, ProjectDeliveryCiTimelineV1,
     ProjectDeliveryFailureLocalizationSourceV1, ProjectDeliveryGitHubOperationSnapshotV1,
-    ProjectDeliveryGitHubSourceV1, ProjectDeliveryGitHubTimelineV1, ProjectDeliveryPullRequestIdentityV1,
-    ProjectDeliveryPullRequestOperationV1, ProjectDeliveryPullRequestStateV1,
-    ProjectDeliveryPullRequestV1, ProjectDeliveryReadOutcomeV1, ProjectDeliveryReadRequestV1,
-    ProjectDeliveryReleaseSourceV1, ProjectDeliverySnapshotV1,
+    ProjectDeliveryGitHubSourceV1, ProjectDeliveryGitHubTimelineV1,
+    ProjectDeliveryInboxCoverageV1, ProjectDeliveryProximityAttentionSourceV1,
+    ProjectDeliveryProximityEncounterV1, ProjectDeliveryProximityRelationV1,
+    ProjectDeliveryPullRequestIdentityV1, ProjectDeliveryPullRequestOperationV1,
+    ProjectDeliveryPullRequestStateV1, ProjectDeliveryPullRequestV1, ProjectDeliveryReadOutcomeV1,
+    ProjectDeliveryReadRequestV1, ProjectDeliveryReleaseSourceV1, ProjectDeliverySnapshotV1,
 };
 use tracedecay_contracts::code_index_freshness::{
     CodeIndexFreshnessReadFuture, CodeIndexFreshnessReader, CodeIndexWorktreeFreshnessV1,
 };
 use tracedecay_dashboard_api::{
     DashboardDeliveryProjectV1, DashboardDeliveryReadFutureV1, DashboardDeliveryReadPortV1,
-    DashboardHttpRequestControlV1,
+    DashboardHttpRequestControlV1, DashboardProximityAttentionReadFutureV1,
+    DashboardProximityAttentionReadPortV1,
 };
 use tracedecay_domain::feedback::{
     FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewCoverageV1,
     GitHubReviewIngressProviderOutcomeV1, GitHubReviewReadCheckpointV1, GitHubReviewReadOperationV1,
 };
-use tracedecay_domain::{CommitId, ProjectId, ProviderId, RepositoryId, UtcMicros, WorktreeId};
+use tracedecay_domain::{
+    CommitId, ManifestDigest, ProjectId, ProviderId, RepositoryId, UtcMicros, WorktreeId,
+};
 
 use crate::dashboard_api_support::*;
 
@@ -28,6 +33,8 @@ const DELIVERY_HTTP_ADMISSION_MATCHED_PR: &str = "42";
 const DELIVERY_HTTP_ADMISSION_UNMATCHED_PR: &str = "99";
 const DELIVERY_HTTP_ADMISSION_INDEXED_HEAD: &str = "commit.delivery-http-admission.indexed";
 const DELIVERY_HTTP_ADMISSION_UNMATCHED_HEAD: &str = "commit.delivery-http-admission.unmatched";
+const DELIVERY_HTTP_PROXIMITY_ENCOUNTER: &str =
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 /// A fake `DashboardDeliveryReadPortV1` that always returns two provider pull
 /// requests: one whose retained head matches the fixture's indexed head, one
@@ -46,6 +53,34 @@ impl DashboardDeliveryReadPortV1 for FakeDeliveryReadPortV1 {
         Box::pin(async move {
             ProjectDeliveryReadOutcomeV1::Ready {
                 snapshot: Box::new(delivery_http_admission_snapshot()),
+            }
+        })
+    }
+}
+
+/// Mounts a Ready proximity page naming the admitted indexed head so HTTP
+/// proves server-owned overlapping_edit attention (never a client re-join).
+struct FakeProximityAttentionReadPortV1;
+
+impl DashboardProximityAttentionReadPortV1 for FakeProximityAttentionReadPortV1 {
+    fn read(
+        &self,
+        _control: DashboardHttpRequestControlV1,
+        _project: DashboardDeliveryProjectV1,
+    ) -> DashboardProximityAttentionReadFutureV1<'_> {
+        Box::pin(async move {
+            ProjectDeliveryProximityAttentionSourceV1::Ready {
+                encounters: vec![ProjectDeliveryProximityEncounterV1 {
+                    encounter_id: ManifestDigest::new(DELIVERY_HTTP_PROXIMITY_ENCOUNTER.to_owned())
+                        .unwrap(),
+                    relation: ProjectDeliveryProximityRelationV1::OverlappingEdit,
+                    observed_at: UtcMicros(40),
+                    participant_head_revisions: vec![
+                        CommitId::new(DELIVERY_HTTP_ADMISSION_INDEXED_HEAD).unwrap(),
+                        CommitId::new("commit.delivery-http-admission.sibling").unwrap(),
+                    ],
+                }],
+                coverage: ProjectDeliveryInboxCoverageV1::Complete,
             }
         })
     }
@@ -154,6 +189,7 @@ fn delivery_inbox_admits_only_indexed_pull_requests_over_http() {
     runtime.block_on(async {
         let mut fixture = start_dashboard_fixture_with_delivery_authority(FakeDeliveryAuthority {
             delivery_read_authority: Arc::new(FakeDeliveryReadPortV1),
+            proximity_attention_read_authority: Some(Arc::new(FakeProximityAttentionReadPortV1)),
             code_index_freshness_reader: delivery_http_admission_freshness_reader(),
         })
         .await;
@@ -233,6 +269,35 @@ fn delivery_inbox_admits_only_indexed_pull_requests_over_http() {
                 "attention must name every source, missing {source}: {body}"
             );
         }
+
+        let overlapping = attention
+            .iter()
+            .find(|item| item["source"] == "overlapping_edit")
+            .unwrap_or_else(|| panic!("expected overlapping_edit attention: {body}"));
+        assert_eq!(
+            overlapping["state"], "active",
+            "server-owned proximity join must activate overlapping_edit: {body}"
+        );
+        assert_eq!(overlapping["coverage"], "complete");
+        let evidence = overlapping["evidence"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected proximity evidence: {body}"));
+        assert!(
+            evidence.iter().any(|item| {
+                item["kind"] == "proximity_encounter"
+                    && item["relation"] == "overlapping_edit"
+                    && item["encounter_id"] == DELIVERY_HTTP_PROXIMITY_ENCOUNTER
+            }),
+            "HTTP inbox must carry typed proximity_encounter evidence: {body}"
+        );
+        let confirmed = attention
+            .iter()
+            .find(|item| item["source"] == "confirmed_conflict")
+            .unwrap();
+        assert_eq!(
+            confirmed["state"], "clear",
+            "mounted proximity with zero conflict matches measures Clear, not Unsupported: {body}"
+        );
 
         fixture.server.stop();
     });

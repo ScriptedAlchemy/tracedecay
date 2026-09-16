@@ -131,11 +131,15 @@ pub(crate) fn spawn_dashboard_server_with_configuration_runtime(
     spawn_dashboard_server_with_runner(cg, Some((host_runtime, project_graphs)), true, None, port)
 }
 
-/// Test-only mount point for a fake `DashboardDeliveryReadPortV1` and a fake
-/// code-index freshness reader, proving the HTTP admission path (not just the
-/// application unit tests) joins an indexed head with the provider read.
+/// Test-only mount point for a fake `DashboardDeliveryReadPortV1`, optional
+/// proximity attention authority, and a fake code-index freshness reader,
+/// proving the HTTP admission + proximity join path (not just application
+/// unit tests) owns Delivery attention.
 pub(crate) struct FakeDeliveryAuthority {
     pub(crate) delivery_read_authority: Arc<dyn tracedecay_dashboard_api::DashboardDeliveryReadPortV1>,
+    pub(crate) proximity_attention_read_authority: Option<
+        Arc<dyn tracedecay_dashboard_api::DashboardProximityAttentionReadPortV1>,
+    >,
     pub(crate) code_index_freshness_reader:
         tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader,
 }
@@ -175,10 +179,17 @@ fn spawn_dashboard_server_with_runner(
             let authority = match delivery_authority {
                 Some(FakeDeliveryAuthority {
                     delivery_read_authority,
+                    proximity_attention_read_authority,
                     code_index_freshness_reader,
-                }) => authority
-                    .with_delivery_read_authority(delivery_read_authority)
-                    .with_code_index_freshness_reader(code_index_freshness_reader),
+                }) => {
+                    let mut authority = authority
+                        .with_delivery_read_authority(delivery_read_authority)
+                        .with_code_index_freshness_reader(code_index_freshness_reader);
+                    if let Some(proximity) = proximity_attention_read_authority {
+                        authority = authority.with_proximity_attention_read_authority(proximity);
+                    }
+                    authority
+                }
                 None => authority,
             };
             let result = dashboard::run_until_shutdown_for_tests_with_host_admission(
