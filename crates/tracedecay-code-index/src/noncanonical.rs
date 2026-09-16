@@ -281,7 +281,9 @@ impl NonCanonicalCauseV1 {
 impl fmt::Display for NonCanonicalCauseV1 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.reason_code.as_str())?;
-        if self.details.is_empty() {
+        if self.details.is_empty()
+            || self.reason_code == NonCanonicalReasonCodeV1::CloneBodyOccurrenceOrder
+        {
             return Ok(());
         }
         write!(f, " {{")?;
@@ -460,6 +462,25 @@ mod tests {
         assert_eq!(
             NonCanonicalReasonCodeV1::InvalidRange.as_str(),
             "invalid_range"
+        );
+    }
+
+    #[test]
+    fn clone_order_display_omits_identity_details_without_discarding_them() {
+        let cause = NonCanonicalCauseV1::new(NonCanonicalReasonCodeV1::CloneBodyOccurrenceOrder)
+            .with(
+                NonCanonicalDetailKeyV1::LeftSymbolOccurrenceId,
+                "symbol.v1.left",
+            )
+            .with(NonCanonicalDetailKeyV1::LeftPayloadDigest, "sha256:payload");
+        assert_eq!(cause.to_string(), "clone_body_occurrence_order");
+        assert_eq!(
+            cause.details()[&NonCanonicalDetailKeyV1::LeftSymbolOccurrenceId],
+            "symbol.v1.left"
+        );
+        assert_eq!(
+            cause.details()[&NonCanonicalDetailKeyV1::LeftPayloadDigest],
+            "sha256:payload"
         );
     }
 }

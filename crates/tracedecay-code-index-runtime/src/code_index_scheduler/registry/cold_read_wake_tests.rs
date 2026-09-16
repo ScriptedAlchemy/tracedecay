@@ -134,6 +134,35 @@ async fn cold_read_wakes_do_not_cancel_an_in_flight_reconcile_snapshot() {
         "source-change evidence must still supersede the in-flight snapshot"
     );
 
+    assert!(
+        registry
+            .plant_terminal_publication_authority_park_for_test(
+                &project,
+                "publication authority corrupt before progress",
+            )
+            .await
+    );
+    {
+        let mounted = registry.mounted.lock().await;
+        let worktree = mounted.get(&canonical_project).expect("mounted worktree");
+        *worktree.build_progress.write().unwrap() = Default::default();
+    }
+    registry.clear_pending_wake_for_scope(&scope).await;
+    let admission_result = registry.request_query_background_reconcile(&scope).await;
+    assert!(
+        matches!(
+            admission_result,
+            CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(ref parked)
+                if parked.reason == "publication authority corrupt before progress"
+        ),
+        "query admission must use the terminal park without a progress snapshot: {admission_result:?}"
+    );
+    assert_eq!(
+        registry.pending_wake_micros_for_scope(&scope).await,
+        Some(0),
+        "terminal query admission must not enqueue another reconcile"
+    );
+
     drop(reconcile_pass);
     drop(admission);
     registry.shutdown().await;
