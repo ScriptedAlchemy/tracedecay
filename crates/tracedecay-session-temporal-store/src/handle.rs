@@ -73,6 +73,10 @@ pub trait SessionTemporalRegisteredDb: Sync {
         &self,
     ) -> impl Future<Output = Result<DatabaseEngineReadSnapshot, TraceDecayError>> + Send;
 
+    fn health_read_snapshot(
+        &self,
+    ) -> impl Future<Output = Result<DatabaseEngineReadSnapshot, TraceDecayError>> + Send;
+
     fn begin_write_transaction(
         &self,
     ) -> impl Future<Output = Result<Self::WriteTxn<'_>, TraceDecayError>> + Send;

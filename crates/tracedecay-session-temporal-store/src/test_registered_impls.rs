@@ -160,6 +160,12 @@ impl SessionTemporalRegisteredDb for RegisteredGlobalDb {
         RegisteredGlobalDb::read_snapshot(self)
     }
 
+    fn health_read_snapshot(
+        &self,
+    ) -> impl Future<Output = Result<DatabaseEngineReadSnapshot, TraceDecayError>> + Send {
+        RegisteredGlobalDb::health_read_snapshot(self)
+    }
+
     fn begin_write_transaction(
         &self,
     ) -> impl Future<Output = Result<Self::WriteTxn<'_>, TraceDecayError>> + Send {
@@ -206,6 +212,12 @@ impl SessionTemporalRegisteredDb for RegisteredGlobalDbLeaseV1 {
         &self,
     ) -> impl Future<Output = Result<DatabaseEngineReadSnapshot, TraceDecayError>> + Send {
         RegisteredGlobalDb::read_snapshot(self)
+    }
+
+    fn health_read_snapshot(
+        &self,
+    ) -> impl Future<Output = Result<DatabaseEngineReadSnapshot, TraceDecayError>> + Send {
+        RegisteredGlobalDb::health_read_snapshot(self)
     }
 
     fn begin_write_transaction(
