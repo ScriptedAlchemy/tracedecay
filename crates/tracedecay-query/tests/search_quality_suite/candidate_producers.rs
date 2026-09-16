@@ -6627,7 +6627,7 @@ fn lexical_source_occurrence_identity_is_generation_exact() {
 
     // Symbol occurrence identity binds the file occurrence and the logical
     // symbol identity, not the generation, so an unchanged file keeps one
-    // shareable anchor across generations (#1345). Generation exactness lives
+    // shareable anchor across generations. Generation exactness lives
     // in the source occurrence instead.
     assert_eq!(
         first.candidates[0].anchor_id, second.candidates[0].anchor_id,
