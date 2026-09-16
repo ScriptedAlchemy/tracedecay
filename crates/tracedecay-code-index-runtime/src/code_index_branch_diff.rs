@@ -467,15 +467,15 @@ where
                 if let Some(reason) = control.termination() {
                     return unavailable(None, None, reason);
                 }
-                let _permit = match execution_admission.try_acquire_owned() {
+                let _permit = match crate::code_index_executor::acquire_execution_permit(
+                    execution_admission,
+                    control.deadline.as_ref(),
+                    control.cancellation.as_ref(),
+                )
+                .await
+                {
                     Ok(permit) => permit,
-                    Err(_) => {
-                        return unavailable(
-                            None,
-                            None,
-                            code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable,
-                        );
-                    }
+                    Err(reason) => return unavailable(None, None, reason),
                 };
                 let generations = match schedulers
                 .bounded_generations_for_revisions(
