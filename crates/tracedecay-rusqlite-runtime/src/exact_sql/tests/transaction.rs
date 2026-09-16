@@ -1,7 +1,10 @@
 use super::*;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Instant,
 };
 
 fn busy_begin_connections() -> (TempDir, Connection, Connection) {
@@ -35,6 +38,7 @@ fn immediate_begin_retries_sqlite_busy_until_lock_releases() {
                 &contender,
                 TransactionBehavior::Immediate,
                 &shutdown,
+                || false,
             )
             .unwrap();
             transaction.rollback().unwrap();
@@ -43,7 +47,7 @@ fn immediate_begin_retries_sqlite_busy_until_lock_releases() {
             std::thread::yield_now();
         }
         // Hold past a yield-only attempt budget (~50µs for 64 yields) so the
-        // contender must wait on the idle deadline, not burn out spinning.
+        // contender must wait on the write-lock acquire bound, not burn out.
         std::thread::sleep(Duration::from_millis(5));
         lock.rollback().unwrap();
         admission.join().unwrap();
@@ -58,12 +62,15 @@ fn immediate_begin_busy_retry_is_bounded_and_honors_shutdown() {
         .unwrap();
     let shutdown = AtomicBool::new(false);
 
+    let started = Instant::now();
     let error = super::super::command::begin_transaction_with_busy_retry(
         &contender,
         TransactionBehavior::Immediate,
         &shutdown,
+        || false,
     )
     .unwrap_err();
+    let elapsed = started.elapsed();
 
     assert!(matches!(
         error,
@@ -73,12 +80,23 @@ fn immediate_begin_busy_retry_is_bounded_and_honors_shutdown() {
                 rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
             )
     ));
+    // Must not borrow the transaction idle lease (2s in tests / 30s in prod).
+    assert!(
+        elapsed < EXACT_SQL_TRANSACTION_IDLE_LIMIT / 2,
+        "busy acquire waited {elapsed:?}, which reaches toward the idle lease"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(32),
+        "busy acquire returned in {elapsed:?}, below the measured 64ms write-lock bound"
+    );
 
     shutdown.store(true, Ordering::Release);
+    let started = Instant::now();
     let error = super::super::command::begin_transaction_with_busy_retry(
         &contender,
         TransactionBehavior::Immediate,
         &shutdown,
+        || false,
     )
     .unwrap_err();
     assert!(matches!(
@@ -88,6 +106,44 @@ fn immediate_begin_busy_retry_is_bounded_and_honors_shutdown() {
                 error.code,
                 rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
             )
+    ));
+    assert!(
+        started.elapsed() < Duration::from_millis(50),
+        "shutdown-aware busy acquire stalled for {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn immediate_begin_busy_retry_honors_cancellation() {
+    let shutdown = AtomicBool::new(false);
+    let cancelled = AtomicBool::new(false);
+    let mut attempts = 0;
+    let started = Instant::now();
+
+    let error = super::super::command::retry_busy_begin(
+        || {
+            attempts += 1;
+            if attempts == 1 {
+                cancelled.store(true, Ordering::Release);
+            }
+            Err::<(), _>(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                Some("original database lock".to_owned()),
+            ))
+        },
+        &shutdown,
+        || cancelled.load(Ordering::Acquire),
+    )
+    .unwrap_err();
+
+    assert_eq!(attempts, 1);
+    assert!(started.elapsed() < Duration::from_millis(50));
+    assert!(matches!(
+        error,
+        rusqlite::Error::SqliteFailure(error, Some(message))
+            if error.code == rusqlite::ErrorCode::DatabaseBusy
+                && message == "original database lock"
     ));
 }
 
@@ -110,6 +166,7 @@ fn immediate_begin_shutdown_after_busy_never_publishes_late_success() {
             }
         },
         &shutdown,
+        || false,
     )
     .unwrap_err();
 
