@@ -953,9 +953,8 @@ fn rust_export_resolves_to_target<T>(
 where
     T: AsRef<FileGenerationArtifactsV1>,
 {
-    let root_index = origin_index;
     let cache_key = (
-        root_index,
+        origin_index,
         scope_index,
         format!("{exported_name}{member}"),
         target.index,
@@ -967,7 +966,7 @@ where
     if !visited.insert((scope_index, format!("{exported_name}{member}"))) {
         return false;
     }
-    let root_path = &files[root_index].as_ref().authority.logical_path;
+    let root_path = &files[origin_index].as_ref().authority.logical_path;
     let scope_path = &files[scope_index].as_ref().authority.logical_path;
     let Some(source_root) = rust_source_root(scope_path) else {
         return false;
@@ -1045,7 +1044,7 @@ where
                         rust_export_resolves_to_target(
                             files,
                             rust,
-                            root_index,
+                            origin_index,
                             next_scope,
                             imported_name,
                             target,
