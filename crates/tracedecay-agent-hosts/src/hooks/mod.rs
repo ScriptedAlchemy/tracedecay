@@ -1039,6 +1039,8 @@ fn nearest_project_like_root_with_temp_root(
     start: &Path,
     temp_root: Option<&Path>,
 ) -> Option<PathBuf> {
+    // Fail closed when temp identity is unavailable: skipping the bound would
+    // re-enroll ephemeral agent git worktrees (the opposite of #1376 / #1387).
     let Some(temp_root) = temp_root.and_then(usable_absolute_temp_root_from) else {
         return None;
     };
@@ -1055,7 +1057,11 @@ fn nearest_project_like_root_with_temp_root(
     }
     let mut dir = start.to_path_buf();
     loop {
-        if tracedecay_runtime_core::path_safety::canonical_root_identity(&dir) == temp_root {
+        // Same starts_with bound as the git-worktree refusal: a marker inside
+        // the temp tree must not enroll, not only a marker exactly at temp_root.
+        if tracedecay_runtime_core::path_safety::canonical_root_identity(&dir)
+            .starts_with(&temp_root)
+        {
             return None;
         }
         if project_marker_exists(&dir) {
