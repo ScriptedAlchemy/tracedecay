@@ -12,7 +12,10 @@ use tracedecay_domain::{
     RelationEdgeKindV1, SourceSpan, SymbolOccurrenceId,
 };
 
-use super::{ChunkingFailureV1, CodeFileChunksV1, canonical_edge_key, symbol_occurrence_id};
+use super::{
+    ChunkingFailureV1, CodeFileChunksV1, NonCanonicalCloneBodyOrderV1, canonical_edge_key,
+    symbol_occurrence_id,
+};
 use crate::clones::CodeIndexCloneBodyV1;
 use crate::extract::ExtractionBatchV1;
 use crate::extract::parser_import_rows_digest;
@@ -380,17 +383,20 @@ impl CodeFileIndexArtifactsV1 {
         if let Some(pair) = self.clone_bodies.windows(2).find(|pair| {
             pair[0].occurrence.symbol_occurrence_id >= pair[1].occurrence.symbol_occurrence_id
         }) {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(format!(
-                "clone body evidence is not in strict symbol-occurrence order: file={} file_occurrence={} left_payload={} left_symbol={} left_bound={} right_payload={} right_symbol={} right_bound={}",
-                pair[0].occurrence.path,
-                self.chunks.document.file_occurrence_id.as_str(),
-                pair[0].occurrence.payload_digest.as_str(),
-                pair[0].occurrence.symbol_occurrence_id.as_str(),
-                occurrences.contains(&pair[0].occurrence.symbol_occurrence_id),
-                pair[1].occurrence.payload_digest.as_str(),
-                pair[1].occurrence.symbol_occurrence_id.as_str(),
-                occurrences.contains(&pair[1].occurrence.symbol_occurrence_id),
-            )));
+            return Err(ChunkingFailureV1::NonCanonicalCloneBodyOrder(
+                NonCanonicalCloneBodyOrderV1 {
+                    path: pair[0].occurrence.path.clone(),
+                    file_occurrence_id: self.chunks.document.file_occurrence_id.clone(),
+                    left_payload_digest: pair[0].occurrence.payload_digest.clone(),
+                    left_symbol_occurrence_id: pair[0].occurrence.symbol_occurrence_id.clone(),
+                    left_bound_to_symbol: occurrences
+                        .contains(&pair[0].occurrence.symbol_occurrence_id),
+                    right_payload_digest: pair[1].occurrence.payload_digest.clone(),
+                    right_symbol_occurrence_id: pair[1].occurrence.symbol_occurrence_id.clone(),
+                    right_bound_to_symbol: occurrences
+                        .contains(&pair[1].occurrence.symbol_occurrence_id),
+                },
+            ));
         }
         for body in &self.clone_bodies {
             if body.occurrence.path.is_empty() {
@@ -706,6 +712,34 @@ fn canonical_import_order(
 #[cfg(test)]
 mod schema_evidence_tests {
     use super::*;
+    use crate::chunks::ChunkingFailureV1;
+
+    #[test]
+    fn non_canonical_clone_body_order_display_omits_identity_dumps() {
+        let digest = |n: u8| {
+            ManifestDigest::new(format!("sha256:{}", n.to_string().repeat(64)))
+                .expect("test digest")
+        };
+        let symbol = |label: &str| {
+            SymbolOccurrenceId::new(format!("symbol.v1.{label}")).expect("test symbol")
+        };
+        let file = FileOccurrenceId::new("file.v1.test").expect("test file");
+        let detail = NonCanonicalCloneBodyOrderV1 {
+            path: "src/lib.rs".to_owned(),
+            file_occurrence_id: file,
+            left_payload_digest: digest(1),
+            left_symbol_occurrence_id: symbol("left"),
+            left_bound_to_symbol: true,
+            right_payload_digest: digest(2),
+            right_symbol_occurrence_id: symbol("right"),
+            right_bound_to_symbol: false,
+        };
+        let message =
+            ChunkingFailureV1::NonCanonicalCloneBodyOrder(detail).to_string();
+        assert!(message.contains("symbol-occurrence order"));
+        assert!(!message.contains("sha256:"));
+        assert!(!message.contains("symbol.v1.left"));
+    }
 
     #[test]
     fn rejects_schema_evidence_for_a_foreign_language() {

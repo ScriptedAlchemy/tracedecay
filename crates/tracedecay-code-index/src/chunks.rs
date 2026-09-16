@@ -22,10 +22,11 @@ use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
     CodeSearchChunkV1, ComplexityAnalysisV1, ContentDigest, Edge, EdgeAuthorityV1, EdgeKind,
     ExactTechnicalTermKindV1, ExactTechnicalTermV1, ExtractionAdmittedChunkV1, FileIdentityDigest,
-    FileOccurrenceId, LanguageDescriptorV1, MAX_CHUNK_TEXT_BYTES, Node, NodeKind, PolicyRevisionId,
-    RelationEdgeKindV1, RepositoryId, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
-    SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId, UnresolvedRef, ValidatedCodeFileV1,
-    canonical_sha256, classify_technical_token, split_subtokens, technical_tokens,
+    FileOccurrenceId, LanguageDescriptorV1, ManifestDigest, MAX_CHUNK_TEXT_BYTES, Node, NodeKind,
+    PolicyRevisionId, RelationEdgeKindV1, RepositoryId, SanitizerRevision, SensitivityDecision,
+    SensitivityLevelV1, SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId, UnresolvedRef,
+    ValidatedCodeFileV1, canonical_sha256, classify_technical_token, split_subtokens,
+    technical_tokens,
 };
 
 use super::{
@@ -76,6 +77,19 @@ pub struct CodeSearchDocumentV1 {
     pub chunk_ids: Vec<CodeSearchChunkId>,
 }
 
+/// One out-of-order clone-body pair observed during artifact validation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NonCanonicalCloneBodyOrderV1 {
+    pub path: String,
+    pub file_occurrence_id: FileOccurrenceId,
+    pub left_payload_digest: ManifestDigest,
+    pub left_symbol_occurrence_id: SymbolOccurrenceId,
+    pub left_bound_to_symbol: bool,
+    pub right_payload_digest: ManifestDigest,
+    pub right_symbol_occurrence_id: SymbolOccurrenceId,
+    pub right_bound_to_symbol: bool,
+}
+
 /// Chunker failures. Partial coverage is evidence, not an error; errors are
 /// reserved for contract violations.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -88,6 +102,8 @@ pub enum ChunkingFailureV1 {
     Cancelled,
     #[error("chunk identity inputs are not canonical: {0}")]
     NonCanonicalIdentity(String),
+    #[error("clone body evidence is not in strict symbol-occurrence order")]
+    NonCanonicalCloneBodyOrder(NonCanonicalCloneBodyOrderV1),
 }
 
 /// The deterministic chunker contract (Plan 25: `src/code_index/chunks.rs`
