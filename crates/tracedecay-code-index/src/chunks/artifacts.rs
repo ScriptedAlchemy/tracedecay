@@ -434,12 +434,15 @@ impl CodeFileIndexArtifactsV1 {
         extraction: &ExtractionBatchV1,
         snapshot_digest: &ManifestDigest,
     ) -> Result<(), ChunkingFailureV1> {
+        let _ = snapshot_digest;
+        // `snapshot_digest` on clone bodies is the snapshot of last extraction /
+        // rematerialize. Carried Arc-shared pages keep that provenance across
+        // successor publishes; path/project/content binding is the live check.
         if self.clone_bodies.iter().any(|body| {
             body.occurrence.project_id != authority.project_id
                 || body.occurrence.repository_id != authority.repository_id
                 || body.occurrence.worktree_id != authority.worktree_id
                 || body.occurrence.source_generation != extraction.generation_id
-                || body.occurrence.snapshot_digest != *snapshot_digest
                 || body.occurrence.path != authority.logical_path
         }) {
             return Err(ChunkingFailureV1::GenerationMismatch);

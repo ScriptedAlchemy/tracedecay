@@ -1268,8 +1268,13 @@ fn production_owner_publishes_complete_generation_and_restores_it_after_restart(
         "incremental commitments retain the physical generation transition"
     );
     assert_eq!(
+        second_commitments.parent_full_replay_digest.as_ref(),
+        Some(&first_commitments.full_replay_digest),
+        "successor full-replay binds the parent's authenticated digest"
+    );
+    assert_ne!(
         first_commitments.full_replay_digest, second_commitments.full_replay_digest,
-        "unchanged source has one generation-independent full replay commitment"
+        "parent-delta full-replay seals the successor transition, not a copied corpus hash"
     );
     assert!(
         !second
@@ -3239,7 +3244,7 @@ fn partitioned_codec_fixture() -> (
 }
 
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:798ee2279fb0b7036f7bf08389d25c1a76689075b1ff06dd470da860e800a894";
+    "sha256:57a93a05de4c6951f2d053b9e190e480bf848c9d585404222a474dc8d18ab714";
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
         "sha256:0a8f5f5c66ac3bc2bf830d1316f1bcdf2568344c0dffb8e408f89dc36e7d66d9",
@@ -3254,7 +3259,7 @@ const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
         6_278,
     ),
     (
-        "sha256:645c3089b82cab871ee86cff603b38478b58e2440629ea4214ddefbae587909a",
+        "sha256:137fd3ac53a67e6e2c9a0b182f9bc1d7d8a534f268020e96280cbbbc3fdb774b",
         6_837,
     ),
 ];
