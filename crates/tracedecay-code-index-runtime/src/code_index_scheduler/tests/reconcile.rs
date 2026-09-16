@@ -3795,7 +3795,10 @@ async fn unchanged_background_freshness_probe_posts_no_overflow_wake() {
     }
     let receipts_before = registry.event_to_ready_receipts().len();
 
-    assert!(registry.probe_freshness(fixture.path()).await);
+    assert_eq!(
+        registry.probe_freshness_admission(fixture.path()).await,
+        super::super::CodeIndexDemandAdmissionV1::Queued
+    );
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let mounted = registry.mounted.lock().await;

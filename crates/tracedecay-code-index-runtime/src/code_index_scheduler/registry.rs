@@ -2740,17 +2740,10 @@ impl CodeIndexSchedulerRegistryV1 {
     /// query admission wake; a source witness that still matches (stat
     /// signature, then sealed file digests) refreshes the scheduler's cadence
     /// watermark and returns without extraction.
-    pub async fn probe_freshness(&self, project_root: &Path) -> bool {
-        matches!(
-            self.probe_freshness_admission(project_root).await,
-            CodeIndexDemandAdmissionV1::Queued
-        )
-    }
-
-    /// Typed ordinary-read freshness probe. Parks as
-    /// [`CodeIndexDemandAdmissionV1::Terminal`] when the
-    /// convergence park holds terminal publication corruption; never collapses
-    /// that state through a bool.
+    ///
+    /// Returns [`CodeIndexDemandAdmissionV1::Terminal`] when the convergence
+    /// park holds terminal publication corruption, so an operator-reset state
+    /// can never reach a caller as retryable unavailability.
     pub async fn probe_freshness_admission(
         &self,
         project_root: &Path,
