@@ -249,7 +249,7 @@ mod tests {
         CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadFuture,
         CodeGraphReadRequest,
     };
-    use tracedecay_contracts::{CancellationSignal, Deadline, RequestId};
+    use tracedecay_contracts::CancellationSignal;
     use tracedecay_domain::UtcMicros;
     use tracedecay_lsp::analyzer::settings::CodeDiagnosticsSettings;
 
@@ -282,18 +282,6 @@ mod tests {
         crate::events_api::dashboard_state_fixture("project.dashboard-code-diagnostics").await
     }
 
-    fn request_control() -> DashboardHttpRequestControlV1 {
-        let observed_at = UtcMicros(1_000_000);
-        DashboardHttpRequestControlV1 {
-            request_id: RequestId::new("request.dashboard-diagnostics-test")
-                .expect("request identity"),
-            deadline: Deadline::new(UtcMicros(2_000_000)).expect("request deadline"),
-            cancellation: CancellationSignal::active("cancel.dashboard-diagnostics-test")
-                .expect("request cancellation"),
-            observed_at,
-        }
-    }
-
     fn authority_with_settings(
         state: &DashboardState,
         settings: CodeDiagnosticsSettings,
@@ -308,6 +296,16 @@ mod tests {
                 state.project_root.clone(),
                 settings,
             ))),
+        )
+    }
+
+    fn request_control() -> DashboardHttpRequestControlV1 {
+        DashboardHttpRequestControlV1::test_fixture_with(
+            "dashboard-diagnostics-test",
+            CancellationSignal::active("cancel.dashboard-diagnostics-test")
+                .expect("request cancellation"),
+            UtcMicros(1_000_000),
+            UtcMicros(2_000_000),
         )
     }
 

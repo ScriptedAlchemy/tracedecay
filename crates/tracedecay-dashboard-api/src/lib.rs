@@ -1230,6 +1230,37 @@ impl IntoResponse for RequestControlMissing {
     }
 }
 
+#[cfg(test)]
+impl DashboardHttpRequestControlV1 {
+    /// One admitted-request control for tests: unbounded deadline, a fresh
+    /// active cancellation, `observed_at` = 1. `label` names the request and
+    /// cancellation identities so a failing assertion says which test minted it.
+    pub(crate) fn test_fixture(label: &str) -> Self {
+        Self::test_fixture_with(
+            label,
+            tracedecay_contracts::CancellationSignal::active(format!("cancel.{label}"))
+                .expect("test cancellation"),
+            tracedecay_domain::UtcMicros(1),
+            tracedecay_domain::UtcMicros(i64::MAX),
+        )
+    }
+
+    pub(crate) fn test_fixture_with(
+        label: &str,
+        cancellation: tracedecay_contracts::CancellationSignal,
+        observed_at: tracedecay_domain::UtcMicros,
+        deadline_at: tracedecay_domain::UtcMicros,
+    ) -> Self {
+        Self {
+            request_id: tracedecay_contracts::RequestId::new(format!("request.{label}"))
+                .expect("test request identity"),
+            deadline: tracedecay_contracts::Deadline::new(deadline_at).expect("test deadline"),
+            cancellation,
+            observed_at,
+        }
+    }
+}
+
 impl DashboardHttpRequestControlV1 {
     #[cfg(feature = "test-transport")]
     pub fn from_parts_for_test(
@@ -2301,6 +2332,27 @@ mod authority_tests {
     /// requires. A bare [`router_with_active_application`] is not a stack that
     /// exists in production: its handlers can only fail closed on the missing
     /// control, so route behaviour must be asserted through this one.
+    /// One GET through `app`, decoded: the status and the JSON body.
+    async fn get_json(app: &Router, uri: &str) -> (StatusCode, Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header(header::HOST, TEST_DASHBOARD_AUTHORITY)
+                    .body(Body::empty())
+                    .expect("dashboard GET request"),
+            )
+            .await
+            .expect("dashboard GET response");
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("dashboard GET body");
+        let value = serde_json::from_slice(&body).expect("dashboard GET JSON");
+        (status, value)
+    }
+
     fn admitted_router(state: DashboardState) -> Router {
         with_dashboard_http_admission(
             router_with_active_application(state, None, Router::new()),
@@ -2311,20 +2363,6 @@ mod authority_tests {
     }
 
     struct FakeDashboardLcmRead;
-
-    fn dashboard_lcm_test_control() -> DashboardHttpRequestControlV1 {
-        DashboardHttpRequestControlV1 {
-            request_id: tracedecay_contracts::RequestId::new("request.dashboard-lcm-test")
-                .expect("dashboard LCM test request"),
-            deadline: tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(i64::MAX))
-                .expect("dashboard LCM test deadline"),
-            cancellation: tracedecay_contracts::CancellationSignal::active(
-                "cancel.dashboard-lcm-test",
-            )
-            .expect("dashboard LCM test cancellation"),
-            observed_at: tracedecay_domain::UtcMicros(1),
-        }
-    }
 
     impl DashboardLcmReadPortV1 for FakeDashboardLcmRead {
         fn read(
@@ -3043,8 +3081,13 @@ mod authority_tests {
             "scope-set.dashboard-capabilities",
         )));
 
-        let Json(capabilities) =
-            capabilities(State(state), RequestControl(dashboard_lcm_test_control())).await;
+        let Json(capabilities) = capabilities(
+            State(state),
+            RequestControl(DashboardHttpRequestControlV1::test_fixture(
+                "dashboard-lcm-test",
+            )),
+        )
+        .await;
 
         assert_eq!(capabilities["features"]["multi_root"], true);
         assert_eq!(capabilities["multi_root"]["status"], "unavailable");
@@ -3064,7 +3107,7 @@ mod authority_tests {
 
         let mounted = multi_root_api::resolve_collection_capability(
             &state,
-            dashboard_lcm_test_control(),
+            DashboardHttpRequestControlV1::test_fixture("dashboard-lcm-test"),
             Some(tracedecay_domain::ScopeSetId::new("scope-set.dashboard-resolve").unwrap()),
         )
         .await;
@@ -3086,7 +3129,7 @@ mod authority_tests {
         // not-persisted state, never a silent fallback to another scope set.
         let missing = multi_root_api::resolve_collection_capability(
             &state,
-            dashboard_lcm_test_control(),
+            DashboardHttpRequestControlV1::test_fixture("dashboard-lcm-test"),
             Some(tracedecay_domain::ScopeSetId::new("scope-set.dashboard-missing").unwrap()),
         )
         .await;
@@ -3116,7 +3159,9 @@ mod authority_tests {
 
         let response = native_integration_api::status(
             State(fixture.state),
-            RequestControl(dashboard_lcm_test_control()),
+            RequestControl(DashboardHttpRequestControlV1::test_fixture(
+                "dashboard-lcm-test",
+            )),
             axum::extract::Query(native_integration_api::NativeIntegrationStatusQueryV1 {
                 transaction_id: "transaction.dashboard.native".to_owned(),
             }),
@@ -3173,27 +3218,12 @@ mod authority_tests {
             "/api/plugins/holographic/status",
             "/api/capabilities",
         ] {
-            let response = bare
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method(Method::GET)
-                        .uri(path)
-                        .header(header::HOST, TEST_DASHBOARD_AUTHORITY)
-                        .body(Body::empty())
-                        .expect("bare read request"),
-                )
-                .await
-                .expect("bare read response");
+            let (status, body) = get_json(&bare, path).await;
             assert_eq!(
-                response.status(),
+                status,
                 StatusCode::SERVICE_UNAVAILABLE,
                 "{path} must fail closed without request control"
             );
-            let body = axum::body::to_bytes(response.into_body(), 1 << 16)
-                .await
-                .expect("bare read body");
-            let body: Value = serde_json::from_slice(&body).expect("bare read JSON");
             assert_eq!(
                 body,
                 json!({
@@ -3488,24 +3518,12 @@ mod authority_tests {
         let fixture = DashboardStateFixture::open("project.dashboard-registry-envelope").await;
         let app = router_with_active_application(fixture.state, None, Router::new());
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/projects")
-                    .body(Body::empty())
-                    .expect("project registry request"),
-            )
-            .await
-            .expect("project registry response");
+        let (status, value) = get_json(&app, "/api/projects").await;
         assert_eq!(
-            response.status(),
+            status,
             StatusCode::OK,
             "the daemon answered; source unavailability belongs in the envelope"
         );
-        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
-            .await
-            .expect("project registry body");
-        let value: Value = serde_json::from_slice(&body).expect("project registry json");
 
         assert_eq!(value["schema_revision"], 1);
         assert_eq!(value["domain_state"], "unknown");
@@ -3534,7 +3552,9 @@ mod authority_tests {
                 .oneshot(
                     Request::builder()
                         .uri(uri)
-                        .extension(dashboard_lcm_test_control())
+                        .extension(DashboardHttpRequestControlV1::test_fixture(
+                            "dashboard-lcm-test",
+                        ))
                         .body(Body::empty())
                         .expect("LCM browse request"),
                 )
@@ -3576,7 +3596,9 @@ mod authority_tests {
                 .oneshot(
                     Request::builder()
                         .uri(uri)
-                        .extension(dashboard_lcm_test_control())
+                        .extension(DashboardHttpRequestControlV1::test_fixture(
+                            "dashboard-lcm-test",
+                        ))
                         .body(Body::empty())
                         .expect("LCM aggregate request"),
                 )
@@ -3607,21 +3629,8 @@ mod authority_tests {
             "/api/plugins/analytics/underused",
             "/api/plugins/analytics/diagnostics",
         ] {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri(uri)
-                        .body(Body::empty())
-                        .expect("analytics detail request"),
-                )
-                .await
-                .expect("analytics detail response");
-            assert_eq!(response.status(), StatusCode::OK, "{uri}");
-            let body = axum::body::to_bytes(response.into_body(), 1 << 20)
-                .await
-                .expect("analytics detail body");
-            let value: Value = serde_json::from_slice(&body).expect("analytics detail json");
+            let (status, value) = get_json(&app, uri).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
 
             assert_eq!(value["schema_revision"], 1, "{uri}");
             assert_eq!(value["domain_state"], "unknown", "{uri}");

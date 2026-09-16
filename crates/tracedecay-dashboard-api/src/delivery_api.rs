@@ -2330,26 +2330,18 @@ mod tests {
         assert!(refused_reason.contains("refused"));
     }
 
-    fn test_request_control() -> DashboardHttpRequestControlV1 {
-        DashboardHttpRequestControlV1 {
-            request_id: tracedecay_contracts::RequestId::new("request.delivery-inbox-test")
-                .expect("delivery inbox test request"),
-            deadline: tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(i64::MAX))
-                .expect("delivery inbox test deadline"),
-            cancellation: tracedecay_contracts::CancellationSignal::active(
-                "cancel.delivery-inbox-test",
-            )
-            .expect("delivery inbox test cancellation"),
-            observed_at: tracedecay_domain::UtcMicros(1),
-        }
-    }
-
     #[tokio::test]
     async fn inbox_without_a_registry_is_typed_unavailable() {
         let (_project, state) =
             crate::events_api::dashboard_state_fixture("project.delivery-inbox-unavailable").await;
 
-        let Json(envelope) = inbox(State(state), RequestControl(test_request_control())).await;
+        let Json(envelope) = inbox(
+            State(state),
+            RequestControl(DashboardHttpRequestControlV1::test_fixture(
+                "delivery-inbox-test",
+            )),
+        )
+        .await;
 
         assert_eq!(envelope.domain_state, DashboardDomainStateV1::Unknown);
         assert_eq!(
