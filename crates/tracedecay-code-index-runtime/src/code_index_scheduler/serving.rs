@@ -1514,12 +1514,23 @@ impl LatestCodeTextGenerationV1 {
     }
 
     pub(super) fn text_projection_needs_work(&self) -> bool {
-        !self.text_projection_failed.load(Ordering::Acquire)
-            && (!self.query_owners_are_ready()
-                || !matches!(
-                    &*self.text_projection_build.lock_slot(),
-                    CodeTextProjectionSlotV1::Idle
-                ))
+        if self.text_projection_failed.load(Ordering::Acquire) {
+            return false;
+        }
+        if !self.query_owners_are_ready() {
+            return true;
+        }
+        // A read probe must not queue behind an advance: a wake holds the
+        // slot lock for its whole bounded slice, and a clone-fingerprint
+        // backfill slice over a large sealed source runs for seconds. A
+        // contended slot is by definition work in progress.
+        match self.text_projection_build.slot.try_lock() {
+            Ok(slot) => !matches!(&*slot, CodeTextProjectionSlotV1::Idle),
+            Err(std::sync::TryLockError::WouldBlock) => true,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                !matches!(&*poisoned.into_inner(), CodeTextProjectionSlotV1::Idle)
+            }
+        }
     }
 
     pub(super) fn clone_index_status(
