@@ -32,7 +32,7 @@ pub const MAX_CHUNK_TEXT_BYTES: usize = 64 * 1024;
 pub const MAX_EPHEMERAL_QUERY_VIEW_BYTES: usize = 4 * 1024;
 
 const CHANGED_CODE_CHUNK_SET_DIGEST_DOMAIN: &str = "tracedecay.changed-code-chunks.v2";
-const CODE_SOURCE_FULL_REPLAY_DIGEST_DOMAIN: &str = "tracedecay.code-source-full-replay.v1";
+const CODE_SOURCE_PARENT_DELTA_DIGEST_DOMAIN: &str = "tracedecay.code-source-parent-delta.v1";
 const CODE_REUSED_PARTITION_DIGEST_DOMAIN: &str = "tracedecay.code-reused-partition.v1";
 const CODE_INDEX_CAPABILITY_MANIFEST_DIGEST_DOMAIN: &str = "tracedecay.code-index-capability.v1";
 pub const PROJECTION_PUBLICATION_SEPARATOR: &str = "tracedecay.projection-batch-receipt.v1";
@@ -835,65 +835,112 @@ pub fn code_reused_partition_digest(
 /// The two source identities sealed by one code generation.
 ///
 /// The incremental digest authenticates the physical generation transition
-/// and all three change partitions. The full-replay digest authenticates only
-/// the complete ordered chunk corpus, so byte-identical source remains the
-/// same across generation-id churn.
+/// and all three change partitions. The full-replay digest authenticates the
+/// ordered source as a parent-delta: genesis seals `parent_full_replay_digest =
+/// None` over the changed-set partitions alone; successors bind the parent's
+/// full-replay digest plus the affected partitions and reused complement seal.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeGenerationSourceCommitmentsV1 {
     pub incremental_manifest_digest: ManifestDigest,
+    /// Parent-delta source seal (`CODE_SOURCE_PARENT_DELTA_DIGEST_DOMAIN` /
+    /// `tracedecay.code-source-parent-delta.v1`). Field name is historical; it
+    /// is not a generation-independent full-corpus replay hash.
     pub full_replay_digest: ManifestDigest,
+    /// Parent generation's `full_replay_digest` when this commitment was sealed
+    /// as a successor. `None` for genesis.
+    pub parent_full_replay_digest: Option<ManifestDigest>,
 }
 
 #[derive(Serialize)]
-struct CodeSourceFullReplayDigestInput<'a> {
+struct CodeSourceParentDeltaDigestInput<'a> {
     domain: &'static str,
-    chunks: &'a [(CodeSearchChunkId, ContentDigest)],
+    parent_full_replay_digest: Option<&'a ManifestDigest>,
+    added_or_changed: &'a [ChangedCodeChunkV1],
+    deleted: &'a [ChangedCodeChunkV1],
+    reused_count: u64,
+    reused_digest: &'a ManifestDigest,
 }
 
-/// Digest a complete source corpus in canonical chunk-identity order.
-pub fn code_source_full_replay_digest(
-    chunks: &[(CodeSearchChunkId, ContentDigest)],
+/// Digest source identity from an optional parent full-replay digest plus the
+/// changed-set partitions (without enumerating the reused complement).
+pub fn code_source_parent_delta_digest(
+    parent_full_replay: Option<&ManifestDigest>,
+    changes: &ChangedCodeChunkSetV1,
 ) -> Result<ManifestDigest, DomainError> {
-    for (chunk, digest) in chunks {
-        chunk.validate()?;
-        digest.validate()?;
+    if let Some(parent) = parent_full_replay {
+        parent.validate()?;
     }
-    if chunks.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
-        return Err(DomainError::NonCanonical {
-            field: "full replay source chunk order",
-        });
+    changes.reused_digest.validate()?;
+    for change in changes.added_or_changed.iter().chain(&changes.deleted) {
+        change.chunk_id.validate()?;
+        if let Some(digest) = &change.prior_digest {
+            digest.validate()?;
+        }
+        if let Some(digest) = &change.current_digest {
+            digest.validate()?;
+        }
     }
-    canonical_sha256(&CodeSourceFullReplayDigestInput {
-        domain: CODE_SOURCE_FULL_REPLAY_DIGEST_DOMAIN,
-        chunks,
+    canonical_sha256(&CodeSourceParentDeltaDigestInput {
+        domain: CODE_SOURCE_PARENT_DELTA_DIGEST_DOMAIN,
+        parent_full_replay_digest: parent_full_replay,
+        added_or_changed: &changes.added_or_changed,
+        deleted: &changes.deleted,
+        reused_count: changes.reused_count,
+        reused_digest: &changes.reused_digest,
     })
 }
 
 impl CodeGenerationSourceCommitmentsV1 {
+    /// Seal source commitments from the changed-set and an optional parent
+    /// full-replay digest. Callers must not rebuild the full chunk corpus.
     pub fn from_changed_chunks(
+        parent_full_replay: Option<&ManifestDigest>,
         changes: &ChangedCodeChunkSetV1,
-        prior: Option<&[(CodeSearchChunkId, ContentDigest)]>,
-        full_source: &[(CodeSearchChunkId, ContentDigest)],
     ) -> Result<Self, DomainError> {
-        changes.validate_reused_complement(prior, full_source)?;
+        changes.validate()?;
+        match (parent_full_replay, changes.from_generation.as_ref()) {
+            (None, None) | (Some(_), Some(_)) => {}
+            _ => {
+                return Err(DomainError::SnapshotMismatch {
+                    field: "source commitment parent binding",
+                });
+            }
+        }
         Ok(Self {
             incremental_manifest_digest: changes.manifest_digest.clone(),
-            full_replay_digest: code_source_full_replay_digest(full_source)?,
+            parent_full_replay_digest: parent_full_replay.cloned(),
+            full_replay_digest: code_source_parent_delta_digest(parent_full_replay, changes)?,
         })
     }
 
     pub fn validate(&self) -> Result<(), DomainError> {
         self.incremental_manifest_digest.validate()?;
-        self.full_replay_digest.validate()
+        self.full_replay_digest.validate()?;
+        if let Some(parent) = &self.parent_full_replay_digest {
+            parent.validate()?;
+        }
+        Ok(())
     }
 
-    pub fn validate_for_source(
-        &self,
-        full_source: &[(CodeSearchChunkId, ContentDigest)],
-    ) -> Result<(), DomainError> {
+    /// Recompute the parent-delta full-replay digest from the sealed parent
+    /// binding and the projection changed-set.
+    pub fn validate_for_changes(&self, changes: &ChangedCodeChunkSetV1) -> Result<(), DomainError> {
         self.validate()?;
-        if self.full_replay_digest != code_source_full_replay_digest(full_source)? {
+        changes.validate()?;
+        if self.incremental_manifest_digest != changes.manifest_digest {
+            return Err(DomainError::DigestMismatch);
+        }
+        match (
+            self.parent_full_replay_digest.as_ref(),
+            changes.from_generation.as_ref(),
+        ) {
+            (None, None) | (Some(_), Some(_)) => {}
+            _ => return Err(DomainError::DigestMismatch),
+        }
+        if self.full_replay_digest
+            != code_source_parent_delta_digest(self.parent_full_replay_digest.as_ref(), changes)?
+        {
             return Err(DomainError::DigestMismatch);
         }
         Ok(())
@@ -1749,32 +1796,40 @@ mod tests {
     }
 
     #[test]
-    fn source_commitments_preserve_incremental_and_full_replay_identities() {
+    fn source_commitments_bind_parent_delta_without_full_corpus_hash() {
         let incremental = changed_set();
-        let full_source = vec![
-            (id("chunk.added"), id(&digest('a'))),
-            (id("chunk.reused"), id(&digest('c'))),
-        ];
-        let first =
-            CodeGenerationSourceCommitmentsV1::from_changed_chunks(&incremental, None, &full_source)
-                .expect("source commitments");
+        let parent_replay = id::<ManifestDigest>(&digest('e'));
+        let first = CodeGenerationSourceCommitmentsV1::from_changed_chunks(
+            Some(&parent_replay),
+            &incremental,
+        )
+        .expect("source commitments");
 
         assert_eq!(
             first.incremental_manifest_digest,
             incremental.compute_digest().expect("incremental digest")
         );
+        assert_eq!(
+            first.parent_full_replay_digest.as_ref(),
+            Some(&parent_replay)
+        );
         assert_ne!(
             first.incremental_manifest_digest, first.full_replay_digest,
-            "the generation-bound changed-set digest is not a full replay identity"
+            "the generation-bound changed-set digest is not a parent-delta identity"
         );
+        first
+            .validate_for_changes(&incremental)
+            .expect("parent-delta commitments validate");
 
-        let mut republished = incremental;
+        let mut republished = incremental.clone();
         republished.from_generation = Some(id("generation.8"));
         republished.to_generation = id("generation.9");
         republished.manifest_digest = republished.compute_digest().expect("republished digest");
-        let second =
-            CodeGenerationSourceCommitmentsV1::from_changed_chunks(&republished, None, &full_source)
-                .expect("republished source commitments");
+        let second = CodeGenerationSourceCommitmentsV1::from_changed_chunks(
+            Some(&parent_replay),
+            &republished,
+        )
+        .expect("republished source commitments");
 
         assert_ne!(
             first.incremental_manifest_digest, second.incremental_manifest_digest,
@@ -1782,12 +1837,47 @@ mod tests {
         );
         assert_eq!(
             first.full_replay_digest, second.full_replay_digest,
-            "full replay identity must survive generation-id churn over identical source"
+            "parent-delta full replay ignores generation watermarks and seals partitions only"
         );
 
-        let mut tampered = first;
+        let mut tampered = first.clone();
         tampered.full_replay_digest = id(&digest('f'));
-        assert!(tampered.validate_for_source(&full_source).is_err());
+        assert!(tampered.validate_for_changes(&incremental).is_err());
+
+        let mut wrong_parent = first;
+        wrong_parent.parent_full_replay_digest = Some(id(&digest('d')));
+        assert!(wrong_parent.validate_for_changes(&incremental).is_err());
+
+        let genesis_changes = {
+            let (reused_count, reused_digest) =
+                ChangedCodeChunkSetV1::seal_reused_partition(&[]).expect("empty reused");
+            let mut changes = ChangedCodeChunkSetV1 {
+                from_generation: None,
+                to_generation: id("generation.1"),
+                manifest_digest: id(&digest('0')),
+                added_or_changed: vec![change("chunk.added", None, Some('a'))],
+                deleted: vec![],
+                reused_count,
+                reused_digest,
+            };
+            changes.manifest_digest = changes.compute_digest().expect("genesis digest");
+            changes
+        };
+        let genesis =
+            CodeGenerationSourceCommitmentsV1::from_changed_chunks(None, &genesis_changes)
+                .expect("genesis commitments");
+        assert!(genesis.parent_full_replay_digest.is_none());
+        genesis
+            .validate_for_changes(&genesis_changes)
+            .expect("genesis parent-delta validates");
+        assert!(
+            CodeGenerationSourceCommitmentsV1::from_changed_chunks(
+                Some(&parent_replay),
+                &genesis_changes
+            )
+            .is_err(),
+            "genesis changes cannot bind a parent full-replay digest"
+        );
     }
 
     #[test]
