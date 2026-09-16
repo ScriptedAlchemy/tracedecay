@@ -49,7 +49,7 @@ struct GrepHit {
 impl From<GrepSearchHit> for GrepHit {
     fn from(hit: GrepSearchHit) -> Self {
         Self {
-            file: hit.file,
+            file: hit.file.to_string(),
             line: hit.line,
             text: hit.text,
             before: hit.before,
@@ -487,7 +487,7 @@ mod tests {
         );
 
         assert_eq!(scan.hits.len(), 1, "{scan:?}");
-        assert_eq!(scan.hits[0].file, "docs/plans/notes.md");
+        assert_eq!(scan.hits[0].file.as_ref(), "docs/plans/notes.md");
         assert_eq!(scan.hits[0].line, 3);
         assert!(
             scan.hits[0]
@@ -536,7 +536,7 @@ mod tests {
         let files = scan
             .hits
             .iter()
-            .map(|hit| hit.file.as_str())
+            .map(|hit| hit.file.as_ref())
             .collect::<Vec<_>>();
 
         assert!(files.contains(&"src/tracked.rs"), "{files:?}");
@@ -625,7 +625,7 @@ mod tests {
         let files = scan
             .hits
             .iter()
-            .map(|hit| hit.file.as_str())
+            .map(|hit| hit.file.as_ref())
             .collect::<Vec<_>>();
         assert!(
             files.contains(&"dist/generated.js"),
@@ -721,7 +721,7 @@ mod tests {
         let (scan, output) = scan_output(project.path(), "MIXED_OVERSIZED_TOKEN");
 
         assert_eq!(scan.hits.len(), 1);
-        assert_eq!(scan.hits[0].file, "tracked.txt");
+        assert_eq!(scan.hits[0].file.as_ref(), "tracked.txt");
         assert_eq!(scan.files_scanned, 1);
         assert_eq!(scan.lines_examined, 3);
         assert_eq!(scan.omissions.oversized_files, 1);

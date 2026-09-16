@@ -1,9 +1,10 @@
 use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::Arc;
 
 use regex::{Regex, RegexBuilder};
 
-use crate::source_walk::source_walk;
+use crate::source_walk::{forward_slash_relative, source_walk};
 
 const MAX_HITS_PER_FILE: usize = 20;
 const BINARY_SNIFF_BYTES: usize = 8_192;
@@ -22,7 +23,7 @@ pub struct GrepSearchQuery {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GrepSearchHit {
-    pub file: String,
+    pub file: Arc<str>,
     pub line: u32,
     pub text: String,
     pub before: Vec<String>,
@@ -145,14 +146,15 @@ pub fn search_tree_with_cancel(
         {
             source_bytes = source_bytes.saturating_add(content.len() as u64);
         }
-        let relative = relative.to_string_lossy().replace('\\', "/");
+        // Defer path materialization until the file yields a hit so zero-hit
+        // files never pay normalize+alloc on the grep hot path.
         let stop = if crate::hotpath_observe::sample_hot_loop() {
             hotpath::measure_block!(
                 "code_index_grep_file",
                 examine_grep_file(
                     &matcher,
                     query,
-                    &relative,
+                    relative,
                     &content,
                     &mut result,
                     max_results,
@@ -163,7 +165,7 @@ pub fn search_tree_with_cancel(
             examine_grep_file(
                 &matcher,
                 query,
-                &relative,
+                relative,
                 &content,
                 &mut result,
                 max_results,
@@ -186,7 +188,7 @@ pub fn search_tree_with_cancel(
 fn examine_grep_file<C: Fn() -> bool>(
     matcher: &Regex,
     query: &GrepSearchQuery,
-    relative: &str,
+    relative: &Path,
     content: &str,
     result: &mut GrepSearchResult,
     max_results: usize,
@@ -198,6 +200,7 @@ fn examine_grep_file<C: Fn() -> bool>(
     let mut pending = VecDeque::new();
     let mut source = content.lines().enumerate();
     let mut file_hits = 0;
+    let mut relative_key: Option<Arc<str>> = None;
     while let Some((index, line)) = next_grep_line(&mut source, &mut pending, result) {
         if is_cancelled() {
             result.cancelled = true;
@@ -219,8 +222,9 @@ fn examine_grep_file<C: Fn() -> bool>(
         }
         file_hits += 1;
         fill_after_context(&mut source, &mut pending, result, context_lines);
+        let file = Arc::clone(relative_key.get_or_insert_with(|| forward_slash_relative(relative)));
         result.hits.push(GrepSearchHit {
-            file: relative.to_owned(),
+            file,
             line: index as u32 + 1,
             text: line.to_owned(),
             before: before.iter().copied().map(str::to_owned).collect(),
@@ -344,7 +348,7 @@ mod tests {
             search_tree_with_cancel(project.path(), &query("FILE_CAP_TOKEN"), || false).unwrap();
 
         assert_eq!(result.hits.len(), 1);
-        assert_eq!(result.hits[0].file, "tracked.txt");
+        assert_eq!(result.hits[0].file.as_ref(), "tracked.txt");
     }
 
     #[test]

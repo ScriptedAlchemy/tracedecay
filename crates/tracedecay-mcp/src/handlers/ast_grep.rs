@@ -87,7 +87,7 @@ pub async fn handle_ast_grep_search(
 
     let hits = search.matches;
 
-    let touched_files = unique_file_paths(hits.iter().map(|hit| hit.file.as_str()));
+    let touched_files = unique_file_paths(hits.iter().map(|hit| hit.file.as_ref()));
     let output_value = build_output_value(&hits, search.truncated, search.files_scanned);
 
     let text = render::finalize(Some(project_root), &args, &output_value, || {
@@ -104,7 +104,7 @@ fn build_output_value(hits: &[AstGrepSearchMatch], truncated: bool, files_scanne
         .iter()
         .map(|hit| {
             json!({
-                "file": hit.file,
+                "file": hit.file.as_ref(),
                 "line": hit.line,
                 "column": hit.column,
                 "lang": hit.lang,

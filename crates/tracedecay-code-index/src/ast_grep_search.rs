@@ -21,6 +21,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use ast_grep_core::matcher::PatternBuilder;
 use ast_grep_core::tree_sitter::{LanguageExt, StrDoc, TSLanguage};
@@ -29,7 +30,7 @@ use ast_grep_core::{AstGrep, Language, Pattern, PatternError};
 use tracedecay_code_extraction::ts_provider;
 
 use crate::grep_search::MAX_INTERACTIVE_SOURCE_BYTES;
-use crate::source_walk::source_walk;
+use crate::source_walk::{forward_slash_relative, source_walk};
 use tracedecay_domain::repository_path_matches_scope;
 
 /// Bytes sniffed from the head of each file to classify it as binary.
@@ -164,7 +165,7 @@ fn lang_key_for_ext(ext: &str) -> Option<&'static str> {
 /// line it starts on.
 #[derive(Debug, Clone)]
 pub struct AstGrepSearchMatch {
-    pub file: String,
+    pub file: Arc<str>,
     /// Exact UTF-8 byte range minted by the bundled tree-sitter authority.
     pub start_byte: usize,
     pub end_byte: usize,
@@ -351,8 +352,8 @@ where
         let Ok(rel) = path.strip_prefix(project_root) else {
             continue;
         };
-        let rel_str = rel.to_string_lossy().replace('\\', "/");
-        if !repository_path_matches_scope(&rel_str, scope_prefix) {
+        let rel_str = forward_slash_relative(rel);
+        if !repository_path_matches_scope(rel_str.as_ref(), scope_prefix) {
             continue;
         }
 
@@ -430,7 +431,7 @@ where
 /// always describe the same file, so they travel as one value.
 #[derive(Clone, Copy)]
 struct AstGrepFileIdentity<'file> {
-    rel_str: &'file str,
+    rel_str: &'file Arc<str>,
     key: &'file str,
 }
 
@@ -460,7 +461,7 @@ fn examine_ast_grep_file<C: Fn() -> bool>(
         result.lines_visited = result.lines_visited.saturating_add(1);
         let line_text = source_line_at_byte(source, range.start);
         result.matches.push(AstGrepSearchMatch {
-            file: file.rel_str.to_owned(),
+            file: Arc::clone(file.rel_str),
             start_byte: range.start,
             end_byte: range.end,
             node_kind: node.kind().into_owned(),
@@ -499,13 +500,42 @@ fn source_line_at_byte(source: &str, byte_offset: usize) -> String {
 /// squeezing interior whitespace and capping length.
 fn collapse_snippet(text: &str) -> String {
     const MAX: usize = 200;
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.chars().count() > MAX {
-        let truncated: String = collapsed.chars().take(MAX).collect();
-        format!("{truncated}…")
-    } else {
-        collapsed
+    // Single-pass collapse into one String — no intermediate Vec from
+    // split_whitespace().collect().join(" "), and truncate while scanning so
+    // long nodes never allocate a second full copy.
+    let mut collapsed = String::new();
+    let mut chars = 0_usize;
+    let mut pending_space = false;
+    let mut truncated = false;
+    for piece in text.split_whitespace() {
+        if piece.is_empty() {
+            continue;
+        }
+        if pending_space {
+            if chars >= MAX {
+                truncated = true;
+                break;
+            }
+            collapsed.push(' ');
+            chars += 1;
+        }
+        for ch in piece.chars() {
+            if chars >= MAX {
+                truncated = true;
+                break;
+            }
+            collapsed.push(ch);
+            chars += 1;
+        }
+        if truncated {
+            break;
+        }
+        pending_space = true;
     }
+    if truncated {
+        collapsed.push('…');
+    }
+    collapsed
 }
 
 /// Classifies a byte buffer as binary when a NUL byte appears in the head — the
@@ -566,7 +596,7 @@ mod tests {
 
         assert_eq!(result.files_scanned, 1);
         assert_eq!(result.matches.len(), 1);
-        assert_eq!(result.matches[0].file, "tracked.rs");
+        assert_eq!(result.matches[0].file.as_ref(), "tracked.rs");
     }
 
     #[test]

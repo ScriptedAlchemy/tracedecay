@@ -142,7 +142,7 @@ impl AstGrepAuthorityV1 for TraceDecayAstGrepAuthorityV1 {
                     let enclosing = match symbol_at_location(
                         &reader,
                         Arc::clone(&graph_cancellation),
-                        &item.file,
+                        item.file.as_ref(),
                         item.line,
                     ) {
                         Ok(enclosing) => enclosing,
@@ -152,7 +152,7 @@ impl AstGrepAuthorityV1 for TraceDecayAstGrepAuthorityV1 {
                         }
                     };
                     matches.push(AstGrepHitV1 {
-                        file: item.file,
+                        file: item.file.to_string(),
                         line: item.line,
                         column: item.column,
                         lang: item.lang,
