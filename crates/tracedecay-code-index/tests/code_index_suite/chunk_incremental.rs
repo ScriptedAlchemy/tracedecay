@@ -314,23 +314,28 @@ fn mixed_increment_preserves_sorted_change_partitions() {
 }
 
 #[test]
-fn mixed_snapshot_and_duplicate_chunk_identities_are_rejected_before_diffing() {
-    let expected_generation = generation(2);
-    let foreign_generation = generation(3);
-    let foreign = baseline_file(&foreign_generation, "file.foreign", "src/lib.rs");
-    assert_eq!(
-        GenerationChunkManifestV1::new(expected_generation.clone(), vec![foreign]),
-        Err(ChunkIncrementErrorV1::MixedGeneration)
+fn extraction_provenance_may_predate_publish_generation_and_duplicates_are_rejected() {
+    let publish_generation = generation(2);
+    let extraction_generation = generation(3);
+    let carried = baseline_file(&extraction_generation, "file.carried", "src/lib.rs");
+    let manifest = GenerationChunkManifestV1::new(publish_generation.clone(), vec![carried])
+        .expect("carried extraction provenance may predate the publish generation");
+    assert_eq!(manifest.generation_id(), &publish_generation);
+    assert!(
+        manifest
+            .chunks()
+            .iter()
+            .all(|chunk| chunk.anchor.generation_id == extraction_generation)
     );
 
-    let mut duplicate = baseline_file(&expected_generation, "file.duplicate", "src/lib.rs");
+    let mut duplicate = baseline_file(&publish_generation, "file.duplicate", "src/lib.rs");
     duplicate.chunks.push(duplicate.chunks[0].clone());
     duplicate
         .document
         .chunk_ids
         .push(duplicate.chunks[0].id.clone());
     assert!(matches!(
-        GenerationChunkManifestV1::new(expected_generation, vec![duplicate]),
+        GenerationChunkManifestV1::new(publish_generation, vec![duplicate]),
         Err(ChunkIncrementErrorV1::DuplicateChunk(_))
     ));
 }

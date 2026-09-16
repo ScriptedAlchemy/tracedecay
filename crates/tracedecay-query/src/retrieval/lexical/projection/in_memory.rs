@@ -382,9 +382,8 @@ impl CodeLexicalProjectionBuildV1 {
                             "raw exact terms require parser-backed extraction admission".to_owned(),
                         ));
                     }
-                    if chunk.anchor.generation_id != self.metadata.generation {
-                        return Err(RetrievalPortError::GenerationMismatch);
-                    }
+                    // Serving generation is metadata.generation. Chunk anchors keep
+                    // extraction provenance and may predate this projection.
                     let logical_path = self
                         .metadata
                         .logical_paths

@@ -242,7 +242,7 @@ pub(super) fn prepare_page(
     let mut clone_bodies = Vec::with_capacity(page.clone_bodies().len());
     for body in page.clone_bodies() {
         checkpoint(control)?;
-        clone_bodies.push(prepare_clone_body(layout, body)?);
+        clone_bodies.push(prepare_clone_body(layout, metadata, body)?);
     }
     let next_cursor = page
         .next_cursor()
@@ -326,6 +326,7 @@ pub(super) fn prepare_page(
 
 fn prepare_clone_body(
     layout: LexicalArtifactLayoutV1,
+    metadata: &CodeLexicalProjectionMetadataV1,
     body: &CodeIndexCloneBodyV1,
 ) -> Result<PreparedCloneBodyV1, CodeLexicalArtifactErrorV1> {
     let fingerprint_stream = if layout.has_clone_fingerprints() {
@@ -347,17 +348,21 @@ fn prepare_clone_body(
     } else {
         None
     };
+    // Stamp the serving generation onto carried Arc-shared clone bodies so the
+    // artifact authority matches metadata.generation at lookup time.
+    let mut occurrence = body.occurrence.clone();
+    occurrence.source_generation = metadata.generation.clone();
     Ok(PreparedCloneBodyV1 {
         payload_digest: body.payload.payload_digest.as_str().to_owned(),
         payload: serde_json::to_vec(&body.payload)
             .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
-        occurrence: serde_json::to_vec(&body.occurrence)
+        occurrence: serde_json::to_vec(&occurrence)
             .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
-        symbol_occurrence_id: body.occurrence.symbol_occurrence_id.as_str().to_owned(),
-        path: body.occurrence.path.clone(),
-        body_start: body.occurrence.body_span.start_byte,
-        body_end: body.occurrence.body_span.end_byte,
-        exact_keys: body.payload.exact_keys(body.occurrence.eligibility),
+        symbol_occurrence_id: occurrence.symbol_occurrence_id.as_str().to_owned(),
+        path: occurrence.path.clone(),
+        body_start: occurrence.body_span.start_byte,
+        body_end: occurrence.body_span.end_byte,
+        exact_keys: body.payload.exact_keys(occurrence.eligibility),
         fingerprint_stream,
     })
 }
@@ -463,11 +468,9 @@ fn prepare_document(
             "lexical artifact exceeds the posting document-id range".to_owned(),
         )
     })?;
-    if chunk.anchor.generation_id != metadata.generation {
-        return Err(CodeLexicalArtifactErrorV1::Contract(
-            "sealed lexical page contains a foreign generation".to_owned(),
-        ));
-    }
+    // Serving generation is metadata.generation. Chunk anchors may retain
+    // extraction provenance from an Arc-shared parent page; path membership
+    // is the live binding, and the encoded row is stamped with the serving id.
     let logical_path = metadata
         .logical_paths
         .get(&chunk.anchor.file_occurrence_id)
@@ -478,7 +481,8 @@ fn prepare_document(
                 chunk.anchor.file_occurrence_id
             ))
         })?;
-    let (row, fields) = ProjectedChunkV1::from_ref(chunk, logical_path, display);
+    let (mut row, fields) = ProjectedChunkV1::from_ref(chunk, logical_path, display);
+    row.anchor.generation_id = metadata.generation.clone();
     let mut term_postings = Vec::new();
     for (field, terms) in &fields {
         checkpoint(control)?;

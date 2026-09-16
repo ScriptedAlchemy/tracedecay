@@ -1089,7 +1089,6 @@ impl CodeLexicalArtifactReaderV1 {
             || occurrence.repository_id != authority.repository_id
             || occurrence.worktree_id != authority.worktree_id
             || occurrence.source_generation != self.metadata.generation
-            || occurrence.snapshot_digest != authority.snapshot_digest
             || occurrence.payload_digest.as_str() != posting_payload
             || occurrence.payload_digest != payload.payload_digest
             || payload.validate().is_err()

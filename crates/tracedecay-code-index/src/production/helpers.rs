@@ -32,7 +32,7 @@ pub(crate) fn staged_generation(
     });
     let chunks = hotpath::measure_block!(
         "code_index.generation.aggregate_chunks",
-        GenerationChunkManifestV1::new(
+        GenerationChunkManifestV1::from_validated_files(
             generation_id.clone(),
             files
                 .iter()
