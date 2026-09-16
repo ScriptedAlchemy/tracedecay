@@ -415,8 +415,11 @@ where
         } else {
             await_dispatch_with_cancellation(handling, request_cancellation.cancelled(), || {
                 dispatch_cancellation.cancel();
-                let _ = self.context.cancel_request(&id, &self.memory_request_scope);
-                true
+                // Only an admitted request has a worker that can observe the
+                // signal and settle its own cancelled terminal. A cancel that
+                // arrives before registration has nothing to poll, so the
+                // dispatch is abandoned instead of run to completion.
+                self.context.cancel_request(&id, &self.memory_request_scope)
             })
             .await
         }
