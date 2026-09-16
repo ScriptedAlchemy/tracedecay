@@ -451,7 +451,7 @@ fn sealed_state_digest_changes_when_ignored_source_roster_changes() {
 
 #[test]
 fn sealed_format_refuses_superseded_revisions_beside_the_partitioned_revision() {
-    assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 11);
+    assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 12);
     let generation = publish(request_with_ignored_sources(vec![admission(
         PRIMARY_IGNORED_PATH,
     )]));
