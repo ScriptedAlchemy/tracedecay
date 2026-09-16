@@ -13,7 +13,7 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::ObservationCoverageReason;
 
-use crate::admission::test_support::PanicHostAdmission;
+use crate::admission::test_support::{MemoryHostAdmission, PanicHostAdmission};
 use crate::observation::ObservationCancellation;
 use crate::runtime::shared::StoredCursor;
 use tracedecay_privacy::{MAX_OBSERVATION_RECORD_BYTES, parse_normalized_observation_record_v1};
@@ -1644,4 +1644,45 @@ mod destination_routing_tests {
         assert!(persisted.position > previous.position);
         assert_eq!(IDENTITY_ATTEMPTS.load(Ordering::SeqCst), 3);
     }
+}
+
+/// A Hermes profile whose `state.db` cannot be opened is a skipped source, and
+/// a skipped source is a partial sweep. The outcome must say so; the provider
+/// turns it into a typed catch-up failure instead of reporting a clean pass.
+#[tokio::test]
+async fn unreadable_state_db_is_a_counted_source_failure_not_a_clean_sweep() {
+    let dir = tempfile::tempdir().unwrap();
+    initialize_owned_store_before_foreign_fixture(dir.path()).await;
+    let project_root = dir.path().join("project");
+    std::fs::create_dir_all(&project_root).unwrap();
+    // A profile pinned to this project the way `tracedecay install --agent
+    // hermes` writes it, so the source is a candidate without a git checkout.
+    let home = dir.path().join("hermes-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let pin = serde_json::to_string(project_root.to_string_lossy().as_ref()).unwrap();
+    std::fs::write(
+        home.join("config.yaml"),
+        format!("plugins:\n  enabled:\n    - tracedecay\n  tracedecay:\n    project_root: {pin}\n"),
+    )
+    .unwrap();
+    std::fs::write(home.join("state.db"), b"this is not a sqlite database").unwrap();
+    let admission = MemoryHostAdmission::default();
+
+    let outcome = ingest::ingest_homes_capped_with_admission_and_cancellation(
+        std::slice::from_ref(&home),
+        &project_root,
+        tracedecay_domain::ProjectId::new("project.hermes-unreadable-source").unwrap(),
+        &admission,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await;
+
+    assert_eq!(outcome.source_failures, 1, "the unreadable profile is one skipped source");
+    assert!(!outcome.projection_drain_deferred);
+    assert_eq!(
+        outcome.stats,
+        crate::runtime::shared::TranscriptIngestStats::default()
+    );
+    assert!(admission.observations().is_empty());
 }
