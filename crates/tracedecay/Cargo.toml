@@ -32,7 +32,6 @@ include = [
     "/benchmark_data/claude-observation/**",
     "/benchmark_data/session-temporal/**",
     "/benchmark_data/query-code-index/**",
-    "/benchmark_data/search-quality/query-fallback-report-v1.json",
     "/scripts/run-session-temporal-benchmark.sh",
     "/plugin/.claude-plugin/**",
     "/plugin/.cursor-plugin/**",

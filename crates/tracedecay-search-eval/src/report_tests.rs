@@ -168,9 +168,10 @@ fn baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples() {
     }
 }
 
-/// The report is evidence about labels, not authority over retrieval: it may
-/// not carry a qualification or activation verdict, and workload documents may
-/// not be re-read as the candidate evidence an evaluator run produces. See
+/// The report is evidence about labels, not authority over retrieval: its
+/// status vocabulary cannot express qualification or activation, unknown
+/// activation fields are refused on the wire, and workload documents may not
+/// be re-read as the candidate evidence an evaluator run produces. See
 /// `docs/development/search-quality-direct-evaluation.md`.
 #[test]
 fn direct_report_is_evidence_only_and_owns_its_candidate_schema() {
@@ -188,11 +189,61 @@ fn direct_report_is_evidence_only_and_owns_its_candidate_schema() {
     let report = evaluate_generated_outputs(repo_root, workload, &generated)
         .expect("evaluate direct fixture outputs");
 
+    // Closed evidence statuses only. An activation claim such as
+    // status:"qualified" is not a representable DirectEvaluationStatusV1.
+    assert!(matches!(
+        report.status,
+        crate::DirectEvaluationStatusV1::Pass
+            | crate::DirectEvaluationStatusV1::Fail
+            | crate::DirectEvaluationStatusV1::Pending
+    ));
+    for profile in &report.profiles {
+        assert!(matches!(
+            profile.status,
+            crate::DirectEvaluationStatusV1::Pass
+                | crate::DirectEvaluationStatusV1::Fail
+                | crate::DirectEvaluationStatusV1::Pending
+        ));
+        // Offline is derived from this run's observed query-fallback match,
+        // not a self-asserted availability stamp on the raw output.
+        assert_eq!(profile.offline, profile.fallback_matches_expected);
+    }
+
     let value = serde_json::to_value(&report).expect("serialize direct report");
-    assert_eq!(
-        activation_claim_keys(&value),
-        Vec::<String>::new(),
-        "a direct report must not claim qualification or activation"
+    let mut activation_claim = value.clone();
+    activation_claim
+        .as_object_mut()
+        .expect("report object")
+        .insert(
+            "activation".to_owned(),
+            serde_json::json!({"status": "qualified"}),
+        );
+    serde_json::from_value::<DirectEvaluationReportV1>(activation_claim).expect_err(
+        "an activation object is an unknown field, not evidence",
+    );
+
+    let mut qualified_status = value.clone();
+    qualified_status["status"] = serde_json::json!("qualified");
+    serde_json::from_value::<DirectEvaluationReportV1>(qualified_status)
+        .expect_err("status:\"qualified\" is not an evidence status");
+
+    // Unrelated future keys are not activation claims; deny_unknown_fields
+    // refuses them as schema, not because their names contain "accepted".
+    let mut unrelated = value;
+    unrelated
+        .as_object_mut()
+        .expect("report object")
+        .insert(
+            "accepted_languages".to_owned(),
+            serde_json::json!(["rust"]),
+        );
+    let unrelated_error =
+        serde_json::from_value::<DirectEvaluationReportV1>(unrelated)
+            .expect_err("unknown fields are refused by schema")
+            .to_string();
+    assert!(
+        unrelated_error.contains("accepted_languages"),
+        "{unrelated_error}"
     );
 
     // Workload documents are schema 1; candidate evidence is schema 2. The two
@@ -215,26 +266,6 @@ fn direct_report_is_evidence_only_and_owns_its_candidate_schema() {
         error.contains("unsupported candidate output schema"),
         "{error}"
     );
-}
-
-/// Every retained key whose name claims a decision about activating retrieval.
-fn activation_claim_keys(value: &serde_json::Value) -> Vec<String> {
-    match value {
-        serde_json::Value::Object(fields) => fields
-            .iter()
-            .flat_map(|(key, child)| {
-                let claimed = ["qualif", "activat", "promot", "accepted"]
-                    .into_iter()
-                    .any(|claim| key.contains(claim));
-                claimed
-                    .then(|| key.clone())
-                    .into_iter()
-                    .chain(activation_claim_keys(child))
-            })
-            .collect(),
-        serde_json::Value::Array(items) => items.iter().flat_map(activation_claim_keys).collect(),
-        _ => Vec::new(),
-    }
 }
 
 #[test]
