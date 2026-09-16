@@ -1277,6 +1277,34 @@ mod tests {
         );
     }
 
+    /// The sibling restriction is what lets one validated ancestor chain cover
+    /// both spellings, so an absolute destination in another directory has to
+    /// be refused rather than renamed across chains.
+    #[test]
+    fn replacement_refuses_an_absolute_destination_in_another_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_directory = temp.path().join("staging");
+        let destination_directory = temp.path().join("published");
+        create_private_directory(&source_directory).unwrap();
+        create_private_directory(&destination_directory).unwrap();
+        let source = source_directory.join("record");
+        let destination = destination_directory.join("record");
+        let mut staging = create_private_file(&source).unwrap();
+        staging.write_all(b"new").unwrap();
+        drop(staging);
+        assert!(destination.is_absolute());
+
+        let error = replace_file_atomically(&source, &destination).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            error.to_string().contains("siblings"),
+            "expected the sibling refusal, got {error:?}"
+        );
+        assert!(source.exists());
+        assert!(!destination.exists());
+    }
+
     #[test]
     fn file_restriction_rejects_a_directory() {
         let temp = tempfile::tempdir().unwrap();
