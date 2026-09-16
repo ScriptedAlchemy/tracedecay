@@ -103,7 +103,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
                     match_class,
                     normalization_revision: candidate.key.normalization_revision,
                     family_digest: candidate.key.digest,
-                    representative_payload_digest: source.payload.payload_digest,
+                    representative_payload_digest: source.payload.payload_digest.clone(),
                     member_count: members.len(),
                     members,
                     complete,
