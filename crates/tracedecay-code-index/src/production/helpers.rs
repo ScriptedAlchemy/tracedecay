@@ -1165,22 +1165,21 @@ where
         )
     };
     let target_path = &files[target.index].as_ref().authority.logical_path;
-    let resolves = if target.index == scope_index
+    let resolves = if (target.index == scope_index
         && rust_crate_qualified_name_matches(
             &qualified,
             root_path,
             target_path,
             &target.symbol.qualified_name,
+        ))
+        || rust_inherent_method_owned_by_scope_type(
+            files,
+            root_path,
+            scope_index,
+            exported_name,
+            member,
+            target,
         ) {
-        true
-    } else if rust_inherent_method_owned_by_scope_type(
-        files,
-        root_path,
-        scope_index,
-        exported_name,
-        member,
-        target,
-    ) {
         true
     } else {
         let mut bindings = files[scope_index]
