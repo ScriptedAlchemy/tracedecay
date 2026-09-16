@@ -2982,6 +2982,18 @@ impl CodeIndexPublishedGenerationV1 {
     /// once: one reusable segment buffer per indexing worker. Its file
     /// allocation is therefore bounded by this many buffers, each no larger
     /// than the largest file segment it read.
+    ///
+    /// Left at bare `workers` rather than the restore-window multiplier used
+    /// by `fill_admitted_window`/`read_window`
+    /// (`LEXICAL_DECODE_WINDOW_FILES_PER_WORKER_V1`): this function only
+    /// bounds `decode_partitioned_sealed`'s monolithic in-memory rehydration
+    /// path, which no measured hotpath drives through the drain-window
+    /// fan-out that motivated the multiplier (`index-bench` reaches the
+    /// lazy `VerifiedSealedLexicalPageSourceV1` restore paths, never this
+    /// one). Widening it here would only grow buffer-pool memory without
+    /// cutting any observed `install()` call count, and it would silently
+    /// disable the cross-window buffer-reuse coverage this function's
+    /// callers test against fixed small fixtures.
     #[must_use]
     pub fn partitioned_decode_window_files() -> usize {
         crate::parallelism::indexing_workers().max(1)
