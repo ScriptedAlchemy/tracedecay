@@ -480,6 +480,94 @@ mod rustup_proxy {
         );
     }
 
+    /// `rustup component add` after a refusal must show on the very next
+    /// admission probe: the recorded `Unavailable` state and error are the
+    /// refusal's, so a later successful resolution clears exactly them.
+    #[test]
+    fn successful_resolution_clears_the_recorded_refusal() {
+        let rustup = fake_rustup::install(None);
+        let project = rust_project();
+        let command = rustup.path().join("rust-analyzer");
+        let mut broker = DiagnosticBroker::new_for_test(
+            project.path(),
+            vec![adapter(
+                "rust",
+                command.to_string_lossy(),
+                "rs",
+                "Cargo.toml",
+            )],
+        );
+        let files = vec!["src/lib.rs".to_owned()];
+        broker.admitted_providers_for_files(&files);
+        let refused = broker.snapshot().engines.remove(0);
+        assert_eq!(refused.state, EngineState::Unavailable);
+        assert!(refused.last_error.is_some());
+
+        // The operator installs the component: the same proxy now resolves.
+        let real = tempfile::tempdir().expect("real analyzer");
+        let real_binary = real.path().join("rust-analyzer");
+        std::fs::write(&real_binary, "").expect("real analyzer binary");
+        let installed = fake_rustup::install(Some(&real_binary));
+        std::fs::copy(
+            installed.path().join("rustup"),
+            rustup.path().join("rustup"),
+        )
+        .expect("swap in the fake with the component installed");
+
+        let admitted = broker.admitted_providers_for_files(&files);
+
+        assert!(admitted.iter().all(|provider| provider.analyzer_available));
+        let engine = broker.snapshot().engines.remove(0);
+        assert_eq!(
+            engine.state,
+            EngineState::Available,
+            "the refusal is cleared without waiting for a refresh"
+        );
+        assert_eq!(engine.last_error, None);
+        assert!(broker.launch_refusals.is_empty());
+    }
+
+    /// A state recorded after the refusal is not the refusal's to clear.
+    #[test]
+    fn successful_resolution_leaves_a_later_recorded_state_alone() {
+        let rustup = fake_rustup::install(None);
+        let project = rust_project();
+        let command = rustup.path().join("rust-analyzer");
+        let mut broker = DiagnosticBroker::new_for_test(
+            project.path(),
+            vec![adapter(
+                "rust",
+                command.to_string_lossy(),
+                "rs",
+                "Cargo.toml",
+            )],
+        );
+        let files = vec!["src/lib.rs".to_owned()];
+        broker.admitted_providers_for_files(&files);
+        broker
+            .engine_errors
+            .insert("rust".to_owned(), "analyzer crashed".to_owned());
+        broker
+            .engine_overrides
+            .insert("rust".to_owned(), EngineState::Crashed);
+        let real = tempfile::tempdir().expect("real analyzer");
+        let real_binary = real.path().join("rust-analyzer");
+        std::fs::write(&real_binary, "").expect("real analyzer binary");
+        let installed = fake_rustup::install(Some(&real_binary));
+        std::fs::copy(
+            installed.path().join("rustup"),
+            rustup.path().join("rustup"),
+        )
+        .expect("swap in the fake with the component installed");
+
+        broker.admitted_providers_for_files(&files);
+
+        let engine = broker.snapshot().engines.remove(0);
+        assert_eq!(engine.state, EngineState::Crashed);
+        assert_eq!(engine.last_error.as_deref(), Some("analyzer crashed"));
+        assert!(broker.launch_refusals.is_empty());
+    }
+
     /// The toolchain itself being absent is a different refusal from a
     /// missing component and must not advise `rustup component add`.
     #[test]

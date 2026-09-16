@@ -209,6 +209,10 @@ pub struct DiagnosticBroker {
     /// Probes rustup and remembers each rustup binary's version for as long
     /// as `launches` is retained.
     launch_resolver: AnalyzerLaunchResolver,
+    /// Languages whose current `Unavailable` state and error were recorded by
+    /// a launch refusal, with the recorded error, so a later successful
+    /// resolution clears exactly that refusal and nothing recorded since.
+    launch_refusals: BTreeMap<String, String>,
     engine_overrides: BTreeMap<String, EngineState>,
     engine_errors: BTreeMap<String, String>,
     refresh_epochs: BTreeMap<String, u64>,
@@ -240,6 +244,7 @@ impl DiagnosticBroker {
             clients: BTreeMap::new(),
             launches: BTreeMap::new(),
             launch_resolver: AnalyzerLaunchResolver::new(),
+            launch_refusals: BTreeMap::new(),
             engine_overrides: BTreeMap::new(),
             engine_errors: BTreeMap::new(),
             refresh_epochs: BTreeMap::new(),
@@ -669,7 +674,9 @@ impl DiagnosticBroker {
     /// recording a refusal as the language's typed `Unavailable` state so the
     /// snapshot reports why no analyzer runs instead of an `Available` engine
     /// that `TraceDecay` will never start. Successful resolutions are retained
-    /// per root.
+    /// per root, and a success clears the refusal this method recorded
+    /// earlier, so an operator's `rustup component add` shows on the very
+    /// next admission probe.
     fn resolve_launch(
         &mut self,
         language: &str,
@@ -684,14 +691,33 @@ impl DiagnosticBroker {
             .resolve(command, workspace_root)
             .inspect(|launch| {
                 self.launches.insert(key, launch.clone());
+                self.clear_launch_refusal(language);
             })
             .inspect_err(|error| {
+                let message = error.engine_error();
                 self.engine_errors
-                    .insert(language.to_string(), error.engine_error());
+                    .insert(language.to_string(), message.clone());
+                self.launch_refusals.insert(language.to_string(), message);
                 self.engine_overrides
                     .insert(language.to_string(), EngineState::Unavailable);
                 self.remove_language_clients(language);
             })
+    }
+
+    /// Restores the engine to its pre-refusal default when the recorded
+    /// error is still the one a launch refusal wrote. A state or error
+    /// recorded since (a crash, a disabled setting) is left alone.
+    fn clear_launch_refusal(&mut self, language: &str) {
+        let Some(recorded) = self.launch_refusals.remove(language) else {
+            return;
+        };
+        if self.engine_errors.get(language) != Some(&recorded) {
+            return;
+        }
+        self.engine_errors.remove(language);
+        if self.engine_overrides.get(language) == Some(&EngineState::Unavailable) {
+            self.engine_overrides.remove(language);
+        }
     }
 
     pub async fn refresh_documents(
@@ -776,6 +802,7 @@ impl DiagnosticBroker {
         self.settings_unavailable = None;
         self.clients.clear();
         self.clear_launches();
+        self.launch_refusals.clear();
         self.engine_overrides.clear();
         let disabled_languages: Vec<String> = self
             .settings
