@@ -3839,6 +3839,7 @@ fn verify_clone_payload_digests<'body>(
     Ok(())
 }
 
+/// CI retrigger marker (no behavior).
 fn append_prepared_clone_bodies(
     transaction: &Transaction<'_>,
     pages: &[PreparedCodeLexicalArtifactPageV1],
