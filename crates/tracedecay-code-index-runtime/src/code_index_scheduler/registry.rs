@@ -20,6 +20,7 @@ use std::{
 #[cfg(test)]
 use std::sync::Condvar;
 
+use super::demand_admission::{CodeIndexDemandAdmissionV1, CodeIndexDemandUnavailableV1};
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_contracts::code_index_freshness::{
     CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexConvergenceParkedV1,
@@ -1002,25 +1003,6 @@ mod terminal_publication_park_tests {
         assert_eq!(parked.observed_passes, 1);
         assert_eq!(parked.reason, "source gone");
     }
-
-    #[test]
-    fn reconcile_admission_merge_preserves_corrupt_and_unavailable() {
-        let corrupt =
-            CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(terminal_park("corrupt"));
-        assert!(matches!(
-            CodeIndexReconcileAdmissionV1::Accepted.merge(corrupt.clone()),
-            CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_)
-        ));
-        assert!(matches!(
-            CodeIndexReconcileAdmissionV1::Unavailable.merge(corrupt),
-            CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_)
-        ));
-        assert!(matches!(
-            CodeIndexReconcileAdmissionV1::Accepted
-                .merge(CodeIndexReconcileAdmissionV1::Unavailable),
-            CodeIndexReconcileAdmissionV1::Unavailable
-        ));
-    }
 }
 
 /// The sealed-generation identity half of a freshness reading. Every other
@@ -1362,28 +1344,6 @@ type ReadyProbeServingPartsV1 = (
     Arc<PendingWakeV1>,
     Arc<AtomicUsize>,
 );
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CodeIndexReconcileAdmissionV1 {
-    Accepted,
-    PublicationAuthorityCorrupt(CodeIndexConvergenceParkedV1),
-    Unavailable,
-}
-
-impl CodeIndexReconcileAdmissionV1 {
-    /// Combine path and overflow admissions. Precedence never erases corrupt or
-    /// unavailable behind an accepted sibling: corrupt > unavailable > accepted.
-    pub fn merge(self, other: Self) -> Self {
-        use CodeIndexReconcileAdmissionV1::*;
-        match (self, other) {
-            (PublicationAuthorityCorrupt(parked), _) | (_, PublicationAuthorityCorrupt(parked)) => {
-                PublicationAuthorityCorrupt(parked)
-            }
-            (Unavailable, _) | (_, Unavailable) => Unavailable,
-            (Accepted, Accepted) => Accepted,
-        }
-    }
-}
 
 #[derive(Clone)]
 pub struct CodeIndexSchedulerRegistryV1 {
@@ -2610,17 +2570,21 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
         path: PathBuf,
-    ) -> CodeIndexReconcileAdmissionV1 {
+    ) -> CodeIndexDemandAdmissionV1 {
         let Ok(project_root) = project_root.canonicalize() else {
-            return CodeIndexReconcileAdmissionV1::Unavailable;
+            return CodeIndexDemandAdmissionV1::Unavailable(
+                CodeIndexDemandUnavailableV1::SchedulerUnmounted,
+            );
         };
         let (hints, wake, epoch, pending_wake) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
-                return CodeIndexReconcileAdmissionV1::Unavailable;
+                return CodeIndexDemandAdmissionV1::Unavailable(
+                    CodeIndexDemandUnavailableV1::SchedulerUnmounted,
+                );
             };
             if let Some(parked) = Self::publication_authority_reset(worktree) {
-                return CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(parked);
+                return CodeIndexDemandAdmissionV1::Terminal(parked);
             }
             (
                 Arc::clone(&worktree.hints),
@@ -2635,7 +2599,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .path(path);
         DaemonCodeIndexControlV1::advance(&epoch);
         Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::HookHint);
-        CodeIndexReconcileAdmissionV1::Accepted
+        CodeIndexDemandAdmissionV1::Queued
     }
 
     /// Primary hint path: deliver the exact touched paths carried by a host
@@ -2647,17 +2611,21 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
         rel_paths: &[String],
-    ) -> CodeIndexReconcileAdmissionV1 {
+    ) -> CodeIndexDemandAdmissionV1 {
         let Ok(project_root) = project_root.canonicalize() else {
-            return CodeIndexReconcileAdmissionV1::Unavailable;
+            return CodeIndexDemandAdmissionV1::Unavailable(
+                CodeIndexDemandUnavailableV1::SchedulerUnmounted,
+            );
         };
         let (hints, wake, epoch, pending_wake) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
-                return CodeIndexReconcileAdmissionV1::Unavailable;
+                return CodeIndexDemandAdmissionV1::Unavailable(
+                    CodeIndexDemandUnavailableV1::SchedulerUnmounted,
+                );
             };
             if let Some(parked) = Self::publication_authority_reset(worktree) {
-                return CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(parked);
+                return CodeIndexDemandAdmissionV1::Terminal(parked);
             }
             (
                 Arc::clone(&worktree.hints),
@@ -2680,7 +2648,7 @@ impl CodeIndexSchedulerRegistryV1 {
         }
         DaemonCodeIndexControlV1::advance(&epoch);
         Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::HookHint);
-        CodeIndexReconcileAdmissionV1::Accepted
+        CodeIndexDemandAdmissionV1::Queued
     }
 
     /// Read-only terminal publication-authority corruption for one mounted
@@ -2735,17 +2703,21 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Preserve correctness when the pre-mount activation queue exceeds its
     /// bounded exact-path capacity. Overflow requests one authoritative scan for
     /// this exact mounted worktree; it never aliases a sibling worktree.
-    pub async fn notify_hook_overflow(&self, project_root: &Path) -> CodeIndexReconcileAdmissionV1 {
+    pub async fn notify_hook_overflow(&self, project_root: &Path) -> CodeIndexDemandAdmissionV1 {
         let Ok(project_root) = project_root.canonicalize() else {
-            return CodeIndexReconcileAdmissionV1::Unavailable;
+            return CodeIndexDemandAdmissionV1::Unavailable(
+                CodeIndexDemandUnavailableV1::SchedulerUnmounted,
+            );
         };
         let (hints, wake, epoch, pending_wake) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
-                return CodeIndexReconcileAdmissionV1::Unavailable;
+                return CodeIndexDemandAdmissionV1::Unavailable(
+                    CodeIndexDemandUnavailableV1::SchedulerUnmounted,
+                );
             };
             if let Some(parked) = Self::publication_authority_reset(worktree) {
-                return CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(parked);
+                return CodeIndexDemandAdmissionV1::Terminal(parked);
             }
             (
                 Arc::clone(&worktree.hints),
@@ -2760,7 +2732,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .overflow();
         DaemonCodeIndexControlV1::advance(&epoch);
         Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::Overflow);
-        CodeIndexReconcileAdmissionV1::Accepted
+        CodeIndexDemandAdmissionV1::Queued
     }
 
     /// Run the bounded Git/stat/content freshness ladder for an ordinary read
@@ -2771,28 +2743,32 @@ impl CodeIndexSchedulerRegistryV1 {
     pub async fn probe_freshness(&self, project_root: &Path) -> bool {
         matches!(
             self.probe_freshness_admission(project_root).await,
-            CodeIndexReconcileAdmissionV1::Accepted
+            CodeIndexDemandAdmissionV1::Queued
         )
     }
 
     /// Typed ordinary-read freshness probe. Parks as
-    /// [`CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt`] when the
+    /// [`CodeIndexDemandAdmissionV1::Terminal`] when the
     /// convergence park holds terminal publication corruption; never collapses
     /// that state through a bool.
     pub async fn probe_freshness_admission(
         &self,
         project_root: &Path,
-    ) -> CodeIndexReconcileAdmissionV1 {
+    ) -> CodeIndexDemandAdmissionV1 {
         let Ok(canonical) = project_root.canonicalize() else {
-            return CodeIndexReconcileAdmissionV1::Unavailable;
+            return CodeIndexDemandAdmissionV1::Unavailable(
+                CodeIndexDemandUnavailableV1::SchedulerUnmounted,
+            );
         };
         {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&canonical) else {
-                return CodeIndexReconcileAdmissionV1::Unavailable;
+                return CodeIndexDemandAdmissionV1::Unavailable(
+                    CodeIndexDemandUnavailableV1::SchedulerUnmounted,
+                );
             };
             if let Some(parked) = Self::publication_authority_reset(worktree) {
-                return CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(parked);
+                return CodeIndexDemandAdmissionV1::Terminal(parked);
             }
         }
         if self
@@ -2800,9 +2776,9 @@ impl CodeIndexSchedulerRegistryV1 {
             .await
             .is_some()
         {
-            CodeIndexReconcileAdmissionV1::Accepted
+            CodeIndexDemandAdmissionV1::Queued
         } else {
-            CodeIndexReconcileAdmissionV1::Unavailable
+            CodeIndexDemandAdmissionV1::Unavailable(CodeIndexDemandUnavailableV1::NoProvenChange)
         }
     }
 
