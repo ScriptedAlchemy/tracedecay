@@ -360,6 +360,35 @@ describe('Code index freshness', () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
+  it('keeps polling moving worktrees when another active worktree is quiet', async () => {
+    vi.useFakeTimers();
+    const reading = envelope('loading', {
+      worktrees: [
+        {
+          ...worktree(),
+          rebuild_in_flight: true,
+          progress: { ...progress(), last_progress_micros: NOW_MICROS - 60_000_000 },
+        },
+        {
+          ...worktree(),
+          worktree_root: '/repo/moving',
+          rebuild_in_flight: true,
+          progress: progress(),
+        },
+      ],
+      note: 'mixed active worktrees',
+    });
+    const fetch = vi.fn(async () => new Response(JSON.stringify(reading), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
   it('backs a quiet active build to 4s and keeps stall age visible without claiming SSE resume', async () => {
     vi.useFakeTimers();
     const stalled = {
