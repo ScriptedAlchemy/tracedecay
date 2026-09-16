@@ -285,10 +285,7 @@ fn arc_share_increment_restores_under_parentless_validate_fresh() {
     let sealed = next.encode_sealed().expect("arc-share generation seals");
     let restored =
         CodeIndexPublishedGenerationV1::decode_sealed(&sealed).expect("parentless restore");
-    assert_eq!(
-        restored.manifest.generation_id,
-        next.manifest.generation_id
-    );
+    assert_eq!(restored.manifest.generation_id, next.manifest.generation_id);
     assert_eq!(
         restored.projection.request().changes.reused_digest,
         next.projection.request().changes.reused_digest

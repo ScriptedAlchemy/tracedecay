@@ -1644,8 +1644,8 @@ mod tests {
         )
         .expect("arc-share seal");
         assert_eq!(count, 9);
-        let again = code_reused_partition_arc_share_digest(&parent, &prior, &current, 9)
-            .expect("again");
+        let again =
+            code_reused_partition_arc_share_digest(&parent, &prior, &current, 9).expect("again");
         assert_eq!(sealed, again);
         let pair_list = code_reused_partition_digest(&[(
             id::<CodeSearchChunkId>("chunk.reused"),
@@ -1676,10 +1676,15 @@ mod tests {
         let current_gen = id::<CodeGenerationId>("generation.2");
         let reused_chunk = id::<CodeSearchChunkId>("chunk.reused");
         let reused_digest_content = id::<ContentDigest>(&digest('c'));
-        let (reused_count, reused_digest) = ChangedCodeChunkSetV1::seal_arc_shared_reused_partition(
-            &parent, &prior, &current_gen, 1, 1,
-        )
-        .expect("arc-share seal");
+        let (reused_count, reused_digest) =
+            ChangedCodeChunkSetV1::seal_arc_shared_reused_partition(
+                &parent,
+                &prior,
+                &current_gen,
+                1,
+                1,
+            )
+            .expect("arc-share seal");
         let mut changes = ChangedCodeChunkSetV1 {
             from_generation: Some(prior),
             to_generation: current_gen,
@@ -1701,9 +1706,7 @@ mod tests {
             .validate_reused_complement_for_restore(Some(&parent), &current)
             .expect("arc-share restore proves corpus without pair-list");
         assert!(
-            changes
-                .validate_reused_complement(None, &current)
-                .is_err(),
+            changes.validate_reused_complement(None, &current).is_err(),
             "pair-list path must still reject an arc-share seal"
         );
     }
@@ -2047,8 +2050,7 @@ mod tests {
 
         let mut wrong_count = valid.clone();
         wrong_count.reused_count = 0;
-        wrong_count.reused_digest =
-            ChangedCodeChunkSetV1::seal_reused_partition(&[]).unwrap().1;
+        wrong_count.reused_digest = ChangedCodeChunkSetV1::seal_reused_partition(&[]).unwrap().1;
         wrong_count.manifest_digest = wrong_count.compute_digest().unwrap();
         assert!(wrong_count.validate().is_ok());
         assert!(matches!(
@@ -2056,8 +2058,15 @@ mod tests {
             Err(DomainError::DigestMismatch)
         ));
 
-        let prior = [(id("chunk.deleted"), id(&digest('b'))), (id("chunk.reused"), id(&digest('c')))];
-        assert!(valid.validate_reused_complement(Some(&prior), &current).is_ok());
+        let prior = [
+            (id("chunk.deleted"), id(&digest('b'))),
+            (id("chunk.reused"), id(&digest('c'))),
+        ];
+        assert!(
+            valid
+                .validate_reused_complement(Some(&prior), &current)
+                .is_ok()
+        );
         assert!(matches!(
             malformed_reuse.validate_reused_complement(Some(&prior), &current),
             Err(DomainError::DigestMismatch)

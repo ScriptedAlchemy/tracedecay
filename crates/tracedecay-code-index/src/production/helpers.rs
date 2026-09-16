@@ -124,10 +124,7 @@ fn aggregate_from_parent(
         }
     }
 
-    let shared_occurrence_set = shared_occurrences
-        .iter()
-        .cloned()
-        .collect::<HashSet<_>>();
+    let shared_occurrence_set = shared_occurrences.iter().cloned().collect::<HashSet<_>>();
 
     // One parent pointer copy + in-place retain of shared rows, then merge the
     // tiny fresh set. Avoids building a second nearly-full filter vec.

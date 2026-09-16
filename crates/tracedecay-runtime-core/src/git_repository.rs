@@ -344,9 +344,9 @@ fn forced_unreadable_repository_discovery(path: &Path) -> bool {
         return false;
     }
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    observations.iter().any(|(root, observation)| {
-        observation.force_unreadable && canonical.starts_with(root)
-    })
+    observations
+        .iter()
+        .any(|(root, observation)| observation.force_unreadable && canonical.starts_with(root))
 }
 
 /// Live `gix` discoveries observed under `root` since observation began.

@@ -419,9 +419,7 @@ impl SymbolLineageResolver {
             }
         }
         let empty_shared = HashSet::new();
-        let scan_cost = fresh_symbols
-            .len()
-            .saturating_mul(available_prior.len());
+        let scan_cost = fresh_symbols.len().saturating_mul(available_prior.len());
         let mut consumed = vec![false; prior.symbols.len()];
         if scan_cost > 1_000_000 {
             let mut by_identity: BTreeMap<&str, usize> = BTreeMap::new();
@@ -1433,16 +1431,12 @@ mod tests {
     #[test]
     fn arc_share_empty_fresh_persists_unchanged_continuity() {
         let shared = Arc::new(record("sym.s1", 'a', "crate::alpha", "function", 'f', '0'));
-        let prior = GenerationSymbolIndexV1::from_sorted_arcs(
-            generation(1),
-            vec![Arc::clone(&shared)],
-        )
-        .expect("prior");
-        let current = GenerationSymbolIndexV1::from_sorted_arcs(
-            generation(2),
-            vec![Arc::clone(&shared)],
-        )
-        .expect("current");
+        let prior =
+            GenerationSymbolIndexV1::from_sorted_arcs(generation(1), vec![Arc::clone(&shared)])
+                .expect("prior");
+        let current =
+            GenerationSymbolIndexV1::from_sorted_arcs(generation(2), vec![Arc::clone(&shared)])
+                .expect("current");
         let candidates = resolver()
             .resolve_fresh_symbol_ptrs(&prior, &current, &HashSet::new())
             .expect("shared continuity");
@@ -1482,7 +1476,11 @@ mod tests {
             .resolve_fresh_symbol_ptrs(&prior, &current, &HashSet::new())
             .expect("per-symbol continuity");
         assert_eq!(candidates.len(), 2);
-        assert!(candidates.iter().all(|c| c.kind == LineageKindV1::Unchanged));
+        assert!(
+            candidates
+                .iter()
+                .all(|c| c.kind == LineageKindV1::Unchanged)
+        );
         let order: Vec<_> = candidates
             .iter()
             .map(|c| c.current_occurrence.as_str())
@@ -1493,11 +1491,9 @@ mod tests {
     #[test]
     fn arc_share_reserves_shared_ancestor_from_fresh_content_match() {
         let shared = Arc::new(record("sym.s1", 'a', "crate::alpha", "function", 'f', '0'));
-        let prior = GenerationSymbolIndexV1::from_sorted_arcs(
-            generation(1),
-            vec![Arc::clone(&shared)],
-        )
-        .expect("prior");
+        let prior =
+            GenerationSymbolIndexV1::from_sorted_arcs(generation(1), vec![Arc::clone(&shared)])
+                .expect("prior");
         let fresh = Arc::new(record("sym.t1", 'c', "crate::alpha", "function", 'e', '0'));
         let current = GenerationSymbolIndexV1::from_sorted_arcs(
             generation(2),
@@ -1522,21 +1518,15 @@ mod tests {
 
     #[test]
     fn arc_share_rename_emits_moved_from_deleted_prior_file() {
-        let prior_in_a =
-            Arc::new(record("sym.old", 'a', "crate::alpha", "function", 'e', 'c'));
-        let prior = GenerationSymbolIndexV1::from_sorted_arcs(
-            generation(1),
-            vec![Arc::clone(&prior_in_a)],
-        )
-        .expect("prior");
+        let prior_in_a = Arc::new(record("sym.old", 'a', "crate::alpha", "function", 'e', 'c'));
+        let prior =
+            GenerationSymbolIndexV1::from_sorted_arcs(generation(1), vec![Arc::clone(&prior_in_a)])
+                .expect("prior");
         // New file identity, same content + qualified name → Moved.
-        let fresh_in_b =
-            Arc::new(record("sym.new", 'b', "crate::alpha", "function", 'f', 'c'));
-        let current = GenerationSymbolIndexV1::from_sorted_arcs(
-            generation(2),
-            vec![Arc::clone(&fresh_in_b)],
-        )
-        .expect("current");
+        let fresh_in_b = Arc::new(record("sym.new", 'b', "crate::alpha", "function", 'f', 'c'));
+        let current =
+            GenerationSymbolIndexV1::from_sorted_arcs(generation(2), vec![Arc::clone(&fresh_in_b)])
+                .expect("current");
         let fresh_ptrs = HashSet::from([Arc::as_ptr(&fresh_in_b)]);
         let candidates = resolver()
             .resolve_fresh_symbol_ptrs(&prior, &current, &fresh_ptrs)
@@ -1551,8 +1541,7 @@ mod tests {
     fn arc_share_candidates_follow_current_occurrence_order() {
         let shared_a = Arc::new(record("sym.a", 'a', "crate::alpha", "function", 'f', '0'));
         let shared_b = Arc::new(record("sym.b", 'b', "crate::beta", "function", 'f', '1'));
-        let prior_for_fresh =
-            Arc::new(record("sym.z", 'c', "crate::gamma", "function", 'd', '9'));
+        let prior_for_fresh = Arc::new(record("sym.z", 'c', "crate::gamma", "function", 'd', '9'));
         let prior = GenerationSymbolIndexV1::from_sorted_arcs(
             generation(1),
             vec![
