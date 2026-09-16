@@ -40,6 +40,71 @@ pub struct BranchGenerationPairV1 {
     pub head: LatestCompleteCodeIndexV1,
 }
 
+/// How long a contended scheduler read sleeps between lock attempts.
+const SCHEDULER_LOCK_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
+
+type SchedulerGuard<'a> = std::sync::MutexGuard<'a, super::CodeIndexWorktreeSchedulerV1>;
+
+/// One attempt at the per-worktree scheduler: `None` when another owner holds
+/// it, `Internal` when that owner panicked while holding it.
+fn try_lock_scheduler(
+    scheduler: &std::sync::Mutex<super::CodeIndexWorktreeSchedulerV1>,
+) -> Result<Option<SchedulerGuard<'_>>, CodeIndexSearchUnavailableReasonV1> {
+    match scheduler.try_lock() {
+        Ok(scheduler) => Ok(Some(scheduler)),
+        Err(std::sync::TryLockError::WouldBlock) => Ok(None),
+        Err(std::sync::TryLockError::Poisoned(_)) => {
+            Err(CodeIndexSearchUnavailableReasonV1::Internal)
+        }
+    }
+}
+
+/// Take the scheduler for one exact read from a blocking thread, waiting out a
+/// transient holder for as long as the request's deadline and cancellation
+/// allow.
+///
+/// Callers already hold the build-publication fence, and every long-lived
+/// scheduler owner — the reconcile worker above all — takes that fence before
+/// the scheduler, so a contended scheduler here is a short-lived status probe,
+/// not a rebuild in flight. Losing that race used to be refused outright with
+/// `CapacityUnavailable`, the same reason a genuinely oversized generation is
+/// refused with, so a compare read that merely collided with a probe told the
+/// user its generation exceeded the bounded-read limits. The wait ends with the
+/// request's own terminal state, exactly as the fence wait above it does.
+fn lock_scheduler_for_exact_read<'a>(
+    scheduler: &'a std::sync::Mutex<super::CodeIndexWorktreeSchedulerV1>,
+    control: &BranchGenerationReadControlV1,
+) -> Result<SchedulerGuard<'a>, CodeIndexSearchUnavailableReasonV1> {
+    loop {
+        if let Some(scheduler) = try_lock_scheduler(scheduler)? {
+            return Ok(scheduler);
+        }
+        if let Some(reason) = control.termination() {
+            return Err(reason);
+        }
+        std::thread::sleep(SCHEDULER_LOCK_RETRY_INTERVAL);
+    }
+}
+
+/// The async twin of [`lock_scheduler_for_exact_read`] for the native
+/// candidate producer, which runs on its caller's runtime rather than a
+/// blocking thread; the sleep between attempts parks the future, never a
+/// worker. The guard is only ever produced on the attempt that returns.
+async fn lock_scheduler_for_exact_read_async<'a>(
+    scheduler: &'a std::sync::Mutex<super::CodeIndexWorktreeSchedulerV1>,
+    control: &BranchGenerationReadControlV1,
+) -> Result<SchedulerGuard<'a>, CodeIndexSearchUnavailableReasonV1> {
+    loop {
+        if let Some(scheduler) = try_lock_scheduler(scheduler)? {
+            return Ok(scheduler);
+        }
+        if let Some(reason) = control.termination() {
+            return Err(reason);
+        }
+        tokio::time::sleep(SCHEDULER_LOCK_RETRY_INTERVAL).await;
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct BranchGenerationCardinalityBoundsV1 {
     pub maximum_files: usize,
@@ -267,15 +332,7 @@ impl CodeIndexSchedulerRegistryV1 {
             }
         };
         control.termination().map_or(Ok(()), Err)?;
-        let mut scheduler = match scheduler.try_lock() {
-            Ok(scheduler) => scheduler,
-            Err(std::sync::TryLockError::WouldBlock) => {
-                return Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable);
-            }
-            Err(std::sync::TryLockError::Poisoned(_)) => {
-                return Err(CodeIndexSearchUnavailableReasonV1::Internal);
-            }
-        };
+        let mut scheduler = lock_scheduler_for_exact_read_async(&scheduler, &control).await?;
         control.termination().map_or(Ok(()), Err)?;
         produce(&mut scheduler, &control)
     }
@@ -413,15 +470,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // working repository could no longer capture into a hard failure
                 // of a read the index could have answered.
                 ExactGenerationPairV1::Missing(missing) => {
-                    let mut scheduler = match scheduler.try_lock() {
-                        Ok(scheduler) => scheduler,
-                        Err(std::sync::TryLockError::WouldBlock) => {
-                            return Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable);
-                        }
-                        Err(std::sync::TryLockError::Poisoned(_)) => {
-                            return Err(CodeIndexSearchUnavailableReasonV1::Internal);
-                        }
-                    };
+                    let mut scheduler = lock_scheduler_for_exact_read(&scheduler, &control)?;
                     hotpath::measure_block!("daemon.code_index.branch_generations.mint", {
                         if missing.base {
                             scheduler.publish_exact_git_tree_generation(
@@ -669,8 +718,6 @@ mod tests {
         let base_generation_id = pair.base.generation().manifest().generation_id.clone();
         // A revision paired with a tree that is not its own names no commit in
         // this repository, so neither the index nor a capture can serve it.
-        // The mount worker may claim the scheduler between exact reads, so
-        // settle only its documented transient lock-contention response.
         let mismatched_tree = settled_pair(
             &registry,
             &scope,
@@ -1313,6 +1360,156 @@ mod tests {
             head_symbols
                 .iter()
                 .any(|symbol| symbol.name == "current_tip_value")
+        );
+    }
+
+    /// A read that has to mint finds the scheduler held by a short-lived
+    /// probe. It waits for the scheduler, bounded by its own deadline: a read
+    /// with deadline left completes once the holder lets go, and one whose
+    /// deadline passes first reports the typed `TimedOut` state. Losing that
+    /// race used to be refused with `CapacityUnavailable`, the reason a
+    /// genuinely oversized generation is refused with, so a compare read that
+    /// merely collided with a probe told the user its generation exceeded the
+    /// bounded-read limits.
+    #[tokio::test]
+    async fn an_exact_read_that_finds_the_scheduler_held_waits_for_it() {
+        let project = TempDir::new().expect("project");
+        let store = TempDir::new().expect("store");
+        init_fixture_repository(project.path());
+        let (base_revision, base_tree) = commit_source(
+            project.path(),
+            "pub fn held_scheduler_base_value() -> usize { 1 }\n",
+            "base",
+        );
+        let (head_revision, head_tree) = commit_source(
+            project.path(),
+            "pub fn held_scheduler_head_value() -> usize { 2 }\n",
+            "head",
+        );
+
+        let project_id = ProjectId::new("project.held-scheduler-read").expect("project id");
+        let canonical_project = project.path().canonicalize().expect("canonical project");
+        let scoped_store = scoped_code_index_store_root(store.path(), &canonical_project);
+        // Only the tip is indexed, so the base has to be minted, and minting
+        // is the step that needs the scheduler.
+        let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+            project_id.clone(),
+            &canonical_project,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        )
+        .expect("open scheduler");
+        scheduler.reconcile_now().expect("publish tip generation");
+        drop(scheduler);
+
+        let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
+        registry
+            .mount_worktree(
+                project_id.clone(),
+                &canonical_project,
+                store.path().to_path_buf(),
+            )
+            .await
+            .expect("mount sealed store");
+        let identity = super::super::identity::IndexingIdentityV1::resolve(&canonical_project)
+            .expect("indexing identity");
+        let reference = identity.head_ref().cloned().expect("head reference");
+        let scope = ResolvedScope::new(
+            project_id,
+            identity.repository_id().clone(),
+            identity.worktree_id().clone(),
+            Some(reference.clone()),
+        )
+        .expect("resolved scope");
+        let deadline_in = |duration: std::time::Duration| {
+            tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(
+                tracedecay_contracts::clock::now_micros().0
+                    + i64::try_from(duration.as_micros()).expect("deadline fits"),
+            ))
+            .expect("deadline")
+        };
+
+        let handle = registry
+            .scheduler_handle(&canonical_project)
+            .await
+            .expect("mounted scheduler handle");
+        // The probe holds the scheduler from its own thread, the way a status
+        // read on the blocking pool does, until the test lets it go.
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let probe = std::thread::spawn(move || {
+            let _held = handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            held_tx.send(()).expect("the test observes the hold");
+            release_rx.recv().expect("the test releases the hold");
+        });
+        held_rx.recv().expect("the probe holds the scheduler");
+
+        let expired = settled_pair(
+            &registry,
+            &scope,
+            (&reference, &base_revision, &base_tree),
+            (&reference, &head_revision, &head_tree),
+            &BranchGenerationReadControlV1 {
+                deadline: Some(deadline_in(std::time::Duration::from_millis(300))),
+                cancellation: None,
+            },
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .map(|_| "sealed pair");
+        assert!(
+            matches!(expired, Err(CodeIndexSearchUnavailableReasonV1::TimedOut)),
+            "a read that runs out of deadline waiting for the scheduler reports the deadline, got {expired:?}"
+        );
+
+        let control = BranchGenerationReadControlV1 {
+            deadline: Some(deadline_in(std::time::Duration::from_secs(30))),
+            cancellation: None,
+        };
+        let mut waiting = std::pin::pin!(registry.generations_for_revisions(
+            &scope,
+            &reference,
+            &base_revision,
+            &base_tree,
+            &reference,
+            &head_revision,
+            &head_tree,
+            control.clone(),
+        ));
+        tokio::select! {
+            outcome = &mut waiting => {
+                let outcome = outcome.map(|_| "sealed pair");
+                panic!("a read with deadline left must wait for the scheduler, got {outcome:?}");
+            }
+            () = tokio::time::sleep(std::time::Duration::from_millis(300)) => {}
+        }
+
+        release_tx
+            .send(())
+            .expect("the probe is waiting to release");
+        probe.join().expect("the probe thread joins");
+        let pair = tokio::time::timeout(std::time::Duration::from_secs(30), waiting)
+            .await
+            .expect("bounded exact-generation read")
+            .expect("the read completes once the scheduler is released");
+        assert_eq!(
+            pair.base
+                .generation()
+                .snapshot()
+                .source_revision
+                .as_ref()
+                .map(tracedecay_domain::CommitId::as_str),
+            Some(base_revision.as_str()),
+            "the waiting read mints the base it was asked for"
+        );
+        let base_symbols =
+            generation_symbols(pair.base.generation(), None, None, &control).expect("base symbols");
+        assert!(
+            base_symbols
+                .iter()
+                .any(|symbol| symbol.name == "held_scheduler_base_value")
         );
     }
 
