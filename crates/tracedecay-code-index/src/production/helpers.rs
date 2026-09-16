@@ -635,10 +635,21 @@ where
     }
     let source_path = &file.authority.logical_path;
     let crate_qualified = reference.reference_name.strip_prefix("crate::");
+    let is_rust = file.extraction.language.as_str() == "rust";
     let mut rust = RustResolutionContextV1 {
         files: rust_files,
         reexports: reexport_cache,
     };
+    // A blocklisted member (`new`, `read`, `spawn`) is exempt from the
+    // blocklist only behind an owner this file attests as project code;
+    // `fs::read` through `use std::fs` keeps the member's verdict.
+    if qualified
+        && is_rust
+        && CROSS_FILE_REFERENCE_BLOCKLIST.contains(&simple_name)
+        && !rust_qualified_owner_is_project_attested(&rust, file, &reference.reference_name)
+    {
+        return None;
+    }
     let mut compatible = candidates.iter().filter(|(candidate_index, symbol)| {
         let target = RustSymbolTargetV1 {
             index: *candidate_index,
@@ -662,11 +673,16 @@ where
                                         target,
                                     )
                                 ))
-                                || file_qualified_name_matches(
-                                    &reference.reference_name,
-                                    &files[*candidate_index].as_ref().authority.logical_path,
-                                    &symbol.qualified_name,
-                                )
+                                // Rust `::` paths bind only through the
+                                // hop-by-hop walk below; a bare file-stem
+                                // match would bind `fs::read` to any crate's
+                                // `fs.rs`.
+                                || (!is_rust
+                                    && file_qualified_name_matches(
+                                        &reference.reference_name,
+                                        &files[*candidate_index].as_ref().authority.logical_path,
+                                        &symbol.qualified_name,
+                                    ))
                         }
                         Some(crate_path) => rust_crate_qualified_name_matches(
                             crate_path,
@@ -677,7 +693,7 @@ where
                     };
                     direct
                         || (qualified
-                            && file.extraction.language.as_str() == "rust"
+                            && is_rust
                             && hotpath::measure_block!(
                                 "code_index.seal.qualified_path_walk",
                                 rust_qualified_path_matches(
@@ -1072,6 +1088,45 @@ fn rust_expand_path_head(
     let mut relative = vec!["self"];
     relative.extend_from_slice(segments);
     rust_relative_path(source_path, &relative).map(|path| (RustPathOriginV1::InCrate, path))
+}
+
+/// Whether the head of the qualified Rust path `reference_name` is attested
+/// as project code by `file`'s own evidence: a `crate`/`self`/`super` path,
+/// an import whose path leads into this crate or a staged workspace crate,
+/// a workspace crate name, a module file beside the referencing module, or
+/// a type this file defines. `fs` from `use std::fs` is none of those, so
+/// `fs::read` is judged by its member, while `ignore::WalkBuilder::new`
+/// behind a workspace crate is not.
+fn rust_qualified_owner_is_project_attested(
+    rust: &RustResolutionContextV1<'_>,
+    file: &FileGenerationArtifactsV1,
+    reference_name: &str,
+) -> bool {
+    let Some((head, _)) = reference_name.split_once("::") else {
+        return false;
+    };
+    if matches!(head, "crate" | "self" | "super") {
+        return true;
+    }
+    if let Some(binding) = unique_named_import(file, head) {
+        let import_head = binding
+            .module_specifier
+            .split("::")
+            .next()
+            .unwrap_or_default();
+        return matches!(import_head, "crate" | "self" | "super")
+            || rust.files.crate_root(import_head).is_some();
+    }
+    if rust.files.crate_root(head).is_some() {
+        return true;
+    }
+    let source_path = file.authority.logical_path.as_str();
+    rust_relative_module(&format!("self::{head}"), source_path)
+        .is_some_and(|module| rust.files.module(source_path, &module).is_some())
+        || file.artifacts.symbols.iter().any(|symbol| {
+            symbol.simple_name == head
+                && relation_target_kind_is_compatible(RelationEdgeKindV1::TypeOf, &symbol.kind)
+        })
 }
 
 /// The crate-root-relative module segments of a `crate::`/`self::`/`super::`

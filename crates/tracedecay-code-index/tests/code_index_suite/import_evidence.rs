@@ -431,6 +431,57 @@ fn rust_inherent_impl_resolves_when_type_is_reexported_from_a_submodule() {
 }
 
 #[test]
+fn rust_std_module_paths_do_not_bind_to_same_stem_project_files() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.std-stem.widgets-lib",
+            "crates/widgets/src/lib.rs",
+            "pub mod fs;\n",
+        ),
+        (
+            "file.std-stem.widgets-fs",
+            "crates/widgets/src/fs.rs",
+            "pub fn read(path: &str) -> Vec<u8> { path.as_bytes().to_vec() }\n",
+        ),
+        (
+            "file.std-stem.ignore-lib",
+            "crates/ignore/src/lib.rs",
+            "mod walk;\npub use walk::WalkBuilder;\n",
+        ),
+        (
+            "file.std-stem.ignore-walk",
+            "crates/ignore/src/walk.rs",
+            "pub struct WalkBuilder;\nimpl WalkBuilder {\n    pub fn new() -> WalkBuilder { WalkBuilder }\n}\n",
+        ),
+        (
+            "file.std-stem.app",
+            "crates/app/src/main.rs",
+            "use std::fs;\nfn load() {\n    fs::read(\"x\");\n}\nfn walk() {\n    ignore::WalkBuilder::new();\n}\nfn main() { load(); walk(); }\n",
+        ),
+    ]);
+    let load = symbol_occurrence(&generation, "crates/app/src/main.rs::load");
+    let project_read = symbol_occurrence(&generation, "crates/widgets/src/fs.rs::read");
+    let walk = symbol_occurrence(&generation, "crates/app/src/main.rs::walk");
+    let walk_builder_new =
+        symbol_occurrence(&generation, "crates/ignore/src/walk.rs::WalkBuilder::new");
+
+    assert!(
+        generation.edges().iter().all(|edge| {
+            edge.from_occurrence != load
+                || edge.to_occurrence != project_read
+                || edge.kind != RelationEdgeKindV1::Calls
+        }),
+        "`fs::read` through `use std::fs` must not bind to a project `fs.rs::read`"
+    );
+    assert_resolved_edge(
+        &generation,
+        &walk,
+        &walk_builder_new,
+        RelationEdgeKindV1::Calls,
+    );
+}
+
+#[test]
 fn rust_typed_parameter_method_call_binds_through_import_and_crate_reexport() {
     let generation = published_rust_workspace(&[
         (
