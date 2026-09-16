@@ -279,19 +279,26 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
   let readabilityFoldedRegions = 0;
   for (const [depth, band] of byBand) {
     const inBand = [...band].sort((a, b) => a.cluster.order - b.cluster.order);
-    const bandCapacity = maxRegionsWithoutOverlap(
-      usableWidth,
-      inBand.map((draft) => labelOf(draft.cluster.directory)),
-      inBand.map((draft) => ({
-        fileCount: draft.cluster.file_count,
-        density:
-          draft.cluster.file_count > 0
+    let capacity = inBand.length;
+    const retained: Draft[] = [];
+    // A folded candidate must not reduce the space available to the kept prefix.
+    for (const draft of inBand) {
+      const nextCapacity = Math.min(capacity, maxRegionsWithoutOverlap(
+        usableWidth,
+        [labelOf(draft.cluster.directory)],
+        [{
+          fileCount: draft.cluster.file_count,
+          density: draft.cluster.file_count > 0
             ? draft.cluster.internal_edges / draft.cluster.file_count
             : 0,
-      })),
-    );
-    readableByBand.set(depth, inBand.slice(0, bandCapacity));
-    readabilityFoldedRegions += Math.max(0, inBand.length - bandCapacity);
+        }],
+      ));
+      if (retained.length + 1 > nextCapacity) break;
+      retained.push(draft);
+      capacity = nextCapacity;
+    }
+    readableByBand.set(depth, retained);
+    readabilityFoldedRegions += inBand.length - retained.length;
   }
   const { drawnByBand, capFoldedRegions } = applyGlobalDrawCap(readableByBand);
   const widestBand = [...drawnByBand.values()].reduce((max, band) => Math.max(max, band.length), 1);

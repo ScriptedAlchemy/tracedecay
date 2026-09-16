@@ -301,6 +301,17 @@ describe('elevation', () => {
     expect(scale.teach).not.toMatch(/28-region drawing cap folds/);
   });
 
+  it('does not let a folded long label displace a readable prefix', () => {
+    const directories = ['src/a', 'src/b', 'src/c', `src/${'wide'.repeat(100)}`];
+    const clusters = directories.map((directory, order) => cluster(directory, { order }));
+    const files = directories.map((directory) => file(`${directory}/a.rs`, 0));
+    const model = buildCortexModel(measurement(clusters, files));
+
+    expect(model.drawnRegions.map((region) => region.directory)).toEqual(directories.slice(0, 3));
+    expect(model.readabilityFoldedRegions).toBe(1);
+    assertBandClear(model.drawnRegions);
+  });
+
   it('keeps a representable ridge after folding a crowded bedrock band', () => {
     const bedrockCount = 28;
     const clusters = [
