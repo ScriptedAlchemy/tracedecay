@@ -88,7 +88,7 @@ export function readSharedCodeCoverage(coverage: SimilarCoverageV1): SharedCodeC
       return {
         kind: 'partial',
         sentence:
-          'The read stopped at its result budget. What is listed is verified; more copies may exist past the page boundary.',
+          'Not every member of this body\'s families is on this page. What is listed is verified; the family headers say whether a further page exists.',
       };
     case 'excluded_too_small':
       return {
