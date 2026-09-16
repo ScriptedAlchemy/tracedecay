@@ -36,6 +36,10 @@ dashboard/.*-axe/
 # mockup screenshot output; regenerate with each mockup's shoot.mjs / qa-drive.mjs
 mockups/**/shots/
 
+# Operator TraceDecay profile snapshots must never be committed (real global.db /
+# hook analytics / session IDs). Concept HUD may recreate this path locally only.
+mockups/ui-concept-v2/app/profile-pack/
+
 # standalone lockfiles cargo writes when a vendored grafeo crate is tested
 # from inside its own directory; the workspace lock is the one that matters
 vendor/grafeo/*/Cargo.lock

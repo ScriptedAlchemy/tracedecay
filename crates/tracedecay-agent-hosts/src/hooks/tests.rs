@@ -64,38 +64,74 @@ fn git_root_outside_configured_temp_is_project_like() {
 }
 
 #[test]
-fn empty_temp_root_does_not_reject_a_git_repo() {
+fn marker_root_outside_configured_temp_is_project_like() {
+    let configured_temp = tempfile::tempdir().expect("configured temp root");
+    let sibling = tempfile::tempdir().expect("sibling root");
+    let project = sibling.path().join("project");
+    let nested = project.join("src");
+    std::fs::create_dir_all(&nested).expect("nested project directory");
+    std::fs::write(project.join("Cargo.toml"), "[package]\nname = \"x\"\n")
+        .expect("project marker");
+
+    assert!(
+        !canonical(&project).starts_with(canonical(configured_temp.path())),
+        "sibling marker root must sit outside the injected temp root"
+    );
+    assert_eq!(
+        project_like_root(&nested, Some(configured_temp.path())),
+        Some(project)
+    );
+}
+
+#[test]
+fn empty_temp_root_input_is_rejected_and_fail_closed() {
     let home = tempfile::tempdir().expect("workspace root");
     let nested = init_nested_git_workspace(home.path());
-    let discovered = tracedecay_runtime_core::worktree::git_worktree_root(&nested)
-        .expect("fixture must be a real git worktree root");
+    assert!(
+        tracedecay_runtime_core::worktree::git_worktree_root(&nested).is_some(),
+        "fixture must be a real git worktree root"
+    );
     assert_eq!(super::usable_absolute_temp_root_from(Path::new("")), None);
-    assert_eq!(
-        project_like_root(&nested, Some(Path::new(""))),
-        Some(discovered)
-    );
+    assert_eq!(project_like_root(&nested, Some(Path::new(""))), None);
 }
 
 #[test]
-fn relative_temp_root_does_not_reject_a_git_repo() {
+fn relative_temp_root_input_is_rejected_and_fail_closed() {
     let home = tempfile::tempdir().expect("workspace root");
     let nested = init_nested_git_workspace(home.path());
-    let discovered = tracedecay_runtime_core::worktree::git_worktree_root(&nested)
-        .expect("fixture must be a real git worktree root");
+    assert!(
+        tracedecay_runtime_core::worktree::git_worktree_root(&nested).is_some(),
+        "fixture must be a real git worktree root"
+    );
     assert_eq!(super::usable_absolute_temp_root_from(Path::new(".")), None);
-    assert_eq!(
-        project_like_root(&nested, Some(Path::new("."))),
-        Some(discovered)
-    );
+    assert_eq!(project_like_root(&nested, Some(Path::new("."))), None);
 }
 
 #[test]
-fn absent_temp_root_does_not_reject_a_git_repo() {
+fn absent_temp_root_is_fail_closed() {
     let home = tempfile::tempdir().expect("workspace root");
     let nested = init_nested_git_workspace(home.path());
-    let discovered = tracedecay_runtime_core::worktree::git_worktree_root(&nested)
-        .expect("fixture must be a real git worktree root");
-    assert_eq!(project_like_root(&nested, None), Some(discovered));
+    assert!(
+        tracedecay_runtime_core::worktree::git_worktree_root(&nested).is_some(),
+        "fixture must be a real git worktree root"
+    );
+    assert_eq!(project_like_root(&nested, None), None);
+}
+
+#[test]
+fn marker_under_temp_is_not_project_like() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let agent = temp.path().join("agent-x");
+    std::fs::create_dir(&agent).expect("ephemeral workspace");
+    std::fs::write(agent.join("package.json"), "{}").expect("workspace marker");
+    assert_eq!(project_like_root(&agent, Some(temp.path())), None);
+
+    let project = temp.path().join("project");
+    let nested = project.join("src");
+    std::fs::create_dir_all(&nested).expect("nested project directory");
+    std::fs::write(project.join("Cargo.toml"), "[package]\nname = \"x\"\n")
+        .expect("project marker");
+    assert_eq!(project_like_root(&nested, Some(temp.path())), None);
 }
 
 #[test]
@@ -106,13 +142,6 @@ fn marker_at_temp_root_does_not_make_descendant_project_like() {
     let generic = temp.path().join("generic");
     std::fs::create_dir(&generic).expect("generic directory");
     assert_eq!(project_like_root(&generic, Some(temp.path())), None);
-
-    let project = temp.path().join("project");
-    let nested = project.join("src");
-    std::fs::create_dir_all(&nested).expect("nested project directory");
-    std::fs::write(project.join("Cargo.toml"), "[package]\nname = \"x\"\n")
-        .expect("project marker");
-    assert_eq!(project_like_root(&nested, Some(temp.path())), Some(project));
 }
 
 #[test]
