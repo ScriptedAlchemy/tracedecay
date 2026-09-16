@@ -927,11 +927,7 @@ fn dashboard_generation_is_ready(
         text_ready
             && matches!(
                 code_graph_serving,
-                Some(
-                    CodeGraphServingReadinessV1::Ready
-                        | CodeGraphServingReadinessV1::Refused { .. }
-                        | CodeGraphServingReadinessV1::Unavailable { .. }
-                )
+                Some(CodeGraphServingReadinessV1::Ready)
             )
     } else {
         latest.is_some() || text_ready
