@@ -1086,6 +1086,17 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         admitted["execution_snapshot"]["route"], proposal["proposal"]["route"]["recommended"],
         "execution admission must pin the route the user accepted: {admitted}"
     );
+    assert_eq!(admitted["mutation"]["replayed"], false);
+    let mut expected_replay = admitted.clone();
+    expected_replay["mutation"]["replayed"] = json!(true);
+    assert_eq!(
+        fixture.payload(
+            "replay execution admission",
+            "/application/work/admit-execution",
+            &prepared_admission["request"],
+        ),
+        expected_replay,
+    );
     let admitted_graph = product_graph(&fixture, "product graph after execution admission");
     let admitted_item = task_item(&admitted_graph);
     assert!(
@@ -1499,6 +1510,18 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
     assert!(
         task_item(&accepted_task_graph)["accepted_at"].is_number(),
         "{accepted_task}"
+    );
+    assert_eq!(
+        fixture.payload(
+            "replay execution admission after task completion",
+            "/application/work/admit-execution",
+            &prepared_admission["request"],
+        ),
+        expected_replay,
+    );
+    assert_eq!(
+        product_graph(&fixture, "graph after completed admission replay")["snapshot"]["graph"],
+        accepted_task_graph["snapshot"]["graph"],
     );
     let closed = fixture.payload(
         "generate a proposal against the accepted task",
