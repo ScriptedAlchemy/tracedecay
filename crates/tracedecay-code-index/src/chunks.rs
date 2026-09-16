@@ -245,15 +245,19 @@ where
     if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
         return chunks.iter().try_for_each(&operation);
     }
-    let failure = chunks
-        .par_iter()
-        .enumerate()
-        .filter_map(|(index, chunk)| {
-            admit(&mut || operation(chunk))
-                .err()
-                .map(|error| (index, error))
-        })
-        .min_by_key(|(index, _)| *index);
+    // Leaves are admitted one unit at a time on whichever worker runs them,
+    // so the caller's own unit must not be held across the join.
+    let failure = crate::parallelism::with_yielded_background_cpu_permits(|| {
+        chunks
+            .par_iter()
+            .enumerate()
+            .filter_map(|(index, chunk)| {
+                admit(&mut || operation(chunk))
+                    .err()
+                    .map(|error| (index, error))
+            })
+            .min_by_key(|(index, _)| *index)
+    });
     match failure {
         Some((_, error)) => Err(error),
         None => Ok(()),
@@ -371,10 +375,12 @@ impl ExactExtractionAuthorityV1 {
         if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
             return chunks.into_iter().map(|chunk| self.admit(chunk)).collect();
         }
-        let admitted = chunks
-            .into_par_iter()
-            .map(|chunk| crate::parallelism::with_background_cpu_permit(|| self.admit(chunk)))
-            .collect::<Vec<_>>();
+        let admitted = crate::parallelism::with_yielded_background_cpu_permits(|| {
+            chunks
+                .into_par_iter()
+                .map(|chunk| crate::parallelism::with_background_cpu_permit(|| self.admit(chunk)))
+                .collect::<Vec<_>>()
+        });
         admitted.into_iter().collect()
     }
 
@@ -2575,18 +2581,22 @@ fn attribute_whitespace_only_windows(source: &str, pending: &mut Vec<PendingChun
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::sync::{Arc, Barrier};
+    use std::time::{Duration, Instant};
 
     use super::*;
     use crate::extract::ExtractionCoverageV1;
     use tracedecay_domain::{
-        BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
-        CodeSearchChunkGrainV1, CodeSearchChunkId, ContentDigest, FileOccurrenceId,
-        GrammarRevision, LanguageDescriptorRevision, LanguageId, ManifestDigest, PolicyRevisionId,
-        ProjectId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-        SanitizerRevision, SensitivityDecision, SensitivityLevelV1, SnapshotFileDispositionV1,
-        SourceSpan, SymbolOccurrenceId, UtcMicros, ValidatedCodeFileV1,
+        BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeIndexWorkerSelectionV1,
+        CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId, ContentDigest,
+        FileOccurrenceId, GrammarRevision, LanguageDescriptorRevision, LanguageId, ManifestDigest,
+        PolicyRevisionId, ProjectId, SanitizationReceiptId, SanitizedCodeFileV1,
+        SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
+        SnapshotFileDispositionV1, SourceSpan, SymbolOccurrenceId, UtcMicros, ValidatedCodeFileV1,
     };
+    use tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1;
 
     use crate::extract::{
         ExtractionCancellation, LanguageExtractor as CanonicalLanguageExtractor, NeverCancelled,
@@ -2711,6 +2721,134 @@ mod tests {
         let mut wrong_membership = file_chunks();
         wrong_membership.document.chunk_ids[0] = id("chunk.other");
         assert!(wrong_membership.validate().is_err());
+    }
+
+    const ADMISSION_STEP_DEADLINE: Duration = Duration::from_secs(10);
+
+    fn wait_until(what: &str, condition: impl Fn() -> bool) {
+        let started = Instant::now();
+        while !condition() {
+            assert!(
+                started.elapsed() < ADMISSION_STEP_DEADLINE,
+                "{what} did not happen within {ADMISSION_STEP_DEADLINE:?}"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// The production shape of the wedge: a pool worker admitted for one
+    /// background-CPU unit (a `collect_bounded_ordered` leaf) fans chunk work
+    /// out across the pool while a full-width request (the lexical sorter's
+    /// admission) is already queued at the FIFO head. Stolen leaves must not
+    /// wait behind that head on a unit their own parent holds.
+    #[test]
+    fn nested_chunk_fan_out_does_not_wedge_behind_a_full_width_head_waiter() {
+        let installed = crate::parallelism::install_worker_plan(
+            CodeIndexWorkerSelectionV1::Automatic {},
+            DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
+        )
+        .expect("install the automatic worker plan");
+        let authority = installed.background_cpu;
+        let width = authority.width().get();
+        // Single-CPU hosts and TRACEDECAY_INDEX_WORKERS=1 yield width 1; the
+        // steal-behind-FIFO scenario needs a second worker.
+        if width < 2 {
+            return;
+        }
+        let chunks = std::iter::repeat_n(
+            Arc::clone(&file_chunks().chunks[0]),
+            PARALLEL_CHUNK_THRESHOLD * width,
+        )
+        .collect::<Vec<_>>();
+        let chunks_len = chunks.len();
+
+        let holder_admitted = Arc::new(AtomicBool::new(false));
+        let head_queued = Arc::new(AtomicBool::new(false));
+        let leaves_entered = Arc::new(AtomicUsize::new(0));
+        let (finished, finishes) = mpsc::channel::<&'static str>();
+
+        let holder = {
+            let authority = Arc::clone(&authority);
+            let holder_admitted = Arc::clone(&holder_admitted);
+            let head_queued = Arc::clone(&head_queued);
+            let leaves_entered = Arc::clone(&leaves_entered);
+            let finished = finished.clone();
+            std::thread::spawn(move || {
+                let outcome = crate::parallelism::install(|| {
+                    crate::parallelism::with_background_cpu_permit(|| {
+                        holder_admitted.store(true, Ordering::SeqCst);
+                        wait_until("full-width head request queued", || {
+                            head_queued.load(Ordering::SeqCst)
+                        });
+                        try_for_each_chunk_ordered(
+                            |unit| crate::parallelism::with_background_cpu_permit(unit),
+                            &chunks,
+                            |_| {
+                                if leaves_entered.fetch_add(1, Ordering::SeqCst) == 0 {
+                                    // Keep the first leaf busy until a sibling
+                                    // either ran (admission progressed) or is
+                                    // queued behind the head (the wedge).
+                                    wait_until("a sibling leaf ran or queued", || {
+                                        leaves_entered.load(Ordering::SeqCst) >= 2
+                                            || authority.waiting_work_units() > width
+                                    });
+                                }
+                                Ok(())
+                            },
+                        )
+                    })
+                });
+                assert!(matches!(outcome, Ok(Ok(()))), "fan-out failed: {outcome:?}");
+                finished.send("holder").expect("test thread is waiting");
+            })
+        };
+        wait_until("holder admitted", || holder_admitted.load(Ordering::SeqCst));
+        // The authority is shared with every other test in this binary, so
+        // counters are lower bounds here; run alone they are exact.
+        assert!(authority.active_units() >= 1);
+
+        // Gate the head thread so the waiting baseline is taken before this
+        // request can enqueue; under parallel libtest a foreign backlog can
+        // already be >= width and would otherwise release the holder early.
+        let head_enter = Arc::new(Barrier::new(2));
+        let head = {
+            let finished = finished.clone();
+            let head_enter = Arc::clone(&head_enter);
+            std::thread::spawn(move || {
+                head_enter.wait();
+                crate::parallelism::with_background_cpu_permits(width, || {});
+                finished.send("head").expect("test thread is waiting");
+            })
+        };
+        let waiting_before = authority.waiting_work_units();
+        head_enter.wait();
+        wait_until("head request waiting for the full width", || {
+            authority.waiting_work_units() >= waiting_before.saturating_add(width)
+        });
+        assert!(
+            !head.is_finished(),
+            "head must still be blocked in full-width admission before fan-out"
+        );
+        head_queued.store(true, Ordering::SeqCst);
+
+        for _ in 0..2 {
+            assert!(
+                finishes.recv_timeout(ADMISSION_STEP_DEADLINE).is_ok(),
+                "nested chunk fan-out wedged behind the full-width head waiter for \
+                 {ADMISSION_STEP_DEADLINE:?}: active_units={} waiting_work_units={} \
+                 leaves_entered={}",
+                authority.active_units(),
+                authority.waiting_work_units(),
+                leaves_entered.load(Ordering::SeqCst),
+            );
+        }
+        holder.join().expect("holder thread");
+        head.join().expect("head thread");
+        assert_eq!(
+            leaves_entered.load(Ordering::SeqCst),
+            chunks_len,
+            "every leaf must run once the fan-out completes"
+        );
     }
 
     const RUST_SOURCE: &str = "//! Module documentation.\n\nuse std::collections::HashMap;\n\n/// Doc comment.\npub fn alpha(x: u32) -> u32 {\n    x + 1\n}\n\npub struct Holder {\n    map: HashMap<u32, u32>,\n}\n\nimpl Holder {\n    pub fn get(&self, key: u32) -> Option<u32> {\n        self.map.get(&key).copied()\n    }\n}\n\n// A trailing free-floating comment.\n";
