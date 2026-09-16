@@ -4230,6 +4230,246 @@ fn partitioned_encode_publishes_only_the_edited_file_segment() {
     assert_reused_segment_descriptors_stable(&parent_manifest, &child_manifest);
 }
 
+/// The one-edit increment the daemon publishes: one re-extracted file beside
+/// carried-forward files whose segments the child reuses from the parent.
+fn increment_wedge_request(edited_value: u64, sealed_at: i64) -> CodeIndexBuildRequestV1 {
+    let carried = concat!(
+        "pub fn walk_one(items: &[u32]) -> u32 { items.iter().copied().filter(|i| i % 2 == 0).sum() }\n",
+        "pub fn walk_two(items: &[u32]) -> u32 { items.iter().copied().filter(|i| i % 3 == 0).sum() }\n",
+        "pub fn walk_three(items: &[u32]) -> u32 { items.iter().copied().filter(|i| i % 5 == 0).sum() }\n",
+        "pub fn walk_four(items: &[u32]) -> u32 { items.iter().copied().filter(|i| i % 7 == 0).sum() }\n",
+        "pub fn walk_five(items: &[u32]) -> u32 { items.iter().copied().filter(|i| i % 11 == 0).sum() }\n",
+    );
+    let edited = if edited_value == 1 {
+        "pub fn edited() -> u64 { 1 }\n"
+    } else {
+        "pub fn edited() -> u64 { 2 }\npub fn appended_marker() -> u64 { 1103 }\n"
+    };
+    let sources = [
+        ("file.wedge.carried", "src/carried.rs", carried),
+        ("file.wedge.edited", "src/edited.rs", edited),
+    ];
+    let mut identity = Sha256::new();
+    let mut files = Vec::new();
+    let mut captured_files = Vec::new();
+    let mut receipts = Vec::new();
+    for (index, (occurrence, logical_path, source)) in sources.into_iter().enumerate() {
+        identity.update(logical_path.as_bytes());
+        identity.update([0]);
+        identity.update(source.as_bytes());
+        let file_occurrence_id = id::<FileOccurrenceId>(occurrence);
+        files.push(SanitizedCodeFileV1 {
+            file_occurrence_id: file_occurrence_id.clone(),
+            logical_path: logical_path.to_owned(),
+            language: Some(id::<LanguageId>("rust")),
+            content_digest: content_digest(source.as_bytes()),
+            disposition: SnapshotFileDispositionV1::Present,
+        });
+        captured_files.push(CodeIndexCapturedFileV1 {
+            file_occurrence_id,
+            sanitized_bytes: Arc::from(source.as_bytes()),
+            sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
+        });
+        receipts.push(id::<SanitizationReceiptId>(&format!(
+            "receipt.wedge.{index}"
+        )));
+    }
+    CodeIndexBuildRequestV1 {
+        snapshot: SanitizedCodeSnapshotV1 {
+            repository: id::<RepositoryId>("repository.production"),
+            worktree: None,
+            reference: None,
+            source_revision: None,
+            sanitizer_revision: id::<SanitizerRevision>("sanitizer.v1"),
+            sanitization_receipts: receipts,
+            content_identity: content_digest(&identity.finalize()),
+            captured_at: UtcMicros(1_000_000),
+            files,
+        },
+        captured_files,
+        changed_files: if edited_value == 1 {
+            BTreeSet::new()
+        } else {
+            BTreeSet::from(["src/edited.rs".to_owned()])
+        },
+        invalidations: BTreeSet::new(),
+        ignored_source_admissions: Vec::new(),
+        repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            tree: None,
+            dirty: RepositoryDirtyStateV1::Dirty,
+        },
+        sealed_at: UtcMicros(sealed_at),
+        target_projection_key: projection_key(),
+    }
+}
+
+/// `(path, symbol_occurrence_id, payload_digest)` per clone body, in the
+/// order the file carries them, read from the generation's sealed JSON.
+fn sealed_clone_bindings(
+    generation: &CodeIndexPublishedGenerationV1,
+) -> BTreeMap<String, Vec<(String, String)>> {
+    let sealed = generation.encode_sealed().expect("generation seals");
+    let envelope: serde_json::Value = serde_json::from_slice(&sealed).expect("sealed JSON");
+    envelope["generation"]["files"]
+        .as_array()
+        .expect("sealed files")
+        .iter()
+        .map(|file| {
+            let bodies = file["artifacts"]["clone_bodies"]
+                .as_array()
+                .expect("clone bodies")
+                .iter()
+                .map(|body| {
+                    (
+                        body["occurrence"]["symbol_occurrence_id"]
+                            .as_str()
+                            .expect("clone symbol occurrence")
+                            .to_owned(),
+                        body["occurrence"]["payload_digest"]
+                            .as_str()
+                            .expect("clone payload digest")
+                            .to_owned(),
+                    )
+                })
+                .collect();
+            (
+                file["authority"]["logical_path"]
+                    .as_str()
+                    .expect("file logical path")
+                    .to_owned(),
+                bodies,
+            )
+        })
+        .collect()
+}
+
+/// The daemon publishes a one-file increment with parent-segment reuse and
+/// then projects its text through `open_partitioned_sealed`, admitting every
+/// restored file under `CodeFileIndexArtifactsV1::validate`. A carried-forward
+/// file's clone bodies must come back through that sealed path bound to the
+/// same file symbols, in the same strict order, with the same payload digests
+/// the in-memory generation published; otherwise the text projection refuses
+/// the generation and the index never serves the edit.
+#[test]
+fn carried_forward_clone_bodies_admit_through_the_reused_sealed_segment() {
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("increment owner");
+    let parent = owner
+        .build_and_publish(increment_wedge_request(1, 1_100_000), &ActiveControl)
+        .expect("parent generation");
+    let segments = Arc::new(Mutex::new(BTreeMap::<String, Vec<u8>>::new()));
+    let mut evidence_pack = Vec::new();
+    let mut collect = |publication: SealedGenerationSegmentPublicationV1<'_>| {
+        match publication {
+            SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
+                segments
+                    .lock()
+                    .expect("segments lock")
+                    .insert(digest.as_str().to_owned(), bytes.to_vec());
+            }
+            SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
+                evidence_pack.extend_from_slice(bytes);
+            }
+            SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
+                segment_digest,
+                ..
+            } => {
+                segments.lock().expect("segments lock").insert(
+                    segment_digest.as_str().to_owned(),
+                    std::mem::take(&mut evidence_pack),
+                );
+            }
+        }
+        Ok(())
+    };
+    let parent_manifest = parent
+        .encode_partitioned_sealed(&mut collect)
+        .expect("parent encoding");
+    let child = owner
+        .build_and_publish(increment_wedge_request(2, 1_200_000), &ActiveControl)
+        .expect("child generation");
+    let parent_segment_count = segments.lock().expect("segments lock").len();
+    let child_manifest = child
+        .encode_partitioned_sealed_with_parent(Some(&parent_manifest), &mut collect)
+        .expect("child encoding");
+    let child_published_file_segments =
+        segments.lock().expect("segments lock").len() - parent_segment_count - 1;
+    assert_eq!(
+        child_published_file_segments, 1,
+        "only the edited file is re-encoded; the carried file reuses its parent segment"
+    );
+
+    let expected = sealed_clone_bindings(&child);
+    let carried = expected
+        .get("src/carried.rs")
+        .expect("carried file is in the child generation");
+    assert!(
+        carried.len() >= 2,
+        "the carried file needs several clone bodies to pin their order: {carried:?}"
+    );
+    let parent_carried = sealed_clone_bindings(&parent);
+    assert_eq!(
+        parent_carried.get("src/carried.rs"),
+        Some(carried),
+        "a carried-forward file keeps its parent clone binding in memory"
+    );
+
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&child_manifest).expect("child manifest JSON");
+    let state_digest = id::<ManifestDigest>(
+        envelope["state_digest"]
+            .as_str()
+            .expect("child state digest"),
+    );
+    let read_segments = Arc::clone(&segments);
+    let mut source = VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
+        Cursor::new(Vec::<u8>::new()),
+        &child_manifest,
+        state_digest,
+        move |digest, _, buffer| {
+            let segments = read_segments.lock().expect("segments lock");
+            let bytes = segments.get(digest.as_str()).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract("published segment is missing".to_owned())
+            })?;
+            buffer.clear();
+            buffer.extend_from_slice(bytes);
+            Ok(())
+        },
+        64,
+        1 << 20,
+    )
+    .expect("child manifest opens through the daemon's text projection path")
+    .expect("current partitioned manifest");
+
+    let mut restored: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    let receipt = loop {
+        match source
+            .next_page(&ActiveControl)
+            .expect("every carried and re-extracted file admits under sealed validation")
+        {
+            VerifiedSealedLexicalPageReadV1::Page(page) => {
+                for body in page.clone_bodies() {
+                    restored
+                        .entry(body.occurrence.path.clone())
+                        .or_default()
+                        .push((
+                            body.occurrence.symbol_occurrence_id.as_str().to_owned(),
+                            body.occurrence.payload_digest.as_str().to_owned(),
+                        ));
+                }
+            }
+            VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
+        }
+    };
+    let expected_total = expected.values().map(Vec::len).sum::<usize>();
+    assert_eq!(receipt.total_clone_bodies(), expected_total as u64);
+    assert_eq!(
+        restored, expected,
+        "sealed decode must yield the clone binding the in-memory generation published"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Peak-RSS bound for the pre-paging (legacy) generation restore.
 //
