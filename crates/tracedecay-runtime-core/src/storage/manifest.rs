@@ -79,10 +79,7 @@ impl ValidatedProfileShard {
                 })?;
         if canonical_store_root != canonical_profile_root.join(&expected_relpath) {
             return Err(ProfileShardValidationError::NonCanonical {
-                reason: format!(
-                    "store root resolves outside '{}'",
-                    expected_relpath.display()
-                ),
+                reason: super::ProfileShardNonCanonicalReasonV1::StoreRootOutsideExpected,
             });
         }
 
@@ -96,7 +93,7 @@ impl ValidatedProfileShard {
             Ok(true) => {}
             Ok(false) => {
                 return Err(ProfileShardValidationError::NonCanonical {
-                    reason: format!("'{}' is not a SQLite database", sessions_db_path.display()),
+                    reason: super::ProfileShardNonCanonicalReasonV1::SessionsDbNotSqlite,
                 });
             }
             Err(_) => {
@@ -133,13 +130,6 @@ enum RequiredArtifactKind {
 }
 
 impl RequiredArtifactKind {
-    fn description(self) -> &'static str {
-        match self {
-            Self::Directory => "directory",
-            Self::File => "file",
-        }
-    }
-
     fn matches(self, file_type: fs::FileType) -> bool {
         match self {
             Self::Directory => file_type.is_dir(),
@@ -158,13 +148,15 @@ fn require_regular_artifact(
         })?;
     let file_type = metadata.file_type();
     if file_type.is_symlink() || !kind.matches(file_type) {
-        return Err(ProfileShardValidationError::NonCanonical {
-            reason: format!(
-                "'{}' is not a regular {}",
-                path.display(),
-                kind.description()
-            ),
-        });
+        let reason = match kind {
+            RequiredArtifactKind::Directory => {
+                super::ProfileShardNonCanonicalReasonV1::ArtifactNotRegularDirectory
+            }
+            RequiredArtifactKind::File => {
+                super::ProfileShardNonCanonicalReasonV1::ArtifactNotRegularFile
+            }
+        };
+        return Err(ProfileShardValidationError::NonCanonical { reason });
     }
     Ok(())
 }
@@ -174,46 +166,31 @@ fn validate_profile_shard_manifest(
     store_root: &Path,
     manifest_path: &Path,
 ) -> std::result::Result<(), ProfileShardValidationError> {
-    let manifest = read_store_manifest(manifest_path).map_err(|error| {
-        ProfileShardValidationError::NonCanonical {
-            reason: format!("store manifest is invalid: {error}"),
-        }
-    })?;
-    let invalid = |reason: String| ProfileShardValidationError::NonCanonical { reason };
+    use super::ProfileShardNonCanonicalReasonV1 as Reason;
+    let invalid = |reason: Reason| ProfileShardValidationError::NonCanonical { reason };
+    let manifest = read_store_manifest(manifest_path)
+        .map_err(|_| invalid(Reason::ManifestInvalid))?;
     if manifest.schema_version != STORE_MANIFEST_SCHEMA_VERSION {
-        return Err(invalid(format!(
-            "manifest schema must be {STORE_MANIFEST_SCHEMA_VERSION}, found {}",
-            manifest.schema_version
-        )));
+        return Err(invalid(Reason::ManifestSchemaMismatch));
     }
     if manifest.project_id.as_deref() != Some(project_id) {
-        return Err(invalid(
-            "manifest project id does not match the registry".to_string(),
-        ));
+        return Err(invalid(Reason::ManifestProjectIdMismatch));
     }
     if manifest.store_kind != StoreKind::CodeProject {
-        return Err(invalid(
-            "manifest store kind must be 'code_project'".to_string(),
-        ));
+        return Err(invalid(Reason::ManifestStoreKindMismatch));
     }
     if manifest.storage_mode != StorageMode::ProfileSharded {
-        return Err(invalid(
-            "manifest storage mode must be 'profile_sharded'".to_string(),
-        ));
+        return Err(invalid(Reason::ManifestStorageModeMismatch));
     }
     if manifest.sessions_db_relpath != Path::new(SESSIONS_DB_FILENAME) {
-        return Err(invalid(format!(
-            "manifest sessions database path must be '{SESSIONS_DB_FILENAME}'"
-        )));
+        return Err(invalid(Reason::ManifestSessionsDbPathMismatch));
     }
     let manifest_data_root = manifest
         .data_root
         .canonicalize()
-        .map_err(|_| invalid("manifest data root is unavailable".to_string()))?;
+        .map_err(|_| invalid(Reason::ManifestDataRootUnavailable))?;
     if manifest_data_root != store_root {
-        return Err(invalid(
-            "manifest data root does not match the registered store".to_string(),
-        ));
+        return Err(invalid(Reason::ManifestDataRootMismatch));
     }
     Ok(())
 }
