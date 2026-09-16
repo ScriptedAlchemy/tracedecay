@@ -39,7 +39,9 @@ pub enum ChunkIncrementErrorV1 {
     #[error("symbol occurrence {0} occurs more than once in re-extracted evidence")]
     DuplicateReextractedSymbol(SymbolOccurrenceId),
     #[error("a chunk manifest is not canonical: {0}")]
-    NonCanonical(String),
+    NonCanonical(crate::noncanonical::NonCanonicalCauseV1),
+    #[error("code-index parallel worker runtime failed: {0}")]
+    Parallelism(#[from] crate::parallelism::CodeIndexParallelismErrorV1),
     #[error("the increment plan does not match the supplied prior generation")]
     PriorGenerationMismatch,
     #[error("the increment plan references missing prior file occurrence {0}")]
@@ -85,7 +87,11 @@ impl GenerationChunkManifestV1 {
     ) -> Result<Self, ChunkIncrementErrorV1> {
         generation_id
             .validate()
-            .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+            .map_err(|error| {
+                ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(
+                    error,
+                ))
+            })?;
 
         let capacity = files.iter().map(|file| file.chunks.len()).sum();
         let mut chunks = Vec::with_capacity(capacity);
@@ -94,7 +100,11 @@ impl GenerationChunkManifestV1 {
             file.document
                 .generation_id
                 .validate()
-                .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+                .map_err(|error| {
+                ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(
+                    error,
+                ))
+            })?;
             if !file_occurrences.insert(file.document.file_occurrence_id.clone()) {
                 return Err(ChunkIncrementErrorV1::DuplicateFileOccurrence(
                     file.document.file_occurrence_id,
@@ -102,8 +112,7 @@ impl GenerationChunkManifestV1 {
             }
             chunks.extend(file.chunks);
         }
-        crate::parallelism::install(|| chunks.par_sort_by(|left, right| left.id.cmp(&right.id)))
-            .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+        crate::parallelism::install(|| chunks.par_sort_by(|left, right| left.id.cmp(&right.id)))?;
         if let Some(duplicate) = chunks
             .windows(2)
             .find(|pair| pair[0].id == pair[1].id)
@@ -126,7 +135,11 @@ impl GenerationChunkManifestV1 {
     ) -> Result<Self, ChunkIncrementErrorV1> {
         generation_id
             .validate()
-            .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+            .map_err(|error| {
+                ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(
+                    error,
+                ))
+            })?;
         if let Some(duplicate) = chunks
             .windows(2)
             .find(|pair| pair[0].id >= pair[1].id)
@@ -147,7 +160,7 @@ impl GenerationChunkManifestV1 {
     ) -> Result<Self, ChunkIncrementErrorV1> {
         generation_id
             .validate()
-            .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+            .map_err(|error| ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(error)))?;
 
         // Per-file validation is independent work and dominates a
         // corpus-sized aggregate, so it fans out over the indexing pool
@@ -165,8 +178,7 @@ impl GenerationChunkManifestV1 {
                     })
                 })
                 .collect::<Vec<_>>()
-        })
-        .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+        })?;
         validated.into_iter().collect::<Result<(), _>>()?;
 
         Self::from_validated_files(generation_id, files)
@@ -270,7 +282,9 @@ pub fn materialize_generation_increment(
                 })?;
                 if &prior.document.content_digest != content_digest {
                     return Err(ChunkIncrementErrorV1::NonCanonical(
-                        "carry-forward content digest does not match prior chunks".to_owned(),
+                        crate::noncanonical::NonCanonicalCauseV1::new(
+                            crate::noncanonical::NonCanonicalReasonCodeV1::CarryForwardDigestMismatch,
+                        ),
                     ));
                 }
                 let rematerialized_occurrences = prior
@@ -352,9 +366,7 @@ pub fn materialize_generation_increment(
         }
     }
     if !reextracted_files.is_empty() || !reextracted_symbols.is_empty() {
-        return Err(ChunkIncrementErrorV1::NonCanonical(
-            "unplanned re-extracted generation evidence was supplied".to_owned(),
-        ));
+        return Err(ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::UnplannedReextractedEvidence)));
     }
 
     let chunks = GenerationChunkManifestV1::new(generation_id.clone(), files)?;
@@ -423,7 +435,11 @@ pub fn plan_chunk_increment(
     }));
 
     let (reused_count, reused_digest) = ChangedCodeChunkSetV1::seal_reused_partition(&reused_pairs)
-        .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+        .map_err(|error| {
+            ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(
+                error,
+            ))
+        })?;
     let mut changes = ChangedCodeChunkSetV1 {
         from_generation: prior.map(|manifest| manifest.generation_id.clone()),
         to_generation: current.generation_id.clone(),
@@ -435,10 +451,18 @@ pub fn plan_chunk_increment(
     };
     changes.manifest_digest = changes
         .compute_digest()
-        .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+        .map_err(|error| {
+            ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(
+                error,
+            ))
+        })?;
     changes
         .validate()
-        .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+        .map_err(|error| {
+            ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(
+                error,
+            ))
+        })?;
     Ok(changes)
 }
 
@@ -459,7 +483,10 @@ pub(crate) fn plan_chunk_increment_arc_shared(
     }
     if shared_occurrences.is_empty() {
         return Err(ChunkIncrementErrorV1::NonCanonical(
-            "arc-share increment requires shared file pages".to_owned(),
+            crate::noncanonical::noncanonical_detail(
+                crate::noncanonical::NonCanonicalReasonCodeV1::IdentityValidation,
+                "arc-share increment requires shared file pages",
+            ),
         ));
     }
 
@@ -512,7 +539,10 @@ pub(crate) fn plan_chunk_increment_arc_shared(
     }));
 
     let shared_file_count = u64::try_from(shared_occurrences.len()).map_err(|_| {
-        ChunkIncrementErrorV1::NonCanonical("shared file count exceeds u64".to_owned())
+        ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_detail(
+            crate::noncanonical::NonCanonicalReasonCodeV1::IdentityValidation,
+            "shared file count exceeds u64",
+        ))
     })?;
     let (reused_count, reused_digest) = ChangedCodeChunkSetV1::seal_arc_shared_reused_partition(
         parent_full_replay_digest,
@@ -521,7 +551,9 @@ pub(crate) fn plan_chunk_increment_arc_shared(
         reused_count,
         shared_file_count,
     )
-    .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+    .map_err(|error| {
+        ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(error))
+    })?;
     let mut changes = ChangedCodeChunkSetV1 {
         from_generation: Some(prior.generation_id.clone()),
         to_generation: current.generation_id.clone(),
@@ -533,22 +565,41 @@ pub(crate) fn plan_chunk_increment_arc_shared(
     };
     changes.manifest_digest = changes
         .compute_digest()
-        .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+        .map_err(|error| ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(error)))?;
     changes
         .validate()
-        .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+        .map_err(|error| ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(error)))?;
     Ok(changes)
 }
 
 fn map_chunking_error(error: ChunkingFailureV1) -> ChunkIncrementErrorV1 {
     match error {
         ChunkingFailureV1::GenerationMismatch => ChunkIncrementErrorV1::MixedGeneration,
-        other => ChunkIncrementErrorV1::NonCanonical(other.to_string()),
+        ChunkingFailureV1::NonCanonicalIdentity(cause) => {
+            ChunkIncrementErrorV1::NonCanonical(cause)
+        }
+        other => ChunkIncrementErrorV1::NonCanonical(
+            crate::noncanonical::NonCanonicalCauseV1::new(
+                crate::noncanonical::NonCanonicalReasonCodeV1::IdentityValidation,
+            )
+            .with(
+                crate::noncanonical::NonCanonicalDetailKeyV1::Detail,
+                other.to_string(),
+            ),
+        ),
     }
 }
 
 fn map_lineage_error(error: LineageResolutionErrorV1) -> ChunkIncrementErrorV1 {
-    ChunkIncrementErrorV1::NonCanonical(error.to_string())
+    ChunkIncrementErrorV1::NonCanonical(
+        crate::noncanonical::NonCanonicalCauseV1::new(
+            crate::noncanonical::NonCanonicalReasonCodeV1::IdentityValidation,
+        )
+        .with(
+            crate::noncanonical::NonCanonicalDetailKeyV1::Detail,
+            error.to_string(),
+        ),
+    )
 }
 
 fn placeholder_digest() -> ManifestDigest {
