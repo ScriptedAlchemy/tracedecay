@@ -379,21 +379,21 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
             spec.capability.replace('_', "-")
         ))?;
         let surfaces = primitive_read_surfaces(spec);
-        let (surface_bindings, mut binding_ids) = if matches!(
-            spec.operation,
-            "similar" | "redundancy"
-        ) {
-            clone_family_surface_bindings(&capability_id, spec.operation, surfaces)?
-        } else {
-            match ApplicationSurfaceOperation::from_catalog_name(spec.operation) {
-                Some(operation) => current_application_bindings(
-                    &capability_id,
-                    operation,
-                    surfaces.iter().copied(),
-                )?,
-                None => current_bindings(&capability_id, spec.operation, surfaces.iter().copied())?,
-            }
-        };
+        let (surface_bindings, mut binding_ids) =
+            if matches!(spec.operation, "similar" | "redundancy") {
+                clone_family_surface_bindings(&capability_id, spec.operation, surfaces)?
+            } else {
+                match ApplicationSurfaceOperation::from_catalog_name(spec.operation) {
+                    Some(operation) => current_application_bindings(
+                        &capability_id,
+                        operation,
+                        surfaces.iter().copied(),
+                    )?,
+                    None => {
+                        current_bindings(&capability_id, spec.operation, surfaces.iter().copied())?
+                    }
+                }
+            };
         bindings.extend(surface_bindings);
         binding_ids.reserve(primitive_lsp_methods(spec.operation).len());
         for method in primitive_lsp_methods(spec.operation) {

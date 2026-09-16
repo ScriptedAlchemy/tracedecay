@@ -7,7 +7,7 @@ use std::process::{Command, Output, Stdio};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay_agent_hosts::agents::host_bundle::{
-    HostComponentV1, HostComponentSetReceiptV1, HostKindV1, latest_host_component_receipt_at,
+    HostComponentSetReceiptV1, HostComponentV1, HostKindV1, latest_host_component_receipt_at,
     latest_host_component_set_receipt_at,
 };
 use tracedecay_agent_hosts::agents::host_bundle_registry::unsupported_host_component_set_reason;
@@ -1739,13 +1739,10 @@ fn killed_feedback_switch_recovers_from_durable_effect_identity() {
         fs::set_permissions(&permission_path, fs::Permissions::from_mode(0o640)).unwrap();
     }
     let before = owned_bytes(&cli, &before_receipt, &originals);
-    let before_core = latest_host_component_receipt_at(
-        &cli.lifecycle_root(),
-        case.host,
-        HostComponentV1::Core,
-    )
-    .unwrap()
-    .unwrap();
+    let before_core =
+        latest_host_component_receipt_at(&cli.lifecycle_root(), case.host, HostComponentV1::Core)
+            .unwrap()
+            .unwrap();
     let state = cli.home.path().join("killed-feedback-rollback.json");
     let mut command = cli.command(&[
         "feedback-rollback",
@@ -1771,13 +1768,9 @@ fn killed_feedback_switch_recovers_from_durable_effect_identity() {
         "feedback fault boundary did not cross an artifact mutation"
     );
     assert_ne!(
-        latest_host_component_receipt_at(
-            &cli.lifecycle_root(),
-            case.host,
-            HostComponentV1::Core
-        )
-        .unwrap()
-        .unwrap(),
+        latest_host_component_receipt_at(&cli.lifecycle_root(), case.host, HostComponentV1::Core)
+            .unwrap()
+            .unwrap(),
         before_core,
         "feedback fault boundary did not publish its component receipt"
     );

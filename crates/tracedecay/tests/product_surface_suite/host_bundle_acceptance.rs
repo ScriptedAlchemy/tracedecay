@@ -6,13 +6,13 @@ use std::path::Path;
 use serde_json::{Value, json};
 use tracedecay_agent_hosts::agents::host_bundle::{
     ClineFamilyAdmissionV1, ClineFamilyProviderV1, HostBundleComponentDoctorStateV1,
-    HostComponentV1, HostBundleError, HostBundleExecutionRequestV1,
-    HostBundleInstallReceiptV1, HostBundleLifecycleOpV1, HostBundleLifecycleRequestV1,
-    HostBundleReceiptArtifactV1, HostBundleRegistrationInspectorV1, HostBundleRegistrationStateV1,
-    HostBundleRollbackBoundaryV1, HostBundleWriterV1, HostCapabilityStateV1,
-    HostCapabilityUnavailableReasonV1, HostCapabilityV1, HostComponentSetExecutionRequestV1,
-    HostComponentSetLifecycleRequestV1, HostComponentSetRegistrationV1,
-    HostComponentSetTransactionV1, HostKindV1, HostRegistrationRouteV1, cline_family_evidence,
+    HostBundleError, HostBundleExecutionRequestV1, HostBundleInstallReceiptV1,
+    HostBundleLifecycleOpV1, HostBundleLifecycleRequestV1, HostBundleReceiptArtifactV1,
+    HostBundleRegistrationInspectorV1, HostBundleRegistrationStateV1, HostBundleRollbackBoundaryV1,
+    HostBundleWriterV1, HostCapabilityStateV1, HostCapabilityUnavailableReasonV1, HostCapabilityV1,
+    HostComponentSetExecutionRequestV1, HostComponentSetLifecycleRequestV1,
+    HostComponentSetRegistrationV1, HostComponentSetTransactionV1, HostComponentV1, HostKindV1,
+    HostRegistrationRouteV1, cline_family_evidence,
     dry_run_host_component_set_lifecycle_with_lifecycle_root_at,
     inspect_installed_host_bundle_components_at, native_host_edit_stop_conformance_evidence,
     stock_host_kinds, stock_host_registration_evidence,
@@ -469,10 +469,7 @@ fn unsupported_host_components_are_not_advertised_or_constructible() {
         );
     }
     for host in [HostKindV1::Cline, HostKindV1::RooCode, HostKindV1::Kilo] {
-        assert_eq!(
-            default_components(host),
-            vec![HostComponentV1::ContextMcp]
-        );
+        assert_eq!(default_components(host), vec![HostComponentV1::ContextMcp]);
         assert_eq!(unsupported_host_component_set_reason(host), None);
         assert!(
             verified_embedded_default_host_component_set(host, 0, GENERATOR_COMMIT).is_ok(),
@@ -627,10 +624,7 @@ fn cline_family_hook_evidence_stays_separate_from_mcp_lifecycle_support() {
     }
     for host in [HostKindV1::Cline, HostKindV1::RooCode, HostKindV1::Kilo] {
         assert_eq!(unsupported_host_component_set_reason(host), None);
-        assert_eq!(
-            default_components(host),
-            vec![HostComponentV1::ContextMcp]
-        );
+        assert_eq!(default_components(host), vec![HostComponentV1::ContextMcp]);
         let routes = stock_host_registration_evidence(host);
         assert!(routes.iter().any(|route| {
             route.route == HostRegistrationRouteV1::Mcp

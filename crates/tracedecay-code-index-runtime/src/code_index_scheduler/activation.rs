@@ -574,9 +574,7 @@ mod tests {
             activation
                 .admit(repository.path(), CodeIndexDemandV1::HookPaths(Vec::new()))
                 .await,
-            CodeIndexDemandAdmissionV1::Unavailable(
-                CodeIndexDemandUnavailableV1::NoProvenChange
-            )
+            CodeIndexDemandAdmissionV1::Unavailable(CodeIndexDemandUnavailableV1::NoProvenChange)
         );
         assert_eq!(mount_attempts.load(Ordering::SeqCst), 0);
         assert!(!activation.is_mounted());

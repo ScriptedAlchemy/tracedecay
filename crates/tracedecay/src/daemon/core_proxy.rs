@@ -14,9 +14,8 @@ use tokio::time::{Duration, Instant};
 use super::{
     DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DaemonClientDeadline, DaemonHandshake,
     PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, PROJECT_WARMING_RETRY_HINT,
-    REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
-    connect_to_current_daemon_within, json_rpc_error_is_project_open_retryable,
-    next_daemon_response_line, write_daemon_preamble,
+    REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE, connect_to_current_daemon_within,
+    json_rpc_error_is_project_open_retryable, next_daemon_response_line, write_daemon_preamble,
 };
 #[cfg(unix)]
 use super::{binary_version, connect_with_restart_grace};

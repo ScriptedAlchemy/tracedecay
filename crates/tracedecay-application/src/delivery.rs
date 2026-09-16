@@ -1255,10 +1255,12 @@ fn apply_proximity_attention(
                 item.coverage = *coverage;
                 item.evidence = matching
                     .iter()
-                    .map(|encounter| ProjectDeliveryAttentionEvidenceV1::ProximityEncounter {
-                        encounter_id: encounter.encounter_id.clone(),
-                        relation: encounter.relation,
-                    })
+                    .map(
+                        |encounter| ProjectDeliveryAttentionEvidenceV1::ProximityEncounter {
+                            encounter_id: encounter.encounter_id.clone(),
+                            relation: encounter.relation,
+                        },
+                    )
                     .collect();
                 item.observed_at = matching.iter().map(|encounter| encounter.observed_at).max();
             }
@@ -2879,7 +2881,10 @@ mod tests {
             .find(|item| item.source == ProjectDeliveryAttentionSourceV1::OverlappingEdit)
             .unwrap();
         assert_eq!(overlapping.state, ProjectDeliveryAttentionStateV1::Active);
-        assert_eq!(overlapping.coverage, ProjectDeliveryInboxCoverageV1::Complete);
+        assert_eq!(
+            overlapping.coverage,
+            ProjectDeliveryInboxCoverageV1::Complete
+        );
         assert_eq!(
             overlapping.evidence,
             vec![ProjectDeliveryAttentionEvidenceV1::ProximityEncounter {

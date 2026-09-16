@@ -667,11 +667,11 @@ pub fn tool_json_payload(
 mod tests {
     use serde_json::json;
 
-    use super::daemon_tool_call_error;
     use super::super::{
-        PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE, PROJECT_WARMING_REASON_CODE, JsonRpcError,
+        JsonRpcError, PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE, PROJECT_WARMING_REASON_CODE,
         tool_call_transport_error_is_retryable,
     };
+    use super::daemon_tool_call_error;
 
     #[test]
     fn daemon_tool_call_error_round_trips_typed_warming_and_revoked() {
@@ -696,7 +696,8 @@ mod tests {
 
         let revoked = daemon_tool_call_error(JsonRpcError {
             code: -32603,
-            message: "the retained project server was retired before response completion".to_owned(),
+            message: "the retained project server was retired before response completion"
+                .to_owned(),
             data: Some(json!({
                 "reason_code": PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE,
                 "retryable": true,

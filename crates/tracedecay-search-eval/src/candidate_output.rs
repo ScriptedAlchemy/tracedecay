@@ -71,11 +71,11 @@ use tracedecay_query::search_quality::candidate_output::{
     CandidateOutputError, CandidateWorkloadV1, CorpusDocumentV1, EVALUATION_CACHE_STATE,
     EVALUATION_SEED, GenerateCandidateOutputsResultV1, HistoricalQueryExecutionV1,
     PRODUCTION_BOUNDARY, ProductionCandidateOutputV1, ProfileSpecV1, QueryCandidateRowV1,
-    RankedCandidateRowV1, RequiredCancellationV1, ResourceSampleV1,
-    WORKLOAD_RELATIVE, WorkloadQueryV1, canonical_json_bytes, canonical_sha256,
-    compute_corpus_digest, compute_profile_material_digest, compute_workload_digest,
-    evaluated_diversity_policy, fusion_profile, load_candidate_workload, retrieval_budget,
-    typed_id as id, validate_workload_for_tuning,
+    RankedCandidateRowV1, RequiredCancellationV1, ResourceSampleV1, WORKLOAD_RELATIVE,
+    WorkloadQueryV1, canonical_json_bytes, canonical_sha256, compute_corpus_digest,
+    compute_profile_material_digest, compute_workload_digest, evaluated_diversity_policy,
+    fusion_profile, load_candidate_workload, retrieval_budget, typed_id as id,
+    validate_workload_for_tuning,
 };
 
 mod control;

@@ -1285,8 +1285,8 @@ mod cancellable_queue_tests {
             !route_completed.load(Ordering::Acquire),
             "cancel must abandon routing before the stalled resolver finishes"
         );
-        let response: Value =
-            serde_json::from_str(response_line.trim()).expect("route-abandonment cancellation JSON");
+        let response: Value = serde_json::from_str(response_line.trim())
+            .expect("route-abandonment cancellation JSON");
         assert_eq!(response["id"], serde_json::json!(41));
         assert_eq!(
             response["error"]["code"],

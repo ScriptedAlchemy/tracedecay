@@ -291,11 +291,15 @@ impl ExactExtractionAuthorityV1 {
     }
 
     fn validate_chunk(&self, chunk: &Arc<CodeSearchChunkV1>) -> Result<(), ChunkingFailureV1> {
-        chunk
-            .validate()
-            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(error)))?;
+        chunk.validate().map_err(|error| {
+            ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(
+                error,
+            ))
+        })?;
         let mismatch = || {
-            ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::ExactAuthorityMismatch))
+            ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(
+                crate::noncanonical::NonCanonicalReasonCodeV1::ExactAuthorityMismatch,
+            ))
         };
         let minted = self.chunk_digests.get(&chunk.id).ok_or_else(mismatch)?;
         if Arc::ptr_eq(&minted.minted_row, chunk) {
@@ -314,7 +318,11 @@ impl ExactExtractionAuthorityV1 {
         chunks: &[Arc<CodeSearchChunkV1>],
     ) -> Result<(), ChunkingFailureV1> {
         if chunks.len() != self.chunk_digests.len() {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::ExactAuthoritySetMismatch)));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::ExactAuthoritySetMismatch,
+                ),
+            ));
         }
         let mut seen = BTreeSet::new();
         let repeated_at = chunks
@@ -329,7 +337,11 @@ impl ExactExtractionAuthorityV1 {
             |chunk| self.validate_chunk(chunk),
         )?;
         if repeated_at < chunks.len() {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::ExactAuthorityDuplicateIdentity)));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::ExactAuthorityDuplicateIdentity,
+                ),
+            ));
         }
         Ok(())
     }
@@ -376,7 +388,11 @@ impl ExactExtractionAuthorityV1 {
                     prior.id != current.id || prior.content_digest != current.content_digest
                 })
         {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::ExactAuthorityCarryChanged)));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::ExactAuthorityCarryChanged,
+                ),
+            ));
         }
         self.validate_all(&prior.chunks)?;
         Ok(Self::mint(&current.chunks))
@@ -387,18 +403,24 @@ impl CodeFileChunksV1 {
     /// Validate the generation/file binding and canonical document membership
     /// of one chunker result before it can cross the publication boundary.
     pub fn validate(&self) -> Result<(), ChunkingFailureV1> {
-        self.document
-            .generation_id
-            .validate()
-            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(error)))?;
+        self.document.generation_id.validate().map_err(|error| {
+            ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(
+                error,
+            ))
+        })?;
         self.document
             .file_occurrence_id
             .validate()
-            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(error)))?;
-        self.document
-            .content_digest
-            .validate()
-            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(error)))?;
+            .map_err(|error| {
+                ChunkingFailureV1::NonCanonicalIdentity(
+                    crate::noncanonical::noncanonical_from_domain(error),
+                )
+            })?;
+        self.document.content_digest.validate().map_err(|error| {
+            ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(
+                error,
+            ))
+        })?;
 
         if self.document.chunk_ids.len() != self.chunks.len()
             || self
@@ -408,7 +430,11 @@ impl CodeFileChunksV1 {
                 .zip(&self.chunks)
                 .any(|(document_id, chunk)| document_id != &chunk.id)
         {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::DocumentChunkMembershipMismatch)));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::DocumentChunkMembershipMismatch,
+                ),
+            ));
         }
         try_for_each_chunk_ordered(
             |unit| crate::parallelism::with_background_cpu_permit(unit),
@@ -419,9 +445,11 @@ impl CodeFileChunksV1 {
                 {
                     return Err(ChunkingFailureV1::GenerationMismatch);
                 }
-                chunk
-                    .validate()
-                    .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(error)))
+                chunk.validate().map_err(|error| {
+                    ChunkingFailureV1::NonCanonicalIdentity(
+                        crate::noncanonical::noncanonical_from_domain(error),
+                    )
+                })
             },
         )
     }
@@ -465,7 +493,9 @@ impl CodeFileChunksV1 {
                     if term.kind() == ExactTechnicalTermKindV1::WholeSymbol {
                         term.rebind_symbol_occurrence(current_occurrence.clone())
                             .map_err(|error| {
-                                ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(error))
+                                ChunkingFailureV1::NonCanonicalIdentity(
+                                    crate::noncanonical::noncanonical_from_domain(error),
+                                )
                             })?;
                     }
                 }
@@ -693,8 +723,11 @@ impl DeterministicCodeChunker {
             chunker_revision: self.chunker_revision.clone(),
         };
         let digest = canonical_digest(CHUNK_IDENTITY_SEPARATOR, &identity)?;
-        CodeSearchChunkId::new(format!("chunk.v1.{digest}"))
-            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(error)))
+        CodeSearchChunkId::new(format!("chunk.v1.{digest}")).map_err(|error| {
+            ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(
+                error,
+            ))
+        })
     }
 }
 
@@ -720,7 +753,11 @@ fn canonical_digest<T: serde::Serialize>(
 ) -> Result<String, ChunkingFailureV1> {
     canonical_sha256(&(separator, payload))
         .map(|digest| digest.as_str().to_owned())
-        .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(error)))
+        .map_err(|error| {
+            ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(
+                error,
+            ))
+        })
 }
 
 pub(crate) fn symbol_occurrence_id(
@@ -732,8 +769,11 @@ pub(crate) fn symbol_occurrence_id(
         &(file_occurrence_id.as_str(), identity.as_str()),
     )
     .and_then(|digest| {
-        SymbolOccurrenceId::new(format!("symbol.v1.{digest}"))
-            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(error)))
+        SymbolOccurrenceId::new(format!("symbol.v1.{digest}")).map_err(|error| {
+            ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(
+                error,
+            ))
+        })
     })
 }
 
@@ -793,7 +833,11 @@ fn bind_clone_bodies(
             .insert(symbol.node_id.as_str(), &symbol.occurrence)
             .is_some()
         {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::DuplicateParserNodeId)));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::DuplicateParserNodeId,
+                ),
+            ));
         }
     }
     let mut bound = Vec::with_capacity(extracted.len());
@@ -803,14 +847,12 @@ fn bind_clone_bodies(
             .ok_or_else(|| {
                 ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::CloneBodyNotBoundToIndexedSymbol))
             })?;
-        let payload = clone_build
-            .payload(body)
-            .map_err(|error| {
-                ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_detail(
-                    crate::noncanonical::NonCanonicalReasonCodeV1::CloneBodyPayloadNotCanonical,
-                    error,
-                ))
-            })?;
+        let payload = clone_build.payload(body).map_err(|error| {
+            ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_detail(
+                crate::noncanonical::NonCanonicalReasonCodeV1::CloneBodyPayloadNotCanonical,
+                error,
+            ))
+        })?;
         bound.push(CodeIndexCloneBodyV1 {
             occurrence: CloneBodyOccurrenceV1 {
                 project_id: authority.project_id.clone(),
@@ -1262,7 +1304,11 @@ impl DeterministicCodeChunker {
             )
         })?;
         if !full_source.is_char_boundary(parsed_prefix_end) {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::ParsedPrefixNotUtf8Boundary)));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::ParsedPrefixNotUtf8Boundary,
+                ),
+            ));
         }
         let source = &full_source[..parsed_prefix_end];
         let mut reparsed;
@@ -1578,7 +1624,11 @@ impl DeterministicCodeChunker {
                 )
             })?;
             let text = source.get(start..end).ok_or_else(|| {
-                ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::SymbolSpanNotUtf8))
+                ChunkingFailureV1::NonCanonicalIdentity(
+                    crate::noncanonical::NonCanonicalCauseV1::new(
+                        crate::noncanonical::NonCanonicalReasonCodeV1::SymbolSpanNotUtf8,
+                    ),
+                )
             })?;
             symbols.push(LineageSymbolRecordV1 {
                 occurrence: row.occurrence.clone(),
@@ -1867,7 +1917,9 @@ impl DeterministicCodeChunker {
                     exact_terms,
                     subtokens,
                     sanitized_text: BoundedSanitizedText::new(text).map_err(|error| {
-                        ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(error))
+                        ChunkingFailureV1::NonCanonicalIdentity(
+                            crate::noncanonical::noncanonical_from_domain(error),
+                        )
                     })?,
                 });
             }

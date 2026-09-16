@@ -2615,7 +2615,10 @@ mod wire_input_fail_closed_tests {
                 } => carried,
                 other => panic!("{label}: expected payload with preserved scope, got {other:?}"),
             };
-            assert_eq!(carried, &scope, "{label} must preserve the cross-project selector");
+            assert_eq!(
+                carried, &scope,
+                "{label} must preserve the cross-project selector"
+            );
         }
     }
 

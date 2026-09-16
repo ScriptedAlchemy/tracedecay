@@ -77,19 +77,33 @@ impl CodeIndexImportEvidenceV1 {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ChunkingFailureV1> {
-        self.file_occurrence_id
-            .validate()
-            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(error)))?;
+        self.file_occurrence_id.validate().map_err(|error| {
+            ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(
+                error,
+            ))
+        })?;
         if self.logical_path.is_empty() || self.module_specifier.is_empty() {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::ImportEmptyPathOrSpecifier)));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::ImportEmptyPathOrSpecifier,
+                ),
+            ));
         }
         if self.span.is_empty() {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::ImportEmptySourceSpan)));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::ImportEmptySourceSpan,
+                ),
+            ));
         }
         if self.imported_name.as_deref().is_some_and(str::is_empty)
             || self.local_name.as_deref().is_some_and(str::is_empty)
         {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::ImportEmptyBindingName)));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::ImportEmptyBindingName,
+                ),
+            ));
         }
 
         let binding_shape_is_valid = match self.namespace {
@@ -104,7 +118,11 @@ impl CodeIndexImportEvidenceV1 {
             }
         };
         if !binding_shape_is_valid {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::ImportNamespaceMismatch)));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::ImportNamespaceMismatch,
+                ),
+            ));
         }
 
         Ok(())
@@ -129,14 +147,24 @@ pub struct CodeIndexUnresolvedReferenceV1 {
 
 impl CodeIndexUnresolvedReferenceV1 {
     pub(crate) fn validate(&self) -> Result<(), ChunkingFailureV1> {
-        self.from_occurrence
-            .validate()
-            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(error)))?;
+        self.from_occurrence.validate().map_err(|error| {
+            ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(
+                error,
+            ))
+        })?;
         if self.reference_name.is_empty() {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::UnresolvedReferenceEmptyName)));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::UnresolvedReferenceEmptyName,
+                ),
+            ));
         }
         if self.evidence_span.is_empty() {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::UnresolvedReferenceEmptySpan)));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::UnresolvedReferenceEmptySpan,
+                ),
+            ));
         }
         Ok(())
     }
@@ -300,7 +328,11 @@ impl CodeFileIndexArtifactsV1 {
             .windows(2)
             .any(|pair| pair[0].occurrence >= pair[1].occurrence)
         {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::LineageSymbolsUnordered)));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::LineageSymbolsUnordered,
+                ),
+            ));
         }
         let chunk_occurrences = self
             .chunks
@@ -314,7 +346,11 @@ impl CodeFileIndexArtifactsV1 {
             .map(|symbol| &symbol.occurrence)
             .collect::<std::collections::BTreeSet<_>>();
         if !occurrences.is_subset(&chunk_occurrences) {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::LineageSymbolMissingChunk)));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::LineageSymbolMissingChunk,
+                ),
+            ));
         }
         if self.edges.iter().any(|edge| {
             !occurrences.contains(&edge.from_occurrence)
@@ -328,7 +364,11 @@ impl CodeFileIndexArtifactsV1 {
                 .windows(2)
                 .any(|pair| pair[0] > pair[1])
         {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::FileGraphNotCanonical)));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::FileGraphNotCanonical,
+                ),
+            ));
         }
         for reference in &self.unresolved_references {
             reference.validate()?;
@@ -341,7 +381,11 @@ impl CodeFileIndexArtifactsV1 {
             .windows(2)
             .any(|pair| pair[0] >= pair[1])
         {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::UnresolvedReferencesUnordered)));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::UnresolvedReferencesUnordered,
+                ),
+            ));
         }
         Ok(())
     }
@@ -399,17 +443,23 @@ impl CodeFileIndexArtifactsV1 {
         }
         for body in &self.clone_bodies {
             if body.occurrence.path.is_empty() {
-                return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::CloneBodyEmptyPath)));
+                return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                    crate::noncanonical::NonCanonicalCauseV1::new(
+                        crate::noncanonical::NonCanonicalReasonCodeV1::CloneBodyEmptyPath,
+                    ),
+                ));
             }
             if body.occurrence.body_span.is_empty() {
-                return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::CloneBodyEmptySpan)));
+                return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                    crate::noncanonical::NonCanonicalCauseV1::new(
+                        crate::noncanonical::NonCanonicalReasonCodeV1::CloneBodyEmptySpan,
+                    ),
+                ));
             }
             if body.occurrence.payload_digest != body.payload.payload_digest {
                 return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::CloneBodyPayloadDigestMismatch)));
             }
-            if validate_payloads
-                && let Err(detail) = body.payload.validate()
-            {
+            if validate_payloads && let Err(detail) = body.payload.validate() {
                 return Err(ChunkingFailureV1::NonCanonicalIdentity(
                     crate::noncanonical::NonCanonicalCauseV1::new(
                         crate::noncanonical::NonCanonicalReasonCodeV1::CloneBodyPayloadNotCanonical,
@@ -421,7 +471,11 @@ impl CodeFileIndexArtifactsV1 {
                 ));
             }
             if !occurrences.contains(&body.occurrence.symbol_occurrence_id) {
-                return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::CloneBodyMissingSymbol)));
+                return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                    crate::noncanonical::NonCanonicalCauseV1::new(
+                        crate::noncanonical::NonCanonicalReasonCodeV1::CloneBodyMissingSymbol,
+                    ),
+                ));
             }
         }
         Ok(())
@@ -454,13 +508,21 @@ impl CodeFileIndexArtifactsV1 {
             || evidence.issues.windows(2).any(|pair| pair[0] >= pair[1])
             || evidence.facts.windows(2).any(|pair| pair[0] >= pair[1])
         {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::SchemaUnordered)));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::SchemaUnordered,
+                ),
+            ));
         }
         if matches!(evidence.status, SchemaEvidenceStatusV1::Complete) != evidence.issues.is_empty()
             || (matches!(evidence.status, SchemaEvidenceStatusV1::Unsupported)
                 && !evidence.facts.is_empty())
         {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::SchemaStatusMismatch)));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::SchemaStatusMismatch,
+                ),
+            ));
         }
         let indexed_end = self
             .chunks
@@ -472,7 +534,11 @@ impl CodeFileIndexArtifactsV1 {
             let span = fact.span();
             span.is_empty() || indexed_end.is_none_or(|end| span.end_byte > end)
         }) {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::SchemaExceedsFileExtent)));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::SchemaExceedsFileExtent,
+                ),
+            ));
         }
         Ok(())
     }
@@ -485,12 +551,20 @@ impl CodeFileIndexArtifactsV1 {
             import_module_kind(extraction.language.as_str(), &row.module_specifier)
                 != Some(row.module_kind)
         }) {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::ImportModuleKindMismatch)));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::ImportModuleKindMismatch,
+                ),
+            ));
         }
         extraction
             .parser_import_rows_digest
             .validate()
-            .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(error)))?;
+            .map_err(|error| {
+                ChunkingFailureV1::NonCanonicalIdentity(
+                    crate::noncanonical::noncanonical_from_domain(error),
+                )
+            })?;
         let parser_rows = self
             .imports
             .iter()
@@ -524,7 +598,11 @@ impl CodeFileIndexArtifactsV1 {
             .windows(2)
             .any(|pair| canonical_import_order(&pair[0], &pair[1]) != Ordering::Less)
         {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::ImportUnordered)));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::ImportUnordered,
+                ),
+            ));
         }
         let indexed_end = self
             .chunks
@@ -539,10 +617,18 @@ impl CodeFileIndexArtifactsV1 {
                 return Err(ChunkingFailureV1::GenerationMismatch);
             }
             if Some(row.logical_path.as_str()) != expected_path {
-                return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::ImportMultiFile)));
+                return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                    crate::noncanonical::NonCanonicalCauseV1::new(
+                        crate::noncanonical::NonCanonicalReasonCodeV1::ImportMultiFile,
+                    ),
+                ));
             }
             if indexed_end.is_none_or(|end| row.span.end_byte > end) {
-                return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::ImportExceedsFileExtent)));
+                return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                    crate::noncanonical::NonCanonicalCauseV1::new(
+                        crate::noncanonical::NonCanonicalReasonCodeV1::ImportExceedsFileExtent,
+                    ),
+                ));
             }
         }
         Ok(())
@@ -654,11 +740,19 @@ fn validate_schema_evidence_language(
         }
         ("sql", Some(evidence)) if evidence.language == SchemaEvidenceLanguageV1::Sql => {}
         ("protobuf" | "sql", None) => {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::SchemaMissingEvidence)));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::SchemaMissingEvidence,
+                ),
+            ));
         }
         (_, None) => {}
         (_, Some(_)) => {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::SchemaLanguageMismatch)));
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::SchemaLanguageMismatch,
+                ),
+            ));
         }
     }
     Ok(())
@@ -669,7 +763,9 @@ fn rematerialized_occurrence(
     occurrence: &SymbolOccurrenceId,
 ) -> Result<SymbolOccurrenceId, ChunkingFailureV1> {
     occurrences.get(occurrence).cloned().ok_or_else(|| {
-        ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(crate::noncanonical::NonCanonicalReasonCodeV1::GraphRematerializeFailed))
+        ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1::new(
+            crate::noncanonical::NonCanonicalReasonCodeV1::GraphRematerializeFailed,
+        ))
     })
 }
 

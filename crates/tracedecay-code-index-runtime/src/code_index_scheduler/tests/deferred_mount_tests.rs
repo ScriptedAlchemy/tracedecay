@@ -1,6 +1,6 @@
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
@@ -10,17 +10,14 @@ use super::{ALPHA_LIB_V1, GitFixture, wait_for_initial_generation};
 use crate::code_index_scheduler::query_runtime::{
     DeferredMountAttemptV1, retry_deferred_query_authority_until_serving,
 };
-use crate::code_index_scheduler::{
-    CodeIndexGenerationPublishedV1, CodeIndexSchedulerRegistryV1,
-};
+use crate::code_index_scheduler::{CodeIndexGenerationPublishedV1, CodeIndexSchedulerRegistryV1};
 
 const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
 
 fn synthetic_publication(project_root: &Path, index: usize) -> CodeIndexGenerationPublishedV1 {
     CodeIndexGenerationPublishedV1 {
         project_root: project_root.to_path_buf(),
-        repository_id: RepositoryId::new("repository.deferred-mount.test")
-            .expect("repository id"),
+        repository_id: RepositoryId::new("repository.deferred-mount.test").expect("repository id"),
         generation_id: CodeGenerationId::new(format!("generation.deferred-mount.{index}"))
             .expect("generation id"),
         snapshot_content_identity: ContentDigest::new(format!("sha256:{index:064x}"))
@@ -55,7 +52,8 @@ async fn deferred_query_authority_wakes_without_ready_poll() {
     let project_root = fixture.path().to_path_buf();
     let attempts = Arc::new(AtomicUsize::new(0));
 
-    let waiter = spawn_deferred_mount_waiter(&registry, project_root.clone(), Arc::clone(&attempts));
+    let waiter =
+        spawn_deferred_mount_waiter(&registry, project_root.clone(), Arc::clone(&attempts));
 
     // Let the waiter miss the empty slot before mount publishes.
     tokio::task::yield_now().await;
@@ -97,7 +95,8 @@ async fn deferred_query_authority_recovers_from_lagged_publications() {
     let attempts = Arc::new(AtomicUsize::new(0));
     let noise_root = TempDir::new().expect("noise root");
 
-    let waiter = spawn_deferred_mount_waiter(&registry, project_root.clone(), Arc::clone(&attempts));
+    let waiter =
+        spawn_deferred_mount_waiter(&registry, project_root.clone(), Arc::clone(&attempts));
 
     tokio::task::yield_now().await;
 
@@ -105,10 +104,8 @@ async fn deferred_query_authority_recovers_from_lagged_publications() {
     let noise_root = noise_root.path().to_path_buf();
     let flood = tokio::spawn(async move {
         for index in 0..=GENERATION_PUBLICATION_CHANNEL_CAPACITY {
-            flood_registry.push_generation_publication_for_test(synthetic_publication(
-                &noise_root,
-                index,
-            ));
+            flood_registry
+                .push_generation_publication_for_test(synthetic_publication(&noise_root, index));
         }
     });
 

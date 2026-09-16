@@ -1039,4 +1039,3 @@ mod tests {
             .expect("fallback policy is accepted by the fallback authority mode");
     }
 }
-

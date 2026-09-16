@@ -20,6 +20,7 @@ use super::super::{
         MAX_CONSECUTIVE_CAPACITY_RETRIES_V1, MAX_CONSECUTIVE_RECONCILE_PANICS_V1,
         ReconcileFaultInjectionV1, ReconcileFaultKindV1,
     },
+    serving::CodeIndexBuildProgressSlotStateV1,
 };
 use super::CodeIndexSchedulerRegistryV1;
 
@@ -166,7 +167,8 @@ impl Fixture {
         *worktree
             .build_progress
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Default::default();
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            CodeIndexBuildProgressSlotStateV1::default();
     }
 
     async fn plant_terminal_publication_park(&self, reason: &str) {
