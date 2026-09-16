@@ -17,7 +17,7 @@
 //! mismatch inside a qualified-structure group abstains with
 //! [`ABSTAIN_CANDIDATE_COUNT_MISMATCH`] rather than guessing one.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -354,10 +354,13 @@ impl SymbolLineageResolver {
         Ok(candidates)
     }
 
-    /// Resolve lineage only for fresh (non-Arc-shared) current symbols.
+    /// Resolve lineage for an Arc-shared increment.
     ///
-    /// Shared page symbols keep extraction provenance and need no Unchanged
-    /// candidate rows; continuity is the Arc identity itself.
+    /// Shared current symbols (not in `fresh_symbol_ptrs`) emit durable
+    /// [`LineageKindV1::Unchanged`] rows so continuity survives serialize and
+    /// reload. Fresh symbols resolve against prior with shared ancestors
+    /// reserved in `consumed` so content/group matches cannot steal them.
+    /// Candidates follow current occurrence order.
     pub fn resolve_fresh_symbol_ptrs(
         &self,
         prior: &GenerationSymbolIndexV1,
@@ -367,26 +370,29 @@ impl SymbolLineageResolver {
         if prior.generation_id == current.generation_id {
             return Err(LineageResolutionErrorV1::SameGeneration);
         }
-        if fresh_symbol_ptrs.is_empty() {
-            return Ok(Vec::new());
-        }
 
-        // ponytail: tiny fresh sets — prefer identity scan. Large fresh sets
-        // fall through to the indexed resolver (scan is O(fresh × prior)).
-        let fresh_symbols = current
+        let prior_by_ptr = prior
             .symbols
             .iter()
-            .filter(|symbol| fresh_symbol_ptrs.contains(&Arc::as_ptr(symbol)))
-            .cloned()
-            .collect::<Vec<_>>();
-        let scan_cost = fresh_symbols
-            .len()
-            .saturating_mul(prior.symbols.len());
-        if scan_cost > 1_000_000 {
-            let fresh_ptrs = fresh_symbol_ptrs;
-            let mut by_identity: BTreeMap<&str, usize> = BTreeMap::new();
-            let mut by_content: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
-            let mut by_group: BTreeMap<(&str, &str, &str), Vec<usize>> = BTreeMap::new();
+            .enumerate()
+            .map(|(index, symbol)| (Arc::as_ptr(symbol), index))
+            .collect::<HashMap<_, _>>();
+        let mut consumed = vec![false; prior.symbols.len()];
+        // Reserve shared ancestors before any fresh resolve_one call.
+        for symbol in &current.symbols {
+            if fresh_symbol_ptrs.contains(&Arc::as_ptr(symbol)) {
+                continue;
+            }
+            if let Some(&index) = prior_by_ptr.get(&Arc::as_ptr(symbol)) {
+                consumed[index] = true;
+            }
+        }
+
+        let mut by_identity: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut by_content: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+        let mut by_group: BTreeMap<(&str, &str, &str), Vec<usize>> = BTreeMap::new();
+        let need_indexes = !fresh_symbol_ptrs.is_empty();
+        if need_indexes {
             for (index, symbol) in prior.symbols.iter().enumerate() {
                 by_identity.insert(symbol.identity.as_str(), index);
                 by_content
@@ -395,13 +401,19 @@ impl SymbolLineageResolver {
                     .push(index);
                 by_group.entry(symbol.group_key()).or_default().push(index);
             }
-            let mut current_group_sizes: BTreeMap<(&str, &str, &str), usize> = BTreeMap::new();
-            for symbol in &fresh_symbols {
-                *current_group_sizes.entry(symbol.group_key()).or_insert(0) += 1;
+        }
+        let mut current_group_sizes: BTreeMap<(&str, &str, &str), usize> = BTreeMap::new();
+        if need_indexes {
+            for symbol in &current.symbols {
+                if fresh_symbol_ptrs.contains(&Arc::as_ptr(symbol)) {
+                    *current_group_sizes.entry(symbol.group_key()).or_insert(0) += 1;
+                }
             }
-            let mut consumed = vec![false; prior.symbols.len()];
-            let mut candidates = Vec::with_capacity(fresh_symbols.len());
-            for symbol in &fresh_symbols {
+        }
+
+        let mut candidates = Vec::with_capacity(current.symbols.len());
+        for symbol in &current.symbols {
+            if fresh_symbol_ptrs.contains(&Arc::as_ptr(symbol)) {
                 let resolution = self.resolve_one(
                     prior,
                     current,
@@ -415,78 +427,25 @@ impl SymbolLineageResolver {
                 if let Some(candidate) = resolution {
                     candidates.push(candidate);
                 }
+                continue;
             }
-            let _ = fresh_ptrs;
-            return Ok(candidates);
-        }
-        let mut consumed = vec![false; prior.symbols.len()];
-        let mut candidates = Vec::with_capacity(fresh_symbols.len());
-        let mut unresolved = Vec::new();
-        for symbol in &fresh_symbols {
-            let mut matched = None;
-            for (index, ancestor) in prior.symbols.iter().enumerate() {
-                if consumed[index] || ancestor.identity != symbol.identity {
-                    continue;
-                }
-                consumed[index] = true;
-                matched = Some(ancestor);
-                break;
-            }
-            match matched {
-                Some(ancestor) => {
-                    let kind = if ancestor.content_digest == symbol.content_digest {
-                        LineageKindV1::Unchanged
-                    } else {
-                        LineageKindV1::StructuralContinuity
-                    };
-                    if let Some(candidate) = self.candidate(
-                        prior,
-                        current,
-                        symbol,
-                        ancestor,
-                        kind,
-                        LineageMethodV1::ExactIdentityTuple,
-                        LineageConfidenceKindV1::Exact,
-                        vec![],
-                        None,
-                    )? {
-                        candidates.push(candidate);
-                    }
-                }
-                None => unresolved.push(Arc::clone(symbol)),
-            }
-        }
-        if unresolved.is_empty() {
-            return Ok(candidates);
-        }
-
-        let mut by_identity: BTreeMap<&str, usize> = BTreeMap::new();
-        let mut by_content: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
-        let mut by_group: BTreeMap<(&str, &str, &str), Vec<usize>> = BTreeMap::new();
-        for (index, symbol) in prior.symbols.iter().enumerate() {
-            by_identity.insert(symbol.identity.as_str(), index);
-            by_content
-                .entry(symbol.content_digest.as_str())
-                .or_default()
-                .push(index);
-            by_group.entry(symbol.group_key()).or_default().push(index);
-        }
-        let mut current_group_sizes: BTreeMap<(&str, &str, &str), usize> = BTreeMap::new();
-        for symbol in &unresolved {
-            *current_group_sizes.entry(symbol.group_key()).or_insert(0) += 1;
-        }
-        for symbol in &unresolved {
-            let resolution = self.resolve_one(
+            let Some(&index) = prior_by_ptr.get(&Arc::as_ptr(symbol)) else {
+                return Err(LineageResolutionErrorV1::Contract(
+                    "Arc-shared current symbol is missing from the prior index".to_owned(),
+                ));
+            };
+            let ancestor = &prior.symbols[index];
+            if let Some(candidate) = self.candidate(
                 prior,
                 current,
                 symbol,
-                &by_identity,
-                &by_content,
-                &by_group,
-                &current_group_sizes,
-                &mut consumed,
-            )?;
-            if let Some(candidate) = resolution {
+                ancestor,
+                LineageKindV1::Unchanged,
+                LineageMethodV1::ExactIdentityTuple,
+                LineageConfidenceKindV1::Exact,
+                vec![],
+                None,
+            )? {
                 candidates.push(candidate);
             }
         }
@@ -1213,5 +1172,97 @@ mod tests {
             ),
             "the unclaimable twin must produce a typed abstention"
         );
+    }
+
+    #[test]
+    fn arc_share_empty_fresh_persists_unchanged_continuity() {
+        let shared = Arc::new(record("sym.s1", 'a', "crate::alpha", "function", 'f', '0'));
+        let prior = GenerationSymbolIndexV1::from_sorted_arcs(
+            generation(1),
+            vec![Arc::clone(&shared)],
+        )
+        .expect("prior");
+        let current = GenerationSymbolIndexV1::from_sorted_arcs(
+            generation(2),
+            vec![Arc::clone(&shared)],
+        )
+        .expect("current");
+        let candidates = resolver()
+            .resolve_fresh_symbol_ptrs(&prior, &current, &HashSet::new())
+            .expect("shared continuity");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].kind, LineageKindV1::Unchanged);
+        assert_eq!(candidates[0].method, LineageMethodV1::ExactIdentityTuple);
+        assert_eq!(candidates[0].prior_occurrence.as_str(), "sym.s1");
+    }
+
+    #[test]
+    fn arc_share_reserves_shared_ancestor_from_fresh_content_match() {
+        let shared = Arc::new(record("sym.s1", 'a', "crate::alpha", "function", 'f', '0'));
+        let prior = GenerationSymbolIndexV1::from_sorted_arcs(
+            generation(1),
+            vec![Arc::clone(&shared)],
+        )
+        .expect("prior");
+        // Same body+name, new identity/file: without reserving the shared Arc,
+        // content match would claim Moved from sym.s1. Reservation leaves no
+        // unconsumed content ancestor, so fresh emits nothing.
+        let fresh = Arc::new(record("sym.t1", 'c', "crate::alpha", "function", 'e', '0'));
+        let current = GenerationSymbolIndexV1::from_sorted_arcs(
+            generation(2),
+            vec![Arc::clone(&shared), Arc::clone(&fresh)],
+        )
+        .expect("current");
+        let fresh_ptrs = HashSet::from([Arc::as_ptr(&fresh)]);
+        let candidates = resolver()
+            .resolve_fresh_symbol_ptrs(&prior, &current, &fresh_ptrs)
+            .expect("reserved resolve");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].kind, LineageKindV1::Unchanged);
+        assert_eq!(candidates[0].prior_occurrence.as_str(), "sym.s1");
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.current_occurrence.as_str() != "sym.t1"),
+            "fresh must not consume the Arc-shared ancestor"
+        );
+    }
+
+    #[test]
+    fn arc_share_candidates_follow_current_occurrence_order() {
+        let shared_a = Arc::new(record("sym.a", 'a', "crate::alpha", "function", 'f', '0'));
+        let shared_b = Arc::new(record("sym.b", 'b', "crate::beta", "function", 'f', '1'));
+        let prior_for_fresh =
+            Arc::new(record("sym.z", 'c', "crate::gamma", "function", 'd', '9'));
+        let prior = GenerationSymbolIndexV1::from_sorted_arcs(
+            generation(1),
+            vec![
+                Arc::clone(&shared_a),
+                Arc::clone(&shared_b),
+                Arc::clone(&prior_for_fresh),
+            ],
+        )
+        .expect("prior");
+        // Fresh keeps identity `c` with new content so ExactIdentityTuple emits
+        // StructuralContinuity between shared Unchanged rows.
+        let fresh = Arc::new(record("sym.af", 'c', "crate::gamma", "function", 'd', '2'));
+        let current = GenerationSymbolIndexV1::from_sorted_arcs(
+            generation(2),
+            vec![
+                Arc::clone(&shared_a),
+                Arc::clone(&fresh),
+                Arc::clone(&shared_b),
+            ],
+        )
+        .expect("current");
+        let fresh_ptrs = HashSet::from([Arc::as_ptr(&fresh)]);
+        let candidates = resolver()
+            .resolve_fresh_symbol_ptrs(&prior, &current, &fresh_ptrs)
+            .expect("ordered resolve");
+        let order: Vec<_> = candidates
+            .iter()
+            .map(|candidate| candidate.current_occurrence.as_str())
+            .collect();
+        assert_eq!(order, vec!["sym.a", "sym.af", "sym.b"]);
     }
 }

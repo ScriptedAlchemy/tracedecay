@@ -1598,7 +1598,11 @@ impl CodeIndexPublishedGenerationV1 {
     }
 }
 
-/// Prove reused complement via changed-set membership (no full-corpus walk).
+/// Prove reused complement against the current corpus before publication.
+///
+/// `changes.validate()` only seals the public manifest digest; the reused
+/// partition is not self-authenticating. Rebuild the ordered complement from
+/// corpus digests and require the same count+digest the plan claimed.
 fn validate_arc_shared_reused_complement(
     changes: &tracedecay_domain::ChangedCodeChunkSetV1,
     _prior: &[Arc<tracedecay_domain::CodeSearchChunkV1>],
@@ -1608,51 +1612,60 @@ fn validate_arc_shared_reused_complement(
     changes
         .validate()
         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-    let expected_reused = current
-        .len()
-        .saturating_sub(changes.added_or_changed.len()) as u64;
-    if changes.reused_count != expected_reused {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "reused complement count mismatch".to_owned(),
-        ));
-    }
+    let mut added = BTreeMap::new();
     for change in &changes.added_or_changed {
         let Some(digest) = change.current_digest.as_ref() else {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "added or changed current digest".to_owned(),
             ));
         };
-        let index = current
-            .binary_search_by(|chunk| chunk.id.cmp(&change.chunk_id))
-            .map_err(|_| {
-                CodeIndexProductionErrorV1::Contract(
-                    "added or changed chunk missing from current corpus".to_owned(),
-                )
-            })?;
-        let chunk = &current[index];
-        if &chunk.content_digest != digest {
+        if added.insert(&change.chunk_id, digest).is_some() {
             return Err(CodeIndexProductionErrorV1::Contract(
-                "added or changed digest mismatch".to_owned(),
-            ));
-        }
-        if shared_occurrences.contains(&chunk.anchor.file_occurrence_id) {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "shared chunk also listed as added or changed".to_owned(),
+                "duplicate added or changed chunk".to_owned(),
             ));
         }
     }
-    for change in &changes.deleted {
-        if current
-            .binary_search_by(|chunk| chunk.id.cmp(&change.chunk_id))
-            .is_ok()
-        {
+    let deleted = changes
+        .deleted
+        .iter()
+        .map(|change| &change.chunk_id)
+        .collect::<BTreeSet<_>>();
+    let mut reused_refs = Vec::with_capacity(current.len().saturating_sub(added.len()));
+    for chunk in current {
+        if deleted.contains(&chunk.id) {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "deleted chunk still present in current corpus".to_owned(),
             ));
         }
+        match added.remove(&chunk.id) {
+            Some(expected) if expected == &chunk.content_digest => {
+                if shared_occurrences.contains(&chunk.anchor.file_occurrence_id) {
+                    return Err(CodeIndexProductionErrorV1::Contract(
+                        "shared chunk also listed as added or changed".to_owned(),
+                    ));
+                }
+            }
+            Some(_) => {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "added or changed digest mismatch".to_owned(),
+                ));
+            }
+            None => reused_refs.push((&chunk.id, &chunk.content_digest)),
+        }
     }
-    // ponytail: skip complement re-hash on Arc-share publish; plan sealed
-    // reused_digest once. Restore still full-rehashes via validate_fresh(None).
+    if !added.is_empty() {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "added or changed chunk missing from current corpus".to_owned(),
+        ));
+    }
+    let (reused_count, reused_digest) =
+        tracedecay_domain::ChangedCodeChunkSetV1::seal_reused_partition_refs_trusted(&reused_refs)
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+    if reused_count != changes.reused_count || reused_digest != changes.reused_digest {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "reused complement seal mismatch".to_owned(),
+        ));
+    }
     Ok(())
 }
 
