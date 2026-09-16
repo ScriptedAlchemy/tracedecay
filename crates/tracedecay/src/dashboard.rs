@@ -257,7 +257,8 @@ pub async fn dashboard_lcm_read_authority_for_test(
     .await?;
     let root = DaemonSessionRetrievalRoot::project(serving, registry).await?;
     let identity = root.identity().clone();
-    let service = DaemonSessionRetrievalService::new(project_database.clone(), root, None)?;
+    let service =
+        DaemonSessionRetrievalService::new_without_refresh_worker(project_database.clone(), root)?;
     let adapter = tracedecay_mcp::handlers::dashboard_lcm::DashboardLcmReadAdapter::new(
         std::sync::Arc::new(service),
         identity,

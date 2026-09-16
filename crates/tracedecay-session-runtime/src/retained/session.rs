@@ -82,6 +82,8 @@ enum RetainedSessionAuthority<'a> {
         identity: ResolvedSessionIdentity,
         configuration_digest: ManifestDigest,
         refresh: Option<&'a dyn RetainedSessionRefreshPortV1>,
+        refresh_status:
+            Option<Arc<dyn tracedecay_sessions::serving::SessionProjectionServingStatusPort>>,
     },
 }
 
@@ -96,6 +98,9 @@ impl<'a> DirectRetainedSessionPortV1<'a> {
         identity: ResolvedSessionIdentity,
         configuration_digest: ManifestDigest,
         refresh: Option<&'a dyn RetainedSessionRefreshPortV1>,
+        refresh_status: Option<
+            Arc<dyn tracedecay_sessions::serving::SessionProjectionServingStatusPort>,
+        >,
     ) -> Self {
         Self {
             authorities: RetainedSessionAuthority::Profile {
@@ -103,6 +108,7 @@ impl<'a> DirectRetainedSessionPortV1<'a> {
                 identity,
                 configuration_digest,
                 refresh,
+                refresh_status,
             },
         }
     }
@@ -146,19 +152,25 @@ impl<'a> DirectRetainedSessionPortV1<'a> {
         request: &MessageSearchRequestV1,
         session_database: &super::ProfileSessionDatabaseSource<'_>,
         identity: &ResolvedSessionIdentity,
+        refresh_status: Option<
+            Arc<dyn tracedecay_sessions::serving::SessionProjectionServingStatusPort>,
+        >,
     ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
         ensure_profile_message_scope(request)?;
         let input = MessageSearchInput::parse(request)?;
         let query = input.query()?;
         let database =
             super::bounded_execution(context, async { session_database().await }).await?;
-        let retrieval =
-            DaemonSessionRetrievalService::new_admitted_profile(database, identity.clone())
-                .ok_or_else(|| {
-                    RetainedSurfaceExecutionErrorV1::unavailable(
-                        "the profile session retrieval service could not be admitted",
-                    )
-                })?;
+        let retrieval = DaemonSessionRetrievalService::new_admitted_profile(
+            database,
+            identity.clone(),
+            refresh_status,
+        )
+        .ok_or_else(|| {
+            RetainedSurfaceExecutionErrorV1::unavailable(
+                "the profile session retrieval service could not be admitted",
+            )
+        })?;
         let outcome = retrieve_bounded(context, &retrieval, query).await?;
         let result = input.result(outcome, SessionRetrievalStoreScope::Profile)?;
         evidence_outcome(
@@ -394,6 +406,7 @@ impl RetainedSessionExecutionPortV1 for DirectRetainedSessionPortV1<'_> {
                     RetainedSessionAuthority::Profile {
                         session_database,
                         identity,
+                        refresh_status,
                         ..
                     },
                     RetainedSessionRequestV1::MessageSearch(request),
@@ -403,6 +416,7 @@ impl RetainedSessionExecutionPortV1 for DirectRetainedSessionPortV1<'_> {
                         request,
                         session_database,
                         identity,
+                        refresh_status.clone(),
                     )
                     .await
                 }

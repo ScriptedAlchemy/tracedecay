@@ -66,6 +66,8 @@ enum DirectRetainedLcmAuthority<'a> {
         authority: Option<&'a dyn MountedLcmAuthorityPort>,
         session_database: ProfileSessionDatabaseSource<'a>,
         identity: ResolvedSessionIdentity,
+        refresh_status:
+            Option<Arc<dyn tracedecay_sessions::serving::SessionProjectionServingStatusPort>>,
     },
 }
 
@@ -306,12 +308,16 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
         session_database: ProfileSessionDatabaseSource<'a>,
         identity: ResolvedSessionIdentity,
         authority: Option<&'a dyn MountedLcmAuthorityPort>,
+        refresh_status: Option<
+            Arc<dyn tracedecay_sessions::serving::SessionProjectionServingStatusPort>,
+        >,
     ) -> Self {
         Self {
             authority: DirectRetainedLcmAuthority::Profile {
                 authority,
                 session_database,
                 identity,
+                refresh_status,
             },
         }
     }
@@ -349,6 +355,7 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
                 authority: None,
                 session_database,
                 identity,
+                ..
             } => {
                 let database =
                     super::bounded_execution(context, async { session_database().await }).await?;
@@ -384,17 +391,21 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
             DirectRetainedLcmAuthority::Profile {
                 session_database,
                 identity,
+                refresh_status,
                 ..
             } => {
                 let database =
                     super::bounded_execution(context, async { session_database().await }).await?;
-                let service =
-                    DaemonSessionRetrievalService::new_admitted_profile(database, identity.clone())
-                        .ok_or_else(|| {
-                            RetainedSurfaceExecutionErrorV1::unavailable(
-                                "the profile session retrieval service could not be admitted",
-                            )
-                        })?;
+                let service = DaemonSessionRetrievalService::new_admitted_profile(
+                    database,
+                    identity.clone(),
+                    refresh_status.clone(),
+                )
+                .ok_or_else(|| {
+                    RetainedSurfaceExecutionErrorV1::unavailable(
+                        "the profile session retrieval service could not be admitted",
+                    )
+                })?;
                 Ok(RetainedLcmRetrieval::Profile {
                     service: Box::new(service),
                     cancellation: context.cancellation_signal,

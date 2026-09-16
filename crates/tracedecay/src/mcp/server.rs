@@ -283,6 +283,9 @@ pub struct McpServer {
         Option<Arc<dyn tracedecay_contracts::SessionTemporalRefreshWakePort>>,
     user_session_refresh_wake:
         Option<Arc<dyn tracedecay_contracts::SessionTemporalRefreshWakePort>>,
+    /// Serving-status port of the daemon-mounted profile refresh worker.
+    user_session_refresh_serving:
+        Option<Arc<dyn tracedecay_sessions::serving::SessionProjectionServingStatusPort>>,
     project_session_refresh_service: Option<Arc<dyn SessionRefreshServicePort>>,
     /// Daemon-wide profile session refresh service shared with the projectless
     /// route, so a handle begun on either connection resolves on the other.
@@ -764,6 +767,7 @@ impl McpServer {
             user_session_refresh_wake,
             profile_session_refresh,
             project_session_refresh_serving,
+            user_session_refresh_serving,
             own_project_host_admission_replay,
             startup_catch_up_enabled,
             automation_scheduler_reconciler,
@@ -941,10 +945,14 @@ impl McpServer {
             .zip(project_session_retrieval_root.clone())
             .and_then(|(database, root)| {
                 let identity = root.identity().clone();
+                // A direct or core server mounts no project refresh worker;
+                // its retrieval says so instead of serving `RequireFresh`.
                 let service = DaemonSessionRetrievalService::new_with_serving_port(
                     database.clone(),
                     root,
-                    project_session_refresh_serving.clone(),
+                    project_session_refresh_serving.clone().unwrap_or_else(|| {
+                        Arc::new(tracedecay_sessions::serving::RefreshWorkerMissing)
+                    }),
                 )?;
                 Some(MountedProjectApplicationRetrievalV1 {
                     identity,
@@ -1022,6 +1030,7 @@ impl McpServer {
             background_cpu,
             project_session_refresh_wake,
             user_session_refresh_wake,
+            user_session_refresh_serving,
             project_session_refresh_service,
             profile_session_refresh_service: profile_session_refresh,
             project_session_store_id,

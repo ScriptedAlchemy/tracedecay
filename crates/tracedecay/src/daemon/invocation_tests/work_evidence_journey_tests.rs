@@ -406,10 +406,9 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
         .session_request_scope()
         .expect("Work scope");
     let retrieval =
-        tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalService::new(
+        tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalService::new_without_refresh_worker(
             database.clone(),
             retrieval_root,
-            None,
         )
         .expect("mounted session retrieval");
     let evidence_retrieval =
