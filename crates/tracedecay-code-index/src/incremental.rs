@@ -606,3 +606,29 @@ fn placeholder_digest() -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
         .expect("a zeroed sha256 digest is canonical")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{ChunkIncrementErrorV1, GenerationChunkManifestV1};
+    use crate::parallelism::{CodeIndexParallelismErrorV1, force_install_failure_for_test};
+    use tracedecay_domain::CodeGenerationId;
+
+    #[test]
+    fn pool_failure_remains_a_typed_parallelism_error() {
+        struct ClearForce;
+        impl Drop for ClearForce {
+            fn drop(&mut self) {
+                force_install_failure_for_test(false);
+            }
+        }
+        let _clear = ClearForce;
+        force_install_failure_for_test(true);
+        let generation = CodeGenerationId::new("generation.pool-failure").expect("generation");
+        assert!(matches!(
+            GenerationChunkManifestV1::new(generation, vec![]),
+            Err(ChunkIncrementErrorV1::Parallelism(
+                CodeIndexParallelismErrorV1::PoolBuild { .. }
+            ))
+        ));
+    }
+}
