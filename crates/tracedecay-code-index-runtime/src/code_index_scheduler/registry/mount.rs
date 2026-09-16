@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock, RwLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -269,6 +269,8 @@ impl CodeIndexSchedulerRegistryV1 {
         let worker_scheduler = Arc::clone(&scheduler);
         let worker_reconcile_in_progress = Arc::clone(&reconcile_in_progress);
         let worker_build_progress = Arc::clone(&build_progress);
+        let text_backfill_in_progress = Arc::new(AtomicUsize::new(0));
+        let worker_text_backfill_in_progress = Arc::clone(&text_backfill_in_progress);
         let worker_serving_generation = Arc::clone(&serving_generation);
         let worker_complete_generation_requested = Arc::clone(&complete_generation_requested);
         let worker_text_generation = Arc::clone(&text_generation);
@@ -605,10 +607,21 @@ impl CodeIndexSchedulerRegistryV1 {
                     // guard for that reported a complete current generation
                     // as `verifying` / `partial_source_verification` for the
                     // whole backfill (#1103).
+                    // The pass guard is what `rebuild_in_flight` and the
+                    // `verifying` freshness state read. An owner whose query
+                    // owners already serve has only the clone-fingerprint
+                    // backfill left; that is counted on its own so a complete
+                    // current generation is not reported as verifying for the
+                    // whole backfill (#1103), while shutdown and test
+                    // quiescence still see the work.
                     retained_projection_successor_only = latest.query_owners_are_ready();
-                    let projection_pass = Some(super::super::ReconcilePassGuard::enter(
-                        &worker_reconcile_in_progress,
-                    ));
+                    let projection_pass = super::super::ReconcilePassGuard::enter(
+                        if retained_projection_successor_only {
+                            &worker_text_backfill_in_progress
+                        } else {
+                            &worker_reconcile_in_progress
+                        },
+                    );
                     let projection_pending_wake = Arc::clone(&worker_pending_wake);
                     let projection_wake = Arc::clone(&worker_wake);
                     retained_text_projection = Some(tokio::spawn(async move {
@@ -2283,6 +2296,7 @@ impl CodeIndexSchedulerRegistryV1 {
             index_observability,
             shutting_down,
             reconcile_in_progress,
+            text_backfill_in_progress,
             _active_generation_encoded_bytes: active_generation_encoded_bytes,
             task,
         });

@@ -66,14 +66,16 @@ impl CodeIndexSchedulerRegistryV1 {
         let Ok(project_root) = project_root.canonicalize() else {
             return false;
         };
-        let reconcile_in_progress = self
-            .mounted
-            .lock()
-            .await
-            .get(&project_root)
-            .map(|worktree| Arc::clone(&worktree.reconcile_in_progress));
-        reconcile_in_progress
-            .is_some_and(|reconcile_in_progress| reconcile_in_progress.load(Ordering::Acquire) != 0)
+        let counters = self.mounted.lock().await.get(&project_root).map(|worktree| {
+            (
+                Arc::clone(&worktree.reconcile_in_progress),
+                Arc::clone(&worktree.text_backfill_in_progress),
+            )
+        });
+        counters.is_some_and(|(reconcile_in_progress, text_backfill_in_progress)| {
+            reconcile_in_progress.load(Ordering::Acquire) != 0
+                || text_backfill_in_progress.load(Ordering::Acquire) != 0
+        })
     }
 
     /// Test-only: hold an exact mounted worktree's owner-pass authority, as
