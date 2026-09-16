@@ -364,11 +364,22 @@ mod tests {
             pagination: None,
             streaming: None,
         };
-        assert!(matches!(
+        assert_eq!(
             McpDispatchContractV1::new(input.clone()),
-            Err(McpDispatchCatalogError::InvalidInverse { .. })
-        ));
+            Err(McpDispatchCatalogError::InvalidInverse {
+                tool_name: "read".to_owned(),
+            })
+        );
         input.effect = EffectClass::Administrative;
-        assert!(McpDispatchContractV1::new(input).is_ok());
+        let accepted = McpDispatchContractV1::new(input).unwrap();
+        assert_eq!(accepted.tool_name(), "read");
+        assert_eq!(accepted.effect(), EffectClass::Administrative);
+        assert!(!accepted.read_only());
+        assert_eq!(
+            accepted.inverse(),
+            &McpInverseContract::Tool {
+                tool_name: "write".to_owned(),
+            }
+        );
     }
 }

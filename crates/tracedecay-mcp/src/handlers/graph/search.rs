@@ -1671,7 +1671,10 @@ mod tests {
             true,
             "new generation published",
         );
-        assert!(preserve_complete_search_after_lazy_admission(Err(advanced)).is_ok());
+        assert!(matches!(
+            preserve_complete_search_after_lazy_admission(Err(advanced)),
+            Ok(())
+        ));
 
         let stale = TraceDecayError::project_route(
             "application.symbol-graph.ignored-dependency-generation-stale",

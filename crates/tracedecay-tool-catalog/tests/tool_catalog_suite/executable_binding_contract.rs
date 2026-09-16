@@ -282,13 +282,19 @@ fn executable_registry_rejects_duplicate_operation_ids() {
     let first = ExecutableBindingAvailabilityV1::available(binding.clone());
     let duplicate = ExecutableBindingAvailabilityV1::available(binding);
 
-    assert!(ExecutableBindingRegistryV1::new(vec![first, duplicate]).is_err());
+    assert_eq!(
+        ExecutableBindingRegistryV1::new(vec![first, duplicate]),
+        Err(
+            tracedecay_tool_catalog::CatalogValidationError::DuplicateValue {
+                field: "executable operation IDs",
+            }
+        )
+    );
 
-    let registry =
-        ExecutableBindingRegistryV1::new(vec![ExecutableBindingAvailabilityV1::Unavailable {
-            operation_id: operation_id.clone(),
-            disposition: ExecutableUnavailableDispositionV1::RouteUnavailable,
-        }])
-        .unwrap();
-    assert!(registry.get(&operation_id).is_some());
+    let unavailable = ExecutableBindingAvailabilityV1::Unavailable {
+        operation_id: operation_id.clone(),
+        disposition: ExecutableUnavailableDispositionV1::RouteUnavailable,
+    };
+    let registry = ExecutableBindingRegistryV1::new(vec![unavailable.clone()]).unwrap();
+    assert_eq!(registry.get(&operation_id), Some(&unavailable));
 }

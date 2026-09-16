@@ -209,7 +209,12 @@ mod tests {
             require_node_id(&json!({"id": "trait:alias"})),
             Ok("trait:alias")
         ));
-        assert!(require_node_id(&json!({"query": "missing"})).is_err());
+        assert_eq!(
+            require_node_id(&json!({"query": "missing"}))
+                .unwrap_err()
+                .to_string(),
+            "config error: missing required parameter: node_id"
+        );
 
         for args in [
             json!({"node_id": ""}),
@@ -243,17 +248,25 @@ mod tests {
             json!({"node_id": "function:canonical", "project_id": "project.legacy"}),
             json!({"id": "function:legacy"}),
         ] {
-            assert!(
+            let error =
                 decode_primitive_request::<NodeSurfaceRequestV1>(&invalid, "tracedecay_node")
-                    .is_err(),
-                "legacy request must fail: {invalid}"
+                    .expect_err("legacy request must fail");
+            let message = error.to_string();
+            assert!(
+                message.contains("unknown field `project_id`")
+                    || message.contains("unknown field `id`")
+                    || message.contains("missing field `node_id`"),
+                "legacy request must name the rejected field, got {message} for {invalid}"
             );
         }
     }
 
     #[test]
     fn positive_limit_and_unique_paths_keep_validation_parity() {
-        assert!(require_positive_limit(1, "tracedecay_fixture").is_ok());
+        assert!(matches!(
+            require_positive_limit(1, "tracedecay_fixture"),
+            Ok(())
+        ));
         let error =
             require_positive_limit(0, "tracedecay_fixture").expect_err("zero limit must fail");
         assert!(error.to_string().contains("limit to be at least 1"));

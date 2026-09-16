@@ -78,7 +78,21 @@ fn retained_claims_backpressure_at_a_deterministic_bound() {
                 .is_ok()
         );
     }
-    assert!(retain_hook_v2_delivery_claim([203; 16], retained_claim(1), UtcMicros(1)).is_err());
+    let overflow = retained_claim(1);
+    assert_eq!(
+        retain_hook_v2_delivery_claim([203; 16], overflow.clone(), UtcMicros(1)),
+        Err(Box::new(overflow.clone()))
+    );
+    assert_eq!(
+        lookup_hook_v2_delivery_claim([203; 16], overflow.entry.envelope.envelope_id),
+        None
+    );
+    let mut stored_project = [202; 16];
+    stored_project[0] = 0;
+    assert_eq!(
+        lookup_hook_v2_delivery_claim(stored_project, [0; 16]),
+        Some(retained_claim(0))
+    );
     for index in 0..MAX_RETAINED_HOOK_V2_DELIVERY_CLAIMS as u16 {
         let mut project_id = [202; 16];
         project_id[0] = (index >> 8) as u8;
@@ -111,15 +125,26 @@ fn receipt_outcomes_release_claims_and_only_retry_unavailable() {
 
 #[test]
 fn scout_read_actions_are_closed_and_read_only() {
-    for action in [
-        "hook_v2_scout_recent",
-        "hook_v2_scout_explain",
-        "hook_v2_scout_capability",
-        "hook_v2_scout_budget",
-    ] {
-        assert!(ContextScoutReadSurfaceV1::from_action(action).is_some());
-    }
-    assert!(ContextScoutReadSurfaceV1::from_action("hook_v2_scout_apply").is_none());
+    assert_eq!(
+        ContextScoutReadSurfaceV1::from_action("hook_v2_scout_recent"),
+        Some(ContextScoutReadSurfaceV1::Recent)
+    );
+    assert_eq!(
+        ContextScoutReadSurfaceV1::from_action("hook_v2_scout_explain"),
+        Some(ContextScoutReadSurfaceV1::Explain)
+    );
+    assert_eq!(
+        ContextScoutReadSurfaceV1::from_action("hook_v2_scout_capability"),
+        Some(ContextScoutReadSurfaceV1::Capability)
+    );
+    assert_eq!(
+        ContextScoutReadSurfaceV1::from_action("hook_v2_scout_budget"),
+        Some(ContextScoutReadSurfaceV1::Budget)
+    );
+    assert_eq!(
+        ContextScoutReadSurfaceV1::from_action("hook_v2_scout_apply"),
+        None
+    );
 }
 
 #[test]
