@@ -1653,18 +1653,17 @@ mod destination_routing_tests {
 async fn unreadable_state_db_is_a_counted_source_failure_not_a_clean_sweep() {
     let dir = tempfile::tempdir().unwrap();
     initialize_owned_store_before_foreign_fixture(dir.path()).await;
+    // The pin resolver is a root-registered port and stays unwired in this
+    // crate's tests, so the project qualifies as a candidate destination by
+    // carrying an initialized project database instead of a config pin.
     let project_root = dir.path().join("project");
-    std::fs::create_dir_all(&project_root).unwrap();
-    // A profile pinned to this project the way `tracedecay install --agent
-    // hermes` writes it, so the source is a candidate without a git checkout.
+    let project_db = project_root
+        .join(tracedecay_runtime_core::config::TRACEDECAY_DIR)
+        .join(tracedecay_runtime_core::config::DB_FILENAME);
+    std::fs::create_dir_all(project_db.parent().unwrap()).unwrap();
+    std::fs::write(&project_db, b"").unwrap();
     let home = dir.path().join("hermes-home");
     std::fs::create_dir_all(&home).unwrap();
-    let pin = serde_json::to_string(project_root.to_string_lossy().as_ref()).unwrap();
-    std::fs::write(
-        home.join("config.yaml"),
-        format!("plugins:\n  enabled:\n    - tracedecay\n  tracedecay:\n    project_root: {pin}\n"),
-    )
-    .unwrap();
     std::fs::write(home.join("state.db"), b"this is not a sqlite database").unwrap();
     let admission = MemoryHostAdmission::default();
 
@@ -1678,7 +1677,10 @@ async fn unreadable_state_db_is_a_counted_source_failure_not_a_clean_sweep() {
     )
     .await;
 
-    assert_eq!(outcome.source_failures, 1, "the unreadable profile is one skipped source");
+    assert_eq!(
+        outcome.source_failures, 1,
+        "the unreadable profile is one skipped source"
+    );
     assert!(!outcome.projection_drain_deferred);
     assert_eq!(
         outcome.stats,

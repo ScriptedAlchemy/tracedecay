@@ -19,6 +19,7 @@ use super::failure::{
     cancelled_provider_outcome, classify_transcript_ingest_failure, claude_catch_up_failure,
     warn_transcript_catch_up_failure,
 };
+use super::project_provider::hermes_run_outcome;
 use super::scheduler::{read_codex_discovery_frontier, write_codex_discovery_frontier};
 use super::user::{
     BoundedProviderFailure, BoundedProviderOutcome, try_ingest_user_codex_sessions_rotated,
@@ -272,11 +273,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
         else {
             return ProviderRunOutcome::skipped();
         };
-        ProviderRunOutcome::bounded(
-            outcome.stats,
-            outcome.bytes_consumed,
-            outcome.deferred_by_byte_cap,
-        )
+        hermes_run_outcome(outcome, false)
     }
 
     #[hotpath::measure(label = "sessions.ingest.user.claude", future = true)]

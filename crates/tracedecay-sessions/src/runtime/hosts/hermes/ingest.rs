@@ -38,11 +38,20 @@ fn hermes_homes_from(home: Option<PathBuf>) -> Option<Vec<PathBuf>> {
 }
 
 /// Result of a Hermes sweep with one aggregate logical source-byte budget.
+///
+/// A sweep that skipped a source or could not drain its projections is a
+/// partial pass. Both are reported here so the provider can turn them into
+/// typed catch-up failures and deferrals; a clean `stats` alone never means
+/// every discovered source was read.
 #[derive(Debug, Default, Clone)]
 pub struct HermesSweepOutcome {
     pub stats: TranscriptIngestStats,
     pub bytes_consumed: u64,
     pub deferred_by_byte_cap: bool,
+    /// Discovered `state.db` sources the sweep could not open, query, or admit.
+    pub source_failures: u64,
+    /// The post-sweep projection drain did not complete for this scope.
+    pub projection_drain_deferred: bool,
 }
 
 /// Ingests Hermes sessions proven to belong to `project_root` into the
@@ -275,11 +284,14 @@ pub(super) async fn ingest_homes_capped_with_admission_and_cancellation(
         .await
         {
             Ok(source_stats) => outcome.stats = outcome.stats.merge(source_stats),
-            Err(error) => tracing::debug!(
-                state_db = %source.state_db.display(),
-                error,
-                "skipping Hermes transcript source"
-            ),
+            Err(error) => {
+                outcome.source_failures = outcome.source_failures.saturating_add(1);
+                tracing::warn!(
+                    state_db = %source.state_db.display(),
+                    error,
+                    "skipping Hermes transcript source"
+                );
+            }
         }
     }
     let scope = ObservationScopeV1::Project { project_id };
@@ -291,7 +303,8 @@ pub(super) async fn ingest_homes_capped_with_admission_and_cancellation(
         )
         .await
     {
-        tracing::debug!(error, "Hermes project projection drain deferred");
+        outcome.projection_drain_deferred = true;
+        tracing::warn!(error, "Hermes project projection drain deferred");
     }
     outcome.bytes_consumed = budget.consumed();
     outcome.deferred_by_byte_cap = budget.deferred();
@@ -391,11 +404,14 @@ async fn ingest_user_homes_capped_with_admission(
         .await
         {
             Ok(source_stats) => outcome.stats = outcome.stats.merge(source_stats),
-            Err(error) => tracing::debug!(
-                state_db = %source.state_db.display(),
-                error,
-                "skipping projectless Hermes transcript source"
-            ),
+            Err(error) => {
+                outcome.source_failures = outcome.source_failures.saturating_add(1);
+                tracing::warn!(
+                    state_db = %source.state_db.display(),
+                    error,
+                    "skipping projectless Hermes transcript source"
+                );
+            }
         }
     }
     if !cancellation.is_cancelled()
@@ -406,7 +422,8 @@ async fn ingest_user_homes_capped_with_admission(
         )
         .await
     {
-        tracing::debug!(error, "Hermes profile projection drain deferred");
+        outcome.projection_drain_deferred = true;
+        tracing::warn!(error, "Hermes profile projection drain deferred");
     }
     outcome.bytes_consumed = budget.consumed();
     outcome.deferred_by_byte_cap = budget.deferred();
