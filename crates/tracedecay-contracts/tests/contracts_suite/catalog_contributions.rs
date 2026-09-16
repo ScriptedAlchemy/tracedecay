@@ -185,3 +185,44 @@ fn verified_graph_mcp_reads_have_application_primitive_admission_identity() {
         }));
     }
 }
+
+#[test]
+fn similar_and_redundancy_cover_protocol_revisions_on_one_surface_operation() {
+    use tracedecay_tool_catalog::BindingStatus;
+
+    let contribution = primitive_read_contribution().unwrap();
+    for operation in ["similar", "redundancy"] {
+        let mcp_bindings: Vec<_> = contribution
+            .bindings()
+            .iter()
+            .filter(|binding| {
+                binding.surface() == BindingSurface::Mcp
+                    && binding.operation().as_str() == operation
+            })
+            .collect();
+        assert_eq!(
+            mcp_bindings.len(),
+            1,
+            "{operation} must keep one MCP (surface, operation) binding"
+        );
+        let binding = mcp_bindings[0];
+        assert!(matches!(binding.status(), BindingStatus::Current));
+        assert_eq!(binding.alias_of(), None);
+        assert!(
+            binding.protocol_revisions().contains(1),
+            "{operation} must accept protocol revision 1"
+        );
+        assert!(
+            binding.protocol_revisions().contains(2),
+            "{operation} must accept protocol revision 2"
+        );
+        assert_eq!(binding.protocol_revisions().minimum(), 1);
+        assert_eq!(binding.protocol_revisions().maximum(), 2);
+    }
+}
+
+#[test]
+fn application_catalog_snapshot_admits_similar_redundancy_protocol_range() {
+    tracedecay_contracts::catalog_composition::build_application_catalog_snapshot()
+        .expect("catalog construction must succeed with one binding per surface-operation");
+}

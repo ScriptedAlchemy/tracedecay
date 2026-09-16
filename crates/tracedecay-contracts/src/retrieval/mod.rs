@@ -110,7 +110,9 @@ pub use primitive_surface::{
     RenamePreviewPrimitiveOutcomeV1, RenamePreviewPrimitiveRequestV1,
     RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1, RenamePreviewTextOnlyMatchV1,
     SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1, SimilarOccurrenceV1, SimilarResultV1,
-    SimilarSurfaceRequestV1, SimilarTargetV1, TodoMarkerV1, TodosResultV1, TodosSurfaceRequestV1,
+    SimilarSurfaceRequestV1, SimilarSurfaceRequestWireV1, SimilarTargetV1, TodoMarkerV1,
+    TodosResultV1, TodosSurfaceRequestV1, LegacyRedundancySurfaceRequestV1,
+    LegacySimilarSurfaceRequestV1, RedundancySurfaceRequestWireV1,
 };
 pub use requests::{
     AffectedTestAttributionV1, AffectedTestsRequest, AffectedTestsResult, AnchorExpandRequest,
