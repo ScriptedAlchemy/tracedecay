@@ -2347,6 +2347,8 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         // and renamed above; POSIX only requires a single directory fsync
         // to make those renames durable, so batch it here rather than
         // syncing once per segment inside `publish_segment_durable`.
+        // The manifest and active pointer must remain unpublished until this
+        // succeeds: a crash before it may discard any of the segment renames.
         if wrote_new_file_segment {
             hotpath::measure_block!(
                 "code_index.generation.publish.segments_dir_sync",

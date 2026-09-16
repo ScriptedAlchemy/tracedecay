@@ -966,6 +966,72 @@ async fn query_admission_serves_v14_while_clone_successor_is_pending() {
     registry.shutdown().await;
 }
 
+#[tokio::test]
+async fn expired_source_proof_reschedules_pending_clone_backfill() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn alpha() { one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }\n",
+    )]);
+    let retained_store = TempDir::new().expect("retained store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        retained_store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    while !latest.query_owners_are_ready() {
+        latest.advance_text_serving(1).expect("advance V14 build");
+    }
+    assert!(
+        latest.text_projection_needs_work(),
+        "the query must enter admission while clone successor work remains"
+    );
+
+    let registry_store = TempDir::new().expect("registry store root");
+    let (registry, scope) =
+        mounted_core_query_worktree_with_one_permit(&fixture, &registry_store).await;
+    let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
+    registry.clear_pending_wake_for_scope(&scope).await;
+    {
+        let mounted = registry.mounted.lock().await;
+        let worktree = mounted
+            .get(&fixture.path().canonicalize().expect("canonical root"))
+            .expect("mounted worktree");
+        *worktree
+            .text_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(latest.text_generation_handle());
+    }
+
+    let source_freshness = registry
+        .source_freshness_for_root(fixture.path())
+        .await
+        .expect("mounted source fence");
+    {
+        let mut state = source_freshness.state.lock().unwrap();
+        state.last_reconciled_at = Instant::now()
+            .checked_sub(state.staleness_threshold + Duration::from_secs(1))
+            .expect("expire source proof");
+    }
+    assert!(matches!(
+        registry.request_query_background_reconcile(&scope).await,
+        CodeIndexReconcileAdmissionV1::Accepted
+    ));
+    drop(admission);
+    // No second query or external wake: refreshing the proof must hand the
+    // pending clone work to a successor pass by itself.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while latest.text_projection_needs_work() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the source refresh stranded clone backfill");
+    registry.shutdown().await;
+}
+
 #[test]
 fn transient_clone_successor_reservation_refusal_retries_without_cooling_v14_owners() {
     let fixture = GitFixture::new(&[(
