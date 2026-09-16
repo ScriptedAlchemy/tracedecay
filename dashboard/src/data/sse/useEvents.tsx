@@ -233,6 +233,9 @@ export function targetedInvalidationKeys(
   if (projects) keys.push([...projectRegistryInvalidationKey]);
   for (const projectId of codeIndexProjects) {
     keys.push(['code-index', 'freshness', `project:${projectId}`]);
+    if (projectId === activeProjectId) {
+      keys.push(['code-index', 'freshness', 'all']);
+    }
   }
   for (const projectId of workProjects) {
     for (const key of workProjectInvalidationKeys(projectId)) keys.push([...key]);
