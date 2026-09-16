@@ -232,7 +232,7 @@ fn dispatch_info_tools_inner<'a>(
             }
             "tracedecay_project_list" => {
                 portable_info::handle_project_list(
-                    cg.project_root(),
+                    Some(cg.project_root()),
                     args,
                     options.project_registry_reads,
                 )
@@ -240,7 +240,7 @@ fn dispatch_info_tools_inner<'a>(
             }
             "tracedecay_project_search" => {
                 portable_info::handle_project_search(
-                    cg.project_root(),
+                    Some(cg.project_root()),
                     args,
                     options.project_registry_reads,
                 )
@@ -248,7 +248,7 @@ fn dispatch_info_tools_inner<'a>(
             }
             "tracedecay_project_context" => {
                 portable_info::handle_project_context(
-                    cg.project_root(),
+                    Some(cg.project_root()),
                     args,
                     options.project_registry_reads,
                 )

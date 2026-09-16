@@ -35,8 +35,15 @@ impl DaemonProjectRegistryReadService {
 
     /// Resolves the served root's registered `project_id`, the same identity
     /// lookup the `tracedecay projects` CLI performs for its own active
-    /// project. An unregistered root simply has no active id.
-    async fn active_project_id(&self, active_project_root: &Path) -> Result<Option<String>> {
+    /// project. An unregistered root, or a projectless read with no served
+    /// root, simply has no active id.
+    async fn active_project_id(
+        &self,
+        active_project_root: Option<&Path>,
+    ) -> Result<Option<String>> {
+        let Some(active_project_root) = active_project_root else {
+            return Ok(None);
+        };
         let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(active_project_root);
         Ok(self
             .registry
@@ -48,7 +55,7 @@ impl DaemonProjectRegistryReadService {
     #[hotpath::skip]
     async fn listing(
         &self,
-        active_project_root: &Path,
+        active_project_root: Option<&Path>,
         mut projects: Vec<CodeProjectRecord>,
         limit: usize,
     ) -> Result<ProjectRegistryListingView> {
@@ -91,7 +98,8 @@ impl DaemonProjectRegistryReadService {
             }
         };
         Ok(ProjectRegistryListingOutcome::Listing(
-            self.listing(&active_project_root, projects, limit).await?,
+            self.listing(active_project_root.as_deref(), projects, limit)
+                .await?,
         ))
     }
 
@@ -141,7 +149,9 @@ impl DaemonProjectRegistryReadService {
         let Some(context) = self.resolve_context(&selector).await? else {
             return Ok(ProjectRegistryContextOutcome::NotFound { registry_path });
         };
-        let active_id = self.active_project_id(&active_project_root).await?;
+        let active_id = self
+            .active_project_id(active_project_root.as_deref())
+            .await?;
         let is_active = active_id.as_deref() == Some(context.project.project_id.as_str());
         Ok(ProjectRegistryContextOutcome::Context(Box::new(
             ProjectRegistryContextView {
