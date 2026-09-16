@@ -208,11 +208,16 @@ export function targetedInvalidationKeys(
 ): ReadonlyArray<ReadonlyArray<string>> {
   let storage = false;
   let projects = false;
+  const codeIndexProjects = new Set<string>();
   const workProjects = new Set<string>();
   for (const event of batch.events) {
     if (!isRecord(event.payload)) continue;
     if (event.payload['family'] === 'storage_telemetry_invalidated') storage = true;
     if (event.payload['family'] === 'project_registry_changed') projects = true;
+    if (event.payload['family'] === 'code_index_activity') {
+      const projectId = eventProjectId(event);
+      if (projectId !== null) codeIndexProjects.add(projectId);
+    }
     if (event.payload['family'] === 'task_activity') {
       const projectId = eventProjectId(event);
       if (projectId !== null) workProjects.add(projectId);
@@ -226,6 +231,12 @@ export function targetedInvalidationKeys(
   // and silently missed the rest — including the scope bar's, which is where
   // activation is reconciled.
   if (projects) keys.push([...projectRegistryInvalidationKey]);
+  for (const projectId of codeIndexProjects) {
+    keys.push(['code-index', 'freshness', `project:${projectId}`]);
+    if (projectId === activeProjectId) {
+      keys.push(['code-index', 'freshness', 'all']);
+    }
+  }
   for (const projectId of workProjects) {
     for (const key of workProjectInvalidationKeys(projectId)) keys.push([...key]);
     if (projectId === activeProjectId) {

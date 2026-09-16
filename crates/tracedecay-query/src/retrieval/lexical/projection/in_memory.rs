@@ -1397,7 +1397,9 @@ mod deadline_budget_tests {
         let file = FileOccurrenceId::new("file.carry.v1").expect("file");
         let mut metadata = dummy_metadata();
         metadata.generation = serving.clone();
-        metadata.logical_paths.insert(file.clone(), "src/carry.rs".to_owned());
+        metadata
+            .logical_paths
+            .insert(file.clone(), "src/carry.rs".to_owned());
 
         let digest = |byte: char| {
             ContentDigest::try_from(format!("sha256:{}", byte.to_string().repeat(64)))

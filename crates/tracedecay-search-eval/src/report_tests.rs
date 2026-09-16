@@ -218,9 +218,8 @@ fn direct_report_is_evidence_only_and_owns_its_candidate_schema() {
             "activation".to_owned(),
             serde_json::json!({"status": "qualified"}),
         );
-    serde_json::from_value::<DirectEvaluationReportV1>(activation_claim).expect_err(
-        "an activation object is an unknown field, not evidence",
-    );
+    serde_json::from_value::<DirectEvaluationReportV1>(activation_claim)
+        .expect_err("an activation object is an unknown field, not evidence");
 
     let mut qualified_status = value.clone();
     qualified_status["status"] = serde_json::json!("qualified");
@@ -233,14 +232,10 @@ fn direct_report_is_evidence_only_and_owns_its_candidate_schema() {
     unrelated
         .as_object_mut()
         .expect("report object")
-        .insert(
-            "accepted_languages".to_owned(),
-            serde_json::json!(["rust"]),
-        );
-    let unrelated_error =
-        serde_json::from_value::<DirectEvaluationReportV1>(unrelated)
-            .expect_err("unknown fields are refused by schema")
-            .to_string();
+        .insert("accepted_languages".to_owned(), serde_json::json!(["rust"]));
+    let unrelated_error = serde_json::from_value::<DirectEvaluationReportV1>(unrelated)
+        .expect_err("unknown fields are refused by schema")
+        .to_string();
     assert!(
         unrelated_error.contains("accepted_languages"),
         "{unrelated_error}"

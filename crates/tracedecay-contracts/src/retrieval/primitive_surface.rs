@@ -928,8 +928,8 @@ mod tests {
             "work_limit": 100,
             "cursor": null
         });
-        let wire: SimilarSurfaceRequestWireV1 =
-            serde_json::from_value(current_similar).expect("current similar decodes with limit alias");
+        let wire: SimilarSurfaceRequestWireV1 = serde_json::from_value(current_similar)
+            .expect("current similar decodes with limit alias");
         match wire {
             SimilarSurfaceRequestWireV1::Current(request) => assert_eq!(request.result_limit, 3),
             SimilarSurfaceRequestWireV1::Legacy(_) => panic!("expected current family schema"),

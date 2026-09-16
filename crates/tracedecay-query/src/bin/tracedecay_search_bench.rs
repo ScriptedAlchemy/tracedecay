@@ -540,8 +540,7 @@ impl CodeChunkProjectionSink for ApplyingProjectionSink {
         receipt_builder: ProjectionReceiptBuilderV1<'_>,
     ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
         let mut decisions = Vec::with_capacity(
-            request.changes.added_or_changed.len()
-                + request.changes.deleted.len(),
+            request.changes.added_or_changed.len() + request.changes.deleted.len(),
         );
         decisions.extend(request.changes.added_or_changed.iter().map(|change| {
             ChunkProjectionDecisionV1 {

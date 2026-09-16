@@ -437,10 +437,7 @@ fn reembeds_reused_chunks(
 
 /// Count work-free reused chunks from the request complement. Profile replay
 /// arrives pre-expanded, so `reused_count` is already zero on that path.
-fn work_free_reused_count(
-    changes: &ChangedCodeChunkSetV1,
-    reembed_reused: bool,
-) -> u64 {
+fn work_free_reused_count(changes: &ChangedCodeChunkSetV1, reembed_reused: bool) -> u64 {
     if reembed_reused {
         0
     } else {
@@ -975,7 +972,9 @@ mod tests {
         request
     }
 
-    fn expanded_profile_decisions(changes: &ChangedCodeChunkSetV1) -> Vec<ChunkProjectionDecisionV1> {
+    fn expanded_profile_decisions(
+        changes: &ChangedCodeChunkSetV1,
+    ) -> Vec<ChunkProjectionDecisionV1> {
         changes
             .added_or_changed
             .iter()

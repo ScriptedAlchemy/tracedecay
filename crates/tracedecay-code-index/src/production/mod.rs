@@ -13,12 +13,13 @@ use tracedecay_code_extraction::incremental::{ParseDocumentIdentity, ParseError}
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeGenerationManifestV1,
     CodeGenerationSourceCommitmentsV1, CodeIndexCapabilityManifestV1, ComponentVersion,
-    CoverageSummaryV1, ExtractorRevision, FileOccurrenceId, LanguageId, GenerationTestAttributionV1,
-    ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1,
-    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1, ProviderEvaluationStateV1,
-    RefId, RelationEdgeKindV1, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-    SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1, SymbolOccurrenceId,
-    TestAttributionEvidenceClassV1, UtcMicros, ValidatedCodeFileV1, WorktreeId, canonical_sha256,
+    CoverageSummaryV1, ExtractorRevision, FileOccurrenceId, GenerationTestAttributionV1,
+    LanguageId, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId,
+    ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1,
+    ProviderEvaluationStateV1, RefId, RelationEdgeKindV1, RepositoryId, SanitizedCodeFileV1,
+    SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1,
+    SymbolOccurrenceId, TestAttributionEvidenceClassV1, UtcMicros, ValidatedCodeFileV1, WorktreeId,
+    canonical_sha256,
 };
 use tracedecay_graph_db::{
     GraphGenerationManifest, GraphProjectionIdentity, GraphProjectorRevision,
@@ -37,7 +38,10 @@ use super::{
     clones::{ClonePayloadBuildStatsV1, CodeIndexCloneBodyV1},
     extract::{ExtractionCancellation, TreeSitterExtractor, rebind_extraction_batch},
     generations::{FileExtractionActionV1, GenerationPlanner, GenerationPlanningErrorV1},
-    incremental::{ChunkIncrementErrorV1, GenerationChunkManifestV1, plan_chunk_increment, plan_chunk_increment_arc_shared},
+    incremental::{
+        ChunkIncrementErrorV1, GenerationChunkManifestV1, plan_chunk_increment,
+        plan_chunk_increment_arc_shared,
+    },
     intake::{
         CodeIndexIntake, ReceiptBoundCodeFileAuthorityV1, ReceiptBoundCodeFileV1,
         SanitizedCodeIntake, SanitizedSnapshotCapabilityV1,
@@ -1319,10 +1323,7 @@ impl CodeIndexPublishedGenerationV1 {
         Ok(())
     }
 
-    fn validate_uncached(
-        &self,
-        parent: Option<&Self>,
-    ) -> Result<(), CodeIndexProductionErrorV1> {
+    fn validate_uncached(&self, parent: Option<&Self>) -> Result<(), CodeIndexProductionErrorV1> {
         self.manifest
             .validate()
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
@@ -1360,12 +1361,7 @@ impl CodeIndexPublishedGenerationV1 {
                     .iter()
                     .filter_map(|prior| {
                         current_by_ptr.get(&Arc::as_ptr(prior)).map(|current| {
-                            current
-                                .artifacts
-                                .chunks
-                                .document
-                                .file_occurrence_id
-                                .clone()
+                            current.artifacts.chunks.document.file_occurrence_id.clone()
                         })
                     })
                     .collect::<HashSet<_>>()
@@ -1459,7 +1455,8 @@ impl CodeIndexPublishedGenerationV1 {
         hotpath::measure_block!(
             "code_index.collect.validate_files",
             collect_bounded_ordered(&files, |file, _worker| {
-                let shared = shared_occurrences.contains(&file.artifacts.chunks.document.file_occurrence_id);
+                let shared =
+                    shared_occurrences.contains(&file.artifacts.chunks.document.file_occurrence_id);
                 if !shared {
                     file.artifacts
                         .validate()
@@ -1491,8 +1488,7 @@ impl CodeIndexPublishedGenerationV1 {
                     || file.extraction.content_digest != file.authority.content_digest
                     || file.extraction.file_occurrence_id
                         != file.artifacts.chunks.document.file_occurrence_id
-                    || file.artifacts.chunks.document.generation_id
-                        != file.extraction.generation_id
+                    || file.artifacts.chunks.document.generation_id != file.extraction.generation_id
                 {
                     return Err(CodeIndexProductionErrorV1::Contract(
                     "extraction authority does not match its published project, repository, scope, path, or content"
@@ -1569,8 +1565,7 @@ impl CodeIndexPublishedGenerationV1 {
                             .binary_search_by(|candidate| candidate.id.cmp(&chunk.id))
                             .map_err(|_| {
                                 CodeIndexProductionErrorV1::Contract(
-                                    "published generation does not match file artifacts"
-                                        .to_owned(),
+                                    "published generation does not match file artifacts".to_owned(),
                                 )
                             })?;
                         if !Arc::ptr_eq(&self.chunks.chunks()[index], chunk) {
@@ -1588,8 +1583,7 @@ impl CodeIndexPublishedGenerationV1 {
                             })
                             .map_err(|_| {
                                 CodeIndexProductionErrorV1::Contract(
-                                    "published generation does not match file artifacts"
-                                        .to_owned(),
+                                    "published generation does not match file artifacts".to_owned(),
                                 )
                             })?;
                         if !Arc::ptr_eq(&self.symbols.symbols[index], symbol) {
@@ -1644,9 +1638,7 @@ fn validate_arc_shared_reused_complement(
     changes
         .validate()
         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-    let expected_reused = current
-        .len()
-        .saturating_sub(changes.added_or_changed.len()) as u64;
+    let expected_reused = current.len().saturating_sub(changes.added_or_changed.len()) as u64;
     if changes.reused_count != expected_reused {
         return Err(CodeIndexProductionErrorV1::Contract(
             "reused complement count mismatch".to_owned(),
@@ -2056,10 +2048,7 @@ where
         Self::checkpoint(control)?;
         let candidate = hotpath::measure_block!("code_index.build.assemble", {
             let coverage = coverage_summary(&validated.snapshot, &staged.files);
-            let changes = match (
-                active.as_ref(),
-                staged.parent_shared_occurrences.as_ref(),
-            ) {
+            let changes = match (active.as_ref(), staged.parent_shared_occurrences.as_ref()) {
                 (Some(active), Some(shared)) if !shared.is_empty() => {
                     let parent_full_replay = active
                         .manifest
@@ -2548,17 +2537,14 @@ where
                         {
                             let language = current_file.language.as_ref();
                             let extractor_revision = language.and_then(|language| {
-                                if let Some(existing) =
-                                    extractor_by_language.get(language)
-                                {
+                                if let Some(existing) = extractor_by_language.get(language) {
                                     return Some(existing.clone());
                                 }
                                 let revision = intake
                                     .registry()
                                     .descriptor(language)
                                     .map(|descriptor| descriptor.extractor_revision.clone())?;
-                                extractor_by_language
-                                    .insert(language.clone(), revision.clone());
+                                extractor_by_language.insert(language.clone(), revision.clone());
                                 Some(revision)
                             });
                             match extractor_revision {
@@ -2745,7 +2731,6 @@ where
             )
         )?;
 
-
         let mut file_materializations: Vec<Option<IncrementFileMaterializationV1>> =
             (0..increment.files.len()).map(|_| None).collect();
         let mut shared_clone_reused = 0_u64;
@@ -2828,19 +2813,14 @@ where
         staged.clone_payloads_reused = clone_payloads_reused;
         staged.clone_payloads_computed = clone_payloads_computed;
         staged.clone_stale_invalidations = clone_stale_invalidations;
-        let fresh_symbol_ptrs = staged
-            .parent_shared_occurrences
-            .as_ref()
-            .map(|shared| {
-                staged
-                    .files
-                    .iter()
-                    .filter(|file| {
-                        !shared.contains(&file.artifacts.chunks.document.file_occurrence_id)
-                    })
-                    .flat_map(|file| file.artifacts.symbols.iter().map(Arc::as_ptr))
-                    .collect::<HashSet<_>>()
-            });
+        let fresh_symbol_ptrs = staged.parent_shared_occurrences.as_ref().map(|shared| {
+            staged
+                .files
+                .iter()
+                .filter(|file| !shared.contains(&file.artifacts.chunks.document.file_occurrence_id))
+                .flat_map(|file| file.artifacts.symbols.iter().map(Arc::as_ptr))
+                .collect::<HashSet<_>>()
+        });
         staged.lineage = match fresh_symbol_ptrs.as_ref() {
             Some(fresh) => SymbolLineageResolver::new()
                 .resolve_fresh_symbol_ptrs(&active.symbols, &staged.symbols, fresh)

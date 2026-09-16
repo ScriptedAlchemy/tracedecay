@@ -21,6 +21,7 @@ import {
   CONTOUR_INDEX_EVERY,
   MAX_DRAWN_CONTOURS,
   RELIEF_ASPECT,
+  reliefFieldDirectory,
   type CortexModel,
   type CortexRegion,
 } from './cortexRelief.ts';
@@ -300,7 +301,7 @@ export function createCortexRenderer(
     );
     ctx!.font = mono(10);
     ctx!.fillStyle = palette.edgeStrong;
-    ctx!.fillText(region.directory, region.x, region.y - ry - 6);
+    ctx!.fillText(reliefFieldDirectory(region.directory, region.radius), region.x, region.y - ry - 6);
     ctx!.restore();
   }
 

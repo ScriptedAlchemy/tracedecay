@@ -4,8 +4,7 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 use tracedecay_agent_hosts::agents::host_bundle::{
-    HostComponentV1, HostBundleInstallReceiptV1, HostBundleManifestV1,
-    HostComponentSetReceiptV1,
+    HostBundleInstallReceiptV1, HostBundleManifestV1, HostComponentSetReceiptV1, HostComponentV1,
 };
 
 pub(super) fn selected_feedback_component(

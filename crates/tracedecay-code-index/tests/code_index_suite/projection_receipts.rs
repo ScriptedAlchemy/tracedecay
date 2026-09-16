@@ -45,10 +45,7 @@ fn projection_key() -> ProjectionKeyV1 {
 }
 
 fn changeset() -> ChangedCodeChunkSetV1 {
-    let reused = [(
-        chunk("reused"),
-        digest::<ContentDigest>('c'),
-    )];
+    let reused = [(chunk("reused"), digest::<ContentDigest>('c'))];
     let (reused_count, reused_digest) =
         ChangedCodeChunkSetV1::seal_reused_partition(&reused).expect("reused seal");
     let mut changes = ChangedCodeChunkSetV1 {

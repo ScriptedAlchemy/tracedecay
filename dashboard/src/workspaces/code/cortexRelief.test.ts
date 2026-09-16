@@ -14,7 +14,19 @@ import type {
   StrataFileV1,
   StrataMeasurementV1,
 } from '../../contracts/generated.ts';
-import { CONTOUR_INTERVAL, MAX_DRAWN_REGIONS, buildCortexModel } from './cortexRelief.ts';
+import {
+  CONTOUR_INTERVAL,
+  CORTEX_WORLD,
+  MAX_DRAWN_REGIONS,
+  RELIEF_ASPECT,
+  buildCortexModel,
+  cortexDescription,
+  cortexLegendPanels,
+  maxRegionsWithoutOverlap,
+  reliefBodyRx,
+  reliefCaptionHalfWidth,
+  reliefLabelHalfWidth,
+} from './cortexRelief.ts';
 
 function cluster(
   directory: string,
@@ -63,6 +75,48 @@ function measurement(
     },
     ...overrides,
   };
+}
+
+function assertBandClear(
+  regions: ReadonlyArray<{
+    readonly x: number | null;
+    readonly y: number | null;
+    readonly radius: number | null;
+    readonly label: string;
+    readonly fileCount: number;
+    readonly density: number;
+  }>,
+): void {
+  expect(new Set(regions.map((region) => region.y)).size).toBe(1);
+  const ordered = [...regions].sort((a, b) => a.x! - b.x!);
+  for (let index = 1; index < ordered.length; index += 1) {
+    const previous = ordered[index - 1]!;
+    const current = ordered[index]!;
+    const bodyGap = reliefBodyRx(previous.radius!) + reliefBodyRx(current.radius!);
+    const labelGap = reliefLabelHalfWidth(previous.label) + reliefLabelHalfWidth(current.label);
+    const captionGap =
+      reliefCaptionHalfWidth(previous.fileCount, previous.density) +
+      reliefCaptionHalfWidth(current.fileCount, current.density);
+    expect(current.x! - previous.x!).toBeGreaterThanOrEqual(
+      Math.max(bodyGap, labelGap, captionGap) - 1e-6,
+    );
+  }
+}
+
+function assertReadableOnField(region: {
+  readonly x: number | null;
+  readonly y: number | null;
+  readonly radius: number | null;
+  readonly label: string;
+}): void {
+  const rx = reliefBodyRx(region.radius!);
+  const ry = region.radius! * RELIEF_ASPECT.y;
+  const labelHalf = reliefLabelHalfWidth(region.label);
+  expect(region.x! - Math.max(rx, labelHalf)).toBeGreaterThanOrEqual(0);
+  expect(region.x! + Math.max(rx, labelHalf)).toBeLessThanOrEqual(CORTEX_WORLD.width);
+  expect(region.y! + 30).toBeGreaterThanOrEqual(0);
+  expect(region.y! + 30).toBeLessThanOrEqual(CORTEX_WORLD.height);
+  expect(region.y! - ry - 6).toBeGreaterThanOrEqual(0);
 }
 
 describe('elevation', () => {
@@ -131,6 +185,7 @@ describe('elevation', () => {
     const sameDepth = model.drawnRegions.filter((region) => region.depth === 1);
     expect(sameDepth).toHaveLength(count);
     expect(new Set(sameDepth.map((region) => region.y))).toEqual(new Set([band.y]));
+    assertBandClear(sameDepth);
   });
 
   it('keeps a single crowded stratum on its measured depth line, not spread across the field', () => {
@@ -147,7 +202,161 @@ describe('elevation', () => {
     const spread = Math.max(...sameDepth.map((region) => region.y!)) -
       Math.min(...sameDepth.map((region) => region.y!));
     expect(spread).toBe(0);
+    assertBandClear(sameDepth);
   });
+
+  it('folds crowded same-depth bodies instead of overlapping them', () => {
+    const count = 28;
+    const clusters = Array.from({ length: count }, (_, index) =>
+      cluster(`src/mod${index}`, { order: index, file_count: 4 }),
+    );
+    const files = Array.from({ length: count }, (_, index) => file(`src/mod${index}/a.rs`, 0));
+    const model = buildCortexModel(measurement(clusters, files, { max_depth: 1 }));
+    const labels = clusters.map(
+      (item) => `${item.directory.slice(item.directory.lastIndexOf('/') + 1)}/`,
+    );
+    const captions = clusters.map((item) => ({
+      fileCount: item.file_count,
+      density: item.internal_edges / item.file_count,
+    }));
+    const capacity = maxRegionsWithoutOverlap(model.world.width - 104 - 44, labels, captions);
+    expect(model.drawnRegions.length).toBe(capacity);
+    expect(model.foldedRegions).toBe(count - capacity);
+    expect(model.foldedRegions).toBeGreaterThan(0);
+    assertBandClear(model.drawnRegions.filter((region) => region.depth === 0));
+  });
+
+  it('keeps multi-depth bedrock bands free of body and label collisions', () => {
+    const bedrockCount = 16;
+    const ridgeCount = 6;
+    const count = bedrockCount + ridgeCount;
+    const clusters = Array.from({ length: count }, (_, index) =>
+      cluster(`src/mod${index}`, { order: index, file_count: 8 }),
+    );
+    const files = Array.from({ length: count }, (_, index) =>
+      file(`src/mod${index}/a.rs`, index < bedrockCount ? 0 : 1 + (index % 3)),
+    );
+    const model = buildCortexModel(measurement(clusters, files, { max_depth: 3 }));
+    expect(model.maxDepth).toBeGreaterThanOrEqual(3);
+    const bedrock = model.drawnRegions.filter((region) => region.depth === 0);
+    const labels = clusters
+      .slice(0, bedrockCount)
+      .map((item) => `${item.directory.slice(item.directory.lastIndexOf('/') + 1)}/`);
+    const captions = clusters.slice(0, bedrockCount).map((item) => ({
+      fileCount: item.file_count,
+      density: item.internal_edges / item.file_count,
+    }));
+    const capacity = maxRegionsWithoutOverlap(model.world.width - 104 - 44, labels, captions);
+    expect(bedrock.length).toBeGreaterThanOrEqual(1);
+    expect(bedrock.length).toBeLessThanOrEqual(capacity);
+    if (bedrockCount > capacity) {
+      expect(model.foldedRegions).toBeGreaterThan(0);
+    }
+    assertBandClear(bedrock);
+  });
+
+  it('lets a sparse two-region band keep a space-driven radius well above the fold floor', () => {
+    const model = buildCortexModel(
+      measurement(
+        [
+          cluster('src/alpha', { order: 0, file_count: 100 }),
+          cluster('src/beta', { order: 1, file_count: 25 }),
+        ],
+        [file('src/alpha/a.rs', 0), file('src/beta/a.rs', 0)],
+        { max_depth: 1 },
+      ),
+    );
+    const big = model.regions.find((region) => region.directory === 'src/alpha')!;
+    const small = model.regions.find((region) => region.directory === 'src/beta')!;
+    expect(big.radius).toBeGreaterThan(100);
+    expect(small.radius).toBeGreaterThan(40);
+    expect((big.radius! - 13) / (small.radius! - 13)).toBeCloseTo(2, 5);
+    for (const region of model.drawnRegions) assertReadableOnField(region);
+    assertBandClear(model.drawnRegions);
+  });
+
+  it('sizes band capacity from the abbreviated canvas label, not the full directory path', () => {
+    const count = 8;
+    const clusters = Array.from({ length: count }, (_, index) =>
+      cluster(
+        `crates/tracedecay-code-index-runtime/src/code_index_scheduler/region${index}`,
+        { order: index, file_count: 6 },
+      ),
+    );
+    const files = Array.from({ length: count }, (_, index) =>
+      file(
+        `crates/tracedecay-code-index-runtime/src/code_index_scheduler/region${index}/mod.rs`,
+        1,
+      ),
+    );
+    const model = buildCortexModel(measurement(clusters, files, { max_depth: 2 }));
+    expect(model.drawnRegions).toHaveLength(count);
+    expect(model.readabilityFoldedRegions).toBe(0);
+    expect(model.capFoldedRegions).toBe(0);
+    expect(model.regions[0]!.directory.length).toBeGreaterThan(60);
+    expect(model.regions[0]!.label).toBe('region0/');
+    assertBandClear(model.drawnRegions);
+    const scale = cortexLegendPanels(model).find((panel) => panel.label === 'scale')!;
+    expect(scale.teach).toMatch(/whole clustering is drawn/);
+    expect(scale.teach).not.toMatch(/28-region drawing cap folds/);
+  });
+
+  it('keeps a representable ridge after folding a crowded bedrock band', () => {
+    const bedrockCount = 28;
+    const clusters = [
+      ...Array.from({ length: bedrockCount }, (_, index) =>
+        cluster(`src/bedrock${index}`, { order: index, file_count: 4 }),
+      ),
+      cluster('src/ridge', { order: bedrockCount, file_count: 8 }),
+    ];
+    const files = [
+      ...Array.from({ length: bedrockCount }, (_, index) => file(`src/bedrock${index}/a.rs`, 0)),
+      file('src/ridge/a.rs', 3),
+    ];
+    const model = buildCortexModel(measurement(clusters, files, { max_depth: 3 }));
+    const ridge = model.regions.find((region) => region.directory === 'src/ridge')!;
+    expect(ridge.drawn).toBe(true);
+    expect(ridge.depth).toBe(3);
+    expect(model.drawnRegions.length).toBeLessThanOrEqual(MAX_DRAWN_REGIONS);
+    expect(model.foldedRegions).toBe(model.regions.length - model.drawnRegions.length);
+    expect(model.readabilityFoldedRegions + model.capFoldedRegions).toBe(model.foldedRegions);
+    expect(model.readabilityFoldedRegions).toBeGreaterThan(0);
+    const scale = cortexLegendPanels(model).find((panel) => panel.label === 'scale')!;
+    expect(scale.teach).toMatch(/readable/);
+    expect(cortexDescription(model)).toMatch(/readability/);
+    const bedrockBand = model.strata.find((band) => band.depth === 0)!;
+    expect(bedrockBand.regions).toBe(bedrockCount);
+    expect(bedrockBand.drawn).toBe(model.drawnRegions.filter((region) => region.depth === 0).length);
+    expect(bedrockBand.drawn).toBeLessThan(bedrockCount);
+    expect(cortexDescription(model)).toMatch(/stratum 0 holds \d+ of 28/);
+    assertBandClear(model.drawnRegions.filter((region) => region.depth === 0));
+  });
+
+  it('folds a short-label band to file-count caption width instead of overlapping it', () => {
+    const count = 24;
+    const clusters = Array.from({ length: count }, (_, index) =>
+      cluster(`src/a${index}`, { order: index, file_count: 12345, internal_edges: 20000 }),
+    );
+    const files = Array.from({ length: count }, (_, index) => file(`src/a${index}/a.rs`, 0));
+    const model = buildCortexModel(measurement(clusters, files, { max_depth: 1 }));
+    const labels = clusters.map(
+      (item) => `${item.directory.slice(item.directory.lastIndexOf('/') + 1)}/`,
+    );
+    const captions = clusters.map((item) => ({
+      fileCount: item.file_count,
+      density: item.internal_edges / item.file_count,
+    }));
+    const usable = model.world.width - 104 - 44;
+    const labelOnly = maxRegionsWithoutOverlap(usable, labels);
+    const withCaptions = maxRegionsWithoutOverlap(usable, labels, captions);
+    expect(withCaptions).toBeLessThan(labelOnly);
+    const band = model.strata.find((stratum) => stratum.depth === 0)!;
+    expect(band.regions).toBe(count);
+    expect(band.drawn).toBe(withCaptions);
+    expect(model.drawnRegions).toHaveLength(withCaptions);
+    assertBandClear(model.drawnRegions);
+  });
+
 });
 
 describe('area', () => {
