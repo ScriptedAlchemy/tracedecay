@@ -2782,7 +2782,14 @@ mod tests {
 
         let mut wrong_membership = file_chunks();
         wrong_membership.document.chunk_ids[0] = id("chunk.other");
-        assert!(wrong_membership.validate().is_err());
+        assert_eq!(
+            wrong_membership.validate(),
+            Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::DocumentChunkMembershipMismatch,
+                )
+            ))
+        );
     }
 
     const RUST_SOURCE: &str = "//! Module documentation.\n\nuse std::collections::HashMap;\n\n/// Doc comment.\npub fn alpha(x: u32) -> u32 {\n    x + 1\n}\n\npub struct Holder {\n    map: HashMap<u32, u32>,\n}\n\nimpl Holder {\n    pub fn get(&self, key: u32) -> Option<u32> {\n        self.map.get(&key).copied()\n    }\n}\n\n// A trailing free-floating comment.\n";

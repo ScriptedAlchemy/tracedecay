@@ -1051,7 +1051,14 @@ fn cancellable_artifact_apply_stops_rehash_before_quarantine_and_retries() {
         !orphan_path.exists(),
         "only the successful retry may remove the candidate"
     );
-    assert!(report.text_artifact_receipt.is_some());
+    let receipt = report
+        .text_artifact_receipt
+        .expect("the successful retry publishes the deletion receipt cancellation withheld");
+    assert_eq!(receipt.deleted_artifacts.len(), 1);
+    assert_eq!(
+        receipt.reclaimed_bytes,
+        u64::try_from(bytes.len()).expect("artifact byte length")
+    );
 }
 
 #[test]

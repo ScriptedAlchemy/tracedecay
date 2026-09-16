@@ -1471,11 +1471,14 @@ mod tests {
     /// seal a generation that every later load would refuse as corrupt.
     #[test]
     fn sealed_generation_byte_bound_is_symmetric() {
-        assert!(admit_sealed_generation_len(MAX_SEALED_CODE_GENERATION_BYTES_V1).is_ok());
+        assert!(matches!(
+            admit_sealed_generation_len(MAX_SEALED_CODE_GENERATION_BYTES_V1),
+            Ok(())
+        ));
         assert!(matches!(
             admit_sealed_generation_len(MAX_SEALED_CODE_GENERATION_BYTES_V1 + 1),
             Err(CodeIndexProductionErrorV1::Contract(message))
-                if message.contains("canonical byte limit")
+                if message == "sealed generation exceeds the canonical byte limit"
         ));
     }
 

@@ -6,6 +6,7 @@ use tracedecay_code_index::{
     chunks::{
         ChunkingFailureV1, CodeFileIndexArtifactsV1, CodeIndexImportEvidenceV1, content_digest,
     },
+    noncanonical::{NonCanonicalCauseV1, NonCanonicalReasonCodeV1},
     production::{
         CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionErrorV1,
         CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1,
@@ -755,19 +756,37 @@ fn file_import_artifacts_bind_file_consistent_path_and_nonempty_span_to_indexed_
     for row in &mut wrong_file.imports {
         row.file_occurrence_id = id("file.foreign");
     }
-    assert!(wrong_file.validate().is_err());
+    assert_eq!(
+        wrong_file.validate(),
+        Err(ChunkingFailureV1::GenerationMismatch)
+    );
 
     let mut inconsistent_path = artifacts.clone();
     inconsistent_path.imports[1].logical_path = "src/foreign.ts".to_owned();
-    assert!(inconsistent_path.validate().is_err());
+    assert_eq!(
+        inconsistent_path.validate(),
+        Err(ChunkingFailureV1::NonCanonicalIdentity(
+            NonCanonicalCauseV1::new(NonCanonicalReasonCodeV1::ImportMultiFile)
+        ))
+    );
 
     let mut empty_span = artifacts.clone();
     empty_span.imports[0].span.end_byte = empty_span.imports[0].span.start_byte;
-    assert!(empty_span.validate().is_err());
+    assert_eq!(
+        empty_span.validate(),
+        Err(ChunkingFailureV1::NonCanonicalIdentity(
+            NonCanonicalCauseV1::new(NonCanonicalReasonCodeV1::ImportEmptySourceSpan)
+        ))
+    );
 
     let mut out_of_bounds = artifacts;
     out_of_bounds.imports[0].span.end_byte = indexed_end + 1;
-    assert!(out_of_bounds.validate().is_err());
+    assert_eq!(
+        out_of_bounds.validate(),
+        Err(ChunkingFailureV1::NonCanonicalIdentity(
+            NonCanonicalCauseV1::new(NonCanonicalReasonCodeV1::ImportExceedsFileExtent)
+        ))
+    );
 }
 
 #[test]
