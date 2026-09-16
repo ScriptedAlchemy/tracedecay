@@ -1081,13 +1081,12 @@ pub async fn handle_similar(ctx: &McpToolContext<'_>, args: Value) -> Result<Too
         .map_err(|error| TraceDecayError::Config {
             message: format!("invalid tracedecay_similar cursor: {error}"),
         })?;
-    let executor =
-        ctx.code_index_similar_executor()
-            .ok_or_else(|| TraceDecayError::ProjectRoute {
-                reason_code: "verified-code-similarity-unavailable".to_owned(),
-                retryable: false,
-                detail: "the maintained clone similarity lane is unavailable".to_owned(),
-            })?;
+    let executor = ctx.code_index_similar_executor().ok_or_else(|| {
+        clone_lane_unavailable_error(
+            "similarity",
+            tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CapabilityUnavailable,
+        )
+    })?;
     let similar = match executor(tracedecay_query::code_search::CodeIndexSimilarRequestV1 {
         project_root: ctx.project_root().to_path_buf(),
         target,
@@ -1280,13 +1279,12 @@ pub async fn handle_redundancy(ctx: &McpToolContext<'_>, args: Value) -> Result<
             }
         }
     };
-    let executor =
-        ctx.code_index_redundancy_executor()
-            .ok_or_else(|| TraceDecayError::ProjectRoute {
-                reason_code: "verified-code-redundancy-unavailable".to_owned(),
-                retryable: false,
-                detail: "the maintained clone family lane is unavailable".to_owned(),
-            })?;
+    let executor = ctx.code_index_redundancy_executor().ok_or_else(|| {
+        clone_lane_unavailable_error(
+            "family",
+            tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CapabilityUnavailable,
+        )
+    })?;
     let outcome = executor(tracedecay_query::code_search::CodeIndexRedundancyQueryV1 {
         project_root: ctx.project_root().to_path_buf(),
         project_id: request.project_id,
