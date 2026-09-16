@@ -761,9 +761,13 @@ fn compose_graph_authority(
             .unwrap_or_else(|error| panic!("verify fixture graph: {error}")),
     );
     (
-        Arc::new(FixtureGraphAdmissionV1 {
-            scope: scope.clone(),
-        }),
+        Arc::new(
+            tracedecay_daemon_service::DaemonCodeGraphReadAdmission::production(
+                cg.project_root().to_path_buf(),
+                scope.clone(),
+                Arc::clone(cg.configuration_runtime()),
+            ),
+        ),
         Arc::new(FixtureGraphProjectionV1 {
             scope,
             store,
@@ -1022,6 +1026,54 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
         );
     });
 }
+
+#[test]
+fn every_graph_route_accepts_the_production_project_owner_grant() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture_with(false, true, false).await;
+        let agent = http_agent();
+        let routes = [
+            ("overview", "/api/plugins/graph/overview"),
+            ("search", "/api/plugins/graph/search?q=dashboard&limit=10"),
+            ("node", "/api/plugins/graph/node/n-route"),
+            (
+                "neighbors",
+                "/api/plugins/graph/node/n-route/neighbors?limit=10",
+            ),
+            (
+                "subgraph",
+                "/api/plugins/graph/subgraph?node_id=n-route&limit_nodes=10&limit_edges=10",
+            ),
+            (
+                "path",
+                "/api/plugins/graph/path?from=n-dashboard&to=n-render&max_depth=6",
+            ),
+            (
+                "call-chain",
+                "/api/plugins/graph/call-chain?from=n-dashboard&to=n-render&max_depth=20",
+            ),
+            ("strata", "/api/plugins/graph/strata"),
+            ("node facts", "/api/plugins/graph/node/n-route/facts"),
+            ("node tests", "/api/plugins/graph/node/n-route/tests"),
+            ("node sessions", "/api/plugins/graph/node/n-route/sessions"),
+        ];
+
+        for (route, path) in routes {
+            let (status, body) = get_json(&agent, &format!("{}{path}", fixture.base_url));
+            assert_eq!(status, 200, "{route}: {body}");
+            assert_eq!(
+                body["authorization"]["outcome"], "authorized",
+                "{route}: {body}"
+            );
+            assert_eq!(body["domain_state"], "ready", "{route}: {body}");
+        }
+    });
+}
+
 
 #[test]
 fn code_read_api_returns_verified_families_and_one_revision_union_layout() {
