@@ -30,7 +30,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
     FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FILE_TRAVERSE, FileAttributeTagInfo, FileRenameInfoEx, GetDiskFreeSpaceExW,
+    FILE_SHARE_WRITE, FileAttributeTagInfo, FileRenameInfoEx, GetDiskFreeSpaceExW,
     GetFileInformationByHandleEx, OPEN_ALWAYS, OPEN_EXISTING, READ_CONTROL,
     SetFileInformationByHandle, WRITE_DAC, WRITE_OWNER,
 };
@@ -295,8 +295,21 @@ pub fn create_private_file_retained(
     Ok(file)
 }
 
-/// Atomically replace one sibling file with another through exact file and
-/// parent-directory handles, returning the exact published file handle.
+/// Atomically replace one sibling file with another, returning the exact
+/// published file handle.
+///
+/// The rename is issued on the opened source handle with a null
+/// `RootDirectory` and an absolute destination — see [`posix_rename_payload`]
+/// for why a parent handle in `RootDirectory` is not an option. No
+/// parent-directory handle therefore participates in the rename itself.
+///
+/// What still pins the directory the file is published into is the ancestor
+/// chain [`hold_directory_ancestors`] opens and validates: every ancestor of
+/// the source stays open, and reparse-point rejected, from before the payload
+/// is built until after `SetFileInformationByHandle` returns, so no ancestor
+/// can be swapped for a junction between validation and publication. The
+/// source and destination are required to be siblings, so that one chain
+/// covers both spellings.
 pub fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<File> {
     let source = absolute_security_path(source)?;
     let destination = absolute_security_path(destination)?;
@@ -338,14 +351,6 @@ pub fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<
     }
 
     let ancestor_handles = hold_directory_ancestors(&source)?;
-    let parent = open_raw_handle(
-        source_parent,
-        OPEN_EXISTING,
-        FILE_TRAVERSE | FILE_READ_ATTRIBUTES,
-        null(),
-        SHARE_READ_WRITE,
-    )?;
-    validate_file_kind(&parent, source_parent, PathKind::Directory)?;
     let source_file = open_raw_handle(
         &source,
         OPEN_EXISTING,
@@ -358,9 +363,9 @@ pub fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<
 
     let (storage, buffer_size) = posix_rename_payload(&destination)?;
 
-    // SAFETY: the source handle stays live with DELETE access, the parent and
-    // ancestor handles pin the destination directory, and `storage` is a
-    // complete FILE_RENAME_INFO_EX payload.
+    // SAFETY: the source handle stays live with DELETE access, the ancestor
+    // handles pin the destination directory, and `storage` is a complete
+    // FILE_RENAME_INFO_EX payload.
     if unsafe {
         SetFileInformationByHandle(
             source_file.as_raw_handle(),
@@ -372,7 +377,6 @@ pub fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<
     {
         return Err(io::Error::last_os_error());
     }
-    drop(parent);
     drop(ancestor_handles);
     Ok(source_file)
 }
