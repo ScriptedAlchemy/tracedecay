@@ -15,13 +15,13 @@ use tracedecay_application::advisory::github_runtime::{
 };
 use tracedecay_application::advisory::{
     AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, AdvisoryHookDeliveryV1,
-    AdvisoryHookLookupNoticeV1, AdvisoryHookNoticeQueueV1, AdvisoryHookNoticeSinkV1,
-    AdvisoryProductionOpenV1, AdvisoryProductionStartupRegistrationV1, AdvisoryRuntimeOpenV1,
-    CiCodeAnchorStoreV1, CiRetainedProviderObservationAuthorityV1, CiSourceAccessAuthorityV1,
-    GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1,
-    GitHubReadPermissionV1, GitHubRepositoryTargetV1, GitHubReviewProviderIdentityV1,
-    GitHubReviewRuntimeOwnerConfigV1, ProductionCiFailureDiscoveryOutcomeV1,
-    ProductionCiProviderConfigV1, ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1,
+    AdvisoryHookNoticeQueueV1, AdvisoryProductionOpenV1, AdvisoryProductionStartupRegistrationV1,
+    AdvisoryRuntimeOpenV1, CiCodeAnchorStoreV1, CiRetainedProviderObservationAuthorityV1,
+    CiSourceAccessAuthorityV1, GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1,
+    GitHubReadOnlyCredentialV1, GitHubReadPermissionV1, GitHubRepositoryTargetV1,
+    GitHubReviewProviderIdentityV1, GitHubReviewRuntimeOwnerConfigV1,
+    ProductionCiFailureDiscoveryOutcomeV1, ProductionCiProviderConfigV1,
+    ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1,
     discover_production_ci_failure_request_v1, github_anchor_authorities_arc_v1,
     open_advisory_production_authorities, register_advisory_daemon_startup,
     register_advisory_hook_notice_queue, unregister_advisory_hook_notice_queue,
@@ -69,7 +69,7 @@ use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use tracedecay_global_db::configuration::contracts::ports::ConfigurationCurrentStateV1;
 use tracedecay_hooks::{
     HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1, HookConfigurationSubscriberV1,
-    HookFeedbackDeliveryRouteV1, HookFeedbackRollbackSwitchV1, hook_configuration_path,
+    HookFeedbackRollbackSwitchV1, hook_configuration_path,
 };
 use tracedecay_lsp::{
     DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort, LspRuntimeFailure,
@@ -407,7 +407,6 @@ fn advisory_hook_notice_dispatch(
                     host.host_kind(),
                     HookFeedbackRollbackSwitchV1 {
                         configuration_revision: snapshot.revision,
-                        route: HookFeedbackDeliveryRouteV1::HookV2,
                     },
                 )),
                 _ => None,
@@ -630,16 +629,6 @@ impl ProductionFeedbackCycleAuthorizationPort for ProjectOpenFeedbackCycleAuthor
             .map_err(|_| LspRuntimeFailure::new("feedback-cycle-authorization"))
         })
     }
-}
-
-fn unavailable_advisory_hook_notice(
-    _notice: &AdvisoryHookLookupNoticeV1,
-) -> tracedecay_hooks::HookFeedbackDeliveryOutcomeV1 {
-    tracedecay_hooks::HookFeedbackDeliveryOutcomeV1::Unavailable
-}
-
-fn unavailable_advisory_hook_sink() -> Arc<AdvisoryHookNoticeSinkV1> {
-    Arc::new(unavailable_advisory_hook_notice)
 }
 
 async fn install_project_open_context_scout_configuration(
@@ -1653,7 +1642,6 @@ async fn register_production_advisory_owner(
         ci_retained,
         ci_code_anchors,
         hook_v2: hook_notices.sink(),
-        legacy_hook: unavailable_advisory_hook_sink(),
     };
     let proximity_read = production_feedback_proximity_read_runtime_v1(
         production.project_runtime_db.clone(),

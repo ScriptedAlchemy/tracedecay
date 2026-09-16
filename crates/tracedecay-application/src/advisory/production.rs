@@ -74,7 +74,6 @@ pub struct AdvisoryProductionOpenV1 {
     pub ci_retained: Arc<dyn CiRetainedProviderObservationAuthorityV1>,
     pub ci_code_anchors: Arc<dyn CiCodeAnchorStoreV1>,
     pub hook_v2: Arc<AdvisoryHookNoticeSinkV1>,
-    pub legacy_hook: Arc<AdvisoryHookNoticeSinkV1>,
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -105,7 +104,6 @@ pub fn open_advisory_production_authorities(
         ci_retained,
         ci_code_anchors,
         hook_v2,
-        legacy_hook,
     } = input;
     let github = github_anchor_authorities_arc_v1(
         database,
@@ -135,7 +133,7 @@ pub fn open_advisory_production_authorities(
             .map_err(|_| AdvisoryProductionOpenErrorV1::CiAuthorityUnavailable)?,
     };
     let (ci_source, ci_exact_evidence) = ci.into_registrar_parts();
-    let hook_delivery_port = new_advisory_hook_delivery_port(feedback_scope, hook_v2, legacy_hook);
+    let hook_delivery_port = new_advisory_hook_delivery_port(feedback_scope, hook_v2);
 
     Ok(AdvisoryProductionAuthoritiesV1 {
         providers: AdvisoryProviderAuthoritiesV1 {

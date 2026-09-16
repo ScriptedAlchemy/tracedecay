@@ -17,8 +17,8 @@ use tracedecay_domain::{CodeGenerationId, DomainError, ManifestDigest};
 use tracedecay_global_db::configuration::contracts::ports::ConfigurationControlStore;
 use tracedecay_hooks::{
     HookEventEnvelopeV2, HookFeedbackDeliveryOutcomeV1, HookFeedbackDeliveryPortV1,
-    HookFeedbackDeliveryRouteV1, HookFeedbackRollbackSwitchV1, HookRuntimeErrorV1,
-    HookScopedFeedbackV1, deliver_feedback_with_rollback, envelope_identity_hash16,
+    HookFeedbackRollbackSwitchV1, HookRuntimeErrorV1, HookScopedFeedbackV1,
+    deliver_feedback_with_rollback, envelope_identity_hash16,
 };
 use tracedecay_lsp::DaemonLspProviderBundle;
 
@@ -233,13 +233,12 @@ pub fn acknowledge_advisory_hook_notice(
     queue.acknowledge(notice)
 }
 
-/// Concrete Hook V2 delivery port. Both routes delegate to the registered host
-/// response sinks after exact scope validation; finding content remains in the
-/// canonical feedback publication store.
+/// Concrete Hook V2 delivery port. Finding content remains in the canonical
+/// feedback publication store; this port only validates scope and forwards to
+/// the registered host-response sink.
 pub struct AdvisoryHookDeliveryPortV1 {
     scope: FeedbackScopeV1,
     hook_v2: Arc<AdvisoryHookNoticeSinkV1>,
-    legacy: Arc<AdvisoryHookNoticeSinkV1>,
 }
 
 impl HookFeedbackDeliveryPortV1<AdvisoryHookLookupNoticeV1> for AdvisoryHookDeliveryPortV1 {
@@ -252,25 +251,13 @@ impl HookFeedbackDeliveryPortV1<AdvisoryHookLookupNoticeV1> for AdvisoryHookDeli
         }
         (self.hook_v2)(notice)
     }
-
-    fn deliver_legacy(&self, notice: &AdvisoryHookLookupNoticeV1) -> HookFeedbackDeliveryOutcomeV1 {
-        if !feedback_scope_matches(&self.scope, &notice.scope) {
-            return HookFeedbackDeliveryOutcomeV1::Unavailable;
-        }
-        (self.legacy)(notice)
-    }
 }
 
 pub fn new_advisory_hook_delivery_port(
     scope: FeedbackScopeV1,
     hook_v2: Arc<AdvisoryHookNoticeSinkV1>,
-    legacy: Arc<AdvisoryHookNoticeSinkV1>,
 ) -> Arc<dyn HookFeedbackDeliveryPortV1<AdvisoryHookLookupNoticeV1> + Send + Sync> {
-    Arc::new(AdvisoryHookDeliveryPortV1 {
-        scope,
-        hook_v2,
-        legacy,
-    })
+    Arc::new(AdvisoryHookDeliveryPortV1 { scope, hook_v2 })
 }
 
 /// Host-visible routes assembled only from checked-in registration evidence.
@@ -497,10 +484,7 @@ impl AdvisoryHostDeliveryRegistrationV1 {
         else {
             return Err(AdvisoryHostDeliveryErrorV1::AdvisoryNotCompleted);
         };
-        let delivery_route = match rollback.route {
-            HookFeedbackDeliveryRouteV1::HookV2 => FeedbackDeliveryRouteV1::HookV2,
-            HookFeedbackDeliveryRouteV1::Legacy => FeedbackDeliveryRouteV1::HookLegacy,
-        };
+        let delivery_route = FeedbackDeliveryRouteV1::HookV2;
         let Some(route) = self
             .host_routes(host)
             .into_iter()
@@ -511,7 +495,7 @@ impl AdvisoryHostDeliveryRegistrationV1 {
                 delivery_route,
                 FeedbackHookScoutPhaseV1::Admission,
                 FeedbackOutcomeV1::Unavailable,
-                rollback.route == HookFeedbackDeliveryRouteV1::Legacy,
+                false,
                 0,
             );
             return Ok(AdvisoryHookDeliveryV1::Unavailable(
@@ -524,7 +508,7 @@ impl AdvisoryHostDeliveryRegistrationV1 {
                 delivery_route,
                 FeedbackHookScoutPhaseV1::Admission,
                 FeedbackOutcomeV1::Unavailable,
-                rollback.route == HookFeedbackDeliveryRouteV1::Legacy,
+                false,
                 0,
             );
             return Ok(AdvisoryHookDeliveryV1::Unavailable(reason));
@@ -536,7 +520,7 @@ impl AdvisoryHostDeliveryRegistrationV1 {
             delivery_route,
             FeedbackHookScoutPhaseV1::Admission,
             FeedbackOutcomeV1::Admitted,
-            rollback.route == HookFeedbackDeliveryRouteV1::Legacy,
+            false,
             1,
         );
         let outcome = deliver_feedback_with_rollback(rollback, &notice, port)?;
@@ -550,7 +534,7 @@ impl AdvisoryHostDeliveryRegistrationV1 {
             delivery_route,
             FeedbackHookScoutPhaseV1::Delivery,
             observed_outcome,
-            rollback.route == HookFeedbackDeliveryRouteV1::Legacy,
+            false,
             1,
         );
         self.observe_hook_delivery(
@@ -558,7 +542,7 @@ impl AdvisoryHostDeliveryRegistrationV1 {
             delivery_route,
             FeedbackHookScoutPhaseV1::FeedbackTerminal,
             observed_outcome,
-            rollback.route == HookFeedbackDeliveryRouteV1::Legacy,
+            false,
             1,
         );
         match outcome {
