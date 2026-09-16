@@ -438,7 +438,7 @@ impl CodeIndexSchedulerRegistryV1 {
             )
         };
         let mut build_publication = std::pin::pin!(build_publication_lock.lock_owned());
-        let _build_publication = loop {
+        let build_publication = loop {
             tokio::select! {
                 guard = &mut build_publication => break guard,
                 () = tokio::time::sleep(std::time::Duration::from_millis(5)) => {
@@ -457,6 +457,13 @@ impl CodeIndexSchedulerRegistryV1 {
         let scope = scope.clone();
         let terminal_control = control.clone();
         let task = tokio::task::spawn_blocking(move || {
+            // The fence travels with the work it fences. The settle loop below
+            // never answers before this closure returns, but the caller may drop
+            // that future — a request timeout, a closed connection — which
+            // detaches the blocking task and would otherwise release the fence
+            // while a mint could still be waiting on the scheduler. Owned by
+            // the closure, the fence outlives every scheduler acquisition here.
+            let _build_publication = build_publication;
             let exact_source = |reference: &RefId, revision: &GitOidV1, tree: &GitOidV1| {
                 Ok::<_, CodeIndexSearchUnavailableReasonV1>(
                     super::git_tree_capture::ExactGitTreeSourceV1 {
