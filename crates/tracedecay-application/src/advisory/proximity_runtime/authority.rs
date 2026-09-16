@@ -877,13 +877,12 @@ fn activity_interval(hit: &SessionGitCorrelationHit) -> Option<FeedbackProximity
 }
 
 fn branch_ref(branch: &str) -> Option<RefId> {
-    RefId::new(
-        branch
-            .starts_with("refs/")
-            .then(|| branch.to_owned())
-            .unwrap_or_else(|| format!("refs/heads/{branch}")),
-    )
-    .ok()
+    let reference = if branch.starts_with("refs/") {
+        branch.to_owned()
+    } else {
+        format!("refs/heads/{branch}")
+    };
+    RefId::new(reference).ok()
 }
 
 fn participant_graph_address(
