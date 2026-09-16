@@ -41,7 +41,7 @@ pub use product_admission::WorkProductAttemptServiceV1;
 pub(crate) use product_admission::{
     CurrentWorkProductAttemptGraphV1, accepted_attempt_draft, admit_product_attempt_request,
     current_work_product_attempt_graph, product_admission_problem,
-    product_attempt_projection_binding, replayed_attempt_matches_command,
+    product_attempt_projection_binding,
 };
 pub use product_synthesis_admission::WorkProductSynthesisAttemptServiceV1;
 pub use synthesis_admission::{
