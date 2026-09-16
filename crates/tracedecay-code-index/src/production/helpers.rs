@@ -5,7 +5,10 @@ use std::path::{Component, Path, PathBuf};
 use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1};
 use tracedecay_domain::{EdgeAuthorityV1, RelationEdgeKindV1, SymbolOccurrenceId};
 
-use crate::chunks::{CROSS_FILE_REFERENCE_BLOCKLIST, relation_target_kind_is_compatible};
+use crate::chunks::{
+    CROSS_FILE_REFERENCE_BLOCKLIST, cross_file_reference_name_is_blocklisted,
+    relation_target_kind_is_compatible,
+};
 use crate::lineage::LineageSymbolRecordV1;
 
 pub(crate) struct StagedGenerationV1 {
@@ -438,7 +441,10 @@ where
         .unwrap_or(reference.reference_name.as_str());
     // Retention already narrows names, but carried artifacts outlive policy
     // revisions; apply the current blocklist to every retained reference.
-    if simple_name.is_empty() || CROSS_FILE_REFERENCE_BLOCKLIST.contains(&simple_name) {
+    if simple_name.is_empty()
+        || (import.is_some() && CROSS_FILE_REFERENCE_BLOCKLIST.contains(&simple_name))
+        || cross_file_reference_name_is_blocklisted(&reference.reference_name)
+    {
         return None;
     }
     let candidates = by_simple_name.get(simple_name)?;
@@ -466,38 +472,48 @@ where
         files[*candidate_index].as_ref().extraction.language == file.extraction.language
             && relation_target_kind_is_compatible(reference.kind, &symbol.kind)
             && match import {
-                None => crate_qualified.map_or_else(
-                    || {
-                        if has_rust_glob
+                None => {
+                    let direct = match crate_qualified {
+                        None => {
+                            (has_rust_glob
+                                && hotpath::measure_block!(
+                                    "code_index.seal.glob_expansion",
+                                    rust_parent_glob_import_matches(
+                                        files,
+                                        &mut rust,
+                                        index,
+                                        &reference.reference_name,
+                                        reference.kind,
+                                        target,
+                                    )
+                                ))
+                                || file_qualified_name_matches(
+                                    &reference.reference_name,
+                                    &files[*candidate_index].as_ref().authority.logical_path,
+                                    &symbol.qualified_name,
+                                )
+                        }
+                        Some(crate_path) => rust_crate_qualified_name_matches(
+                            crate_path,
+                            source_path,
+                            &files[*candidate_index].as_ref().authority.logical_path,
+                            &symbol.qualified_name,
+                        ),
+                    };
+                    direct
+                        || (qualified
+                            && file.extraction.language.as_str() == "rust"
                             && hotpath::measure_block!(
-                                "code_index.seal.glob_expansion",
-                                rust_parent_glob_import_matches(
+                                "code_index.seal.qualified_path_walk",
+                                rust_qualified_path_matches(
                                     files,
                                     &mut rust,
                                     index,
                                     &reference.reference_name,
-                                    reference.kind,
                                     target,
                                 )
-                            )
-                        {
-                            return true;
-                        }
-                        file_qualified_name_matches(
-                            &reference.reference_name,
-                            &files[*candidate_index].as_ref().authority.logical_path,
-                            &symbol.qualified_name,
-                        )
-                    },
-                    |qualified| {
-                        rust_crate_qualified_name_matches(
-                            qualified,
-                            source_path,
-                            &files[*candidate_index].as_ref().authority.logical_path,
-                            &symbol.qualified_name,
-                        )
-                    },
-                ),
+                            ))
+                }
                 Some(binding) => match binding.module_kind {
                     ImportModuleKindV1::ProjectRelative => project_import_matches(
                         binding,
@@ -510,7 +526,7 @@ where
                     {
                         hotpath::measure_block!(
                             "code_index.seal.reexport_walk",
-                            rust_bare_import_matches(files, &mut rust, binding, target,)
+                            rust_bare_import_matches(files, &mut rust, binding, target, "")
                         )
                     }
                     ImportModuleKindV1::BareModule => false,
@@ -694,7 +710,7 @@ where
                 &target.symbol.qualified_name,
             ),
             ImportModuleKindV1::BareModule => {
-                rust_bare_import_matches(files, rust, binding, target)
+                rust_bare_import_matches(files, rust, binding, target, "")
             }
         })
 }
@@ -704,6 +720,7 @@ fn rust_bare_import_matches<T>(
     rust: &mut RustResolutionContextV1<'_>,
     binding: &CodeIndexImportEvidenceV1,
     target: RustSymbolTargetV1<'_>,
+    member: &str,
 ) -> bool
 where
     T: AsRef<FileGenerationArtifactsV1>,
@@ -739,33 +756,215 @@ where
         scope_index,
         imported_name,
         target,
+        member,
         &mut visited,
     )
 }
 
+/// Where a qualified Rust path starts once its head segment is expanded.
+enum RustPathOriginV1 {
+    /// A path inside the referencing file's own crate, as module segments
+    /// from that crate's root.
+    InCrate,
+    /// A path into another workspace crate, from that crate's root file.
+    Crate { root_index: usize },
+}
+
+/// Whether the qualified reference `reference_name` names `target` when its
+/// path is walked segment by segment: `Type::member` through the file's
+/// import of `Type`, `krate::module::Type::member` through the workspace
+/// crate's root and its (re-)exports, `crate::`/`self::`/`super::` paths
+/// through this crate's module files, and a bare module path relative to the
+/// referencing module. Every hop is parser-attested (a module file, an
+/// import row, or a symbol whose qualified name equals the walked path), so
+/// a path that does not exist in the staged file set never binds.
+fn rust_qualified_path_matches<T>(
+    files: &[T],
+    rust: &mut RustResolutionContextV1<'_>,
+    index: usize,
+    reference_name: &str,
+    target: RustSymbolTargetV1<'_>,
+) -> bool
+where
+    T: AsRef<FileGenerationArtifactsV1>,
+{
+    let file = files[index].as_ref();
+    let source_path = file.authority.logical_path.as_str();
+    let segments = reference_name.split("::").collect::<Vec<_>>();
+    if segments.len() < 2
+        || segments
+            .iter()
+            .any(|segment| segment.is_empty() || segment.contains('<'))
+    {
+        return false;
+    }
+    let Some((origin, path)) = rust_expand_path_head(rust, file, &segments) else {
+        return false;
+    };
+    let (origin_index, root_path) = match origin {
+        RustPathOriginV1::InCrate => (index, source_path),
+        RustPathOriginV1::Crate { root_index } => {
+            if target.symbol.visibility != "public" {
+                return false;
+            }
+            (
+                root_index,
+                files[root_index].as_ref().authority.logical_path.as_str(),
+            )
+        }
+    };
+    // Each split treats `path[..k]` as modules, `path[k]` as the exported
+    // name, and the rest as the member path below it, so both a method on a
+    // re-exported type and a free function in a nested module are covered.
+    for k in 0..path.len() {
+        let module = path[..k].join("/");
+        let scope_index = if module.is_empty() {
+            rust.files.module(root_path, "")
+        } else {
+            rust.files.module(root_path, &module)
+        };
+        let Some(scope_index) = scope_index else {
+            continue;
+        };
+        let member = path[k + 1..]
+            .iter()
+            .map(|segment| format!("::{segment}"))
+            .collect::<String>();
+        let mut visited = BTreeSet::new();
+        if rust_export_resolves_to_target(
+            files,
+            rust,
+            origin_index,
+            scope_index,
+            &path[k],
+            target,
+            &member,
+            &mut visited,
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Expands the head of a qualified path into its origin and the remaining
+/// segments: `crate`/`self`/`super` prefixes become module segments of this
+/// crate, an imported name becomes the path it was imported from, a
+/// workspace crate name becomes that crate's root, and any other name is a
+/// module beside the referencing one. A path whose head is not attested by
+/// any of those is `None`.
+fn rust_expand_path_head(
+    rust: &RustResolutionContextV1<'_>,
+    file: &FileGenerationArtifactsV1,
+    segments: &[&str],
+) -> Option<(RustPathOriginV1, Vec<String>)> {
+    let source_path = file.authority.logical_path.as_str();
+    let head = segments[0];
+    if matches!(head, "crate" | "self" | "super") {
+        return rust_relative_path(source_path, segments)
+            .map(|path| (RustPathOriginV1::InCrate, path));
+    }
+    if let Some(binding) = unique_named_import(file, head) {
+        let imported_name = binding.imported_name.as_deref()?;
+        let mut expanded = binding
+            .module_specifier
+            .split("::")
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        expanded.push(imported_name.to_owned());
+        expanded.extend(segments[1..].iter().map(|segment| (*segment).to_owned()));
+        let expanded_segments = expanded.iter().map(String::as_str).collect::<Vec<_>>();
+        let head = expanded_segments[0];
+        if matches!(head, "crate" | "self" | "super") {
+            return rust_relative_path(source_path, &expanded_segments)
+                .map(|path| (RustPathOriginV1::InCrate, path));
+        }
+        let root_index = rust.files.crate_root(head)?;
+        return Some((
+            RustPathOriginV1::Crate { root_index },
+            expanded[1..].to_vec(),
+        ));
+    }
+    if let Some(root_index) = rust.files.crate_root(head) {
+        return Some((
+            RustPathOriginV1::Crate { root_index },
+            segments[1..]
+                .iter()
+                .map(|segment| (*segment).to_owned())
+                .collect(),
+        ));
+    }
+    let mut relative = vec!["self"];
+    relative.extend_from_slice(segments);
+    rust_relative_path(source_path, &relative).map(|path| (RustPathOriginV1::InCrate, path))
+}
+
+/// The crate-root-relative module segments of a `crate::`/`self::`/`super::`
+/// path from `source_path`, followed by the path's remaining segments.
+fn rust_relative_path(source_path: &str, segments: &[&str]) -> Option<Vec<String>> {
+    let prefix_len = segments
+        .iter()
+        .take_while(|segment| matches!(**segment, "crate" | "self" | "super"))
+        .count();
+    let module = rust_relative_module(&segments[..prefix_len].join("::"), source_path)?;
+    let mut path = module
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    path.extend(
+        segments[prefix_len..]
+            .iter()
+            .map(|segment| (*segment).to_owned()),
+    );
+    (!path.is_empty()).then_some(path)
+}
+
+/// The single non-glob import binding `local_name` in `file`, whatever its
+/// namespace: a path head may be a type, a module, or a value.
+fn unique_named_import<'a>(
+    file: &'a FileGenerationArtifactsV1,
+    local_name: &str,
+) -> Option<&'a CodeIndexImportEvidenceV1> {
+    let mut matches =
+        file.artifacts.imports.iter().filter(|binding| {
+            !binding.is_glob && binding.local_name.as_deref() == Some(local_name)
+        });
+    let binding = matches.next()?;
+    matches.next().is_none().then_some(binding)
+}
+
+/// Whether `exported_name` in the scope file `scope_index` reaches `target`,
+/// directly or through the scope's public re-exports. `member` is the
+/// `::segment` suffix below the exported name (`::build` for a method on a
+/// re-exported type; empty for the export itself). `origin_index` is the
+/// file whose Cargo source root anchors every qualified-name comparison.
+#[allow(clippy::too_many_arguments)]
 fn rust_export_resolves_to_target<T>(
     files: &[T],
     rust: &mut RustResolutionContextV1<'_>,
-    root_index: usize,
+    origin_index: usize,
     scope_index: usize,
     exported_name: &str,
     target: RustSymbolTargetV1<'_>,
+    member: &str,
     visited: &mut BTreeSet<(usize, String)>,
 ) -> bool
 where
     T: AsRef<FileGenerationArtifactsV1>,
 {
+    let root_index = origin_index;
     let cache_key = (
         root_index,
         scope_index,
-        exported_name.to_owned(),
+        format!("{exported_name}{member}"),
         target.index,
         target.symbol.qualified_name.clone(),
     );
     if let Some(resolves) = rust.reexports.get(&cache_key) {
         return *resolves;
     }
-    if !visited.insert((scope_index, exported_name.to_owned())) {
+    if !visited.insert((scope_index, format!("{exported_name}{member}"))) {
         return false;
     }
     let root_path = &files[root_index].as_ref().authority.logical_path;
@@ -783,9 +982,12 @@ where
         return false;
     };
     let qualified = if scope_module.is_empty() {
-        exported_name.to_owned()
+        format!("{exported_name}{member}")
     } else {
-        format!("{}::{exported_name}", scope_module.replace('/', "::"))
+        format!(
+            "{}::{exported_name}{member}",
+            scope_module.replace('/', "::")
+        )
     };
     let resolves = if target.index == scope_index
         && rust_crate_qualified_name_matches(
@@ -807,7 +1009,7 @@ where
         match (bindings.next(), bindings.next()) {
             (Some(binding), None) => match binding.module_kind {
                 ImportModuleKindV1::BareModule => {
-                    rust_bare_import_matches(files, rust, binding, target)
+                    rust_bare_import_matches(files, rust, binding, target, member)
                 }
                 ImportModuleKindV1::ProjectRelative => {
                     let Some(imported_name) = binding.imported_name.as_deref() else {
@@ -821,7 +1023,7 @@ where
                         return false;
                     };
                     if rust_crate_qualified_name_matches(
-                        &qualified,
+                        &format!("{qualified}{member}"),
                         root_path,
                         &files[target.index].as_ref().authority.logical_path,
                         &target.symbol.qualified_name,
@@ -838,6 +1040,7 @@ where
                             next_scope,
                             imported_name,
                             target,
+                            member,
                             visited,
                         )
                     } else {
