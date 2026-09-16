@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tokio::time::Instant;
+use tracedecay_contracts::code_index_freshness::CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT;
 use tracedecay_contracts::code_index_freshness::{
     CodeGraphServingReadinessV1, CodeIndexWorktreeFreshnessV1,
 };
@@ -25,8 +26,6 @@ use super::{
 };
 
 const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
-const CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT: &str =
-    "code_index_publication_authority_corrupt";
 const CODE_INDEX_ACTIVATION_UNAVAILABLE: &str = "code_index_activation_unavailable";
 const CODE_INDEX_IDENTITY_MISMATCH: &str = "code_index_scheduler_identity_mismatch";
 const GIT_SNAPSHOT_UNAVAILABLE: &str = "git_snapshot_unavailable";

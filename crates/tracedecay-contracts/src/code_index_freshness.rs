@@ -27,6 +27,13 @@ pub enum CodeIndexBuildPhaseV1 {
     Ready,
 }
 
+/// Project-route reason code for a code-index publication authority that only
+/// an explicit operator reset clears. Every producer (scheduler admission,
+/// branch publication, MCP sync, host admission) and every test asserting the
+/// refusal shares this one spelling.
+pub const CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT: &str =
+    "code_index_publication_authority_corrupt";
+
 /// A typed reason an otherwise active generation cannot make durable progress.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

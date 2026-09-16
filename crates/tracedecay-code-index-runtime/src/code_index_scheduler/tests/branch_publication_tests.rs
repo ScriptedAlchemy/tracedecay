@@ -284,10 +284,15 @@ async fn mid_wait_branch_publication_surfaces_terminal_publication_park() {
     let context = error
         .project_route_context()
         .expect("typed publication corruption route");
-    assert_eq!(context.0, "code_index_publication_authority_corrupt");
+    assert_eq!(
+        context.0,
+        tracedecay_contracts::code_index_freshness::CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT
+    );
     assert!(!context.1, "terminal corruption is non-retryable");
     assert!(
-        context.2.contains("mid-wait injected publication corruption"),
+        context
+            .2
+            .contains("mid-wait injected publication corruption"),
         "detail must retain the parked reason: {}",
         context.2
     );
