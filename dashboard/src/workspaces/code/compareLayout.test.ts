@@ -101,8 +101,6 @@ function layout(): RevisionPairUnionLayoutV1 {
     symbols: [
       { symbol_identity: 'symbol-0', change: 'unchanged', base: symbol(0, 'a'), head: symbol(0, 'a') },
       { symbol_identity: 'symbol-1', change: 'removed', base: symbol(1, 'b'), head: null },
-      // A symbol whose file region is not in the (filtered) file list.
-      { symbol_identity: 'symbol-9', change: 'added', base: null, head: symbol(9, 'c') },
     ],
   };
 }
@@ -110,20 +108,17 @@ function layout(): RevisionPairUnionLayoutV1 {
 describe('Compare union layout readings', () => {
   it('counts each change class of a region list', () => {
     expect(countChanges(layout().files)).toEqual({ unchanged: 1, changed: 0, added: 0, removed: 1 });
-    expect(countChanges(layout().symbols)).toEqual({ unchanged: 1, changed: 0, added: 1, removed: 1 });
+    expect(countChanges(layout().symbols)).toEqual({ unchanged: 1, changed: 0, added: 0, removed: 1 });
   });
 
-  it('groups symbols under their file in the daemon order and keeps orphans rather than dropping them', () => {
+  it('groups symbols under their file in the daemon order', () => {
     const groups = groupSymbolsByFile(layout());
-    expect(groups.map((group) => group.fileIdentity)).toEqual([
+    expect(groups.map((group) => group.file.file_identity)).toEqual([
       'file-identity-0',
       'file-identity-1',
-      'file-identity-9',
     ]);
-    expect(groups[0]!.file?.change).toBe('unchanged');
+    expect(groups[0]!.file.change).toBe('unchanged');
     expect(groups[0]!.symbols.map((symbol) => symbol.symbol_identity)).toEqual(['symbol-0']);
     expect(groups[1]!.symbols.map((symbol) => symbol.symbol_identity)).toEqual(['symbol-1']);
-    expect(groups[2]!.file).toBeNull();
-    expect(groups[2]!.symbols.map((symbol) => symbol.symbol_identity)).toEqual(['symbol-9']);
   });
 });

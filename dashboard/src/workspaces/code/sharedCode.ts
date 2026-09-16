@@ -88,7 +88,7 @@ export function readSharedCodeCoverage(coverage: SimilarCoverageV1): SharedCodeC
       return {
         kind: 'partial',
         sentence:
-          'The read stopped at its result budget. What is listed is verified; more copies may exist past the page boundary.',
+          'Not every member of this body\'s families is on this page. What is listed is verified; the family headers say whether a further page exists.',
       };
     case 'excluded_too_small':
       return {
@@ -123,13 +123,4 @@ export function shortDigest(digest: string): string {
  * of that identity, so none is invented here. */
 export function describeOccurrence(occurrence: SimilarOccurrenceV1): string {
   return `${occurrence.path} · bytes ${occurrence.body_span.start_byte.toLocaleString()}–${occurrence.body_span.end_byte.toLocaleString()}`;
-}
-
-/** Members other than the selected source itself. The daemon includes the
- * source in its own family; the copies are what the reader came to see. */
-export function copiesOf(
-  members: ReadonlyArray<SimilarOccurrenceV1>,
-  sourceId: string,
-): SimilarOccurrenceV1[] {
-  return members.filter((member) => member.symbol_occurrence_id !== sourceId);
 }

@@ -39,7 +39,6 @@ import { codeReadState } from './codeRead.ts';
 import type { TraceFocus } from './TraceView.tsx';
 import {
   SHARED_CODE_MATCH_CLASSES,
-  copiesOf,
   describeOccurrence,
   readSharedCodeCoverage,
   sharedFamilyUrl,
@@ -183,6 +182,8 @@ function FamilyPage({
       },
     },
   );
+  // The route answers one match class per request and a body has one exact key
+  // per class, so a page carries at most one family and at most one cursor.
   const [followed, setFollowed] = useState<string | null>(null);
   return (
     <ReadSection
@@ -211,18 +212,26 @@ function FamilyPage({
             {coverage.kind === 'excluded' ? (
               <CenteredState title={coverage.title} kind="complete_zero_findings" detail={coverage.sentence} />
             ) : result.families.length === 0 ? (
-              <CenteredState
-                title="No verified copies of this body are indexed"
-                kind="complete_zero_findings"
-              />
+              coverage.kind === 'complete' && cursor === null ? (
+                <CenteredState
+                  title="No verified copies of this body are indexed"
+                  kind="complete_zero_findings"
+                />
+              ) : (
+                // A partial or continuation page with no families is not a
+                // measured zero; it is a page the budget or cursor left empty.
+                <p className="text-3xs leading-relaxed text-text-muted">
+                  No further families on this page.
+                </p>
+              )
             ) : (
               <ol className="flex flex-col gap-2">
                 {result.families.map((family) => (
                   <FamilyGroup
                     key={family.family_digest}
                     family={family}
+                    continuation={cursor !== null}
                     stitch={stitch}
-                    sourceId={result.source.symbol_occurrence_id}
                     onFocusMember={onFocusMember}
                     onTraceMember={onTraceMember}
                     onFollow={
@@ -278,24 +287,29 @@ function SourceIdentity({ result }: { result: SimilarResultV1 }) {
 
 function FamilyGroup({
   family,
+  continuation,
   stitch,
-  sourceId,
   onFocusMember,
   onTraceMember,
   onFollow,
 }: {
   family: SimilarFamilyV1;
+  /** This page was reached through a cursor: earlier pages listed other members. */
+  continuation: boolean;
   stitch: 'solid' | 'double';
-  sourceId: string;
   onFocusMember: (symbolOccurrenceId: string) => void;
   onTraceMember: (symbolOccurrenceId: string) => void;
   onFollow: (() => void) | null;
 }) {
-  const copies = copiesOf(family.members, sourceId);
-  // `member_count` is the daemon's authorized count for the whole family;
-  // `members` is this page. The two differ on a paged family, and the header
-  // says so rather than presenting the page as the total.
-  const listed = family.members.length;
+  // `members` never contains the selected body: the serving read skips the
+  // source before grouping (serving.rs), so every row here is a copy.
+  // `member_count` is the daemon's count of the authorized members *on this
+  // page* (code_reads.rs sets it from the filtered page), not a family total.
+  // `complete` is false either because a cursor continues the family or
+  // because scope filtering omitted members; only the former offers a page.
+  // A continuation page's family can be `complete` (postings ended there) and
+  // is still only this page's slice, so the count stays qualified.
+  const pageOnly = !family.complete || continuation;
   return (
     <li
       className="td-raised flex flex-col border border-edge-subtle"
@@ -310,24 +324,29 @@ function FamilyGroup({
         <span aria-hidden className="td-rule" />
         <span className="td-value shrink-0 text-2xs text-text-secondary" data-cell="numeric">
           {family.member_count.toLocaleString()}
-          <span className="td-unit ml-1">{family.member_count === 1 ? 'member' : 'members'}</span>
-        </span>
-        {listed < family.member_count ? (
-          <span className="td-legend shrink-0 normal-case tracking-normal text-text-muted">
-            {listed.toLocaleString()} listed on this page
+          <span className="td-unit ml-1">
+            {family.member_count === 1 ? 'member' : 'members'}
+            {pageOnly ? ' on this page' : ''}
           </span>
-        ) : null}
+        </span>
+        {family.complete ? null : (
+          <span className="td-legend shrink-0 normal-case tracking-normal text-text-muted">
+            {family.next_cursor !== null
+              ? 'family incomplete · more members follow'
+              : 'family incomplete · no further page in this scope'}
+          </span>
+        )}
         <span className="td-legend shrink-0 normal-case tracking-normal text-text-muted">
           normalization rev {family.normalization_revision}
         </span>
       </div>
-      {copies.length === 0 ? (
+      {family.members.length === 0 ? (
         <p className="px-2.5 py-2 text-3xs text-text-muted">
-          Only the selected body itself is on this page of the family.
+          No authorized members on this page of the family.
         </p>
       ) : (
         <ol className="flex flex-col">
-          {copies.map((member) => (
+          {family.members.map((member) => (
             <MemberRow
               key={member.symbol_occurrence_id}
               member={member}

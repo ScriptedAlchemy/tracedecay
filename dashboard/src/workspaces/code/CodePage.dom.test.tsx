@@ -311,9 +311,15 @@ describe('Shared Code: verified exact families of the selected body', () => {
     // Groups, not pairs: one family per class, its authorized total printed
     // beside the page it lists, and the selected body itself not listed as
     // its own copy.
-    expect(await within(conservative).findByText('5')).toBeTruthy();
-    // The first page carries three members (the source and two copies) of five.
-    expect(within(conservative).getByText(/3 listed on this page/i)).toBeTruthy();
+    // `member_count` is the page's authorized count, never a family total: an
+    // incomplete family is counted "on this page" and says more follow, so a
+    // reader is never told a total about a family the daemon has not finished
+    // listing. The selected body is skipped by the serving read and is neither
+    // counted nor listed.
+    expect(await within(conservative).findByText('2')).toBeTruthy();
+    expect(within(conservative).getByText(/members on this page/i)).toBeTruthy();
+    expect(within(conservative).getByText(/family incomplete · more members follow/i)).toBeTruthy();
+    expect(within(conservative).getByText('Coverage: partial')).toBeTruthy();
     expect(conservative.querySelectorAll('[data-member]')).toHaveLength(2);
     expect(conservative.querySelectorAll('[data-stitch="solid"]').length).toBeGreaterThan(0);
     await waitFor(() => {
@@ -337,11 +343,75 @@ describe('Shared Code: verified exact families of the selected body', () => {
       // First page: sym-7, sym-14. Cursor page: sym-21, sym-28.
       expect(conservative.querySelectorAll('[data-member]')).toHaveLength(4);
     });
+    // The continuation page's family is `complete` (postings ended there), yet
+    // its count is still one page's slice and stays qualified.
+    const continuation = screen.getByRole('region', { name: 'More members' });
+    expect(within(continuation).getByText(/members on this page/i)).toBeTruthy();
+    expect(within(continuation).queryByText(/family incomplete/i)).toBeNull();
     const cursorReads = fetchMock.mock.calls
       .map((call) => new URL(String(call[0]), 'http://localhost'))
       .filter((url) => url.pathname.endsWith('/shared-code/family') && url.searchParams.has('cursor'));
     expect(cursorReads).toHaveLength(1);
     expect(cursorReads[0]!.searchParams.get('cursor')).toBe('cursor.family.page-2');
+  });
+
+  it('does not promise another page when scope filtering, not a cursor, made the family incomplete', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const { pathname, search } = new URL(String(input), 'http://localhost');
+        if (pathname.endsWith('/shared-code/family')) {
+          const fixture = familyEnvelope(search);
+          const payload = fixture.payload as Record<string, unknown>;
+          const [family] = payload.families as Array<Record<string, unknown>>;
+          return jsonOk({
+            ...fixture,
+            domain_state: 'partial',
+            payload: {
+              ...payload,
+              coverage: { status: 'partial' },
+              families: [{ ...family, complete: false, next_cursor: null }],
+            },
+          });
+        }
+        return jsonOk(resolveFixture(pathname, search));
+      }),
+    );
+    renderCode('/code?view=shared-code&symbol=sym-0');
+
+    await waitFor(() => {
+      expect(screen.getAllByText(/no further page in this scope/i)).toHaveLength(2);
+    });
+    expect(screen.queryByText(/more members follow/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /load more members/i })).toBeNull();
+  });
+
+  it('does not call a partial page with no families a measured zero', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const { pathname, search } = new URL(String(input), 'http://localhost');
+        if (pathname.endsWith('/shared-code/family')) {
+          const fixture = familyEnvelope(search);
+          return jsonOk({
+            ...fixture,
+            domain_state: 'partial',
+            payload: {
+              ...(fixture.payload as Record<string, unknown>),
+              coverage: { status: 'partial' },
+              families: [],
+            },
+          });
+        }
+        return jsonOk(resolveFixture(pathname, search));
+      }),
+    );
+    renderCode('/code?view=shared-code&symbol=sym-0');
+
+    await waitFor(() => {
+      expect(screen.getAllByText('No further families on this page.')).toHaveLength(2);
+    });
+    expect(screen.queryByText(/no verified copies/i)).toBeNull();
   });
 
   it('re-centres on a listed copy through the URL identity', async () => {
@@ -446,7 +516,7 @@ describe('Shared Code: verified exact families of the selected body', () => {
     await waitFor(() => {
       expect(screen.getAllByText('Coverage: partial')).toHaveLength(2);
     });
-    expect(screen.getAllByText(/stopped at its result budget/i)).toHaveLength(2);
+    expect(screen.getAllByText(/not every member of this body/i)).toHaveLength(2);
     expect(document.querySelectorAll('[data-member]').length).toBeGreaterThan(0);
   });
 });
