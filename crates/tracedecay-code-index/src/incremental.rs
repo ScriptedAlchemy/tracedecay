@@ -118,6 +118,28 @@ impl GenerationChunkManifestV1 {
         })
     }
 
+    /// Wrap an already-sorted, duplicate-free Arc chunk list under a serving
+    /// generation id. Callers must keep extraction provenance on the rows.
+    pub(crate) fn from_sorted_arcs(
+        generation_id: CodeGenerationId,
+        chunks: Vec<Arc<CodeSearchChunkV1>>,
+    ) -> Result<Self, ChunkIncrementErrorV1> {
+        generation_id
+            .validate()
+            .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+        if let Some(duplicate) = chunks
+            .windows(2)
+            .find(|pair| pair[0].id >= pair[1].id)
+            .map(|pair| pair[0].id.clone())
+        {
+            return Err(ChunkIncrementErrorV1::DuplicateChunk(duplicate));
+        }
+        Ok(Self {
+            generation_id,
+            chunks,
+        })
+    }
+
     /// Construct a canonical generation chunk manifest.
     pub fn new(
         generation_id: CodeGenerationId,
@@ -404,6 +426,86 @@ pub fn plan_chunk_increment(
         .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
     let mut changes = ChangedCodeChunkSetV1 {
         from_generation: prior.map(|manifest| manifest.generation_id.clone()),
+        to_generation: current.generation_id.clone(),
+        manifest_digest: placeholder_digest(),
+        added_or_changed,
+        deleted,
+        reused_count,
+        reused_digest,
+    };
+    changes.manifest_digest = changes
+        .compute_digest()
+        .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+    changes
+        .validate()
+        .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+    Ok(changes)
+}
+
+/// Plan an increment when unchanged file pages are Arc-shared from `prior`.
+///
+/// Shared occurrences reuse by pointer identity (no digest clone on the match
+/// path). The reused seal hashes borrowed ids/digests so the complement does
+/// not allocate a second owned corpus.
+#[hotpath::measure(label = "code_index.build.plan_chunk_increment_arc_shared")]
+pub(crate) fn plan_chunk_increment_arc_shared(
+    prior: &GenerationChunkManifestV1,
+    current: &GenerationChunkManifestV1,
+    shared_occurrences: &BTreeSet<FileOccurrenceId>,
+) -> Result<ChangedCodeChunkSetV1, ChunkIncrementErrorV1> {
+    if prior.generation_id == current.generation_id {
+        return Err(ChunkIncrementErrorV1::SameGeneration);
+    }
+
+    let mut previous = prior.chunks.iter().peekable();
+    let mut added_or_changed = Vec::new();
+    let mut reused_refs: Vec<(&CodeSearchChunkId, &tracedecay_domain::ContentDigest)> = Vec::new();
+    let mut deleted = Vec::new();
+    for chunk in &current.chunks {
+        while let Some(removed) = previous.next_if(|prior| prior.id < chunk.id) {
+            deleted.push(ChangedCodeChunkV1 {
+                chunk_id: removed.id.clone(),
+                prior_digest: Some(removed.content_digest.clone()),
+                current_digest: None,
+            });
+        }
+        let matched = previous.next_if(|prior| prior.id == chunk.id);
+        let shared = shared_occurrences.contains(&chunk.anchor.file_occurrence_id);
+        match matched {
+            Some(prior_chunk)
+                if shared
+                    || Arc::ptr_eq(prior_chunk, chunk)
+                    || prior_chunk.content_digest == chunk.content_digest =>
+            {
+                reused_refs.push((&chunk.id, &chunk.content_digest));
+            }
+            Some(prior_chunk) => {
+                added_or_changed.push(ChangedCodeChunkV1 {
+                    chunk_id: chunk.id.clone(),
+                    prior_digest: Some(prior_chunk.content_digest.clone()),
+                    current_digest: Some(chunk.content_digest.clone()),
+                });
+            }
+            None => {
+                added_or_changed.push(ChangedCodeChunkV1 {
+                    chunk_id: chunk.id.clone(),
+                    prior_digest: None,
+                    current_digest: Some(chunk.content_digest.clone()),
+                });
+            }
+        }
+    }
+    deleted.extend(previous.map(|removed| ChangedCodeChunkV1 {
+        chunk_id: removed.id.clone(),
+        prior_digest: Some(removed.content_digest.clone()),
+        current_digest: None,
+    }));
+
+    let (reused_count, reused_digest) =
+        ChangedCodeChunkSetV1::seal_reused_partition_refs_trusted(&reused_refs)
+            .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+    let mut changes = ChangedCodeChunkSetV1 {
+        from_generation: Some(prior.generation_id.clone()),
         to_generation: current.generation_id.clone(),
         manifest_digest: placeholder_digest(),
         added_or_changed,
