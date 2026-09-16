@@ -1592,19 +1592,40 @@ impl McpServer {
         // Resolve the exact execution server before creating cancellation,
         // deadline, settlement, or accounting state. A failed/ambiguous route
         // therefore cannot leave request authority on the active server.
-        let routed = match self
-            .route_tool_arguments(
-                &id,
-                &tool_name,
-                arguments,
-                &connection.route_cache,
-                connection.initialize_route(),
-                &memory_request_scope,
-            )
-            .await
+        //
+        // Route resolution can await registry reads and retained-server
+        // construction, so the transport token is sampled *around* it, not
+        // only after it: a client that cancels mid-route reads its typed
+        // cancelled terminal instead of waiting for routing to finish. No
+        // request authority exists yet, so abandoning the route future is the
+        // complete unwind.
+        let routing = self.route_tool_arguments(
+            &id,
+            &tool_name,
+            arguments,
+            &connection.route_cache,
+            connection.initialize_route(),
+            &memory_request_scope,
+        );
+        let routed = match tracedecay_mcp::server::await_route_with_cancellation(
+            routing,
+            cancellation.cancelled(),
+        )
+        .await
         {
-            Ok(routed) => routed,
-            Err(error) => return tool_error_response(id, &tool_name, &error),
+            Some(Ok(routed)) => routed,
+            Some(Err(error)) => return tool_error_response(id, &tool_name, &error),
+            None => {
+                return tool_error_response(
+                    id,
+                    &tool_name,
+                    &dispatch_cancelled_error(
+                        &tool_name,
+                        DispatchSettlement::NotStarted,
+                        tool_carries_effect(&tool_name),
+                    ),
+                );
+            }
         };
         let dispatch_server = match routed.selected_server.as_ref() {
             Some(selected) => Arc::clone(selected),

@@ -14,6 +14,7 @@ pub use crate::lifecycle::{
 };
 pub use connection::{
     McpConnectionContext, McpConnectionServer, McpConnectionState, McpResponseLease,
+    await_route_with_cancellation,
 };
 pub use dispatch::{
     McpDispatchParams, McpDispatchRequest, ToolCallParams, dispatch_is_independent_read,
