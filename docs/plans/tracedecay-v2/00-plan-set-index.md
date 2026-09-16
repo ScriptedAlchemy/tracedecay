@@ -21,6 +21,15 @@ compatibility reader, migration, backfill, dual write, or census path, even for
 data written by an older installed binary. Delivery sequence, branch history, tests,
 historical plans, and a `V1` suffix alone do not establish a public release.
 
+**Released-store admission exception (2026-09-16).** The reset policy below
+applies to incompatible, unrecognized shapes, not the released relational
+stores proven by tagged DDL or live dogfood evidence. Admit and converge those
+stores without resetting project memory, diagnostics, or receipts. Exact
+released dense-staging objects may remain as preserved historical data; no
+dense runtime, query surface, or new dense writes return. Fresh stores omit
+those objects. A modified or incomplete staging inventory remains refused.
+This exception takes precedence over the fresh-store-reset wording below.
+
 The root package and every workspace crate, including `tracedecay-sdk`, are
 private Cargo packages (`publish = false`) and ship only as tested GitHub
 release assets. The TypeScript SDK is packaged and tested for npm trusted
@@ -262,8 +271,9 @@ records the rejected mechanism, the reason, and the retained replacement:
     `tracedecay-semantic-contracts` leave the workspace; `fastembed`, `ort`,
     `ort-sys`, and Model2Vec-only dependencies leave the lockfile; a fresh
     installation downloads no model, loads no inference runtime, builds no
-    vectors, and exposes no activation workflow. Old dense stores are reset,
-    never migrated. Plan 31 is retired as an authority; its lexical-fallback
+    vectors, and exposes no activation workflow. Released relational stores
+    retain their data under the admission exception above; dense retrieval
+    is never reactivated. Plan 31 is retired as an authority; its lexical-fallback
     and exact-tier obligations already belong to Plans 05, 15, and 25. The
     retained replacement is exactly three code-intelligence authorities and no
     fourth "semantic" one: lexical search (exact, fielded, phrase, proximity,

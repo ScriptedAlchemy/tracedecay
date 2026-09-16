@@ -176,7 +176,8 @@ pub fn expected_final_schema_fingerprint() -> Result<String> {
 pub(super) fn require_admissible_final_shape_rusqlite(
     connection: &rusqlite::Connection,
 ) -> Result<()> {
-    let actual = read_rusqlite_inventory(connection).map_err(database_error)?;
+    let mut actual = read_rusqlite_inventory(connection).map_err(database_error)?;
+    admit_released_staging_objects(&mut actual)?;
     let shipped = SHIPPED_V35_ALIAS_UPDATE_OBJECT
         .as_ref()
         .map_err(|error| database_error(error.clone()))?;
@@ -232,6 +233,49 @@ async fn read_inventory(conn: &impl QueryExecutor) -> Result<SchemaInventory> {
     Ok(inventory)
 }
 
+/// The tagged beta.25..beta.37 staging inventory is retained byte-for-byte,
+/// including publication receipts and identity guards. It has no current
+/// writer or retrieval path; fresh stores never install it. Only this exact
+/// inventory may accompany the current relational authority.
+fn admit_released_staging_objects(actual: &mut SchemaInventory) -> Result<()> {
+    let released: Vec<_> = actual
+        .iter()
+        .filter(|(name, object)| {
+            name.starts_with("semantic_vector_") || object.table.starts_with("semantic_vector_")
+        })
+        .collect();
+    let Some((first_name, _)) = released.first() else {
+        return Ok(());
+    };
+    let parts: Vec<_> = released
+        .iter()
+        .flat_map(|(name, object)| {
+            [
+                name.as_bytes(),
+                object.object_type.as_bytes(),
+                object.table.as_bytes(),
+                object.sql.as_bytes(),
+            ]
+        })
+        .collect();
+    // Derived from project-store-released-v34.sql, not the current schema.
+    if canonical_framed_sha256(b"tracedecay.released-staging-shape.v1", &parts)
+        != "ca0d1cd46378c80005b081b095095a1d9e1d0afb804547fe43f60787f7e3fba1"
+    {
+        return Err(reset_required(format!(
+            "database schema has an incompatible released staging inventory at '{first_name}'"
+        )));
+    }
+    actual.retain(|name, object| {
+        !name.starts_with("semantic_vector_") && !object.table.starts_with("semantic_vector_")
+    });
+    Ok(())
+}
+
+pub(super) async fn require_admissible_released_staging(conn: &impl QueryExecutor) -> Result<()> {
+    admit_released_staging_objects(&mut read_inventory(conn).await?)
+}
+
 fn database_error(message: String) -> TraceDecayError {
     TraceDecayError::Database {
         message,
@@ -256,7 +300,8 @@ fn reset_required(reason: impl Into<String>) -> TraceDecayError {
 pub(super) async fn require_final_shape_except_payload_digests(
     conn: &impl QueryExecutor,
 ) -> Result<()> {
-    let actual = read_inventory(conn).await?;
+    let mut actual = read_inventory(conn).await?;
+    admit_released_staging_objects(&mut actual)?;
     let expected = EXPECTED_FINAL_SHAPE
         .as_ref()
         .map_err(|error| database_error(error.clone()))?;
@@ -299,7 +344,8 @@ pub(super) async fn require_final_shape_except_payload_digests(
 }
 
 pub(super) async fn require_exact_final_shape(conn: &impl QueryExecutor) -> Result<()> {
-    let actual = read_inventory(conn).await?;
+    let mut actual = read_inventory(conn).await?;
+    admit_released_staging_objects(&mut actual)?;
     require_final_shape_inventory(&actual, None)?;
     Ok(())
 }
@@ -313,7 +359,8 @@ pub(super) async fn require_exact_final_shape(conn: &impl QueryExecutor) -> Resu
 pub(super) async fn require_exact_final_shape_or_shipped_v35_alias_trigger(
     conn: &impl QueryExecutor,
 ) -> Result<bool> {
-    let actual = read_inventory(conn).await?;
+    let mut actual = read_inventory(conn).await?;
+    admit_released_staging_objects(&mut actual)?;
     let shipped = SHIPPED_V35_ALIAS_UPDATE_OBJECT
         .as_ref()
         .map_err(|error| database_error(error.clone()))?;

@@ -379,11 +379,8 @@ async fn a_shipped_v35_alias_trigger_with_another_incompatibility_is_refused_unc
     );
 }
 
-/// A store stamped with any other version was written by an incompatible
-/// binary. This binary has no ladder, so it refuses with the fresh-start
-/// remedy instead of upgrading in place. `SCHEMA_VERSION - 1` is the shipped
-/// v35 dense stamp; the stamp one below the sanctioned step source stands in
-/// for every older release.
+/// Released v34 and live v35 stores have explicit convergence paths;
+/// unrelated stamps remain refused without mutation.
 #[tokio::test]
 async fn a_store_at_another_schema_version_is_refused_with_a_fresh_start_remedy() {
     for stamped in [
@@ -391,7 +388,6 @@ async fn a_store_at_another_schema_version_is_refused_with_a_fresh_start_remedy(
         18,
         24,
         PAYLOAD_DIGEST_STEP_SOURCE_VERSION - 1,
-        SCHEMA_VERSION - 1,
         SCHEMA_VERSION + 1,
     ] {
         let (conn, _dir) = create_schema_db().await;
