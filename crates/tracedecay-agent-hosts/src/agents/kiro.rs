@@ -32,8 +32,8 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
     McpUninstallPolicy, UpdatePluginOutcome, backup_config_file, config_backup_path,
-    install_mcp_server_entry, load_json_file, mcp_config_has_tracedecay, safe_write_json_file,
-    uninstall_mcp_server_entry,
+    install_mcp_server_entry, load_json_file, load_json_file_strict, mcp_config_has_tracedecay,
+    safe_write_json_file, uninstall_mcp_server_entry,
 };
 
 pub struct KiroIntegration;
@@ -394,6 +394,11 @@ impl AgentIntegration for KiroIntegration {
                     "Kiro is detected at {}, but TraceDecay is not installed — run `tracedecay install --agent kiro` if you use Kiro",
                     host_home.display()
                 ));
+                // Retired leftovers can exist without an MCP entry (for example
+                // after MCP-only uninstall, or a profile that never finished
+                // the MCP registration). Advise them independently of install
+                // presence so migration state is not silently omitted.
+                doctor_advise_retired_global_artifacts(dc, &ctx.home);
                 return;
             }
             Ok(KiroDoctorInstallationState::Installed) => {}
@@ -486,6 +491,11 @@ impl AgentIntegration for KiroIntegration {
         if components.contains(&super::host_bundle::HostBundleComponentV1::ContextMcp) {
             let kiro_cli = require_kiro_cli()?;
             kiro_mcp_remove_with(&kiro_cli, &ctx.home)?;
+            // Canonical global install is MCP-only, but older releases left
+            // steering / managed agent / skill-index leftovers. Doctor advises
+            // `tracedecay uninstall --agent kiro` for those; sweep them here so
+            // that remediation actually clears the warned-about files.
+            remove_retired_global_artifacts(&ctx.home)?;
         }
         Ok(())
     }
@@ -809,6 +819,25 @@ fn uninstall_managed_agent(path: &Path) {
     }
 }
 
+/// Remove retired global artifacts that older non-MCP-only installs wrote.
+///
+/// Called after the host MCP entry is removed so uninstall matches doctor
+/// migration advisories for steering and the managed agent. `chat.defaultAgent`
+/// is left alone: clearing it needs a strict cli.json rewrite that this
+/// MCP-only lifecycle does not own; doctor tells the operator to clear it.
+fn remove_retired_global_artifacts(home: &Path) -> Result<()> {
+    let steering = steering_path(home);
+    if steering.exists() {
+        remove_steering_rules(&steering)?;
+    }
+    uninstall_managed_agent(&managed_agent_path(home));
+    let skill_index = managed_skill_index_path(home);
+    if skill_index.exists() {
+        remove_kiro_managed_skill_index(home, &skill_index)?;
+    }
+    Ok(())
+}
+
 fn is_owned_agent_file(path: &Path) -> bool {
     if !path.exists() {
         return false;
@@ -1088,7 +1117,18 @@ fn doctor_advise_retired_default_agent(dc: &mut DoctorCounters, home: &Path) {
     if !path.exists() {
         return;
     }
-    let config = load_json_file(&path);
+    let config = match load_json_file_strict(&path) {
+        Ok(config) => config,
+        Err(error) => {
+            dc.warn(&format!(
+                "migration advisory: retired Kiro cli.json at {} is unreadable ({error}); \
+                 fix or delete the file so doctor can tell whether chat.defaultAgent still \
+                 points at `{KIRO_AGENT_NAME}`",
+                path.display()
+            ));
+            return;
+        }
+    };
     let Some(default_agent) = config
         .pointer("/chat/defaultAgent")
         .and_then(serde_json::Value::as_str)
@@ -1100,7 +1140,8 @@ fn doctor_advise_retired_default_agent(dc: &mut DoctorCounters, home: &Path) {
     }
     dc.warn(&format!(
         "migration advisory: retired Kiro chat.defaultAgent still points at `{KIRO_AGENT_NAME}` in {}; \
-         global install is MCP-only — clear the setting or run `tracedecay uninstall --agent kiro`",
+         global install is MCP-only — clear or delete that setting manually \
+         (`tracedecay uninstall --agent kiro` does not rewrite cli.json)",
         path.display()
     ));
 }

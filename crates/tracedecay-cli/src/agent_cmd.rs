@@ -2819,7 +2819,10 @@ mod tests {
             },
         );
         assert_eq!(counters.issues, 0);
-        assert_eq!(counters.warnings, 0);
+        // Canonical MCP install leaves retired global leftovers untouched, and
+        // doctor must advise migration for the owned steering block plus the
+        // managed agent fixture rather than reporting a silent green check.
+        assert_eq!(counters.warnings, 2);
     }
 
     /// A transaction interrupted after it staged registration leaves a journal

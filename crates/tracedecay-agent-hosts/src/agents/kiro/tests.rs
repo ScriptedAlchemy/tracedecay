@@ -974,6 +974,104 @@ fn detected_kiro_without_a_tracedecay_server_is_a_single_optional_warning() {
 }
 
 #[test]
+fn absent_mcp_entry_still_advises_retired_global_artifacts() {
+    let home = tempfile::tempdir().unwrap();
+    let mcp_path = mcp_config_path(home.path());
+    std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &mcp_path,
+        br#"{"mcpServers":{"operator":{"command":"other","args":[]}}}"#,
+    )
+    .unwrap();
+
+    let steering = steering_path(home.path());
+    std::fs::create_dir_all(steering.parent().unwrap()).unwrap();
+    std::fs::write(
+        &steering,
+        format!(
+            "{}\n",
+            shipped_block(SHIPPED_HEADING, "retired global steering")
+        ),
+    )
+    .unwrap();
+
+    let agent = managed_agent_path(home.path());
+    std::fs::create_dir_all(agent.parent().unwrap()).unwrap();
+    std::fs::write(
+        &agent,
+        serde_json::to_vec(&serde_json::json!({
+            "name": "tracedecay",
+            "description": OWNED_AGENT_DESCRIPTION,
+            "hooks": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let mut counters = DoctorCounters::new();
+    KiroIntegration.healthcheck(
+        &mut counters,
+        &HealthcheckContext {
+            home: home.path().to_path_buf(),
+            project_path: home.path().to_path_buf(),
+        },
+    );
+
+    assert_eq!(counters.issues, 0);
+    assert_eq!(
+        counters.warnings, 3,
+        "absent MCP must still surface the not-installed warning plus steering and managed-agent advisories"
+    );
+}
+
+#[test]
+fn unreadable_cli_json_emits_a_migration_advisory() {
+    let home = tempfile::tempdir().unwrap();
+    let cli = cli_config_path(home.path());
+    std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+    std::fs::write(&cli, "{ not valid JSON").unwrap();
+
+    let mut counters = DoctorCounters::new();
+    doctor_advise_retired_default_agent(&mut counters, home.path());
+
+    assert_eq!(counters.issues, 0);
+    assert_eq!(counters.warnings, 1);
+}
+
+#[test]
+fn remove_retired_global_artifacts_clears_owned_steering_and_managed_agent() {
+    let home = tempfile::tempdir().unwrap();
+    let steering = steering_path(home.path());
+    std::fs::create_dir_all(steering.parent().unwrap()).unwrap();
+    std::fs::write(
+        &steering,
+        format!("keep me\n\n{}\n", shipped_block(SHIPPED_HEADING, "retired")),
+    )
+    .unwrap();
+    let agent = managed_agent_path(home.path());
+    std::fs::create_dir_all(agent.parent().unwrap()).unwrap();
+    std::fs::write(
+        &agent,
+        serde_json::to_vec(&serde_json::json!({
+            "name": "tracedecay",
+            "description": OWNED_AGENT_DESCRIPTION,
+            "hooks": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    remove_retired_global_artifacts(home.path()).unwrap();
+
+    let remaining = std::fs::read_to_string(&steering).unwrap();
+    assert!(
+        remaining.contains("keep me") && !remaining.contains(SHIPPED_HEADING),
+        "owned retired steering must be stripped while operator prose remains: {remaining:?}"
+    );
+    assert!(!agent.exists(), "owned managed agent must be removed");
+}
+
+#[test]
 fn malformed_kiro_mcp_config_remains_a_doctor_failure() {
     let home = tempfile::tempdir().unwrap();
     let mcp_path = mcp_config_path(home.path());
