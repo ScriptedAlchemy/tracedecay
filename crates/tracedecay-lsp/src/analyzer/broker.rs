@@ -451,27 +451,41 @@ impl DiagnosticBroker {
             super::activity::active_languages_for_files(&self.project_root, &self.adapters, files);
         self.update_project_languages(languages);
         let host_retained: BTreeSet<String> = self.host_retained_languages().into_iter().collect();
-        self.adapters
+        let admitted: Vec<(String, String)> = self
+            .adapters
             .iter()
             .filter(|adapter| {
                 self.project_languages.contains(&adapter.language)
                     && self.settings.language_enabled(&adapter.language)
             })
             .map(|adapter| {
-                let command = self
-                    .settings
-                    .command_for(&adapter.language, &adapter.command);
+                (
+                    adapter.language.clone(),
+                    self.settings
+                        .command_for(&adapter.language, &adapter.command),
+                )
+            })
+            .collect();
+        let project_root = self.project_root.clone();
+        admitted
+            .into_iter()
+            .map(|(language, command)| {
+                // A host-retained language stays admitted so graph-backed
+                // TraceDecay findings still project, but it is never reported
+                // as mountable: mounting is what starts the second analyzer
+                // process. A proxy whose toolchain lacks the analyzer is
+                // equally unmountable — mounting it would be the install
+                // attempt — and the refusal is recorded as the language's
+                // typed `Unavailable` state here, because project-open may
+                // never run a refresh that would otherwise record it.
+                let analyzer_available = !host_retained.contains(&language)
+                    && self
+                        .resolve_launch(&language, &command, &project_root)
+                        .is_ok();
                 AdmittedLspProvider {
-                    language: adapter.language.clone(),
-                    // A host-retained language stays admitted so graph-backed
-                    // TraceDecay findings still project, but it is never
-                    // reported as mountable: mounting is what starts the second
-                    // analyzer process. A proxy whose toolchain lacks the
-                    // analyzer is equally unmountable: mounting it would be
-                    // the install attempt.
-                    analyzer_available: !host_retained.contains(&adapter.language)
-                        && resolve_analyzer_launch(&command, &self.project_root).is_ok(),
+                    language,
                     command,
+                    analyzer_available,
                 }
             })
             .collect()

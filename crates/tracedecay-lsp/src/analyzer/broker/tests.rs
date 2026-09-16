@@ -280,6 +280,65 @@ mod rustup_proxy {
         assert!(broker.clients.is_empty());
     }
 
+    /// Project-open admits providers without running a refresh. The proxy is
+    /// on PATH, so the default engine state would read `Available`; the
+    /// admission probe that finds the component missing must record the typed
+    /// `Unavailable` state itself, or the snapshot stays wrong until a refresh
+    /// that may never come.
+    #[test]
+    fn failed_admission_probe_records_the_typed_unavailable_state() {
+        let rustup = fake_rustup::install(None);
+        let project = rust_project();
+        let command = rustup.path().join("rust-analyzer");
+        let mut broker = DiagnosticBroker::new_for_test(
+            project.path(),
+            vec![adapter(
+                "rust",
+                command.to_string_lossy(),
+                "rs",
+                "Cargo.toml",
+            )],
+        );
+        assert_eq!(
+            broker.snapshot().engines[0].state,
+            EngineState::Available,
+            "before any probe the proxy on PATH reads as available"
+        );
+
+        let admitted = broker.admitted_providers_for_files(&["src/lib.rs".to_owned()]);
+
+        assert_eq!(
+            admitted,
+            vec![AdmittedLspProvider {
+                language: "rust".to_owned(),
+                command: command.to_string_lossy().into_owned(),
+                analyzer_available: false,
+            }]
+        );
+        let engine = broker.snapshot().engines.remove(0);
+        assert_eq!(engine.state, EngineState::Unavailable);
+        let last_error = engine.last_error.expect("the failed probe is recorded");
+        assert!(
+            last_error.starts_with(NOT_INSTALLED_FOR_TOOLCHAIN_MESSAGE),
+            "{last_error}"
+        );
+        assert!(!last_error.contains('\n') && !last_error.contains("syncing channel"));
+        let invocations = fake_rustup::invocations(rustup.path());
+        assert!(
+            invocations.contains(" which rust-analyzer"),
+            "{invocations}"
+        );
+        assert!(!invocations.contains("AUTO_INSTALL=unset"), "{invocations}");
+        assert_eq!(
+            invocations
+                .lines()
+                .filter(|line| line.contains("rust-analyzer") && !line.contains(" which "))
+                .count(),
+            0,
+            "the proxy itself never runs: {invocations}"
+        );
+    }
+
     #[test]
     fn installed_component_launches_the_toolchain_binary_not_the_proxy() {
         let real = tempfile::tempdir().expect("real analyzer");
