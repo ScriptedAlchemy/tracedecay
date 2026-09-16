@@ -811,6 +811,65 @@ fn clone_successor_keeps_lexical_owners_ready_and_cas_replaces_v14() {
     assert_eq!(v16_revision, 16);
 }
 
+#[test]
+fn clone_status_distinguishes_unavailable_backfill_partial_ready_and_stale() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn alpha() { one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    assert!(matches!(
+        latest.clone_index_status(false, None),
+        tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Unavailable { .. }
+    ));
+    while !latest.query_owners_are_ready() {
+        latest.advance_text_serving(1).expect("advance V14 build");
+    }
+    assert!(matches!(
+        latest.clone_index_status(false, None),
+        tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Backfilling { .. }
+    ));
+    let successor = {
+        let mut slot = latest.text.text_projection_build.lock_slot();
+        std::mem::replace(&mut *slot, super::super::CodeTextProjectionSlotV1::Idle)
+    };
+
+    let tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Partial {
+        observation,
+        omission_reasons,
+    } = latest.clone_index_status(false, None)
+    else {
+        panic!("missing successor must report partial clone coverage");
+    };
+    assert_eq!(observation.coverage.source_bodies, None);
+    assert!(
+        omission_reasons
+            .iter()
+            .any(|reason| reason.contains("clone rows are missing"))
+    );
+    *latest.text.text_projection_build.lock_slot() = successor;
+    while latest.text_projection_needs_work() {
+        latest
+            .advance_text_serving(16)
+            .expect("finish clone successor");
+    }
+    assert!(matches!(
+        latest.clone_index_status(false, None),
+        tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Ready { .. }
+    ));
+    assert!(matches!(
+        latest.clone_index_status(true, None),
+        tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Stale { .. }
+    ));
+}
+
 #[tokio::test]
 async fn query_admission_serves_v14_while_clone_successor_is_pending() {
     let fixture = GitFixture::new(&[(
@@ -2514,6 +2573,7 @@ fn text_progress_rate_and_eta_require_two_monotonic_committed_samples() {
         observed_at: first,
         completed_files: 20,
         completed_lexical_units: 4_000_000,
+        clone_peak_scratch_memory_bytes: None,
     });
     assert_eq!(state.rates_and_eta(29_000_000), (None, None, None));
 
@@ -2521,6 +2581,7 @@ fn text_progress_rate_and_eta_require_two_monotonic_committed_samples() {
         observed_at: first + Duration::from_secs(2),
         completed_files: 21,
         completed_lexical_units: 14_000_000,
+        clone_peak_scratch_memory_bytes: None,
     });
     let (files_per_second, lexical_units_per_second, eta_seconds) = state.rates_and_eta(29_000_000);
     assert_eq!(files_per_second, Some(0.5));

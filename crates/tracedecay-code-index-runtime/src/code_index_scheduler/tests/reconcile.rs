@@ -665,6 +665,62 @@ async fn registry_feeds_publications_and_bounded_freshness_reads() {
     assert_ne!(changed.generation_id, initial.generation_id);
 }
 
+#[tokio::test]
+async fn registry_clone_freshness_reports_coverage_and_update_accounting() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount worktree");
+    let initial = wait_for_initial_generation(&registry, fixture.path()).await;
+    wait_for_dashboard_ready(&registry, fixture.path()).await;
+    let initial_status = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("initial clone freshness");
+    let Some(tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Ready {
+        observation,
+    }) = initial_status.clone_index
+    else {
+        panic!("a complete V16 artifact must report ready clone coverage");
+    };
+    assert_eq!(observation.coverage.source_bodies, Some(1));
+    assert_eq!(observation.coverage.eligible_source_bodies, Some(0));
+    assert_eq!(observation.coverage.conservative_normalized_bodies, Some(0));
+    assert_eq!(observation.coverage.near_fingerprint_bodies, Some(0));
+    assert_eq!(observation.budgets.posting_rows, 16_384);
+    assert!(observation.resources.bytes_on_disk.is_some());
+    assert!(observation.resources.peak_scratch_memory_bytes.is_some());
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    assert!(
+        registry
+            .notify_hook_paths(fixture.path(), &["src/lib.rs".to_owned()])
+            .await
+    );
+    let _ = wait_for_generation_change(&registry, fixture.path(), &initial).await;
+    wait_for_dashboard_ready(&registry, fixture.path()).await;
+    let changed = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("changed clone freshness");
+    let Some(tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Ready {
+        observation,
+    }) = changed.clone_index
+    else {
+        panic!("the changed V16 artifact must return to ready");
+    };
+    assert_eq!(observation.coverage.payloads_reused, Some(0));
+    assert_eq!(observation.resources.stale_invalidations, Some(1));
+    assert!(observation.resources.changed_symbol_update_micros.is_some());
+}
+
 /// The generation-publication broadcast carries only verified publishes —
 /// generations that crossed the durable publication compare-and-swap, the
 /// verified graph snapshot publish, and the serving swap. A restart that
@@ -1773,6 +1829,17 @@ fn one_symbol_unrelated_work_skip() {
         changed.reused_chunks > 0,
         "unrelated symbol chunks must skip projection work"
     );
+    assert_eq!(
+        changed.clone_payloads_reused,
+        Some(1),
+        "the unchanged symbol keeps its content-addressed clone payload"
+    );
+    assert_eq!(
+        changed.clone_stale_invalidations,
+        Some(1),
+        "the changed symbol invalidates its prior clone payload binding"
+    );
+    assert_eq!(changed.clone_body_changes_observed, Some(true));
     let mut clean = scheduler(&fixture, store.path().join("clean"), bytes);
     let rebuilt = published(clean.reconcile_now().expect("clean rebuild"));
     assert_eq!(
@@ -3918,6 +3985,10 @@ async fn dashboard_freshness_reports_pending_rebuild_liveness() {
         projected.rebuild_in_flight,
         "a pending scheduler wake must keep stale serving typed as rebuilding"
     );
+    assert!(matches!(
+        projected.clone_index,
+        Some(tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Stale { .. })
+    ));
     drop(admission);
     registry.shutdown().await;
 }

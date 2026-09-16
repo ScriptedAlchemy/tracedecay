@@ -30,6 +30,14 @@ impl CodeIndexPublishedGenerationV1 {
     ) -> Result<CodeIndexGenerationStatisticsV1, CodeIndexProductionErrorV1> {
         Ok(self.statistics.clone())
     }
+
+    pub fn clone_update_statistics(&self) -> (u64, u64, bool) {
+        (
+            self.clone_payloads_reused,
+            self.clone_stale_invalidations,
+            self.clone_payloads_computed > 0 || self.clone_stale_invalidations > 0,
+        )
+    }
 }
 
 impl CodeIndexGenerationStatisticsV1 {

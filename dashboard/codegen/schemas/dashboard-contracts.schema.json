@@ -2216,6 +2216,431 @@
       "description": "Strongly typed canonical identity: `CatalogGenerationId`.",
       "type": "string"
     },
+    "CodeCloneIndexBudgetsV1": {
+      "description": "Fixed per-request clone candidate and verification budgets.",
+      "properties": {
+        "candidate_bodies": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "hot_posting_rows": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minimum_body_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minimum_directional_coverage_millionths": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "posting_rows": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "verification_bodies": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "verification_token_work": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "posting_rows",
+        "candidate_bodies",
+        "verification_bodies",
+        "verification_token_work",
+        "hot_posting_rows",
+        "minimum_body_tokens",
+        "minimum_directional_coverage_millionths"
+      ],
+      "type": "object"
+    },
+    "CodeCloneIndexCoverageV1": {
+      "description": "Coverage retained by one clone-index artifact or in-progress successor.\n\nCounts are `None` until the clone artifact has observed the corresponding\ndenominator. A complete empty repository reports `Some(0)`, which keeps a\ndesigned zero distinct from unavailable coverage.",
+      "properties": {
+        "completed_source_pages": {
+          "description": "Sealed source pages committed to clone indexing.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "conservative_normalized_bodies": {
+          "description": "Eligible bodies with a conservative exact posting.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "eligible_source_bodies": {
+          "description": "Source bodies admitted for automatic clone discovery.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "exact_postings": {
+          "description": "Conservative and rename-normalized exact posting rows.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "excluded_incomplete_tokenization_bodies": {
+          "description": "Bodies excluded because conservative tokenization was incomplete.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "excluded_too_small_bodies": {
+          "description": "Bodies excluded because they are below the automatic-discovery minimum.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "hot_posting_rows_skipped": {
+          "description": "Positional rows omitted when those hot posting lists are skipped.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "hot_postings_skipped": {
+          "description": "Fingerprint posting lists above the interactive read threshold.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "near_fingerprint_bodies": {
+          "description": "Eligible bodies represented by positional fingerprints.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "near_fingerprint_postings": {
+          "description": "Positional fingerprint posting rows retained by the artifact.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "payloads_reused": {
+          "description": "Current payload occurrences reused from the preceding generation.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "rename_normalized_bodies": {
+          "description": "Eligible bodies with a complete rename-normalized exact posting.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "rename_partial_bodies": {
+          "description": "Eligible bodies whose rename normalization is partial.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "rename_unsupported_bodies": {
+          "description": "Eligible bodies whose language has no rename normalization.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "source_bodies": {
+          "description": "Clone body occurrences observed in the sealed lexical source.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "total_source_pages": {
+          "description": "Sealed source pages in the generation.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unique_payloads": {
+          "description": "Distinct content-addressed payloads retained by the artifact.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "source_bodies",
+        "eligible_source_bodies",
+        "conservative_normalized_bodies",
+        "rename_normalized_bodies",
+        "unique_payloads",
+        "payloads_reused",
+        "exact_postings",
+        "near_fingerprint_bodies",
+        "near_fingerprint_postings",
+        "hot_postings_skipped",
+        "hot_posting_rows_skipped",
+        "excluded_too_small_bodies",
+        "excluded_incomplete_tokenization_bodies",
+        "rename_partial_bodies",
+        "rename_unsupported_bodies",
+        "completed_source_pages",
+        "total_source_pages"
+      ],
+      "type": "object"
+    },
+    "CodeCloneIndexObservationV1": {
+      "description": "Generation-pinned clone-index evidence shared by non-error readiness states.",
+      "properties": {
+        "artifact_format_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "budgets": {
+          "$ref": "#/$defs/CodeCloneIndexBudgetsV1"
+        },
+        "conservative_normalization_revision": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "coverage": {
+          "$ref": "#/$defs/CodeCloneIndexCoverageV1"
+        },
+        "generation_id": {
+          "type": "string"
+        },
+        "rename_normalization_revision": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "resources": {
+          "$ref": "#/$defs/CodeCloneIndexResourcesV1"
+        },
+        "source_revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "generation_id",
+        "source_revision",
+        "artifact_format_revision",
+        "conservative_normalization_revision",
+        "rename_normalization_revision",
+        "coverage",
+        "budgets",
+        "resources"
+      ],
+      "type": "object"
+    },
+    "CodeCloneIndexResourcesV1": {
+      "description": "Measured resources and update accounting for one clone-index generation.",
+      "properties": {
+        "bytes_on_disk": {
+          "description": "Current durable artifact or staging-file bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "changed_symbol_update_micros": {
+          "description": "Latest observed source-edit arrival through clone-ready publication.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "peak_scratch_memory_bytes": {
+          "description": "Largest measured clone-row serialization scratch during the build.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "stale_invalidations": {
+          "description": "Prior clone payload bindings invalidated by the latest publication.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "bytes_on_disk",
+        "peak_scratch_memory_bytes",
+        "changed_symbol_update_micros",
+        "stale_invalidations"
+      ],
+      "type": "object"
+    },
+    "CodeCloneIndexStatusV1": {
+      "description": "Clone readiness, independent from lexical and graph serving.",
+      "oneOf": [
+        {
+          "description": "The sealed lexical artifact or its clone rows cannot be read.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A restartable clone successor is consuming sealed source pages.",
+          "properties": {
+            "observation": {
+              "$ref": "#/$defs/CodeCloneIndexObservationV1"
+            },
+            "state": {
+              "const": "backfilling",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "observation"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Some clone evidence is readable, but required postings are missing.",
+          "properties": {
+            "observation": {
+              "$ref": "#/$defs/CodeCloneIndexObservationV1"
+            },
+            "omission_reasons": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "state": {
+              "const": "partial",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "observation",
+            "omission_reasons"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Required exact and fingerprint postings cover every eligible body.",
+          "properties": {
+            "observation": {
+              "$ref": "#/$defs/CodeCloneIndexObservationV1"
+            },
+            "state": {
+              "const": "ready",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "observation"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The artifact is readable but belongs to a superseded source generation.",
+          "properties": {
+            "observation": {
+              "$ref": "#/$defs/CodeCloneIndexObservationV1"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "stale",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "observation",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "CodeGenerationId": {
       "description": "Strongly typed canonical identity: `CodeGenerationId`.",
       "type": "string"
@@ -2691,6 +3116,17 @@
     "CodeIndexWorktreeFreshnessV1": {
       "description": "Freshness/generation state for one mounted worktree.\n\n`Deserialize` is part of the wire contract: the CLI status command decodes\nexactly this type back out of the daemon's `tracedecay_status` response,\nkeeping one authority for the freshness shape.",
       "properties": {
+        "clone_index": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeCloneIndexStatusV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Clone readiness from the same sealed lexical artifact."
+        },
         "code_graph_serving": {
           "anyOf": [
             {

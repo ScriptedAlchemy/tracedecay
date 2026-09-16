@@ -11,8 +11,8 @@
 //! [`CodeIndexArrivalV1::Unavailable`]: queue delay and event-to-ready latency
 //! are then withheld, never rendered as a zero-latency sample.
 
-use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, VecDeque};
+use std::path::{Path, PathBuf};
 
 use tracedecay_domain::{CodeGenerationId, ContentDigest};
 
@@ -89,6 +89,9 @@ pub enum CodeIndexCadenceOutcomeV1 {
         reextracted_files: usize,
         changed_chunks: usize,
         reused_chunks: usize,
+        clone_payloads_reused: Option<u64>,
+        clone_stale_invalidations: Option<u64>,
+        clone_body_changes_observed: Option<bool>,
     },
     Noop {
         snapshot_content_identity: ContentDigest,
@@ -257,6 +260,14 @@ pub struct CodeIndexCadenceReadModelV1 {
 #[derive(Debug, Default)]
 pub struct CodeIndexCadenceTelemetryV1 {
     receipts: VecDeque<CodeIndexEventToReadyReceiptV1>,
+    latest_clone_updates: BTreeMap<PathBuf, (CodeGenerationId, CodeIndexCloneUpdateV1)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct CodeIndexCloneUpdateV1 {
+    pub payloads_reused: Option<u64>,
+    pub stale_invalidations: Option<u64>,
+    pub changed_symbol_update_micros: Option<u64>,
 }
 
 impl CodeIndexCadenceTelemetryV1 {
@@ -270,6 +281,40 @@ impl CodeIndexCadenceTelemetryV1 {
     pub fn record(&mut self, receipt: CodeIndexEventToReadyReceiptV1) {
         #[cfg(feature = "hotpath")]
         observe_receipt(&receipt);
+        if let CodeIndexCadenceOutcomeV1::Published {
+            generation_id,
+            clone_payloads_reused,
+            clone_stale_invalidations,
+            clone_body_changes_observed,
+            ..
+        } = &receipt.outcome
+        {
+            if self.latest_clone_updates.len() >= Self::CAPACITY
+                && !self
+                    .latest_clone_updates
+                    .contains_key(&receipt.project_root)
+            {
+                self.latest_clone_updates.pop_first();
+            }
+            self.latest_clone_updates.insert(
+                receipt.project_root.clone(),
+                (
+                    generation_id.clone(),
+                    CodeIndexCloneUpdateV1 {
+                        payloads_reused: *clone_payloads_reused,
+                        stale_invalidations: *clone_stale_invalidations,
+                        changed_symbol_update_micros: if *clone_body_changes_observed == Some(true)
+                        {
+                            receipt
+                                .event_to_ready_micros()
+                                .and_then(|value| u64::try_from(value).ok())
+                        } else {
+                            None
+                        },
+                    },
+                ),
+            );
+        }
         while self.receipts.len() >= Self::CAPACITY {
             self.receipts.pop_front();
         }
@@ -292,6 +337,15 @@ impl CodeIndexCadenceTelemetryV1 {
             .iter()
             .filter(|receipt| receipt.arrival.wake_micros().is_some())
             .count()
+    }
+
+    pub(super) fn latest_clone_update(
+        &self,
+        project_root: &Path,
+        generation_id: &CodeGenerationId,
+    ) -> Option<CodeIndexCloneUpdateV1> {
+        let (observed_generation, update) = self.latest_clone_updates.get(project_root)?;
+        (observed_generation == generation_id).then_some(*update)
     }
 
     /// Aggregate the retained ring into the bounded truthful read model.
@@ -387,6 +441,9 @@ pub fn newly_eligible_percentile(latency_sample_count: usize) -> Option<&'static
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod clone_update_tests;
 
 #[cfg(test)]
 mod tests {

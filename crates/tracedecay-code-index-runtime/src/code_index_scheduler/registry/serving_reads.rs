@@ -250,6 +250,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
     ) -> Option<tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1> {
         let canonical_root = project_root.canonicalize().ok()?;
+        let cadence_telemetry = Arc::clone(&self.cadence_telemetry);
         let (
             scheduler,
             reconcile_in_progress,
@@ -344,6 +345,15 @@ impl CodeIndexSchedulerRegistryV1 {
                         text.as_ref(),
                         graph_activation_enabled,
                     );
+                    let clone_update = text.as_ref().and_then(|text| {
+                        cadence_telemetry
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .latest_clone_update(
+                                &canonical_root,
+                                &text.metadata().manifest().generation_id,
+                            )
+                    });
                     let ready = dashboard_generation_is_ready(
                         latest.as_ref(),
                         text_ready,
@@ -354,6 +364,9 @@ impl CodeIndexSchedulerRegistryV1 {
                     let refreshing = refresh_in_flight && !verifying;
                     let rebuild_in_flight = refreshing;
                     let stale = hook_hint_count != Some(0);
+                    let clone_index = text.as_ref().map_or_else(Default::default, |text| {
+                        text.clone_index_status(stale || refreshing, clone_update)
+                    });
                     let last_reconcile_micros = match last_reconciled_at_micros
                         .load(Ordering::Acquire)
                     {
@@ -363,6 +376,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     return tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
                         worktree_root: canonical_root.display().to_string(),
                         code_graph_serving,
+                        clone_index: Some(clone_index),
                         last_reconcile_micros,
                         rebuild_in_flight,
                         staleness_state: Some(
@@ -422,6 +436,15 @@ impl CodeIndexSchedulerRegistryV1 {
                 text.as_ref(),
                 graph_activation_enabled,
             );
+            let clone_update = text.as_ref().and_then(|text| {
+                cadence_telemetry
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .latest_clone_update(
+                        &canonical_root,
+                        &text.metadata().manifest().generation_id,
+                    )
+            });
             let ready = dashboard_generation_is_ready(
                 latest.as_ref(),
                 text_ready,
@@ -431,6 +454,9 @@ impl CodeIndexSchedulerRegistryV1 {
             let verifying = ready && refresh_in_flight && !source_change_pending;
             let refreshing = refresh_in_flight && !verifying;
             let rebuild_in_flight = refreshing;
+            let clone_index = text.as_ref().map_or_else(Default::default, |text| {
+                text.clone_index_status(stale || refreshing, clone_update)
+            });
             let staleness_state = if parked.is_some() && !ready {
                 "parked"
             } else if verifying {
@@ -460,6 +486,7 @@ impl CodeIndexSchedulerRegistryV1 {
             tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
                 worktree_root: canonical_root.display().to_string(),
                 code_graph_serving,
+                clone_index: Some(clone_index),
                 last_reconcile_micros: scheduler.last_reconciled_at_micros(),
                 rebuild_in_flight,
                 staleness_state: Some(staleness_state.to_owned()),

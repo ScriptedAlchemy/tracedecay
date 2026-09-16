@@ -11,6 +11,7 @@ pub use tracedecay_code_index::clones::CloneSelectedBlockV1;
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexInterruptionV1};
 
 mod builder;
+mod clone_census;
 mod clone_successor;
 mod fingerprints;
 mod format;
@@ -25,6 +26,7 @@ pub use builder::{
     CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,
     PreparedCodeLexicalArtifactBatchV1,
 };
+pub use clone_census::CodeLexicalCloneIndexCensusV1;
 pub use clone_successor::CodeLexicalCloneSuccessorV1;
 pub use fingerprints::{
     CLONE_FINGERPRINT_CANDIDATE_BODY_BUDGET_V1, CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1,

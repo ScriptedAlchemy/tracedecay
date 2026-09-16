@@ -18,6 +18,7 @@ import {
   ObservatoryReadModelV1Schema,
   type CodeIndexBuildProgressV1,
   type CodeIndexFreshnessPayloadV1,
+  type CodeIndexWorktreeFreshnessV1,
 } from '../../contracts/generated.ts';
 import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
 import { useEnvelope } from '../../data/query/useEnvelope.ts';
@@ -33,6 +34,7 @@ import { StateChip, type DomainStateKind } from '../../ui/StateChip';
 import { CanonicalObservations } from './CanonicalObservations.tsx';
 import { AdoptionCoverage } from './AdoptionCoverage.tsx';
 import { AdoptionOutcomes } from './AdoptionOutcomes.tsx';
+import { CloneIndexStatus } from './CloneIndexStatus.tsx';
 import { HookHints } from './HookHints.tsx';
 import { PerformanceBudgets } from './PerformanceBudgets.tsx';
 import { PerformanceComparisons } from './PerformanceComparisons.tsx';
@@ -178,6 +180,7 @@ function DiagnosisWing() {
         pending={codeIndexFreshness.isPending}
         scopeKey={codeIndexScopeKey}
       />
+      <CloneIndexStatus result={codeIndexFreshness.data} pending={codeIndexFreshness.isPending} />
     </>
   );
 }
@@ -256,6 +259,7 @@ function CodeIndexPipeline({
   scopeKey: string;
 }) {
   const progress = useLatestCodeIndexProgress(result, scopeKey);
+  const worktrees = result?.outcome === 'envelope' ? result.envelope.payload.worktrees : [];
   if (pending) {
     return (
       <section className="mx-4 mt-3" aria-label="Code-index pipeline">
@@ -270,29 +274,80 @@ function CodeIndexPipeline({
       </section>
     );
   }
-  if (progress.length === 0) {
-    return (
-      <section
-        className="mx-4 mt-3 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 p-3"
-        aria-label="Code-index pipeline"
-      >
-        <p className="text-2xs text-text-muted">no active code-index build</p>
-      </section>
-    );
-  }
   return (
     <section
       className="mx-4 mt-3 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 p-3"
       aria-label="Code-index pipeline"
     >
       <h2 className="td-legend">Code-index pipeline</h2>
-      <div className="mt-2 flex flex-col gap-2">
-        {progress.map((build) => (
-          <CodeIndexBuildCard key={build.generation_id} progress={build} />
-        ))}
-      </div>
+      <CodeIndexReadinessList worktrees={worktrees} />
+      {progress.length === 0 ? (
+        <p className="mt-2 text-2xs text-text-muted">no active code-index build</p>
+      ) : (
+        <div className="mt-2 flex flex-col gap-2">
+          {progress.map((build) => (
+            <CodeIndexBuildCard key={build.generation_id} progress={build} />
+          ))}
+        </div>
+      )}
     </section>
   );
+}
+
+function CodeIndexReadinessList({
+  worktrees,
+}: {
+  worktrees: CodeIndexWorktreeFreshnessV1[];
+}) {
+  if (worktrees.length === 0) {
+    return <p className="mt-2 text-2xs text-text-muted">no mounted code-index worktree</p>;
+  }
+  return (
+    <ul className="mt-2 flex flex-col gap-2">
+      {worktrees.map((worktree) => (
+        <li
+          key={worktree.worktree_root}
+          className="rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 p-2.5"
+        >
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-3xs">
+            <dt className="text-text-muted">Lexical readiness</dt>
+            <dd className="text-right text-text-secondary">
+              {lexicalReadinessLabel(worktree)}
+            </dd>
+            <dt className="text-text-muted">Graph serving</dt>
+            <dd className="text-right text-text-secondary">
+              {graphServingLabel(worktree.code_graph_serving)}
+            </dd>
+          </dl>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function lexicalReadinessLabel(worktree: CodeIndexWorktreeFreshnessV1): string {
+  if (!worktree.latest_generation_id) return 'unavailable';
+  return worktree.staleness_state ?? 'unknown';
+}
+
+function graphServingLabel(
+  graph: CodeIndexWorktreeFreshnessV1['code_graph_serving'],
+): string {
+  if (!graph) return 'unknown';
+  switch (graph.state) {
+    case 'pending':
+      return 'pending';
+    case 'ready':
+      return 'ready';
+    case 'refused':
+      return `refused · ${graph.reason}`;
+    case 'unavailable':
+      return `unavailable · ${graph.reason}`;
+    default: {
+      const unhandled: never = graph;
+      return unhandled;
+    }
+  }
 }
 
 function CodeIndexBuildCard({ progress }: { progress: CodeIndexBuildProgressV1 }) {
@@ -358,7 +413,9 @@ function hasActiveCodeIndexBuild(
     result?.outcome === 'envelope' &&
     (result.envelope.domain_state !== 'ready' ||
       result.envelope.payload.worktrees.some(
-        (worktree) => worktree.progress != null && worktree.progress.phase !== 'ready',
+        (worktree) =>
+          (worktree.progress != null && worktree.progress.phase !== 'ready') ||
+          worktree.clone_index?.state === 'backfilling',
       ))
   );
 }

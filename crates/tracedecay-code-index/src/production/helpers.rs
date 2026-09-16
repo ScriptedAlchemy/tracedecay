@@ -13,6 +13,9 @@ pub(crate) struct StagedGenerationV1 {
     pub(crate) chunks: GenerationChunkManifestV1,
     pub(crate) symbols: GenerationSymbolIndexV1,
     pub(crate) lineage: Vec<SymbolLineageCandidateV1>,
+    pub(crate) clone_payloads_reused: u64,
+    pub(crate) clone_payloads_computed: u64,
+    pub(crate) clone_stale_invalidations: u64,
 }
 
 pub(crate) fn staged_generation(
@@ -54,6 +57,9 @@ pub(crate) fn staged_generation(
         chunks,
         symbols,
         lineage,
+        clone_payloads_reused: 0,
+        clone_payloads_computed: 0,
+        clone_stale_invalidations: 0,
     })
 }
 
