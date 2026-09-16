@@ -1099,7 +1099,7 @@ pub async fn handle_similar(ctx: &McpToolContext<'_>, args: Value) -> Result<Too
             });
         }
         tracedecay_query::code_search::CodeIndexSimilarOutcomeV1::Unavailable(reason) => {
-            return Err(similar_unavailable_error(reason));
+            return Err(clone_lane_unavailable_error("similarity", reason));
         }
     };
     if similar.source.occurrence.project_id != project_id
@@ -1187,21 +1187,19 @@ pub async fn handle_similar(ctx: &McpToolContext<'_>, args: Value) -> Result<Too
     Ok(generic_tool_result(ctx, &args, &value, touched_files))
 }
 
-fn similar_unavailable_error(
+/// The one clone-family unavailable wire shape. `tracedecay_similar` and
+/// `tracedecay_redundancy` read the same executor vocabulary, so they report
+/// the same `reason_code` and the same retry verdict; only the human lane name
+/// in `detail` differs.
+fn clone_lane_unavailable_error(
+    lane: &str,
     reason: tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1,
 ) -> TraceDecayError {
     TraceDecayError::ProjectRoute {
         reason_code: reason.as_str().to_owned(),
-        retryable: matches!(
-            reason,
-            tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::Cancelled
-                | tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::TimedOut
-                | tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable
-                | tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable
-                | tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnverified
-        ),
+        retryable: reason.is_retryable(),
         detail: format!(
-            "the maintained clone similarity lane is unavailable: {}",
+            "the maintained clone {lane} lane is unavailable: {}",
             reason.as_str()
         ),
     }
@@ -1284,16 +1282,7 @@ pub async fn handle_redundancy(ctx: &McpToolContext<'_>, args: Value) -> Result<
         cancellation: ctx.cancellation().cloned(),
     })
     .await
-    .map_err(|reason| TraceDecayError::ProjectRoute {
-                reason_code: "verified-code-redundancy-unavailable".to_owned(),
-                retryable: matches!(
-                    reason,
-                    tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::Cancelled
-                        | tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::TimedOut
-                        | tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable
-                ),
-                detail: format!("the maintained clone family lane is unavailable: {}", reason.as_str()),
-            })?;
+    .map_err(|reason| clone_lane_unavailable_error("family", reason))?;
     let mut touched_files = outcome
         .families
         .iter()
@@ -1591,6 +1580,38 @@ pub async fn handle_rename_preview(
 mod tests {
     use super::*;
     use tracedecay_contracts::memory::FactSearchHitV1;
+
+    #[test]
+    fn clone_lanes_report_one_unavailable_wire_protocol() {
+        use tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1 as Reason;
+
+        for reason in [
+            Reason::CapabilityUnavailable,
+            Reason::AuthorityUnavailable,
+            Reason::LinkedWorktreeDisabled,
+            Reason::Cancelled,
+            Reason::TimedOut,
+            Reason::CapacityUnavailable,
+            Reason::GenerationUnavailable,
+            Reason::GenerationUnverified,
+            Reason::InvalidRequest,
+            Reason::CorruptionResetRequired,
+            Reason::Internal,
+        ] {
+            let similarity = clone_lane_unavailable_error("similarity", reason);
+            let family = clone_lane_unavailable_error("family", reason);
+            let (similarity_code, similarity_retryable, _) = similarity
+                .project_route_context()
+                .expect("clone lane failures are typed project-route errors");
+            let (family_code, family_retryable, _) = family
+                .project_route_context()
+                .expect("clone lane failures are typed project-route errors");
+            assert_eq!(similarity_code, reason.as_str());
+            assert_eq!(family_code, reason.as_str());
+            assert_eq!(similarity_retryable, reason.is_retryable());
+            assert_eq!(family_retryable, reason.is_retryable());
+        }
+    }
 
     #[test]
     fn complete_search_preserves_generation_advance_but_not_stale_admission() {
