@@ -737,6 +737,12 @@ pub struct MountedCodeIndexWorktreeV1 {
     /// Count of in-flight owner passes; nonzero means activation or reconcile
     /// work is running for this worktree.
     reconcile_in_progress: Arc<AtomicUsize>,
+    /// Count of in-flight clone-fingerprint backfills for an owner whose exact
+    /// and lexical serving are already ready. Kept apart from
+    /// `reconcile_in_progress` so a complete current generation does not read
+    /// as `verifying` while its shared-code lane catches up; test quiescence
+    /// waits on both.
+    text_backfill_in_progress: Arc<AtomicUsize>,
     /// Live handle to the publication's encoded-byte counter; observed only by
     /// test memory accounting today.
     _active_generation_encoded_bytes: Arc<AtomicU64>,
