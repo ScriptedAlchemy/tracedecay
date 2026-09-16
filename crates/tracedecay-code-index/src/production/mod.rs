@@ -1333,7 +1333,7 @@ impl CodeIndexPublishedGenerationV1 {
             .validate_reused_complement(None, &full_source)
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
         commitments
-            .validate_for_source(&full_source)
+            .validate_for_changes(&self.projection.request().changes)
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
         self.ignored_source_roster
             .validate(&self.snapshot, &self.repository_parse_identity)?;
@@ -1851,11 +1851,17 @@ where
                     .iter()
                     .map(|chunk| (chunk.id.clone(), chunk.content_digest.clone()))
                     .collect::<Vec<_>>();
+                changes
+                    .validate_reused_complement(prior_source.as_deref(), &full_source)
+                    .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+                let parent_full_replay = active
+                    .as_ref()
+                    .and_then(|active| active.manifest.source_commitments.as_ref())
+                    .map(|commitments| &commitments.full_replay_digest);
                 manifest.source_commitments = Some(
                     CodeGenerationSourceCommitmentsV1::from_changed_chunks(
+                        parent_full_replay,
                         &changes,
-                        prior_source.as_deref(),
-                        &full_source,
                     )
                     .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?,
                 );
