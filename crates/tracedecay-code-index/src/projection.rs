@@ -13,8 +13,8 @@
 
 use thiserror::Error;
 use tracedecay_domain::{
-    ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId, ManifestDigest,
-    ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionReplayReasonV1,
+    CodeGenerationId, ManifestDigest, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
+    ProjectionReplayReasonV1,
 };
 
 pub use super::receipts::{
@@ -202,7 +202,7 @@ pub fn project_for_publication<S: CodeChunkProjectionSink>(
 /// Verify the incoming request and expand a projection-key replay, returning
 /// the request alongside its recomputed canonical digest.
 fn expand_projection_key_replay(
-    mut request: ProjectionBatchRequestV1,
+    request: ProjectionBatchRequestV1,
 ) -> Result<(ProjectionBatchRequestV1, ManifestDigest), ProjectionReceiptErrorV1> {
     let expected_request = expected_request_digest(&request)
         .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
@@ -230,43 +230,14 @@ fn expand_projection_key_replay(
             "a projection-key change requires projection_profile_change replay".to_owned(),
         ));
     }
-
-    let mut added_or_changed = request
-        .changes
-        .added_or_changed
-        .iter()
-        .chain(&request.changes.reused)
-        .filter_map(|change| {
-            change
-                .current_digest
-                .clone()
-                .map(|current_digest| ChangedCodeChunkV1 {
-                    chunk_id: change.chunk_id.clone(),
-                    prior_digest: None,
-                    current_digest: Some(current_digest),
-                })
-        })
-        .collect::<Vec<_>>();
-    added_or_changed.sort_by(|left, right| left.chunk_id.cmp(&right.chunk_id));
-    let mut changes = ChangedCodeChunkSetV1 {
-        from_generation: request.changes.from_generation.clone(),
-        to_generation: request.changes.to_generation.clone(),
-        manifest_digest: request.changes.manifest_digest.clone(),
-        added_or_changed,
-        deleted: vec![],
-        reused: vec![],
-    };
-    changes.manifest_digest = changes
-        .compute_digest()
-        .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
-    changes
-        .validate()
-        .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
-    request.changes = changes;
-    let expanded_request_digest = expected_request_digest(&request)
-        .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
-    request.request_digest = expanded_request_digest.clone();
-    Ok((request, expanded_request_digest))
+    // Profile change must already list every current chunk as added_or_changed.
+    if request.changes.reused_count != 0 || !request.changes.deleted.is_empty() {
+        return Err(ProjectionReceiptErrorV1::Contract(
+            "projection profile change must arrive pre-expanded without a reused complement"
+                .to_owned(),
+        ));
+    }
+    Ok((request, expected_request))
 }
 
 fn request_is_true_noop(request: &ProjectionBatchRequestV1) -> bool {

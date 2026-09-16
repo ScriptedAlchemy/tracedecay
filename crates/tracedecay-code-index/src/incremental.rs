@@ -356,7 +356,7 @@ pub fn plan_chunk_increment(
         .flat_map(|manifest| &manifest.chunks)
         .peekable();
     let mut added_or_changed = Vec::new();
-    let mut reused = Vec::new();
+    let mut reused_pairs = Vec::new();
     let mut deleted = Vec::new();
     for chunk in &current.chunks {
         while let Some(removed) = previous.next_if(|prior| prior.id < chunk.id) {
@@ -369,15 +369,14 @@ pub fn plan_chunk_increment(
         let prior_digest = previous
             .next_if(|prior| prior.id == chunk.id)
             .map(|prior| prior.content_digest.clone());
-        let change = ChangedCodeChunkV1 {
-            chunk_id: chunk.id.clone(),
-            prior_digest,
-            current_digest: Some(chunk.content_digest.clone()),
-        };
-        if change.prior_digest == change.current_digest {
-            reused.push(change);
+        if prior_digest.as_ref() == Some(&chunk.content_digest) {
+            reused_pairs.push((chunk.id.clone(), chunk.content_digest.clone()));
         } else {
-            added_or_changed.push(change);
+            added_or_changed.push(ChangedCodeChunkV1 {
+                chunk_id: chunk.id.clone(),
+                prior_digest,
+                current_digest: Some(chunk.content_digest.clone()),
+            });
         }
     }
     deleted.extend(previous.map(|removed| ChangedCodeChunkV1 {
@@ -386,13 +385,16 @@ pub fn plan_chunk_increment(
         current_digest: None,
     }));
 
+    let (reused_count, reused_digest) = ChangedCodeChunkSetV1::seal_reused_partition(&reused_pairs)
+        .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
     let mut changes = ChangedCodeChunkSetV1 {
         from_generation: prior.map(|manifest| manifest.generation_id.clone()),
         to_generation: current.generation_id.clone(),
         manifest_digest: placeholder_digest(),
         added_or_changed,
         deleted,
-        reused,
+        reused_count,
+        reused_digest,
     };
     changes.manifest_digest = changes
         .compute_digest()

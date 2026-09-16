@@ -1860,6 +1860,7 @@ where
                 increment.as_ref(),
                 request.target_projection_key,
                 changes,
+                &staged.chunks,
             )?;
             Self::checkpoint(control)?;
             let projection = project_for_publication(&mut self.projection, projection_request)
