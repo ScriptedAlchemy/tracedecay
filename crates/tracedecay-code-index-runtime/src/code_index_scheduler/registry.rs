@@ -2611,7 +2611,6 @@ impl CodeIndexSchedulerRegistryV1 {
                     == Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt)
             })
     }
-    }
 
     #[cfg(any(test, feature = "test-helpers"))]
     #[cfg_attr(not(test), allow(dead_code))]
