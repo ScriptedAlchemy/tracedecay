@@ -140,7 +140,7 @@ gate (run by SDK conformance CI) enforces this job isolation.
 
 ## Beta Channel
 
-The `codex/tracedecay-total-redesign-plan` branch runs its own release-please
+The `codex/tracedecay-total-redesign-plan-reopened` branch runs its own release-please
 channel: `beta-release-please.yml` with `release-please-config-beta.json` and
 `.release-please-manifest-beta.json` (versioning strategy `prerelease`,
 prerelease type `beta`). Every push to the branch opens or updates a release
