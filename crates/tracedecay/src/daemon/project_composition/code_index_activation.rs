@@ -5,7 +5,9 @@
 //! reachable from the published MCP servers.
 
 use super::*;
-use tracedecay_code_index_runtime::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1;
+use tracedecay_code_index_runtime::code_index_scheduler::{
+    CodeIndexReconcileAdmissionV1, query_runtime::QueryRuntimeMountErrorV1,
+};
 use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// Inputs the deferred mount closure re-clones on every activation attempt.
@@ -302,7 +304,10 @@ pub(super) fn code_index_activation_hint_sink(
                     .await
             };
             let overflow_accepted = if batch.overflow {
-                schedulers.notify_hook_overflow(&project_root).await
+                matches!(
+                    schedulers.notify_hook_overflow(&project_root).await,
+                    CodeIndexReconcileAdmissionV1::Accepted
+                )
             } else {
                 true
             };
@@ -363,8 +368,16 @@ pub(super) fn code_index_reconcile_sink(
                 {
                     return crate::mcp::server::CodeIndexAdmission::LinkedWorktreeDisabled;
                 }
-                if schedulers.notify_hook_overflow(&root).await {
-                    return crate::mcp::server::CodeIndexAdmission::Accepted;
+                match schedulers.notify_hook_overflow(&root).await {
+                    CodeIndexReconcileAdmissionV1::Accepted => {
+                        return crate::mcp::server::CodeIndexAdmission::Accepted;
+                    }
+                    CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(parked) => {
+                        return crate::mcp::server::CodeIndexAdmission::PublicationAuthorityCorrupt(
+                            parked,
+                        );
+                    }
+                    CodeIndexReconcileAdmissionV1::Unavailable => {}
                 }
                 match demand {
                     crate::mcp::server::CodeIndexReconcileDemandV1::Automatic => {
