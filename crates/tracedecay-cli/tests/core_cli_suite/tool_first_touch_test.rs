@@ -120,11 +120,24 @@ fn project_list_answers_from_the_registry_without_an_initialised_project() {
     let _daemon = common::spawn_tracedecay_daemon(&home_path);
     let target_arg = target_path.to_string_lossy().to_string();
 
-    let bare = run_tool(&cwd_path, &home_path, &["project_list", "--json"]);
+    // `--format json` selects the tool's JSON payload; `--json` prints the raw
+    // daemon envelope around it instead of the rendered text.
+    let bare = run_tool(
+        &cwd_path,
+        &home_path,
+        &["project_list", "--format", "json", "--json"],
+    );
     let explicit = run_tool(
         &cwd_path,
         &home_path,
-        &["--project", &target_arg, "project_list", "--json"],
+        &[
+            "--project",
+            &target_arg,
+            "project_list",
+            "--format",
+            "json",
+            "--json",
+        ],
     );
     for (label, output) in [
         ("bare", bare),
