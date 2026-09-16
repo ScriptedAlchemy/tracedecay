@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -32,10 +31,7 @@ use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecor
 use tracedecay_contracts::retrieval::{
     SimilarCoverageV1, SimilarFamilyV1, SimilarOccurrenceV1, SimilarResultV1,
 };
-use tracedecay_contracts::{
-    CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass, RequestAdmission, RequestContext,
-    ResolvedScope,
-};
+use tracedecay_contracts::{RequestAdmission, ResolvedScope};
 use tracedecay_dashboard_api::code_read_api::{
     DashboardCodeReadErrorV1, DashboardCodeReadPortV1, DashboardRevisionPairReadFuture,
     DashboardRevisionPairRequestV1, DashboardSharedFamilyReadFuture,
@@ -45,7 +41,7 @@ use tracedecay_dashboard_api::code_read_api::{
 };
 use tracedecay_domain::code_intelligence::{Edge, EdgeKind, Node, NodeKind, Visibility};
 use tracedecay_domain::{
-    ActorId, BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeGenerationId,
+    BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeGenerationId,
     CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1,
     ComplexityAnalysisV1, ContentDigest, EdgeAuthorityV1, FileIdentityDigest, FileOccurrenceId,
     GitOidV1, LanguageDescriptorRevision, LanguageId, ManifestDigest, PolicyRevisionId, ProjectId,
@@ -55,9 +51,8 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_graph_query::{
-    CodeGraphProjectionReadPort, CodeGraphReadAdmissionFuture, CodeGraphReadAdmissionPort,
-    CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
-    VerifiedCodeGraphRead,
+    CodeGraphProjectionReadPort, CodeGraphReadAdmissionPort, CodeGraphReadError,
+    CodeGraphReadFuture, CodeGraphReadRequest, VerifiedCodeGraphRead,
 };
 use tracedecay_session_memory::context::RegisteredScopeResolver;
 
@@ -104,11 +99,6 @@ impl CodeGraphProjectionReadPort for FixtureGraphProjectionV1 {
             }
         })
     }
-}
-
-#[derive(Clone)]
-struct FixtureGraphAdmissionV1 {
-    scope: ResolvedScope,
 }
 
 #[derive(Clone)]
@@ -167,52 +157,6 @@ impl DashboardCodeReadPortV1 for FixtureCodeReadPortV1 {
         request: DashboardRevisionPairRequestV1,
     ) -> DashboardRevisionPairReadFuture<'a> {
         Box::pin(async move { Ok(revision_pair_fixture(request)) })
-    }
-}
-
-impl CodeGraphReadAdmissionPort for FixtureGraphAdmissionV1 {
-    fn admit<'a>(
-        &'a self,
-        request: CodeGraphReadAdmissionRequest<'a>,
-    ) -> CodeGraphReadAdmissionFuture<'a> {
-        Box::pin(async move {
-            if request.cancellation.is_cancelled() {
-                return Err(CodeGraphReadError::Cancelled);
-            }
-            if request.deadline.is_elapsed_at(request.observed_at) {
-                return Err(CodeGraphReadError::TimedOut);
-            }
-            let actor = ActorId::new("actor.dashboard-graph-fixture")
-                .unwrap_or_else(|error| panic!("fixture actor: {error}"));
-            let grant = CapabilityGrantSnapshot::new(
-                CapabilityGrantId::new("grant.dashboard-graph-fixture")
-                    .unwrap_or_else(|error| panic!("fixture grant: {error}")),
-                1,
-                ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))
-                    .unwrap_or_else(|error| panic!("fixture grant digest: {error}")),
-                actor.clone(),
-                request.observed_at,
-                request.deadline.expires_at,
-                self.scope.clone(),
-                BTreeSet::from([request.operation.capability_id().clone()]),
-                BTreeSet::from([request.operation.use_case_id().clone()]),
-                DisclosureClass::Evidence,
-            )
-            .map_err(|error| CodeGraphReadError::InvalidRequest {
-                detail: error.to_string(),
-            })?;
-            RequestContext::new(
-                actor,
-                self.scope.clone(),
-                grant,
-                request.request_id,
-                request.deadline,
-                request.cancellation.context(),
-            )
-            .map_err(|error| CodeGraphReadError::InvalidRequest {
-                detail: error.to_string(),
-            })
-        })
     }
 }
 
@@ -761,9 +705,13 @@ fn compose_graph_authority(
             .unwrap_or_else(|error| panic!("verify fixture graph: {error}")),
     );
     (
-        Arc::new(FixtureGraphAdmissionV1 {
-            scope: scope.clone(),
-        }),
+        Arc::new(
+            tracedecay_daemon_service::DaemonCodeGraphReadAdmission::production(
+                cg.project_root().to_path_buf(),
+                scope.clone(),
+                Arc::clone(cg.configuration_runtime()),
+            ),
+        ),
         Arc::new(FixtureGraphProjectionV1 {
             scope,
             store,
@@ -1020,6 +968,53 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
                 .any(|node| node["id"] == "n-route" && node["degree"] == 3),
             "subgraph nodes should carry total degree counts (n-route has 3 edges)"
         );
+    });
+}
+
+#[test]
+fn every_graph_route_accepts_the_production_project_owner_grant() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture_with(false, true, false).await;
+        let agent = http_agent();
+        let routes = [
+            ("overview", "/api/plugins/graph/overview"),
+            ("search", "/api/plugins/graph/search?q=dashboard&limit=10"),
+            ("node", "/api/plugins/graph/node/n-route"),
+            (
+                "neighbors",
+                "/api/plugins/graph/node/n-route/neighbors?limit=10",
+            ),
+            (
+                "subgraph",
+                "/api/plugins/graph/subgraph?node_id=n-route&limit_nodes=10&limit_edges=10",
+            ),
+            (
+                "path",
+                "/api/plugins/graph/path?from=n-dashboard&to=n-render&max_depth=6",
+            ),
+            (
+                "call-chain",
+                "/api/plugins/graph/call-chain?from=n-dashboard&to=n-render&max_depth=20",
+            ),
+            ("strata", "/api/plugins/graph/strata"),
+            ("node facts", "/api/plugins/graph/node/n-route/facts"),
+            ("node tests", "/api/plugins/graph/node/n-route/tests"),
+            ("node sessions", "/api/plugins/graph/node/n-route/sessions"),
+        ];
+
+        for (route, path) in routes {
+            let (status, body) = get_json(&agent, &format!("{}{path}", fixture.base_url));
+            assert_eq!(status, 200, "{route}: {body}");
+            assert_eq!(
+                body["authorization"]["outcome"], "authorized",
+                "{route}: {body}"
+            );
+            assert_eq!(body["domain_state"], "ready", "{route}: {body}");
+        }
     });
 }
 

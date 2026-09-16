@@ -18,6 +18,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::graph_service::GraphReadAdmissionOperation;
 use super::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
     DashboardVersionV1, scope_from_state,
@@ -29,11 +30,12 @@ use crate::graph::queries::GraphQueryManager;
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1, CodeGraphSymbolSummaryV1,
 };
-use tracedecay_contracts::{CallableCodeOperationKind, callable_code_operation};
+use tracedecay_contracts::CallableCodeOperationKind;
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_session_memory::memory::entities::normalize_entity;
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 const MAX_CALL_CHAIN_DEPTH: usize = 20;
 const TEST_CALLER_DEPTH: usize = 3;
@@ -686,7 +688,7 @@ async fn node_tests(
             let graph = match admitted_graph::<TestMapMeasurementV1>(
                 &state,
                 &control,
-                CallableCodeOperationKind::Callers,
+                ApplicationSurfaceOperation::CodeCallers,
             )
             .await
             {
@@ -972,7 +974,7 @@ fn graph_control<T: Serialize>(
 async fn admitted_graph<T: Serialize>(
     state: &DashboardState,
     control: &DashboardHttpRequestControlV1,
-    operation_kind: CallableCodeOperationKind,
+    operation: impl Into<GraphReadAdmissionOperation>,
 ) -> std::result::Result<AdmittedGraphReadV1, Response> {
     let (Some(admission), Some(projection)) = (
         state.code_graph_read_admission.as_ref(),
@@ -985,14 +987,10 @@ async fn admitted_graph<T: Serialize>(
             "the exact-project verified code graph authority is unavailable",
         ));
     };
-    let operation = callable_code_operation(operation_kind).map_err(|error| {
-        graph_error_response::<T>(
-            state,
-            crate::graph::CodeGraphReadError::InvalidRequest {
-                detail: error.to_string(),
-            },
-        )
-    })?;
+    let operation = operation
+        .into()
+        .resolve()
+        .map_err(|error| graph_error_response::<T>(state, error))?;
     // Admission and projection-open are the per-request store-open cost every
     // structure route pays before any graph work; separate spans let a flat
     // profile distinguish them from the traversal itself.

@@ -320,6 +320,11 @@ impl DaemonCallableCodeAuthorization {
             || context.admission_at(observed_at) != RequestAdmission::Admitted
             || !current.allows(context, operation, observed_at)
         {
+            tracing::warn!(
+                capability_id = operation.capability_id().as_str(),
+                scope = ?context.scope(),
+                "callable code authorization concealed denial"
+            );
             return Err(concealed());
         }
         let policy = tracedecay_contracts::PolicyDecisionRef::new(

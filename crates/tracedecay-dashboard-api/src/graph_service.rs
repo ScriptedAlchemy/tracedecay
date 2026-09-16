@@ -5,13 +5,17 @@ use std::sync::Arc;
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1, CodeGraphSymbolSummaryV1,
 };
-use tracedecay_contracts::{CallableCodeOperationKind, callable_code_operation};
+use tracedecay_contracts::retrieval::catalog::primitive_read_operation;
+use tracedecay_contracts::{
+    ApplicationOperation, CallableCodeOperationKind, callable_code_operation,
+};
 use tracedecay_domain::{ComplexityAnalysisV1, RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_graph_query::{
     CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadRequest,
     application_graph_cancellation, map_projection_error,
 };
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use super::{DashboardHttpRequestControlV1, DashboardState};
 
@@ -194,11 +198,50 @@ struct AdmittedGraphReadV1 {
     freshness: crate::graph::CodeGraphReadFreshnessV1,
 }
 
+pub(super) enum GraphReadAdmissionOperation {
+    CallableCode(CallableCodeOperationKind),
+    ApplicationSurface(ApplicationSurfaceOperation),
+}
+
+impl From<CallableCodeOperationKind> for GraphReadAdmissionOperation {
+    fn from(kind: CallableCodeOperationKind) -> Self {
+        Self::CallableCode(kind)
+    }
+}
+
+impl From<ApplicationSurfaceOperation> for GraphReadAdmissionOperation {
+    fn from(operation: ApplicationSurfaceOperation) -> Self {
+        Self::ApplicationSurface(operation)
+    }
+}
+
+impl GraphReadAdmissionOperation {
+    pub(super) fn resolve(self) -> Result<ApplicationOperation, CodeGraphReadError> {
+        match self {
+            Self::CallableCode(kind) => {
+                callable_code_operation(kind).map_err(|error| CodeGraphReadError::InvalidRequest {
+                    detail: error.to_string(),
+                })
+            }
+            Self::ApplicationSurface(operation) => primitive_read_operation(operation.as_str())
+                .map_err(|error| CodeGraphReadError::InvalidRequest {
+                    detail: error.to_string(),
+                })?
+                .ok_or_else(|| CodeGraphReadError::InvalidRequest {
+                    detail: format!(
+                        "dashboard graph operation {} has no canonical read authority",
+                        operation.as_str()
+                    ),
+                }),
+        }
+    }
+}
+
 #[hotpath::measure(label = "dashboard_api.graph.admitted_read", future = true)]
 async fn admitted_graph(
     state: &DashboardState,
     control: &DashboardHttpRequestControlV1,
-    operation_kind: CallableCodeOperationKind,
+    operation: impl Into<GraphReadAdmissionOperation>,
 ) -> Result<AdmittedGraphReadV1, CodeGraphReadError> {
     let (Some(admission), Some(projection)) = (
         state.code_graph_read_admission.as_ref(),
@@ -206,11 +249,7 @@ async fn admitted_graph(
     ) else {
         return Err(CodeGraphReadError::MissingRegistry);
     };
-    let operation = callable_code_operation(operation_kind).map_err(|error| {
-        CodeGraphReadError::InvalidRequest {
-            detail: error.to_string(),
-        }
-    })?;
+    let operation = operation.into().resolve()?;
     // Admission and projection-open are the per-request store-open cost every
     // explorer route pays before any graph work; separate spans let a flat
     // profile distinguish them from the traversal itself.
@@ -375,7 +414,12 @@ pub async fn search_payload(
     limit: i64,
     offset: i64,
 ) -> Result<GraphServiceReadV1<GraphSearchPayloadV1>, CodeGraphReadError> {
-    let graph = admitted_graph(state, control, CallableCodeOperationKind::SymbolSearch).await?;
+    let graph = admitted_graph(
+        state,
+        control,
+        ApplicationSurfaceOperation::CodeSymbolSearch,
+    )
+    .await?;
     let matched: Vec<_> = all_symbols(&graph)?
         .into_iter()
         .filter(|symbol| query.is_empty() || symbol_matches(symbol, query))
@@ -441,7 +485,7 @@ pub async fn neighbors_payload(
     node_id: &str,
     limit: i64,
 ) -> Result<GraphServiceReadV1<Option<GraphNeighborsPayloadV1>>, CodeGraphReadError> {
-    let graph = admitted_graph(state, control, CallableCodeOperationKind::Callers).await?;
+    let graph = admitted_graph(state, control, ApplicationSurfaceOperation::CodeCallers).await?;
     let occurrence = parse_occurrence(node_id)?;
     if graph
         .reader
