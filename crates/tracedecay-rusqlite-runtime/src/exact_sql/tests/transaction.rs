@@ -42,7 +42,9 @@ fn immediate_begin_retries_sqlite_busy_until_lock_releases() {
         while !started.load(Ordering::Acquire) {
             std::thread::yield_now();
         }
-        std::thread::yield_now();
+        // Hold past a yield-only attempt budget (~50µs for 64 yields) so the
+        // contender must wait on the idle deadline, not burn out spinning.
+        std::thread::sleep(Duration::from_millis(5));
         lock.rollback().unwrap();
         admission.join().unwrap();
     });
