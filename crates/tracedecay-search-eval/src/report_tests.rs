@@ -168,6 +168,75 @@ fn baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples() {
     }
 }
 
+/// The report is evidence about labels, not authority over retrieval: it may
+/// not carry a qualification or activation verdict, and workload documents may
+/// not be re-read as the candidate evidence an evaluator run produces. See
+/// `docs/development/search-quality-direct-evaluation.md`.
+#[test]
+fn direct_report_is_evidence_only_and_owns_its_candidate_schema() {
+    let fixture = crate::candidate_output::tests::packaged_fixture();
+    let repo_root = fixture.root();
+    let workload = fixture.workload();
+    let profile_ids = vec![QUERY_BASELINE_PROFILE.to_owned()];
+    let generated = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
+        repo_root,
+        workload_path: None,
+        profile_ids: Some(&profile_ids),
+        admitted_scope: direct_fixture_scope,
+    })
+    .expect("generate direct fixture outputs");
+    let report = evaluate_generated_outputs(repo_root, workload, &generated)
+        .expect("evaluate direct fixture outputs");
+
+    let value = serde_json::to_value(&report).expect("serialize direct report");
+    assert_eq!(
+        activation_claim_keys(&value),
+        Vec::<String>::new(),
+        "a direct report must not claim qualification or activation"
+    );
+
+    // Workload documents are schema 1; candidate evidence is schema 2. The two
+    // schemas have separate owners, and the gate refuses to conflate them.
+    assert_eq!(workload.schema_version, 1);
+    assert!(
+        report
+            .raw_outputs
+            .iter()
+            .all(|output| output.schema_version == 2)
+    );
+    let mut workload_schema = generated.clone();
+    for output in &mut workload_schema.outputs {
+        output.schema_version = workload.schema_version;
+    }
+    let error = evaluate_generated_outputs(repo_root, workload, &workload_schema)
+        .expect_err("schema-1 evidence is refused rather than reinterpreted")
+        .to_string();
+    assert!(
+        error.contains("unsupported candidate output schema"),
+        "{error}"
+    );
+}
+
+/// Every retained key whose name claims a decision about activating retrieval.
+fn activation_claim_keys(value: &serde_json::Value) -> Vec<String> {
+    match value {
+        serde_json::Value::Object(fields) => fields
+            .iter()
+            .flat_map(|(key, child)| {
+                let claimed = ["qualif", "activat", "promot", "accepted"]
+                    .into_iter()
+                    .any(|claim| key.contains(claim));
+                claimed
+                    .then(|| key.clone())
+                    .into_iter()
+                    .chain(activation_claim_keys(child))
+            })
+            .collect(),
+        serde_json::Value::Array(items) => items.iter().flat_map(activation_claim_keys).collect(),
+        _ => Vec::new(),
+    }
+}
+
 #[test]
 fn baseline_report_is_self_validating_and_refuses_conceptual_misses() {
     if std::env::var_os(BASELINE_REPORT_RESOURCE_CHILD_ENV).is_none() {
