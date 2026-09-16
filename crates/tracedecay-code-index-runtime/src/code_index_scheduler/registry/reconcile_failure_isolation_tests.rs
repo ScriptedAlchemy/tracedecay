@@ -15,7 +15,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 use super::super::{
-    CodeIndexCadenceTriggerV1,
+    CodeIndexCadenceTriggerV1, CodeIndexReconcileAdmissionV1,
     reconcile_panic_guard::{
         MAX_CONSECUTIVE_CAPACITY_RETRIES_V1, MAX_CONSECUTIVE_RECONCILE_PANICS_V1,
         ReconcileFaultInjectionV1, ReconcileFaultKindV1,
@@ -481,6 +481,16 @@ async fn corrupt_publication_authority_stops_after_one_attempt_and_reports_termi
     assert!(
         !parked.retries_on_wake,
         "an index reset requirement cannot clear on another wake"
+    );
+    assert!(
+        matches!(
+            fixture
+                .registry
+                .notify_hook_overflow(&fixture.project)
+                .await,
+            CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_)
+        ),
+        "the mounted scheduler must return the terminal state until reset"
     );
 
     fixture.registry.shutdown().await;

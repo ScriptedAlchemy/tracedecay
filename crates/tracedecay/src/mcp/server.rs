@@ -13,6 +13,7 @@ use crate::mcp::project_route::{
     HookProjectRouteCache, SharedHookProjectRouteCache, mcp_analytics_session_id,
 };
 use crate::project::TraceDecay;
+use tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1;
 use tracedecay_contracts::request_identity::McpConnectionIdentityAuthority;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -118,11 +119,22 @@ impl ServerStats {
 }
 
 /// Admission preserves policy refusal separately from scheduler availability.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CodeIndexAdmission {
     Accepted,
     LinkedWorktreeDisabled,
+    PublicationAuthorityCorrupt(CodeIndexConvergenceParkedV1),
     Unavailable,
+}
+
+pub(crate) fn code_index_publication_corrupt(
+    parked: CodeIndexConvergenceParkedV1,
+) -> TraceDecayError {
+    TraceDecayError::project_route(
+        "code_index_publication_authority_corrupt",
+        false,
+        format!("{}; {}", parked.reason, parked.remediation),
+    )
 }
 
 impl CodeIndexAdmission {
@@ -131,6 +143,9 @@ impl CodeIndexAdmission {
             Self::Accepted => HostAdmissionOutcome::replay_completed(true, false),
             Self::LinkedWorktreeDisabled => {
                 HostAdmissionOutcome::degraded("linked_worktree_disabled")
+            }
+            Self::PublicationAuthorityCorrupt(_) => {
+                HostAdmissionOutcome::degraded("code_index_publication_authority_corrupt")
             }
             Self::Unavailable => {
                 HostAdmissionOutcome::retained_unavailable("code_index_scheduler_unavailable")

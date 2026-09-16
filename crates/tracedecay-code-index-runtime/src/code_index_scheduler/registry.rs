@@ -22,7 +22,7 @@ use std::sync::Condvar;
 
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_contracts::code_index_freshness::{
-    CodeGraphServingReadinessV1, CodeIndexConvergenceParkedV1,
+    CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexConvergenceParkedV1,
 };
 use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, WorktreeId, host_cpu_target,
@@ -1199,6 +1199,13 @@ type ReadyProbeServingPartsV1 = (
     Arc<PendingWakeV1>,
     Arc<AtomicUsize>,
 );
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CodeIndexReconcileAdmissionV1 {
+    Accepted,
+    PublicationAuthorityCorrupt(CodeIndexConvergenceParkedV1),
+    Unavailable,
+}
 
 #[derive(Clone)]
 pub struct CodeIndexSchedulerRegistryV1 {
@@ -2377,6 +2384,20 @@ impl CodeIndexSchedulerRegistryV1 {
         self.mounted.lock().await.contains_key(&project_root)
     }
 
+    fn publication_authority_requires_reset(worktree: &MountedCodeIndexWorktreeV1) -> bool {
+        let progress = worktree
+            .build_progress
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        matches!(
+            progress
+                .snapshot()
+                .as_deref()
+                .and_then(|snapshot| snapshot.blocked_reason),
+            Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt)
+        )
+    }
+
     #[cfg(any(test, feature = "test-helpers"))]
     #[cfg_attr(not(test), allow(dead_code))]
     pub async fn notify_path(&self, project_root: &Path, path: PathBuf) -> bool {
@@ -2388,6 +2409,9 @@ impl CodeIndexSchedulerRegistryV1 {
             let Some(worktree) = mounted.get(&project_root) else {
                 return false;
             };
+            if Self::publication_authority_requires_reset(worktree) {
+                return false;
+            }
             (
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.wake),
@@ -2417,6 +2441,9 @@ impl CodeIndexSchedulerRegistryV1 {
             let Some(worktree) = mounted.get(&project_root) else {
                 return false;
             };
+            if Self::publication_authority_requires_reset(worktree) {
+                return false;
+            }
             (
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.wake),
@@ -2444,15 +2471,26 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Preserve correctness when the pre-mount activation queue exceeds its
     /// bounded exact-path capacity. Overflow requests one authoritative scan for
     /// this exact mounted worktree; it never aliases a sibling worktree.
-    pub async fn notify_hook_overflow(&self, project_root: &Path) -> bool {
+    pub async fn notify_hook_overflow(&self, project_root: &Path) -> CodeIndexReconcileAdmissionV1 {
         let Ok(project_root) = project_root.canonicalize() else {
-            return false;
+            return CodeIndexReconcileAdmissionV1::Unavailable;
         };
         let (hints, wake, epoch, pending_wake) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
-                return false;
+                return CodeIndexReconcileAdmissionV1::Unavailable;
             };
+            if Self::publication_authority_requires_reset(worktree) {
+                return worktree
+                    .convergence_park
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+                    .map_or(
+                        CodeIndexReconcileAdmissionV1::Unavailable,
+                        CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt,
+                    );
+            }
             (
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.wake),
@@ -2466,7 +2504,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .overflow();
         DaemonCodeIndexControlV1::advance(&epoch);
         Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::Overflow);
-        true
+        CodeIndexReconcileAdmissionV1::Accepted
     }
 
     /// Run the bounded Git/stat/content freshness ladder for an ordinary read

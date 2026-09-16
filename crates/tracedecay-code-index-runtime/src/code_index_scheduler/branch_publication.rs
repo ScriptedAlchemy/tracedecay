@@ -20,7 +20,7 @@ use tracedecay_runtime_core::cancellation::CancellationToken;
 
 use super::registry::{CodeIndexServingScopeV1, ServingGenerationInstallationV1};
 use super::{
-    CodeIndexPublishedGenerationV1, CodeIndexSchedulerRegistryV1,
+    CodeIndexPublishedGenerationV1, CodeIndexReconcileAdmissionV1, CodeIndexSchedulerRegistryV1,
     ServingGenerationInstallationOutcomeV1, ServingGenerationRollbackOutcomeV1,
 };
 
@@ -443,18 +443,28 @@ impl BranchPublicationContextV1 {
                 ),
             ));
         }
-        if !schedulers
+        match schedulers
             .notify_hook_overflow(canonical_worktree_root)
             .await
         {
-            return Err(TraceDecayError::project_route(
-                CODE_INDEX_SCHEDULER_UNAVAILABLE,
-                true,
-                format!(
-                    "code-index scheduler rejected refresh for branch worktree '{}'",
-                    canonical_worktree_root.display()
-                ),
-            ));
+            CodeIndexReconcileAdmissionV1::Accepted => {}
+            CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(parked) => {
+                return Err(TraceDecayError::project_route(
+                    "code_index_publication_authority_corrupt",
+                    false,
+                    format!("{}; {}", parked.reason, parked.remediation),
+                ));
+            }
+            CodeIndexReconcileAdmissionV1::Unavailable => {
+                return Err(TraceDecayError::project_route(
+                    CODE_INDEX_SCHEDULER_UNAVAILABLE,
+                    true,
+                    format!(
+                        "code-index scheduler rejected refresh for branch worktree '{}'",
+                        canonical_worktree_root.display()
+                    ),
+                ));
+            }
         }
         let hard_deadline = Instant::now() + BRANCH_GENERATION_HARD_TIMEOUT;
         let mut idle_deadline = Instant::now() + BRANCH_GENERATION_IDLE_TIMEOUT;

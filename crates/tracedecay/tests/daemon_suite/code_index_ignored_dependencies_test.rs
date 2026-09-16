@@ -253,7 +253,12 @@ async fn reconcile_through_worker(
         release_rx.recv().expect("release scheduler hold");
     });
     held_rx.recv().expect("scheduler is held");
-    assert!(registry.notify_hook_overflow(project_root).await);
+    assert!(
+        matches!(
+            registry.notify_hook_overflow(project_root).await,
+            tracedecay_code_index_runtime::code_index_scheduler::CodeIndexReconcileAdmissionV1::Accepted
+        )
+    );
     wait_for_reconciling(registry, 1).await;
     release_tx.send(()).expect("release scheduler");
     lock_thread.join().expect("scheduler holder joins");
