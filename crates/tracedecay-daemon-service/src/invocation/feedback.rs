@@ -21,6 +21,14 @@ pub struct DaemonFeedbackInvocationResult {
     pub(crate) evidence: EvidencePacket<serde_json::Value>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum DaemonFeedbackProximityPayloadError {
+    #[error("feedback proximity evidence payload is missing")]
+    Missing,
+    #[error("feedback proximity evidence payload is invalid: {0}")]
+    Invalid(#[source] serde_json::Error),
+}
+
 impl DaemonFeedbackInvocationResult {
     pub fn project_id(&self) -> &tracedecay_domain::ProjectId {
         &self.scope.project_id
@@ -28,9 +36,34 @@ impl DaemonFeedbackInvocationResult {
 
     /// Recover the typed proximity read carried in the evidence payload.
     /// Production Delivery inbox mounts this as the single join authority.
-    pub fn feedback_proximity_read_result(&self) -> Option<FeedbackProximityReadResultV1> {
-        let payload = self.evidence.payload.as_ref()?;
-        serde_json::from_value(payload.clone()).ok()
+    pub fn feedback_proximity_read_result(
+        &self,
+    ) -> Result<FeedbackProximityReadResultV1, DaemonFeedbackProximityPayloadError> {
+        decode_feedback_proximity_payload(self.evidence.payload.as_ref())
+    }
+}
+
+fn decode_feedback_proximity_payload(
+    payload: Option<&serde_json::Value>,
+) -> Result<FeedbackProximityReadResultV1, DaemonFeedbackProximityPayloadError> {
+    let payload = payload.ok_or(DaemonFeedbackProximityPayloadError::Missing)?;
+    serde_json::from_value(payload.clone()).map_err(DaemonFeedbackProximityPayloadError::Invalid)
+}
+
+#[cfg(test)]
+mod payload_decode_tests {
+    use super::{DaemonFeedbackProximityPayloadError, decode_feedback_proximity_payload};
+
+    #[test]
+    fn missing_or_invalid_proximity_payload_is_a_typed_failure() {
+        assert!(matches!(
+            decode_feedback_proximity_payload(None),
+            Err(DaemonFeedbackProximityPayloadError::Missing)
+        ));
+        assert!(matches!(
+            decode_feedback_proximity_payload(Some(&serde_json::json!({"unexpected": true}))),
+            Err(DaemonFeedbackProximityPayloadError::Invalid(_))
+        ));
     }
 }
 
