@@ -1164,13 +1164,23 @@ where
             scope_module.replace('/', "::")
         )
     };
+    let target_path = &files[target.index].as_ref().authority.logical_path;
     let resolves = if target.index == scope_index
         && rust_crate_qualified_name_matches(
             &qualified,
             root_path,
-            &files[target.index].as_ref().authority.logical_path,
+            target_path,
             &target.symbol.qualified_name,
         ) {
+        true
+    } else if rust_inherent_method_owned_by_scope_type(
+        files,
+        root_path,
+        scope_index,
+        exported_name,
+        member,
+        target,
+    ) {
         true
     } else {
         let mut bindings = files[scope_index]
@@ -1200,7 +1210,7 @@ where
                     if rust_crate_qualified_name_matches(
                         &format!("{qualified}{member}"),
                         root_path,
-                        &files[target.index].as_ref().authority.logical_path,
+                        target_path,
                         &target.symbol.qualified_name,
                     ) {
                         true
@@ -1373,6 +1383,90 @@ fn file_qualified_name_matches(
         .strip_prefix(file_stem)
         .and_then(|path| path.strip_prefix("::"))
         == Some(symbol_path)
+}
+
+/// An inherent `Type::method` whose owning type is defined in `scope_index`
+/// may live in any other file of the same crate. Validate the type at scope,
+/// then match the method by its file-relative `Type::method` path without
+/// requiring `target.index == scope_index`.
+fn rust_inherent_method_owned_by_scope_type<T>(
+    files: &[T],
+    root_path: &str,
+    scope_index: usize,
+    exported_name: &str,
+    member: &str,
+    target: RustSymbolTargetV1<'_>,
+) -> bool
+where
+    T: AsRef<FileGenerationArtifactsV1>,
+{
+    if member.is_empty() {
+        return false;
+    }
+    let scope_path = &files[scope_index].as_ref().authority.logical_path;
+    let type_defined = files[scope_index].as_ref().artifacts.symbols.iter().any(|symbol| {
+        relation_target_kind_is_compatible(RelationEdgeKindV1::TypeOf, &symbol.kind)
+            && rust_crate_qualified_name_matches(
+                exported_name,
+                root_path,
+                scope_path,
+                &symbol.qualified_name,
+            )
+    });
+    type_defined
+        && rust_inherent_method_matches(
+            exported_name,
+            member,
+            root_path,
+            &files[target.index].as_ref().authority.logical_path,
+            &target.symbol.qualified_name,
+        )
+}
+
+/// File-relative inherent method identity: `Type::method`, same crate as
+/// `source_path`, ignoring which module file holds the `impl` block.
+fn rust_inherent_method_matches(
+    type_name: &str,
+    member: &str,
+    source_path: &str,
+    target_path: &str,
+    target_qualified_name: &str,
+) -> bool {
+    let Some(source_root) = rust_source_root(source_path) else {
+        return false;
+    };
+    if rust_source_root(target_path) != Some(source_root) {
+        return false;
+    }
+    let Some(relative_file) = target_path
+        .strip_prefix(source_root)
+        .and_then(|path| path.strip_prefix('/'))
+    else {
+        return false;
+    };
+    let Some(source_file) = source_path
+        .strip_prefix(source_root)
+        .and_then(|path| path.strip_prefix('/'))
+    else {
+        return false;
+    };
+    if source_file.starts_with("bin/") || relative_file.starts_with("bin/") {
+        return false;
+    }
+    if matches!(
+        (source_file, relative_file),
+        ("lib.rs", "main.rs") | ("main.rs", "lib.rs")
+    ) {
+        return false;
+    }
+    let Some(symbol_path) = target_qualified_name
+        .strip_prefix(target_path)
+        .and_then(|path| path.strip_prefix("::"))
+    else {
+        return false;
+    };
+    let expected = format!("{type_name}{member}");
+    symbol_path == expected || symbol_path.ends_with(&format!("::{expected}"))
 }
 
 /// Map an extracted Rust symbol back to the path used by a `crate::...`

@@ -597,10 +597,10 @@ fn call_names(result: &ExtractionResult, function_name: &str) -> Vec<String> {
 fn test_rust_dotted_calls_on_typed_bindings_also_name_the_method_by_type() {
     let source = r#"
 fn assemble(args: &HiArgs, raw: Vec<u8>) -> Widget {
-    let mut builder = ignore::WalkBuilder::new(&raw);
+    let mut builder: ignore::WalkBuilder = ignore::WalkBuilder::new(&raw);
     let types = ignore::types::TypesBuilder::new().build()?;
     let parsed: config::Parsed = config::parse(raw)?;
-    let fallback = Fallback::default().unwrap();
+    let fallback: Fallback = Fallback::default().unwrap();
     let literal = Literal { raw };
     args.walk_builder();
     builder.build();
@@ -637,6 +637,45 @@ fn assemble(args: &HiArgs, raw: Vec<u8>) -> Widget {
     assert!(
         names.contains(&"raw.len".to_owned()) && names.contains(&"builder.build".to_owned()),
         "the receiver-dotted forms stay alongside the typed ones: {names:?}"
+    );
+}
+
+#[test]
+fn test_rust_constructor_like_names_do_not_infer_receiver_types() {
+    let source = r#"
+struct Factory;
+struct Product;
+impl Factory {
+    fn new() -> Product { Product }
+    fn run(&self) {}
+}
+impl Product {
+    fn run(&self) {}
+}
+fn assemble() {
+    let p = Factory::new();
+    p.run();
+    let q = Factory::with_defaults();
+    q.run();
+    let r = Factory::from_config();
+    r.run();
+}
+"#;
+    let result = RustExtractor.extract("factory.rs", source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let names = call_names(&result, "assemble");
+    assert!(
+        !names.iter().any(|name| name == "Factory::run"),
+        "constructor-like names must not fabricate Factory::run callers: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|name| name == "Product::run"),
+        "without an explicit type or struct literal, abstain from Product::run too: {names:?}"
+    );
+    assert!(
+        names.contains(&"p.run".to_owned())
+            && names.contains(&"Factory::new".to_owned()),
+        "receiver-dotted and associated-function forms remain: {names:?}"
     );
 }
 

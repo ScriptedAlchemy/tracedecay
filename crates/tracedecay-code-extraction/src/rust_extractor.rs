@@ -27,12 +27,14 @@ struct ShadowedCallNames {
 }
 
 /// Receiver bindings whose type the function body states outright: typed
-/// parameters, typed `let`s, and `let`s initialised by a constructor path
-/// (`T::new(..)`, `T::default()`, `T::with_*`/`T::from_*`, possibly behind
-/// `?`, `.unwrap()`, or `.expect(..)`) or a struct literal. A dotted call on
-/// such a binding also names the method by its type (`builder.build()` →
-/// `ignore::WalkBuilder::build`), which is the only form the resolver can bind
-/// across files. Bindings are function-scoped: a name bound more than once to
+/// parameters, typed `let`s, and `let`s initialised by a struct literal
+/// (`T { .. }`, possibly behind `?`, `.unwrap()`, or `.expect(..)`). A dotted
+/// call on such a binding also names the method by its type
+/// (`builder.build()` → `ignore::WalkBuilder::build`), which is the only form
+/// the resolver can bind across files. Constructor-like names (`new`,
+/// `with_*`, `from_*`, `default`) are never treated as return-type evidence —
+/// Rust does not require those associated functions to return their owning
+/// type. Bindings are function-scoped: a name bound more than once to
 /// different or unknown types is withheld rather than guessed.
 #[derive(Default)]
 struct ReceiverTypes {
@@ -1632,7 +1634,7 @@ impl RustExtractor {
                         Some(ty) => Self::stated_type_path(state, ty),
                         None => node
                             .child_by_field_name("value")
-                            .and_then(|value| Self::constructor_type_path(state, value)),
+                            .and_then(|value| Self::stated_initializer_type_path(state, value)),
                     };
                     Self::record_receiver_pattern(state, pattern, type_path, receivers);
                 }
@@ -1715,41 +1717,30 @@ impl RustExtractor {
         }
     }
 
-    /// The type a `let` initialiser constructs: `T::new(..)`, `T::default()`,
-    /// `T::with_*(..)`, `T::from_*(..)` (each optionally unwrapped by `?`,
-    /// `.unwrap()`, or `.expect(..)`), or a `T { .. }` literal.
-    fn constructor_type_path(state: &ExtractionState<'_>, value: TsNode<'_>) -> Option<String> {
+    /// The type a `let` initialiser states in syntax: a `T { .. }` literal,
+    /// optionally behind `?`, `.unwrap()`, or `.expect(..)`. Associated-function
+    /// names are never evidence — abstain rather than fabricate a receiver type.
+    fn stated_initializer_type_path(
+        state: &ExtractionState<'_>,
+        value: TsNode<'_>,
+    ) -> Option<String> {
         match value.kind() {
             "try_expression" => value
                 .child(0)
-                .and_then(|inner| Self::constructor_type_path(state, inner)),
+                .and_then(|inner| Self::stated_initializer_type_path(state, inner)),
             "struct_expression" => value
                 .child_by_field_name("name")
                 .and_then(|name| Self::stated_type_path(state, name)),
             "call_expression" => {
                 let function = value.child_by_field_name("function")?;
-                match function.kind() {
-                    "scoped_identifier" => {
-                        let path = state.node_text(function);
-                        let (type_path, constructor) = path.rsplit_once("::")?;
-                        let is_constructor = matches!(constructor, "new" | "default")
-                            || constructor.starts_with("with_")
-                            || constructor.starts_with("from_");
-                        (is_constructor
-                            && !type_path.is_empty()
-                            && type_path != "Self"
-                            && !type_path.contains('<'))
-                        .then(|| type_path.to_owned())
-                    }
-                    "field_expression" => {
-                        let field = function.child_by_field_name("field")?;
-                        matches!(state.node_text(field), "unwrap" | "expect")
-                            .then(|| function.child_by_field_name("value"))
-                            .flatten()
-                            .and_then(|inner| Self::constructor_type_path(state, inner))
-                    }
-                    _ => None,
+                if function.kind() != "field_expression" {
+                    return None;
                 }
+                let field = function.child_by_field_name("field")?;
+                matches!(state.node_text(field), "unwrap" | "expect")
+                    .then(|| function.child_by_field_name("value"))
+                    .flatten()
+                    .and_then(|inner| Self::stated_initializer_type_path(state, inner))
             }
             _ => None,
         }
