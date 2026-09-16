@@ -20,7 +20,7 @@
  * counts printed are of the filtered union the daemon returned, not of the
  * repository.
  */
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import {
   CodeIndexFreshnessPayloadV1Schema,
   RevisionPairUnionLayoutV1Schema,
@@ -55,6 +55,36 @@ export function CompareView({
   onSelectionChange: (selection: CompareSelection) => void;
 }) {
   const complete = isCompareSelectionComplete(selection);
+  const freshness = useEnvelope(
+    ['code-index', 'freshness'],
+    '/api/code-index/freshness',
+    CodeIndexFreshnessPayloadV1Schema,
+  );
+  // The indexed worktree is the one revision the daemon already knows exactly.
+  // It is offered for head only when the scheduler reported both the
+  // reference and the revision; a missing revision is not defaulted.
+  const indexedWorktree = envelopePayload(freshness.data)?.worktrees.find(
+    (worktree) => worktree.source_reference !== null && worktree.source_revision !== null,
+  );
+  const indexed =
+    indexedWorktree?.source_reference != null && indexedWorktree.source_revision != null
+      ? {
+          branch: branchFromReference(indexedWorktree.source_reference),
+          revision: indexedWorktree.source_revision,
+        }
+      : undefined;
+  const [draft, setDraft] = useState<CompareSelection>(selection);
+  // An empty head is filled with the indexed worktree as soon as the daemon
+  // names it, so the reader types one side, not two. A head the reader typed
+  // is never overwritten.
+  useEffect(() => {
+    if (indexed === undefined) return;
+    setDraft((current) =>
+      current.head.branch === '' && current.head.revision === ''
+        ? { ...current, head: { branch: indexed.branch, revision: indexed.revision } }
+        : current,
+    );
+  }, [indexed]);
   return (
     <div className="flex min-h-full flex-col" data-compare-selected={complete}>
       <header className="flex flex-col gap-1 border-b border-edge-subtle px-3 py-2">
@@ -66,16 +96,58 @@ export function CompareView({
           reported as stale, never compared as whatever it points at now.
         </p>
       </header>
-      <SelectionForm selection={selection} onSubmit={onSelectionChange} />
+      <SelectionForm draft={draft} onDraftChange={setDraft} indexed={indexed} onSubmit={onSelectionChange} />
       {complete ? (
         <UnionLayoutReading selection={selection} />
       ) : (
-        <CenteredState
-          title="Compare needs two exact revisions"
-          kind="unknown"
-          detail="Name a base and a head branch with the commit each is expected to hold, then compare."
-        />
+        <SelectionGuidance draft={draft} indexed={indexed} />
       )}
+    </div>
+  );
+}
+
+type IndexedRevision = { branch: string; revision: string };
+
+/**
+ * What stands between the reader and a comparison, said in terms of the two
+ * fields: which side is already exact and which is still to be named. The
+ * indexed worktree is the only revision this surface can assert; nothing else
+ * is claimed about what the daemon holds.
+ */
+function SelectionGuidance({
+  draft,
+  indexed,
+}: {
+  draft: CompareSelection;
+  indexed: IndexedRevision | undefined;
+}) {
+  const side = (value: CompareSelection['base']) => {
+    if (value.branch === '' && value.revision === '') return 'not named yet';
+    if (value.branch === '' || value.revision === '') return 'needs both a branch and its exact commit';
+    const exact = indexed && value.branch === indexed.branch && value.revision === indexed.revision;
+    return `${value.branch} @ ${value.revision.slice(0, 12)}${exact ? ' — the indexed worktree' : ''}`;
+  };
+  return (
+    <div
+      className="td-graticule @container flex h-full min-h-48 items-center justify-center bg-surface-0 p-3 @md:p-8"
+      data-compare-guidance
+    >
+      <div className="relative flex w-full max-w-md flex-col gap-3 border border-edge-subtle bg-surface-1 px-4 py-4 @md:w-auto @md:px-8 @md:py-6">
+        <h1 className="text-2xs font-semibold uppercase tracking-[0.2em] text-text-primary">
+          Compare needs two exact revisions
+        </h1>
+        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-2xs">
+          <dt className="td-legend">base</dt>
+          <dd className="text-text-primary">{side(draft.base)}</dd>
+          <dt className="td-legend">head</dt>
+          <dd className="text-text-primary">{side(draft.head)}</dd>
+        </dl>
+        <p className="text-3xs leading-relaxed text-text-muted">
+          {indexed === undefined
+            ? 'The daemon has not reported an indexed worktree revision, so nothing is prefilled.'
+            : 'Name the base branch and the exact commit it should hold, then press Compare. A branch that has moved past that commit is reported as stale rather than compared.'}
+        </p>
+      </div>
     </div>
   );
 }
@@ -83,24 +155,16 @@ export function CompareView({
 /** The four identity fields and two lens filters. Submission writes the URL;
  * nothing is read until every identity field is present. */
 function SelectionForm({
-  selection,
+  draft,
+  onDraftChange: setDraft,
+  indexed,
   onSubmit,
 }: {
-  selection: CompareSelection;
+  draft: CompareSelection;
+  onDraftChange: (draft: CompareSelection) => void;
+  indexed: IndexedRevision | undefined;
   onSubmit: (selection: CompareSelection) => void;
 }) {
-  const [draft, setDraft] = useState<CompareSelection>(selection);
-  const freshness = useEnvelope(
-    ['code-index', 'freshness'],
-    '/api/code-index/freshness',
-    CodeIndexFreshnessPayloadV1Schema,
-  );
-  // The indexed worktree is the one revision the daemon already knows exactly.
-  // It is offered as a fill for head only when the scheduler reported both the
-  // reference and the revision; a missing revision is not defaulted.
-  const indexed = envelopePayload(freshness.data)?.worktrees.find(
-    (worktree) => worktree.source_reference !== null && worktree.source_revision !== null,
-  );
   const submit = (event: FormEvent) => {
     event.preventDefault();
     onSubmit({
@@ -126,16 +190,13 @@ function SelectionForm({
         value={draft.head}
         onChange={(head) => setDraft({ ...draft, head })}
         fill={
-          indexed && indexed.source_reference !== null && indexed.source_revision !== null
+          indexed
             ? {
-                label: `Use indexed ${branchFromReference(indexed.source_reference)}`,
+                label: `Use indexed ${indexed.branch}`,
                 apply: () =>
                   setDraft({
                     ...draft,
-                    head: {
-                      branch: branchFromReference(indexed.source_reference ?? ''),
-                      revision: indexed.source_revision ?? '',
-                    },
+                    head: { branch: indexed.branch, revision: indexed.revision },
                   }),
               }
             : null
