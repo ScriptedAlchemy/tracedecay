@@ -47,6 +47,15 @@ const MAX_LEXICAL_GENERATION_METADATA_BYTES: u64 = 64 * 1024 * 1024;
 /// segment window share it so neither holds more than this in raw segment
 /// bytes while the pool decodes them.
 pub(super) const LEXICAL_FILE_PREFETCH_BYTES_V1: u64 = 64 * 1024 * 1024;
+/// Files admitted per worker in one restore window, mirroring the encode
+/// side's `SEALED_ENCODE_WINDOW_FILES_PER_WORKER_V1`. A bare `workers`-sized
+/// window forces a fresh `install()` fan-out (and its barrier/dispatch
+/// overhead) every `workers` files during a drain; multiplying it lets the
+/// byte budget above (`LEXICAL_FILE_PREFETCH_BYTES_V1`) be the binding
+/// constraint far more often, without changing how many bytes are held in
+/// flight at once (the byte cap still applies on top of this file cap).
+/// CI retrigger marker (no behavior).
+pub(super) const LEXICAL_DECODE_WINDOW_FILES_PER_WORKER_V1: usize = 4;
 
 type PersistedSealedLexicalCursorFields = (
     String,
@@ -2225,6 +2234,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         let snapshot_digest = self.metadata.manifest().snapshot_digest.clone();
         let start_index = self.file_range_index(file_offset)?;
         let workers = crate::parallelism::indexing_workers().max(1);
+        let window_files = workers.saturating_mul(LEXICAL_DECODE_WINDOW_FILES_PER_WORKER_V1);
         let mut prefetch_bytes = 0u64;
         let mut inputs = Vec::new();
         for (index, &(start, end)) in self.file_ranges[start_index..].iter().enumerate() {
@@ -2234,7 +2244,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 )
             })?;
             if index > 0
-                && (inputs.len() >= workers
+                && (inputs.len() >= window_files
                     || prefetch_bytes
                         .checked_add(file_bytes)
                         .is_some_and(|total| total > LEXICAL_FILE_PREFETCH_BYTES_V1))
@@ -2286,6 +2296,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         };
         let start_index = self.file_range_index(file_offset)?;
         let workers = crate::parallelism::indexing_workers().max(1);
+        let window_files = workers.saturating_mul(LEXICAL_DECODE_WINDOW_FILES_PER_WORKER_V1);
         let mut prefetch_bytes = 0u64;
         let mut inputs = Vec::new();
         for (index, file) in files[start_index..].iter().enumerate() {
@@ -2300,7 +2311,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 )
             })?;
             if index > 0
-                && (inputs.len() >= workers
+                && (inputs.len() >= window_files
                     || prefetch_bytes
                         .checked_add(file_bytes)
                         .is_some_and(|total| total > LEXICAL_FILE_PREFETCH_BYTES_V1))
@@ -2346,7 +2357,9 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         };
         let files = source.read_window(
             start,
-            crate::parallelism::indexing_workers().max(1),
+            crate::parallelism::indexing_workers()
+                .max(1)
+                .saturating_mul(LEXICAL_DECODE_WINDOW_FILES_PER_WORKER_V1),
             LEXICAL_FILE_PREFETCH_BYTES_V1,
             control,
         )?;
