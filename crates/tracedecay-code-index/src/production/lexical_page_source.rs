@@ -54,7 +54,6 @@ pub(super) const LEXICAL_FILE_PREFETCH_BYTES_V1: u64 = 64 * 1024 * 1024;
 /// byte budget above (`LEXICAL_FILE_PREFETCH_BYTES_V1`) be the binding
 /// constraint far more often, without changing how many bytes are held in
 /// flight at once (the byte cap still applies on top of this file cap).
-/// CI retrigger marker (no behavior).
 pub(super) const LEXICAL_DECODE_WINDOW_FILES_PER_WORKER_V1: usize = 4;
 
 type PersistedSealedLexicalCursorFields = (
