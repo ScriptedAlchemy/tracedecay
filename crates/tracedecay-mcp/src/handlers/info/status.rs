@@ -831,7 +831,9 @@ mod tests {
             code_graph_serving: Some(
                 tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready,
             ),
-            clone_index: Some(Default::default()),
+            clone_index: Some(
+                tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::default(),
+            ),
             ..Default::default()
         };
 
