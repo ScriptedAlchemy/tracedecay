@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_contracts::retrieval::{
     ContextCodeBlockV1, ContextModeV1, ContextResultV1, ContextSearchMatchV1,
-    ContextSurfaceRequestV1, RedundancySurfaceRequestV1, RenamePreviewNodeV1,
+    ContextSurfaceRequestV1, RedundancyScopeV1, RedundancySurfaceRequestV1, RenamePreviewNodeV1,
     RenamePreviewPrimitiveRequestV1, RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1,
     RenamePreviewTextOnlyMatchV1, SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1,
     SimilarOccurrenceV1, SimilarResultV1, SimilarSurfaceRequestV1, SimilarTargetV1,
@@ -1216,6 +1216,35 @@ pub async fn handle_redundancy(ctx: &McpToolContext<'_>, args: Value) -> Result<
             }
         })
         .collect();
+    let scope = match request.scope {
+        RedundancyScopeV1::Repository => {
+            tracedecay_query::code_search::CodeIndexRedundancyScopeV1::Repository
+        }
+        RedundancyScopeV1::Path { path } => {
+            tracedecay_query::code_search::CodeIndexRedundancyScopeV1::Path(path)
+        }
+        RedundancyScopeV1::PullRequest {
+            provider,
+            pull_request_id,
+            head_commit_id,
+            mut changed_paths,
+        } => {
+            changed_paths.sort();
+            changed_paths.dedup();
+            let pull_request_id = tracedecay_domain::feedback::GitHubPullRequestIdV1::new(
+                pull_request_id,
+            )
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("invalid arguments for tracedecay_redundancy: {error}"),
+            })?;
+            tracedecay_query::code_search::CodeIndexRedundancyScopeV1::PullRequest {
+                provider,
+                pull_request_id,
+                head_commit_id,
+                changed_paths,
+            }
+        }
+    };
     let executor =
         ctx.code_index_redundancy_executor()
             .ok_or_else(|| TraceDecayError::ProjectRoute {
@@ -1228,7 +1257,7 @@ pub async fn handle_redundancy(ctx: &McpToolContext<'_>, args: Value) -> Result<
         project_id: request.project_id,
         repository_id: request.repository_id,
         match_classes,
-        path: request.path,
+        scope,
         include_generated_paths: request.include_generated_paths,
         family_limit: request.family_limit as usize,
         member_limit: request.member_limit as usize,

@@ -5959,6 +5959,156 @@
       ],
       "type": "object"
     },
+    "DeliveryAttentionEvidenceV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "fetched_at_micros": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "kind": {
+              "const": "provider_operation",
+              "type": "string"
+            },
+            "operation": {
+              "$ref": "#/$defs/DeliveryGitHubReadOperationV1"
+            }
+          },
+          "required": [
+            "kind",
+            "operation",
+            "fetched_at_micros"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "comment_id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "review_comment",
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "comment_id",
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "failure_anchor": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "ci_failure",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "failure_anchor"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "generation": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "indexed_generation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "generation"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryAttentionItemV1": {
+      "properties": {
+        "coverage": {
+          "$ref": "#/$defs/DeliveryInboxCoverageV1"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/DeliveryAttentionEvidenceV1"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "observed_at_micros": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "pull_request_id": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/DeliveryAttentionSourceV1"
+        },
+        "state": {
+          "$ref": "#/$defs/DeliveryAttentionStateV1"
+        }
+      },
+      "required": [
+        "id",
+        "project_id",
+        "pull_request_id",
+        "source",
+        "state",
+        "evidence",
+        "coverage",
+        "observed_at_micros"
+      ],
+      "type": "object"
+    },
+    "DeliveryAttentionSourceV1": {
+      "enum": [
+        "ci_failure",
+        "unresolved_review",
+        "new_review_comment",
+        "contradiction",
+        "unsafe_pattern",
+        "test_risk",
+        "unreviewed_changed_code",
+        "weak_evidence",
+        "evidence_gap",
+        "overlapping_edit",
+        "confirmed_conflict",
+        "divergent_shared_implementation",
+        "stale_provider_state"
+      ],
+      "type": "string"
+    },
+    "DeliveryAttentionStateV1": {
+      "enum": [
+        "active",
+        "clear",
+        "unavailable",
+        "denied"
+      ],
+      "type": "string"
+    },
     "DeliveryCiAnnotationLevelV1": {
       "enum": [
         "notice",
@@ -6490,6 +6640,288 @@
         "ignored",
         "changed_paths",
         "schema_version"
+      ],
+      "type": "object"
+    },
+    "DeliveryInboxCoverageV1": {
+      "enum": [
+        "complete",
+        "partial",
+        "stale",
+        "denied",
+        "unavailable",
+        "unsupported"
+      ],
+      "type": "string"
+    },
+    "DeliveryInboxProjectV1": {
+      "properties": {
+        "branch_ref": {
+          "type": "string"
+        },
+        "git_common_dir": {
+          "type": "string"
+        },
+        "indexed_generation": {
+          "type": "string"
+        },
+        "indexed_head_commit_id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "project_root": {
+          "type": "string"
+        },
+        "provider_state": {
+          "$ref": "#/$defs/DeliveryProviderStateV1"
+        },
+        "repository_id": {
+          "type": "string"
+        },
+        "worktree_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project_id",
+        "label",
+        "project_root",
+        "git_common_dir",
+        "repository_id",
+        "worktree_id",
+        "branch_ref",
+        "indexed_head_commit_id",
+        "indexed_generation",
+        "provider_state"
+      ],
+      "type": "object"
+    },
+    "DeliveryInboxPullRequestStateV1": {
+      "enum": [
+        "current",
+        "partial",
+        "stale"
+      ],
+      "type": "string"
+    },
+    "DeliveryInboxPullRequestV1": {
+      "properties": {
+        "attention": {
+          "items": {
+            "$ref": "#/$defs/DeliveryAttentionItemV1"
+          },
+          "type": "array"
+        },
+        "branch_ref": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "indexed_generation": {
+          "type": "string"
+        },
+        "indexed_head_commit_id": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "pull_request": {
+          "$ref": "#/$defs/DeliveryPullRequestV1"
+        },
+        "repository_id": {
+          "type": "string"
+        },
+        "shared_code": {
+          "items": {
+            "$ref": "#/$defs/DeliverySharedCodeRefV1"
+          },
+          "type": "array"
+        },
+        "state": {
+          "$ref": "#/$defs/DeliveryInboxPullRequestStateV1"
+        },
+        "worktree_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "project_id",
+        "repository_id",
+        "worktree_id",
+        "branch_ref",
+        "indexed_head_commit_id",
+        "indexed_generation",
+        "state",
+        "pull_request",
+        "attention",
+        "shared_code"
+      ],
+      "type": "object"
+    },
+    "DeliveryInboxV1": {
+      "properties": {
+        "excluded_pull_requests": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "membership_edges": {
+          "items": {
+            "$ref": "#/$defs/DeliveryMembershipEdgeV1"
+          },
+          "type": "array"
+        },
+        "omitted_projects": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "projects": {
+          "items": {
+            "$ref": "#/$defs/DeliveryInboxProjectV1"
+          },
+          "type": "array"
+        },
+        "pull_requests": {
+          "items": {
+            "$ref": "#/$defs/DeliveryInboxPullRequestV1"
+          },
+          "type": "array"
+        },
+        "registry_state": {
+          "$ref": "#/$defs/DeliveryRegistryStateV1"
+        }
+      },
+      "required": [
+        "registry_state",
+        "projects",
+        "pull_requests",
+        "membership_edges",
+        "omitted_projects",
+        "excluded_pull_requests"
+      ],
+      "type": "object"
+    },
+    "DeliveryMembershipBasisV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "shared_work_objective",
+              "type": "string"
+            },
+            "work_item_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "work_item_id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "commit_id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "session_git_relation",
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "session_id",
+            "commit_id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "handoff_id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "explicit_handoff",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "handoff_id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "agent_id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "shared_agent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "agent_id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "branch_ref": {
+              "type": "string"
+            },
+            "head_commit_id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "branch_pull_request_reference",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "branch_ref",
+            "head_commit_id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryMembershipEdgeV1": {
+      "properties": {
+        "basis": {
+          "$ref": "#/$defs/DeliveryMembershipBasisV1"
+        },
+        "id": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "pull_request_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "project_id",
+        "pull_request_id",
+        "basis"
       ],
       "type": "object"
     },
@@ -8132,6 +8564,20 @@
         }
       ]
     },
+    "DeliveryProviderStateV1": {
+      "enum": [
+        "ready",
+        "partial",
+        "stale",
+        "rate_limited",
+        "failed",
+        "denied",
+        "not_published",
+        "not_configured",
+        "unavailable"
+      ],
+      "type": "string"
+    },
     "DeliveryPullRequestIdentityV1": {
       "properties": {
         "additions": {
@@ -8308,6 +8754,14 @@
         "reset_at_micros"
       ],
       "type": "object"
+    },
+    "DeliveryRegistryStateV1": {
+      "enum": [
+        "ready",
+        "partial",
+        "unavailable"
+      ],
+      "type": "string"
     },
     "DeliveryReleaseAssetV1": {
       "properties": {
@@ -8676,6 +9130,42 @@
         "items",
         "total_retained",
         "truncated"
+      ],
+      "type": "object"
+    },
+    "DeliverySharedCodeRefKindV1": {
+      "enum": [
+        "shared_code",
+        "compare"
+      ],
+      "type": "string"
+    },
+    "DeliverySharedCodeRefStateV1": {
+      "enum": [
+        "requires_selection"
+      ],
+      "type": "string"
+    },
+    "DeliverySharedCodeRefV1": {
+      "properties": {
+        "href": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/DeliverySharedCodeRefKindV1"
+        },
+        "source_generation": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/DeliverySharedCodeRefStateV1"
+        }
+      },
+      "required": [
+        "kind",
+        "state",
+        "href",
+        "source_generation"
       ],
       "type": "object"
     },
@@ -31331,6 +31821,9 @@
     "costs": {
       "$ref": "#/$defs/CostsReadModelV1"
     },
+    "delivery_inbox": {
+      "$ref": "#/$defs/DeliveryInboxV1"
+    },
     "delivery_overview": {
       "$ref": "#/$defs/DeliveryOverviewV1"
     },
@@ -31727,6 +32220,7 @@
     "lcm_overview",
     "lcm_search",
     "loom_temporal",
+    "delivery_inbox",
     "delivery_overview",
     "feedback_status",
     "feedback_proximity_request",

@@ -123,6 +123,10 @@ fn delivery_contract_exposes_typed_provider_rows_and_source_states() {
         "DeliveryCiRunIdentityV1",
         "DeliveryReleaseV1",
         "DeliveryRateLimitCheckpointV1",
+        "DeliveryInboxV1",
+        "DeliveryAttentionItemV1",
+        "DeliveryMembershipEdgeV1",
+        "DeliverySharedCodeRefV1",
     ] {
         assert!(
             definitions.contains_key(definition),
@@ -159,6 +163,41 @@ fn delivery_contract_exposes_typed_provider_rows_and_source_states() {
                     .get(private_field)
                     .is_none(),
             "private retained-source field {private_field} must not cross the dashboard wire"
+        );
+    }
+
+    let membership = definitions["DeliveryMembershipBasisV1"].to_string();
+    for basis in [
+        "shared_work_objective",
+        "session_git_relation",
+        "explicit_handoff",
+        "shared_agent",
+        "branch_pull_request_reference",
+    ] {
+        assert!(
+            membership.contains(basis),
+            "Delivery membership must retain the explicit {basis} basis: {membership}"
+        );
+    }
+    let attention = definitions["DeliveryAttentionSourceV1"].to_string();
+    for source in [
+        "ci_failure",
+        "unresolved_review",
+        "new_review_comment",
+        "contradiction",
+        "unsafe_pattern",
+        "test_risk",
+        "unreviewed_changed_code",
+        "weak_evidence",
+        "evidence_gap",
+        "overlapping_edit",
+        "confirmed_conflict",
+        "divergent_shared_implementation",
+        "stale_provider_state",
+    ] {
+        assert!(
+            attention.contains(source),
+            "Delivery attention must retain the typed {source} source: {attention}"
         );
     }
 

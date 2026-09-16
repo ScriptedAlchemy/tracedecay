@@ -19,11 +19,13 @@ use tracedecay_contracts::{RequestAdmission, RequestContext, ResolvedScope, now_
 use tracedecay_domain::feedback::{
     CiFailureKindV1, CiFailureRunIdentityV1, FeedbackScopeV1, GitHubPullRequestSnapshotV1,
     GitHubPullRequestStateV1, GitHubReviewCommentIdV1, GitHubReviewCoverageV1,
-    GitHubReviewIngressProviderOutcomeV1, GitHubReviewItemV1, GitHubReviewRateLimitCheckpointV1,
-    GitHubReviewReadCheckpointV1, GitHubReviewReadOperationV1,
+    GitHubReviewIngressProviderOutcomeV1, GitHubReviewItemV1, GitHubReviewLifecycleV1,
+    GitHubReviewRateLimitCheckpointV1, GitHubReviewReadCheckpointV1, GitHubReviewReadOperationV1,
 };
 use tracedecay_domain::{
-    CommitId, ProviderId, UserProfileId, UtcMicros, feedback::GitHubPullRequestIdV1,
+    CanonicalObservationIdV1, CodeGenerationId, CommitId, ProjectId, ProviderId, RefId,
+    RepositoryId, RetrievalAnchorId, UserProfileId, UtcMicros, WorktreeId,
+    feedback::GitHubPullRequestIdV1,
 };
 use tracedecay_runtime_core::db::Database;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -58,8 +60,15 @@ pub const MAX_PROJECT_DELIVERY_CI_ANNOTATIONS_V1: usize = 8;
 
 /// Independent caller bounds. No provider URL, database key, or source
 /// identity is caller-selectable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectDeliveryReadKindV1 {
+    Overview,
+    Inbox,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectDeliveryReadRequestV1 {
+    pub kind: ProjectDeliveryReadKindV1,
     pub expected_head_commit_id: CommitId,
     pub max_pull_requests: usize,
     pub max_review_items: usize,
@@ -204,7 +213,7 @@ pub enum ProjectDeliveryGitHubSourceV1 {
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct ProjectDeliveryCiCheckV1 {
-    pub observation_id: tracedecay_domain::CanonicalObservationIdV1,
+    pub observation_id: CanonicalObservationIdV1,
     pub run: CiFailureRunIdentityV1,
     pub workflow_path: String,
     pub workflow_status: ProjectDeliveryCiStatusV1,
@@ -220,7 +229,7 @@ pub struct ProjectDeliveryCiCheckV1 {
     pub annotations: Vec<ProjectDeliveryCiAnnotationV1>,
     pub annotation_count: u64,
     pub provider_head_sha: String,
-    pub failure_anchor: tracedecay_domain::RetrievalAnchorId,
+    pub failure_anchor: RetrievalAnchorId,
     pub failure_kind: CiFailureKindV1,
     pub observed_at: UtcMicros,
 }
@@ -366,6 +375,670 @@ pub enum ProjectDeliveryProviderMountGateV1 {
     /// The project's GitHub source-access configuration authority could not
     /// be opened.
     GitHubSourceAccessUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectDeliveryInboxCoverageV1 {
+    Complete,
+    Partial,
+    Stale,
+    Denied,
+    Unavailable,
+    Unsupported,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ProjectDeliveryRegistrySourceV1 {
+    pub project_id: ProjectId,
+    pub label: String,
+    pub project_root: String,
+    pub git_common_dir: Option<String>,
+    pub repository_id: Option<RepositoryId>,
+    pub worktree_id: Option<WorktreeId>,
+    pub branch_ref: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ProjectDeliveryIndexedHeadV1 {
+    pub repository_id: RepositoryId,
+    pub worktree_id: WorktreeId,
+    pub branch_ref: String,
+    pub head_commit_id: CommitId,
+    pub generation: CodeGenerationId,
+    pub coverage: ProjectDeliveryInboxCoverageV1,
+    pub observed_at: UtcMicros,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProjectDeliveryMembershipBasisV1 {
+    SharedWorkObjective {
+        work_item_id: String,
+    },
+    SessionGitRelation {
+        session_id: String,
+        commit_id: CommitId,
+    },
+    ExplicitHandoff {
+        handoff_id: String,
+    },
+    SharedAgent {
+        agent_id: String,
+    },
+    BranchPullRequestReference {
+        branch_ref: String,
+        head_commit_id: CommitId,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ProjectDeliveryMembershipEvidenceV1 {
+    pub pull_request_id: GitHubPullRequestIdV1,
+    pub basis: ProjectDeliveryMembershipBasisV1,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ProjectDeliveryInboxSourceV1 {
+    pub registry: ProjectDeliveryRegistrySourceV1,
+    pub indexed: Option<ProjectDeliveryIndexedHeadV1>,
+    pub delivery: ProjectDeliveryReadOutcomeV1,
+    pub memberships: Vec<ProjectDeliveryMembershipEvidenceV1>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectDeliveryProviderStateV1 {
+    Ready,
+    Partial,
+    Stale,
+    RateLimited,
+    Failed,
+    Denied,
+    NotPublished,
+    NotConfigured,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectDeliveryInboxPullRequestStateV1 {
+    Current,
+    Partial,
+    Stale,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectDeliveryAttentionSourceV1 {
+    CiFailure,
+    UnresolvedReview,
+    NewReviewComment,
+    Contradiction,
+    UnsafePattern,
+    TestRisk,
+    UnreviewedChangedCode,
+    WeakEvidence,
+    EvidenceGap,
+    OverlappingEdit,
+    ConfirmedConflict,
+    DivergentSharedImplementation,
+    StaleProviderState,
+}
+
+impl ProjectDeliveryAttentionSourceV1 {
+    pub const ALL: [Self; 13] = [
+        Self::CiFailure,
+        Self::UnresolvedReview,
+        Self::NewReviewComment,
+        Self::Contradiction,
+        Self::UnsafePattern,
+        Self::TestRisk,
+        Self::UnreviewedChangedCode,
+        Self::WeakEvidence,
+        Self::EvidenceGap,
+        Self::OverlappingEdit,
+        Self::ConfirmedConflict,
+        Self::DivergentSharedImplementation,
+        Self::StaleProviderState,
+    ];
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectDeliveryAttentionStateV1 {
+    Active,
+    Clear,
+    Unavailable,
+    Denied,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProjectDeliveryAttentionEvidenceV1 {
+    ProviderOperation {
+        operation: GitHubReviewReadOperationV1,
+        fetched_at: UtcMicros,
+    },
+    ReviewComment {
+        comment_id: GitHubReviewCommentIdV1,
+        path: String,
+    },
+    CiFailure {
+        failure_anchor: RetrievalAnchorId,
+    },
+    IndexedGeneration {
+        generation: CodeGenerationId,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ProjectDeliveryAttentionItemV1 {
+    pub source: ProjectDeliveryAttentionSourceV1,
+    pub state: ProjectDeliveryAttentionStateV1,
+    pub evidence: Vec<ProjectDeliveryAttentionEvidenceV1>,
+    pub coverage: ProjectDeliveryInboxCoverageV1,
+    pub observed_at: Option<UtcMicros>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ProjectDeliveryInboxProjectV1 {
+    pub project_id: ProjectId,
+    pub label: String,
+    pub project_root: String,
+    pub git_common_dir: String,
+    pub repository_id: RepositoryId,
+    pub worktree_id: WorktreeId,
+    pub branch_ref: String,
+    pub indexed_head_commit_id: CommitId,
+    pub indexed_generation: CodeGenerationId,
+    pub provider_state: ProjectDeliveryProviderStateV1,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ProjectDeliveryInboxPullRequestV1 {
+    pub project_id: ProjectId,
+    pub repository_id: RepositoryId,
+    pub worktree_id: WorktreeId,
+    pub branch_ref: String,
+    pub indexed_head_commit_id: CommitId,
+    pub indexed_generation: CodeGenerationId,
+    pub pull_request: ProjectDeliveryPullRequestV1,
+    pub state: ProjectDeliveryInboxPullRequestStateV1,
+    pub attention: Vec<ProjectDeliveryAttentionItemV1>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ProjectDeliveryMembershipEdgeV1 {
+    pub project_id: ProjectId,
+    pub pull_request_id: GitHubPullRequestIdV1,
+    pub basis: ProjectDeliveryMembershipBasisV1,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ProjectDeliveryInboxAggregationV1 {
+    pub projects: Vec<ProjectDeliveryInboxProjectV1>,
+    pub pull_requests: Vec<ProjectDeliveryInboxPullRequestV1>,
+    pub memberships: Vec<ProjectDeliveryMembershipEdgeV1>,
+    pub coverage: ProjectDeliveryInboxCoverageV1,
+    pub omitted_projects: usize,
+    pub excluded_pull_requests: usize,
+}
+
+pub fn aggregate_project_delivery_inbox_v1(
+    mut sources: Vec<ProjectDeliveryInboxSourceV1>,
+    max_pull_requests: usize,
+) -> ProjectDeliveryInboxAggregationV1 {
+    sources.sort_by(|left, right| left.registry.project_id.cmp(&right.registry.project_id));
+    let mut projects = Vec::new();
+    let mut pull_requests = Vec::new();
+    let mut memberships = Vec::new();
+    let mut omitted_projects = 0usize;
+    let mut excluded_pull_requests = 0usize;
+    let mut partial = false;
+
+    for source in sources {
+        let Some((git_common_dir, repository_id, worktree_id, branch_ref, indexed)) =
+            attached_indexed_source(&source.registry, source.indexed)
+        else {
+            omitted_projects = omitted_projects.saturating_add(1);
+            partial = true;
+            continue;
+        };
+        partial |= indexed.coverage != ProjectDeliveryInboxCoverageV1::Complete;
+        let (provider_state, timeline, ci_checks) = delivery_inbox_provider(source.delivery);
+        projects.push(ProjectDeliveryInboxProjectV1 {
+            project_id: source.registry.project_id.clone(),
+            label: source.registry.label,
+            project_root: source.registry.project_root,
+            git_common_dir,
+            repository_id: repository_id.clone(),
+            worktree_id: worktree_id.clone(),
+            branch_ref: branch_ref.clone(),
+            indexed_head_commit_id: indexed.head_commit_id.clone(),
+            indexed_generation: indexed.generation.clone(),
+            provider_state,
+        });
+        let Some(timeline) = timeline else {
+            continue;
+        };
+        partial |= timeline.pull_requests_truncated || timeline.review_items_truncated;
+        for pull_request in timeline.pull_requests {
+            let Some(mut state) =
+                indexed_pull_request_state(&pull_request, &indexed.head_commit_id)
+            else {
+                excluded_pull_requests = excluded_pull_requests.saturating_add(1);
+                continue;
+            };
+            if state == ProjectDeliveryInboxPullRequestStateV1::Current {
+                match indexed.coverage {
+                    ProjectDeliveryInboxCoverageV1::Complete => {}
+                    ProjectDeliveryInboxCoverageV1::Stale => {
+                        state = ProjectDeliveryInboxPullRequestStateV1::Stale;
+                    }
+                    ProjectDeliveryInboxCoverageV1::Partial
+                    | ProjectDeliveryInboxCoverageV1::Denied
+                    | ProjectDeliveryInboxCoverageV1::Unavailable
+                    | ProjectDeliveryInboxCoverageV1::Unsupported => {
+                        state = ProjectDeliveryInboxPullRequestStateV1::Partial;
+                    }
+                }
+            }
+            if pull_requests.len() >= max_pull_requests {
+                partial = true;
+                continue;
+            }
+            let pull_request_id = pull_request.pull_request_id.clone();
+            let attention = delivery_attention(
+                &pull_request,
+                state,
+                provider_state,
+                &timeline.review_items,
+                &ci_checks,
+                &indexed,
+            );
+            memberships.push(ProjectDeliveryMembershipEdgeV1 {
+                project_id: source.registry.project_id.clone(),
+                pull_request_id: pull_request_id.clone(),
+                basis: ProjectDeliveryMembershipBasisV1::BranchPullRequestReference {
+                    branch_ref: branch_ref.clone(),
+                    head_commit_id: indexed.head_commit_id.clone(),
+                },
+            });
+            memberships.extend(
+                source
+                    .memberships
+                    .iter()
+                    .filter(|evidence| evidence.pull_request_id == pull_request_id)
+                    .cloned()
+                    .map(|evidence| ProjectDeliveryMembershipEdgeV1 {
+                        project_id: source.registry.project_id.clone(),
+                        pull_request_id: evidence.pull_request_id,
+                        basis: evidence.basis,
+                    }),
+            );
+            pull_requests.push(ProjectDeliveryInboxPullRequestV1 {
+                project_id: source.registry.project_id.clone(),
+                repository_id: repository_id.clone(),
+                worktree_id: worktree_id.clone(),
+                branch_ref: branch_ref.clone(),
+                indexed_head_commit_id: indexed.head_commit_id.clone(),
+                indexed_generation: indexed.generation.clone(),
+                pull_request,
+                state,
+                attention,
+            });
+        }
+    }
+    pull_requests.sort_by(|left, right| {
+        left.project_id.cmp(&right.project_id).then_with(|| {
+            left.pull_request
+                .pull_request_id
+                .cmp(&right.pull_request.pull_request_id)
+        })
+    });
+    memberships.sort_by(|left, right| {
+        left.project_id
+            .cmp(&right.project_id)
+            .then_with(|| left.pull_request_id.cmp(&right.pull_request_id))
+    });
+    ProjectDeliveryInboxAggregationV1 {
+        projects,
+        pull_requests,
+        memberships,
+        coverage: if partial {
+            ProjectDeliveryInboxCoverageV1::Partial
+        } else {
+            ProjectDeliveryInboxCoverageV1::Complete
+        },
+        omitted_projects,
+        excluded_pull_requests,
+    }
+}
+
+fn attached_indexed_source(
+    registry: &ProjectDeliveryRegistrySourceV1,
+    indexed: Option<ProjectDeliveryIndexedHeadV1>,
+) -> Option<(
+    String,
+    RepositoryId,
+    WorktreeId,
+    String,
+    ProjectDeliveryIndexedHeadV1,
+)> {
+    let indexed = indexed?;
+    let git_common_dir = registry.git_common_dir.clone()?;
+    let repository_id = registry.repository_id.clone()?;
+    let worktree_id = registry.worktree_id.clone()?;
+    let branch_ref = registry.branch_ref.clone()?;
+    (indexed.repository_id == repository_id
+        && indexed.worktree_id == worktree_id
+        && indexed.branch_ref == branch_ref)
+        .then_some((
+            git_common_dir,
+            repository_id,
+            worktree_id,
+            branch_ref,
+            indexed,
+        ))
+}
+
+fn delivery_inbox_provider(
+    delivery: ProjectDeliveryReadOutcomeV1,
+) -> (
+    ProjectDeliveryProviderStateV1,
+    Option<ProjectDeliveryGitHubTimelineV1>,
+    ProjectDeliveryCiSourceV1,
+) {
+    match delivery {
+        ProjectDeliveryReadOutcomeV1::Ready { snapshot } => {
+            let ci_checks = snapshot.ci_checks;
+            match snapshot.github_reviews {
+                ProjectDeliveryGitHubSourceV1::Ready { timeline } => (
+                    ProjectDeliveryProviderStateV1::Ready,
+                    Some(timeline),
+                    ci_checks,
+                ),
+                ProjectDeliveryGitHubSourceV1::Partial { timeline } => (
+                    ProjectDeliveryProviderStateV1::Partial,
+                    Some(timeline),
+                    ci_checks,
+                ),
+                ProjectDeliveryGitHubSourceV1::Stale { timeline } => (
+                    ProjectDeliveryProviderStateV1::Stale,
+                    Some(timeline),
+                    ci_checks,
+                ),
+                ProjectDeliveryGitHubSourceV1::RateLimited { timeline, .. } => (
+                    ProjectDeliveryProviderStateV1::RateLimited,
+                    Some(timeline),
+                    ci_checks,
+                ),
+                ProjectDeliveryGitHubSourceV1::Failed { timeline } => (
+                    ProjectDeliveryProviderStateV1::Failed,
+                    Some(timeline),
+                    ci_checks,
+                ),
+                ProjectDeliveryGitHubSourceV1::Denied { timeline } => (
+                    ProjectDeliveryProviderStateV1::Denied,
+                    Some(timeline),
+                    ci_checks,
+                ),
+                ProjectDeliveryGitHubSourceV1::NotPublished => (
+                    ProjectDeliveryProviderStateV1::NotPublished,
+                    None,
+                    ci_checks,
+                ),
+                ProjectDeliveryGitHubSourceV1::Unavailable { timeline } => (
+                    ProjectDeliveryProviderStateV1::Unavailable,
+                    Some(timeline),
+                    ci_checks,
+                ),
+            }
+        }
+        ProjectDeliveryReadOutcomeV1::Denied => (
+            ProjectDeliveryProviderStateV1::Denied,
+            None,
+            ProjectDeliveryCiSourceV1::Denied {
+                timeline: empty_ci_timeline(),
+            },
+        ),
+        ProjectDeliveryReadOutcomeV1::NotMounted {
+            gate:
+                ProjectDeliveryProviderMountGateV1::GitHubCredentialNotConfigured
+                | ProjectDeliveryProviderMountGateV1::NoGitRemote,
+        } => (
+            ProjectDeliveryProviderStateV1::NotConfigured,
+            None,
+            ProjectDeliveryCiSourceV1::NotPublished,
+        ),
+        ProjectDeliveryReadOutcomeV1::NotMounted {
+            gate: ProjectDeliveryProviderMountGateV1::GitHubAccessRefused,
+        } => (
+            ProjectDeliveryProviderStateV1::Denied,
+            None,
+            ProjectDeliveryCiSourceV1::Denied {
+                timeline: empty_ci_timeline(),
+            },
+        ),
+        ProjectDeliveryReadOutcomeV1::NotMounted {
+            gate: ProjectDeliveryProviderMountGateV1::GitHubSourceAccessUnavailable,
+        }
+        | ProjectDeliveryReadOutcomeV1::Unavailable => (
+            ProjectDeliveryProviderStateV1::Unavailable,
+            None,
+            ProjectDeliveryCiSourceV1::Unavailable {
+                timeline: empty_ci_timeline(),
+            },
+        ),
+    }
+}
+
+fn indexed_pull_request_state(
+    pull_request: &ProjectDeliveryPullRequestV1,
+    indexed_head: &CommitId,
+) -> Option<ProjectDeliveryInboxPullRequestStateV1> {
+    let latest = pull_request
+        .operations
+        .iter()
+        .filter_map(|operation| operation.latest_attempt.as_ref())
+        .find(|snapshot| &snapshot.provider_head_commit_id == indexed_head);
+    if let Some(latest) = latest {
+        return Some(
+            if latest.outcome == GitHubReviewIngressProviderOutcomeV1::Complete
+                && latest.coverage == GitHubReviewCoverageV1::Complete
+            {
+                ProjectDeliveryInboxPullRequestStateV1::Current
+            } else {
+                ProjectDeliveryInboxPullRequestStateV1::Partial
+            },
+        );
+    }
+    pull_request
+        .operations
+        .iter()
+        .filter_map(|operation| operation.last_complete.as_ref())
+        .any(|snapshot| &snapshot.provider_head_commit_id == indexed_head)
+        .then_some(ProjectDeliveryInboxPullRequestStateV1::Stale)
+}
+
+fn delivery_attention(
+    pull_request: &ProjectDeliveryPullRequestV1,
+    state: ProjectDeliveryInboxPullRequestStateV1,
+    provider_state: ProjectDeliveryProviderStateV1,
+    reviews: &[ProjectDeliveryReviewItemV1],
+    ci_source: &ProjectDeliveryCiSourceV1,
+    indexed: &ProjectDeliveryIndexedHeadV1,
+) -> Vec<ProjectDeliveryAttentionItemV1> {
+    let observed_at = pull_request
+        .operations
+        .iter()
+        .flat_map(|operation| {
+            [
+                operation.latest_attempt.as_ref(),
+                operation.last_complete.as_ref(),
+            ]
+        })
+        .flatten()
+        .map(|snapshot| snapshot.fetched_at)
+        .max();
+    let source_state = match provider_state {
+        ProjectDeliveryProviderStateV1::Denied => ProjectDeliveryAttentionStateV1::Denied,
+        ProjectDeliveryProviderStateV1::Unavailable
+        | ProjectDeliveryProviderStateV1::Failed
+        | ProjectDeliveryProviderStateV1::NotConfigured
+        | ProjectDeliveryProviderStateV1::NotPublished => {
+            ProjectDeliveryAttentionStateV1::Unavailable
+        }
+        _ => ProjectDeliveryAttentionStateV1::Clear,
+    };
+    let source_coverage = match provider_state {
+        ProjectDeliveryProviderStateV1::Ready => ProjectDeliveryInboxCoverageV1::Complete,
+        ProjectDeliveryProviderStateV1::Partial | ProjectDeliveryProviderStateV1::RateLimited => {
+            ProjectDeliveryInboxCoverageV1::Partial
+        }
+        ProjectDeliveryProviderStateV1::Stale => ProjectDeliveryInboxCoverageV1::Stale,
+        ProjectDeliveryProviderStateV1::Denied => ProjectDeliveryInboxCoverageV1::Denied,
+        ProjectDeliveryProviderStateV1::Unavailable
+        | ProjectDeliveryProviderStateV1::Failed
+        | ProjectDeliveryProviderStateV1::NotConfigured
+        | ProjectDeliveryProviderStateV1::NotPublished => {
+            ProjectDeliveryInboxCoverageV1::Unavailable
+        }
+    };
+    let mut items = ProjectDeliveryAttentionSourceV1::ALL
+        .into_iter()
+        .map(|source| ProjectDeliveryAttentionItemV1 {
+            source,
+            state: ProjectDeliveryAttentionStateV1::Unavailable,
+            evidence: Vec::new(),
+            coverage: ProjectDeliveryInboxCoverageV1::Unsupported,
+            observed_at: None,
+        })
+        .collect::<Vec<_>>();
+    for source in [
+        ProjectDeliveryAttentionSourceV1::UnresolvedReview,
+        ProjectDeliveryAttentionSourceV1::NewReviewComment,
+        ProjectDeliveryAttentionSourceV1::EvidenceGap,
+        ProjectDeliveryAttentionSourceV1::StaleProviderState,
+    ] {
+        if let Some(item) = items.iter_mut().find(|item| item.source == source) {
+            item.state = source_state;
+            item.coverage = source_coverage;
+            item.observed_at = observed_at;
+        }
+    }
+    if let Some(item) = items
+        .iter_mut()
+        .find(|item| item.source == ProjectDeliveryAttentionSourceV1::CiFailure)
+    {
+        match ci_source {
+            ProjectDeliveryCiSourceV1::Ready { timeline } => {
+                item.state = ProjectDeliveryAttentionStateV1::Clear;
+                item.coverage = if timeline.truncated {
+                    ProjectDeliveryInboxCoverageV1::Partial
+                } else {
+                    ProjectDeliveryInboxCoverageV1::Complete
+                };
+                let failures = timeline
+                    .checks
+                    .iter()
+                    .filter(|check| {
+                        check.provider_head_sha == indexed.head_commit_id.as_str()
+                            && delivery_ci_check_rank(check) == 0
+                    })
+                    .collect::<Vec<_>>();
+                if !failures.is_empty() {
+                    item.state = ProjectDeliveryAttentionStateV1::Active;
+                    item.evidence = failures
+                        .iter()
+                        .map(|check| ProjectDeliveryAttentionEvidenceV1::CiFailure {
+                            failure_anchor: check.failure_anchor.clone(),
+                        })
+                        .collect();
+                    item.observed_at = failures.iter().map(|check| check.observed_at).max();
+                }
+            }
+            ProjectDeliveryCiSourceV1::Denied { .. } => {
+                item.state = ProjectDeliveryAttentionStateV1::Denied;
+                item.coverage = ProjectDeliveryInboxCoverageV1::Denied;
+            }
+            ProjectDeliveryCiSourceV1::NotPublished
+            | ProjectDeliveryCiSourceV1::Unavailable { .. } => {
+                item.state = ProjectDeliveryAttentionStateV1::Unavailable;
+                item.coverage = ProjectDeliveryInboxCoverageV1::Unavailable;
+            }
+        }
+    }
+    let matching_reviews = reviews
+        .iter()
+        .filter(|review| review.pull_request_id == pull_request.pull_request_id)
+        .flat_map(|review| review.observations.iter())
+        .filter(|observation| observation.item.lifecycle != GitHubReviewLifecycleV1::Resolved)
+        .collect::<Vec<_>>();
+    if let Some(item) = items
+        .iter_mut()
+        .find(|item| item.source == ProjectDeliveryAttentionSourceV1::UnresolvedReview)
+        && !matching_reviews.is_empty()
+    {
+        item.state = ProjectDeliveryAttentionStateV1::Active;
+        item.evidence = matching_reviews
+            .iter()
+            .map(
+                |observation| ProjectDeliveryAttentionEvidenceV1::ReviewComment {
+                    comment_id: observation.item.comment_id.clone(),
+                    path: observation.item.path.clone(),
+                },
+            )
+            .collect();
+    }
+    if let Some(item) = items
+        .iter_mut()
+        .find(|item| item.source == ProjectDeliveryAttentionSourceV1::NewReviewComment)
+        && let Some(review) = matching_reviews
+            .iter()
+            .max_by_key(|review| review.item.observed_at)
+    {
+        item.state = ProjectDeliveryAttentionStateV1::Active;
+        item.evidence = vec![ProjectDeliveryAttentionEvidenceV1::ReviewComment {
+            comment_id: review.item.comment_id.clone(),
+            path: review.item.path.clone(),
+        }];
+        item.observed_at = Some(review.item.observed_at);
+    }
+    if let Some(item) = items
+        .iter_mut()
+        .find(|item| item.source == ProjectDeliveryAttentionSourceV1::EvidenceGap)
+        && state == ProjectDeliveryInboxPullRequestStateV1::Partial
+    {
+        item.state = ProjectDeliveryAttentionStateV1::Active;
+        item.coverage = ProjectDeliveryInboxCoverageV1::Partial;
+        item.evidence = vec![ProjectDeliveryAttentionEvidenceV1::IndexedGeneration {
+            generation: indexed.generation.clone(),
+        }];
+        item.observed_at = Some(indexed.observed_at);
+    }
+    if let Some(item) = items
+        .iter_mut()
+        .find(|item| item.source == ProjectDeliveryAttentionSourceV1::StaleProviderState)
+        && state == ProjectDeliveryInboxPullRequestStateV1::Stale
+    {
+        item.state = ProjectDeliveryAttentionStateV1::Active;
+        item.coverage = ProjectDeliveryInboxCoverageV1::Stale;
+        item.evidence = pull_request
+            .operations
+            .iter()
+            .filter_map(|operation| {
+                operation.latest_attempt.as_ref().map(|snapshot| {
+                    ProjectDeliveryAttentionEvidenceV1::ProviderOperation {
+                        operation: operation.operation,
+                        fetched_at: snapshot.fetched_at,
+                    }
+                })
+            })
+            .collect();
+    }
+    items
 }
 
 pub type ProjectDeliveryReadFutureV1<'a> =
@@ -553,11 +1226,19 @@ impl ProjectDeliveryReadPortV1 for ProjectDeliveryReadAuthorityV1 {
                         }
                     }
                 };
-                let (github_reviews, ci_checks, releases) = tokio::join!(
-                    github_read,
-                    ci_read,
-                    self.release_read(context, request.max_releases, control),
-                );
+                let release_read = async {
+                    match request.kind {
+                        ProjectDeliveryReadKindV1::Overview => {
+                            self.release_read(context, request.max_releases, control)
+                                .await
+                        }
+                        ProjectDeliveryReadKindV1::Inbox => {
+                            ProjectDeliveryReleaseSourceV1::Unavailable
+                        }
+                    }
+                };
+                let (github_reviews, ci_checks, releases) =
+                    tokio::join!(github_read, ci_read, release_read,);
                 if context.admission_at(now_micros()) != RequestAdmission::Admitted {
                     return ProjectDeliveryReadOutcomeV1::Unavailable;
                 }
@@ -1232,11 +1913,7 @@ fn resolved_scope_matches_feedback_scope(
         && resolved.project_id == feedback.project_id
         && resolved.repository_id == feedback.repository_id
         && resolved.worktree_id == feedback.worktree_id
-        && resolved
-            .reference
-            .as_ref()
-            .map(tracedecay_domain::RefId::as_str)
-            == Some(feedback.branch_ref.as_str())
+        && resolved.reference.as_ref().map(RefId::as_str) == Some(feedback.branch_ref.as_str())
 }
 
 fn github_http_is_official(config: &GitHubHttpReadConfigV1) -> bool {
@@ -1407,6 +2084,111 @@ mod tests {
         }
     }
 
+    fn inbox_operation(
+        head: &str,
+        kind: ProjectDeliveryReviewObservationKindV1,
+    ) -> ProjectDeliveryPullRequestOperationV1 {
+        let snapshot = ProjectDeliveryGitHubOperationSnapshotV1 {
+            provider_base_commit_id: CommitId::new("commit.delivery.inbox.base").unwrap(),
+            provider_head_commit_id: CommitId::new(head).unwrap(),
+            merge_base_commit_id: CommitId::new("commit.delivery.inbox.merge-base").unwrap(),
+            outcome: GitHubReviewIngressProviderOutcomeV1::Complete,
+            coverage: GitHubReviewCoverageV1::Complete,
+            fetched_at: UtcMicros(20),
+            checkpoint: GitHubReviewReadCheckpointV1 {
+                etag: None,
+                next_cursor: None,
+                rate_limit: None,
+            },
+        };
+        ProjectDeliveryPullRequestOperationV1 {
+            operation: GitHubReviewReadOperationV1::RestGetPullRequest,
+            latest_attempt: (kind == ProjectDeliveryReviewObservationKindV1::LatestAttempt)
+                .then_some(snapshot.clone()),
+            last_complete: (kind == ProjectDeliveryReviewObservationKindV1::LastComplete)
+                .then_some(snapshot),
+        }
+    }
+
+    fn inbox_pull_request(
+        id: &str,
+        latest_head: &str,
+        last_complete_head: Option<&str>,
+    ) -> ProjectDeliveryPullRequestV1 {
+        let mut operations = vec![inbox_operation(
+            latest_head,
+            ProjectDeliveryReviewObservationKindV1::LatestAttempt,
+        )];
+        if let Some(head) = last_complete_head {
+            operations.push(inbox_operation(
+                head,
+                ProjectDeliveryReviewObservationKindV1::LastComplete,
+            ));
+        }
+        ProjectDeliveryPullRequestV1 {
+            provider: ProviderId::new("github").unwrap(),
+            pull_request_id: GitHubPullRequestIdV1::new(id).unwrap(),
+            identity: Some(ProjectDeliveryPullRequestIdentityV1 {
+                title: format!("Pull request {id}"),
+                state: ProjectDeliveryPullRequestStateV1::Open,
+                draft: false,
+                additions: 12,
+                deletions: 3,
+                changed_files: 2,
+            }),
+            operations,
+        }
+    }
+
+    fn inbox_source(
+        project: &str,
+        head: &str,
+        github_reviews: ProjectDeliveryGitHubSourceV1,
+    ) -> ProjectDeliveryInboxSourceV1 {
+        let project_id = ProjectId::new(project).unwrap();
+        let repository_id = RepositoryId::new(format!("repository.{project}")).unwrap();
+        let worktree_id = WorktreeId::new(format!("worktree.{project}")).unwrap();
+        ProjectDeliveryInboxSourceV1 {
+            registry: ProjectDeliveryRegistrySourceV1 {
+                project_id: project_id.clone(),
+                label: project.to_owned(),
+                project_root: format!("/tmp/{project}"),
+                git_common_dir: Some(format!("/tmp/{project}/.git")),
+                repository_id: Some(repository_id.clone()),
+                worktree_id: Some(worktree_id.clone()),
+                branch_ref: Some("refs/heads/feature".to_owned()),
+            },
+            indexed: Some(ProjectDeliveryIndexedHeadV1 {
+                repository_id,
+                worktree_id,
+                branch_ref: "refs/heads/feature".to_owned(),
+                head_commit_id: CommitId::new(head).unwrap(),
+                generation: CodeGenerationId::new(format!("generation.{project}.1")).unwrap(),
+                coverage: ProjectDeliveryInboxCoverageV1::Complete,
+                observed_at: UtcMicros(30),
+            }),
+            delivery: ProjectDeliveryReadOutcomeV1::Ready {
+                snapshot: Box::new(ProjectDeliverySnapshotV1 {
+                    scope: FeedbackScopeV1 {
+                        project_id,
+                        repository_id: RepositoryId::new(format!("repository.{project}")).unwrap(),
+                        worktree_id: WorktreeId::new(format!("worktree.{project}")).unwrap(),
+                        branch_ref: "refs/heads/feature".to_owned(),
+                        head_commit_id: CommitId::new(head).unwrap(),
+                    },
+                    expected_head_commit_id: CommitId::new(head).unwrap(),
+                    github_reviews,
+                    ci_checks: ProjectDeliveryCiSourceV1::Ready {
+                        timeline: empty_ci_timeline(),
+                    },
+                    failure_localization: ProjectDeliveryFailureLocalizationSourceV1::NotConfigured,
+                    releases: ProjectDeliveryReleaseSourceV1::Unavailable,
+                }),
+            },
+            memberships: Vec::new(),
+        }
+    }
+
     #[test]
     fn provider_transition_keeps_latest_and_last_complete_under_their_owners() {
         let fixture =
@@ -1515,6 +2297,301 @@ mod tests {
     }
 
     #[test]
+    fn inbox_excludes_unindexed_provider_pull_requests_and_names_membership_basis() {
+        let timeline = ProjectDeliveryGitHubTimelineV1 {
+            pull_requests: vec![
+                inbox_pull_request("42", "commit.delivery.matched", None),
+                inbox_pull_request("99", "commit.delivery.unrelated", None),
+            ],
+            review_items: Vec::new(),
+            pull_requests_total: 2,
+            review_items_total: 0,
+            pull_requests_truncated: false,
+            review_items_truncated: false,
+        };
+        let inbox = aggregate_project_delivery_inbox_v1(
+            vec![inbox_source(
+                "project.delivery-inbox",
+                "commit.delivery.matched",
+                ProjectDeliveryGitHubSourceV1::Ready { timeline },
+            )],
+            16,
+        );
+
+        assert_eq!(inbox.pull_requests.len(), 1);
+        assert_eq!(
+            inbox.pull_requests[0].pull_request.pull_request_id.as_str(),
+            "42"
+        );
+        assert_eq!(inbox.excluded_pull_requests, 1);
+        assert_eq!(inbox.memberships.len(), 1);
+        assert!(matches!(
+            inbox.memberships[0].basis,
+            ProjectDeliveryMembershipBasisV1::BranchPullRequestReference { .. }
+        ));
+        assert_eq!(
+            inbox.memberships[0].pull_request_id,
+            GitHubPullRequestIdV1::new("42").unwrap()
+        );
+    }
+
+    #[test]
+    fn inbox_keeps_every_attention_source_and_unsupported_sources_explicit() {
+        let timeline = ProjectDeliveryGitHubTimelineV1 {
+            pull_requests: vec![inbox_pull_request("42", "commit.delivery.attention", None)],
+            review_items: Vec::new(),
+            pull_requests_total: 1,
+            review_items_total: 0,
+            pull_requests_truncated: false,
+            review_items_truncated: false,
+        };
+        let inbox = aggregate_project_delivery_inbox_v1(
+            vec![inbox_source(
+                "project.delivery-attention",
+                "commit.delivery.attention",
+                ProjectDeliveryGitHubSourceV1::Ready { timeline },
+            )],
+            16,
+        );
+        let attention = &inbox.pull_requests[0].attention;
+
+        assert_eq!(attention.len(), ProjectDeliveryAttentionSourceV1::ALL.len());
+        assert!(
+            ProjectDeliveryAttentionSourceV1::ALL
+                .iter()
+                .all(|source| attention.iter().any(|item| item.source == *source))
+        );
+        let unsupported = attention
+            .iter()
+            .filter(|item| {
+                item.state == ProjectDeliveryAttentionStateV1::Unavailable
+                    && item.coverage == ProjectDeliveryInboxCoverageV1::Unsupported
+            })
+            .collect::<Vec<_>>();
+        assert!(!unsupported.is_empty());
+        assert!(unsupported.iter().all(|item| {
+            item.evidence.is_empty()
+                && item.coverage == ProjectDeliveryInboxCoverageV1::Unsupported
+                && item.observed_at.is_none()
+        }));
+    }
+
+    #[test]
+    fn inbox_preserves_every_explicit_membership_basis_for_an_admitted_pull_request() {
+        let timeline = ProjectDeliveryGitHubTimelineV1 {
+            pull_requests: vec![inbox_pull_request("42", "commit.delivery.membership", None)],
+            review_items: Vec::new(),
+            pull_requests_total: 1,
+            review_items_total: 0,
+            pull_requests_truncated: false,
+            review_items_truncated: false,
+        };
+        let mut source = inbox_source(
+            "project.delivery-membership",
+            "commit.delivery.membership",
+            ProjectDeliveryGitHubSourceV1::Ready { timeline },
+        );
+        let pull_request_id = GitHubPullRequestIdV1::new("42").unwrap();
+        source.memberships = vec![
+            ProjectDeliveryMembershipEvidenceV1 {
+                pull_request_id: pull_request_id.clone(),
+                basis: ProjectDeliveryMembershipBasisV1::SharedWorkObjective {
+                    work_item_id: "work.delivery".to_owned(),
+                },
+            },
+            ProjectDeliveryMembershipEvidenceV1 {
+                pull_request_id: pull_request_id.clone(),
+                basis: ProjectDeliveryMembershipBasisV1::SessionGitRelation {
+                    session_id: "session.delivery".to_owned(),
+                    commit_id: CommitId::new("commit.delivery.membership").unwrap(),
+                },
+            },
+            ProjectDeliveryMembershipEvidenceV1 {
+                pull_request_id: pull_request_id.clone(),
+                basis: ProjectDeliveryMembershipBasisV1::ExplicitHandoff {
+                    handoff_id: "handoff.delivery".to_owned(),
+                },
+            },
+            ProjectDeliveryMembershipEvidenceV1 {
+                pull_request_id,
+                basis: ProjectDeliveryMembershipBasisV1::SharedAgent {
+                    agent_id: "agent.delivery".to_owned(),
+                },
+            },
+        ];
+
+        let inbox = aggregate_project_delivery_inbox_v1(vec![source], 16);
+
+        assert_eq!(inbox.memberships.len(), 5);
+        assert!(inbox.memberships.iter().any(|edge| matches!(
+            edge.basis,
+            ProjectDeliveryMembershipBasisV1::SharedWorkObjective { .. }
+        )));
+        assert!(inbox.memberships.iter().any(|edge| matches!(
+            edge.basis,
+            ProjectDeliveryMembershipBasisV1::SessionGitRelation { .. }
+        )));
+        assert!(inbox.memberships.iter().any(|edge| matches!(
+            edge.basis,
+            ProjectDeliveryMembershipBasisV1::ExplicitHandoff { .. }
+        )));
+        assert!(inbox.memberships.iter().any(|edge| matches!(
+            edge.basis,
+            ProjectDeliveryMembershipBasisV1::SharedAgent { .. }
+        )));
+        assert!(inbox.memberships.iter().any(|edge| matches!(
+            edge.basis,
+            ProjectDeliveryMembershipBasisV1::BranchPullRequestReference { .. }
+        )));
+    }
+
+    #[test]
+    fn inbox_preserves_provider_gates_zero_and_partial_omissions() {
+        let mut not_configured = inbox_source(
+            "project.delivery-not-configured",
+            "commit.delivery.zero",
+            ProjectDeliveryGitHubSourceV1::Ready {
+                timeline: empty_github_timeline(),
+            },
+        );
+        not_configured.delivery = ProjectDeliveryReadOutcomeV1::NotMounted {
+            gate: ProjectDeliveryProviderMountGateV1::GitHubCredentialNotConfigured,
+        };
+        let mut denied = inbox_source(
+            "project.delivery-denied",
+            "commit.delivery.denied",
+            ProjectDeliveryGitHubSourceV1::Ready {
+                timeline: empty_github_timeline(),
+            },
+        );
+        denied.delivery = ProjectDeliveryReadOutcomeV1::Denied;
+        let mut omitted = inbox_source(
+            "project.delivery-omitted",
+            "commit.delivery.omitted",
+            ProjectDeliveryGitHubSourceV1::Ready {
+                timeline: empty_github_timeline(),
+            },
+        );
+        omitted.indexed = None;
+        let inbox = aggregate_project_delivery_inbox_v1(vec![not_configured, denied, omitted], 16);
+
+        assert!(inbox.pull_requests.is_empty());
+        assert_eq!(inbox.omitted_projects, 1);
+        assert_eq!(inbox.coverage, ProjectDeliveryInboxCoverageV1::Partial);
+        assert!(inbox.projects.iter().any(|project| {
+            project.provider_state == ProjectDeliveryProviderStateV1::NotConfigured
+        }));
+        assert!(
+            inbox.projects.iter().any(|project| {
+                project.provider_state == ProjectDeliveryProviderStateV1::Denied
+            })
+        );
+    }
+
+    #[test]
+    fn inbox_marks_a_head_matched_ci_failure_with_exact_evidence() {
+        let timeline = ProjectDeliveryGitHubTimelineV1 {
+            pull_requests: vec![inbox_pull_request("42", "commit.delivery.ci-failure", None)],
+            review_items: Vec::new(),
+            pull_requests_total: 1,
+            review_items_total: 0,
+            pull_requests_truncated: false,
+            review_items_truncated: false,
+        };
+        let mut source = inbox_source(
+            "project.delivery-ci-failure",
+            "commit.delivery.ci-failure",
+            ProjectDeliveryGitHubSourceV1::Ready { timeline },
+        );
+        let failure_anchor = RetrievalAnchorId::new("anchor.delivery.ci-failure").unwrap();
+        let ProjectDeliveryReadOutcomeV1::Ready { snapshot } = &mut source.delivery else {
+            panic!("fixture delivery source must be ready");
+        };
+        snapshot.ci_checks = ProjectDeliveryCiSourceV1::Ready {
+            timeline: ProjectDeliveryCiTimelineV1 {
+                checks: vec![ProjectDeliveryCiCheckV1 {
+                    observation_id: CanonicalObservationIdV1::new(format!(
+                        "sha256:{}",
+                        "c".repeat(64)
+                    ))
+                    .unwrap(),
+                    run: CiFailureRunIdentityV1 {
+                        workflow_id: "workflow.delivery".to_owned(),
+                        job_id: "job.delivery".to_owned(),
+                        check_suite_id: "suite.delivery".to_owned(),
+                        check_run_id: "check.delivery".to_owned(),
+                        run_id: "run.delivery".to_owned(),
+                        attempt_id: "attempt.delivery".to_owned(),
+                    },
+                    workflow_path: ".github/workflows/ci.yml".to_owned(),
+                    workflow_status: ProjectDeliveryCiStatusV1::Completed,
+                    workflow_conclusion: Some(ProjectDeliveryCiConclusionV1::Failure),
+                    job_status: ProjectDeliveryCiStatusV1::Completed,
+                    job_conclusion: Some(ProjectDeliveryCiConclusionV1::Failure),
+                    check_status: ProjectDeliveryCiStatusV1::Completed,
+                    check_conclusion: Some(ProjectDeliveryCiConclusionV1::Failure),
+                    failed_step: Some("test".to_owned()),
+                    annotations: Vec::new(),
+                    annotation_count: 0,
+                    provider_head_sha: "commit.delivery.ci-failure".to_owned(),
+                    failure_anchor: failure_anchor.clone(),
+                    failure_kind: CiFailureKindV1::TestFailure,
+                    observed_at: UtcMicros(40),
+                }],
+                total_retained: 1,
+                truncated: false,
+            },
+        };
+
+        let inbox = aggregate_project_delivery_inbox_v1(vec![source], 16);
+        let ci = inbox.pull_requests[0]
+            .attention
+            .iter()
+            .find(|item| item.source == ProjectDeliveryAttentionSourceV1::CiFailure)
+            .expect("CI source slot");
+
+        assert_eq!(ci.state, ProjectDeliveryAttentionStateV1::Active);
+        assert_eq!(ci.observed_at, Some(UtcMicros(40)));
+        assert_eq!(
+            ci.evidence,
+            vec![ProjectDeliveryAttentionEvidenceV1::CiFailure { failure_anchor }]
+        );
+    }
+
+    #[test]
+    fn inbox_marks_a_last_complete_head_match_as_stale() {
+        let timeline = ProjectDeliveryGitHubTimelineV1 {
+            pull_requests: vec![inbox_pull_request(
+                "42",
+                "commit.delivery.moved",
+                Some("commit.delivery.indexed"),
+            )],
+            review_items: Vec::new(),
+            pull_requests_total: 1,
+            review_items_total: 0,
+            pull_requests_truncated: false,
+            review_items_truncated: false,
+        };
+        let inbox = aggregate_project_delivery_inbox_v1(
+            vec![inbox_source(
+                "project.delivery-stale",
+                "commit.delivery.indexed",
+                ProjectDeliveryGitHubSourceV1::Ready { timeline },
+            )],
+            16,
+        );
+
+        assert_eq!(
+            inbox.pull_requests[0].state,
+            ProjectDeliveryInboxPullRequestStateV1::Stale
+        );
+        assert!(inbox.pull_requests[0].attention.iter().any(|item| {
+            item.source == ProjectDeliveryAttentionSourceV1::StaleProviderState
+                && item.state == ProjectDeliveryAttentionStateV1::Active
+        }));
+    }
+
+    #[test]
     fn review_body_preview_bounds_on_a_character_boundary() {
         let short = review_body_preview("short body");
         assert_eq!(short.text, "short body");
@@ -1580,6 +2657,7 @@ mod tests {
             ProjectDeliveryProviderMountGateV1::GitHubCredentialNotConfigured,
         );
         let request = ProjectDeliveryReadRequestV1 {
+            kind: ProjectDeliveryReadKindV1::Overview,
             expected_head_commit_id: scope.head_commit_id.clone(),
             max_pull_requests: 1,
             max_review_items: 1,
@@ -1706,6 +2784,7 @@ mod tests {
             review_bodies: None,
         };
         let request = ProjectDeliveryReadRequestV1 {
+            kind: ProjectDeliveryReadKindV1::Overview,
             expected_head_commit_id,
             max_pull_requests: 1,
             max_review_items: 1,
@@ -1806,6 +2885,7 @@ mod tests {
         let expected_head_commit_id =
             tracedecay_domain::CommitId::new("fedcba9876543210fedcba9876543210fedcba98").unwrap();
         let request = ProjectDeliveryReadRequestV1 {
+            kind: ProjectDeliveryReadKindV1::Overview,
             expected_head_commit_id: expected_head_commit_id.clone(),
             max_pull_requests: 1,
             max_review_items: 1,
