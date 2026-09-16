@@ -119,7 +119,7 @@ pub(crate) fn spawn_dashboard_server_with_host_runtime(
     project_graphs: dashboard::DashboardTestProjectGraphsV1,
     port: u16,
 ) -> DashboardServer {
-    spawn_dashboard_server_with_runner(cg, Some((host_runtime, project_graphs)), false, port)
+    spawn_dashboard_server_with_runner(cg, Some((host_runtime, project_graphs)), false, None, port)
 }
 
 pub(crate) fn spawn_dashboard_server_with_configuration_runtime(
@@ -128,7 +128,16 @@ pub(crate) fn spawn_dashboard_server_with_configuration_runtime(
     project_graphs: dashboard::DashboardTestProjectGraphsV1,
     port: u16,
 ) -> DashboardServer {
-    spawn_dashboard_server_with_runner(cg, Some((host_runtime, project_graphs)), true, port)
+    spawn_dashboard_server_with_runner(cg, Some((host_runtime, project_graphs)), true, None, port)
+}
+
+/// Test-only mount point for a fake `DashboardDeliveryReadPortV1` and a fake
+/// code-index freshness reader, proving the HTTP admission path (not just the
+/// application unit tests) joins an indexed head with the provider read.
+pub(crate) struct FakeDeliveryAuthority {
+    pub(crate) delivery_read_authority: Arc<dyn tracedecay_dashboard_api::DashboardDeliveryReadPortV1>,
+    pub(crate) code_index_freshness_reader:
+        tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader,
 }
 
 fn spawn_dashboard_server_with_runner(
@@ -138,6 +147,7 @@ fn spawn_dashboard_server_with_runner(
         dashboard::DashboardTestProjectGraphsV1,
     )>,
     mount_configuration_runtime: bool,
+    delivery_authority: Option<FakeDeliveryAuthority>,
     port: u16,
 ) -> DashboardServer {
     let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -162,6 +172,15 @@ fn spawn_dashboard_server_with_runner(
                     .await
             }
             .expect("dashboard test authority");
+            let authority = match delivery_authority {
+                Some(FakeDeliveryAuthority {
+                    delivery_read_authority,
+                    code_index_freshness_reader,
+                }) => authority
+                    .with_delivery_read_authority(delivery_read_authority)
+                    .with_code_index_freshness_reader(code_index_freshness_reader),
+                None => authority,
+            };
             let result = dashboard::run_until_shutdown_for_tests_with_host_admission(
                 cg.clone(),
                 authority,
@@ -838,10 +857,31 @@ pub(crate) async fn start_dashboard_retained_memory_fixture() -> DashboardFixtur
     start_dashboard_fixture_with_options(false, true, true).await
 }
 
+/// Starts a dashboard fixture with a fake `DashboardDeliveryReadPortV1` and
+/// code-index freshness reader mounted, proving the admitted-PR HTTP path
+/// (`GET /api/delivery/inbox`) joins the provider read with an indexed head
+/// end-to-end rather than only through the application unit tests.
+pub(crate) async fn start_dashboard_fixture_with_delivery_authority(
+    delivery_authority: FakeDeliveryAuthority,
+) -> DashboardFixture {
+    start_dashboard_fixture_with_options_and_delivery(false, false, false, Some(delivery_authority))
+        .await
+}
+
 async fn start_dashboard_fixture_with_options(
     seed_lcm: bool,
     seed_memory: bool,
     mount_configuration_runtime: bool,
+) -> DashboardFixture {
+    start_dashboard_fixture_with_options_and_delivery(seed_lcm, seed_memory, mount_configuration_runtime, None)
+        .await
+}
+
+async fn start_dashboard_fixture_with_options_and_delivery(
+    seed_lcm: bool,
+    seed_memory: bool,
+    mount_configuration_runtime: bool,
+    delivery_authority: Option<FakeDeliveryAuthority>,
 ) -> DashboardFixture {
     let tmp = tempdir_or_panic();
     let tmp_root = tmp
@@ -891,6 +931,7 @@ async fn start_dashboard_fixture_with_options(
         cg,
         Some((Arc::clone(&host_runtime), project_graphs.clone())),
         mount_configuration_runtime,
+        delivery_authority,
         port,
     );
 
