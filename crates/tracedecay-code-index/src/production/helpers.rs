@@ -1229,15 +1229,20 @@ where
         return false;
     }
     let scope_path = &files[scope_index].as_ref().authority.logical_path;
-    let type_defined = files[scope_index].as_ref().artifacts.symbols.iter().any(|symbol| {
-        relation_target_kind_is_compatible(RelationEdgeKindV1::TypeOf, &symbol.kind)
-            && rust_crate_qualified_name_matches(
-                exported_name,
-                root_path,
-                scope_path,
-                &symbol.qualified_name,
-            )
-    });
+    let type_defined = files[scope_index]
+        .as_ref()
+        .artifacts
+        .symbols
+        .iter()
+        .any(|symbol| {
+            relation_target_kind_is_compatible(RelationEdgeKindV1::TypeOf, &symbol.kind)
+                && rust_crate_qualified_name_matches(
+                    exported_name,
+                    root_path,
+                    scope_path,
+                    &symbol.qualified_name,
+                )
+        });
     type_defined
         && rust_inherent_method_matches(
             exported_name,
