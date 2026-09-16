@@ -509,6 +509,33 @@ describe('Code index freshness', () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  it('polls an active source verification even without a rebuild', async () => {
+    vi.useFakeTimers();
+    const verifying = envelope('partial', {
+      worktrees: [
+        {
+          ...worktree(),
+          staleness_state: 'verifying',
+          coverage: 'partial_source_verification',
+          rebuild_in_flight: false,
+        },
+      ],
+      note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+    });
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(verifying), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(verifying), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps a non-building loading envelope on the idle cadence', async () => {
     vi.useFakeTimers();
     const parked = envelope('loading', {

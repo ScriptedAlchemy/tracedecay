@@ -277,7 +277,7 @@ function hasActiveBuild(result: EnvelopeResult<CodeIndexFreshnessPayloadV1> | un
 }
 
 function worktreeHasActiveBuild(worktree: CodeIndexWorktreeFreshnessV1): boolean {
-  if (!worktree.rebuild_in_flight) return false;
+  if (!worktree.rebuild_in_flight && worktree.staleness_state !== 'verifying') return false;
   if (worktree.parked != null && !worktree.parked.retries_on_wake) return false;
   if (worktree.progress?.blocked_reason === 'publication_authority_corrupt') return false;
   return true;
