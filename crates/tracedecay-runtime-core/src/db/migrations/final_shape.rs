@@ -233,7 +233,7 @@ async fn read_inventory(conn: &impl QueryExecutor) -> Result<SchemaInventory> {
     Ok(inventory)
 }
 
-/// The tagged beta.25..beta.37 staging inventory is retained byte-for-byte,
+/// The tagged beta.25..beta.37 and live a2e7694c51 staging inventories are retained,
 /// including publication receipts and identity guards. It has no current
 /// writer or retrieval path; fresh stores never install it. Only this exact
 /// inventory may accompany the current relational authority.
@@ -258,10 +258,14 @@ fn admit_released_staging_objects(actual: &mut SchemaInventory) -> Result<()> {
             ]
         })
         .collect();
-    // Derived from project-store-released-v34.sql, not the current schema.
-    if canonical_framed_sha256(b"tracedecay.released-staging-shape.v1", &parts)
-        != "ca0d1cd46378c80005b081b095095a1d9e1d0afb804547fe43f60787f7e3fba1"
-    {
+    // Tagged DDL and the a2e7694c51 Mac dogfood DDL differ only in the
+    // expected_chunk_count CHECK. Neither inventory comes from today's schema.
+    let digest = canonical_framed_sha256(b"tracedecay.released-staging-shape.v1", &parts);
+    if !matches!(
+        digest.as_str(),
+        "ca0d1cd46378c80005b081b095095a1d9e1d0afb804547fe43f60787f7e3fba1"
+            | "418ac9a0900844ba66f869c1f113086d6d726e6dafa5963b8fa5a2730a09596f"
+    ) {
         return Err(reset_required(format!(
             "database schema has an incompatible released staging inventory at '{first_name}'"
         )));

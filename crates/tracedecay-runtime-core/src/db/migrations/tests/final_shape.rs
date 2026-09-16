@@ -129,14 +129,14 @@ const RELEASED_V34_PROJECT_STORE_SQL: &str =
 /// Writes the released project store into an empty file, in the WAL mode
 /// every shipped binary ran, and stamps the `user_version` a shipped binary
 /// left, which is what selects the released admission path.
-fn released_v34_project_store(directory: &TempDir) -> PathBuf {
+fn released_project_store(directory: &TempDir, schema: &str) -> PathBuf {
     let path = directory.path().join("released-v34.db");
     let connection = rusqlite::Connection::open(&path).expect("create released store fixture");
     connection
         .pragma_update(None, "journal_mode", "WAL")
         .expect("run the released store in WAL mode");
     connection
-        .execute_batch(RELEASED_V34_PROJECT_STORE_SQL)
+        .execute_batch(schema)
         .expect("install the released project schema");
     connection
         .execute_batch(&format!(
@@ -234,7 +234,7 @@ fn seeded_project_rows(path: &Path) -> Vec<String> {
 #[tokio::test]
 async fn released_project_store_migrates_and_retains_every_row() {
     let directory = tempfile::tempdir().expect("create released fixture directory");
-    let path = released_v34_project_store(&directory);
+    let path = released_project_store(&directory, RELEASED_V34_PROJECT_STORE_SQL);
     seed_released_project_rows(&path);
     let connection = TestConnection::open(&path);
     super::seed_payload(&connection, 0, "Preserve café 東京 and \nwhitespace ").await;
@@ -274,7 +274,7 @@ async fn released_project_store_migrates_and_retains_every_row() {
 #[tokio::test]
 async fn released_project_store_without_diagnostics_converges() {
     let directory = tempfile::tempdir().unwrap();
-    let path = released_v34_project_store(&directory);
+    let path = released_project_store(&directory, RELEASED_V34_PROJECT_STORE_SQL);
     // The Mac beta.32 profile never published diagnostics, so neither table exists.
     tamper(
         &path,
@@ -298,7 +298,7 @@ async fn released_project_schema_drift_is_refused_without_mutation() {
         "CREATE TABLE unrecognized_authority(id INTEGER PRIMARY KEY);",
     ] {
         let directory = tempfile::tempdir().unwrap();
-        let path = released_v34_project_store(&directory);
+        let path = released_project_store(&directory, RELEASED_V34_PROJECT_STORE_SQL);
         seed_released_project_rows(&path);
         tamper(&path, mutation);
         assert_reset_required_without_repair(&path, mutation).await;
@@ -308,7 +308,13 @@ async fn released_project_schema_drift_is_refused_without_mutation() {
 #[tokio::test]
 async fn live_v35_project_store_converges_and_reopens_without_reset() {
     let directory = tempfile::tempdir().unwrap();
-    let path = released_v34_project_store(&directory);
+    // Exact DDL delta in a2e7694c51's repository/semantic_vector_staging_schema.sql.
+    let live_schema = RELEASED_V34_PROJECT_STORE_SQL.replace(
+        "expected_chunk_count INTEGER NOT NULL\n        CHECK (expected_chunk_count >= 0 AND expected_chunk_count <= 100000)",
+        "expected_chunk_count INTEGER NOT NULL CHECK (expected_chunk_count >= 0)",
+    );
+    assert_ne!(live_schema, RELEASED_V34_PROJECT_STORE_SQL);
+    let path = released_project_store(&directory, &live_schema);
     seed_released_project_rows(&path);
     admit_existing(&path, "converge the released fixture").await;
     // The previous Mac dogfood binary wrote this payload-digest-complete stamp.
@@ -327,6 +333,11 @@ async fn live_v35_project_store_converges_and_reopens_without_reset() {
     let converged = store_snapshot(&path);
     admit_existing(&path, "reopen converged v35").await;
     assert_eq!(store_snapshot(&path), converged);
+    tamper(
+        &path,
+        "PRAGMA user_version = 35; CREATE TABLE unknown_v35_authority(id INTEGER);",
+    );
+    assert_reset_required_without_repair(&path, "unknown v35 shape").await;
 }
 
 #[tokio::test]
