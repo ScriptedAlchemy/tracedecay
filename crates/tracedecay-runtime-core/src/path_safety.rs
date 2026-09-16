@@ -108,7 +108,18 @@ pub fn canonical_root_identity(path: &Path) -> PathBuf {
 ///
 /// Only a verbatim disk path is shortened. `\\?\UNC\server\share` and device
 /// namespace paths genuinely need the prefix and are returned unchanged, as is
-/// every path that does not carry one (which is every path on Unix).
+/// every path that does not carry one (which is every path on Unix). A caller
+/// that has to put such a path into a URL must encode or refuse it rather than
+/// hand the verbatim spelling on: `file:///` plus `\\?\UNC\...` is not a URL
+/// any tool parses.
+///
+/// Pass the `Path` that is held, never a string rebuilt from it. A path whose
+/// encoding is not valid UTF-8 (or, on Windows, not valid UTF-16) is handed
+/// back unchanged, because shortening it would require inventing bytes; a
+/// caller that pre-stringifies with `to_string_lossy` instead turns those units
+/// into U+FFFD and gets a *different* path that this transform then happily
+/// shortens, so the lossy name reaches the child process looking correct while
+/// naming nothing.
 #[must_use]
 pub fn plain_host_path(path: &Path) -> PathBuf {
     // Deliberately a string transform rather than `Path::components`: the
@@ -138,6 +149,12 @@ pub fn plain_host_path(path: &Path) -> PathBuf {
 /// apply this to its whole argument list instead of guessing which positions
 /// carry a resolved path (`git worktree add <path>` refuses a `\\?\` root
 /// with "could not create leading directories ... Invalid argument").
+///
+/// No argument this returns is a verbatim *disk* path, whatever the caller
+/// passed in. The remaining verbatim spellings — UNC and device namespace —
+/// are handed on unchanged for the reason [`plain_host_path`] gives, so a
+/// caller building a `file://` URL out of one of them must encode or refuse it
+/// there.
 pub fn plain_git_args<'a>(args: &'a [&str]) -> impl Iterator<Item = PathBuf> + 'a {
     args.iter().map(|arg| plain_host_path(Path::new(arg)))
 }
@@ -209,9 +226,23 @@ pub fn source_edit_path_error(operation: &'static str, error: io::Error) -> Trac
 mod tests {
     use super::{
         canonical_root_identity, canonicalize_existing_prefix, collapse_relative_components,
-        normalize_source_edit_relative_path, plain_host_path, same_canonical_path,
+        normalize_source_edit_relative_path, plain_git_args, plain_host_path, same_canonical_path,
     };
     use std::path::{Path, PathBuf};
+
+    /// Whether `path` is spelled as an extended-length *disk* path, the one
+    /// spelling git for Windows refuses outright.
+    fn is_verbatim_disk_path(path: &Path) -> bool {
+        path.to_str()
+            .and_then(|text| text.strip_prefix(r"\\?\"))
+            .is_some_and(|rest| {
+                let bytes = rest.as_bytes();
+                bytes.len() >= 3
+                    && bytes[0].is_ascii_alphabetic()
+                    && bytes[1] == b':'
+                    && bytes[2] == b'\\'
+            })
+    }
 
     #[test]
     fn canonicalization_reattaches_a_missing_tail_to_an_existing_ancestor() {
@@ -308,6 +339,92 @@ mod tests {
                 "{preserved} must be handed on unchanged"
             );
         }
+    }
+
+    /// The property a command builder relies on when it applies the transform
+    /// to a whole argument list: whatever went in, nothing that comes out is a
+    /// verbatim disk path, and nothing that was not one is rewritten.
+    #[test]
+    fn no_git_argument_is_ever_a_verbatim_disk_path() {
+        let arguments = [
+            "worktree",
+            "add",
+            "--detach",
+            r"\\?\D:\a\_temp\.tmpAbCdEf\repo",
+            r"\\?\c:\a\_temp\.tmpAbCdEf\repo\.git",
+            "refs/heads/main",
+            "HEAD~1",
+            "src/lib.rs",
+            r"\\?\UNC\server\share\repo",
+            r"\\server\share\repo",
+            r"D:\repo",
+            "/home/user/repo",
+        ];
+
+        let spelled: Vec<PathBuf> = plain_git_args(&arguments).collect();
+
+        for argument in &spelled {
+            assert!(
+                !is_verbatim_disk_path(argument),
+                "{} reached git as a verbatim disk path",
+                argument.display()
+            );
+        }
+        assert_eq!(spelled[3], PathBuf::from(r"D:\a\_temp\.tmpAbCdEf\repo"));
+        assert_eq!(
+            spelled[4],
+            PathBuf::from(r"c:\a\_temp\.tmpAbCdEf\repo\.git")
+        );
+        for (index, argument) in arguments.iter().enumerate() {
+            if index == 3 || index == 4 {
+                continue;
+            }
+            assert_eq!(
+                spelled[index],
+                PathBuf::from(argument),
+                "'{argument}' must be handed to git unchanged"
+            );
+        }
+    }
+
+    /// The fixture shape #1329 came from: a test canonicalizes its `tempfile`
+    /// root, which on Windows *is* a `\\?\` path, and hands it to git.
+    #[cfg(windows)]
+    #[test]
+    fn a_canonicalized_temp_root_reaches_git_without_its_verbatim_prefix() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let canonical = temp.path().canonicalize().expect("canonical temp root");
+        assert!(
+            is_verbatim_disk_path(&canonical),
+            "a canonicalized Windows temp root is the verbatim spelling this guards: {}",
+            canonical.display()
+        );
+        let canonical = canonical.to_str().expect("UTF-8 temp root");
+
+        let spelled: Vec<PathBuf> =
+            plain_git_args(&["-C", canonical, "rev-parse", "HEAD"]).collect();
+
+        assert!(!is_verbatim_disk_path(&spelled[1]));
+        assert!(same_canonical_path(&spelled[1], temp.path()));
+        assert_eq!(spelled[0], PathBuf::from("-C"));
+    }
+
+    /// A path whose encoding this transform cannot read is handed back exactly,
+    /// never repaired through a lossy round-trip: the documented contract the
+    /// callers depend on.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_valid_utf8_is_handed_back_unchanged() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let raw = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff\xfe/repo"));
+
+        assert_eq!(plain_host_path(&raw), raw);
+        assert!(
+            plain_host_path(&raw).as_os_str().as_bytes().contains(&0xff),
+            "a lossy conversion would have replaced the byte with U+FFFD"
+        );
     }
 
     #[test]
