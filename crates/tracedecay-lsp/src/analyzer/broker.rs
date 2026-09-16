@@ -720,6 +720,14 @@ impl DiagnosticBroker {
         }
     }
 
+    /// Forgets the retained launch a refresh could not start from, so the
+    /// next refresh probes rustup again instead of spawning a program that
+    /// is no longer there.
+    fn evict_launch(&mut self, command: &str, workspace_root: &Path) {
+        self.launches
+            .remove(&(command.to_owned(), workspace_root.to_path_buf()));
+    }
+
     pub async fn refresh_documents(
         &mut self,
         language: &str,
@@ -781,6 +789,9 @@ impl DiagnosticBroker {
                 Ok(RefreshCommitOutcome::Applied(self.snapshot()))
             }
             Err(failure) => {
+                if let Some(workspace_root) = &failure.unstartable_launch_root {
+                    self.evict_launch(&completed.command, workspace_root);
+                }
                 let message = failure.message;
                 self.engine_errors.insert(language.clone(), message.clone());
                 self.engine_overrides

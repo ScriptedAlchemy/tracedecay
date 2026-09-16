@@ -249,7 +249,10 @@ async fn collect_refresh_batch(
             Ok(client) => Some(client),
             Err(error) => {
                 use_of_analyzer.retire(AnalyzerEvent::StartupFailed);
-                return Err(RefreshFailure::crashed(&error));
+                return Err(RefreshFailure::unstartable(
+                    &error,
+                    batch.workspace_root.clone(),
+                ));
             }
         };
         if shared.mark_ready(attempt).is_none() {
@@ -343,6 +346,10 @@ impl Drop for RefreshUseOfAnalyzer<'_> {
 pub(crate) struct RefreshFailure {
     pub(crate) state: EngineState,
     pub(crate) message: String,
+    /// The workspace root whose resolved launch could not be started at all
+    /// (the program is gone, not executable, or exited before initialize).
+    /// The broker evicts that retained launch so the next refresh re-probes.
+    pub(crate) unstartable_launch_root: Option<PathBuf>,
 }
 
 impl RefreshFailure {
@@ -354,6 +361,7 @@ impl RefreshFailure {
                 EngineState::Crashed
             },
             message: error.to_string(),
+            unstartable_launch_root: None,
         }
     }
 
@@ -361,10 +369,18 @@ impl RefreshFailure {
         Self::crashed_message(error.to_string())
     }
 
-    fn crashed_message(message: String) -> Self {
+    fn unstartable(error: &TraceDecayError, workspace_root: PathBuf) -> Self {
+        Self {
+            unstartable_launch_root: Some(workspace_root),
+            ..Self::crashed(error)
+        }
+    }
+
+    pub(crate) fn crashed_message(message: String) -> Self {
         Self {
             state: EngineState::Crashed,
             message,
+            unstartable_launch_root: None,
         }
     }
 }

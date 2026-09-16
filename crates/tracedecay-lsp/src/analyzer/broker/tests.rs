@@ -670,6 +670,63 @@ mod rustup_proxy {
         assert!(last_error.contains("did not answer within"), "{last_error}");
         assert!(!last_error.contains('\n'));
     }
+
+    /// A retained launch whose program has since disappeared is evicted when
+    /// the refresh cannot start it, so the next refresh probes rustup again
+    /// instead of spawning the vanished program forever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unstartable_retained_launch_is_evicted_and_reprobed() {
+        let real = tempfile::tempdir().expect("real analyzer");
+        let real_binary = real.path().join("rust-analyzer");
+        std::fs::write(&real_binary, "").expect("real analyzer binary");
+        let rustup = fake_rustup::install(Some(&real_binary));
+        let project = rust_project();
+        let command = rustup.path().join("rust-analyzer");
+        let mut broker = DiagnosticBroker::new_for_test(
+            project.path(),
+            vec![adapter(
+                "rust",
+                command.to_string_lossy(),
+                "rs",
+                "Cargo.toml",
+            )],
+        );
+        let canonical_root = project.path().canonicalize().expect("canonical project");
+        let key = (command.to_string_lossy().into_owned(), canonical_root);
+        let timeouts =
+            LspRefreshTimeouts::from_diagnostics_quiet_window(std::time::Duration::from_millis(10));
+
+        let prepared = broker
+            .prepare_refresh("rust", vec![rust_document()])
+            .expect("installed component prepares")
+            .expect("active language prepares");
+        assert!(broker.launches.contains_key(&key), "the launch is retained");
+        assert_eq!(fake_rustup::which_probes(rustup.path()), 1);
+
+        // The toolchain binary vanishes (`rustup toolchain uninstall`).
+        std::fs::remove_file(&real_binary).expect("remove the analyzer binary");
+        let completed = prepared.collect_diagnostics_with_timeouts(timeouts).await;
+        assert!(!completed.is_ok(), "spawning a vanished program fails");
+        let Err(error) = broker.finish_refresh_snapshot(completed) else {
+            panic!("the failed start is reported");
+        };
+        assert!(matches!(error, TraceDecayError::Config { .. }));
+        assert!(
+            !broker.launches.contains_key(&key),
+            "the unstartable launch is evicted"
+        );
+
+        std::fs::write(&real_binary, "").expect("the binary returns");
+        broker
+            .prepare_refresh("rust", vec![rust_document()])
+            .expect("the re-probed launch prepares")
+            .expect("active language prepares");
+        assert_eq!(
+            fake_rustup::which_probes(rustup.path()),
+            2,
+            "the next refresh probes rustup again"
+        );
+    }
 }
 
 #[test]
