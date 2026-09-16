@@ -727,9 +727,13 @@ async fn socket_client_requires_user_storage_scope_without_project() {
         .expect("projectless client shutdown should be clean");
 }
 
+/// A projectless connection reads the profile's real project registry: an
+/// enrolled-nothing profile answers `ok` with an empty listing, the same
+/// answer `tracedecay projects list` gives, not a claim that the registry is
+/// absent.
 #[cfg(unix)]
 #[tokio::test]
-async fn projectless_project_list_reports_missing_registry() {
+async fn projectless_project_list_reads_the_empty_profile_registry() {
     let home = TempDir::new().expect("home");
     let home = home.path().canonicalize().expect("canonical home");
     let client_identity = test_client_identity_for(home.join("client"));
@@ -780,12 +784,16 @@ async fn projectless_project_list_reports_missing_registry() {
     assert_eq!(response["id"], json!(8));
     let payload = super::super::tool_json_payload(&response["result"], "tracedecay_project_list")
         .expect("typed project-list payload");
-    assert_eq!(payload["status"], "unavailable");
-    assert_eq!(
-        payload["message"],
-        "project registry is not present for this profile"
-    );
+    assert_eq!(payload["status"], "ok", "payload: {payload}");
     assert_eq!(payload["projects"], json!([]));
+    assert_eq!(payload["summary"]["project_count"], json!(0));
+    assert_eq!(payload["truncated"], json!(false));
+    assert!(
+        payload["registry_path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("global.db")),
+        "listing must name the registry it read: {payload}"
+    );
 
     server_task
         .await

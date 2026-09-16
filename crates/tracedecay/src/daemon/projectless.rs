@@ -5,6 +5,7 @@ use serde_json::json;
 
 use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_protocol::DaemonClientIdentity;
+use tracedecay_daemon_service::DaemonProjectRegistryReadService;
 use tracedecay_domain::errors::Result;
 use tracedecay_mcp::server::{LiveTranscriptRefreshJoin, join_required_live_transcript_refresh};
 use tracedecay_mcp::{
@@ -296,7 +297,7 @@ async fn projectless_tools_call_response_with_connection(
             tool_name @ ("tracedecay_project_list"
             | "tracedecay_project_search"
             | "tracedecay_project_context") => boxed_projectless_phase(
-                projectless_registry_response(id, tool_name, arguments, connection),
+                projectless_registry_response(id, tool_name, arguments, store_administration),
             ),
             _ => {
                 if let Some(operation) =
@@ -322,34 +323,45 @@ async fn projectless_tools_call_response_with_connection(
     response.await
 }
 
+/// Registry reads are profile-scoped: they answer from the authenticated
+/// profile's project registry, the same authority `tracedecay projects`
+/// reads, so a connection without a mounted project still gets the real
+/// listing (possibly empty). No project is marked active. A registry that
+/// cannot be opened is a typed tool error, never an empty listing.
 async fn projectless_registry_response(
     id: serde_json::Value,
     tool_name: &str,
     arguments: serde_json::Value,
-    connection: &ProjectlessConnectionStateV1,
+    store_administration: &StoreAdministration,
 ) -> tracedecay_mcp::JsonRpcResponse {
+    let registry =
+        match boxed_projectless_phase(store_administration.registered_profile_database()).await {
+            Ok(registry) => registry,
+            Err(error) => return tool_error_response(id, tool_name, &error),
+        };
+    let registry_reads = DaemonProjectRegistryReadService::new(registry);
     let result = match tool_name {
         "tracedecay_project_list" => {
             tracedecay_mcp::handlers::info::handle_project_list(
-                &connection.client_identity.profile_root,
-                arguments,
                 None,
+                arguments,
+                Some(&registry_reads),
             )
             .await
         }
         "tracedecay_project_search" => {
             tracedecay_mcp::handlers::info::handle_project_search(
-                &connection.client_identity.profile_root,
-                arguments,
                 None,
+                arguments,
+                Some(&registry_reads),
             )
             .await
         }
         "tracedecay_project_context" => {
             tracedecay_mcp::handlers::info::handle_project_context(
-                &connection.client_identity.profile_root,
-                arguments,
                 None,
+                arguments,
+                Some(&registry_reads),
             )
             .await
         }

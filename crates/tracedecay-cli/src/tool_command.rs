@@ -110,6 +110,17 @@ const FIRST_TOUCH_STORE_TOOLS: &[&str] = &[
     "tracedecay_lcm_expand_query",
 ];
 
+/// Tools that read the profile's project registry. They need no mounted
+/// project: a project, when one is connected, only marks the active listing
+/// entry. An explicit `--project` that is not an initialised project therefore
+/// routes projectless instead of being refused for a project the read never
+/// depended on.
+const PROFILE_REGISTRY_TOOLS: &[&str] = &[
+    "tracedecay_project_list",
+    "tracedecay_project_search",
+    "tracedecay_project_context",
+];
+
 const MAX_SURFACE_ATTEMPTS: usize = 3;
 
 fn tool_deadline_range_error() -> TraceDecayError {
@@ -549,7 +560,24 @@ impl DaemonToolDispatch {
                 allow_init: false,
             };
         }
+        if PROFILE_REGISTRY_TOOLS.contains(&tool_name) {
+            return Self::registry_scoped(explicit_project);
+        }
         Self::project_scoped(explicit_project, tool_name)
+    }
+
+    /// Registry reads connect through the nearest initialised project of the
+    /// explicit `--project` (or cwd) so the daemon can mark it active, and
+    /// otherwise stay projectless. Never initialises anything.
+    fn registry_scoped(explicit_project: Option<String>) -> Self {
+        let anchor = match explicit_project {
+            Some(path) => Some(tracedecay_configuration::resolve_path(Some(path))),
+            None => std::env::current_dir().ok(),
+        };
+        Self {
+            project_path: anchor.and_then(|anchor| implicit_tool_project_path(&anchor)),
+            allow_init: false,
+        }
     }
 
     fn project_scoped(explicit_project: Option<String>, tool_name: &str) -> Self {

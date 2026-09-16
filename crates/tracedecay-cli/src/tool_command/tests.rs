@@ -400,6 +400,61 @@ fn user_storage_scope_dispatch_never_invents_a_project_from_cwd() {
 }
 
 #[test]
+fn registry_read_dispatch_stays_projectless_without_an_initialised_project() {
+    let uninitialised = tempfile::tempdir().expect("tempdir");
+    let uninitialised_arg = uninitialised.path().to_string_lossy().into_owned();
+    for tool_name in [
+        "tracedecay_project_list",
+        "tracedecay_project_search",
+        "tracedecay_project_context",
+    ] {
+        let dispatch =
+            DaemonToolDispatch::for_tool(Some(uninitialised_arg.clone()), tool_name, &json!({}));
+        assert_eq!(
+            dispatch.project_path, None,
+            "{tool_name}: an uninitialised --project must not become a project handshake"
+        );
+        assert!(!dispatch.allow_init, "{tool_name}");
+        assert!(
+            !uninitialised.path().join(".tracedecay").exists(),
+            "{tool_name}: registry reads must never create a project store"
+        );
+    }
+
+    // A project-bound tool keeps the explicit project and the daemon's
+    // typed refusal for an uninitialised root.
+    let project_bound = DaemonToolDispatch::for_tool(
+        Some(uninitialised_arg.clone()),
+        "tracedecay_status",
+        &json!({}),
+    );
+    assert_eq!(
+        project_bound.project_path,
+        Some(tracedecay_configuration::resolve_path(Some(
+            uninitialised_arg.clone()
+        )))
+    );
+
+    // An initialised explicit project still routes through that project so
+    // the listing can mark it active.
+    let initialised = tempfile::tempdir().expect("tempdir");
+    let store = initialised.path().join(".tracedecay");
+    std::fs::create_dir_all(&store).expect("create project store dir");
+    std::fs::write(store.join("tracedecay.db"), b"").expect("write project marker");
+    let dispatch = DaemonToolDispatch::for_tool(
+        Some(initialised.path().to_string_lossy().into_owned()),
+        "tracedecay_project_list",
+        &json!({}),
+    );
+    assert_eq!(
+        dispatch.project_path.as_deref(),
+        Some(initialised.path()),
+        "an initialised --project keeps the project route"
+    );
+    assert!(!dispatch.allow_init);
+}
+
+#[test]
 fn profile_scoped_session_refresh_dispatch_is_projectless() {
     for tool_name in [
         "tracedecay_session_refresh_begin",
