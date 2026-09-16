@@ -1040,4 +1040,3 @@ mod tests {
     }
 }
 
-// CI retrigger marker (no behavior).
