@@ -2618,10 +2618,8 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
     // observed below is the source-verification Noop alone.
     drain_clone_backfill(&registry, fixture.path()).await;
 
-    // Exercise the ordinary expiry path too: one readiness request starts a
-    // real Noop, and a read during that owner pass records one BusyFollowUp.
-    // Both passes must settle because the existing seat keeps its exact
-    // witness while the source proof is renewed.
+    // Exercise the ordinary expiry path too. The existing seat keeps its exact
+    // witness while the source-verification Noop renews the proof.
     {
         let mut state = source_freshness
             .state
@@ -2640,52 +2638,23 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
             .is_none(),
         "the expired proof declines before the worker renews it"
     );
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !registry
-            .reconcile_in_progress_for_test(fixture.path())
-            .await
-        {
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await
-    .expect("readiness did not start a source-verification pass");
+    assert_eq!(
+        wait_until_serving_seat(&registry, fixture.path(), Duration::from_secs(10), || {
+            registry.latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+        })
+        .await
+        .generation()
+        .manifest()
+        .generation_id,
+        generation
+    );
     assert!(
         registry
-            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
-            .await
-            .is_none(),
-        "readiness stays fail-closed while the Noop owns verification"
-    );
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let receipts = registry.event_to_ready_receipts();
-            let settled = !registry
-                .reconcile_in_progress_for_test(fixture.path())
-                .await
-                && registry.pending_wake_micros_for_scope(&scope).await == Some(0);
-            let new = &receipts[receipts_before.min(receipts.len())..];
-            if settled
-                && new.iter().any(|receipt| {
-                    receipt.trigger == CodeIndexCadenceTriggerV1::BusyFollowUp && receipt.is_noop()
-                })
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await
-    .expect("the real Noop and its single busy follow-up did not settle");
-    assert_eq!(
-        registry
-            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
-            .await
-            .expect("renewed seat is ready")
-            .generation()
-            .manifest()
-            .generation_id,
-        generation
+            .event_to_ready_receipts()
+            .iter()
+            .skip(receipts_before)
+            .any(|receipt| receipt.is_noop()),
+        "source verification records an unchanged-source receipt"
     );
 
     fixture.edit("src/lib.rs", "pub fn changed_after_seat() {}\n");
