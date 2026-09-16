@@ -71,7 +71,7 @@ use tracedecay_query::search_quality::candidate_output::{
     CandidateOutputError, CandidateWorkloadV1, CorpusDocumentV1, EVALUATION_CACHE_STATE,
     EVALUATION_SEED, GenerateCandidateOutputsResultV1, HistoricalQueryExecutionV1,
     PRODUCTION_BOUNDARY, ProductionCandidateOutputV1, ProfileSpecV1, QueryCandidateRowV1,
-    RankedCandidateRowV1, RequiredCancellationV1, RequiredOfflineV1, ResourceSampleV1,
+    RankedCandidateRowV1, RequiredCancellationV1, ResourceSampleV1,
     WORKLOAD_RELATIVE, WorkloadQueryV1, canonical_json_bytes, canonical_sha256,
     compute_corpus_digest, compute_profile_material_digest, compute_workload_digest,
     evaluated_diversity_policy, fusion_profile, load_candidate_workload, retrieval_budget,
@@ -660,7 +660,6 @@ fn generate_partition_output(
         expected_query_fallback_digest,
         query_fallback_matches_expected,
         cancellation: RequiredCancellationV1::BoundedTypedCancelled,
-        offline: RequiredOfflineV1::NoNetworkAndQueryFallbackAvailable,
         resources,
         queries: rows,
     })
@@ -1793,10 +1792,6 @@ pub(crate) mod tests {
             assert_eq!(
                 output.cancellation,
                 RequiredCancellationV1::BoundedTypedCancelled
-            );
-            assert_eq!(
-                output.offline,
-                RequiredOfflineV1::NoNetworkAndQueryFallbackAvailable
             );
             assert_eq!(output.fallback_digest, output.query_fallback_digest);
             assert_eq!(
