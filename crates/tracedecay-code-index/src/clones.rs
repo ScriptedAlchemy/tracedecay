@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::ops::Range;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -147,7 +148,7 @@ pub struct CloneBodyOccurrenceV1 {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeIndexCloneBodyV1 {
-    pub payload: CloneBodyPayloadV1,
+    pub payload: Arc<CloneBodyPayloadV1>,
     pub occurrence: CloneBodyOccurrenceV1,
 }
 
@@ -172,7 +173,9 @@ struct ClonePayloadReuseKeyV1<'a> {
     rename_issues: &'a [CloneBodyRenameIssueV1],
 }
 
-struct ClonePayloadReuseIndexV1<'a>(HashMap<ClonePayloadReuseKeyV1<'a>, &'a CloneBodyPayloadV1>);
+struct ClonePayloadReuseIndexV1<'a>(
+    HashMap<ClonePayloadReuseKeyV1<'a>, &'a Arc<CloneBodyPayloadV1>>,
+);
 
 pub(crate) struct ClonePayloadBuildContextV1<'a> {
     prior: ClonePayloadReuseIndexV1<'a>,
@@ -190,15 +193,15 @@ impl<'a> ClonePayloadBuildContextV1<'a> {
     pub(crate) fn payload(
         &mut self,
         extracted: &ExtractedCloneBodyV1,
-    ) -> Result<CloneBodyPayloadV1, String> {
+    ) -> Result<Arc<CloneBodyPayloadV1>, String> {
         match self.prior.payload_for(extracted) {
             Some(payload) => {
                 self.stats.reused = self.stats.reused.saturating_add(1);
-                Ok(payload.clone())
+                Ok(Arc::clone(payload))
             }
             None => {
                 self.stats.computed = self.stats.computed.saturating_add(1);
-                CloneBodyPayloadV1::from_extracted(extracted)
+                CloneBodyPayloadV1::from_extracted(extracted).map(Arc::new)
             }
         }
     }
@@ -224,7 +227,7 @@ impl<'a> ClonePayloadReuseIndexV1<'a> {
         )
     }
 
-    fn payload_for(&self, extracted: &ExtractedCloneBodyV1) -> Option<&'a CloneBodyPayloadV1> {
+    fn payload_for(&self, extracted: &ExtractedCloneBodyV1) -> Option<&'a Arc<CloneBodyPayloadV1>> {
         self.0
             .get(&ClonePayloadReuseKeyV1::from_extracted(extracted))
             .copied()

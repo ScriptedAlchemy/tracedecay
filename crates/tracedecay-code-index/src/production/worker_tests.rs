@@ -222,6 +222,36 @@ fn restored_generation_resolves_seal_references_once() {
 }
 
 #[test]
+fn unchanged_increment_shares_symbol_records_with_parent_generation() {
+    let store = WorkerPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(worker_config(), store, WorkerProjectionSink)
+        .expect("production owner");
+    let source = b"pub fn unchanged() -> u32 { 1 }\n";
+    let first = owner
+        .build_and_publish(
+            worker_request_with_source("file.worker.shared-symbol", 1_100_000, source),
+            &UninterruptibleCodeIndexControlV1,
+        )
+        .expect("first generation");
+    let next = owner
+        .build_and_publish(
+            worker_request_with_source("file.worker.shared-symbol", 1_200_000, source),
+            &UninterruptibleCodeIndexControlV1,
+        )
+        .expect("unchanged increment");
+
+    assert_eq!(first.symbols.symbols.len(), 1);
+    assert!(Arc::ptr_eq(
+        &first.symbols.symbols[0],
+        &next.symbols.symbols[0]
+    ));
+    assert!(Arc::ptr_eq(
+        &first.files[0].artifacts.clone_bodies[0].payload,
+        &next.files[0].artifacts.clone_bodies[0].payload
+    ));
+}
+
+#[test]
 fn extractor_revision_change_reextracts_before_validating_retained_import_rows() {
     let store = WorkerPublicationStore::default();
     let mut seed =

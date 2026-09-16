@@ -1202,9 +1202,7 @@ impl PartitionedSegmentEncoderV1 {
         let symbol_identities = ordered_identities.into_iter().cloned().collect::<Vec<_>>();
         let symbol_occurrences = symbol_identities
             .iter()
-            .map(|identity| {
-                crate::chunks::symbol_occurrence_id(generation_id, &file_occurrence_id, identity)
-            })
+            .map(|identity| crate::chunks::symbol_occurrence_id(&file_occurrence_id, identity))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
         let identity_keys = symbol_identities
@@ -2500,7 +2498,6 @@ fn parse_partitioned_manifest(
 }
 
 fn bind_file_segment_occurrences(
-    generation_id: &CodeGenerationId,
     descriptors: &mut [PartitionedFileSegmentDescriptorV1],
 ) -> Result<(), CodeIndexProductionErrorV1> {
     for descriptor in descriptors {
@@ -2508,11 +2505,7 @@ fn bind_file_segment_occurrences(
             .symbol_identities
             .iter()
             .map(|identity| {
-                crate::chunks::symbol_occurrence_id(
-                    generation_id,
-                    &descriptor.file_occurrence_id,
-                    identity,
-                )
+                crate::chunks::symbol_occurrence_id(&descriptor.file_occurrence_id, identity)
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
@@ -2756,10 +2749,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         let Some(mut generation) = parse_partitioned_manifest(manifest_bytes)? else {
             return Ok(None);
         };
-        bind_file_segment_occurrences(
-            &generation.manifest.generation_id,
-            &mut generation.file_segments,
-        )?;
+        bind_file_segment_occurrences(&mut generation.file_segments)?;
         let source = PartitionedLexicalFileSourceV1 {
             generation_id: generation.manifest.generation_id.clone(),
             snapshot_digest: generation.manifest.snapshot_digest.clone(),
@@ -3011,10 +3001,7 @@ impl CodeIndexPublishedGenerationV1 {
         else {
             return Ok(None);
         };
-        bind_file_segment_occurrences(
-            &generation.manifest.generation_id,
-            &mut generation.file_segments,
-        )?;
+        bind_file_segment_occurrences(&mut generation.file_segments)?;
         let mut files = Vec::with_capacity(generation.file_segments.len());
         // One segment buffer per window slot, reused across windows: the
         // decode holds at most `partitioned_decode_window_files()` segments,
@@ -3521,15 +3508,12 @@ mod tests {
                 file: value,
             })
             .expect("reference segment bytes");
-            let generation_id =
-                CodeGenerationId::new(generation_id).expect("reference generation identity");
             let file_occurrence_id =
                 FileOccurrenceId::new(file_occurrence_id).expect("reference file identity");
             let symbol_occurrences = ordered_symbols
                 .keys()
                 .map(|identity| {
                     crate::chunks::symbol_occurrence_id(
-                        &generation_id,
                         &file_occurrence_id,
                         &SymbolIdentityDigest::new(*identity).expect("reference symbol identity"),
                     )

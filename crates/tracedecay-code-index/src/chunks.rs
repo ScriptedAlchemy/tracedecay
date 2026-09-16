@@ -732,17 +732,12 @@ fn canonical_digest<T: serde::Serialize>(
 }
 
 pub(crate) fn symbol_occurrence_id(
-    generation_id: &CodeGenerationId,
     file_occurrence_id: &FileOccurrenceId,
     identity: &SymbolIdentityDigest,
 ) -> Result<SymbolOccurrenceId, ChunkingFailureV1> {
     canonical_digest(
         SYMBOL_OCCURRENCE_SEPARATOR,
-        &(
-            generation_id.as_str(),
-            file_occurrence_id.as_str(),
-            identity.as_str(),
-        ),
+        &(file_occurrence_id.as_str(), identity.as_str()),
     )
     .and_then(|digest| {
         SymbolOccurrenceId::new(format!("symbol.v1.{digest}"))
@@ -1510,8 +1505,7 @@ impl DeterministicCodeChunker {
                 SymbolIdentityDigest::new(digest)
                     .expect("canonical digest is a valid symbol identity digest")
             })?;
-            let occurrence =
-                symbol_occurrence_id(&self.generation_id, file_occurrence_id, &identity)?;
+            let occurrence = symbol_occurrence_id(file_occurrence_id, &identity)?;
             rows.push(SymbolRow {
                 node_id: node.node_id.clone(),
                 span: node.span,

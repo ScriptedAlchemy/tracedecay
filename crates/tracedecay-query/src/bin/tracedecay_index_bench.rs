@@ -75,7 +75,7 @@ use tracedecay_code_index::projection::{
     ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
 };
 use tracedecay_domain::{
-    ChunkerRevision, CodeGenerationId, ComponentRevision, FileOccurrenceId,
+    ChunkerRevision, CodeGenerationId, ComponentRevision, ContentDigest, FileOccurrenceId,
     FreshnessCompatibilityV1, LanguageId, ManifestDigest, PolicyRevisionId, PrivacyDomainId,
     ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
     ProjectionOutcomeV1, RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId,
@@ -493,7 +493,6 @@ fn build_body_refresh(
         sanitizer_revision,
         &refresh_files,
         refresh_paths,
-        "refresh",
         "tree.index-bench.refresh",
         REFRESH_SEALED_AT,
     );
@@ -694,7 +693,6 @@ fn build_generations(
         sanitizer_revision,
         files,
         files.iter().map(|file| file.logical_path.clone()).collect(),
-        "clean",
         "tree.index-bench.clean",
         CLEAN_SEALED_AT,
     );
@@ -713,7 +711,6 @@ fn build_generations(
         sanitizer_revision,
         &edited,
         edited_paths,
-        "increment",
         "tree.index-bench.increment",
         INCREMENT_SEALED_AT,
     );
@@ -889,18 +886,16 @@ fn build_request(
     sanitizer_revision: &SanitizerRevision,
     files: &[AdmittedFile],
     changed_files: BTreeSet<String>,
-    occurrence_generation: &str,
     tree: &str,
     sealed_at: i64,
 ) -> CodeIndexBuildRequestV1 {
     let mut snapshot_files = Vec::with_capacity(files.len());
-    let mut captured_files = Vec::with_capacity(files.len());
+    let mut captured_files = Vec::with_capacity(changed_files.len());
     let mut identity_hash = Vec::new();
-    for (ordinal, file) in files.iter().enumerate() {
+    for file in files {
         let digest = content_digest(&file.bytes);
         identity_hash.extend_from_slice(digest.as_str().as_bytes());
-        let file_occurrence_id =
-            identity::<FileOccurrenceId>(&format!("file.{occurrence_generation}.{ordinal:06}"));
+        let file_occurrence_id = benchmark_file_occurrence_id(file, &digest);
         snapshot_files.push(SanitizedCodeFileV1 {
             file_occurrence_id: file_occurrence_id.clone(),
             logical_path: file.logical_path.clone(),
@@ -908,11 +903,13 @@ fn build_request(
             content_digest: digest,
             disposition: SnapshotFileDispositionV1::Present,
         });
-        captured_files.push(CodeIndexCapturedFileV1 {
-            file_occurrence_id,
-            sanitized_bytes: Arc::clone(&file.bytes),
-            sensitivity_level: SensitivityLevelV1::Public,
-        });
+        if changed_files.contains(&file.logical_path) {
+            captured_files.push(CodeIndexCapturedFileV1 {
+                file_occurrence_id,
+                sanitized_bytes: Arc::clone(&file.bytes),
+                sensitivity_level: SensitivityLevelV1::Public,
+            });
+        }
     }
     let snapshot = SanitizedCodeSnapshotV1 {
         repository: repository.clone(),
@@ -942,6 +939,15 @@ fn build_request(
             profile_digest: identity::<ManifestDigest>(&format!("sha256:{}", "e".repeat(64))),
         },
     }
+}
+
+fn benchmark_file_occurrence_id(file: &AdmittedFile, digest: &ContentDigest) -> FileOccurrenceId {
+    let occurrence =
+        content_digest(format!("{}\0{}", file.logical_path, digest.as_str()).as_bytes());
+    identity(&format!(
+        "file.index-bench.{}",
+        occurrence.as_str().trim_start_matches("sha256:")
+    ))
 }
 
 fn sealed_state_digest(sealed: &[u8]) -> Result<ManifestDigest, String> {
@@ -1532,4 +1538,71 @@ where
     T::try_from(value.to_owned()).unwrap_or_else(|error| {
         panic!("deterministic benchmark identity {value:?} must be valid: {error:?}")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn incremental_request_captures_only_changed_files() {
+        let files = vec![
+            AdmittedFile {
+                logical_path: "src/changed.rs".to_owned(),
+                language: identity("rust"),
+                bytes: Arc::from(b"fn changed() {}".as_slice()),
+            },
+            AdmittedFile {
+                logical_path: "src/unchanged.rs".to_owned(),
+                language: identity("rust"),
+                bytes: Arc::from(b"fn unchanged() {}".as_slice()),
+            },
+        ];
+        let request = build_request(
+            &identity("repository.test"),
+            &identity("sanitizer.test"),
+            &files,
+            BTreeSet::from(["src/changed.rs".to_owned()]),
+            "tree.test",
+            INCREMENT_SEALED_AT,
+        );
+
+        assert_eq!(request.snapshot.files.len(), 2);
+        assert_eq!(request.captured_files.len(), 1);
+        assert_eq!(
+            request.captured_files[0].file_occurrence_id,
+            request.snapshot.files[0].file_occurrence_id
+        );
+    }
+
+    #[test]
+    fn file_occurrence_identity_changes_with_content_not_generation() {
+        let file = |source: &'static [u8]| AdmittedFile {
+            logical_path: "src/lib.rs".to_owned(),
+            language: identity("rust"),
+            bytes: Arc::from(source),
+        };
+        let request = |file, tree| {
+            build_request(
+                &identity("repository.test"),
+                &identity("sanitizer.test"),
+                &[file],
+                BTreeSet::from(["src/lib.rs".to_owned()]),
+                tree,
+                INCREMENT_SEALED_AT,
+            )
+        };
+        let first = request(file(b"fn value() -> u8 { 1 }"), "tree.first");
+        let next = request(file(b"fn value() -> u8 { 1 }"), "tree.next");
+        let changed = request(file(b"fn value() -> u8 { 2 }"), "tree.changed");
+
+        assert_eq!(
+            first.snapshot.files[0].file_occurrence_id,
+            next.snapshot.files[0].file_occurrence_id
+        );
+        assert_ne!(
+            first.snapshot.files[0].file_occurrence_id,
+            changed.snapshot.files[0].file_occurrence_id
+        );
+    }
 }
