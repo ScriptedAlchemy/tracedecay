@@ -804,29 +804,49 @@ const CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1: &str = "inspect the daemon l
      abnormal text-projection failure; indexing retries when a new generation seals over \
      changed input";
 
-const CONVERGENCE_PARK_PUBLICATION_CORRUPTION_REMEDIATION_V1: &str = "the code-index \
-     publication authority requires an explicit reset; `tracedecay sync` cannot repair it";
+const CONVERGENCE_PARK_PUBLICATION_CORRUPTION_REMEDIATION_V1: &str = "the durable code-index \
+     publication store is corrupt; retire this project route, replace or rebuild that store, \
+     then remount — `tracedecay sync` and ordinary wakes cannot clear it";
+
+fn is_terminal_publication_authority_park(parked: &CodeIndexConvergenceParkedV1) -> bool {
+    parked.blocked_reason == Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt)
+}
 
 /// Record one observation of a deterministic contract violation on a mounted
 /// worktree's park slot. The first observation stamps the park, an identical
 /// reason increments the pass counter, and a different reason replaces the
 /// park so the surfaced state always names the current obstacle.
+///
+/// A parked `PublicationAuthorityCorrupt` is terminal for this mount: text
+/// projection and later contract parks must not replace it. Only retire /
+/// remount drops the slot.
 fn park_convergence(
     slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>,
     reason: String,
     remediation: &str,
+    blocked_reason: Option<CodeIndexBuildBlockedReasonV1>,
     retries_on_wake: bool,
 ) {
     let mut slot = slot
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(parked) = slot.as_mut()
+        && is_terminal_publication_authority_park(parked)
+    {
+        if parked.reason == reason {
+            parked.observed_passes = parked.observed_passes.saturating_add(1);
+        }
+        return;
+    }
     match slot.as_mut() {
         Some(parked) if parked.reason == reason => {
             parked.observed_passes = parked.observed_passes.saturating_add(1);
+            parked.blocked_reason = blocked_reason;
         }
         _ => {
             *slot = Some(CodeIndexConvergenceParkedV1 {
                 reason,
+                blocked_reason,
                 remediation: remediation.to_owned(),
                 parked_at_micros: now_micros().0,
                 observed_passes: 1,
@@ -847,17 +867,72 @@ fn convergence_park_retries_on_wake(slot: &RwLock<Option<CodeIndexConvergencePar
 
 /// Clear the park after a pass progressed or completed: the previously parked
 /// violation is no longer the current convergence obstacle.
+///
+/// Terminal publication-authority corruption is preserved until the worktree
+/// is retired and remounted over a repaired store.
 fn clear_convergence_park(slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>) {
+    let mut slot = slot
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if slot
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .is_none()
+        .as_ref()
+        .is_some_and(is_terminal_publication_authority_park)
     {
         return;
     }
-    *slot
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    *slot = None;
+}
+
+#[cfg(test)]
+mod terminal_publication_park_tests {
+    use super::*;
+    use std::sync::RwLock;
+    use tracedecay_contracts::code_index_freshness::CodeIndexBuildBlockedReasonV1;
+
+    fn terminal_park(reason: &str) -> CodeIndexConvergenceParkedV1 {
+        CodeIndexConvergenceParkedV1 {
+            reason: reason.to_owned(),
+            blocked_reason: Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt),
+            remediation: "retire and rebuild".to_owned(),
+            parked_at_micros: 1,
+            observed_passes: 1,
+            retries_on_wake: false,
+        }
+    }
+
+    #[test]
+    fn clear_convergence_park_preserves_terminal_publication_corruption() {
+        let slot = RwLock::new(Some(terminal_park("corrupt-authority")));
+        clear_convergence_park(&slot);
+        let parked = slot
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            parked.as_ref().map(|parked| parked.reason.as_str()),
+            Some("corrupt-authority")
+        );
+    }
+
+    #[test]
+    fn park_convergence_does_not_replace_terminal_publication_corruption() {
+        let slot = RwLock::new(Some(terminal_park("corrupt-authority")));
+        park_convergence(
+            &slot,
+            "text projection contract".to_owned(),
+            "chmod 700",
+            None,
+            true,
+        );
+        let parked = slot
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let parked = parked.expect("terminal park must remain");
+        assert_eq!(parked.reason, "corrupt-authority");
+        assert_eq!(
+            parked.blocked_reason,
+            Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt)
+        );
+    }
 }
 
 /// The sealed-generation identity half of a freshness reading. Every other
@@ -2061,6 +2136,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             &convergence_park,
                             error.to_string(),
                             CONVERGENCE_PARK_CONTRACT_REMEDIATION_V1,
+                            None,
                             true,
                         );
                         tracing::warn!(
@@ -2099,6 +2175,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         &convergence_park,
                         format!("code text projection task failed abnormally: {error}"),
                         CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1,
+                        None,
                         false,
                     );
                     tracing::warn!(
@@ -2384,33 +2461,37 @@ impl CodeIndexSchedulerRegistryV1 {
         self.mounted.lock().await.contains_key(&project_root)
     }
 
-    fn publication_authority_requires_reset(worktree: &MountedCodeIndexWorktreeV1) -> bool {
-        let progress = worktree
-            .build_progress
+    fn publication_authority_reset(
+        worktree: &MountedCodeIndexWorktreeV1,
+    ) -> Option<CodeIndexConvergenceParkedV1> {
+        worktree
+            .convergence_park
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        matches!(
-            progress
-                .snapshot()
-                .as_deref()
-                .and_then(|snapshot| snapshot.blocked_reason),
-            Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt)
-        )
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .filter(|parked| {
+                parked.blocked_reason
+                    == Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt)
+            })
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
     #[cfg_attr(not(test), allow(dead_code))]
-    pub async fn notify_path(&self, project_root: &Path, path: PathBuf) -> bool {
+    pub async fn notify_path(
+        &self,
+        project_root: &Path,
+        path: PathBuf,
+    ) -> CodeIndexReconcileAdmissionV1 {
         let Ok(project_root) = project_root.canonicalize() else {
-            return false;
+            return CodeIndexReconcileAdmissionV1::Unavailable;
         };
         let (hints, wake, epoch, pending_wake) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
-                return false;
+                return CodeIndexReconcileAdmissionV1::Unavailable;
             };
-            if Self::publication_authority_requires_reset(worktree) {
-                return false;
+            if let Some(parked) = Self::publication_authority_reset(worktree) {
+                return CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(parked);
             }
             (
                 Arc::clone(&worktree.hints),
@@ -2425,24 +2506,29 @@ impl CodeIndexSchedulerRegistryV1 {
             .path(path);
         DaemonCodeIndexControlV1::advance(&epoch);
         Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::HookHint);
-        true
+        CodeIndexReconcileAdmissionV1::Accepted
     }
 
     /// Primary hint path: deliver the exact touched paths carried by a host
     /// after-file-edit hook into the mounted worktree's incremental queue.
     /// `rel_paths` are repository-relative; they are resolved against the
-    /// project root. Returns `true` when a worktree was mounted to receive them.
-    pub async fn notify_hook_paths(&self, project_root: &Path, rel_paths: &[String]) -> bool {
+    /// project root. Returns typed admission so terminal publication corruption
+    /// keeps its exact reason instead of collapsing through a bool facade.
+    pub async fn notify_hook_paths(
+        &self,
+        project_root: &Path,
+        rel_paths: &[String],
+    ) -> CodeIndexReconcileAdmissionV1 {
         let Ok(project_root) = project_root.canonicalize() else {
-            return false;
+            return CodeIndexReconcileAdmissionV1::Unavailable;
         };
         let (hints, wake, epoch, pending_wake) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
-                return false;
+                return CodeIndexReconcileAdmissionV1::Unavailable;
             };
-            if Self::publication_authority_requires_reset(worktree) {
-                return false;
+            if let Some(parked) = Self::publication_authority_reset(worktree) {
+                return CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(parked);
             }
             (
                 Arc::clone(&worktree.hints),
@@ -2465,6 +2551,55 @@ impl CodeIndexSchedulerRegistryV1 {
         }
         DaemonCodeIndexControlV1::advance(&epoch);
         Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::HookHint);
+        CodeIndexReconcileAdmissionV1::Accepted
+    }
+
+    /// Read-only terminal publication-authority corruption for one mounted
+    /// worktree. Branch-publication waiters use this each iteration without
+    /// posting another overflow wake.
+    pub async fn publication_authority_corruption(
+        &self,
+        project_root: &Path,
+    ) -> Option<CodeIndexConvergenceParkedV1> {
+        let Ok(project_root) = project_root.canonicalize() else {
+            return None;
+        };
+        let mounted = self.mounted.lock().await;
+        mounted
+            .get(&project_root)
+            .and_then(Self::publication_authority_reset)
+    }
+
+    /// Test-only: stamp the sole terminal publication-authority park without
+    /// driving a reconcile. Mid-wait branch waiters re-read this slot each
+    /// iteration.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn plant_terminal_publication_authority_park_for_test(
+        &self,
+        project_root: &Path,
+        reason: &str,
+    ) -> bool {
+        let Ok(project_root) = project_root.canonicalize() else {
+            return false;
+        };
+        let mounted = self.mounted.lock().await;
+        let Some(worktree) = mounted.get(&project_root) else {
+            return false;
+        };
+        *worktree
+            .convergence_park
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(CodeIndexConvergenceParkedV1 {
+                reason: reason.to_owned(),
+                blocked_reason: Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt),
+                remediation: CONVERGENCE_PARK_PUBLICATION_CORRUPTION_REMEDIATION_V1.to_owned(),
+                parked_at_micros: 1,
+                observed_passes: 1,
+                retries_on_wake: false,
+            });
+        // Wake branch-publication waiters that re-read the park each iteration.
+        worktree.serving_generation_changed.send_replace(());
         true
     }
 
@@ -2480,16 +2615,8 @@ impl CodeIndexSchedulerRegistryV1 {
             let Some(worktree) = mounted.get(&project_root) else {
                 return CodeIndexReconcileAdmissionV1::Unavailable;
             };
-            if Self::publication_authority_requires_reset(worktree) {
-                return worktree
-                    .convergence_park
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone()
-                    .map_or(
-                        CodeIndexReconcileAdmissionV1::Unavailable,
-                        CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt,
-                    );
+            if let Some(parked) = Self::publication_authority_reset(worktree) {
+                return CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(parked);
             }
             (
                 Arc::clone(&worktree.hints),

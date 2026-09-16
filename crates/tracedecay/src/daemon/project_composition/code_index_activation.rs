@@ -296,22 +296,21 @@ pub(super) fn code_index_activation_hint_sink(
         let schedulers = schedulers.clone();
         let project_root = project_root.clone();
         Box::pin(async move {
-            let paths_accepted = if batch.paths.is_empty() {
-                true
+            let paths = if batch.paths.is_empty() {
+                CodeIndexReconcileAdmissionV1::Accepted
             } else {
                 schedulers
                     .notify_hook_paths(&project_root, &batch.paths)
                     .await
             };
-            let overflow_accepted = if batch.overflow {
-                matches!(
-                    schedulers.notify_hook_overflow(&project_root).await,
-                    CodeIndexReconcileAdmissionV1::Accepted
-                )
+            if !matches!(paths, CodeIndexReconcileAdmissionV1::Accepted) {
+                return paths;
+            }
+            if batch.overflow {
+                schedulers.notify_hook_overflow(&project_root).await
             } else {
-                true
-            };
-            paths_accepted && overflow_accepted
+                CodeIndexReconcileAdmissionV1::Accepted
+            }
         })
     });
     sink
@@ -332,7 +331,17 @@ pub(super) fn code_index_hook_sink(
                 {
                     return crate::mcp::server::CodeIndexAdmission::LinkedWorktreeDisabled;
                 }
-                activation.notify_hook_paths(&root, rel_paths).await.into()
+                match activation.notify_hook_paths(&root, rel_paths).await {
+                    CodeIndexReconcileAdmissionV1::Accepted => {
+                        crate::mcp::server::CodeIndexAdmission::Accepted
+                    }
+                    CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(parked) => {
+                        crate::mcp::server::CodeIndexAdmission::PublicationAuthorityCorrupt(parked)
+                    }
+                    CodeIndexReconcileAdmissionV1::Unavailable => {
+                        crate::mcp::server::CodeIndexAdmission::Unavailable
+                    }
+                }
             })
         });
     sink
@@ -379,14 +388,24 @@ pub(super) fn code_index_reconcile_sink(
                     }
                     CodeIndexReconcileAdmissionV1::Unavailable => {}
                 }
-                match demand {
+                let admission = match demand {
                     crate::mcp::server::CodeIndexReconcileDemandV1::Automatic => {
-                        activation.notify_hook_overflow(&root).await.into()
+                        activation.notify_hook_overflow(&root).await
                     }
-                    crate::mcp::server::CodeIndexReconcileDemandV1::Explicit => activation
-                        .notify_explicit_reconciliation(&root)
-                        .await
-                        .into(),
+                    crate::mcp::server::CodeIndexReconcileDemandV1::Explicit => {
+                        activation.notify_explicit_reconciliation(&root).await
+                    }
+                };
+                match admission {
+                    CodeIndexReconcileAdmissionV1::Accepted => {
+                        crate::mcp::server::CodeIndexAdmission::Accepted
+                    }
+                    CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(parked) => {
+                        crate::mcp::server::CodeIndexAdmission::PublicationAuthorityCorrupt(parked)
+                    }
+                    CodeIndexReconcileAdmissionV1::Unavailable => {
+                        crate::mcp::server::CodeIndexAdmission::Unavailable
+                    }
                 }
             })
         },
@@ -472,7 +491,7 @@ mod tests {
                 let overflow_batches = Arc::clone(&overflow_batches);
                 Box::pin(async move {
                     overflow_batches.lock().expect("record batch").push(batch);
-                    true
+                    CodeIndexReconcileAdmissionV1::Accepted
                 })
             })
         };
@@ -539,7 +558,9 @@ mod tests {
             })
         };
         let hint_sink: code_index_scheduler::CodeIndexActivationHintSinkV1 =
-            Arc::new(move |_batch| Box::pin(async move { true }));
+            Arc::new(move |_batch| {
+                Box::pin(async move { CodeIndexReconcileAdmissionV1::Accepted })
+            });
         let activation = Arc::new(
             code_index_scheduler::CodeIndexActivationV1::new_with_admission(
                 &root,
@@ -552,9 +573,12 @@ mod tests {
         );
         // The watch-driven hint path keeps the gate.
         assert!(
-            !activation
-                .notify_hook_paths(&root, vec!["lib.rs".to_owned()])
-                .await,
+            matches!(
+                activation
+                    .notify_hook_paths(&root, vec!["lib.rs".to_owned()])
+                    .await,
+                CodeIndexReconcileAdmissionV1::Unavailable
+            ),
             "a watch-driven hint must still honour the linked-worktree watch policy"
         );
 

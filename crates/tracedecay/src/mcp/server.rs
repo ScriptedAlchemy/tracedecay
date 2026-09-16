@@ -127,11 +127,14 @@ pub(crate) enum CodeIndexAdmission {
     Unavailable,
 }
 
+pub(crate) const CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT: &str =
+    "code_index_publication_authority_corrupt";
+
 pub(crate) fn code_index_publication_corrupt(
     parked: CodeIndexConvergenceParkedV1,
 ) -> TraceDecayError {
     TraceDecayError::project_route(
-        "code_index_publication_authority_corrupt",
+        CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT,
         false,
         format!("{}; {}", parked.reason, parked.remediation),
     )
@@ -145,7 +148,7 @@ impl CodeIndexAdmission {
                 HostAdmissionOutcome::degraded("linked_worktree_disabled")
             }
             Self::PublicationAuthorityCorrupt(_) => {
-                HostAdmissionOutcome::degraded("code_index_publication_authority_corrupt")
+                HostAdmissionOutcome::degraded(CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT)
             }
             Self::Unavailable => {
                 HostAdmissionOutcome::retained_unavailable("code_index_scheduler_unavailable")

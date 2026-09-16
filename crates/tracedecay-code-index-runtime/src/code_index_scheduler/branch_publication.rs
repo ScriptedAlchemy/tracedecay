@@ -25,6 +25,8 @@ use super::{
 };
 
 const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
+const CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT: &str =
+    "code_index_publication_authority_corrupt";
 const CODE_INDEX_ACTIVATION_UNAVAILABLE: &str = "code_index_activation_unavailable";
 const CODE_INDEX_IDENTITY_MISMATCH: &str = "code_index_scheduler_identity_mismatch";
 const GIT_SNAPSHOT_UNAVAILABLE: &str = "git_snapshot_unavailable";
@@ -450,7 +452,7 @@ impl BranchPublicationContextV1 {
             CodeIndexReconcileAdmissionV1::Accepted => {}
             CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(parked) => {
                 return Err(TraceDecayError::project_route(
-                    "code_index_publication_authority_corrupt",
+                    CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT,
                     false,
                     format!("{}; {}", parked.reason, parked.remediation),
                 ));
@@ -471,6 +473,16 @@ impl BranchPublicationContextV1 {
         loop {
             if cancellation.is_cancelled() {
                 return Err(branch_publication_cancelled_error(&source.reference));
+            }
+            if let Some(parked) = schedulers
+                .publication_authority_corruption(canonical_worktree_root)
+                .await
+            {
+                return Err(TraceDecayError::project_route(
+                    CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT,
+                    false,
+                    format!("{}; {}", parked.reason, parked.remediation),
+                ));
             }
             let scope = schedulers
                 .serving_code_scope(canonical_worktree_root)

@@ -666,6 +666,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                     &worker_convergence_park,
                                     error.to_string(),
                                     CONVERGENCE_PARK_CONTRACT_REMEDIATION_V1,
+                                    None,
                                     true,
                                 );
                                 tracing::warn!(
@@ -690,6 +691,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 &worker_convergence_park,
                                 format!("code text projection task failed abnormally: {error}"),
                                 CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1,
+                                None,
                                 false,
                             );
                             tracing::warn!(
@@ -1083,6 +1085,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                     &worker_convergence_park,
                                     format!("code text projection task failed abnormally: {error}"),
                                     CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1,
+                                    None,
                                     false,
                                 );
                                 tracing::warn!(
@@ -2007,6 +2010,9 @@ impl CodeIndexSchedulerRegistryV1 {
                                     &worker_convergence_park,
                                     error.to_string(),
                                     CONVERGENCE_PARK_PUBLICATION_CORRUPTION_REMEDIATION_V1,
+                                    Some(
+                                        CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt,
+                                    ),
                                     false,
                                 );
                                 worker_build_progress
@@ -2015,6 +2021,9 @@ impl CodeIndexSchedulerRegistryV1 {
                                     .block_current(
                                         CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt,
                                     );
+                                // Mid-wait branch publication rechecks the park on
+                                // serving-generation notifications.
+                                worker_serving_generation_changed.send_replace(());
                                 publication_authority_terminal = true;
                             } else if transient_capacity {
                                 // Shared process capacity was held by another
@@ -2154,6 +2163,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 &worker_convergence_park,
                                 format!("code text projection task failed abnormally: {error}"),
                                 CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1,
+                                None,
                                 false,
                             );
                             tracing::warn!(

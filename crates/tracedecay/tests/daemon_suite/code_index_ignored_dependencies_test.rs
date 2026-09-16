@@ -721,9 +721,12 @@ async fn superseded_real_generation_pin_preserves_the_successor_head() {
         "import type { Widget } from \"pkg\";\nexport const revision = 2;\n",
     );
     assert!(
-        registry
-            .notify_path(fixture.path(), fixture.path().join("src/app.ts"))
-            .await
+        matches!(
+            registry
+                .notify_path(fixture.path(), fixture.path().join("src/app.ts"))
+                .await,
+            tracedecay_code_index_runtime::code_index_scheduler::CodeIndexReconcileAdmissionV1::Accepted
+        )
     );
     let successor = wait_for_generation_change(&registry, fixture.path(), &old_generation).await;
     let error = index_dependency(
@@ -816,9 +819,12 @@ async fn ordinary_reconcile_retains_the_exact_ignored_source_roster() {
         "import type { Widget } from \"pkg\";\nexport const revision = 2;\n",
     );
     assert!(
-        registry
-            .notify_path(fixture.path(), fixture.path().join("src/app.ts"))
-            .await
+        matches!(
+            registry
+                .notify_path(fixture.path(), fixture.path().join("src/app.ts"))
+                .await,
+            tracedecay_code_index_runtime::code_index_scheduler::CodeIndexReconcileAdmissionV1::Accepted
+        )
     );
     let changed =
         wait_for_generation_change(&registry, fixture.path(), &admitted.generation_id).await;
@@ -871,9 +877,12 @@ async fn a_changed_latest_generation_id_is_already_seated() {
         "import type { Widget } from \"pkg\";\nexport const revision = 2;\n",
     );
     assert!(
-        registry
-            .notify_path(fixture.path(), fixture.path().join("src/app.ts"))
-            .await
+        matches!(
+            registry
+                .notify_path(fixture.path(), fixture.path().join("src/app.ts"))
+                .await,
+            tracedecay_code_index_runtime::code_index_scheduler::CodeIndexReconcileAdmissionV1::Accepted
+        )
     );
     let changed =
         wait_for_generation_change(&registry, fixture.path(), &admitted.generation_id).await;

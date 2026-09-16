@@ -2249,6 +2249,9 @@ async fn admin_sync_reports_terminal_publication_corruption_without_queueing() {
                 crate::mcp::server::CodeIndexAdmission::PublicationAuthorityCorrupt(
                     tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1 {
                         reason: "the publication authority is corrupt and requires an index reset: injected sync refusal".to_owned(),
+                        blocked_reason: Some(
+                            tracedecay_contracts::code_index_freshness::CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt,
+                        ),
                         remediation: "reset the code-index publication authority".to_owned(),
                         parked_at_micros: 1,
                         observed_passes: 1,
@@ -2277,7 +2280,7 @@ async fn admin_sync_reports_terminal_publication_corruption_without_queueing() {
 
     let (reason_code, retryable, detail) =
         error.project_route_context().expect("typed project route");
-    assert_eq!(reason_code, "code_index_publication_authority_corrupt");
+    assert_eq!(reason_code, crate::mcp::server::CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT);
     assert!(!retryable, "publication corruption requires reset");
     assert!(
         detail.contains("injected sync refusal"),
