@@ -8,7 +8,6 @@
 .cursor/*
 !.cursor/skills/
 !.cursor/skills/**
-docs/superpowers/plans/
 /local-only
 .worktrees
 .codex-worktrees
