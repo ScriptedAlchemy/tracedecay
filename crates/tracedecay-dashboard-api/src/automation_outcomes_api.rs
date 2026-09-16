@@ -2,14 +2,14 @@
 //! activated managed skills and recall trajectory of automatically applied
 //! facts.
 
-use axum::extract::{Extension, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Json;
 use serde_json::{Value, json};
 
 use super::automation_authority_error_response;
 use super::exact_automation_authority;
-use super::{DashboardAutomationAuthorityErrorV1, DashboardHttpRequestControlV1, DashboardState};
+use super::{DashboardAutomationAuthorityErrorV1, DashboardState, RequestControl};
 use crate::memory_api::control::{fact_read_control, request_terminal_state, terminal_read_code};
 use crate::read_model::DashboardDomainStateV1;
 use tracedecay_automation_runtime::automation::managed_skills::list_managed_skills;
@@ -25,16 +25,8 @@ use tracedecay_store::FactReadControl;
 #[hotpath::measure(label = "dashboard_api.outcomes.read", future = true)]
 pub async fn outcomes(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
 ) -> (StatusCode, Json<Value>) {
-    let Some(Extension(control)) = control else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
-                "detail": "dashboard HTTP request admission is unavailable",
-            })),
-        );
-    };
     let result = outcomes_payload(&state, &fact_read_control(&control)).await;
     if let Some(state) = request_terminal_state(&control) {
         let (code, detail) = terminal_read_code(state);

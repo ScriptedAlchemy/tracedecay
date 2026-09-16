@@ -8,8 +8,8 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
+use axum::Json;
 use axum::extract::State;
-use axum::{Extension, Json};
 use schemars::JsonSchema;
 use serde::Serialize;
 use tracedecay_application::advisory::{GitHubReleaseV1, ProjectGitHubReleasePageV1};
@@ -56,7 +56,7 @@ use super::read_model::{
     DashboardLegalActionKindV1, DashboardLegalActionRefV1, DashboardVersionV1,
     DashboardWatermarkV1, scope_from_state,
 };
-use super::{DashboardHttpRequestControlV1, DashboardState};
+use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl};
 
 const DELIVERY_SOURCE_COUNT: u64 = 8;
 const MAX_DELIVERY_INBOX_PROJECTS_V1: usize = 64;
@@ -805,7 +805,7 @@ pub trait DashboardDeliveryReadPortV1: Send + Sync {
 #[hotpath::measure(label = "dashboard_api.delivery.overview", future = true)]
 pub async fn overview(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
 ) -> Json<DashboardEnvelopeV1<DeliveryOverviewV1>> {
     let (changes, commits) = read_git_projections(&state).await;
     let indexed_commit = match &state.code_index_freshness_reader {
@@ -822,16 +822,10 @@ pub async fn overview(
 
     let delivery = match (
         state.delivery_read_authority.as_ref(),
-        control,
         live_head,
         state.project_id.as_ref(),
     ) {
-        (
-            Some(authority),
-            Some(Extension(control)),
-            Some(expected_head_commit_id),
-            Some(project_id),
-        ) => {
+        (Some(authority), Some(expected_head_commit_id), Some(project_id)) => {
             authority
                 .read(
                     control,
@@ -910,7 +904,7 @@ pub async fn overview(
 #[hotpath::measure(label = "dashboard_api.delivery.inbox", future = true)]
 pub async fn inbox(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
 ) -> Json<DashboardEnvelopeV1<DeliveryInboxV1>> {
     let unavailable = || DeliveryInboxV1 {
         registry_state: DeliveryRegistryStateV1::Unavailable,
@@ -966,12 +960,8 @@ pub async fn inbox(
                 .and_then(indexed_delivery_head),
             None => None,
         };
-        let delivery = match (
-            state.delivery_read_authority.as_ref(),
-            control.as_ref(),
-            indexed.as_ref(),
-        ) {
-            (Some(authority), Some(Extension(control)), Some(indexed)) => {
+        let delivery = match (state.delivery_read_authority.as_ref(), indexed.as_ref()) {
+            (Some(authority), Some(indexed)) => {
                 authority
                     .read(
                         control.clone(),
@@ -2345,7 +2335,13 @@ mod tests {
         let (_project, state) =
             crate::events_api::dashboard_state_fixture("project.delivery-inbox-unavailable").await;
 
-        let Json(envelope) = inbox(State(state), None).await;
+        let Json(envelope) = inbox(
+            State(state),
+            RequestControl(DashboardHttpRequestControlV1::test_fixture(
+                "delivery-inbox-test",
+            )),
+        )
+        .await;
 
         assert_eq!(envelope.domain_state, DashboardDomainStateV1::Unknown);
         assert_eq!(
