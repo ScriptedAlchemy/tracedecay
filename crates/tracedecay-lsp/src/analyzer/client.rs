@@ -35,6 +35,7 @@ use super::error::{
     AnalyzerCancellation as CancellationToken, AnalyzerResult as Result,
     AnalyzerRuntimeError as TraceDecayError,
 };
+use super::launch::{AnalyzerLaunch, resolve_analyzer_launch};
 
 use crate::{
     AnalyzerEvent, AsyncContentLengthError, ContentLengthCodec, UpstreamCapabilities,
@@ -331,14 +332,37 @@ pub struct StdioLspClient {
 }
 
 impl StdioLspClient {
+    /// Resolves `command` for `project_root` (see [`resolve_analyzer_launch`])
+    /// and starts it. A rustup proxy whose toolchain lacks the analyzer is a
+    /// typed configuration failure here; no process is spawned for it.
     pub async fn start_with_timeouts(
         command: &str,
         args: &[String],
         project_root: &Path,
         timeouts: LspRefreshTimeouts,
     ) -> Result<Self> {
-        let mut child = tokio::process::Command::new(command)
+        let launch = resolve_analyzer_launch(command, project_root).map_err(|error| {
+            TraceDecayError::Config {
+                message: error.engine_error(),
+            }
+        })?;
+        Self::start_with_launch(&launch, args, project_root, timeouts).await
+    }
+
+    /// Starts an already resolved launch. Every spawn carries the launch
+    /// environment, so neither the analyzer nor a `cargo` it runs can trigger a
+    /// rustup toolchain install.
+    pub async fn start_with_launch(
+        launch: &AnalyzerLaunch,
+        args: &[String],
+        project_root: &Path,
+        timeouts: LspRefreshTimeouts,
+    ) -> Result<Self> {
+        let command = launch.program.to_string_lossy().into_owned();
+        let command = command.as_str();
+        let mut child = tokio::process::Command::new(&launch.program)
             .args(args)
+            .envs(launch.env.iter().map(|(key, value)| (key, value)))
             .current_dir(project_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

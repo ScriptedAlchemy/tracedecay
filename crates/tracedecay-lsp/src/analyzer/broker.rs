@@ -11,6 +11,8 @@ use super::adapters::{LspAdapterDefinition, LspInstallOption};
 use super::client::{LspDocument, LspRefreshTimeouts, file_uri};
 use super::error::{AnalyzerResult as Result, AnalyzerRuntimeError as TraceDecayError};
 use super::host_ownership::HostAnalyzerOwnership;
+pub use super::launch::command_available;
+use super::launch::{AnalyzerLaunch, AnalyzerLaunchError, resolve_analyzer_launch};
 use super::settings::CodeDiagnosticsSettings;
 use crate::AdmittedRoot;
 mod refresh;
@@ -381,9 +383,10 @@ impl DiagnosticBroker {
                 message: format!("no LSP adapter registered for language '{language}'"),
             })?;
         let command = self.settings.command_for(language, &adapter.command);
-        if !command_available(&command) {
-            return Ok(None);
-        }
+        let launch = match self.resolve_launch(language, &command) {
+            Ok(launch) => launch,
+            Err(_) => return Ok(None),
+        };
         let key = LspSessionKey {
             language: language.to_owned(),
             command: command.clone(),
@@ -397,7 +400,7 @@ impl DiagnosticBroker {
             })
             .clone();
         Ok(Some(StdioLspSemanticAuthority::from_shared_client(
-            command,
+            launch,
             adapter.args,
             adapter.language,
             workspace_root,
@@ -457,9 +460,11 @@ impl DiagnosticBroker {
                     // A host-retained language stays admitted so graph-backed
                     // TraceDecay findings still project, but it is never
                     // reported as mountable: mounting is what starts the second
-                    // analyzer process.
+                    // analyzer process. A proxy whose toolchain lacks the
+                    // analyzer is equally unmountable: mounting it would be
+                    // the install attempt.
                     analyzer_available: !host_retained.contains(&adapter.language)
-                        && command_available(&command),
+                        && resolve_analyzer_launch(&command, &self.project_root).is_ok(),
                     command,
                 }
             })
@@ -530,15 +535,11 @@ impl DiagnosticBroker {
             })?;
 
         let command = self.settings.command_for(language, &adapter.command);
-        if !command_available(&command) {
-            let message = format!("LSP command '{command}' is not available on PATH");
-            self.engine_errors
-                .insert(language.to_string(), message.clone());
-            self.engine_overrides
-                .insert(language.to_string(), EngineState::Unavailable);
-            self.remove_language_clients(language);
-            return Err(TraceDecayError::Config { message });
-        }
+        let launch =
+            self.resolve_launch(language, &command)
+                .map_err(|error| TraceDecayError::Config {
+                    message: error.engine_error(),
+                })?;
 
         let project_root = self.project_root.clone();
         let canonical_project_root = canonicalize_project_root(&project_root).map_err(|error| {
@@ -616,11 +617,31 @@ impl DiagnosticBroker {
             language.to_string(),
             canonical_project_root,
             command,
+            launch,
             adapter.args,
             epoch,
             batches,
             reservation,
         )))
+    }
+
+    /// Resolves the executable for `command` in this project, recording a
+    /// refusal as the language's typed `Unavailable` state so the snapshot
+    /// reports why no analyzer runs instead of an `Available` engine that
+    /// TraceDecay will never start.
+    fn resolve_launch(
+        &mut self,
+        language: &str,
+        command: &str,
+    ) -> std::result::Result<AnalyzerLaunch, AnalyzerLaunchError> {
+        resolve_analyzer_launch(command, &self.project_root).map_err(|error| {
+            self.engine_errors
+                .insert(language.to_string(), error.engine_error());
+            self.engine_overrides
+                .insert(language.to_string(), EngineState::Unavailable);
+            self.remove_language_clients(language);
+            error
+        })
     }
 
     pub async fn refresh_documents(
@@ -922,49 +943,4 @@ fn default_state(enabled: bool, active: bool, command: &str) -> EngineState {
     } else {
         EngineState::Unavailable
     }
-}
-
-pub fn command_available(command: &str) -> bool {
-    if Path::new(command).components().count() > 1 {
-        return Path::new(command).is_file();
-    }
-    let Some(paths) = std::env::var_os("PATH") else {
-        return false;
-    };
-    let candidates = command_candidates(command);
-    std::env::split_paths(&paths).any(|path| {
-        candidates
-            .iter()
-            .any(|candidate| path.join(candidate).is_file())
-    })
-}
-
-#[cfg(windows)]
-fn command_candidates(command: &str) -> Vec<String> {
-    if Path::new(command).extension().is_some() {
-        return vec![command.to_string()];
-    }
-
-    let pathext = std::env::var_os("PATHEXT").map_or_else(
-        || ".COM;.EXE;.BAT;.CMD".to_string(),
-        |value| value.to_string_lossy().into_owned(),
-    );
-
-    let mut candidates = vec![command.to_string()];
-    candidates.extend(pathext.split(';').filter_map(|extension| {
-        let extension = extension.trim();
-        if extension.is_empty() {
-            None
-        } else if extension.starts_with('.') {
-            Some(format!("{command}{extension}"))
-        } else {
-            Some(format!("{command}.{extension}"))
-        }
-    }));
-    candidates
-}
-
-#[cfg(not(windows))]
-fn command_candidates(command: &str) -> Vec<String> {
-    vec![command.to_string()]
 }

@@ -6,6 +6,7 @@ use tokio::sync::{MutexGuard, OwnedSemaphorePermit, Semaphore};
 
 use super::super::client::{LspDocument, LspRefreshError, LspRefreshTimeouts, StdioLspClient};
 use super::super::error::AnalyzerRuntimeError as TraceDecayError;
+use super::super::launch::AnalyzerLaunch;
 use super::shared_client::{SharedAnalyzerClient, SharedAnalyzerClientSlot};
 use super::{CodeDiagnostic, EngineState};
 use crate::AnalyzerEvent;
@@ -69,6 +70,7 @@ pub struct PreparedRefresh {
     language: String,
     project_root: PathBuf,
     command: String,
+    launch: AnalyzerLaunch,
     args: Vec<String>,
     epoch: u64,
     batches: Vec<RefreshBatch>,
@@ -93,6 +95,7 @@ impl PreparedRefresh {
         language: String,
         project_root: PathBuf,
         command: String,
+        launch: AnalyzerLaunch,
         args: Vec<String>,
         epoch: u64,
         batches: Vec<RefreshBatch>,
@@ -102,11 +105,17 @@ impl PreparedRefresh {
             language,
             project_root,
             command,
+            launch,
             args,
             epoch,
             batches,
             reservation,
         }
+    }
+
+    /// The exact program and environment every batch of this refresh spawns.
+    pub fn launch(&self) -> &AnalyzerLaunch {
+        &self.launch
     }
 
     pub async fn collect_diagnostics(
@@ -156,6 +165,7 @@ impl PreparedRefresh {
                 batch,
                 self.project_root.clone(),
                 self.command.clone(),
+                self.launch.clone(),
                 self.args.clone(),
                 timeouts,
                 run_permit,
@@ -178,6 +188,7 @@ impl PreparedRefresh {
                     batch,
                     self.project_root.clone(),
                     self.command.clone(),
+                    self.launch.clone(),
                     self.args.clone(),
                     timeouts,
                     run_permit,
@@ -198,6 +209,7 @@ async fn collect_refresh_batch(
     batch: RefreshBatch,
     project_root: PathBuf,
     command: String,
+    launch: AnalyzerLaunch,
     args: Vec<String>,
     timeouts: LspRefreshTimeouts,
     _run_permit: OwnedSemaphorePermit,
@@ -219,8 +231,8 @@ async fn collect_refresh_batch(
             )));
         };
         let mut use_of_analyzer = RefreshUseOfAnalyzer::new(&shared, client_slot, attempt, None);
-        use_of_analyzer.client = match StdioLspClient::start_with_timeouts(
-            &command,
+        use_of_analyzer.client = match StdioLspClient::start_with_launch(
+            &launch,
             &args,
             &batch.workspace_root,
             timeouts,

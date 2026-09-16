@@ -168,6 +168,152 @@ fn absent_analyzer_keeps_an_admitted_graph_fallback_provider() {
     );
 }
 
+#[cfg(unix)]
+mod rustup_proxy {
+    use super::*;
+    use crate::analyzer::launch::fake_rustup;
+    use crate::analyzer::launch::{NOT_INSTALLED_FOR_TOOLCHAIN_MESSAGE, RUSTUP_AUTO_INSTALL_ENV};
+
+    fn rust_project() -> tempfile::TempDir {
+        let project = tempfile::tempdir().expect("project");
+        std::fs::write(project.path().join("Cargo.toml"), "").expect("rust root marker");
+        std::fs::create_dir(project.path().join("src")).expect("src");
+        std::fs::write(project.path().join("src/lib.rs"), "pub fn lib() {}").expect("lib.rs");
+        project
+    }
+
+    fn rust_document() -> LspDocument {
+        LspDocument {
+            language: "rust".to_owned(),
+            language_id: "rust".to_owned(),
+            relative_path: "src/lib.rs".to_owned(),
+            text: "pub fn lib() {}".to_owned(),
+        }
+    }
+
+    /// The dogfood defect: the configured `rust-analyzer` is a rustup proxy
+    /// and the project's active toolchain lacks the component. The broker
+    /// must report the typed state and never run the proxy, which is what
+    /// would download the toolchain.
+    #[test]
+    fn missing_toolchain_component_is_typed_unavailable_without_an_install() {
+        let rustup = fake_rustup::install(None);
+        let project = rust_project();
+        let command = rustup.path().join("rust-analyzer");
+        let mut broker = DiagnosticBroker::new_for_test(
+            project.path(),
+            vec![adapter(
+                "rust",
+                command.to_string_lossy(),
+                "rs",
+                "Cargo.toml",
+            )],
+        );
+        let files = vec!["src/lib.rs".to_owned()];
+
+        assert_eq!(
+            broker.admitted_providers_for_files(&files),
+            vec![AdmittedLspProvider {
+                language: "rust".to_owned(),
+                command: command.to_string_lossy().into_owned(),
+                analyzer_available: false,
+            }]
+        );
+
+        let error = broker
+            .prepare_refresh("rust", vec![rust_document()])
+            .err()
+            .expect("a missing component must refuse the refresh");
+        let TraceDecayError::Config { message } = &error else {
+            panic!("a missing component is a typed configuration refusal, got {error:?}");
+        };
+        assert!(
+            message.starts_with(NOT_INSTALLED_FOR_TOOLCHAIN_MESSAGE),
+            "{message}"
+        );
+        assert!(!message.contains('\n') && !message.contains("syncing channel"), "{message}");
+
+        let engine = broker.snapshot().engines.remove(0);
+        assert_eq!(engine.state, EngineState::Unavailable);
+        let last_error = engine.last_error.expect("typed engine error");
+        assert!(last_error.starts_with(NOT_INSTALLED_FOR_TOOLCHAIN_MESSAGE));
+        assert!(!last_error.contains('\n'));
+        assert!(!last_error.contains("stderr"));
+
+        assert!(
+            broker
+                .semantic_authority_if_available(
+                    "rust",
+                    project.path().to_path_buf(),
+                    url::Url::from_directory_path(project.path())
+                        .expect("project root URI")
+                        .to_string(),
+                    LspRefreshTimeouts::from_diagnostics_quiet_window(
+                        std::time::Duration::from_millis(10),
+                    ),
+                )
+                .expect("configured adapter")
+                .is_none()
+        );
+
+        let invocations = fake_rustup::invocations(rustup.path());
+        let probes = invocations
+            .lines()
+            .filter(|line| line.ends_with(" which rust-analyzer"))
+            .count();
+        let proxy_runs = invocations
+            .lines()
+            .filter(|line| line.contains("rust-analyzer") && !line.contains(" which "))
+            .count();
+        assert!(probes >= 1, "{invocations}");
+        assert_eq!(
+            proxy_runs, 0,
+            "the proxy itself must never run: {invocations}"
+        );
+        assert!(
+            !invocations.contains("AUTO_INSTALL=unset"),
+            "every probe must carry {RUSTUP_AUTO_INSTALL_ENV}=0: {invocations}"
+        );
+        assert!(broker.clients.is_empty());
+    }
+
+    #[test]
+    fn installed_component_launches_the_toolchain_binary_not_the_proxy() {
+        let real = tempfile::tempdir().expect("real analyzer");
+        let real_binary = real.path().join("rust-analyzer");
+        std::fs::write(&real_binary, "").expect("real analyzer binary");
+        let rustup = fake_rustup::install(Some(&real_binary));
+        let project = rust_project();
+        let command = rustup.path().join("rust-analyzer");
+        let mut broker = DiagnosticBroker::new_for_test(
+            project.path(),
+            vec![adapter(
+                "rust",
+                command.to_string_lossy(),
+                "rs",
+                "Cargo.toml",
+            )],
+        );
+
+        assert!(
+            broker
+                .admitted_providers_for_files(&["src/lib.rs".to_owned()])
+                .iter()
+                .all(|provider| provider.analyzer_available)
+        );
+        let prepared = broker
+            .prepare_refresh("rust", vec![rust_document()])
+            .expect("installed component prepares")
+            .expect("active language prepares");
+        assert_eq!(prepared.launch().program, real_binary);
+        assert_eq!(
+            prepared.launch().env,
+            vec![(RUSTUP_AUTO_INSTALL_ENV.to_owned(), "0".to_owned())]
+        );
+        assert_eq!(broker.snapshot().engines[0].state, EngineState::Refreshing);
+    }
+}
+
 #[test]
 fn refresh_rejects_a_removed_project_root_after_one_canonicalization() {
     let temp = tempfile::tempdir().expect("temporary parent");
