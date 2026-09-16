@@ -1134,9 +1134,10 @@ function similarOccurrence(i: number, generation: string): Record<string, unknow
 
 /**
  * `GET /api/plugins/graph/shared-code/family` — wire-true against
- * `code_reads.rs::shared_family_result`: one digest group per class, the
- * selected source (`sym-0`) among its own members, `member_count` the count of
- * authorized members on this page (never a family total), and `coverage`
+ * `code_reads.rs::shared_family_result`: one digest group per class (the route
+ * answers one class per request and a body has one exact key per class), the
+ * selected source (`sym-0`) never among the members (serving.rs skips it),
+ * `member_count` the count of authorized members on this page, and `coverage`
  * `partial` whenever a family is incomplete. The conservative family pages
  * (`complete: false`, cursor) so the "load more" journey has a cursor to
  * follow; the rename family is whole.
@@ -1144,8 +1145,10 @@ function similarOccurrence(i: number, generation: string): Record<string, unknow
 function sharedCodeFamilyPayload(matchClass: string, cursor: string | null): Record<string, unknown> {
   const generation = 'generation.2f8c41ab';
   const conservative = matchClass === 'conservative_exact';
+  // The serving read skips the selected source before grouping, so `sym-0`
+  // never appears among its own family's members.
   const members = cursor === null
-    ? [similarOccurrence(0, generation), similarOccurrence(7, generation), similarOccurrence(14, generation)]
+    ? [similarOccurrence(7, generation), similarOccurrence(14, generation)]
     : [similarOccurrence(21, generation), similarOccurrence(28, generation)];
   const complete = !conservative || cursor !== null;
   return {

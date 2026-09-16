@@ -264,14 +264,14 @@ function UnionLayoutReading({ selection }: { selection: CompareSelection }) {
               <RevisionIdentity side="base" revision={layout.base} />
               <RevisionIdentity side="head" revision={layout.head} />
             </div>
-            {layout.files.length === 0 && layout.symbols.length === 0 ? (
+            {layout.files.length === 0 ? (
               <CenteredState
-                title="No regions in this union"
+                title="No file regions in this union"
                 kind="complete_zero_findings"
                 detail={
                   selection.file !== '' || selection.kind !== ''
                     ? 'Both generations were read; nothing matched the active filters.'
-                    : 'Both generations were read and contain no indexed files or symbols.'
+                    : 'Both generations were read and contain no indexed files.'
                 }
               />
             ) : (
@@ -367,14 +367,8 @@ function FileRegions({ layout }: { layout: RevisionPairUnionLayoutV1 }) {
   return (
     <ol className="flex flex-col gap-1.5" aria-label="File regions in identity order">
       {groups.map((group) => (
-        <li key={group.fileIdentity} data-file-identity={group.fileIdentity}>
-          {group.file ? (
-            <FileRegionRow region={group.file} />
-          ) : (
-            <p className="td-legend px-2 py-1 normal-case tracking-normal text-text-muted">
-              symbols whose file region is outside the active filter
-            </p>
-          )}
+        <li key={group.file.file_identity} data-file-identity={group.file.file_identity}>
+          <FileRegionRow region={group.file} />
           {group.symbols.length > 0 ? (
             <ol className="flex flex-col border-l border-edge-subtle pl-2">
               {group.symbols.map((symbol) => (

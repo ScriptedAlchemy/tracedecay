@@ -134,13 +134,13 @@ export function countChanges(
 }
 
 /** Symbol regions grouped under the file identity they belong to, in the
- * daemon's file order. A symbol whose file is not in the file list (a filter
- * removed it) is kept under its own identity so nothing served is dropped. */
+ * daemon's file order. The producer (`code_reads.rs::revision_file_regions`)
+ * refuses with a typed internal error if any symbol's file identity is not in
+ * the file list, so every served symbol has a file region here. */
 export function groupSymbolsByFile(
   layout: RevisionPairUnionLayoutV1,
 ): ReadonlyArray<{
-  readonly file: RevisionPairFileRegionV1 | null;
-  readonly fileIdentity: string;
+  readonly file: RevisionPairFileRegionV1;
   readonly symbols: ReadonlyArray<RevisionPairSymbolRegionV1>;
 }> {
   const byFile = new Map<string, RevisionPairSymbolRegionV1[]>();
@@ -150,21 +150,8 @@ export function groupSymbolsByFile(
     if (bucket) bucket.push(symbol);
     else byFile.set(identity, [symbol]);
   }
-  const groups: Array<{
-    file: RevisionPairFileRegionV1 | null;
-    fileIdentity: string;
-    symbols: RevisionPairSymbolRegionV1[];
-  }> = [];
-  for (const file of layout.files) {
-    groups.push({
-      file,
-      fileIdentity: file.file_identity,
-      symbols: byFile.get(file.file_identity) ?? [],
-    });
-    byFile.delete(file.file_identity);
-  }
-  for (const [fileIdentity, symbols] of byFile) {
-    groups.push({ file: null, fileIdentity, symbols });
-  }
-  return groups;
+  return layout.files.map((file) => ({
+    file,
+    symbols: byFile.get(file.file_identity) ?? [],
+  }));
 }

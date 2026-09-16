@@ -39,7 +39,6 @@ import { codeReadState } from './codeRead.ts';
 import type { TraceFocus } from './TraceView.tsx';
 import {
   SHARED_CODE_MATCH_CLASSES,
-  copiesOf,
   describeOccurrence,
   readSharedCodeCoverage,
   sharedFamilyUrl,
@@ -183,9 +182,9 @@ function FamilyPage({
       },
     },
   );
-  // Every family that carries a cursor may be followed, each once; the daemon
-  // mints one cursor per incomplete family, so one page may hand out several.
-  const [followed, setFollowed] = useState<ReadonlyArray<string>>([]);
+  // The route answers one match class per request and a body has one exact key
+  // per class, so a page carries at most one family and at most one cursor.
+  const [followed, setFollowed] = useState<string | null>(null);
   return (
     <ReadSection
       title={cursor === null ? 'Families' : 'More members'}
@@ -232,12 +231,11 @@ function FamilyPage({
                     key={family.family_digest}
                     family={family}
                     stitch={stitch}
-                    sourceId={result.source.symbol_occurrence_id}
                     onFocusMember={onFocusMember}
                     onTraceMember={onTraceMember}
                     onFollow={
-                      family.next_cursor !== null && !followed.includes(family.next_cursor)
-                        ? () => setFollowed([...followed, family.next_cursor as string])
+                      family.next_cursor !== null && followed === null
+                        ? () => setFollowed(family.next_cursor)
                         : null
                     }
                   />
@@ -247,17 +245,16 @@ function FamilyPage({
             {coverage.kind === 'partial' ? (
               <p className="text-3xs leading-relaxed text-text-muted">{coverage.sentence}</p>
             ) : null}
-            {followed.map((next) => (
+            {followed !== null ? (
               <FamilyPage
-                key={next}
                 focus={focus}
                 matchClass={matchClass}
                 stitch={stitch}
-                cursor={next}
+                cursor={followed}
                 onFocusMember={onFocusMember}
                 onTraceMember={onTraceMember}
               />
-            ))}
+            ) : null}
           </div>
         );
       }}
@@ -290,23 +287,22 @@ function SourceIdentity({ result }: { result: SimilarResultV1 }) {
 function FamilyGroup({
   family,
   stitch,
-  sourceId,
   onFocusMember,
   onTraceMember,
   onFollow,
 }: {
   family: SimilarFamilyV1;
   stitch: 'solid' | 'double';
-  sourceId: string;
   onFocusMember: (symbolOccurrenceId: string) => void;
   onTraceMember: (symbolOccurrenceId: string) => void;
   onFollow: (() => void) | null;
 }) {
-  const copies = copiesOf(family.members, sourceId);
+  // `members` never contains the selected body: the serving read skips the
+  // source before grouping (serving.rs), so every row here is a copy.
   // `member_count` is the daemon's count of the authorized members *on this
   // page* (code_reads.rs sets it from the filtered page), not a family total.
-  // The header therefore never claims a total: a complete family is counted,
-  // an incomplete one is counted "on this page" with more to follow.
+  // `complete` is false either because a cursor continues the family or
+  // because scope filtering omitted members; only the former offers a page.
   return (
     <li
       className="td-raised flex flex-col border border-edge-subtle"
@@ -328,20 +324,22 @@ function FamilyGroup({
         </span>
         {family.complete ? null : (
           <span className="td-legend shrink-0 normal-case tracking-normal text-text-muted">
-            family incomplete · more members follow
+            {family.next_cursor !== null
+              ? 'family incomplete · more members follow'
+              : 'family incomplete · no further page in this scope'}
           </span>
         )}
         <span className="td-legend shrink-0 normal-case tracking-normal text-text-muted">
           normalization rev {family.normalization_revision}
         </span>
       </div>
-      {copies.length === 0 ? (
+      {family.members.length === 0 ? (
         <p className="px-2.5 py-2 text-3xs text-text-muted">
-          Only the selected body itself is on this page of the family.
+          No authorized members on this page of the family.
         </p>
       ) : (
         <ol className="flex flex-col">
-          {copies.map((member) => (
+          {family.members.map((member) => (
             <MemberRow
               key={member.symbol_occurrence_id}
               member={member}

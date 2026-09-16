@@ -315,7 +315,7 @@ describe('Shared Code: verified exact families of the selected body', () => {
     // incomplete family is counted "on this page" and says more follow, so a
     // reader is never told "3 members" about a family the daemon has not
     // finished listing. The source itself is counted but not listed as a copy.
-    expect(await within(conservative).findByText('3')).toBeTruthy();
+    expect(await within(conservative).findByText('2')).toBeTruthy();
     expect(within(conservative).getByText(/members on this page/i)).toBeTruthy();
     expect(within(conservative).getByText(/family incomplete · more members follow/i)).toBeTruthy();
     expect(within(conservative).getByText('Coverage: partial')).toBeTruthy();
@@ -349,54 +349,35 @@ describe('Shared Code: verified exact families of the selected body', () => {
     expect(cursorReads[0]!.searchParams.get('cursor')).toBe('cursor.family.page-2');
   });
 
-  it('lets every cursor-bearing family be followed, not only the first', async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const { pathname, search } = new URL(String(input), 'http://localhost');
-      if (pathname.endsWith('/shared-code/family')) {
-        const params = new URLSearchParams(search);
-        const fixture = familyEnvelope(search);
-        const payload = fixture.payload as Record<string, unknown>;
-        const [first] = payload.families as Array<Record<string, unknown>>;
-        if (params.get('cursor') === null && params.get('match_class') === 'conservative_exact') {
+  it('does not promise another page when scope filtering, not a cursor, made the family incomplete', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const { pathname, search } = new URL(String(input), 'http://localhost');
+        if (pathname.endsWith('/shared-code/family')) {
+          const fixture = familyEnvelope(search);
+          const payload = fixture.payload as Record<string, unknown>;
+          const [family] = payload.families as Array<Record<string, unknown>>;
           return jsonOk({
             ...fixture,
+            domain_state: 'partial',
             payload: {
               ...payload,
-              families: [
-                { ...first, next_cursor: 'cursor.family.a' },
-                {
-                  ...first,
-                  family_digest: 'sha256:second-family',
-                  next_cursor: 'cursor.family.b',
-                },
-              ],
+              coverage: { status: 'partial' },
+              families: [{ ...family, complete: false, next_cursor: null }],
             },
           });
         }
-        return jsonOk(fixture);
-      }
-      return jsonOk(resolveFixture(pathname, search));
-    });
-    vi.stubGlobal('fetch', fetchMock);
-    const user = userEvent.setup();
+        return jsonOk(resolveFixture(pathname, search));
+      }),
+    );
     renderCode('/code?view=shared-code&symbol=sym-0');
 
-    const buttons = await screen.findAllByRole('button', { name: /load more members/i });
-    expect(buttons).toHaveLength(2);
-    await user.click(buttons[0]!);
-    await user.click(buttons[1]!);
-
     await waitFor(() => {
-      const cursors = fetchMock.mock.calls
-        .map((call) => new URL(String(call[0]), 'http://localhost'))
-        .filter((url) => url.pathname.endsWith('/shared-code/family'))
-        .map((url) => url.searchParams.get('cursor'))
-        .filter((cursor) => cursor !== null);
-      expect(cursors.sort()).toEqual(['cursor.family.a', 'cursor.family.b']);
+      expect(screen.getAllByText(/no further page in this scope/i)).toHaveLength(2);
     });
-    // Both followed families now point at a mounted continuation below them.
-    expect(screen.getAllByText(/more members follow below/i)).toHaveLength(2);
-    expect(screen.getAllByRole('region', { name: 'More members' })).toHaveLength(2);
+    expect(screen.queryByText(/more members follow/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /load more members/i })).toBeNull();
   });
 
   it('does not call a partial page with no families a measured zero', async () => {
@@ -596,29 +577,6 @@ describe('Compare: two exact revisions in one union layout', () => {
         String(call[0]).includes('/compare/union-layout?base=main'),
       ),
     ).toBe(true);
-  });
-
-  it('keeps symbol regions whose file region a filter removed instead of a zero plate', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
-        const { pathname, search } = new URL(String(input), 'http://localhost');
-        if (pathname.endsWith('/compare/union-layout')) {
-          const fixture = resolveFixture(pathname, search) as Record<string, unknown>;
-          const payload = fixture.payload as Record<string, unknown>;
-          return jsonOk({ ...fixture, payload: { ...payload, files: [] } });
-        }
-        return jsonOk(resolveFixture(pathname, search));
-      }),
-    );
-    renderCode(
-      `/code?view=compare&base=main&base_revision=${'1'.repeat(40)}&head=feature&head_revision=${'2'.repeat(40)}&compare_kind=function`,
-    );
-
-    const regions = await screen.findByRole('list', { name: /file regions in identity order/i });
-    expect(regions.querySelectorAll('li[data-region-change]')).toHaveLength(4);
-    expect(screen.getAllByText(/outside the active filter/i).length).toBeGreaterThan(0);
-    expect(screen.queryByText(/no regions in this union/i)).toBeNull();
   });
 
   it('reports a moved reference as stale, never as a comparison of another commit', async () => {
