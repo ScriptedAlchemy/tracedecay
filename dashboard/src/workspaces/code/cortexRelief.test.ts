@@ -119,6 +119,35 @@ describe('elevation', () => {
     expect(model.strata.map((band) => band.depth)).toEqual([0, 4]);
     expect(model.strata.every((band) => band.regions === 1)).toBe(true);
   });
+
+  it('keeps every same-depth region on the stratum line when the band is crowded', () => {
+    const count = 20;
+    const clusters = Array.from({ length: count }, (_, index) =>
+      cluster(`src/mod${index}`, { order: index, file_count: 4 }),
+    );
+    const files = Array.from({ length: count }, (_, index) => file(`src/mod${index}/a.rs`, 1));
+    const model = buildCortexModel(measurement(clusters, files, { max_depth: 4 }));
+    const band = model.strata.find((stratum) => stratum.depth === 1)!;
+    const sameDepth = model.drawnRegions.filter((region) => region.depth === 1);
+    expect(sameDepth).toHaveLength(count);
+    expect(new Set(sameDepth.map((region) => region.y))).toEqual(new Set([band.y]));
+  });
+
+  it('keeps a single crowded stratum on its measured depth line, not spread across the field', () => {
+    const count = 20;
+    const clusters = Array.from({ length: count }, (_, index) =>
+      cluster(`src/mod${index}`, { order: index, file_count: 4 }),
+    );
+    const files = Array.from({ length: count }, (_, index) => file(`src/mod${index}/a.rs`, 0));
+    const model = buildCortexModel(measurement(clusters, files, { max_depth: 1 }));
+    const band = model.strata.find((stratum) => stratum.depth === 0)!;
+    const sameDepth = model.drawnRegions.filter((region) => region.depth === 0);
+    expect(sameDepth).toHaveLength(count);
+    expect(new Set(sameDepth.map((region) => region.y))).toEqual(new Set([band.y]));
+    const spread = Math.max(...sameDepth.map((region) => region.y!)) -
+      Math.min(...sameDepth.map((region) => region.y!));
+    expect(spread).toBe(0);
+  });
 });
 
 describe('area', () => {

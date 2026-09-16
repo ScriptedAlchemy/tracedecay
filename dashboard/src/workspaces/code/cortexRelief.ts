@@ -56,11 +56,6 @@ const PAD = { left: 104, right: 44, top: 44, bottom: 64 } as const;
  * the additive-floor idiom the connectivity spine's `markDiameter` already
  * uses, and the legend states it rather than pretending area is pure. */
 const MIN_RADIUS = 13;
-/** A region narrower than this reads as a dot, not a body; a band whose
- * one-row slots would fall below it wraps into more rows instead. */
-const COMFORTABLE_RADIUS = 44;
-const ROW_GAP = 12;
-const MAX_ROWS_PER_BAND = 4;
 /** Landforms are wider than they are tall. Applied uniformly, so relative area
  * between regions is untouched. */
 export const RELIEF_ASPECT = { x: 1.14, y: 0.76 } as const;
@@ -190,32 +185,7 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
     if (bucket) bucket.push(draft);
     else byBand.set(depth, [draft]);
   }
-  // A shallow repository puts most regions in one or two strata. Laid out as
-  // one row per stratum, 28 regions on a 0–1 depth range became a hairline of
-  // 18 px dots along the bottom edge (measured on ripgrep). A crowded band
-  // therefore wraps into rows within its own vertical span, so the field is
-  // used and the labels stay legible; the strata still read top to bottom.
-  // One populated stratum owns the whole field; several share it by depth.
-  const singleBand = byBand.size <= 1;
-  const bandSpan = singleBand || maxDepth === 0 ? usableHeight : bandGap;
-  const rowsFor = (count: number): number => {
-    let rows = 1;
-    while (
-      rows < MAX_ROWS_PER_BAND &&
-      usableWidth / Math.ceil(count / rows) < 2 * COMFORTABLE_RADIUS + ROW_GAP &&
-      bandSpan / (rows + 1) >= 2 * MIN_RADIUS + ROW_GAP
-    ) {
-      rows += 1;
-    }
-    return rows;
-  };
-  const bandRows = new Map<number, number>();
-  for (const [depth, band] of byBand) bandRows.set(depth, rowsFor(band.length));
-  const widestRow = [...byBand.entries()].reduce(
-    (max, [depth, band]) => Math.max(max, Math.ceil(band.length / (bandRows.get(depth) ?? 1))),
-    1,
-  );
-  const mostRows = [...bandRows.values()].reduce((max, rows) => Math.max(max, rows), 1);
+  const widestBand = [...byBand.values()].reduce((max, band) => Math.max(max, band.length), 1);
 
   // ONE global scale, so the √-area law holds between every pair of regions
   // on the field rather than being bent per body by a clamp.
@@ -223,9 +193,8 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
     (max, draft) => Math.max(max, draft.cluster.file_count),
     0,
   );
-  const slotWidth = usableWidth / widestRow;
-  const rowPitch = bandSpan / mostRows;
-  const allowedRadius = Math.max(18, Math.min(slotWidth * 0.42, rowPitch * 0.4));
+  const slotWidth = usableWidth / widestBand;
+  const allowedRadius = Math.max(18, Math.min(slotWidth * 0.42, bandGap * 0.40));
   const areaScale =
     widestFileCount > 0 ? (allowedRadius - MIN_RADIUS) / Math.sqrt(widestFileCount) : 0;
 
@@ -237,24 +206,10 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
   const placed = new Map<string, { x: number; y: number; radius: number }>();
   for (const [depth, band] of byBand) {
     const inBand = [...band].sort((a, b) => a.cluster.order - b.cluster.order);
-    const rows = bandRows.get(depth) ?? 1;
-    const perRow = Math.ceil(inBand.length / rows);
-    // The band owns the half-gap on either side of its stratum line, cut off
-    // at the field edge: bedrock's rows climb from the bottom, the ridge's
-    // descend from the top, and a middle stratum fans out around its line.
-    const line = bandY(depth);
-    const bandTop = singleBand ? PAD.top : Math.max(PAD.top, line - bandSpan / 2);
-    const bandBottom = singleBand
-      ? PAD.top + usableHeight
-      : Math.min(PAD.top + usableHeight, line + bandSpan / 2);
-    const pitch = (bandBottom - bandTop) / rows;
     inBand.forEach((draft, index) => {
-      const row = Math.floor(index / perRow);
-      const rowStart = row * perRow;
-      const rowLength = Math.min(perRow, inBand.length - rowStart);
       placed.set(draft.cluster.directory, {
-        x: PAD.left + ((index - rowStart + 0.5) / rowLength) * usableWidth,
-        y: rows === 1 ? line : bandTop + (row + 0.5) * pitch,
+        x: PAD.left + ((index + 0.5) / inBand.length) * usableWidth,
+        y: bandY(depth),
         radius: MIN_RADIUS + areaScale * Math.sqrt(draft.cluster.file_count),
       });
     });

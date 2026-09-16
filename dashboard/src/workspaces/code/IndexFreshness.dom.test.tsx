@@ -353,7 +353,7 @@ describe('Code index freshness', () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
-  it('backs off while an active build reports the same progress, and says how long it has been quiet', async () => {
+  it('keeps polling an unchanged active build each second and reports how long it has been quiet', async () => {
     vi.useFakeTimers();
     // A stuck scheduler: same epoch and last-progress stamp on every read, and
     // the daemon's observation clock ten minutes past the last progress.
@@ -379,24 +379,29 @@ describe('Code index freshness', () => {
 
     await advanceTimers(0);
     expect(screen.getByText('0 / 500 files')).toBeTruthy();
+    expect(screen.getByText('no progress for')).toBeTruthy();
     expect(screen.getByText('10m')).toBeTruthy();
     expect(fetch).toHaveBeenCalledTimes(1);
-    // First unchanged read arrives after 1 s; the next waits 2 s, then 4 s.
     await advanceTimers(1_001);
     await advanceTimers(0);
     expect(fetch).toHaveBeenCalledTimes(2);
     await advanceTimers(1_001);
-    await advanceTimers(0);
-    expect(fetch).toHaveBeenCalledTimes(2);
-    await advanceTimers(1_000);
-    await advanceTimers(0);
-    expect(fetch).toHaveBeenCalledTimes(3);
-    await advanceTimers(3_000);
     await advanceTimers(0);
     expect(fetch).toHaveBeenCalledTimes(3);
     await advanceTimers(1_001);
     await advanceTimers(0);
     expect(fetch).toHaveBeenCalledTimes(4);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(5);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(6);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(7);
+    expect(screen.getByText('no progress for')).toBeTruthy();
+    expect(screen.getByText('10m')).toBeTruthy();
   });
 
   it('keeps polling ready progress until the freshness envelope is ready', async () => {
