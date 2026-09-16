@@ -245,6 +245,7 @@ pub use serving::{
 #[cfg(test)]
 use serving::{
     CodeIndexCommittedProgressSampleV1, CodeTextProjectionSlotV1, TEXT_ARTIFACT_PAGE_CHUNKS_V1,
-    map_sealed_page_source_error, sha256_private_file_and_size, text_artifact_builder_budget,
+    clone_successor_source_batch_limits_from_charges, map_sealed_page_source_error,
+    sha256_private_file_and_size, text_artifact_builder_budget,
     text_artifact_resident_memory_charges, text_artifact_source_batch_limits,
 };
