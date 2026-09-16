@@ -69,14 +69,14 @@ function StrataReading({ measurement }: { measurement: StrataMeasurementV1 }) {
 
   return (
     <div className="flex flex-col gap-2">
-      <div className="td-raised flex items-baseline gap-3 border border-edge-subtle px-2.5 py-2">
+      <div className="td-raised flex flex-wrap items-baseline gap-x-4 gap-y-2 border border-edge-subtle px-2.5 py-2">
         <span className="flex min-w-0 flex-col">
           <span className="td-legend">depth</span>
           <span className="flex items-baseline gap-1">
             <span className="td-value text-base text-text-primary" data-cell="numeric">
               {measurement.max_depth}
             </span>
-            <span className="td-unit">
+            <span className="td-unit whitespace-nowrap">
               {capped ? 'or more' : `of ${measurement.ideal_depth} ideal`}
             </span>
           </span>
@@ -96,7 +96,7 @@ function StrataReading({ measurement }: { measurement: StrataMeasurementV1 }) {
             <span className="td-value text-base text-text-primary" data-cell="numeric">
               {measurement.files.length.toLocaleString()}
             </span>
-            <span className="td-unit">laid out</span>
+            <span className="td-unit whitespace-nowrap">laid out</span>
           </span>
         </span>
       </div>
