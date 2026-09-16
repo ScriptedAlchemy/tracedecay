@@ -155,8 +155,11 @@ pub(super) async fn ensure_registered_project_route(
     {
         Some(context) => Some(context),
         None => {
-            let repository_root = match super::core_proxy::bounded_repository_identity(project_path)
-                .await
+            let repository_root = match super::core_proxy::bounded_repository_identity(
+                project_path,
+                super::core_proxy::repository_discovery_parent_deadline(),
+            )
+            .await
             {
                 tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Resolved(
                     identity,
