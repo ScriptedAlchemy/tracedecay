@@ -841,7 +841,7 @@ fn park_convergence(
         if same_park_identity(parked, blocked_reason.as_ref(), &reason) {
             parked.observed_passes = parked.observed_passes.saturating_add(1);
             parked.reason = reason;
-            remediation.clone_into(&mut parked.remediation);
+            parked.remediation = remediation.to_owned();
         }
         return;
     }
@@ -850,7 +850,7 @@ fn park_convergence(
             parked.observed_passes = parked.observed_passes.saturating_add(1);
             parked.reason = reason;
             parked.blocked_reason = blocked_reason;
-            remediation.clone_into(&mut parked.remediation);
+            parked.remediation = remediation.to_owned();
             parked.retries_on_wake = retries_on_wake;
         }
         _ => {
@@ -2568,34 +2568,6 @@ impl CodeIndexSchedulerRegistryV1 {
             return false;
         };
         self.mounted.lock().await.contains_key(&project_root)
-    }
-
-    fn publication_authority_requires_reset(worktree: &MountedCodeIndexWorktreeV1) -> bool {
-        let progress = worktree
-            .build_progress
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        matches!(
-            progress
-                .snapshot()
-                .as_deref()
-                .and_then(|snapshot| snapshot.blocked_reason),
-            Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt)
-        )
-    }
-
-    fn publication_authority_corrupt_admission(
-        worktree: &MountedCodeIndexWorktreeV1,
-    ) -> CodeIndexReconcileAdmissionV1 {
-        worktree
-            .convergence_park
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-            .map_or(
-                CodeIndexReconcileAdmissionV1::Unavailable,
-                CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt,
-            )
     }
 
     fn publication_authority_reset(

@@ -236,6 +236,28 @@ impl Database {
         self.begin_isolated_read_snapshot(operation).await
     }
 
+    /// Starts a health-check snapshot on the reader capacity reserved for
+    /// diagnosis, so an active writer cannot block operator visibility.
+    #[hotpath::skip]
+    pub async fn begin_engine_health_read_snapshot(
+        &self,
+        operation: &str,
+    ) -> Result<DatabaseEngineReadSnapshot> {
+        let snapshot = self
+            .inner
+            .conn
+            .health_read_snapshot()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to begin health read snapshot: {error}"),
+                operation: operation.to_owned(),
+            })?;
+        Ok(DatabaseEngineReadSnapshot {
+            snapshot,
+            _client_guard: self.client_guard(),
+        })
+    }
+
     #[hotpath::skip]
     pub async fn begin_memory_read_transaction(
         &self,

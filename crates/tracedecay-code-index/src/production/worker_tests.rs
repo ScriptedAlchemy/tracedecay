@@ -251,6 +251,50 @@ fn unchanged_increment_shares_symbol_records_with_parent_generation() {
     ));
 }
 
+/// Arc-share incremental seals must survive parentless sealed restore.
+///
+/// Publish validates with a live parent; restore calls `validate_fresh()` with
+/// no parent and must still authenticate the Arc-share reused complement.
+/// Omit captured bytes on the successor so the file page is Arc-shared.
+#[test]
+fn arc_share_increment_restores_under_parentless_validate_fresh() {
+    let store = WorkerPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(worker_config(), store, WorkerProjectionSink)
+        .expect("production owner");
+    let source = b"pub fn carried() -> u32 { 7 }\n";
+    let first = owner
+        .build_and_publish(
+            worker_request_with_source("file.worker.arc-share-restore", 1_100_000, source),
+            &UninterruptibleCodeIndexControlV1,
+        )
+        .expect("first generation");
+    let mut carry = worker_request_with_source("file.worker.arc-share-restore", 1_200_000, source);
+    carry.captured_files.clear();
+    let next = owner
+        .build_and_publish(carry, &UninterruptibleCodeIndexControlV1)
+        .expect("arc-share increment");
+    assert!(
+        next.projection.request().changes.reused_count > 0,
+        "unchanged carry must seal a non-empty reused complement"
+    );
+    assert!(
+        Arc::ptr_eq(&first.files[0], &next.files[0]),
+        "fixture must Arc-share the unchanged file page"
+    );
+
+    let sealed = next.encode_sealed().expect("arc-share generation seals");
+    let restored =
+        CodeIndexPublishedGenerationV1::decode_sealed(&sealed).expect("parentless restore");
+    assert_eq!(restored.manifest.generation_id, next.manifest.generation_id);
+    assert_eq!(
+        restored.projection.request().changes.reused_digest,
+        next.projection.request().changes.reused_digest
+    );
+    restored
+        .validate_fresh()
+        .expect("restored generation must re-validate without a live parent");
+}
+
 #[test]
 fn extractor_revision_change_reextracts_before_validating_retained_import_rows() {
     let store = WorkerPublicationStore::default();

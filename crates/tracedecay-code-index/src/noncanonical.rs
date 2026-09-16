@@ -15,8 +15,23 @@ use tracedecay_domain::research::DomainError;
 /// Stable reason codes for non-canonical chunk / increment failures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum NonCanonicalReasonCodeV1 {
-    IdentityField,
     IdentityValidation,
+    Empty,
+    DomainNonCanonical,
+    DuplicateId,
+    UnknownReference,
+    SnapshotMismatch,
+    UnsafeText,
+    InvalidRange,
+    InvalidConfidence,
+    ActivityFacetOnActivitySubject,
+    SelfSupersession,
+    AuthorshipWithoutProviderLinkage,
+    InvalidTimeInterval,
+    InvalidRedactionCounts,
+    NonCertainDeclaration,
+    DigestMismatch,
+    CanonicalSerialization,
     DocumentChunkMembershipMismatch,
     ExactAuthorityMismatch,
     ExactAuthoritySetMismatch,
@@ -68,8 +83,23 @@ pub enum NonCanonicalReasonCodeV1 {
 impl NonCanonicalReasonCodeV1 {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::IdentityField => "identity_field",
             Self::IdentityValidation => "identity_validation",
+            Self::Empty => "empty",
+            Self::DomainNonCanonical => "domain_non_canonical",
+            Self::DuplicateId => "duplicate_id",
+            Self::UnknownReference => "unknown_reference",
+            Self::SnapshotMismatch => "snapshot_mismatch",
+            Self::UnsafeText => "unsafe_text",
+            Self::InvalidRange => "invalid_range",
+            Self::InvalidConfidence => "invalid_confidence",
+            Self::ActivityFacetOnActivitySubject => "activity_facet_on_activity_subject",
+            Self::SelfSupersession => "self_supersession",
+            Self::AuthorshipWithoutProviderLinkage => "authorship_without_provider_linkage",
+            Self::InvalidTimeInterval => "invalid_time_interval",
+            Self::InvalidRedactionCounts => "invalid_redaction_counts",
+            Self::NonCertainDeclaration => "non_certain_declaration",
+            Self::DigestMismatch => "digest_mismatch",
+            Self::CanonicalSerialization => "canonical_serialization",
             Self::DocumentChunkMembershipMismatch => "document_chunk_membership_mismatch",
             Self::ExactAuthorityMismatch => "exact_authority_mismatch",
             Self::ExactAuthoritySetMismatch => "exact_authority_set_mismatch",
@@ -197,21 +227,53 @@ impl NonCanonicalCauseV1 {
     }
 
     pub fn from_domain(error: DomainError) -> Self {
-        let field = match &error {
-            DomainError::Empty { field }
-            | DomainError::NonCanonical { field }
-            | DomainError::DuplicateId { field }
-            | DomainError::UnknownReference { field }
-            | DomainError::SnapshotMismatch { field }
-            | DomainError::UnsafeText { field }
-            | DomainError::InvalidRange { field } => Some(*field),
-            _ => None,
-        };
-        match field {
-            Some(field) => Self::new(NonCanonicalReasonCodeV1::IdentityField)
+        match error {
+            DomainError::Empty { field } => Self::new(NonCanonicalReasonCodeV1::Empty)
                 .with(NonCanonicalDetailKeyV1::Field, field),
-            None => Self::new(NonCanonicalReasonCodeV1::IdentityValidation)
-                .with(NonCanonicalDetailKeyV1::Detail, error.to_string()),
+            DomainError::NonCanonical { field } => {
+                Self::new(NonCanonicalReasonCodeV1::DomainNonCanonical)
+                    .with(NonCanonicalDetailKeyV1::Field, field)
+            }
+            DomainError::DuplicateId { field } => Self::new(NonCanonicalReasonCodeV1::DuplicateId)
+                .with(NonCanonicalDetailKeyV1::Field, field),
+            DomainError::UnknownReference { field } => {
+                Self::new(NonCanonicalReasonCodeV1::UnknownReference)
+                    .with(NonCanonicalDetailKeyV1::Field, field)
+            }
+            DomainError::SnapshotMismatch { field } => {
+                Self::new(NonCanonicalReasonCodeV1::SnapshotMismatch)
+                    .with(NonCanonicalDetailKeyV1::Field, field)
+            }
+            DomainError::UnsafeText { field } => Self::new(NonCanonicalReasonCodeV1::UnsafeText)
+                .with(NonCanonicalDetailKeyV1::Field, field),
+            DomainError::InvalidRange { field } => {
+                Self::new(NonCanonicalReasonCodeV1::InvalidRange)
+                    .with(NonCanonicalDetailKeyV1::Field, field)
+            }
+            DomainError::InvalidConfidence => {
+                Self::new(NonCanonicalReasonCodeV1::InvalidConfidence)
+            }
+            DomainError::ActivityFacetOnActivitySubject => {
+                Self::new(NonCanonicalReasonCodeV1::ActivityFacetOnActivitySubject)
+            }
+            DomainError::SelfSupersession => Self::new(NonCanonicalReasonCodeV1::SelfSupersession),
+            DomainError::AuthorshipWithoutProviderLinkage => {
+                Self::new(NonCanonicalReasonCodeV1::AuthorshipWithoutProviderLinkage)
+            }
+            DomainError::InvalidTimeInterval => {
+                Self::new(NonCanonicalReasonCodeV1::InvalidTimeInterval)
+            }
+            DomainError::InvalidRedactionCounts => {
+                Self::new(NonCanonicalReasonCodeV1::InvalidRedactionCounts)
+            }
+            DomainError::NonCertainDeclaration => {
+                Self::new(NonCanonicalReasonCodeV1::NonCertainDeclaration)
+            }
+            DomainError::DigestMismatch => Self::new(NonCanonicalReasonCodeV1::DigestMismatch),
+            DomainError::CanonicalSerialization(detail) => {
+                Self::new(NonCanonicalReasonCodeV1::CanonicalSerialization)
+                    .with(NonCanonicalDetailKeyV1::Detail, detail)
+            }
         }
     }
 }
@@ -219,7 +281,9 @@ impl NonCanonicalCauseV1 {
 impl fmt::Display for NonCanonicalCauseV1 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.reason_code.as_str())?;
-        if self.details.is_empty() {
+        if self.details.is_empty()
+            || self.reason_code == NonCanonicalReasonCodeV1::CloneBodyOccurrenceOrder
+        {
             return Ok(());
         }
         write!(f, " {{")?;
@@ -246,4 +310,177 @@ pub fn noncanonical_detail(
     error: impl fmt::Display,
 ) -> NonCanonicalCauseV1 {
     NonCanonicalCauseV1::new(reason_code).with(NonCanonicalDetailKeyV1::Detail, error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_domain_maps_field_bearing_errors_one_to_one() {
+        let cases = [
+            (
+                DomainError::Empty { field: "chunk_id" },
+                NonCanonicalReasonCodeV1::Empty,
+                "chunk_id",
+            ),
+            (
+                DomainError::NonCanonical {
+                    field: "file_occurrence_id",
+                },
+                NonCanonicalReasonCodeV1::DomainNonCanonical,
+                "file_occurrence_id",
+            ),
+            (
+                DomainError::DuplicateId {
+                    field: "symbol_occurrence_id",
+                },
+                NonCanonicalReasonCodeV1::DuplicateId,
+                "symbol_occurrence_id",
+            ),
+            (
+                DomainError::UnknownReference { field: "anchor_id" },
+                NonCanonicalReasonCodeV1::UnknownReference,
+                "anchor_id",
+            ),
+            (
+                DomainError::SnapshotMismatch {
+                    field: "snapshot_digest",
+                },
+                NonCanonicalReasonCodeV1::SnapshotMismatch,
+                "snapshot_digest",
+            ),
+            (
+                DomainError::UnsafeText { field: "source" },
+                NonCanonicalReasonCodeV1::UnsafeText,
+                "source",
+            ),
+            (
+                DomainError::InvalidRange { field: "byte_span" },
+                NonCanonicalReasonCodeV1::InvalidRange,
+                "byte_span",
+            ),
+        ];
+
+        for (error, expected_code, expected_field) in cases {
+            let cause = NonCanonicalCauseV1::from_domain(error);
+            assert_eq!(cause.reason_code(), expected_code);
+            assert_eq!(
+                cause
+                    .details()
+                    .get(&NonCanonicalDetailKeyV1::Field)
+                    .map(String::as_str),
+                Some(expected_field)
+            );
+            assert!(
+                !cause
+                    .details()
+                    .contains_key(&NonCanonicalDetailKeyV1::Detail)
+            );
+        }
+    }
+
+    #[test]
+    fn from_domain_maps_fieldless_errors_without_to_string_dump() {
+        let cases = [
+            (
+                DomainError::InvalidConfidence,
+                NonCanonicalReasonCodeV1::InvalidConfidence,
+            ),
+            (
+                DomainError::ActivityFacetOnActivitySubject,
+                NonCanonicalReasonCodeV1::ActivityFacetOnActivitySubject,
+            ),
+            (
+                DomainError::SelfSupersession,
+                NonCanonicalReasonCodeV1::SelfSupersession,
+            ),
+            (
+                DomainError::AuthorshipWithoutProviderLinkage,
+                NonCanonicalReasonCodeV1::AuthorshipWithoutProviderLinkage,
+            ),
+            (
+                DomainError::InvalidTimeInterval,
+                NonCanonicalReasonCodeV1::InvalidTimeInterval,
+            ),
+            (
+                DomainError::InvalidRedactionCounts,
+                NonCanonicalReasonCodeV1::InvalidRedactionCounts,
+            ),
+            (
+                DomainError::NonCertainDeclaration,
+                NonCanonicalReasonCodeV1::NonCertainDeclaration,
+            ),
+            (
+                DomainError::DigestMismatch,
+                NonCanonicalReasonCodeV1::DigestMismatch,
+            ),
+        ];
+
+        for (error, expected_code) in cases {
+            let cause = NonCanonicalCauseV1::from_domain(error);
+            assert_eq!(cause.reason_code(), expected_code);
+            assert!(cause.details().is_empty());
+        }
+
+        let serialized = NonCanonicalCauseV1::from_domain(DomainError::CanonicalSerialization(
+            "payload encoding failed".to_owned(),
+        ));
+        assert_eq!(
+            serialized.reason_code(),
+            NonCanonicalReasonCodeV1::CanonicalSerialization
+        );
+        assert_eq!(
+            serialized
+                .details()
+                .get(&NonCanonicalDetailKeyV1::Detail)
+                .map(String::as_str),
+            Some("payload encoding failed")
+        );
+    }
+
+    #[test]
+    fn domain_reason_codes_use_snake_case_wire_names() {
+        assert_eq!(NonCanonicalReasonCodeV1::Empty.as_str(), "empty");
+        assert_eq!(
+            NonCanonicalReasonCodeV1::DomainNonCanonical.as_str(),
+            "domain_non_canonical"
+        );
+        assert_eq!(
+            NonCanonicalReasonCodeV1::DuplicateId.as_str(),
+            "duplicate_id"
+        );
+        assert_eq!(
+            NonCanonicalReasonCodeV1::UnknownReference.as_str(),
+            "unknown_reference"
+        );
+        assert_eq!(
+            NonCanonicalReasonCodeV1::SnapshotMismatch.as_str(),
+            "snapshot_mismatch"
+        );
+        assert_eq!(NonCanonicalReasonCodeV1::UnsafeText.as_str(), "unsafe_text");
+        assert_eq!(
+            NonCanonicalReasonCodeV1::InvalidRange.as_str(),
+            "invalid_range"
+        );
+    }
+
+    #[test]
+    fn clone_order_display_omits_identity_details_without_discarding_them() {
+        let cause = NonCanonicalCauseV1::new(NonCanonicalReasonCodeV1::CloneBodyOccurrenceOrder)
+            .with(
+                NonCanonicalDetailKeyV1::LeftSymbolOccurrenceId,
+                "symbol.v1.left",
+            )
+            .with(NonCanonicalDetailKeyV1::LeftPayloadDigest, "sha256:payload");
+        assert_eq!(cause.to_string(), "clone_body_occurrence_order");
+        assert_eq!(
+            cause.details()[&NonCanonicalDetailKeyV1::LeftSymbolOccurrenceId],
+            "symbol.v1.left"
+        );
+        assert_eq!(
+            cause.details()[&NonCanonicalDetailKeyV1::LeftPayloadDigest],
+            "sha256:payload"
+        );
+    }
 }

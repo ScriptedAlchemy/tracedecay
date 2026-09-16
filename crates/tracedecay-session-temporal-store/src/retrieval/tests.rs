@@ -1397,7 +1397,13 @@ fn candidate_and_record_cursors_are_stable_and_bounded() {
     };
     let encoded = record.encode(256).unwrap();
     assert_eq!(RecordCursor::decode(Some(&encoded)).unwrap(), record);
-    assert!(record.encode(8).is_err());
+    assert_eq!(
+        record.encode(8),
+        Err(TemporalPortError::BudgetExceeded {
+            resource: "continuation key bytes",
+            accounting: None,
+        })
+    );
 }
 
 #[tokio::test]
@@ -2952,6 +2958,13 @@ fn fts_values_are_bound_as_literal_phrases() {
 #[test]
 fn iso_day_bounds_are_micros_and_half_open() {
     let (start, end) = iso_day_bounds("2026-07-18").unwrap();
+    assert_eq!(start, 1_784_332_800_000_000);
     assert_eq!(end - start, 86_400_000_000);
-    assert!(iso_day_bounds("not-a-date").is_err());
+    assert_eq!(
+        iso_day_bounds("not-a-date"),
+        Err(TemporalPortError::Read {
+            operation: CANDIDATE_OPERATION,
+            message: "invalid ISO date candidate".to_owned(),
+        })
+    );
 }

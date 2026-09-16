@@ -45,6 +45,9 @@ fn projection_key() -> ProjectionKeyV1 {
 }
 
 fn changeset() -> ChangedCodeChunkSetV1 {
+    let reused = [(chunk("reused"), digest::<ContentDigest>('c'))];
+    let (reused_count, reused_digest) =
+        ChangedCodeChunkSetV1::seal_reused_partition(&reused).expect("reused seal");
     let mut changes = ChangedCodeChunkSetV1 {
         from_generation: Some(generation(1)),
         to_generation: generation(2),
@@ -55,11 +58,8 @@ fn changeset() -> ChangedCodeChunkSetV1 {
             current_digest: Some(digest::<ContentDigest>('b')),
         }],
         deleted: vec![],
-        reused: vec![ChangedCodeChunkV1 {
-            chunk_id: chunk("reused"),
-            prior_digest: Some(digest::<ContentDigest>('c')),
-            current_digest: Some(digest::<ContentDigest>('c')),
-        }],
+        reused_count,
+        reused_digest,
     };
     changes.manifest_digest = changes.compute_digest().expect("changeset digest");
     changes
@@ -82,24 +82,14 @@ fn request_for(changes: ChangedCodeChunkSetV1) -> ProjectionBatchRequestV1 {
 }
 
 fn decisions() -> Vec<ChunkProjectionDecisionV1> {
-    vec![
-        ChunkProjectionDecisionV1 {
-            chunk_id: chunk("updated"),
-            prior_chunk_digest: Some(digest::<ContentDigest>('a')),
-            current_chunk_digest: Some(digest::<ContentDigest>('b')),
-            operation: ProjectionOperationV1::Updated,
-            outcome: ProjectionOutcomeV1::Applied,
-            output_digest: Some(digest::<ContentDigest>('d')),
-        },
-        ChunkProjectionDecisionV1 {
-            chunk_id: chunk("reused"),
-            prior_chunk_digest: Some(digest::<ContentDigest>('c')),
-            current_chunk_digest: Some(digest::<ContentDigest>('c')),
-            operation: ProjectionOperationV1::Reused,
-            outcome: ProjectionOutcomeV1::Reused,
-            output_digest: None,
-        },
-    ]
+    vec![ChunkProjectionDecisionV1 {
+        chunk_id: chunk("updated"),
+        prior_chunk_digest: Some(digest::<ContentDigest>('a')),
+        current_chunk_digest: Some(digest::<ContentDigest>('b')),
+        operation: ProjectionOperationV1::Updated,
+        outcome: ProjectionOutcomeV1::Applied,
+        output_digest: Some(digest::<ContentDigest>('d')),
+    }]
 }
 
 struct FixedSink {
@@ -165,7 +155,10 @@ fn request_without_a_prior_key_requires_the_initial_replay_reason() {
             current_digest: Some(digest::<ContentDigest>('a')),
         }],
         deleted: vec![],
-        reused: vec![],
+        reused_count: 0,
+        reused_digest: ChangedCodeChunkSetV1::seal_reused_partition(&[])
+            .expect("empty reused seal")
+            .1,
     };
     changes.manifest_digest = changes.compute_digest().expect("initial changeset digest");
     let mut request = request_for(changes);

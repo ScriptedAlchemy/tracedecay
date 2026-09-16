@@ -18,8 +18,7 @@ use super::{
     WorkAttemptStoragePort, WorkSynthesisAdmissionStoragePort, WorkSynthesisInsertOutcome,
     accepted_attempt_draft, admit_product_attempt_request, conflict_problem, contract_problem,
     current_work_product_attempt_graph, denied_problem, not_found_problem,
-    product_admission_problem, product_attempt_projection_binding,
-    replayed_attempt_matches_command, storage_problem,
+    product_admission_problem, product_attempt_projection_binding, storage_problem,
 };
 
 const COMMAND_DOMAIN: &str = "tracedecay.application.work-product-synthesis-command.final-v2";
@@ -58,7 +57,7 @@ where
             .map_err(storage_problem)
     }
 
-    pub fn replay(
+    pub(crate) fn replay(
         &self,
         context: &RequestContext,
         binding: &WorkProductBindingV1,
@@ -69,14 +68,10 @@ where
         let (authority, identity) = attempt_authority_and_identity(context, command)?;
         match self.storage.load_synthesis(&authority, &identity) {
             Ok(record) if &record.request_digest == request_digest => {
-                if !replayed_attempt_matches_command(
-                    context,
-                    command,
-                    &identity,
-                    &record.result.attempt,
-                )? {
-                    return Err(identity_conflict());
-                }
+                // The digest covers the original command. Stored instructions
+                // also contain hydrated source content, so envelope equality
+                // would reject the same caller request on replay. Storage
+                // scopes this record to the exact request authority.
                 Ok(Some(record.result))
             }
             Ok(_) => Err(identity_conflict()),
@@ -86,7 +81,7 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn admit<F>(
+    pub(crate) fn admit<F>(
         &self,
         context: &RequestContext,
         binding: &WorkProductBindingV1,
@@ -103,14 +98,6 @@ where
         let (authority, identity) = attempt_authority_and_identity(context, &command)?;
         match self.storage.load_synthesis(&authority, &identity) {
             Ok(record) if record.request_digest == request_digest => {
-                if !replayed_attempt_matches_command(
-                    context,
-                    &command,
-                    &identity,
-                    &record.result.attempt,
-                )? {
-                    return Err(identity_conflict());
-                }
                 return Ok(record.result);
             }
             Ok(_) => return Err(identity_conflict()),

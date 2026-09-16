@@ -2,7 +2,10 @@ use tracedecay_lcm::contracts::{LcmError, LcmExpandSourcePagination, validate_pa
 
 #[test]
 fn payload_ref_validation_rejects_traversal_and_separators() {
-    assert!(validate_payload_ref("payload_abc.payload").is_ok());
+    assert_eq!(
+        validate_payload_ref("payload_abc.payload"),
+        Ok("payload_abc.payload")
+    );
 
     for rejected in [
         "",

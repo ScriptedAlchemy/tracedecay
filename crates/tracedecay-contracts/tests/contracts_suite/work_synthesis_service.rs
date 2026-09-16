@@ -119,6 +119,7 @@ fn admit_synthesis(
         &work_product_revisions(context),
         &registered_topology(),
         command,
+        |start, _| Ok(start.instructions.clone()),
     )
 }
 
@@ -135,6 +136,13 @@ fn admit_synthesis_with_topology(
         &work_product_revisions(context),
         topology,
         command,
+        |start, sources| {
+            Ok(format!(
+                "{}\n\n{}",
+                start.instructions,
+                serde_json::to_string(sources).unwrap()
+            ))
+        },
     )
 }
 
@@ -426,7 +434,9 @@ fn synthesis_refuses_empty_duplicate_and_self_source_sets() {
 
 #[test]
 fn synthesis_refuses_an_unknown_source() {
-    let (attempts, _, _, context) = fixture("project.synthesis.unknown-source");
+    let (attempts, _, store, context) = fixture("project.synthesis.unknown-source");
+    admit_work(&store, &context, "task.synthesis");
+    let version = store.graph_version();
     let missing = admit_synthesis(
         &attempts,
         &context,
@@ -437,6 +447,90 @@ fn synthesis_refuses_an_unknown_source() {
         missing.kind(),
         ApplicationProblemKind::NotFoundOrNotAuthorized
     );
+    assert_eq!(store.graph_version(), version);
+    assert_eq!(
+        attempt_count_for_run(&store, &work_authority(&context), &id("run.task.synthesis")),
+        0
+    );
+}
+
+#[test]
+fn synthesis_denies_foreign_sources_without_admitting_an_attempt() {
+    let (attempts, _, store, owner) = fixture("project.synthesis.denial");
+    admit_work(&store, &owner, "task.synthesis");
+    let source = source_identity("task.source.private", "attempt.1");
+    let original = insert_terminal_source(
+        &store,
+        &work_authority(&owner),
+        source.clone(),
+        WorkAttemptStateV1::Succeeded,
+        vec![artifact("artifact.private", '1')],
+        digest('2'),
+    );
+    let stranger = context("project.synthesis.denial", "actor.stranger");
+    let version = store.graph_version();
+    let denied = admit_synthesis(
+        &attempts,
+        &stranger,
+        synthesis_command(vec![source.clone()]),
+    )
+    .unwrap_err();
+    assert_eq!(
+        denied.kind(),
+        ApplicationProblemKind::NotFoundOrNotAuthorized
+    );
+    assert_eq!(store.graph_version(), version);
+    assert_eq!(
+        attempt_count_for_run(
+            &store,
+            &work_authority(&stranger),
+            &id("run.task.synthesis")
+        ),
+        0
+    );
+    assert_eq!(attempts.status(&owner, &source).unwrap(), original);
+}
+
+#[test]
+fn synthesis_instruction_preparation_failure_leaves_no_admission() {
+    let (attempts, _, store, context) = fixture("project.synthesis.payload-unavailable");
+    admit_work(&store, &context, "task.synthesis");
+    let source = source_identity("task.source.citable", "attempt.1");
+    let original = insert_terminal_source(
+        &store,
+        &work_authority(&context),
+        source.clone(),
+        WorkAttemptStateV1::Succeeded,
+        vec![artifact("artifact.source", '1')],
+        digest('2'),
+    );
+    let version = store.graph_version();
+    let unavailable = tracedecay_contracts::ApplicationProblem::unavailable(
+        tracedecay_contracts::SafeDiagnostic {
+            code: "application.work-synthesis.artifact-body-unavailable".to_owned(),
+            message: "Source payload is unavailable.".to_owned(),
+        },
+    );
+    let error = admit_work_synthesis_against_registered_topology(
+        &attempts,
+        &context,
+        &work_product_binding(),
+        &work_product_revisions(&context),
+        &registered_topology(),
+        synthesis_command(vec![source.clone()]),
+        |_, sources| {
+            assert_eq!(sources, std::slice::from_ref(&original));
+            Err(unavailable.clone())
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error, unavailable);
+    assert_eq!(store.graph_version(), version);
+    assert_eq!(
+        attempt_count_for_run(&store, &work_authority(&context), &id("run.task.synthesis")),
+        0
+    );
+    assert_eq!(attempts.status(&context, &source).unwrap(), original);
 }
 
 #[test]
@@ -658,7 +752,19 @@ fn identical_synthesis_replay_returns_the_byte_stable_admitted_result() {
         &running,
         vec![artifact("artifact.late", '3')],
     );
-    let replay = admit_synthesis_with_topology(&attempts, &context, &topology, command).unwrap();
+    let replay =
+        admit_synthesis_with_topology(&attempts, &context, &topology, command.clone()).unwrap();
+    let without_payloads = admit_work_synthesis_against_registered_topology(
+        &attempts,
+        &context,
+        &work_product_binding(),
+        &work_product_revisions(&context),
+        &topology,
+        command,
+        |_, _| panic!("a replay must not rehydrate source payloads"),
+    )
+    .unwrap();
+    assert_eq!(without_payloads, first);
 
     assert_eq!(
         serde_json::to_vec(&replay).unwrap(),
@@ -693,6 +799,17 @@ fn changed_synthesis_request_conflicts_without_mutating_the_admitted_result() {
     let conflict = admit_synthesis(&attempts, &context, changed).unwrap_err();
     assert_eq!(conflict.kind(), ApplicationProblemKind::Conflict);
 
+    let mut changed_instructions = command.clone();
+    changed_instructions
+        .start
+        .instructions
+        .push_str(" changed instructions");
+    assert_eq!(
+        admit_synthesis(&attempts, &context, changed_instructions)
+            .unwrap_err()
+            .kind(),
+        ApplicationProblemKind::Conflict,
+    );
     let replay = admit_synthesis(&attempts, &context, command).unwrap();
     assert_eq!(
         serde_json::to_vec(&replay).unwrap(),

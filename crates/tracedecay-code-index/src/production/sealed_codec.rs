@@ -36,8 +36,12 @@ pub(super) const MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION: u32 = 9;
 /// Revision 10 stored generation-bound `symbol_occurrences` on each file
 /// segment descriptor; revision 11 stores generation-independent
 /// `symbol_identities` and rebinds occurrences at restore so one-file seal
-/// reuse no longer SHA-256-rebounds every unchanged file's symbols.
-pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 11;
+/// reuse no longer SHA-256-rebounds every unchanged file's symbols. Revision
+/// 12 seals `full_replay_digest` as a parent-delta (optional parent binding).
+/// Revision 11 bytes omit that field; decoding them as 12 would fail
+/// `validate_for_changes` as contract corruption instead of the typed rebuild
+/// refusal, so revision 11 is retired rather than migrated.
+pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 12;
 
 /// The oldest sealed envelope revision this build decodes. Anything below it,
 /// and any retired revision between it and
@@ -1283,16 +1287,18 @@ mod tests {
 
     #[test]
     fn format_gate_accepts_only_the_monolithic_and_partitioned_revisions() {
-        assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 11);
+        assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 12);
         assert_eq!(MINIMUM_SEALED_GENERATION_FORMAT_REVISION, 9);
         assert!(sealed_generation_format_revision_is_compatible(9));
-        assert!(sealed_generation_format_revision_is_compatible(11));
+        assert!(sealed_generation_format_revision_is_compatible(12));
         assert!(!sealed_generation_format_revision_is_compatible(8));
-        // Revision 10 stored generation-bound symbol occurrence lists on each
-        // file-segment descriptor; revision 11 stores generation-independent
-        // symbol identities and rebinds occurrences at restore.
+        // Revision 10 stored generation-bound symbol occurrence lists.
+        // Revision 11 sealed generation-independent symbol identities but a
+        // full-corpus `full_replay_digest`. Revision 12 seals that digest as
+        // a parent-delta, so 11 is rebuilt rather than decoded as corruption.
         assert!(!sealed_generation_format_revision_is_compatible(10));
-        assert!(!sealed_generation_format_revision_is_compatible(12));
+        assert!(!sealed_generation_format_revision_is_compatible(11));
+        assert!(!sealed_generation_format_revision_is_compatible(13));
     }
 
     struct LargestAllocationRecorderV1;
@@ -1471,11 +1477,14 @@ mod tests {
     /// seal a generation that every later load would refuse as corrupt.
     #[test]
     fn sealed_generation_byte_bound_is_symmetric() {
-        assert!(admit_sealed_generation_len(MAX_SEALED_CODE_GENERATION_BYTES_V1).is_ok());
+        assert!(matches!(
+            admit_sealed_generation_len(MAX_SEALED_CODE_GENERATION_BYTES_V1),
+            Ok(())
+        ));
         assert!(matches!(
             admit_sealed_generation_len(MAX_SEALED_CODE_GENERATION_BYTES_V1 + 1),
             Err(CodeIndexProductionErrorV1::Contract(message))
-                if message.contains("canonical byte limit")
+                if message == "sealed generation exceeds the canonical byte limit"
         ));
     }
 

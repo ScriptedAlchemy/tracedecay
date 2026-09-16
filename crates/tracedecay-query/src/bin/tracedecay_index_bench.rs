@@ -1119,10 +1119,25 @@ fn measure_clone_queries(
 ) -> Result<serde_json::Value, String> {
     let elapsed_micros =
         |duration: Duration| u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
+    // Always open the reader under --clone-envelope so peak RSS compares like
+    // with like across format revisions. Format 14 has no clone index, but it
+    // still mmaps the sealed artifact; skipping the open made v16−v14 look like
+    // a multi-GiB clone regression when most of the delta was "mmap vs no mmap".
+    let open_started = Instant::now();
+    let reader = CodeLexicalArtifactReaderV1::open_with_control(
+        artifact_path,
+        receipt,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        control,
+    )
+    .map_err(|error| format!("open clone artifact reader: {error}"))?;
+    let first_reader_open_micros = elapsed_micros(open_started.elapsed());
     if format_revision < 15 {
+        drop(reader);
         return Ok(serde_json::json!({
             "state": "unavailable",
             "reason": "artifact_has_no_clone_index",
+            "first_reader_open_micros": first_reader_open_micros,
         }));
     }
     let Some(source) = pages
@@ -1137,20 +1152,13 @@ fn measure_clone_queries(
                     .any(|key| key.class == CloneNormalizationClassV1::Conservative)
         })
     else {
+        drop(reader);
         return Ok(serde_json::json!({
             "state": "unavailable",
             "reason": "no_eligible_clone_body",
+            "first_reader_open_micros": first_reader_open_micros,
         }));
     };
-    let open_started = Instant::now();
-    let reader = CodeLexicalArtifactReaderV1::open_with_control(
-        artifact_path,
-        receipt,
-        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
-        control,
-    )
-    .map_err(|error| format!("open clone artifact reader: {error}"))?;
-    let first_reader_open_micros = elapsed_micros(open_started.elapsed());
 
     let first_reader_started = Instant::now();
     let first_reader =
@@ -1178,11 +1186,23 @@ fn measure_clone_queries(
         .map(|member| member.occurrence.path.clone())
         .collect::<Vec<_>>();
 
+    // Fingerprint authority must come from the artifact (serving-stamped), not
+    // the sealed page's extraction-provenance occurrence.
+    let artifact_source = reader
+        .clone_body(&source.occurrence.symbol_occurrence_id)
+        .map_err(|error| format!("read clone body for fingerprint authority: {error}"))?
+        .ok_or_else(|| {
+            format!(
+                "clone body {} is unavailable for fingerprint authority",
+                source.occurrence.symbol_occurrence_id.as_str()
+            )
+        })?;
+
     let fingerprint = if reader.has_clone_fingerprints() {
         let read = reader
             .clone_fingerprint_page(
-                &source.occurrence,
-                &source.payload,
+                &artifact_source.occurrence,
+                &artifact_source.payload,
                 None,
                 MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1,
                 control,
@@ -1190,8 +1210,8 @@ fn measure_clone_queries(
             .map_err(|error| format!("read clone fingerprints: {error}"))?;
         let cancelled = reader
             .clone_fingerprint_page(
-                &source.occurrence,
-                &source.payload,
+                &artifact_source.occurrence,
+                &artifact_source.payload,
                 None,
                 MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1,
                 &CancelledControl,

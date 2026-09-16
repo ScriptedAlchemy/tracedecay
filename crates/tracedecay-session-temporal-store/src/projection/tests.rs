@@ -5,14 +5,14 @@ use tempfile::TempDir;
 use tracedecay_domain::{
     AnchorProvenanceRelationV2, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
-    CopyProofV1, DurableObservationV1, LogicalCopyRecordV1, ObservationId,
+    CopyProofV1, DurableObservationV1, LogicalCopyRecordV1, MessageOccurrenceIdV1, ObservationId,
     ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-    ObservationSourceRangeV1, PayloadReferenceV1, ProjectionGenerationId, ProviderId,
-    RetentionClass, RetrievalAnchorId, RetrievalAnchorRecordV2, SanitizationReceiptId,
-    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId, TemporalAssertionKindV1, TemporalValidityV1, UtcMicros,
-    derive_exact_observation_anchor_id,
+    ObservationSourceRangeV1, PayloadReferenceV1, ProjectionGenerationId,
+    ProjectionOutputOrdinalV1, ProviderId, RetentionClass, RetrievalAnchorId,
+    RetrievalAnchorRecordV2, SanitizationReceiptId, SanitizationReceiptRefV1,
+    SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId,
+    TemporalAssertionKindV1, TemporalValidityV1, UtcMicros, derive_exact_observation_anchor_id,
 };
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_store::{
@@ -1321,7 +1321,17 @@ async fn parent_resolver_pages_live_sized_observation_history() {
     .await
     .unwrap();
 
-    assert!(resolver.resolve("message.projector.0").is_some());
+    assert_eq!(
+        resolver.resolve("message.projector.0"),
+        Some(
+            MessageOccurrenceIdV1::derive(
+                observation.observation_id(),
+                tracedecay_domain::ProjectionOutputOrdinalV1::new(0),
+            )
+            .as_str()
+        )
+    );
+    assert_eq!(resolver.resolve("message.missing"), None);
 }
 
 #[tokio::test]
@@ -1411,7 +1421,17 @@ async fn parent_resolver_has_bounded_cancellable_session_traversal() {
     .await
     .unwrap();
 
-    assert!(resolver.resolve("message.projector.0").is_some());
+    assert_eq!(
+        resolver.resolve("message.projector.0"),
+        Some(
+            MessageOccurrenceIdV1::derive(
+                observation.observation_id(),
+                ProjectionOutputOrdinalV1::new(0),
+            )
+            .as_str()
+        )
+    );
+    assert_eq!(resolver.resolve("message.missing"), None);
     assert!(
         counted.query_count() <= 2,
         "one relevant history page plus the terminal probe is sufficient, but {} queries visited unrelated profile history",

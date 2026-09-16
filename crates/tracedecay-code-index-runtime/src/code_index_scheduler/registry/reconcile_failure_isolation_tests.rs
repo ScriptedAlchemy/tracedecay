@@ -13,14 +13,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tempfile::TempDir;
+use tracedecay_contracts::ResolvedScope;
 
 use super::super::{
-    CodeIndexCadenceTriggerV1, CodeIndexDemandAdmissionV1,
+    CodeIndexCadenceTriggerV1, CodeIndexDemandAdmissionV1, CodeIndexReconcileAdmissionV1,
     reconcile_panic_guard::{
         MAX_CONSECUTIVE_CAPACITY_RETRIES_V1, MAX_CONSECUTIVE_RECONCILE_PANICS_V1,
         ReconcileFaultInjectionV1, ReconcileFaultKindV1,
     },
-    serving::CodeIndexBuildProgressSlotStateV1,
 };
 use super::CodeIndexSchedulerRegistryV1;
 
@@ -167,8 +167,7 @@ impl Fixture {
         *worktree
             .build_progress
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            CodeIndexBuildProgressSlotStateV1::default();
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Default::default();
     }
 
     async fn plant_terminal_publication_park(&self, reason: &str) {
@@ -574,6 +573,18 @@ async fn corrupt_publication_without_build_progress_returns_terminal_admission()
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn park_visible_before_progress_reason_returns_terminal_admission() {
     let fixture = Fixture::mount("project.reconcile-park-before-progress").await;
+    let scope = {
+        let canonical = fixture.project.canonicalize().expect("canonical project");
+        let mounted = fixture.registry.mounted.lock().await;
+        let worktree = mounted.get(&canonical).expect("mounted worktree");
+        ResolvedScope::new(
+            worktree.project_id.clone(),
+            worktree.repository_id.clone(),
+            worktree.worktree_id.clone(),
+            None,
+        )
+        .expect("resolved scope")
+    };
     fixture
         .plant_terminal_publication_park("parked before progress snapshot")
         .await;
@@ -592,6 +603,13 @@ async fn park_visible_before_progress_reason_returns_terminal_admission() {
             .notify_hook_paths(&fixture.project, &["src/main.rs".to_owned()])
             .await,
         CodeIndexDemandAdmissionV1::Terminal(_)
+    ));
+    assert!(matches!(
+        fixture
+            .registry
+            .request_query_background_reconcile(&scope)
+            .await,
+        CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_)
     ));
     fixture.registry.shutdown().await;
 }

@@ -157,7 +157,7 @@ pub(crate) fn error_is_project_warming(error: &TraceDecayError) -> bool {
 
 /// True when a daemon error describes a project open that has not finished
 /// yet: typed warming, deferred repository discovery, or a saturated open
-/// queue (still named in the Config message until those producers migrate).
+/// queue (still named in the `Config` message until those producers migrate).
 pub(crate) fn error_is_project_open_retryable(error: &TraceDecayError) -> bool {
     error_is_project_warming(error)
         || matches!(

@@ -4,6 +4,7 @@ use std::{
     time::Duration,
 };
 
+use tracedecay_code_extraction::incremental::ParseError;
 use tracedecay_code_extraction::{
     AstroExtractor, LanguageExtractor, RustExtractor,
     incremental::{ParseDocumentIdentity, ParseLimits, ParseReuse},
@@ -239,12 +240,18 @@ fn retained_pool_eviction_and_failure_preserve_truthful_bounded_state() {
     )
     .expect("second parse evicts first");
 
-    let error = pool.parse(
-        identity("worktree.two", "commit-b", "tree-b"),
-        "rust",
-        "fn two() { let value = 12345678901234567890; }\n",
+    let oversized = "fn two() { let value = 12345678901234567890; }\n";
+    assert_eq!(
+        pool.parse(
+            identity("worktree.two", "commit-b", "tree-b"),
+            "rust",
+            oversized,
+        ),
+        Err(ParseError::SourceTooLarge {
+            size: oversized.len(),
+            limit: 32,
+        })
     );
-    assert!(error.is_err());
     let no_op = pool
         .parse(
             identity("worktree.two", "commit-b", "tree-b"),

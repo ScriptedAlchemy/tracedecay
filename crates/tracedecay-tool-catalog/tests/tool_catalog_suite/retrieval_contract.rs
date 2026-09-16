@@ -2,8 +2,8 @@ use crate::common;
 
 use tracedecay_tool_catalog::{
     CancellationPoint, CatalogContributionInputV1, CatalogContributionV1, CatalogSnapshotBuilderV1,
-    ContributionContractRef, ContributionId, CoverageContractRef, DeadlineBehavior,
-    OmissionContractRef, RetrievalFamily, RetrievalPrimitiveManifestInputV1,
+    CatalogValidationError, ContributionContractRef, ContributionId, CoverageContractRef,
+    DeadlineBehavior, OmissionContractRef, RetrievalFamily, RetrievalPrimitiveManifestInputV1,
     RetrievalPrimitiveManifestV1, RetrieverId, ScoringContractRef, SortContract, SortContractId,
     TemporalMode,
 };
@@ -115,5 +115,33 @@ fn retrieval_primitive_rejects_unbounded_page_metadata() {
         deadline_behavior: DeadlineBehavior::ReturnOperationReceipt,
     });
 
-    assert!(result.is_err());
+    assert_eq!(
+        result,
+        Err(CatalogValidationError::InvalidValue {
+            field: "retrieval page bounds",
+            reason: "default and maximum must be non-zero and ordered",
+        })
+    );
+
+    let ordered = RetrievalPrimitiveManifestInputV1 {
+        capability_id: capability_id("capability.source.ordered"),
+        family: RetrievalFamily::Source,
+        retriever_id: RetrieverId::new("retriever.source.ordered").unwrap(),
+        request_schema: schema("schema.ordered.request"),
+        evidence_packet_schema: schema("schema.ordered.result"),
+        coverage_contract: CoverageContractRef::new(schema("schema.invalid.coverage")),
+        omission_contract: OmissionContractRef::new(schema("schema.invalid.omission")),
+        scoring_contract: ScoringContractRef::new(schema("schema.invalid.scoring")),
+        contribution_contract: ContributionContractRef::new(schema("schema.invalid.contribution")),
+        deterministic_order: SortContract::new(SortContractId::new("sort.invalid.v1").unwrap(), 1)
+            .unwrap(),
+        default_page_size: 100,
+        maximum_page_size: 100,
+        temporal_modes: vec![TemporalMode::Current],
+        cancellation_points: vec![CancellationPoint::BeforeAdmission],
+        deadline_behavior: DeadlineBehavior::ReturnOperationReceipt,
+    };
+    let accepted = RetrievalPrimitiveManifestV1::new(ordered).unwrap();
+    assert_eq!(accepted.default_page_size(), 100);
+    assert_eq!(accepted.maximum_page_size(), 100);
 }

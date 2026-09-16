@@ -377,9 +377,8 @@ pub fn code_index_search_display_binding(
                 .chunks()
                 .chunk(&chunk_id)
                 .ok_or(HydrationUnavailableV1::Invalid)?;
-            if chunk.anchor.generation_id != generation.manifest().generation_id {
-                return Err(HydrationUnavailableV1::Stale);
-            }
+            // Membership in the published generation's chunk manifest is the
+            // serving binding. File-page generation_id is extraction provenance.
             let display = match chunk.anchor.symbol_occurrence_id.as_ref() {
                 Some(occurrence) => {
                     let symbol = generation

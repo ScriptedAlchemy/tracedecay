@@ -454,6 +454,16 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    /// Opens the reader capacity reserved for health diagnostics.
+    #[hotpath::skip]
+    pub async fn health_read_snapshot(
+        &self,
+    ) -> tracedecay_domain::errors::Result<DatabaseEngineReadSnapshot> {
+        self.database
+            .begin_engine_health_read_snapshot("open registered database health read snapshot")
+            .await
+    }
+
     #[hotpath::measure(future = true, label = "global_db.registered.snapshot_to")]
     pub async fn snapshot_to(&self, destination: &Path) -> tracedecay_domain::errors::Result<()> {
         self.prepare_snapshot_destination(destination)?;

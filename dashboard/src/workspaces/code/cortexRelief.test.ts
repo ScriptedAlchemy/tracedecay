@@ -158,6 +158,10 @@ describe('elevation', () => {
     expect(model.unplacedRegions).toBe(1);
     // …and it is still a region in the model, so the table can print it.
     expect(model.regions).toHaveLength(2);
+    const scale = cortexLegendPanels(model).find((panel) => panel.label === 'scale')!;
+    expect(scale.teach).not.toMatch(/whole clustering is drawn/i);
+    expect(scale.teach).toMatch(/no file carried measured depth/);
+    expect(cortexDescription(model)).toMatch(/not placed because no file carried measured depth/);
   });
 
   it('puts bedrock at the bottom of the world and the ridge at the top', () => {
@@ -299,6 +303,17 @@ describe('elevation', () => {
     const scale = cortexLegendPanels(model).find((panel) => panel.label === 'scale')!;
     expect(scale.teach).toMatch(/whole clustering is drawn/);
     expect(scale.teach).not.toMatch(/28-region drawing cap folds/);
+  });
+
+  it('does not let a folded long label displace a readable prefix', () => {
+    const directories = ['src/a', 'src/b', 'src/c', `src/${'wide'.repeat(100)}`];
+    const clusters = directories.map((directory, order) => cluster(directory, { order }));
+    const files = directories.map((directory) => file(`${directory}/a.rs`, 0));
+    const model = buildCortexModel(measurement(clusters, files));
+
+    expect(model.drawnRegions.map((region) => region.directory)).toEqual(directories.slice(0, 3));
+    expect(model.readabilityFoldedRegions).toBe(1);
+    assertBandClear(model.drawnRegions);
   });
 
   it('keeps a representable ridge after folding a crowded bedrock band', () => {

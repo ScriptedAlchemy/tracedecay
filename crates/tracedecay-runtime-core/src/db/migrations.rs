@@ -1,9 +1,8 @@
 //! Schema creation for the tracedecay database.
 //!
-//! This binary creates every store at one final schema shape and never steps an
-//! older shape forward. `PRAGMA user_version` records that shape as an atomic
-//! integer built into `SQLite`; a store carrying any other value was written by
-//! an incompatible binary and is refused at open with a fresh-start remedy.
+//! Fresh stores use the current relational shape. Known released v34/v35
+//! stores converge in place, retaining their durable rows and exact historical
+//! staging objects; unknown shapes remain typed refusals.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -40,15 +39,14 @@ const ROOT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS metadata (
     CREATE INDEX IF NOT EXISTS idx_read_cache_session
         ON read_cache(session_id, created_at);";
 
-/// The one schema shape this binary creates and accepts. It is an identity
-/// stamp, not a ladder rung: a store at any other version is refused.
+/// The schema stamp this binary creates after released-store convergence.
 ///
 /// Code topology lives only in the verified Grafeo generation. Exact memory
 /// content, provenance, trust, retention, and feedback live only in the
 /// canonical `memory_v2_*` tables; holographic memory vectors are re-derived
 /// from that content and never persisted. v36 dropped the semantic-vector
-/// staging family (`semantic_vector_*`) with dense code retrieval. A store
-/// containing a retired projection fails closed before interpretation.
+/// staging family (`semantic_vector_*`) from fresh stores with dense code
+/// retrieval. Existing exact released staging objects remain preserved.
 pub const SCHEMA_VERSION: u32 = 36;
 
 /// Verifies that a rusqlite connection sees the final relational shape this
@@ -58,12 +56,8 @@ pub fn verify_admissible_final_shape_rusqlite(conn: &rusqlite::Connection) -> Re
     final_shape::require_admissible_final_shape_rusqlite(conn)
 }
 
-/// The one prior stamp this binary steps forward in place, and only when the
-/// store's inventory is the current shape minus the persisted payload-digest
-/// objects (#834). Every released v34 store also carries the retired
-/// `semantic_vector_*` staging family, which has no forward path, so it is
-/// refused before the step writes anything. Every other stamp is refused with
-/// the fresh-start remedy.
+/// The released stamp preceding persisted payload digests. Live v35 stores
+/// already carry those digests and only need relational convergence.
 pub const PAYLOAD_DIGEST_STEP_SOURCE_VERSION: u32 = 34;
 
 /// Metadata key journaling the payload-digest backfill receipt the v34 step
@@ -396,7 +390,6 @@ async fn retired_sqlite_projection_object(conn: &impl QueryExecutor) -> Result<O
                    )
                    OR name GLOB 'nodes_fts*'
                    OR name GLOB 'memory_facts_fts*'
-                   OR name GLOB 'semantic_vector_*'
                )
              ORDER BY name
              LIMIT 1",
@@ -430,7 +423,7 @@ async fn retired_sqlite_projection_object(conn: &impl QueryExecutor) -> Result<O
 /// so this runs before any stamp-specific step may write.
 async fn require_no_retired_sqlite_projection_object(conn: &impl QueryExecutor) -> Result<()> {
     let Some(object) = retired_sqlite_projection_object(conn).await? else {
-        return Ok(());
+        return final_shape::require_admissible_released_staging(conn).await;
     };
     let current = get_version(conn).await?;
     Err(TraceDecayError::reset_required(
@@ -457,8 +450,7 @@ fn unsupported_schema_version(current: u32) -> TraceDecayError {
 /// Verifies an opened store carries the schema this binary creates, creating it
 /// when the file is still empty.
 ///
-/// This binary has no upgrade ladder: a store stamped with any other version is
-/// refused with the fresh-start remedy rather than stepped forward.
+/// Known released stores converge before admission; unknown shapes remain refused.
 ///
 /// The schema ladder is awaited through a `dyn Future` so its concrete future
 /// type stops at this phase boundary: with the `hotpath` wrappers compiled in,
@@ -478,9 +470,12 @@ pub async fn ensure_schema_current(database: &crate::db::Database) -> Result<()>
 /// replacement. Every other stamp or shape remains for
 /// [`verify_final_schema_connection`] to refuse.
 pub(crate) async fn step_schema_if_pending(conn: &Connection) -> Result<bool> {
-    if get_version(conn).await? == PAYLOAD_DIGEST_STEP_SOURCE_VERSION {
+    let current = get_version(conn).await?;
+    if matches!(current, PAYLOAD_DIGEST_STEP_SOURCE_VERSION | 35) {
         converge_released_project_schema_connection(conn).await?;
-        step_payload_digests(conn).await?;
+        if current == PAYLOAD_DIGEST_STEP_SOURCE_VERSION {
+            step_payload_digests(conn).await?;
+        }
         return Ok(true);
     }
     let ledger_installed = install_runtime_writer_ledger_connection(conn).await?;
@@ -494,9 +489,11 @@ async fn ensure_schema_current_engine_connection(
     if current == 0 && !store_has_objects(conn).await? {
         return create_schema_engine_connection(conn).await;
     }
-    if current == PAYLOAD_DIGEST_STEP_SOURCE_VERSION {
+    if matches!(current, PAYLOAD_DIGEST_STEP_SOURCE_VERSION | 35) {
         converge_released_project_schema_engine_connection(conn).await?;
-        step_payload_digests(conn).await?;
+        if current == PAYLOAD_DIGEST_STEP_SOURCE_VERSION {
+            step_payload_digests(conn).await?;
+        }
     }
     install_runtime_writer_ledger_engine_connection(conn).await?;
     repair_shipped_v35_alias_trigger_engine_connection(conn).await?;
@@ -869,13 +866,18 @@ fn payload_content_digest(content: &str) -> String {
 pub(crate) async fn verify_final_schema_connection(conn: &impl QueryExecutor) -> Result<()> {
     require_no_retired_sqlite_projection_object(conn).await?;
     let current = get_version(conn).await?;
-    if current == PAYLOAD_DIGEST_STEP_SOURCE_VERSION {
+    if matches!(current, PAYLOAD_DIGEST_STEP_SOURCE_VERSION | 35) {
         // A read-only mount may not step the store; the message names the
         // writer-side remedy instead of the fresh-start reset.
+        let step = if current == PAYLOAD_DIGEST_STEP_SOURCE_VERSION {
+            "payload digest"
+        } else {
+            "released schema"
+        };
         return Err(TraceDecayError::Database {
             message: format!(
-                "database schema v{current} is one step behind v{SCHEMA_VERSION}: \
-                 the payload digest step is pending and runs the next time a writer \
+                "database schema v{current} needs convergence to v{SCHEMA_VERSION}: \
+                 the {step} step is pending and runs the next time a writer \
                  opens this store; retry after that open instead of resetting the store"
             ),
             operation: "verify_final_schema".to_owned(),
@@ -894,9 +896,11 @@ pub(crate) async fn ensure_schema_current_connection(conn: &Connection) -> Resul
     if current == 0 && !store_has_objects(conn).await? {
         return create_schema_connection(conn).await;
     }
-    if current == PAYLOAD_DIGEST_STEP_SOURCE_VERSION {
+    if matches!(current, PAYLOAD_DIGEST_STEP_SOURCE_VERSION | 35) {
         converge_released_project_schema_connection(conn).await?;
-        step_payload_digests(conn).await?;
+        if current == PAYLOAD_DIGEST_STEP_SOURCE_VERSION {
+            step_payload_digests(conn).await?;
+        }
     }
     repair_shipped_v35_alias_trigger_connection(conn).await?;
     verify_final_schema_connection(conn).await

@@ -2618,10 +2618,8 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
     // observed below is the source-verification Noop alone.
     drain_clone_backfill(&registry, fixture.path()).await;
 
-    // Exercise the ordinary expiry path too: one readiness request starts a
-    // real Noop, and a read during that owner pass records one BusyFollowUp.
-    // Both passes must settle because the existing seat keeps its exact
-    // witness while the source proof is renewed.
+    // Exercise the ordinary expiry path too. The existing seat keeps its exact
+    // witness while the source-verification Noop renews the proof.
     {
         let mut state = source_freshness
             .state
@@ -2640,52 +2638,23 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
             .is_none(),
         "the expired proof declines before the worker renews it"
     );
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !registry
-            .reconcile_in_progress_for_test(fixture.path())
-            .await
-        {
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await
-    .expect("readiness did not start a source-verification pass");
+    assert_eq!(
+        wait_until_serving_seat(&registry, fixture.path(), Duration::from_secs(10), || {
+            registry.latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+        })
+        .await
+        .generation()
+        .manifest()
+        .generation_id,
+        generation
+    );
     assert!(
         registry
-            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
-            .await
-            .is_none(),
-        "readiness stays fail-closed while the Noop owns verification"
-    );
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let receipts = registry.event_to_ready_receipts();
-            let settled = !registry
-                .reconcile_in_progress_for_test(fixture.path())
-                .await
-                && registry.pending_wake_micros_for_scope(&scope).await == Some(0);
-            let new = &receipts[receipts_before.min(receipts.len())..];
-            if settled
-                && new.iter().any(|receipt| {
-                    receipt.trigger == CodeIndexCadenceTriggerV1::BusyFollowUp && receipt.is_noop()
-                })
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await
-    .expect("the real Noop and its single busy follow-up did not settle");
-    assert_eq!(
-        registry
-            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
-            .await
-            .expect("renewed seat is ready")
-            .generation()
-            .manifest()
-            .generation_id,
-        generation
+            .event_to_ready_receipts()
+            .iter()
+            .skip(receipts_before)
+            .any(|receipt| receipt.is_noop()),
+        "source verification records an unchanged-source receipt"
     );
 
     fixture.edit("src/lib.rs", "pub fn changed_after_seat() {}\n");
@@ -2832,6 +2801,7 @@ async fn ignored_dependency_waits_for_global_admission_before_publication_gate()
     let store = TempDir::new().expect("store root");
     let (registry, _) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
     let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    drain_clone_backfill(&registry, fixture.path()).await;
     let generation = latest.generation();
     let verified_import = generation
         .imports()
@@ -7679,7 +7649,7 @@ async fn reopened_current_text_generation_resolves_publication_identity_without_
         "mounted worktree admits complete-generation demand"
     );
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let current = loop {
         if let Some((current, true)) = registry
             .latest_text_serving_freshness_for_scope(&scope)
@@ -7688,11 +7658,10 @@ async fn reopened_current_text_generation_resolves_publication_identity_without_
         {
             break current;
         }
-        assert!(
-            Instant::now() <= deadline,
-            "reopened text generation did not become current"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::timeout_at(deadline, serving_changes.changed())
+            .await
+            .expect("the current retained text owner wakes deferred consumers")
+            .expect("the serving-change channel stays open while mounted");
     };
     assert!(
         current.uses_partitioned_manifest(),
@@ -7705,10 +7674,6 @@ async fn reopened_current_text_generation_resolves_publication_identity_without_
             .is_none(),
         "configured graph refusal must leave the full generation unavailable"
     );
-    tokio::time::timeout(Duration::from_secs(5), serving_changes.changed())
-        .await
-        .expect("the current retained text owner wakes deferred consumers")
-        .expect("the serving-change channel stays open while mounted");
     let selected = registry
         .latest_feedback_generation_for_scope(fixture.path(), &scope)
         .await

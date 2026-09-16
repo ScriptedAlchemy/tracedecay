@@ -1302,12 +1302,19 @@ mod fingerprint_tests {
             "function copy(input) { const one = parse(input); const two = use(one); const three = use(two); return finish(three, input, one, two); }",
         );
         let body = extracted.clone_bodies.first().expect("clone body");
-        let mut payload = CloneBodyPayloadV1::from_extracted(body).expect("payload");
-        payload.conservative_tokens[0] = ConservativeCloneTokenV1::Syntax {
+        let payload = CloneBodyPayloadV1::from_extracted(body).expect("payload");
+        payload
+            .validate()
+            .expect("extracted tokens match their digests");
+        let mut colliding = payload;
+        colliding.conservative_tokens[0] = ConservativeCloneTokenV1::Syntax {
             syntax_kind: "identifier".to_owned(),
             text: "colliding-but-different".to_owned(),
         };
-        assert!(payload.validate().is_err());
+        assert_eq!(
+            colliding.validate(),
+            Err("clone payload digests do not match their canonical tokens".to_owned())
+        );
     }
 
     #[test]

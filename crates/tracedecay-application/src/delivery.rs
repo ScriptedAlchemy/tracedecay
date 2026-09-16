@@ -1190,7 +1190,7 @@ fn delivery_attention(
     items
 }
 
-/// Joins one proximity read into the three head-bound Delivery attention
+/// Joins one proximity read into the two head-bound Delivery attention
 /// sources it can populate. `Unsupported` leaves those sources at their
 /// default unsupported+unavailable state; `Unavailable` marks them
 /// unavailable without discarding the rest of the attention set; `Denied`
@@ -1205,10 +1205,9 @@ fn apply_proximity_attention(
     proximity: &ProjectDeliveryProximityAttentionSourceV1,
     indexed_head: &CommitId,
 ) {
-    const PROXIMITY_SOURCES: [ProjectDeliveryAttentionSourceV1; 3] = [
+    const PROXIMITY_SOURCES: [ProjectDeliveryAttentionSourceV1; 2] = [
         ProjectDeliveryAttentionSourceV1::OverlappingEdit,
         ProjectDeliveryAttentionSourceV1::ConfirmedConflict,
-        ProjectDeliveryAttentionSourceV1::DivergentSharedImplementation,
     ];
     match proximity {
         ProjectDeliveryProximityAttentionSourceV1::Unsupported => {}
@@ -2915,10 +2914,13 @@ mod tests {
             .unwrap();
         assert_eq!(
             divergent.state,
-            ProjectDeliveryAttentionStateV1::Clear,
-            "SharedCodeCandidate must not activate DivergentSharedImplementation"
+            ProjectDeliveryAttentionStateV1::Unavailable,
+            "SharedCodeCandidate cannot establish or clear divergence"
         );
-        assert_eq!(divergent.coverage, ProjectDeliveryInboxCoverageV1::Complete);
+        assert_eq!(
+            divergent.coverage,
+            ProjectDeliveryInboxCoverageV1::Unsupported
+        );
         assert!(divergent.evidence.is_empty());
     }
 
@@ -2949,7 +2951,6 @@ mod tests {
         for proximity_source in [
             ProjectDeliveryAttentionSourceV1::OverlappingEdit,
             ProjectDeliveryAttentionSourceV1::ConfirmedConflict,
-            ProjectDeliveryAttentionSourceV1::DivergentSharedImplementation,
         ] {
             let item = attention
                 .iter()
@@ -3007,7 +3008,6 @@ mod tests {
         for proximity_source in [
             ProjectDeliveryAttentionSourceV1::OverlappingEdit,
             ProjectDeliveryAttentionSourceV1::ConfirmedConflict,
-            ProjectDeliveryAttentionSourceV1::DivergentSharedImplementation,
         ] {
             let item = attention
                 .iter()

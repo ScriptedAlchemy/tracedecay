@@ -399,7 +399,39 @@ mod tests {
             }
         });
 
-        assert!(bound_tagged_union(&mut schema, "ValueV1", "guidance").is_err());
-        assert!(bound_tagged_union(&mut schema, "Missing", "guidance").is_err());
+        assert_eq!(
+            bound_tagged_union(&mut schema, "ValueV1", "guidance")
+                .unwrap_err()
+                .to_string(),
+            "MCP dispatch metadata is invalid: bounded application MCP request schema is invalid: every union branch must be tagged"
+        );
+        assert_eq!(
+            bound_tagged_union(&mut schema, "Missing", "guidance")
+                .unwrap_err()
+                .to_string(),
+            "MCP dispatch metadata is invalid: bounded application MCP request schema is invalid: bounded union must be a `$defs` entry"
+        );
+
+        let mut admitted = json!({
+            "type": "object",
+            "properties": { "value": { "$ref": "#/$defs/ValueV1" } },
+            "$defs": {
+                "ValueV1": {
+                    "oneOf": [{
+                        "type": "object",
+                        "properties": {
+                            "kind": { "const": "boolean" },
+                            "value": { "type": "boolean" }
+                        }
+                    }]
+                }
+            }
+        });
+        bound_tagged_union(&mut admitted, "ValueV1", "guidance").unwrap();
+        assert_eq!(
+            admitted["$defs"]["ValueV1"]["properties"]["kind"]["enum"],
+            json!(["boolean"])
+        );
+        assert_eq!(admitted["$defs"]["ValueV1"]["description"], "guidance");
     }
 }

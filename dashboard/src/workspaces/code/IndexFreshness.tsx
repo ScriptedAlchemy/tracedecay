@@ -266,8 +266,9 @@ function freshnessPollIntervalMs(
   if (!hasActiveBuild(result)) return IDLE_POLL_MS;
   // Quiet-active fallback. code_index_activity is hook admission, not scheduler
   // resume. Freshness samples peaked at 95ms; 4s detects a new progress stamp
-  // without 1 Hz on a wedged build. Terminal and idle stay at 30s.
-  if (hasQuietActiveBuild(result)) return QUIET_ACTIVE_POLL_MS;
+  // without 1 Hz on a wedged build. Keep 1 Hz while any build is moving:
+  // hook-admission SSE does not report scheduler progress. Terminal and idle stay at 30s.
+  if (allActiveBuildsQuiet(result)) return QUIET_ACTIVE_POLL_MS;
   return ACTIVE_POLL_MS;
 }
 
@@ -277,19 +278,19 @@ function hasActiveBuild(result: EnvelopeResult<CodeIndexFreshnessPayloadV1> | un
 }
 
 function worktreeHasActiveBuild(worktree: CodeIndexWorktreeFreshnessV1): boolean {
-  if (!worktree.rebuild_in_flight) return false;
+  if (!worktree.rebuild_in_flight && worktree.staleness_state !== 'verifying') return false;
   if (worktree.parked != null && !worktree.parked.retries_on_wake) return false;
   if (worktree.progress?.blocked_reason === 'publication_authority_corrupt') return false;
   return true;
 }
 
-function hasQuietActiveBuild(
+function allActiveBuildsQuiet(
   result: EnvelopeResult<CodeIndexFreshnessPayloadV1> | undefined,
 ): boolean {
   if (result?.outcome !== 'envelope') return false;
   const observedAt = result.envelope.time.observation_time_micros;
-  return result.envelope.payload.worktrees.some((worktree) => {
-    if (!worktreeHasActiveBuild(worktree)) return false;
+  return result.envelope.payload.worktrees.every((worktree) => {
+    if (!worktreeHasActiveBuild(worktree)) return true;
     const progress = worktree.progress;
     if (progress == null) return false;
     return observedAt - progress.last_progress_micros >= QUIET_AFTER_SECONDS * 1_000_000;

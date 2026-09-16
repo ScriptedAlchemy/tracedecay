@@ -464,7 +464,6 @@ impl PartitionedCompactGenerationEvidenceV1 {
             .added_or_changed
             .iter()
             .chain(&changes.deleted)
-            .chain(&changes.reused)
             .map(|change| {
                 (
                     &change.chunk_id,

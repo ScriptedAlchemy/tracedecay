@@ -67,6 +67,20 @@ def response_problem_code(response: dict[str, Any]) -> tuple[str | None, str | N
             return state, code
         if isinstance(code, str) and code:
             return "failed", code
+    result = response.get("result")
+    contents = result.get("contents") if isinstance(result, dict) else None
+    if isinstance(contents, list):
+        for content in contents:
+            if not isinstance(content, dict) or content.get("mimeType") != "text/plain":
+                continue
+            text = content.get("text")
+            if not isinstance(text, str):
+                continue
+            # Plain resource availability is a status/reason record, not prose
+            # containing the word "unavailable" (as in the overview resource).
+            fields = dict(line.split(": ", 1) for line in text.splitlines() if ": " in line)
+            if fields.get("status") in {"unavailable", "denied", "failed", "cancelled", "deadline_exceeded"}:
+                return fields["status"], fields.get("reason") or None
     return None, None
 
 

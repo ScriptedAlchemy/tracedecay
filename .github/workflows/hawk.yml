@@ -53,13 +53,9 @@ jobs:
           curl --proto '=https' --tlsv1.2 -LsSf \
             "https://github.com/astral-sh/hawk/releases/download/${HAWK_VERSION}/cargo-hawk-installer.sh" | sh
 
-      # Exclude tracedecay-cli so the CLI build script never runs here. That
-      # avoids forging dashboard/app-dist just to satisfy TRACEDECAY_SKIP_*
-      # digest checks while scanning the rest of the workspace.
+      # hawk.toml selects the shipped CLI as the production entry point.
       - name: Hawk
         run: >
           cargo +1.97.1 hawk check
-          --workspace
-          --exclude tracedecay-cli
           --target-dir target/hawk
           -D warnings

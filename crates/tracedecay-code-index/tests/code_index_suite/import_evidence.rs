@@ -6,6 +6,7 @@ use tracedecay_code_index::{
     chunks::{
         ChunkingFailureV1, CodeFileIndexArtifactsV1, CodeIndexImportEvidenceV1, content_digest,
     },
+    noncanonical::{NonCanonicalCauseV1, NonCanonicalReasonCodeV1},
     production::{
         CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionErrorV1,
         CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1,
@@ -355,6 +356,34 @@ fn rust_inherent_impl_methods_resolve_when_type_and_impl_are_in_different_files(
     ]);
     let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
     let build = symbol_occurrence(&generation, "crates/widgets/src/methods.rs::Builder::build");
+
+    assert_resolved_edge(&generation, &caller, &build, RelationEdgeKindV1::Calls);
+}
+
+#[test]
+fn rust_generic_inherent_impl_matches_a_nominal_typed_receiver() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.generic.lib",
+            "crates/widgets/src/lib.rs",
+            "mod methods;\npub struct Builder<T>(pub T);\n",
+        ),
+        (
+            "file.generic.methods",
+            "crates/widgets/src/methods.rs",
+            "use super::Builder;\nimpl<T> Builder<T> {\n    pub fn build(&self) {}\n}\n",
+        ),
+        (
+            "file.generic.app",
+            "crates/app/src/main.rs",
+            "fn assemble(builder: &widgets::Builder<u8>) {\n    builder.build();\n}\nfn main() {}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
+    let build = symbol_occurrence(
+        &generation,
+        "crates/widgets/src/methods.rs::Builder<T>::build",
+    );
 
     assert_resolved_edge(&generation, &caller, &build, RelationEdgeKindV1::Calls);
 }
@@ -755,19 +784,37 @@ fn file_import_artifacts_bind_file_consistent_path_and_nonempty_span_to_indexed_
     for row in &mut wrong_file.imports {
         row.file_occurrence_id = id("file.foreign");
     }
-    assert!(wrong_file.validate().is_err());
+    assert_eq!(
+        wrong_file.validate(),
+        Err(ChunkingFailureV1::GenerationMismatch)
+    );
 
     let mut inconsistent_path = artifacts.clone();
     inconsistent_path.imports[1].logical_path = "src/foreign.ts".to_owned();
-    assert!(inconsistent_path.validate().is_err());
+    assert_eq!(
+        inconsistent_path.validate(),
+        Err(ChunkingFailureV1::NonCanonicalIdentity(
+            NonCanonicalCauseV1::new(NonCanonicalReasonCodeV1::ImportMultiFile)
+        ))
+    );
 
     let mut empty_span = artifacts.clone();
     empty_span.imports[0].span.end_byte = empty_span.imports[0].span.start_byte;
-    assert!(empty_span.validate().is_err());
+    assert_eq!(
+        empty_span.validate(),
+        Err(ChunkingFailureV1::NonCanonicalIdentity(
+            NonCanonicalCauseV1::new(NonCanonicalReasonCodeV1::ImportEmptySourceSpan)
+        ))
+    );
 
     let mut out_of_bounds = artifacts;
     out_of_bounds.imports[0].span.end_byte = indexed_end + 1;
-    assert!(out_of_bounds.validate().is_err());
+    assert_eq!(
+        out_of_bounds.validate(),
+        Err(ChunkingFailureV1::NonCanonicalIdentity(
+            NonCanonicalCauseV1::new(NonCanonicalReasonCodeV1::ImportExceedsFileExtent)
+        ))
+    );
 }
 
 #[test]
@@ -790,7 +837,7 @@ fn raw_use_and_imported_bindings_never_become_canonical_symbols() {
 
 #[test]
 fn sealed_revision_nine_import_generation_round_trips_to_identical_bytes() {
-    assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 11);
+    assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 12);
     let first = published_import_generation();
     let first_sealed = first.encode_sealed().expect("first generation seals");
     let second_sealed = published_import_generation()
