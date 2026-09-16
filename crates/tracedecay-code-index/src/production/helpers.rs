@@ -1,18 +1,25 @@
 use super::*;
 
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1};
-use tracedecay_domain::{EdgeAuthorityV1, RelationEdgeKindV1, SymbolOccurrenceId};
+use tracedecay_domain::{
+    CodeSearchChunkV1, EdgeAuthorityV1, RelationEdgeKindV1, SymbolOccurrenceId,
+};
 
 use crate::chunks::{CROSS_FILE_REFERENCE_BLOCKLIST, relation_target_kind_is_compatible};
-use crate::lineage::LineageSymbolRecordV1;
+use crate::incremental::ChunkIncrementErrorV1;
+use crate::lineage::{LineageResolutionErrorV1, LineageSymbolRecordV1};
 
 pub(crate) struct StagedGenerationV1 {
     pub(crate) files: Vec<Arc<FileGenerationArtifactsV1>>,
     pub(crate) chunks: GenerationChunkManifestV1,
     pub(crate) symbols: GenerationSymbolIndexV1,
     pub(crate) lineage: Vec<SymbolLineageCandidateV1>,
+    /// File occurrences Arc-shared from the parent published generation.
+    /// `None` when this stage was built without a parent.
+    pub(crate) parent_shared_occurrences: Option<BTreeSet<tracedecay_domain::FileOccurrenceId>>,
     pub(crate) clone_payloads_reused: u64,
     pub(crate) clone_payloads_computed: u64,
     pub(crate) clone_stale_invalidations: u64,
@@ -22,6 +29,7 @@ pub(crate) fn staged_generation(
     generation_id: CodeGenerationId,
     mut files: Vec<Arc<FileGenerationArtifactsV1>>,
     lineage: Vec<SymbolLineageCandidateV1>,
+    parent: Option<&CodeIndexPublishedGenerationV1>,
 ) -> Result<StagedGenerationV1, CodeIndexProductionErrorV1> {
     files.sort_by(|left, right| {
         left.artifacts
@@ -30,37 +38,178 @@ pub(crate) fn staged_generation(
             .file_occurrence_id
             .cmp(&right.artifacts.chunks.document.file_occurrence_id)
     });
-    let chunks = hotpath::measure_block!(
-        "code_index.generation.aggregate_chunks",
-        GenerationChunkManifestV1::from_validated_files(
-            generation_id.clone(),
-            files
-                .iter()
-                .map(|file| file.artifacts.chunks.clone())
-                .collect(),
-        )
-    )
-    .map_err(CodeIndexProductionErrorV1::Increment)?;
-    let symbols = hotpath::measure_block!(
-        "code_index.generation.aggregate_symbols",
-        GenerationSymbolIndexV1::new(
-            generation_id,
-            files
-                .iter()
-                .flat_map(|file| file.artifacts.symbols.clone())
-                .collect(),
-        )
-    )
-    .map_err(CodeIndexProductionErrorV1::Lineage)?;
+    let (chunks, symbols, parent_shared_occurrences) = match parent {
+        Some(parent) => {
+            let (chunks, symbols, shared) = hotpath::measure_block!(
+                "code_index.generation.aggregate_parent_delta",
+                aggregate_from_parent(generation_id, parent, &files)
+            )?;
+            (chunks, symbols, Some(shared))
+        }
+        None => {
+            let chunks = hotpath::measure_block!(
+                "code_index.generation.aggregate_chunks",
+                GenerationChunkManifestV1::from_validated_files(
+                    generation_id.clone(),
+                    files
+                        .iter()
+                        .map(|file| file.artifacts.chunks.clone())
+                        .collect(),
+                )
+            )
+            .map_err(CodeIndexProductionErrorV1::Increment)?;
+            let symbols = hotpath::measure_block!(
+                "code_index.generation.aggregate_symbols",
+                GenerationSymbolIndexV1::new(
+                    generation_id,
+                    files
+                        .iter()
+                        .flat_map(|file| file.artifacts.symbols.clone())
+                        .collect(),
+                )
+            )
+            .map_err(CodeIndexProductionErrorV1::Lineage)?;
+            (chunks, symbols, None)
+        }
+    };
     Ok(StagedGenerationV1 {
         files,
         chunks,
         symbols,
         lineage,
+        parent_shared_occurrences,
         clone_payloads_reused: 0,
         clone_payloads_computed: 0,
         clone_stale_invalidations: 0,
     })
+}
+
+/// Build serving chunk/symbol indexes from Arc-shared parent pages plus fresh
+/// file pages. File-page `generation_id` stays extraction provenance; the
+/// returned manifests carry the publish generation as serving identity.
+fn aggregate_from_parent(
+    generation_id: CodeGenerationId,
+    parent: &CodeIndexPublishedGenerationV1,
+    files: &[Arc<FileGenerationArtifactsV1>],
+) -> Result<
+    (
+        GenerationChunkManifestV1,
+        GenerationSymbolIndexV1,
+        BTreeSet<tracedecay_domain::FileOccurrenceId>,
+    ),
+    CodeIndexProductionErrorV1,
+> {
+    let parent_by_occurrence = parent
+        .files
+        .iter()
+        .map(|file| {
+            (
+                file.artifacts.chunks.document.file_occurrence_id.clone(),
+                file,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let mut shared_occurrences = BTreeSet::new();
+    let mut fresh_files = Vec::new();
+    for file in files {
+        let occurrence = &file.artifacts.chunks.document.file_occurrence_id;
+        if parent_by_occurrence
+            .get(occurrence)
+            .is_some_and(|prior| Arc::ptr_eq(prior, file))
+        {
+            shared_occurrences.insert(occurrence.clone());
+        } else {
+            fresh_files.push(file);
+        }
+    }
+
+    let mut chunks = parent
+        .chunks
+        .chunks()
+        .iter()
+        .filter(|chunk| shared_occurrences.contains(&chunk.anchor.file_occurrence_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut fresh_chunks = fresh_files
+        .iter()
+        .flat_map(|file| file.artifacts.chunks.chunks.iter().cloned())
+        .collect::<Vec<_>>();
+    // Fresh set is tiny on ordinary increments (often one file); keep serial.
+    fresh_chunks.sort_by(|left, right| left.id.cmp(&right.id));
+    chunks = merge_sorted_chunk_arcs(chunks, fresh_chunks)?;
+
+    let shared_symbol_ptrs = shared_occurrences
+        .iter()
+        .filter_map(|occurrence| parent_by_occurrence.get(occurrence))
+        .flat_map(|file| file.artifacts.symbols.iter())
+        .map(Arc::as_ptr)
+        .collect::<HashSet<_>>();
+    let mut symbols = parent
+        .symbols
+        .symbols
+        .iter()
+        .filter(|symbol| shared_symbol_ptrs.contains(&Arc::as_ptr(symbol)))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut fresh_symbols = fresh_files
+        .iter()
+        .flat_map(|file| file.artifacts.symbols.iter().cloned())
+        .collect::<Vec<_>>();
+    fresh_symbols.sort_by(|left, right| left.occurrence.cmp(&right.occurrence));
+    symbols = merge_sorted_symbol_arcs(symbols, fresh_symbols)?;
+
+    let chunks = GenerationChunkManifestV1::from_sorted_arcs(generation_id.clone(), chunks)
+        .map_err(CodeIndexProductionErrorV1::Increment)?;
+    let symbols = GenerationSymbolIndexV1::from_sorted_arcs(generation_id, symbols)
+        .map_err(CodeIndexProductionErrorV1::Lineage)?;
+    Ok((chunks, symbols, shared_occurrences))
+}
+
+fn merge_sorted_chunk_arcs(
+    left: Vec<Arc<CodeSearchChunkV1>>,
+    right: Vec<Arc<CodeSearchChunkV1>>,
+) -> Result<Vec<Arc<CodeSearchChunkV1>>, CodeIndexProductionErrorV1> {
+    let mut merged = Vec::with_capacity(left.len().saturating_add(right.len()));
+    let mut left = left.into_iter().peekable();
+    let mut right = right.into_iter().peekable();
+    while let (Some(l), Some(r)) = (left.peek(), right.peek()) {
+        match l.id.cmp(&r.id) {
+            std::cmp::Ordering::Less => merged.push(left.next().expect("peeked")),
+            std::cmp::Ordering::Greater => merged.push(right.next().expect("peeked")),
+            std::cmp::Ordering::Equal => {
+                return Err(CodeIndexProductionErrorV1::Increment(
+                    ChunkIncrementErrorV1::DuplicateChunk(l.id.clone()),
+                ));
+            }
+        }
+    }
+    merged.extend(left);
+    merged.extend(right);
+    Ok(merged)
+}
+
+fn merge_sorted_symbol_arcs(
+    left: Vec<Arc<LineageSymbolRecordV1>>,
+    right: Vec<Arc<LineageSymbolRecordV1>>,
+) -> Result<Vec<Arc<LineageSymbolRecordV1>>, CodeIndexProductionErrorV1> {
+    let mut merged = Vec::with_capacity(left.len().saturating_add(right.len()));
+    let mut left = left.into_iter().peekable();
+    let mut right = right.into_iter().peekable();
+    while let (Some(l), Some(r)) = (left.peek(), right.peek()) {
+        match l.occurrence.cmp(&r.occurrence) {
+            std::cmp::Ordering::Less => merged.push(left.next().expect("peeked")),
+            std::cmp::Ordering::Greater => merged.push(right.next().expect("peeked")),
+            std::cmp::Ordering::Equal => {
+                return Err(CodeIndexProductionErrorV1::Lineage(
+                    LineageResolutionErrorV1::DuplicateOccurrence,
+                ));
+            }
+        }
+    }
+    merged.extend(left);
+    merged.extend(right);
+    Ok(merged)
 }
 
 /// Pin one descriptor registry to the languages this generation can actually
