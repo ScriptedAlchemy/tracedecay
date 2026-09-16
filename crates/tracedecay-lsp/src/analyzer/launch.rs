@@ -338,7 +338,11 @@ fn run_bounded(mut probe: Command, command: &str) -> Result<ProbeOutput, Analyze
                     command: command.to_owned(),
                 });
             }
-            Err(error) => return Err(probe_failed(error.kind().to_string())),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(probe_failed("probe status could not be read".to_owned()));
+            }
         }
     };
     let stdout = stdout.join().unwrap_or_default();
