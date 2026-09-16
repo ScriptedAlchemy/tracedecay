@@ -113,9 +113,9 @@ def validate_kimi(path: Path) -> None:
             or not isinstance(hook.get("timeout"), int)
         ):
             fail(f"{path} requires a callable {event} hook with an integer timeout")
-    # Kimi registers MCP in session/user mcp.json (not the plugin manifest).
-    # Keep this omit-check aligned with the installer contract.
-    # Inline mcpServers here would disagree with the installer and host launch.
+    # Fail closed if inline MCP returns: the supported route is the installer
+    # writing session/user mcp.json (see host-integration evidence for Kimi
+    # MCP). Omission here is only a conflict guard, not MCP success evidence.
     if "mcpServers" in manifest:
         fail(f"{path} must omit mcpServers (MCP is registered outside the plugin manifest)")
 

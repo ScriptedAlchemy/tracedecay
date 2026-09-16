@@ -16,25 +16,28 @@ For install and update, open Kimi Code and run:
 /plugins install <staged-path>
 ```
 
-Replace `<staged-path>` with the exact path printed by TraceDecay. For
+Replace `<staged-path>` with the exact path printed by TraceDecay. `/plugins
+install` only activates the managed plugin; it does not write MCP config. After
+that host action succeeds, re-run the same TraceDecay install/repair command so
+activation can register MCP in Kimi's session/user `mcp.json` (not the plugin
+manifest) with the resolved absolute `tracedecay` executable path. For
 uninstall, run this in Kimi Code:
 
 ```text
 /plugins remove tracedecay
 ```
 
-Then use `tracedecay doctor` to inspect all host-native registrations.
+Then re-run TraceDecay uninstall/repair so it can remove the `tracedecay` MCP
+entry, and use `tracedecay doctor` to inspect all host-native registrations.
 `KIMI_CODE_HOME` resolves to the environment variable when set and
-`~/.kimi-code` otherwise. Install also registers MCP in Kimi's session/user
-`mcp.json` (not the plugin manifest) with the resolved absolute `tracedecay`
-executable path so Kimi Code launches from the workspace without depending on
-shell `PATH`.
+`~/.kimi-code` otherwise.
 
 Run `/reload` or start a new session after installing, updating, or removing the plugin:
 Kimi Code picks up manifest, skill, and command changes only on reload. The
 `/plugins` manager lists the installed TraceDecay plugin and its state.
 
-Install registers the TraceDecay MCP server under the `tracedecay` key as:
+After the post-`/plugins install` repair/install rerun, TraceDecay registers the
+MCP server under the `tracedecay` key as:
 
 ```bash
 tracedecay serve
@@ -78,6 +81,7 @@ For local development, stage the generated Kimi projection after edits:
 tracedecay install --agent kimi
 ```
 
-Complete the printed `/plugins install <staged-path>` action in Kimi Code.
-MCP registration is written to session/user `mcp.json` with the absolute
-binary path. Run `/reload` (or start a new session) after replacing the plugin.
+Complete the printed `/plugins install <staged-path>` action in Kimi Code,
+then re-run `tracedecay install --agent kimi` so MCP registration is written to
+session/user `mcp.json` with the absolute binary path. Run `/reload` (or start
+a new session) after replacing the plugin.
