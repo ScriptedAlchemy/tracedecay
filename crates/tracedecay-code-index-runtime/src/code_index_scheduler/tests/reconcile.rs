@@ -10079,6 +10079,10 @@ fn a_publication_seats_its_own_generation_without_waiting_for_a_quiet_tree() {
         GraphSeatGateV1::PublishedTextOwnerUnavailable,
         "a publication whose replacement text owner did not become ready must not start graph work"
     );
+    // The ready bit above is `query_owners_are_ready` at both the published
+    // seat gate and the full-replay skip — never a second, forked check for
+    // "exact/lexical" or clone-complete. See
+    // `query_owners_ready_admits_seat_and_replay_both_directions`.
     assert_eq!(
         GraphSeatGateV1::decide(true, false, true, false, true),
         GraphSeatGateV1::Prepare,
