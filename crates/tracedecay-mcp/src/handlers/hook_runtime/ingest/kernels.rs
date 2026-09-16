@@ -29,7 +29,7 @@ use tracedecay_session_memory::session::lcm::{
     LcmAuthorityOutcome, LcmAuthorityPayload, LcmAuthorityRequest, LcmAuthorityResponse,
     LcmTranscriptIngestCommand,
 };
-use tracedecay_sessions::admission::HostAdmissionOutcome;
+use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_sessions::runtime::claude_observation::ClaudeObservationIngestStats;
 use tracedecay_sessions::runtime::hermes::HermesSweepOutcome;
@@ -41,7 +41,9 @@ use super::{
     drain_host_observation_projections, project_observation_id,
 };
 use crate::handlers::SessionAuthorities;
-use crate::{map_claude_observation_ingest_error, map_transcript_ingest_error};
+use crate::{
+    hook_admission_error, map_claude_observation_ingest_error, map_transcript_ingest_error,
+};
 
 /// Which payload shape a hook ingest request carries.
 ///
@@ -447,10 +449,24 @@ fn cursor_capture_outcome(
     }
 }
 
+/// Hook capture of one Hermes sweep. A skipped `state.db` is a retryable
+/// source failure. An incomplete projection drain is deferred work, same as
+/// a byte-cap stop.
 fn hermes_capture_outcome(outcome: HermesSweepOutcome) -> Result<TranscriptCaptureOutcome> {
+    if outcome.source_failures > 0 {
+        return Err(hook_admission_error(
+            HostAdmissionStatus::Unavailable,
+            "source_scan_partial",
+            true,
+            format!(
+                "Hermes transcript source scan failed for {} source(s)",
+                outcome.source_failures
+            ),
+        ));
+    }
     Ok(TranscriptCaptureOutcome {
         messages_upserted: outcome.stats.messages_upserted,
-        source_deferred: outcome.deferred_by_byte_cap,
+        source_deferred: outcome.deferred_by_byte_cap || outcome.projection_drain_deferred,
         ..TranscriptCaptureOutcome::default()
     })
 }
