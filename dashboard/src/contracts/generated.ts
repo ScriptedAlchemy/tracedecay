@@ -1175,6 +1175,10 @@ export const DeliveryAttentionEvidenceV1Schema = z.discriminatedUnion("kind", [z
   kind: z.literal("provider_operation"),
   operation: z.lazy(() => DeliveryGitHubReadOperationV1Schema),
 }), z.object({
+  encounter_id: z.string(),
+  kind: z.literal("proximity_encounter"),
+  relation_kind: z.string(),
+}), z.object({
   comment_id: z.string(),
   kind: z.literal("review_comment"),
   path: z.string(),
