@@ -1,0 +1,62 @@
+# Hawk visibility lint — explicit optional channel, not PR tip evidence.
+#
+# Kept off pull_request CI on purpose: tip green must not depend on
+# continue-on-error or a forged dashboard app-dist seed. Dispatch or wait for
+# the weekly schedule until the Hawk backlog is clean enough to promote into
+# required CI without softening -D warnings.
+name: Hawk
+
+on:
+  schedule:
+    # Weekly Monday 06:00 UTC — visibility only; not a merge gate.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hawk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hawk:
+    name: Hawk
+    if: github.repository == 'ScriptedAlchemy/tracedecay'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_NET_RETRY: 10
+      # renovate: datasource=github-releases depName=astral-sh/hawk
+      HAWK_VERSION: 0.1.12
+      RUSTUP_MAX_RETRIES: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target/hawk"
+          cache-workspace-crates: "false"
+          cache-on-failure: true
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.97.1
+
+      - name: Install Hawk
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            "https://github.com/astral-sh/hawk/releases/download/${HAWK_VERSION}/cargo-hawk-installer.sh" | sh
+
+      # Exclude tracedecay-cli so the CLI build script never runs here. That
+      # avoids forging dashboard/app-dist just to satisfy TRACEDECAY_SKIP_*
+      # digest checks while scanning the rest of the workspace.
+      - name: Hawk
+        run: >
+          cargo +1.97.1 hawk check
+          --workspace
+          --exclude tracedecay-cli
+          --target-dir target/hawk
+          -D warnings
