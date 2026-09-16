@@ -913,6 +913,11 @@ fn use_foo() {
         ref_names.contains(&"bar"),
         "expected 'bar' method-name ref from f.bar(), got: {ref_names:?}"
     );
+    // And `Foo::bar` once the local's type is known from `Foo::new()`.
+    assert!(
+        ref_names.contains(&"Foo::bar"),
+        "expected Foo::bar from typed local f, got: {ref_names:?}"
+    );
 }
 
 #[test]

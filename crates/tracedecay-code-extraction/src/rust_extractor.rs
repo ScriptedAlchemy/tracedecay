@@ -1,7 +1,10 @@
 /// Tree-sitter based Rust source code extractor.
 ///
 /// Parses Rust source files and emits nodes and edges for the code graph.
-use std::{collections::BTreeMap, time::Instant};
+use std::{
+    collections::{BTreeMap, HashMap},
+    time::Instant,
+};
 
 use tree_sitter::{Node as TsNode, Tree};
 
@@ -1451,6 +1454,19 @@ impl RustExtractor {
     /// Recursively find `call_expression` nodes inside a given node and create
     /// unresolved Calls references.
     fn extract_call_sites(state: &mut ExtractionState<'_>, node: TsNode<'_>, fn_node_id: &str) {
+        let local_types = Self::collect_local_type_bindings(state, node);
+        Self::extract_call_sites_with_types(state, node, fn_node_id, &local_types);
+    }
+
+    /// Walk one function body and emit Calls refs, using `local_types` to turn
+    /// `receiver.method()` into `Type::method` when the receiver's type was
+    /// established by a typed binding or a `Type::…` constructor call.
+    fn extract_call_sites_with_types(
+        state: &mut ExtractionState<'_>,
+        node: TsNode<'_>,
+        fn_node_id: &str,
+        local_types: &HashMap<String, String>,
+    ) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
@@ -1481,9 +1497,32 @@ impl RustExtractor {
                                     column: child.start_position().column as u32,
                                     file_path: state.file_path.clone(),
                                 });
+                                // When the receiver is a local whose type was
+                                // established in this function, also emit
+                                // `Type::method` so cross-file sealing can bind
+                                // through the builder type instead of the bare
+                                // ubiquitous method name.
+                                if let Some((receiver, _)) = callee_name.rsplit_once('.')
+                                    && !receiver.contains('.')
+                                    && let Some(type_path) = local_types.get(receiver)
+                                {
+                                    state.unresolved_refs.push(UnresolvedRef {
+                                        from_node_id: fn_node_id.to_string(),
+                                        reference_name: format!("{type_path}::{method_name}"),
+                                        reference_kind: EdgeKind::Calls,
+                                        line: child.start_position().row as u32,
+                                        column: child.start_position().column as u32,
+                                        file_path: state.file_path.clone(),
+                                    });
+                                }
                             }
                         }
-                        Self::extract_call_sites(state, child, fn_node_id);
+                        Self::extract_call_sites_with_types(
+                            state,
+                            child,
+                            fn_node_id,
+                            local_types,
+                        );
                     }
                     "macro_invocation" => {
                         let macro_name = child.child_by_field_name("macro").map_or_else(
@@ -1501,7 +1540,12 @@ impl RustExtractor {
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
                         });
-                        Self::extract_call_sites(state, child, fn_node_id);
+                        Self::extract_call_sites_with_types(
+                            state,
+                            child,
+                            fn_node_id,
+                            local_types,
+                        );
                     }
                     // Inside a macro's token_tree, the grammar does not produce
                     // call_expression nodes. Instead, a function call appears as
@@ -1515,7 +1559,12 @@ impl RustExtractor {
                     // Skip nested function definitions — they are handled separately.
                     "function_item" => {}
                     _ => {
-                        Self::extract_call_sites(state, child, fn_node_id);
+                        Self::extract_call_sites_with_types(
+                            state,
+                            child,
+                            fn_node_id,
+                            local_types,
+                        );
                     }
                 }
                 if !cursor.goto_next_sibling() {
@@ -1523,6 +1572,117 @@ impl RustExtractor {
                 }
             }
         }
+    }
+
+    /// Collect simple `local → Type` bindings for one function: typed parameters
+    /// / `let` annotations, and `let x = Type::…` / `path::Type::…` constructor
+    /// calls. Nested field receivers (`foo.bar.baz`) are out of scope.
+    fn collect_local_type_bindings(
+        state: &ExtractionState<'_>,
+        function: TsNode<'_>,
+    ) -> HashMap<String, String> {
+        let mut local_types = HashMap::new();
+        Self::collect_local_type_bindings_walk(state, function, function, &mut local_types);
+        local_types
+    }
+
+    fn collect_local_type_bindings_walk(
+        state: &ExtractionState<'_>,
+        node: TsNode<'_>,
+        function: TsNode<'_>,
+        local_types: &mut HashMap<String, String>,
+    ) {
+        if node != function && node.kind() == "function_item" {
+            return;
+        }
+        match node.kind() {
+            "parameter" => {
+                if let (Some(pattern), Some(ty)) = (
+                    node.child_by_field_name("pattern"),
+                    node.child_by_field_name("type"),
+                ) && pattern.kind() == "identifier"
+                    && let Some(type_path) = Self::simple_type_path(state, ty)
+                {
+                    local_types.insert(state.node_text(pattern).to_owned(), type_path);
+                }
+            }
+            "let_declaration" => {
+                if let Some(pattern) = node.child_by_field_name("pattern")
+                    && pattern.kind() == "identifier"
+                {
+                    let name = state.node_text(pattern).to_owned();
+                    if let Some(ty) = node.child_by_field_name("type")
+                        && let Some(type_path) = Self::simple_type_path(state, ty)
+                    {
+                        local_types.insert(name, type_path);
+                    } else if let Some(value) = node.child_by_field_name("value")
+                        && let Some(type_path) = Self::constructor_type_path(state, value)
+                    {
+                        local_types.insert(name, type_path);
+                    }
+                }
+            }
+            _ => {}
+        }
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                Self::collect_local_type_bindings_walk(
+                    state,
+                    cursor.node(),
+                    function,
+                    local_types,
+                );
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// `WalkBuilder`, `&mut WalkBuilder`, `ignore::WalkBuilder` — the path a
+    /// method call should qualify against. Complex types (tuples, impl Trait)
+    /// return `None`.
+    fn simple_type_path(state: &ExtractionState<'_>, ty: TsNode<'_>) -> Option<String> {
+        match ty.kind() {
+            "type_identifier" => Some(state.node_text(ty).to_owned()),
+            "scoped_type_identifier" => Some(state.node_text(ty).to_owned()),
+            "generic_type" => ty
+                .child_by_field_name("type")
+                .and_then(|inner| Self::simple_type_path(state, inner)),
+            "reference_type" => ty
+                .child_by_field_name("type")
+                .and_then(|inner| Self::simple_type_path(state, inner)),
+            "pointer_type" => ty
+                .child_by_field_name("type")
+                .and_then(|inner| Self::simple_type_path(state, inner)),
+            _ => None,
+        }
+    }
+
+    /// From `WalkBuilder::new(...)` or `ignore::WalkBuilder::new(...)`, the
+    /// type path is everything before the final `::` segment.
+    fn constructor_type_path(state: &ExtractionState<'_>, value: TsNode<'_>) -> Option<String> {
+        let call = match value.kind() {
+            "call_expression" => value,
+            // `let mut x = Type::new();` may wrap through unary / try expressions.
+            "unary_expression" | "try_expression" | "await_expression" => {
+                return value
+                    .child(0)
+                    .or_else(|| value.named_child(0))
+                    .and_then(|inner| Self::constructor_type_path(state, inner));
+            }
+            _ => return None,
+        };
+        let callee = call.child_by_field_name("function")?;
+        let callee_name = state.node_text(callee);
+        if callee_name.contains('.') {
+            return None;
+        }
+        callee_name
+            .rsplit_once("::")
+            .map(|(type_path, _)| type_path.to_owned())
+            .filter(|type_path| !type_path.is_empty())
     }
 
     /// Import rows are file-scoped, so a local binding makes the same bare

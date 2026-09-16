@@ -580,6 +580,102 @@ fn cross_file_edges_require_path_binding_evidence() {
     }));
 }
 
+/// #1355: a Rust builder method called through a typed local from another file
+/// must produce a `Calls` edge. Bare `build` is blocklisted; binding goes through
+/// the extractor's `Type::method` emission and qualified seal resolution.
+#[test]
+fn cross_file_builder_method_calls_bind_through_typed_locals() {
+    let sources = [
+        (
+            "file.builder.caller",
+            "crates/app/src/lib.rs",
+            "rust",
+            "use builder::WalkBuilder;\npub fn make_walk() -> u32 {\n    let mut builder = WalkBuilder::new();\n    builder.build()\n}\npub fn make_walk_again() -> u32 {\n    let builder = WalkBuilder::new();\n    builder.build()\n}\n",
+        ),
+        (
+            "file.builder.def",
+            "crates/builder/src/lib.rs",
+            "rust",
+            "pub struct WalkBuilder;\nimpl WalkBuilder {\n    pub fn new() -> Self { WalkBuilder }\n    pub fn build(&self) -> u32 { 1 }\n}\n",
+        ),
+    ];
+    let mut request = request("file.builder.seed", 1_100_000);
+    request.snapshot.files.clear();
+    request.snapshot.sanitization_receipts.clear();
+    request.captured_files.clear();
+    let mut identity = Sha256::new();
+    for (ordinal, (occurrence, path, language, source)) in sources.into_iter().enumerate() {
+        identity.update(path.as_bytes());
+        identity.update([0]);
+        identity.update(source.as_bytes());
+        let file_occurrence_id = id::<FileOccurrenceId>(occurrence);
+        request.snapshot.files.push(SanitizedCodeFileV1 {
+            file_occurrence_id: file_occurrence_id.clone(),
+            logical_path: path.to_owned(),
+            language: Some(id::<LanguageId>(language)),
+            content_digest: content_digest(source.as_bytes()),
+            disposition: SnapshotFileDispositionV1::Present,
+        });
+        request
+            .snapshot
+            .sanitization_receipts
+            .push(id::<SanitizationReceiptId>(&format!(
+                "receipt.builder.{ordinal}"
+            )));
+        request.captured_files.push(CodeIndexCapturedFileV1 {
+            file_occurrence_id,
+            sanitized_bytes: Arc::from(source.as_bytes()),
+            sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
+        });
+    }
+    request.snapshot.content_identity = content_digest(&identity.finalize());
+
+    let generation = CodeIndexProductionOwnerV1::new(
+        config(),
+        SharedPublicationStore::default(),
+        ApplyingProjectionSink,
+    )
+    .expect("production owner")
+    .build_and_publish(request, &ActiveControl)
+    .expect("generation publishes");
+    let occurrence = |qualified_name: &str| {
+        generation
+            .symbols()
+            .symbols
+            .iter()
+            .find(|symbol| symbol.qualified_name == qualified_name)
+            .unwrap_or_else(|| panic!("missing {qualified_name}"))
+            .occurrence
+            .clone()
+    };
+    let build = occurrence("crates/builder/src/lib.rs::WalkBuilder::build");
+    let make_walk = occurrence("crates/app/src/lib.rs::make_walk");
+    let make_walk_again = occurrence("crates/app/src/lib.rs::make_walk_again");
+    let incoming_callers = generation
+        .edges()
+        .iter()
+        .filter(|edge| {
+            edge.to_occurrence == build && edge.kind == RelationEdgeKindV1::Calls
+        })
+        .map(|edge| edge.from_occurrence.clone())
+        .collect::<BTreeSet<_>>();
+    assert!(
+        incoming_callers.contains(&make_walk),
+        "make_walk must call WalkBuilder::build: edges={:?} symbols={:?}",
+        generation.edges(),
+        generation
+            .symbols()
+            .symbols
+            .iter()
+            .map(|symbol| symbol.qualified_name.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        incoming_callers.contains(&make_walk_again),
+        "make_walk_again must call WalkBuilder::build: {incoming_callers:?}"
+    );
+}
+
 #[test]
 fn production_increment_reuses_retained_tree_and_reports_bounded_parse_work() {
     let store = SharedPublicationStore::default();

@@ -2308,3 +2308,97 @@ async fn body_prefers_function_over_field_with_same_name() {
         "body should be the function source, got: {body}"
     );
 }
+
+/// #1355: public callers of a Rust builder method called from another file
+/// through a typed local must not be an empty complete miss.
+#[tokio::test]
+async fn callers_of_cross_file_builder_method_include_typed_local_sites() {
+    let (fixture, _root) = graph_query_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(
+            project.join("src/lib.rs"),
+            "mod walk;\n\
+             use crate::walk::WalkBuilder;\n\
+             pub fn make_walk() -> u32 {\n\
+                 let mut builder = WalkBuilder::new();\n\
+                 builder.build()\n\
+             }\n\
+             pub fn make_walk_again() -> u32 {\n\
+                 let builder = WalkBuilder::new();\n\
+                 builder.build()\n\
+             }\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("src/walk.rs"),
+            "pub struct WalkBuilder;\n\
+             impl WalkBuilder {\n\
+                 pub fn new() -> Self { WalkBuilder }\n\
+                 pub fn build(&self) -> u32 { 1 }\n\
+             }\n",
+        )
+        .unwrap();
+    })
+    .await;
+
+    let server = fixture
+        .production
+        .harness
+        .server(&fixture.production.project_root)
+        .expect("production graph-query server");
+    warm_code_index_search(&server, "WalkBuilder").await;
+
+    let exact = call_production_tool(
+        &fixture,
+        "tracedecay_find_exact_symbol",
+        json!({"name": "build", "limit": 20, "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .expect("exact-symbol MCP lookup");
+    let payload: Value =
+        serde_json::from_str(extract_text(&exact.value)).expect("exact-symbol response JSON");
+    let build_id = payload["matches"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|item| {
+            item["name"] == "build"
+                && item["file"]
+                    .as_str()
+                    .is_some_and(|file| file.ends_with("walk.rs"))
+        })
+        .and_then(|item| item["id"].as_str())
+        .unwrap_or_else(|| panic!("WalkBuilder::build missing from exact-symbol: {payload}"))
+        .to_owned();
+
+    let callers = call_production_tool(
+        &fixture,
+        "tracedecay_callers",
+        json!({"node_id": build_id, "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .expect("callers MCP lookup");
+    let callers_payload: Value =
+        serde_json::from_str(extract_text(&callers.value)).expect("callers response JSON");
+    let items = callers_payload
+        .as_array()
+        .unwrap_or_else(|| panic!("callers must return a JSON array: {callers_payload}"));
+    let caller_names = items
+        .iter()
+        .filter_map(|item| item["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        caller_names.iter().any(|name| *name == "make_walk"),
+        "expected make_walk among callers of WalkBuilder::build, got {callers_payload}"
+    );
+    assert!(
+        caller_names.iter().any(|name| *name == "make_walk_again"),
+        "expected make_walk_again among callers of WalkBuilder::build, got {callers_payload}"
+    );
+
+    shutdown_graph_fixture(fixture).await;
+}

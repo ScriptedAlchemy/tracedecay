@@ -437,8 +437,12 @@ where
         .or_else(|| reference.reference_name.rsplit("::").next())
         .unwrap_or(reference.reference_name.as_str());
     // Retention already narrows names, but carried artifacts outlive policy
-    // revisions; apply the current blocklist to every retained reference.
-    if simple_name.is_empty() || CROSS_FILE_REFERENCE_BLOCKLIST.contains(&simple_name) {
+    // revisions; apply the current blocklist to every retained *unqualified*
+    // reference. Qualified `Type::method` paths keep the method segment even
+    // when it is ubiquitous — the type path is the binding authority.
+    if simple_name.is_empty()
+        || (!qualified && CROSS_FILE_REFERENCE_BLOCKLIST.contains(&simple_name))
+    {
         return None;
     }
     let candidates = by_simple_name.get(simple_name)?;
@@ -483,10 +487,20 @@ where
                         {
                             return true;
                         }
-                        file_qualified_name_matches(
+                        if file_qualified_name_matches(
                             &reference.reference_name,
                             &files[*candidate_index].as_ref().authority.logical_path,
                             &symbol.qualified_name,
+                        ) {
+                            return true;
+                        }
+                        associated_type_method_matches(
+                            files,
+                            &mut rust,
+                            file,
+                            &reference.reference_name,
+                            *candidate_index,
+                            symbol,
                         )
                     },
                     |qualified| {
@@ -995,6 +1009,98 @@ fn file_qualified_name_matches(
         .strip_prefix(file_stem)
         .and_then(|path| path.strip_prefix("::"))
         == Some(symbol_path)
+}
+
+/// Bind `Type::method` / `path::Type::method` to an associated method whose
+/// file-relative qualified name is `Type::method`.
+///
+/// Ubiquitous method names (`build`, `new`, …) are blocklisted when bare; the
+/// type path is what makes them bindable. A simple `Type::method` with an
+/// import for `Type` must land in that import's module; a `crate_name::Type::…`
+/// path must land under that crate's source root. Uniqueness of the filtered
+/// candidate set still applies in the caller.
+fn associated_type_method_matches<T>(
+    files: &[T],
+    rust: &mut RustResolutionContextV1<'_>,
+    source_file: &FileGenerationArtifactsV1,
+    reference_name: &str,
+    target_index: usize,
+    target_symbol: &LineageSymbolRecordV1,
+) -> bool
+where
+    T: AsRef<FileGenerationArtifactsV1>,
+{
+    let mut parts = reference_name.split("::").collect::<Vec<_>>();
+    if parts.len() < 2 {
+        return false;
+    }
+    let method = parts.pop().expect("len >= 2");
+    let type_name = *parts.last().expect("len >= 1 after pop");
+    if method.is_empty() || type_name.is_empty() {
+        return false;
+    }
+    let target_path = files[target_index].as_ref().authority.logical_path.as_str();
+    let Some(relative) = target_symbol
+        .qualified_name
+        .strip_prefix(target_path)
+        .and_then(|path| path.strip_prefix("::"))
+    else {
+        return false;
+    };
+    let expected = format!("{type_name}::{method}");
+    if relative != expected && !relative.ends_with(&format!("::{expected}")) {
+        return false;
+    }
+    if parts.len() == 1 {
+        // `Type::method` — when the type is imported, require that import.
+        let Some(binding) = unique_import(source_file, type_name, RelationEdgeKindV1::TypeOf)
+            .or_else(|| unique_import(source_file, type_name, RelationEdgeKindV1::Calls))
+        else {
+            // No import evidence: allow and rely on candidate uniqueness.
+            return true;
+        };
+        return files[target_index]
+            .as_ref()
+            .artifacts
+            .symbols
+            .iter()
+            .filter(|symbol| {
+                symbol.simple_name == type_name
+                    && relation_target_kind_is_compatible(
+                        RelationEdgeKindV1::TypeOf,
+                        &symbol.kind,
+                    )
+            })
+            .any(|type_symbol| match binding.module_kind {
+                ImportModuleKindV1::ProjectRelative => project_import_matches(
+                    binding,
+                    &binding.logical_path,
+                    target_path,
+                    &type_symbol.qualified_name,
+                ),
+                ImportModuleKindV1::BareModule
+                    if source_file.extraction.language.as_str() == "rust" =>
+                {
+                    rust_bare_import_matches(
+                        files,
+                        rust,
+                        binding,
+                        RustSymbolTargetV1 {
+                            index: target_index,
+                            symbol: type_symbol,
+                        },
+                    )
+                }
+                ImportModuleKindV1::BareModule => false,
+            });
+    }
+    // `crate_name::…::Type::method`
+    let crate_name = parts[0];
+    let Some(root_index) = rust.files.crate_root(crate_name) else {
+        return false;
+    };
+    let root_path = files[root_index].as_ref().authority.logical_path.as_str();
+    rust_source_root(target_path) == rust_source_root(root_path)
 }
 
 /// Map an extracted Rust symbol back to the path used by a `crate::...`
