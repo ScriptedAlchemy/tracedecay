@@ -28,17 +28,6 @@ use super::report::{
 /// The checked-in exact/lexical/graph profile every packaged evaluation runs.
 pub const QUERY_BASELINE_PROFILE: &str = "query-fallback";
 const METRIC_SCALE_PPM: u64 = 1_000_000;
-const PROTECTED_STRATA: &[&str] = &[
-    "config_key",
-    "exact_error",
-    "exact_flag",
-    "exact_path",
-    "exact_symbol",
-    "qualified_name",
-    "quoted_phrase",
-    "tool_name",
-    "commit_identifier",
-];
 
 #[derive(Debug, Error)]
 pub enum SearchEvalError {
@@ -350,10 +339,7 @@ fn evaluate_query(
     let anchors = label_strings(label, "anchors")?;
     let forbidden_anchors = label_strings(label, "forbidden_anchors")?;
     let forbidden_documents = label_strings(label, "forbidden_documents")?;
-    let protected = query
-        .strata
-        .iter()
-        .any(|stratum| PROTECTED_STRATA.contains(&stratum.as_str()));
+    let protected = query.strata.iter().any(|stratum| stratum.protected());
     let first_useful_rank = row
         .ranked
         .iter()
@@ -537,7 +523,7 @@ fn aggregate_quality(results: &[DirectQueryEvaluationV1]) -> DirectQualityMetric
     );
     let strata_names = results
         .iter()
-        .flat_map(|result| result.strata.iter().cloned())
+        .flat_map(|result| result.strata.iter().copied())
         .collect::<BTreeSet<_>>();
     let strata = strata_names
         .into_iter()
@@ -549,8 +535,8 @@ fn aggregate_quality(results: &[DirectQueryEvaluationV1]) -> DirectQualityMetric
                 .collect::<Vec<_>>();
             let quality = aggregate_quality_rows(&stratum_rows);
             DirectStratumQualityV1 {
-                stratum: stratum.clone(),
-                protected: PROTECTED_STRATA.contains(&stratum.as_str()),
+                stratum,
+                protected: stratum.protected(),
                 query_count: stratum_rows.len() as u64,
                 relevant_query_count: quality.relevant_query_count,
                 recall_at_10: quality.recall_at_10,
@@ -579,7 +565,7 @@ fn aggregate_quality(results: &[DirectQueryEvaluationV1]) -> DirectQualityMetric
                 ))
         })
         .map(|stratum| DirectWorstStratumV1 {
-            stratum: stratum.stratum.clone(),
+            stratum: stratum.stratum,
             protected: stratum.protected,
             relevant_query_count: stratum.relevant_query_count,
             recall_at_10: stratum.recall_at_10.clone(),
@@ -768,7 +754,7 @@ fn aggregate_profile_status(profiles: &[DirectProfileEvaluationV1]) -> DirectEva
 mod tests {
     use super::{aggregate_quality, evaluate_query};
     use crate::search_quality::candidate_output::{
-        HistoricalQueryExecutionV1, QueryCandidateRowV1, RankedCandidateRowV1,
+        HistoricalQueryExecutionV1, QueryCandidateRowV1, QueryStratumV1, RankedCandidateRowV1,
         ResourceMeasurementPendingReasonV1, ResourceMeasurementStatusV1, ResourceSampleV1,
         WorkloadQueryV1,
     };
@@ -783,11 +769,11 @@ mod tests {
         }
     }
 
-    fn query(id: &str, stratum: &str, anchors: &[&str]) -> WorkloadQueryV1 {
+    fn query(id: &str, stratum: QueryStratumV1, anchors: &[&str]) -> WorkloadQueryV1 {
         WorkloadQueryV1 {
             query_id: id.to_owned(),
             partition: "validation".to_owned(),
-            strata: vec![stratum.to_owned()],
+            strata: vec![stratum],
             query: id.to_owned(),
             allowed_scopes: vec!["research".to_owned()],
             lexical_aliases: Vec::new(),
@@ -824,12 +810,12 @@ mod tests {
     #[test]
     fn quality_metrics_retain_exact_numerators_denominators_and_worst_stratum() {
         let exact = evaluate_query(
-            &query("exact", "exact_symbol", &["a", "b"]),
+            &query("exact", QueryStratumV1::ExactSymbol, &["a", "b"]),
             &row("exact", vec![ranked("a"), ranked("noise"), ranked("b")]),
         )
         .expect("exact query");
         let natural = evaluate_query(
-            &query("natural", "natural_language", &["c"]),
+            &query("natural", QueryStratumV1::NaturalLanguage, &["c"]),
             &row("natural", vec![ranked("noise-2"), ranked("c")]),
         )
         .expect("natural query");
@@ -884,7 +870,7 @@ mod tests {
         candidates.push(ranked("wanted"));
         candidates.push(ranked("noise-0"));
         let result = evaluate_query(
-            &query("late", "qualified_name", &["wanted"]),
+            &query("late", QueryStratumV1::QualifiedName, &["wanted"]),
             &row("late", candidates),
         )
         .expect("quality result");
@@ -908,7 +894,7 @@ mod tests {
 
     #[test]
     fn ndcg_credits_each_label_once_despite_distinct_candidate_aliases() {
-        let query = query("aliases", "natural_language", &["a", "b", "c"]);
+        let query = query("aliases", QueryStratumV1::NaturalLanguage, &["a", "b", "c"]);
         let mut candidates = (0..5)
             .map(|index| {
                 let mut candidate = ranked(&format!("symbol-{index}"));

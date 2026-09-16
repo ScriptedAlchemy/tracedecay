@@ -7,7 +7,7 @@ use tracedecay_domain::canonical_sha256;
 
 use super::candidate_output::{
     CandidateWorkloadV1, EvaluationExecutionContractV1, GenerateCandidateOutputsResultV1,
-    ProductionCandidateOutputV1, compute_corpus_digest, compute_workload_digest,
+    ProductionCandidateOutputV1, QueryStratumV1, compute_corpus_digest, compute_workload_digest,
 };
 use super::evaluate::{
     DirectEvaluationStatusV1, SearchEvalError, evaluate_generated_outputs_against_corpus,
@@ -17,7 +17,7 @@ use super::evaluate::{
 #[serde(deny_unknown_fields)]
 pub struct DirectQueryEvaluationV1 {
     pub query_id: String,
-    pub strata: Vec<String>,
+    pub strata: Vec<QueryStratumV1>,
     pub protected: bool,
     pub first_useful_rank: Option<u32>,
     pub returned_candidates: usize,
@@ -49,7 +49,7 @@ pub struct DirectQueryQualityV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DirectStratumQualityV1 {
-    pub stratum: String,
+    pub stratum: QueryStratumV1,
     pub protected: bool,
     pub query_count: u64,
     pub relevant_query_count: u64,
@@ -63,7 +63,7 @@ pub struct DirectStratumQualityV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DirectWorstStratumV1 {
-    pub stratum: String,
+    pub stratum: QueryStratumV1,
     pub protected: bool,
     pub relevant_query_count: u64,
     pub recall_at_10: DirectRatioMetricV1,
