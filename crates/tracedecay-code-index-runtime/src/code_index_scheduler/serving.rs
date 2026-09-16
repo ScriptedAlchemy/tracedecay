@@ -278,6 +278,17 @@ impl CodeIndexBuildProgressSlotStateV1 {
         true
     }
 
+    pub(super) fn block_current(&mut self, reason: CodeIndexBuildBlockedReasonV1) {
+        let (Some(generation_id), Some(snapshot)) =
+            (self.generation_id.clone(), self.snapshot.clone())
+        else {
+            return;
+        };
+        let mut snapshot = snapshot.as_ref().clone();
+        snapshot.blocked_reason = Some(reason);
+        let _ = self.publish(&generation_id, self.owner_epoch, snapshot);
+    }
+
     pub fn snapshot(&self) -> Option<Arc<CodeIndexBuildProgressV1>> {
         self.snapshot.as_ref().map(Arc::clone)
     }

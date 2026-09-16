@@ -435,6 +435,57 @@ async fn a_permanent_refusal_is_never_self_retried() {
     fixture.registry.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn corrupt_publication_authority_stops_after_one_attempt_and_reports_terminal_state() {
+    let fixture = Fixture::mount("project.reconcile-publication-corruption").await;
+    let fault = fixture
+        .install_fault(ReconcileFaultKindV1::PublicationCorruption, usize::MAX)
+        .await;
+
+    fixture.wake_with_pending_arrival().await;
+    wait_for_attempts(&fault, 1).await;
+    fixture.drive_external_wakes().await;
+    fixture.settle_for(TERMINATION_QUIET_WINDOW).await;
+
+    assert_eq!(
+        fault.attempts(),
+        1,
+        "a corrupt publication authority requires reset and must ignore later wakes"
+    );
+    assert_eq!(
+        fixture.pending_wake_micros().await,
+        0,
+        "terminal failure must consume the arrival so status is not rebuilding"
+    );
+    let freshness = fixture
+        .registry
+        .dashboard_freshness(&fixture.project)
+        .await
+        .expect("mounted freshness");
+    assert!(
+        !freshness.rebuild_in_flight,
+        "terminal publication corruption is blocked, not in flight: {freshness:?}"
+    );
+    let wire = serde_json::to_value(&freshness).expect("freshness wire");
+    assert_eq!(
+        wire["progress"]["blocked_reason"], "publication_authority_corrupt",
+        "status must carry the typed terminal reason: {wire}"
+    );
+    let parked = freshness.parked.expect("terminal convergence state");
+    assert!(
+        parked
+            .reason
+            .contains("injected corrupt publication authority"),
+        "terminal state must retain the exact cause: {parked:?}"
+    );
+    assert!(
+        !parked.retries_on_wake,
+        "an index reset requirement cannot clear on another wake"
+    );
+
+    fixture.registry.shutdown().await;
+}
+
 fn run_git_in(root: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)

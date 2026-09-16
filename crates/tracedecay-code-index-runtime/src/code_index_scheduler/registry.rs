@@ -804,6 +804,9 @@ const CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1: &str = "inspect the daemon l
      abnormal text-projection failure; indexing retries when a new generation seals over \
      changed input";
 
+const CONVERGENCE_PARK_PUBLICATION_CORRUPTION_REMEDIATION_V1: &str = "the code-index \
+     publication authority requires an explicit reset; `tracedecay sync` cannot repair it";
+
 /// Record one observation of a deterministic contract violation on a mounted
 /// worktree's park slot. The first observation stamps the park, an identical
 /// reason increments the pass counter, and a different reason replaces the
@@ -834,7 +837,7 @@ fn park_convergence(
 }
 
 /// Whether the current park re-checks on every wake (a contract violation an
-/// operator fix clears in place), as opposed to a terminal task failure.
+/// operator fix clears in place), as opposed to a terminal failure.
 fn convergence_park_retries_on_wake(slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>) -> bool {
     slot.read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -924,11 +927,7 @@ fn dashboard_generation_is_ready(
     code_graph_serving: &Option<CodeGraphServingReadinessV1>,
 ) -> bool {
     if graph_activation_enabled {
-        text_ready
-            && matches!(
-                code_graph_serving,
-                Some(CodeGraphServingReadinessV1::Ready)
-            )
+        text_ready && matches!(code_graph_serving, Some(CodeGraphServingReadinessV1::Ready))
     } else {
         latest.is_some() || text_ready
     }

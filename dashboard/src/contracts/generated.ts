@@ -763,7 +763,7 @@ export const CodeGraphServingReadinessV1Schema = z.discriminatedUnion("state", [
 export type CodeGraphServingReadinessV1 = z.infer<typeof CodeGraphServingReadinessV1Schema>;
 
 /** A typed reason an otherwise active generation cannot make durable progress. */
-export const CodeIndexBuildBlockedReasonV1Schema = z.enum(["artifact_store_unavailable", "resident_memory", "retry_backoff", "source_unavailable"]);
+export const CodeIndexBuildBlockedReasonV1Schema = z.enum(["artifact_store_unavailable", "publication_authority_corrupt", "resident_memory", "retry_backoff", "source_unavailable"]);
 export type CodeIndexBuildBlockedReasonV1 = z.infer<typeof CodeIndexBuildBlockedReasonV1Schema>;
 
 /** The durable build phase whose committed boundary the dashboard is reading.
