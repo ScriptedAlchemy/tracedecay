@@ -237,12 +237,14 @@ async fn refuse_unauthenticated_client(
 /// The typed refusal a connection answers with when its profile-identity
 /// binding did not settle inside [`PROJECT_OPEN_REQUEST_DEADLINE`].
 ///
-/// It carries [`PROJECT_WARMING_RETRY_HINT`], so every client surface already
-/// classifies it as retryable through `error_message_is_project_open_retryable`.
+/// It carries [`PROJECT_WARMING_REASON_CODE`], so every client surface already
+/// classifies it as retryable through [`error_is_project_open_retryable`].
 fn profile_identity_warming_error() -> TraceDecayError {
-    TraceDecayError::Config {
-        message: format!("TraceDecay profile runtime {PROJECT_WARMING_RETRY_HINT}"),
-    }
+    TraceDecayError::project_route(
+        PROJECT_WARMING_REASON_CODE,
+        true,
+        format!("TraceDecay profile runtime {PROJECT_WARMING_RETRY_HINT}"),
+    )
 }
 
 /// Binds the handshake's authenticated profile identity under the same deadline
@@ -305,7 +307,7 @@ async fn refuse_warming_profile_identity(
         .parsed()
         .and_then(|request| request.id.clone())
         .unwrap_or(serde_json::Value::Null);
-    let response = JsonRpcResponse::error(request_id, ErrorCode::InternalError, error.to_string());
+    let response = project_open_error_response(request_id, error);
     write_json_rpc_response(transport, &response).await
 }
 
@@ -768,11 +770,13 @@ where
                                 result.map(|owner| Some((owner, pending_lines))),
                             () = &mut peer_full_close => Ok(None),
                             () = tokio::time::sleep(PROJECT_OWNER_HALF_CLOSE_GRACE) =>
-                                Err(TraceDecayError::Config {
-                                    message: format!(
+                                Err(TraceDecayError::project_route(
+                                    PROJECT_WARMING_REASON_CODE,
+                                    true,
+                                    format!(
                                         "TraceDecay project owner {PROJECT_WARMING_RETRY_HINT}"
                                     ),
-                                }),
+                                )),
                         };
                     };
                     if pending_lines.len() >= MAX_PENDING_PROJECT_OPEN_LINES {
@@ -1099,7 +1103,7 @@ fn serve_broker_socket_client_inner(
                 &engine.store_administration,
             ) => match result {
                 Ok(store_administration) => store_administration,
-                Err(error) if error_message_is_project_warming(&error.to_string()) => {
+                Err(error) if error_is_project_warming(&error) => {
                     drop(setup_activity);
                     refuse_warming_profile_identity(&mut transport, &first_request, &error).await?;
                     return Ok(None);
@@ -1651,7 +1655,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
             &store_administration,
         )) => match result {
             Ok(store_administration) => store_administration,
-            Err(error) if error_message_is_project_warming(&error.to_string()) => {
+            Err(error) if error_is_project_warming(&error) => {
                 drop(setup_activity);
                 refuse_warming_profile_identity(&mut transport, &first_request, &error).await?;
                 return Ok(());

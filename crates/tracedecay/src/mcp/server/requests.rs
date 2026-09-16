@@ -1517,7 +1517,7 @@ impl McpServer {
             .is_cancelled()
         {
             (
-                "project_server_response_revoked",
+                crate::daemon::PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE,
                 "the retained project server was retired before response completion",
             )
         } else if self
@@ -1701,7 +1701,7 @@ impl McpServer {
                 .project_server_revoked_response(&id, &tool_name)
                 .unwrap_or_else(|| {
                     let error = TraceDecayError::project_route(
-                        "project_server_response_revoked",
+                        crate::daemon::PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE,
                         true,
                         "the retained project server was retired before response admission",
                     );

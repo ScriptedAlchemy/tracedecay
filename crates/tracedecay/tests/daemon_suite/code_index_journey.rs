@@ -10,7 +10,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tracedecay::daemon::{call_tool, notify_hook_event};
+use tracedecay::daemon::{
+    PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE, PROJECT_WARMING_REASON_CODE,
+    REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE, call_tool, notify_hook_event,
+    tool_call_transport_error_is_retryable,
+};
 use tracedecay_daemon_protocol::DaemonHandshake;
 use tracedecay_hooks::core_events::{DaemonHookEvent, HookAgent, HookEventNotifyOutcomeV1};
 
@@ -211,6 +215,45 @@ fn tool_payload(result: Value, operation: &str) -> Value {
         .unwrap_or_else(|| panic!("{operation} did not return JSON content: {result}"))
 }
 
+#[test]
+fn journey_transport_retry_keys_on_typed_reason_codes() {
+    let warming = tracedecay_domain::errors::TraceDecayError::project_route(
+        PROJECT_WARMING_REASON_CODE,
+        true,
+        "TraceDecay project '/tmp/fixture' is warming in the background; retry the same tool shortly",
+    );
+    let deferred = tracedecay_domain::errors::TraceDecayError::project_route(
+        REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
+        true,
+        "repository discovery deferred",
+    );
+    let revoked = tracedecay_domain::errors::TraceDecayError::project_route(
+        PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE,
+        true,
+        "the retained project server was retired before response completion",
+    );
+    let terminal = tracedecay_domain::errors::TraceDecayError::project_route(
+        "tool_dispatch_shutdown",
+        true,
+        "MCP server was released before retained dispatch admission",
+    );
+    let untyped = tracedecay_domain::errors::TraceDecayError::Config {
+        message: "project is warming in the background; retry the same tool shortly".to_owned(),
+    };
+
+    assert!(tool_call_transport_error_is_retryable(&warming));
+    assert!(tool_call_transport_error_is_retryable(&deferred));
+    assert!(tool_call_transport_error_is_retryable(&revoked));
+    assert!(
+        !tool_call_transport_error_is_retryable(&terminal),
+        "unrelated retryable project-route codes must not ride the journey transport loop"
+    );
+    assert!(
+        !tool_call_transport_error_is_retryable(&untyped),
+        "English warming prose alone must not decide journey transport retry"
+    );
+}
+
 pub async fn tool(
     socket: &Path,
     handshake: &DaemonHandshake,
@@ -228,11 +271,7 @@ pub async fn tool(
         match result {
             Ok(payload) => return tool_payload(payload, name),
             Err(error)
-                if Instant::now() < deadline
-                    && (error.to_string().contains("warming in the background")
-                        || error
-                            .to_string()
-                            .contains("retired before response completion")) =>
+                if Instant::now() < deadline && tool_call_transport_error_is_retryable(&error) =>
             {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
