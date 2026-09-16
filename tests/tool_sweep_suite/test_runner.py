@@ -22,6 +22,32 @@ def load_runner():
     return module
 
 
+class ManagedSkillReadTests(unittest.TestCase):
+    def test_skill_view_requires_and_preserves_producer_identity(self) -> None:
+        runner = load_runner()
+        definition = {
+            "name": "tracedecay_skill_view",
+            "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
+        }
+        with self.assertRaises(KeyError):
+            runner.materialize_tool_arguments(definition, {})
+        skill = {
+            "metadata": {"id": "produced-skill", "checksum": "sha256:produced"},
+            "body_markdown": "Retain the producer identity.",
+            "support_files": [],
+        }
+        self.assertEqual(
+            runner.materialize_tool_arguments(definition, {"managed_skill": skill}),
+            {"id": "produced-skill", "include_support_files": True, "format": "json"},
+        )
+        runner.validate_managed_skill_read({"skill": skill}, {"managed_skill": skill})
+        with self.assertRaises(runner.SweepError):
+            runner.validate_managed_skill_read(
+                {"skill": {**skill, "body_markdown": "Wrong content"}},
+                {"managed_skill": skill},
+            )
+
+
 def work_product_fixture() -> dict:
     """The prepared-create shape every Work graph journey derives its task from."""
     return {
