@@ -200,8 +200,8 @@ pub use ignored_dependencies::{
     CodeIndexIgnoredDependencyIndexOutcomeV1, CodeIndexIgnoredDependencyRefusalV1,
     CodeIndexIgnoredDependencyRequestV1,
 };
-pub use registry::CodeIndexSchedulerRegistryV1;
 pub use registry::watch_ingress::GitStateChangeRequestV1;
+pub use registry::{CodeIndexReconcileAdmissionV1, CodeIndexSchedulerRegistryV1};
 pub use registry::{
     ScopedFeedbackDocumentIdentityV1, ServingGenerationInstallationOutcomeV1,
     ServingGenerationRollbackOutcomeV1, feedback_document_identity_from_generation,

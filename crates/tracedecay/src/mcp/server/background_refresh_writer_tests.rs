@@ -49,7 +49,7 @@ async fn read_refresh_routes_through_the_freshness_probe_not_forced_reconcile() 
             let forced = Arc::clone(&forced);
             Box::pin(async move {
                 forced.fetch_add(1, Ordering::AcqRel);
-                true.into()
+                super::CodeIndexAdmission::Accepted
             })
         })
     };
@@ -59,7 +59,7 @@ async fn read_refresh_routes_through_the_freshness_probe_not_forced_reconcile() 
             let probed = Arc::clone(&probed);
             Box::pin(async move {
                 probed.fetch_add(1, Ordering::AcqRel);
-                true.into()
+                super::CodeIndexAdmission::Accepted
             })
         })
     };

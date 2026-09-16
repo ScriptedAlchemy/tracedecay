@@ -63,9 +63,12 @@ async fn publish_code_edit(
     )
     .expect("edit source");
     assert!(
-        schedulers
-            .notify_hook_paths(project_root, &["src/lib.rs".to_owned()])
-            .await,
+        matches!(
+            schedulers
+                .notify_hook_paths(project_root, &["src/lib.rs".to_owned()])
+                .await,
+            tracedecay_code_index_runtime::code_index_scheduler::CodeIndexReconcileAdmissionV1::Accepted
+        ),
         "mounted scheduler accepts the exact worktree hint"
     );
     wait_for_changed_generation(schedulers, project_root, prior).await
