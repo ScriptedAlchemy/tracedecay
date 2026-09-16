@@ -2565,9 +2565,9 @@ fn attribute_whitespace_only_windows(source: &str, pending: &mut Vec<PendingChun
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
+    use std::sync::{Arc, Barrier};
     use std::time::{Duration, Instant};
 
     use super::*;
@@ -2734,10 +2734,11 @@ mod tests {
         .expect("install the automatic worker plan");
         let authority = installed.background_cpu;
         let width = authority.width().get();
-        assert!(
-            width >= 2,
-            "nested admission needs a second pool worker to steal onto, got width {width}"
-        );
+        // Single-CPU hosts and TRACEDECAY_INDEX_WORKERS=1 yield width 1; the
+        // steal-behind-FIFO scenario needs a second worker.
+        if width < 2 {
+            return;
+        }
         let chunks = std::iter::repeat_n(
             Arc::clone(&file_chunks().chunks[0]),
             PARALLEL_CHUNK_THRESHOLD * width,
@@ -2790,16 +2791,28 @@ mod tests {
         // counters are lower bounds here; run alone they are exact.
         assert!(authority.active_units() >= 1);
 
+        // Gate the head thread so the waiting baseline is taken before this
+        // request can enqueue; under parallel libtest a foreign backlog can
+        // already be >= width and would otherwise release the holder early.
+        let head_enter = Arc::new(Barrier::new(2));
         let head = {
             let finished = finished.clone();
+            let head_enter = Arc::clone(&head_enter);
             std::thread::spawn(move || {
+                head_enter.wait();
                 crate::parallelism::with_background_cpu_permits(width, || {});
                 finished.send("head").expect("test thread is waiting");
             })
         };
+        let waiting_before = authority.waiting_work_units();
+        head_enter.wait();
         wait_until("head request waiting for the full width", || {
-            authority.waiting_work_units() >= width
+            authority.waiting_work_units() >= waiting_before.saturating_add(width)
         });
+        assert!(
+            !head.is_finished(),
+            "head must still be blocked in full-width admission before fan-out"
+        );
         head_queued.store(true, Ordering::SeqCst);
 
         for _ in 0..2 {
