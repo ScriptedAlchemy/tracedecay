@@ -673,8 +673,7 @@ fn assemble() {
         "without an explicit type or struct literal, abstain from Product::run too: {names:?}"
     );
     assert!(
-        names.contains(&"p.run".to_owned())
-            && names.contains(&"Factory::new".to_owned()),
+        names.contains(&"p.run".to_owned()) && names.contains(&"Factory::new".to_owned()),
         "receiver-dotted and associated-function forms remain: {names:?}"
     );
 }
