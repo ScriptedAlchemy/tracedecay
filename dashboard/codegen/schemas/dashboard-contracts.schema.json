@@ -2720,7 +2720,8 @@
         "resident_memory",
         "source_unavailable",
         "artifact_store_unavailable",
-        "retry_backoff"
+        "retry_backoff",
+        "publication_authority_corrupt"
       ],
       "type": "string"
     },

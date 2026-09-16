@@ -200,7 +200,10 @@ async fn transient_serving_claim_does_not_erase_pending_branch_tracking() {
     .expect("pending branch metadata becomes visible");
 
     drop(held);
-    assert!(registry.notify_hook_overflow(fixture.path()).await);
+    assert!(matches!(
+        registry.notify_hook_overflow(fixture.path()).await,
+        super::super::CodeIndexReconcileAdmissionV1::Accepted
+    ));
     assert_eq!(
         publication
             .await

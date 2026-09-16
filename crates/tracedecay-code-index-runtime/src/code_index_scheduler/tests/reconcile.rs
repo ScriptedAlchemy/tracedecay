@@ -7806,7 +7806,10 @@ async fn failed_retained_activation_never_installs_unverified_serving_state() {
     // the retry prove and activate the exact retained generation.
     std::fs::rename(&unavailable_git_dir, &git_dir).expect("restore Git authority");
     assert!(
-        registry.notify_hook_overflow(fixture.path()).await,
+        matches!(
+            registry.notify_hook_overflow(fixture.path()).await,
+            super::super::CodeIndexReconcileAdmissionV1::Accepted
+        ),
         "restored worktree accepts a retry hint"
     );
     let receipts_before = registry.event_to_ready_receipts().len();
