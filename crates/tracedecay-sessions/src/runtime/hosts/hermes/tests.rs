@@ -13,7 +13,7 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::ObservationCoverageReason;
 
-use crate::admission::test_support::PanicHostAdmission;
+use crate::admission::test_support::{MemoryHostAdmission, PanicHostAdmission};
 use crate::observation::ObservationCancellation;
 use crate::runtime::shared::StoredCursor;
 use tracedecay_privacy::{MAX_OBSERVATION_RECORD_BYTES, parse_normalized_observation_record_v1};
@@ -1644,4 +1644,47 @@ mod destination_routing_tests {
         assert!(persisted.position > previous.position);
         assert_eq!(IDENTITY_ATTEMPTS.load(Ordering::SeqCst), 3);
     }
+}
+
+/// A Hermes profile whose `state.db` cannot be opened is a skipped source, and
+/// a skipped source is a partial sweep. The outcome must say so; the provider
+/// turns it into a typed catch-up failure instead of reporting a clean pass.
+#[tokio::test]
+async fn unreadable_state_db_is_a_counted_source_failure_not_a_clean_sweep() {
+    let dir = tempfile::tempdir().unwrap();
+    initialize_owned_store_before_foreign_fixture(dir.path()).await;
+    // The pin resolver is a root-registered port and stays unwired in this
+    // crate's tests, so the project qualifies as a candidate destination by
+    // carrying an initialized project database instead of a config pin.
+    let project_root = dir.path().join("project");
+    let project_db = project_root
+        .join(tracedecay_runtime_core::config::TRACEDECAY_DIR)
+        .join(tracedecay_runtime_core::config::DB_FILENAME);
+    std::fs::create_dir_all(project_db.parent().unwrap()).unwrap();
+    std::fs::write(&project_db, b"").unwrap();
+    let home = dir.path().join("hermes-home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("state.db"), b"this is not a sqlite database").unwrap();
+    let admission = MemoryHostAdmission::default();
+
+    let outcome = ingest::ingest_homes_capped_with_admission_and_cancellation(
+        std::slice::from_ref(&home),
+        &project_root,
+        tracedecay_domain::ProjectId::new("project.hermes-unreadable-source").unwrap(),
+        &admission,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await;
+
+    assert_eq!(
+        outcome.source_failures, 1,
+        "the unreadable profile is one skipped source"
+    );
+    assert!(!outcome.projection_drain_deferred);
+    assert_eq!(
+        outcome.stats,
+        crate::runtime::shared::TranscriptIngestStats::default()
+    );
+    assert!(admission.observations().is_empty());
 }
