@@ -2288,11 +2288,7 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
             break;
         }
         assert!(
-            matches!(
-                &error,
-                tracedecay_domain::errors::TraceDecayError::Config { message }
-                    if super::super::error_message_is_project_warming(message)
-            ),
+            super::super::error_is_project_warming(&error),
             "the warm-up open must refuse the missing database: {error:?}"
         );
         assert!(
@@ -2418,11 +2414,7 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
             Err(error) => error,
         };
         assert!(
-            matches!(
-                &warming,
-                tracedecay_domain::errors::TraceDecayError::Config { message }
-                    if super::super::error_message_is_project_warming(message)
-            ),
+            super::super::error_is_project_warming(&warming),
             "explicit init must retry with its own authorization: {warming:?}"
         );
         assert!(
@@ -3510,6 +3502,11 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
     let message = response["error"]["message"]
         .as_str()
         .expect("warming error message");
+    assert_eq!(
+        response["error"]["data"]["reason_code"],
+        super::super::PROJECT_WARMING_REASON_CODE,
+        "{response}"
+    );
     assert!(message.contains("warming in the background"), "{message}");
     assert!(message.contains("retry"), "{message}");
 
@@ -3559,7 +3556,7 @@ async fn foreground_project_open_wait_is_bounded_and_accepts_quick_publication()
     .await
     .expect_err("an uncontended warm-up must not pin the foreground request");
     assert!(
-        warming.to_string().contains("warming in the background"),
+        super::super::error_is_project_warming(&warming),
         "{warming}"
     );
 }

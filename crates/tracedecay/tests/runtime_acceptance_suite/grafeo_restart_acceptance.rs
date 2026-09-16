@@ -508,11 +508,14 @@ fn telemetry(fact: &Value) -> Value {
     })
 }
 
-fn graph_publication_retryable(error: &str) -> bool {
-    error.contains("warming in the background")
-        || error.contains("verified code graph is not ready")
-        || error.contains("exact project code graph is unavailable")
-        || error.contains("retired before response completion")
+fn graph_publication_retryable(error: &tracedecay_domain::errors::TraceDecayError) -> bool {
+    // Control flow keys on typed project-route reason codes only — never English
+    // detail prose (migrate-callers-then-delete-legacy).
+    tracedecay::daemon::tool_call_transport_error_is_retryable(error)
+        || matches!(
+            error.project_route_context(),
+            Some(("code-graph-unavailable" | "code-graph-stale", true, _))
+        )
 }
 
 async fn request_authoritative_reconcile(handshake: &DaemonHandshake, label: &str) {
@@ -575,7 +578,7 @@ async fn wait_for_current_graph(handshake: &DaemonHandshake, label: &str) {
                         actual => panic!("{label} graph readiness became {actual:?}: {status}"),
                     }
                 }
-                Err(error) if graph_publication_retryable(&error.to_string()) => {
+                Err(error) if graph_publication_retryable(&error) => {
                     last = error.to_string();
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
@@ -609,7 +612,7 @@ async fn context_payload(handshake: &DaemonHandshake, task: &str, label: &str) -
                             panic!("{label} returned no JSON payload: {error}")
                         });
                 }
-                Err(error) if graph_publication_retryable(&error.to_string()) => {
+                Err(error) if graph_publication_retryable(&error) => {
                     last = error.to_string();
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }

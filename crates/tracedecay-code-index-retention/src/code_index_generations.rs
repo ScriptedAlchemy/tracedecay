@@ -48,7 +48,7 @@ pub use graph_replay_release::{
 };
 pub use locking::{
     CodeGenerationStoreLockV1, acquire_code_generation_store_lock,
-    try_acquire_code_generation_store_lock,
+    acquire_code_generation_store_read_lock, try_acquire_code_generation_store_lock,
 };
 pub use scope_roots::{
     RefusedCodeIndexScopeV1, SCOPE_ROOT_RECORD_FILE, ScopeRootAuthorityReceiptV1,

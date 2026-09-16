@@ -406,6 +406,10 @@ impl CodeIndexSchedulerRegistryV1 {
             // late complete-generation request starts a successor pass; that
             // successor must neither detach nor duplicate the text owner.
             let mut retained_text_projection = None;
+            // Whether the retained projection in flight started with exact
+            // and lexical owners already serving, so it only backfills clone
+            // fingerprints and its finish owes the worker no successor pass.
+            let mut retained_projection_successor_only = false;
             loop {
                 hotpath::future!(
                     worker_wake.notified(),
@@ -579,45 +583,80 @@ impl CodeIndexSchedulerRegistryV1 {
                     && latest.text_projection_needs_work()
                     && graph_activation_enabled
                 {
-                    // The retained owner projects on its own task, exactly as
-                    // a publication's replacement owner does, and this pass
-                    // joins it after the graph seat. Awaiting a slice here
-                    // instead put the whole projection ahead of the seat, and
-                    // one slice is not divisible below its finalization: a
-                    // restart that resumed an unfinished ngram index spent
-                    // that entire build -- 377 s measured on a 5,181-file
-                    // corpus -- before the pass even reached the gate that
-                    // would have recovered the verified head in 8 s.
-                    let shutting_down = Arc::clone(&worker_shutting_down);
-                    let park = Arc::clone(&worker_convergence_park);
-                    let installed = Arc::clone(&worker_text_generation);
-                    #[cfg(any(test, feature = "test-helpers"))]
-                    let gated_root = worker_project_root.clone();
-                    let projection_pass =
-                        super::super::ReconcilePassGuard::enter(&worker_reconcile_in_progress);
-                    let projection_pending_wake = Arc::clone(&worker_pending_wake);
-                    let projection_wake = Arc::clone(&worker_wake);
-                    retained_text_projection = Some(tokio::spawn(async move {
-                        let _projection_pass = projection_pass;
+                    // Exact/lexical warming always runs here. Clone-fingerprint
+                    // backfill is demand-driven *after* the seated generation
+                    // matches this text owner and the source is current: starting
+                    // it while the serving slot is empty, mismatched, or the
+                    // checkout is dirty races the publish/seat path that still
+                    // owns the receipt bound (cc-22286: phase=ready, graph
+                    // pending, rebuild_in_flight, clone 0/N at the 45 s bound).
+                    let owners_ready = latest.query_owners_are_ready();
+                    let serving_matches_text = worker_serving_generation
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_ref()
+                        .is_some_and(|serving| {
+                            serving.generation().manifest().generation_id
+                                == latest.metadata().manifest().generation_id
+                        });
+                    let source_current = worker_source_freshness.ready_without_stat(
+                        &worker_project_root,
+                        &worker_shutting_down,
+                    );
+                    let drive_retained = !owners_ready
+                        || (serving_matches_text && source_current);
+                    if drive_retained {
+                        // The retained owner projects on its own task, exactly as
+                        // a publication's replacement owner does, and this pass
+                        // joins it after the graph seat. Awaiting a slice here
+                        // instead put the whole projection ahead of the seat, and
+                        // one slice is not divisible below its finalization: a
+                        // restart that resumed an unfinished ngram index spent
+                        // that entire build -- 377 s measured on a 5,181-file
+                        // corpus -- before the pass even reached the gate that
+                        // would have recovered the verified head in 8 s.
+                        let shutting_down = Arc::clone(&worker_shutting_down);
+                        let park = Arc::clone(&worker_convergence_park);
+                        let installed = Arc::clone(&worker_text_generation);
                         #[cfg(any(test, feature = "test-helpers"))]
-                        Self::wait_for_retained_text_projection_gate(&gated_root).await;
-                        let outcome = Self::drive_text_projection(
-                            latest,
-                            shutting_down,
-                            park,
-                            Some(installed),
-                            #[cfg(test)]
-                            gated_root,
-                        )
-                        .await;
-                        if matches!(outcome, PublishedTextProjectionOutcomeV1::Unfinished) {
-                            Self::note_worker_continuation(
-                                &projection_pending_wake,
-                                &projection_wake,
-                            );
-                        }
-                        outcome
-                    }));
+                        let gated_root = worker_project_root.clone();
+                        // The pass guard is what `rebuild_in_flight`, the
+                        // `verifying` freshness state and a read's busy fence
+                        // consult: it means exact or lexical serving is still
+                        // being produced. An owner whose query owners already
+                        // serve has only the clone-fingerprint backfill left, and
+                        // holding the guard for that reported a complete current
+                        // generation as verifying / partial_source_verification
+                        // for the whole backfill (#1103). The worker still owns
+                        // and joins the task, so shutdown sees the work.
+                        retained_projection_successor_only = owners_ready;
+                        let projection_pass = (!retained_projection_successor_only).then(|| {
+                            super::super::ReconcilePassGuard::enter(&worker_reconcile_in_progress)
+                        });
+                        let projection_pending_wake = Arc::clone(&worker_pending_wake);
+                        let projection_wake = Arc::clone(&worker_wake);
+                        retained_text_projection = Some(tokio::spawn(async move {
+                            let _projection_pass = projection_pass;
+                            #[cfg(any(test, feature = "test-helpers"))]
+                            Self::wait_for_retained_text_projection_gate(&gated_root).await;
+                            let outcome = Self::drive_text_projection(
+                                latest,
+                                shutting_down,
+                                park,
+                                Some(installed),
+                                #[cfg(test)]
+                                gated_root,
+                            )
+                            .await;
+                            if matches!(outcome, PublishedTextProjectionOutcomeV1::Unfinished) {
+                                Self::note_worker_continuation(
+                                    &projection_pending_wake,
+                                    &projection_wake,
+                                );
+                            }
+                            outcome
+                        }));
+                    }
                 } else if let Some(latest) = text_generation
                     && latest.text_projection_needs_work()
                 {
@@ -1119,7 +1158,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 // re-enters the pass around that acquisition (see
                 // `lock_scheduler_for_graph_step`); only the unlocked decode
                 // and native activation run outside it.
-                if retained_text_projection.is_none() {
+                // A successor-only retained projection holds no pass guard of
+                // its own; keeping the worker's guard through graph seat would
+                // report rebuild_in_flight for clone backfill that is not
+                // exact/lexical work.
+                if retained_text_projection.is_none() || retained_projection_successor_only {
                     drop(reconcile_pass.take());
                 }
                 let gate = GraphSeatGateV1::decide(
@@ -1128,9 +1171,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     matches!(&source_result, Ok(Ok(_))),
                     published_pass,
                     if published_pass {
-                        graph_text
-                            .as_ref()
-                            .is_some_and(LatestCodeTextGenerationV1::query_owners_are_ready)
+                        exact_and_lexical_ready_for_graph(graph_text.as_ref())
                     } else {
                         graph_text.is_some()
                     },
@@ -1391,11 +1432,10 @@ impl CodeIndexSchedulerRegistryV1 {
                 // decode and replay below. Otherwise a failed fresh text pass
                 // becomes a retained pass on its next wake and recreates the
                 // same source and resident-memory contention we avoid above.
+                // Same named predicate as the published seat gate above.
                 if prepare_graph
                     && !graph_already_serves
-                    && graph_text
-                        .as_ref()
-                        .is_none_or(|text| !text.query_owners_are_ready())
+                    && !exact_and_lexical_ready_for_graph(graph_text.as_ref())
                 {
                     prepare_graph = false;
                     tracing::debug!(
@@ -1654,6 +1694,24 @@ impl CodeIndexSchedulerRegistryV1 {
                 if let Some(outcome) = published_text_projection_outcome.take() {
                     match outcome {
                         PublishedTextProjectionOutcomeV1::Finished => {
+                            // The seat needs only the ready exact/lexical
+                            // owners. A clone-fingerprint successor left in
+                            // the slot is retained-owner work on the next
+                            // pass (no pass guard once owners already serve).
+                            // Schedule that pass here: there is no periodic
+                            // cadence timer, and leaving the successor parked
+                            // until the first similar/redundancy request made
+                            // that request own the whole backfill inline on a
+                            // Tokio worker thread (#1339 change-risk S1).
+                            if graph_text
+                                .as_ref()
+                                .is_some_and(LatestCodeTextGenerationV1::text_projection_needs_work)
+                            {
+                                Self::note_worker_continuation(
+                                    &worker_pending_wake,
+                                    &worker_wake,
+                                );
+                            }
                             // Large text projections can outlive the bounded
                             // source proof established before publication. The
                             // serving swap must bind to source truth observed
@@ -1891,7 +1949,18 @@ impl CodeIndexSchedulerRegistryV1 {
                                 ),
                                 ServingSwapOutcomeV1::Offered => {}
                             }
-                            if text_latest.text_projection_needs_work() {
+                            // A seated owner whose exact and lexical serving
+                            // are ready has at most the clone-fingerprint
+                            // backfill left. That is demand-driven work: a
+                            // query over pending clone work requests the
+                            // background pass that drives it (see
+                            // `query_admission_serves_v14_while_clone_successor_is_pending`),
+                            // as does the ordinary cadence, so the worker
+                            // stays idle after the seat. Only an owner still
+                            // short of ready owners needs the follow-up now.
+                            if text_latest.text_projection_needs_work()
+                                && !text_latest.query_owners_are_ready()
+                            {
                                 Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
                             }
                         }
@@ -2167,12 +2236,15 @@ impl CodeIndexSchedulerRegistryV1 {
                     drop(reconcile_pass.take());
                     match outcome {
                         PublishedTextProjectionOutcomeV1::Finished
-                            if !retained_head_recovered_without_complete_replay =>
+                            if !retained_head_recovered_without_complete_replay
+                                && !retained_projection_successor_only =>
                         {
                             // Graph head recovery may have abstained while the
                             // retained text task was still running. Give the
                             // now-ready owner one bounded successor pass so a
                             // full replay can proceed without overlapping it.
+                            // A clone-fingerprint backfill changed no owner
+                            // the seat reads, so it owes no such pass.
                             Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
                         }
                         PublishedTextProjectionOutcomeV1::Finished => {}
@@ -2257,4 +2329,13 @@ impl CodeIndexSchedulerRegistryV1 {
         Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::Mount);
         Ok(true)
     }
+}
+
+/// Sole exact/lexical-ready bit for the published graph seat gate and the
+/// full sealed-generation replay skip. Delegates to
+/// [`LatestCodeTextGenerationV1::query_owners_are_ready`] so those two sites
+/// cannot fork; clone backfill is not part of this bit.
+#[inline]
+fn exact_and_lexical_ready_for_graph(text: Option<&LatestCodeTextGenerationV1>) -> bool {
+    text.is_some_and(LatestCodeTextGenerationV1::query_owners_are_ready)
 }

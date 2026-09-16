@@ -200,6 +200,7 @@ pub use ignored_dependencies::{
     CodeIndexIgnoredDependencyIndexOutcomeV1, CodeIndexIgnoredDependencyRefusalV1,
     CodeIndexIgnoredDependencyRequestV1,
 };
+pub use registry::CodeIndexReconcileAdmissionV1;
 pub use registry::CodeIndexSchedulerRegistryV1;
 pub use registry::watch_ingress::GitStateChangeRequestV1;
 pub use registry::{
@@ -239,8 +240,9 @@ use serving::{
     GenerationTextControlV1, TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1, try_publish_build_progress,
 };
 pub use serving::{
-    CodeIndexBuildProgressSlotStateV1, CodeIndexBuildProgressSlotV1, DaemonCodeTextArtifactStoreV1,
-    LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1, ProductionCodeIndexQueryOwnersV1,
+    CloneSimilarityWarmupForRequestV1, CodeIndexBuildProgressSlotStateV1,
+    CodeIndexBuildProgressSlotV1, DaemonCodeTextArtifactStoreV1, LatestCodeTextGenerationV1,
+    LatestCompleteCodeIndexV1, ProductionCodeIndexQueryOwnersV1,
 };
 #[cfg(test)]
 use serving::{

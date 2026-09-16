@@ -180,10 +180,23 @@ pub(super) fn clone_successor_source_batch_limits_from_charges(
 /// digest call that has not yet reached its own checkpoint.
 const TEXT_HEAD_OPEN_CANCELLATION_CHECK_INTERVAL_V1: Duration = Duration::from_millis(100);
 const TEXT_ARTIFACT_MAXIMUM_OWNER_WARMUP_ADVANCES_V1: usize = 10_000;
+/// Clone-fingerprint backfill slices a request may drive inline. The retained
+/// worker owns the rest after `request_query_background_reconcile`; more than
+/// one advance here re-owns the whole successor encode on a Tokio thread.
+const TEXT_ARTIFACT_MAXIMUM_CLONE_WARMUP_ADVANCES_V1: usize = 1;
 /// Rows digested by one scheduler finalization operation. The builder persists
 /// its exact section/row cursor after this bounded slice, avoiding both a
 /// corpus-sized wake and one scheduler wake per individual `SQLite` row.
 const TEXT_ARTIFACT_FINALIZATION_ROWS_PER_OPERATION_V1: usize = 4 * 1024;
+
+/// Outcome of the one-slice clone-fingerprint warmup on a similar/redundancy
+/// request. `Pending` means the retained worker owns remaining backfill —
+/// never collapse that into a hard GenerationUnavailable miss.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloneSimilarityWarmupForRequestV1 {
+    Ready,
+    Pending,
+}
 
 pub(super) type GenerationServingCachesV1 = (
     CodeGenerationId,
@@ -1550,6 +1563,13 @@ impl LatestCompleteCodeIndexV1 {
 }
 
 impl LatestCodeTextGenerationV1 {
+    /// Exact and lexical query owners are installed for this generation.
+    ///
+    /// This is the sole readiness predicate for a publication's graph seat
+    /// gate and for admitting a full sealed-generation graph replay. Clone
+    /// fingerprint backfill may still be unfinished when this returns true —
+    /// that remaining work is [`Self::text_projection_needs_work`], not a
+    /// seat or replay precondition.
     pub fn query_owners_are_ready(&self) -> bool {
         matches!(
             self.query_owner_readiness(),
@@ -1573,12 +1593,23 @@ impl LatestCodeTextGenerationV1 {
     }
 
     pub(super) fn text_projection_needs_work(&self) -> bool {
-        !self.text_projection_failed.load(Ordering::Acquire)
-            && (!self.query_owners_are_ready()
-                || !matches!(
-                    &*self.text_projection_build.lock_slot(),
-                    CodeTextProjectionSlotV1::Idle
-                ))
+        if self.text_projection_failed.load(Ordering::Acquire) {
+            return false;
+        }
+        if !self.query_owners_are_ready() {
+            return true;
+        }
+        // A read probe must not queue behind an advance: a wake holds the
+        // slot lock for its whole bounded slice, and a clone-fingerprint
+        // backfill slice over a large sealed source runs for seconds. A
+        // contended slot is by definition work in progress.
+        match self.text_projection_build.slot.try_lock() {
+            Ok(slot) => !matches!(&*slot, CodeTextProjectionSlotV1::Idle),
+            Err(std::sync::TryLockError::WouldBlock) => true,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                !matches!(&*poisoned.into_inner(), CodeTextProjectionSlotV1::Idle)
+            }
+        }
     }
 
     pub(super) fn clone_index_status(
@@ -1889,11 +1920,13 @@ impl LatestCodeTextGenerationV1 {
     ///
     /// Lexical owners can be Ready while clone backfill is still background
     /// work. `tracedecay_similar` needs those postings; ordinary search does not
-    /// wait here.
+    /// wait here. Drive at most one bounded slice inline and leave the rest to
+    /// the retained worker wake the caller must have requested — owning the
+    /// whole successor on the request thread was the #1339 S1 regression.
     pub(crate) fn finish_clone_similarity_warmup_for_request(
         &self,
         request_control: &dyn CodeIndexExecutionControlV1,
-    ) -> Result<bool, RetrievalPortError> {
+    ) -> Result<CloneSimilarityWarmupForRequestV1, RetrievalPortError> {
         let mut advances = 0_usize;
         while self.text_projection_needs_work() {
             self.advance_text_serving_for_request(
@@ -1901,11 +1934,17 @@ impl LatestCodeTextGenerationV1 {
                 request_control,
             )?;
             advances += 1;
-            if advances >= TEXT_ARTIFACT_MAXIMUM_OWNER_WARMUP_ADVANCES_V1 {
-                return Ok(false);
+            if advances >= TEXT_ARTIFACT_MAXIMUM_CLONE_WARMUP_ADVANCES_V1 {
+                return Ok(if self.text_projection_needs_work() {
+                    // Background owns the remainder; do not collapse this into
+                    // a hard GenerationUnavailable miss at the executor.
+                    CloneSimilarityWarmupForRequestV1::Pending
+                } else {
+                    CloneSimilarityWarmupForRequestV1::Ready
+                });
             }
         }
-        Ok(true)
+        Ok(CloneSimilarityWarmupForRequestV1::Ready)
     }
 
     pub(crate) fn production_query_owners_with_budget(

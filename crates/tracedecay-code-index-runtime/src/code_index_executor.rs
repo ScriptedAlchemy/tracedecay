@@ -1478,9 +1478,26 @@ where
                     return unavailable(code_search::CodeIndexSearchUnavailableReasonV1::Internal);
                 }
             }
+            // Clone backfill is retained-worker work after the seat. Kick that
+            // wake before any inline slice so a quiet daemon does not strand
+            // the successor on this request thread. Match the admission —
+            // terminal Corrupt must fail closed before the inline slice.
+            match schedulers.request_query_background_reconcile(&scope).await {
+                code_index_scheduler::CodeIndexReconcileAdmissionV1::Accepted
+                | code_index_scheduler::CodeIndexReconcileAdmissionV1::Unavailable => {}
+                code_index_scheduler::CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(
+                    _,
+                ) => {
+                    return unavailable(
+                        code_search::CodeIndexSearchUnavailableReasonV1::CorruptionResetRequired,
+                    );
+                }
+            }
             match generation.finish_clone_similarity_warmup_for_request(control.as_ref()) {
-                Ok(true) => {}
-                Ok(false) => {
+                Ok(code_index_scheduler::CloneSimilarityWarmupForRequestV1::Ready) => {}
+                Ok(code_index_scheduler::CloneSimilarityWarmupForRequestV1::Pending) => {
+                    // One bounded slice ran; retained worker owns the rest.
+                    // Surface warming — not a hard GenerationUnavailable miss.
                     return unavailable(
                         code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnverified,
                     );
@@ -1653,9 +1670,20 @@ where
                     return unavailable(code_search::CodeIndexSearchUnavailableReasonV1::Internal);
                 }
             }
+            match schedulers.request_query_background_reconcile(&scope).await {
+                code_index_scheduler::CodeIndexReconcileAdmissionV1::Accepted
+                | code_index_scheduler::CodeIndexReconcileAdmissionV1::Unavailable => {}
+                code_index_scheduler::CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(
+                    _,
+                ) => {
+                    return unavailable(
+                        code_search::CodeIndexSearchUnavailableReasonV1::CorruptionResetRequired,
+                    );
+                }
+            }
             match generation.finish_clone_similarity_warmup_for_request(control.as_ref()) {
-                Ok(true) => {}
-                Ok(false) => {
+                Ok(code_index_scheduler::CloneSimilarityWarmupForRequestV1::Ready) => {}
+                Ok(code_index_scheduler::CloneSimilarityWarmupForRequestV1::Pending) => {
                     return unavailable(
                         code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnverified,
                     );
