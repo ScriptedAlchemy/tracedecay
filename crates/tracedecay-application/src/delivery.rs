@@ -23,8 +23,8 @@ use tracedecay_domain::feedback::{
     GitHubReviewRateLimitCheckpointV1, GitHubReviewReadCheckpointV1, GitHubReviewReadOperationV1,
 };
 use tracedecay_domain::{
-    CanonicalObservationIdV1, CodeGenerationId, CommitId, ProjectId, ProviderId, RefId,
-    RepositoryId, RetrievalAnchorId, UserProfileId, UtcMicros, WorktreeId,
+    CanonicalObservationIdV1, CodeGenerationId, CommitId, ManifestDigest, ProjectId, ProviderId,
+    RefId, RepositoryId, RetrievalAnchorId, UserProfileId, UtcMicros, WorktreeId,
     feedback::GitHubPullRequestIdV1,
 };
 use tracedecay_runtime_core::db::Database;
@@ -444,6 +444,44 @@ pub struct ProjectDeliveryInboxSourceV1 {
     pub indexed: Option<ProjectDeliveryIndexedHeadV1>,
     pub delivery: ProjectDeliveryReadOutcomeV1,
     pub memberships: Vec<ProjectDeliveryMembershipEvidenceV1>,
+    /// Attention join input from the daemon's proximity read authority
+    /// (`POST /api/feedback/proximity`). This stays a thin local DTO instead
+    /// of importing `FeedbackProximityReadResultV1` directly so Delivery does
+    /// not pull the full proximity contract graph into its aggregation.
+    pub proximity: ProjectDeliveryProximityAttentionSourceV1,
+}
+
+/// Bounded, local shape of one proximity encounter's contribution to
+/// Delivery attention. Only the fields the join needs are retained; the
+/// canonical encounter (participants, spans, clone/conflict handles) stays
+/// owned by the proximity authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectDeliveryProximityEncounterV1 {
+    pub encounter_id: ManifestDigest,
+    /// Mirrors `FeedbackProximityRelationV1`'s serialized `relation_kind`:
+    /// `"overlapping_edit"`, `"confirmed_conflict"`, `"shared_code_candidate"`,
+    /// or `"code_neighborhood_candidate"` (the last never joins Delivery
+    /// attention, which only tracks the three head-bound relations above).
+    pub relation_kind: String,
+    pub observed_at: UtcMicros,
+    /// Head commit ids observed on this encounter's participants. A match
+    /// against a pull request's indexed head admits the encounter into that
+    /// pull request's attention.
+    pub participant_head_revisions: Vec<CommitId>,
+}
+
+/// Typed proximity join input for one project's Delivery inbox source.
+/// `Unsupported` is the current default: until a caller mounts a proximity
+/// read, Overlapping edit/Confirmed conflict/Divergent shared implementation
+/// stay explicitly unsupported rather than silently reading as clear.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ProjectDeliveryProximityAttentionSourceV1 {
+    #[default]
+    Unsupported,
+    Unavailable,
+    Ready {
+        encounters: Vec<ProjectDeliveryProximityEncounterV1>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -529,6 +567,10 @@ pub enum ProjectDeliveryAttentionEvidenceV1 {
     },
     IndexedGeneration {
         generation: CodeGenerationId,
+    },
+    ProximityEncounter {
+        encounter_id: ManifestDigest,
+        relation_kind: String,
     },
 }
 
@@ -655,6 +697,7 @@ pub fn aggregate_project_delivery_inbox_v1(
                 provider_state,
                 &timeline.review_items,
                 &ci_checks,
+                &source.proximity,
                 &indexed,
             );
             memberships.push(ProjectDeliveryMembershipEdgeV1 {
@@ -868,6 +911,7 @@ fn delivery_attention(
     provider_state: ProjectDeliveryProviderStateV1,
     reviews: &[ProjectDeliveryReviewItemV1],
     ci_source: &ProjectDeliveryCiSourceV1,
+    proximity: &ProjectDeliveryProximityAttentionSourceV1,
     indexed: &ProjectDeliveryIndexedHeadV1,
 ) -> Vec<ProjectDeliveryAttentionItemV1> {
     let observed_at = pull_request
@@ -1038,7 +1082,79 @@ fn delivery_attention(
             })
             .collect();
     }
+    apply_proximity_attention(&mut items, proximity, &indexed.head_commit_id);
     items
+}
+
+/// Joins one proximity read into the three head-bound Delivery attention
+/// sources it can populate. `Unsupported` leaves those sources at their
+/// default unsupported+unavailable state; `Unavailable` marks them
+/// unavailable without discarding the rest of the attention set; `Ready`
+/// admits only encounters naming the pull request's indexed head as a
+/// participant revision, and clears sources with zero matches instead of
+/// leaving them unsupported (proximity is mounted and measured zero).
+fn apply_proximity_attention(
+    items: &mut [ProjectDeliveryAttentionItemV1],
+    proximity: &ProjectDeliveryProximityAttentionSourceV1,
+    indexed_head: &CommitId,
+) {
+    const PROXIMITY_SOURCES: [(&str, ProjectDeliveryAttentionSourceV1); 3] = [
+        (
+            "overlapping_edit",
+            ProjectDeliveryAttentionSourceV1::OverlappingEdit,
+        ),
+        (
+            "confirmed_conflict",
+            ProjectDeliveryAttentionSourceV1::ConfirmedConflict,
+        ),
+        (
+            "shared_code_candidate",
+            ProjectDeliveryAttentionSourceV1::DivergentSharedImplementation,
+        ),
+    ];
+    match proximity {
+        ProjectDeliveryProximityAttentionSourceV1::Unsupported => {}
+        ProjectDeliveryProximityAttentionSourceV1::Unavailable => {
+            for (_, source) in PROXIMITY_SOURCES {
+                if let Some(item) = items.iter_mut().find(|item| item.source == source) {
+                    item.state = ProjectDeliveryAttentionStateV1::Unavailable;
+                    item.coverage = ProjectDeliveryInboxCoverageV1::Unavailable;
+                }
+            }
+        }
+        ProjectDeliveryProximityAttentionSourceV1::Ready { encounters } => {
+            for (relation_kind, source) in PROXIMITY_SOURCES {
+                let matching = encounters
+                    .iter()
+                    .filter(|encounter| {
+                        encounter.relation_kind == relation_kind
+                            && encounter
+                                .participant_head_revisions
+                                .iter()
+                                .any(|revision| revision == indexed_head)
+                    })
+                    .collect::<Vec<_>>();
+                let Some(item) = items.iter_mut().find(|item| item.source == source) else {
+                    continue;
+                };
+                if matching.is_empty() {
+                    item.state = ProjectDeliveryAttentionStateV1::Clear;
+                    item.coverage = ProjectDeliveryInboxCoverageV1::Complete;
+                    continue;
+                }
+                item.state = ProjectDeliveryAttentionStateV1::Active;
+                item.coverage = ProjectDeliveryInboxCoverageV1::Complete;
+                item.evidence = matching
+                    .iter()
+                    .map(|encounter| ProjectDeliveryAttentionEvidenceV1::ProximityEncounter {
+                        encounter_id: encounter.encounter_id.clone(),
+                        relation_kind: encounter.relation_kind.clone(),
+                    })
+                    .collect();
+                item.observed_at = matching.iter().map(|encounter| encounter.observed_at).max();
+            }
+        }
+    }
 }
 
 pub type ProjectDeliveryReadFutureV1<'a> =
@@ -2186,6 +2302,7 @@ mod tests {
                 }),
             },
             memberships: Vec::new(),
+            proximity: ProjectDeliveryProximityAttentionSourceV1::Unsupported,
         }
     }
 
@@ -2589,6 +2706,131 @@ mod tests {
             item.source == ProjectDeliveryAttentionSourceV1::StaleProviderState
                 && item.state == ProjectDeliveryAttentionStateV1::Active
         }));
+    }
+
+    #[test]
+    fn inbox_marks_proximity_overlap_as_active_attention_with_evidence() {
+        fn proximity_encounter(
+            id: &str,
+            relation_kind: &str,
+            head: &str,
+        ) -> ProjectDeliveryProximityEncounterV1 {
+            ProjectDeliveryProximityEncounterV1 {
+                encounter_id: ManifestDigest::new(format!("sha256:{}", id.repeat(64))).unwrap(),
+                relation_kind: relation_kind.to_owned(),
+                observed_at: UtcMicros(50),
+                participant_head_revisions: vec![
+                    CommitId::new(head).unwrap(),
+                    CommitId::new("commit.delivery.proximity-other-participant").unwrap(),
+                ],
+            }
+        }
+
+        let timeline = ProjectDeliveryGitHubTimelineV1 {
+            pull_requests: vec![inbox_pull_request("42", "commit.delivery.proximity", None)],
+            review_items: Vec::new(),
+            pull_requests_total: 1,
+            review_items_total: 0,
+            pull_requests_truncated: false,
+            review_items_truncated: false,
+        };
+        let mut source = inbox_source(
+            "project.delivery-proximity",
+            "commit.delivery.proximity",
+            ProjectDeliveryGitHubSourceV1::Ready { timeline },
+        );
+        let overlap = proximity_encounter("a", "overlapping_edit", "commit.delivery.proximity");
+        let conflict = proximity_encounter("b", "confirmed_conflict", "commit.delivery.proximity");
+        let unrelated = proximity_encounter(
+            "c",
+            "shared_code_candidate",
+            "commit.delivery.proximity-unmatched-head",
+        );
+        source.proximity = ProjectDeliveryProximityAttentionSourceV1::Ready {
+            encounters: vec![overlap.clone(), conflict.clone(), unrelated],
+        };
+
+        let inbox = aggregate_project_delivery_inbox_v1(vec![source], 16);
+        let attention = &inbox.pull_requests[0].attention;
+
+        let overlapping = attention
+            .iter()
+            .find(|item| item.source == ProjectDeliveryAttentionSourceV1::OverlappingEdit)
+            .unwrap();
+        assert_eq!(overlapping.state, ProjectDeliveryAttentionStateV1::Active);
+        assert_eq!(overlapping.coverage, ProjectDeliveryInboxCoverageV1::Complete);
+        assert_eq!(
+            overlapping.evidence,
+            vec![ProjectDeliveryAttentionEvidenceV1::ProximityEncounter {
+                encounter_id: overlap.encounter_id.clone(),
+                relation_kind: "overlapping_edit".to_owned(),
+            }]
+        );
+        assert_eq!(overlapping.observed_at, Some(UtcMicros(50)));
+
+        let confirmed = attention
+            .iter()
+            .find(|item| item.source == ProjectDeliveryAttentionSourceV1::ConfirmedConflict)
+            .unwrap();
+        assert_eq!(confirmed.state, ProjectDeliveryAttentionStateV1::Active);
+        assert_eq!(
+            confirmed.evidence,
+            vec![ProjectDeliveryAttentionEvidenceV1::ProximityEncounter {
+                encounter_id: conflict.encounter_id.clone(),
+                relation_kind: "confirmed_conflict".to_owned(),
+            }]
+        );
+
+        // The one `shared_code_candidate` encounter names a head that is not
+        // this pull request's indexed head, so the source measures zero
+        // findings: Clear, not Unsupported.
+        let divergent = attention
+            .iter()
+            .find(|item| {
+                item.source == ProjectDeliveryAttentionSourceV1::DivergentSharedImplementation
+            })
+            .unwrap();
+        assert_eq!(divergent.state, ProjectDeliveryAttentionStateV1::Clear);
+        assert_eq!(divergent.coverage, ProjectDeliveryInboxCoverageV1::Complete);
+        assert!(divergent.evidence.is_empty());
+    }
+
+    #[test]
+    fn inbox_marks_unavailable_proximity_as_unavailable_attention() {
+        let timeline = ProjectDeliveryGitHubTimelineV1 {
+            pull_requests: vec![inbox_pull_request(
+                "42",
+                "commit.delivery.proximity-unavailable",
+                None,
+            )],
+            review_items: Vec::new(),
+            pull_requests_total: 1,
+            review_items_total: 0,
+            pull_requests_truncated: false,
+            review_items_truncated: false,
+        };
+        let mut source = inbox_source(
+            "project.delivery-proximity-unavailable",
+            "commit.delivery.proximity-unavailable",
+            ProjectDeliveryGitHubSourceV1::Ready { timeline },
+        );
+        source.proximity = ProjectDeliveryProximityAttentionSourceV1::Unavailable;
+
+        let inbox = aggregate_project_delivery_inbox_v1(vec![source], 16);
+        let attention = &inbox.pull_requests[0].attention;
+
+        for proximity_source in [
+            ProjectDeliveryAttentionSourceV1::OverlappingEdit,
+            ProjectDeliveryAttentionSourceV1::ConfirmedConflict,
+            ProjectDeliveryAttentionSourceV1::DivergentSharedImplementation,
+        ] {
+            let item = attention
+                .iter()
+                .find(|item| item.source == proximity_source)
+                .unwrap();
+            assert_eq!(item.state, ProjectDeliveryAttentionStateV1::Unavailable);
+            assert_eq!(item.coverage, ProjectDeliveryInboxCoverageV1::Unavailable);
+        }
     }
 
     #[test]
