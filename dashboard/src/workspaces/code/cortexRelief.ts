@@ -531,13 +531,20 @@ export function foldNote(model: CortexModel): string {
   if (model.capFoldedRegions > 0) {
     bits.push(`${model.capFoldedRegions} at the ${MAX_DRAWN_REGIONS}-region cap`);
   }
+  if (model.unplacedRegions > 0) {
+    bits.push(`${model.unplacedRegions} without measured depth`);
+  }
   if (bits.length === 0) return `${model.foldedFiles.toLocaleString()} files, all in the table`;
   return `${bits.join(', ')}; all in the table`;
 }
 
 function foldTeach(model: CortexModel): string {
   const mass = `an aggregate surface: ${model.totalFiles.toLocaleString()} files cannot be drawn as bodies, so they are drawn as mass.`;
-  if (model.readabilityFoldedRegions === 0 && model.capFoldedRegions === 0) {
+  if (
+    model.readabilityFoldedRegions === 0 &&
+    model.capFoldedRegions === 0 &&
+    model.unplacedRegions === 0
+  ) {
     return `${mass} The whole clustering is drawn.`;
   }
   const bits: string[] = [];
@@ -551,6 +558,9 @@ function foldTeach(model: CortexModel): string {
       `${model.capFoldedRegions} folded by the ${MAX_DRAWN_REGIONS}-region drawing cap`,
     );
   }
+  if (model.unplacedRegions > 0) {
+    bits.push(`${model.unplacedRegions} not placed because no file carried measured depth`);
+  }
   return `${mass} ${bits.join('. ')}. Every folded region is in the table below.`;
 }
 
@@ -563,6 +573,9 @@ function foldDescription(model: CortexModel): string {
   }
   if (model.capFoldedRegions > 0) {
     bits.push(`${model.capFoldedRegions} folded by the ${MAX_DRAWN_REGIONS}-region drawing cap.`);
+  }
+  if (model.unplacedRegions > 0) {
+    bits.push(`${model.unplacedRegions} not placed because no file carried measured depth.`);
   }
   return bits.join(' ');
 }
