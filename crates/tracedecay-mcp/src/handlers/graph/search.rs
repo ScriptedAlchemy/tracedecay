@@ -1098,12 +1098,8 @@ pub async fn handle_similar(ctx: &McpToolContext<'_>, args: Value) -> Result<Too
                 detail: "the selected source has no body in the verified clone index".to_owned(),
             });
         }
-        tracedecay_query::code_search::CodeIndexSimilarOutcomeV1::Unavailable(_) => {
-            return Err(TraceDecayError::ProjectRoute {
-                reason_code: "verified-code-similarity-unavailable".to_owned(),
-                retryable: false,
-                detail: "the maintained clone similarity lane is unavailable".to_owned(),
-            });
+        tracedecay_query::code_search::CodeIndexSimilarOutcomeV1::Unavailable(reason) => {
+            return Err(similar_unavailable_error(reason));
         }
     };
     if similar.source.occurrence.project_id != project_id
@@ -1189,6 +1185,26 @@ pub async fn handle_similar(ctx: &McpToolContext<'_>, args: Value) -> Result<Too
     let value =
         hotpath::measure_block!("mcp.graph.similar.serialize", serde_json::to_value(result)?);
     Ok(generic_tool_result(ctx, &args, &value, touched_files))
+}
+
+fn similar_unavailable_error(
+    reason: tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1,
+) -> TraceDecayError {
+    TraceDecayError::ProjectRoute {
+        reason_code: reason.as_str().to_owned(),
+        retryable: matches!(
+            reason,
+            tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::Cancelled
+                | tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::TimedOut
+                | tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable
+                | tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable
+                | tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnverified
+        ),
+        detail: format!(
+            "the maintained clone similarity lane is unavailable: {}",
+            reason.as_str()
+        ),
+    }
 }
 
 #[hotpath::measure(label = "mcp.graph.redundancy.total")]
