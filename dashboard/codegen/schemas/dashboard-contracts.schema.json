@@ -2720,7 +2720,8 @@
         "resident_memory",
         "source_unavailable",
         "artifact_store_unavailable",
-        "retry_backoff"
+        "retry_backoff",
+        "publication_authority_corrupt"
       ],
       "type": "string"
     },
@@ -6033,6 +6034,26 @@
             "generation"
           ],
           "type": "object"
+        },
+        {
+          "properties": {
+            "encounter_id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "proximity_encounter",
+              "type": "string"
+            },
+            "relation": {
+              "$ref": "#/$defs/DeliveryProximityRelationV1"
+            }
+          },
+          "required": [
+            "kind",
+            "encounter_id",
+            "relation"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -8575,6 +8596,15 @@
         "not_published",
         "not_configured",
         "unavailable"
+      ],
+      "type": "string"
+    },
+    "DeliveryProximityRelationV1": {
+      "enum": [
+        "code_neighborhood_candidate",
+        "shared_code_candidate",
+        "overlapping_edit",
+        "confirmed_conflict"
       ],
       "type": "string"
     },

@@ -2251,6 +2251,7 @@ impl CodeIndexSchedulerRegistryV1 {
             _active_generation_encoded_bytes: active_generation_encoded_bytes,
             task,
         });
+        Self::record_root_mounted(&self.root_mounted);
         // Until retained decode/truth verification completes, reads see warming
         // instead of serving unproven bytes.
         Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::Mount);

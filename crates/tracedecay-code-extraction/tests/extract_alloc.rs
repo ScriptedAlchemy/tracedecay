@@ -206,7 +206,7 @@ fn extract_parsed(
 fn parse_with_grammar(key: &str, source: &str) -> Tree {
     let mut parser = Parser::new();
     parser
-        .set_language(&ts_provider::language(key).expect("bundled grammar"))
+        .set_language(&ts_provider::try_language(key).expect("bundled grammar"))
         .expect("configure parser");
     parser.parse(source, None).expect("parse fixture")
 }

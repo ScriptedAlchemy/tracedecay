@@ -596,11 +596,27 @@ pub fn with_background_cpu_permit<R>(operation: impl FnOnce() -> R) -> R {
     with_background_cpu_permits(1, operation)
 }
 
+/// Run a nested pool fan-out with the calling thread's admitted units
+/// yielded for its duration. Admission is FIFO, so a parent that kept its
+/// unit while waiting on leaves stolen by other workers could wedge the
+/// process: a wider request at the queue head never fits while the parent
+/// holds, and the parent's leaves never reach the head. The units are
+/// reacquired before the parent resumes, including during unwind.
+pub fn with_yielded_background_cpu_permits<R>(operation: impl FnOnce() -> R) -> R {
+    match WORKER_RUNTIME.get() {
+        Some(runtime) => runtime.background_cpu.with_yielded_permits(operation),
+        None => operation(),
+    }
+}
+
 /// Run `operation` on the configured indexing pool.
 ///
 /// CPU admission happens inside each active parallel work unit through
 /// [`with_background_cpu_permit`] or [`with_background_cpu_permits`], allowing
 /// indexing, semantic inference, and session preparation to share idle width.
+/// The caller's own units are yielded for the duration; a bare `par_iter`
+/// fan-out issued while already holding a leaf permit must wrap itself in
+/// [`with_yielded_background_cpu_permits`] to get the same guarantee.
 /// A standalone caller without registration shares one process-wide automatic
 /// pool. Building one all-core pool per request oversubscribes concurrent
 /// tests and profiling harnesses, which can turn bounded parser work into

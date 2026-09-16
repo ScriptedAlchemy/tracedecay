@@ -8,8 +8,8 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
+use axum::Json;
 use axum::extract::State;
-use axum::{Extension, Json};
 use schemars::JsonSchema;
 use serde::Serialize;
 use tracedecay_application::advisory::{GitHubReleaseV1, ProjectGitHubReleasePageV1};
@@ -26,6 +26,7 @@ use tracedecay_application::delivery::{
     ProjectDeliveryInboxCoverageV1, ProjectDeliveryInboxPullRequestStateV1,
     ProjectDeliveryInboxSourceV1, ProjectDeliveryIndexedHeadV1, ProjectDeliveryMembershipBasisV1,
     ProjectDeliveryProviderMountGateV1, ProjectDeliveryProviderStateV1,
+    ProjectDeliveryProximityAttentionSourceV1, ProjectDeliveryProximityRelationV1,
     ProjectDeliveryPullRequestIdentityV1, ProjectDeliveryPullRequestOperationV1,
     ProjectDeliveryPullRequestStateV1, ProjectDeliveryPullRequestV1, ProjectDeliveryReadKindV1,
     ProjectDeliveryReadOutcomeV1, ProjectDeliveryReadRequestV1, ProjectDeliveryRegistrySourceV1,
@@ -56,7 +57,7 @@ use super::read_model::{
     DashboardLegalActionKindV1, DashboardLegalActionRefV1, DashboardVersionV1,
     DashboardWatermarkV1, scope_from_state,
 };
-use super::{DashboardHttpRequestControlV1, DashboardState};
+use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl};
 
 const DELIVERY_SOURCE_COUNT: u64 = 8;
 const MAX_DELIVERY_INBOX_PROJECTS_V1: usize = 64;
@@ -659,6 +660,28 @@ pub enum DeliveryAttentionStateV1 {
     Denied,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryProximityRelationV1 {
+    CodeNeighborhoodCandidate,
+    SharedCodeCandidate,
+    OverlappingEdit,
+    ConfirmedConflict,
+}
+
+impl From<ProjectDeliveryProximityRelationV1> for DeliveryProximityRelationV1 {
+    fn from(relation: ProjectDeliveryProximityRelationV1) -> Self {
+        match relation {
+            ProjectDeliveryProximityRelationV1::CodeNeighborhoodCandidate => {
+                Self::CodeNeighborhoodCandidate
+            }
+            ProjectDeliveryProximityRelationV1::SharedCodeCandidate => Self::SharedCodeCandidate,
+            ProjectDeliveryProximityRelationV1::OverlappingEdit => Self::OverlappingEdit,
+            ProjectDeliveryProximityRelationV1::ConfirmedConflict => Self::ConfirmedConflict,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeliveryAttentionEvidenceV1 {
@@ -675,6 +698,10 @@ pub enum DeliveryAttentionEvidenceV1 {
     },
     IndexedGeneration {
         generation: String,
+    },
+    ProximityEncounter {
+        encounter_id: String,
+        relation: DeliveryProximityRelationV1,
     },
 }
 
@@ -802,10 +829,25 @@ pub trait DashboardDeliveryReadPortV1: Send + Sync {
     ) -> DashboardDeliveryReadFutureV1<'_>;
 }
 
+pub type DashboardProximityAttentionReadFutureV1<'a> =
+    Pin<Box<dyn Future<Output = ProjectDeliveryProximityAttentionSourceV1> + Send + 'a>>;
+
+/// Canonical feedback-proximity read folded into Delivery's join input.
+/// Missing mount → `Unsupported`; denied/unavailable → `Unavailable`; ready
+/// pages carry typed coverage. The inbox HTTP handler is the only production
+/// join site — the dashboard never re-joins client-side.
+pub trait DashboardProximityAttentionReadPortV1: Send + Sync {
+    fn read(
+        &self,
+        control: DashboardHttpRequestControlV1,
+        project: DashboardDeliveryProjectV1,
+    ) -> DashboardProximityAttentionReadFutureV1<'_>;
+}
+
 #[hotpath::measure(label = "dashboard_api.delivery.overview", future = true)]
 pub async fn overview(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
 ) -> Json<DashboardEnvelopeV1<DeliveryOverviewV1>> {
     let (changes, commits) = read_git_projections(&state).await;
     let indexed_commit = match &state.code_index_freshness_reader {
@@ -822,16 +864,10 @@ pub async fn overview(
 
     let delivery = match (
         state.delivery_read_authority.as_ref(),
-        control,
         live_head,
         state.project_id.as_ref(),
     ) {
-        (
-            Some(authority),
-            Some(Extension(control)),
-            Some(expected_head_commit_id),
-            Some(project_id),
-        ) => {
+        (Some(authority), Some(expected_head_commit_id), Some(project_id)) => {
             authority
                 .read(
                     control,
@@ -910,7 +946,7 @@ pub async fn overview(
 #[hotpath::measure(label = "dashboard_api.delivery.inbox", future = true)]
 pub async fn inbox(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
 ) -> Json<DashboardEnvelopeV1<DeliveryInboxV1>> {
     let unavailable = || DeliveryInboxV1 {
         registry_state: DeliveryRegistryStateV1::Unavailable,
@@ -966,18 +1002,14 @@ pub async fn inbox(
                 .and_then(indexed_delivery_head),
             None => None,
         };
-        let delivery = match (
-            state.delivery_read_authority.as_ref(),
-            control.as_ref(),
-            indexed.as_ref(),
-        ) {
-            (Some(authority), Some(Extension(control)), Some(indexed)) => {
+        let delivery = match (state.delivery_read_authority.as_ref(), indexed.as_ref()) {
+            (Some(authority), Some(indexed)) => {
                 authority
                     .read(
                         control.clone(),
                         DashboardDeliveryProjectV1 {
                             project_id: project.project_id.clone(),
-                            project_root,
+                            project_root: project_root.clone(),
                         },
                         ProjectDeliveryReadRequestV1 {
                             kind: ProjectDeliveryReadKindV1::Inbox,
@@ -991,6 +1023,22 @@ pub async fn inbox(
                     .await
             }
             _ => ProjectDeliveryReadOutcomeV1::Unavailable,
+        };
+        let proximity = match state.proximity_attention_read_authority.as_ref() {
+            Some(authority) => {
+                authority
+                    .read(
+                        control.clone(),
+                        DashboardDeliveryProjectV1 {
+                            project_id: project.project_id.clone(),
+                            project_root,
+                        },
+                    )
+                    .await
+            }
+            // No proximity authority mounted: leave proximity sources
+            // Unsupported rather than inventing Clear/Active attention.
+            None => ProjectDeliveryProximityAttentionSourceV1::Unsupported,
         };
         sources.push(ProjectDeliveryInboxSourceV1 {
             registry: ProjectDeliveryRegistrySourceV1 {
@@ -1007,6 +1055,7 @@ pub async fn inbox(
             indexed,
             delivery,
             memberships: Vec::new(),
+            proximity,
         });
     }
     let mut aggregation =
@@ -1267,6 +1316,13 @@ fn map_attention_item(
                         generation: generation.as_str().to_owned(),
                     }
                 }
+                ProjectDeliveryAttentionEvidenceV1::ProximityEncounter {
+                    encounter_id,
+                    relation,
+                } => DeliveryAttentionEvidenceV1::ProximityEncounter {
+                    encounter_id: encounter_id.to_string(),
+                    relation: DeliveryProximityRelationV1::from(relation),
+                },
             })
             .collect(),
         coverage: map_inbox_coverage(item.coverage),
@@ -2345,7 +2401,13 @@ mod tests {
         let (_project, state) =
             crate::events_api::dashboard_state_fixture("project.delivery-inbox-unavailable").await;
 
-        let Json(envelope) = inbox(State(state), None).await;
+        let Json(envelope) = inbox(
+            State(state),
+            RequestControl(DashboardHttpRequestControlV1::test_fixture(
+                "delivery-inbox-test",
+            )),
+        )
+        .await;
 
         assert_eq!(envelope.domain_state, DashboardDomainStateV1::Unknown);
         assert_eq!(

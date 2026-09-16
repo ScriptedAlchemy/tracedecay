@@ -21,6 +21,19 @@ pub struct DaemonFeedbackInvocationResult {
     pub(crate) evidence: EvidencePacket<serde_json::Value>,
 }
 
+impl DaemonFeedbackInvocationResult {
+    pub fn project_id(&self) -> &tracedecay_domain::ProjectId {
+        &self.scope.project_id
+    }
+
+    /// Recover the typed proximity read carried in the evidence payload.
+    /// Production Delivery inbox mounts this as the single join authority.
+    pub fn feedback_proximity_read_result(&self) -> Option<FeedbackProximityReadResultV1> {
+        let payload = self.evidence.payload.as_ref()?;
+        serde_json::from_value(payload.clone()).ok()
+    }
+}
+
 pub(crate) type DaemonFeedbackInvocationFuture<'a> = Pin<
     Box<
         dyn Future<Output = Result<DaemonFeedbackInvocationResult, ApplicationProblem>> + Send + 'a,
@@ -84,6 +97,17 @@ impl DaemonAdvisoryCycleInvocationOwner {
             project_id,
             service,
         }
+    }
+
+    pub fn project_id(&self) -> &ProjectId {
+        &self.project_id
+    }
+
+    pub fn invoke_proximity(
+        &self,
+        request: DaemonFeedbackProximityInvocationRequest,
+    ) -> DaemonFeedbackProximityInvocationFuture<'_> {
+        self.service.invoke_proximity(request)
     }
 }
 
@@ -859,6 +883,16 @@ impl DaemonInvocationService {
                 project_root?,
                 Clone::clone,
             )
+            .await
+    }
+
+    #[hotpath::skip]
+    pub async fn advisory_cycle_owner(
+        &self,
+        project_root: Option<&Path>,
+    ) -> Option<DaemonAdvisoryCycleInvocationOwner> {
+        self.project_runtimes
+            .read::<DaemonAdvisoryCycleInvocationOwner, _, _>(project_root?, Clone::clone)
             .await
     }
 

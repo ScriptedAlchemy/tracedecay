@@ -41,9 +41,7 @@ use tracedecay_domain::{
     LanguageDescriptorRevision, LanguageId, LocatorDigest, ManifestDigest, ProjectId, ProviderId,
     RefId, RepositoryId, RetrievalAnchorId, SourceSpan, UtcMicros, WorktreeId,
 };
-use tracedecay_hooks::{
-    HookFeedbackDeliveryOutcomeV1, HookFeedbackDeliveryRouteV1, HookFeedbackRollbackSwitchV1,
-};
+use tracedecay_hooks::{HookFeedbackDeliveryOutcomeV1, HookFeedbackRollbackSwitchV1};
 use tracedecay_lsp::{
     AdmittedRoot, CanonicalContextProjectionAuthority, CanonicalDiagnosticRefreshRequest,
     CanonicalDiagnosticSnapshotAuthority, ContextProjectionOutcome, ContextProjectionRegistration,
@@ -57,9 +55,8 @@ use tracedecay_tool_catalog::CapabilityId;
 use tracedecay_host_integration::HostKindV1;
 
 use super::{
-    AdvisoryHookDeliveryV1, AdvisoryHookLookupNoticeV1, AdvisoryHookNoticeQueueV1,
-    AdvisoryHookNoticeSinkV1, AdvisoryHostDeliveryErrorV1, AdvisoryHostDeliveryRegistrationV1,
-    new_advisory_hook_delivery_port,
+    AdvisoryHookDeliveryV1, AdvisoryHookNoticeQueueV1, AdvisoryHostDeliveryErrorV1,
+    AdvisoryHostDeliveryRegistrationV1, new_advisory_hook_delivery_port,
 };
 use crate::advisory::{AdvisoryContributionsV1, AdvisoryCycleOutcome};
 use crate::feedback::concrete::{FeedbackRuntime, open_feedback_runtime};
@@ -412,18 +409,9 @@ fn lsp_session_factory() -> Arc<DaemonLspSessionFactory> {
     ))
 }
 
-fn unavailable_hook_notice(_notice: &AdvisoryHookLookupNoticeV1) -> HookFeedbackDeliveryOutcomeV1 {
-    HookFeedbackDeliveryOutcomeV1::Unavailable
-}
-
-fn unavailable_hook_sink() -> Arc<AdvisoryHookNoticeSinkV1> {
-    Arc::new(unavailable_hook_notice)
-}
-
 fn rollback() -> HookFeedbackRollbackSwitchV1 {
     HookFeedbackRollbackSwitchV1 {
         configuration_revision: 1,
-        route: HookFeedbackDeliveryRouteV1::HookV2,
     }
 }
 
@@ -560,11 +548,7 @@ async fn consume_fixture() -> ConsumeFixture {
         feedback_owner: runtime.owner(),
         publication_store: runtime.publication_store(),
         lsp_session_factory: lsp_session_factory(),
-        hook_delivery_port: new_advisory_hook_delivery_port(
-            feedback_scope(),
-            queue.sink(),
-            unavailable_hook_sink(),
-        ),
+        hook_delivery_port: new_advisory_hook_delivery_port(feedback_scope(), queue.sink()),
         source_observations: runtime.source_observation_port(),
     };
     ConsumeFixture {

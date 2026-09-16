@@ -541,8 +541,7 @@ impl CodeChunkProjectionSink for ApplyingProjectionSink {
     ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
         let mut decisions = Vec::with_capacity(
             request.changes.added_or_changed.len()
-                + request.changes.deleted.len()
-                + request.changes.reused.len(),
+                + request.changes.deleted.len(),
         );
         decisions.extend(request.changes.added_or_changed.iter().map(|change| {
             ChunkProjectionDecisionV1 {
@@ -569,20 +568,6 @@ impl CodeChunkProjectionSink for ApplyingProjectionSink {
                     current_chunk_digest: None,
                     operation: ProjectionOperationV1::Deleted,
                     outcome: ProjectionOutcomeV1::Applied,
-                    output_digest: None,
-                }),
-        );
-        decisions.extend(
-            request
-                .changes
-                .reused
-                .iter()
-                .map(|change| ChunkProjectionDecisionV1 {
-                    chunk_id: change.chunk_id.clone(),
-                    prior_chunk_digest: change.prior_digest.clone(),
-                    current_chunk_digest: change.current_digest.clone(),
-                    operation: ProjectionOperationV1::Reused,
-                    outcome: ProjectionOutcomeV1::Reused,
                     output_digest: None,
                 }),
         );
@@ -973,11 +958,11 @@ where
                 base: request.clone(),
                 query_view,
                 generation: generation.clone(),
-                whole_terms: parts.whole_terms,
-                subtokens: parts.subtokens,
-                phrases: parts.phrases,
-                proximities: Vec::new(),
-                field_filters: Vec::new(),
+                whole_terms: std::borrow::Cow::Owned(parts.whole_terms),
+                subtokens: std::borrow::Cow::Owned(parts.subtokens),
+                phrases: std::borrow::Cow::Owned(parts.phrases),
+                proximities: std::borrow::Cow::Owned(Vec::new()),
+                field_filters: std::borrow::Cow::Owned(Vec::new()),
                 fuzzy_budget: options.fuzzy_budget,
                 lexical_profile_revision: prototype.lexical_profile_revision.clone(),
                 score_domain: prototype.lexical_score_domain.clone(),

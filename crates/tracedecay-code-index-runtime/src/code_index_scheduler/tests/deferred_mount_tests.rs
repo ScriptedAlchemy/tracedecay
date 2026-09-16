@@ -192,3 +192,93 @@ async fn deferred_query_authority_subscribe_race_survives_silent_restore() {
     );
     restarted.shutdown().await;
 }
+
+/// Pre-activation subscribe returns `None`. Partitioned verified-head Noop
+/// recovery then emits neither publication nor registry-wide serving-seat,
+/// only the per-worktree watch created at mount. The waiter must wake on
+/// registry-wide root-mounted so it can re-subscribe; otherwise it parks
+/// forever and query authority stays unavailable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deferred_query_authority_wakes_after_pre_mount_subscribe_on_partitioned_noop() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let first = CodeIndexSchedulerRegistryV1::new(1);
+    first
+        .mount_worktree(
+            super::test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("initial mount");
+    let sealed = wait_for_initial_generation(&first, fixture.path()).await;
+    let partitioned = first
+        .retained_text_owner_for_root(fixture.path())
+        .await
+        .expect("retained text owner")
+        .uses_partitioned_manifest();
+    assert!(
+        partitioned,
+        "fixture must retain a partitioned generation so remount takes the Noop path"
+    );
+    first.shutdown().await;
+
+    let restarted = CodeIndexSchedulerRegistryV1::new(1);
+    let project_root = fixture.path().to_path_buf();
+    assert!(
+        restarted
+            .subscribe_serving_generation_changes(&project_root)
+            .await
+            .is_none(),
+        "pre-activation serving-generation subscribe must miss until mount"
+    );
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let mut root_mounted = restarted.subscribe_root_mounted();
+    let initial_mount = *root_mounted.borrow();
+    let waiter = spawn_deferred_mount_waiter(&restarted, project_root, Arc::clone(&attempts));
+
+    // Park the waiter on the pre-mount select arms before remount commits.
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+
+    let remount_started = Instant::now();
+    restarted
+        .mount_worktree(
+            super::test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("remount worktree");
+
+    tokio::time::timeout(Duration::from_millis(750), root_mounted.changed())
+        .await
+        .expect("mount must advance the registry-wide root-mounted watch")
+        .expect("root-mounted channel stays open");
+    assert_ne!(
+        *root_mounted.borrow(),
+        initial_mount,
+        "root-mounted must advance on insert"
+    );
+
+    tokio::time::timeout(Duration::from_millis(750), waiter)
+        .await
+        .expect("pre-mount waiter must wake via root-mounted then per-worktree Noop")
+        .expect("deferred mount task");
+    assert!(
+        remount_started.elapsed() < Duration::from_millis(750),
+        "partitioned Noop wake must not wait out a standing poll"
+    );
+    assert_eq!(
+        restarted.latest_generation_id(fixture.path()).await,
+        Some(sealed),
+        "restore must seat the retained generation identity"
+    );
+    assert!(
+        attempts.load(Ordering::SeqCst) >= 1,
+        "mount attempt must run after subscribe-after-mount"
+    );
+    restarted.shutdown().await;
+}

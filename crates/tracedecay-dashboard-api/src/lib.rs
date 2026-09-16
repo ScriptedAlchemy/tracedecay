@@ -135,6 +135,7 @@ pub mod contract_schema;
 mod delivery_api;
 pub use delivery_api::{
     DashboardDeliveryProjectV1, DashboardDeliveryReadFutureV1, DashboardDeliveryReadPortV1,
+    DashboardProximityAttentionReadFutureV1, DashboardProximityAttentionReadPortV1,
 };
 mod doctor_findings_api;
 mod events_api;
@@ -196,7 +197,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{Extension, Path as AxumPath, State};
+use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, Method, Request, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
@@ -335,6 +336,9 @@ pub struct DashboardStateCompositionV1 {
     /// The adapter owns application admission and provider/store access; HTTP
     /// receives only bounded typed source outcomes.
     pub delivery_read_authority: Option<Arc<dyn DashboardDeliveryReadPortV1>>,
+    /// Canonical feedback-proximity read folded into Delivery inbox attention.
+    /// Absent mount leaves proximity sources Unsupported (never Clear).
+    pub proximity_attention_read_authority: Option<Arc<dyn DashboardProximityAttentionReadPortV1>>,
     pub registered_savings_db: Option<RegisteredGlobalDbLeaseV1>,
     /// Exact daemon-selected profile plus its canonical automation run and
     /// managed-skill materialization capabilities. Standalone states leave it
@@ -458,6 +462,8 @@ pub struct DashboardState {
     pub git_correlation_read_authority: Option<Arc<dyn DashboardGitCorrelationReadPortV1>>,
     /// Daemon-wide Delivery projection over exact registered project targets.
     pub delivery_read_authority: Option<Arc<dyn DashboardDeliveryReadPortV1>>,
+    /// Canonical feedback-proximity read folded into Delivery inbox attention.
+    pub proximity_attention_read_authority: Option<Arc<dyn DashboardProximityAttentionReadPortV1>>,
     /// Global accounting DB for the savings ledger and lifetime counters used
     /// by the Savings & Cost tab. Provider usage lives in the retained project
     /// session store exposed separately through `lcm_db`.
@@ -541,6 +547,8 @@ pub struct DashboardHostAdmissionTestAuthorityV1 {
     code_read_authority: Option<code_read_api::DashboardCodeReadAuthorityV1>,
     git_correlation_read_authority: Option<Arc<dyn DashboardGitCorrelationReadPortV1>>,
     delivery_read_authority: Option<Arc<dyn DashboardDeliveryReadPortV1>>,
+    proximity_attention_read_authority: Option<Arc<dyn DashboardProximityAttentionReadPortV1>>,
+    code_index_freshness_reader: Option<CodeIndexFreshnessReader>,
     profile_code_index_worker_settings:
         Option<Arc<dyn DashboardProfileCodeIndexWorkerSettingsPort>>,
     application_invocation_executor: Option<Arc<dyn DashboardApplicationRuntime>>,
@@ -569,6 +577,8 @@ impl DashboardHostAdmissionTestAuthorityV1 {
             code_read_authority: None,
             git_correlation_read_authority: None,
             delivery_read_authority: None,
+            proximity_attention_read_authority: None,
+            code_index_freshness_reader: None,
             profile_code_index_worker_settings: None,
             application_invocation_executor: None,
             pr_autotrack_reader: None,
@@ -646,6 +656,41 @@ impl DashboardHostAdmissionTestAuthorityV1 {
         git_correlation_read_authority: Arc<dyn DashboardGitCorrelationReadPortV1>,
     ) -> Self {
         self.git_correlation_read_authority = Some(git_correlation_read_authority);
+        self
+    }
+
+    /// Attaches the daemon-owned Delivery read authority so the test
+    /// transport serves the same `/api/delivery/*` provider reads production
+    /// mounts.
+    #[must_use]
+    pub fn with_delivery_read_authority(
+        mut self,
+        delivery_read_authority: Arc<dyn DashboardDeliveryReadPortV1>,
+    ) -> Self {
+        self.delivery_read_authority = Some(delivery_read_authority);
+        self
+    }
+
+    /// Attaches the daemon-owned proximity attention read so Delivery inbox
+    /// HTTP serves the same join production mounts (never a client re-join).
+    #[must_use]
+    pub fn with_proximity_attention_read_authority(
+        mut self,
+        proximity_attention_read_authority: Arc<dyn DashboardProximityAttentionReadPortV1>,
+    ) -> Self {
+        self.proximity_attention_read_authority = Some(proximity_attention_read_authority);
+        self
+    }
+
+    /// Attaches a code-index freshness reader so the test transport can
+    /// join provider reads against an indexed head, the same admission gate
+    /// production's Delivery inbox requires before mounting a provider read.
+    #[must_use]
+    pub fn with_code_index_freshness_reader(
+        mut self,
+        code_index_freshness_reader: CodeIndexFreshnessReader,
+    ) -> Self {
+        self.code_index_freshness_reader = Some(code_index_freshness_reader);
         self
     }
 
@@ -799,6 +844,7 @@ async fn build_state_inner(
         lcm_read_authority,
         git_correlation_read_authority,
         delivery_read_authority,
+        proximity_attention_read_authority,
         registered_savings_db,
         automation_authority,
         automation_observation,
@@ -873,6 +919,7 @@ async fn build_state_inner(
         lcm_read_authority,
         git_correlation_read_authority,
         delivery_read_authority,
+        proximity_attention_read_authority,
         savings_db: registered_savings_db,
         savings_db_path,
         project_root: cg.store_layout.project_root.clone(),
@@ -946,6 +993,7 @@ pub async fn build_selected_project_state(
             lcm_read_authority: None,
             git_correlation_read_authority: None,
             delivery_read_authority: active.delivery_read_authority.clone(),
+            proximity_attention_read_authority: active.proximity_attention_read_authority.clone(),
             registered_savings_db: active.savings_db.clone(),
             automation_authority: active.automation_authority.clone(),
             automation_observation: active.automation_observation.clone(),
@@ -1095,6 +1143,8 @@ where
                 .and_then(|authority| authority.git_correlation_read_authority.clone()),
             delivery_read_authority: test_authority
                 .and_then(|authority| authority.delivery_read_authority.clone()),
+            proximity_attention_read_authority: test_authority
+                .and_then(|authority| authority.proximity_attention_read_authority.clone()),
             registered_savings_db: test_authority
                 .map(|authority| authority.profile_database.clone()),
             automation_authority: test_authority
@@ -1106,7 +1156,8 @@ where
                 .unwrap_or_else(standalone_dashboard_automation_writer),
             doctor_report_reader: None,
             remote_operational_status_reader: None,
-            code_index_freshness_reader: None,
+            code_index_freshness_reader: test_authority
+                .and_then(|authority| authority.code_index_freshness_reader.clone()),
             feedback_status_reader: None,
             pr_autotrack_reader: test_authority
                 .and_then(|authority| authority.pr_autotrack_reader.clone()),
@@ -1177,6 +1228,88 @@ pub struct DashboardHttpRequestControlV1 {
     deadline: tracedecay_contracts::Deadline,
     cancellation: tracedecay_contracts::CancellationSignal,
     observed_at: tracedecay_domain::UtcMicros,
+}
+
+pub(crate) const DASHBOARD_REQUEST_CONTROL_MISSING_CODE: &str =
+    "dashboard_request_admission_unavailable";
+pub(crate) const DASHBOARD_REQUEST_CONTROL_MISSING_DETAIL: &str =
+    "dashboard HTTP request admission is unavailable";
+
+/// The admitted request's control, required by every canonical read.
+///
+/// [`with_dashboard_http_admission`] inserts [`DashboardHttpRequestControlV1`]
+/// on every served request, so a missing control means a router was mounted
+/// without that layer. That wiring fault is answered here, once, as a 503
+/// problem; handlers never observe the missing case and never invent a
+/// response for it.
+#[derive(Clone, Debug)]
+pub struct RequestControl(pub DashboardHttpRequestControlV1);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for RequestControl {
+    type Rejection = RequestControlMissing;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> std::result::Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<DashboardHttpRequestControlV1>()
+            .cloned()
+            .map(Self)
+            .ok_or(RequestControlMissing)
+    }
+}
+
+/// Rejection of [`RequestControl`]: the one response for a read served
+/// outside the admission layer.
+#[derive(Debug)]
+pub struct RequestControlMissing;
+
+impl IntoResponse for RequestControlMissing {
+    fn into_response(self) -> Response {
+        crate::observe::record_error_class("admission_unavailable");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "unavailable",
+                "error": DASHBOARD_REQUEST_CONTROL_MISSING_CODE,
+                "detail": DASHBOARD_REQUEST_CONTROL_MISSING_DETAIL,
+            })),
+        )
+            .into_response()
+    }
+}
+
+#[cfg(test)]
+impl DashboardHttpRequestControlV1 {
+    /// One admitted-request control for tests: unbounded deadline, a fresh
+    /// active cancellation, `observed_at` = 1. `label` names the request and
+    /// cancellation identities so a failing assertion says which test minted it.
+    pub(crate) fn test_fixture(label: &str) -> Self {
+        Self::test_fixture_with(
+            label,
+            tracedecay_contracts::CancellationSignal::active(format!("cancel.{label}"))
+                .expect("test cancellation"),
+            tracedecay_domain::UtcMicros(1),
+            tracedecay_domain::UtcMicros(i64::MAX),
+        )
+    }
+
+    pub(crate) fn test_fixture_with(
+        label: &str,
+        cancellation: tracedecay_contracts::CancellationSignal,
+        observed_at: tracedecay_domain::UtcMicros,
+        deadline_at: tracedecay_domain::UtcMicros,
+    ) -> Self {
+        Self {
+            request_id: tracedecay_contracts::RequestId::new(format!("request.{label}"))
+                .expect("test request identity"),
+            deadline: tracedecay_contracts::Deadline::new(deadline_at).expect("test deadline"),
+            cancellation,
+            observed_at,
+        }
+    }
 }
 
 impl DashboardHttpRequestControlV1 {
@@ -2024,7 +2157,7 @@ async fn forward_project_request(
 #[hotpath::measure(label = "dashboard_api.http.capabilities", future = true)]
 async fn capabilities(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
 ) -> Json<Value> {
     let has_lcm = state.lcm_read_authority.is_some();
     let automation = automation_config_api::effective_automation_config(&state);
@@ -2070,12 +2203,7 @@ async fn capabilities(
     // no-collection state, and `/api/multi-root/collection` resolves explicit
     // targets through the same authority.
     let multi_root_resolver_mounted = state.application_invocation_executor.is_some();
-    let multi_root = multi_root_api::resolve_collection_capability(
-        &state,
-        control.map(|Extension(control)| control),
-        None,
-    )
-    .await;
+    let multi_root = multi_root_api::resolve_collection_capability(&state, control, None).await;
     Json(json!({
         "name": "tracedecay-dashboard",
         "version": state.build_version,
@@ -2255,6 +2383,27 @@ mod authority_tests {
     /// requires. A bare [`router_with_active_application`] is not a stack that
     /// exists in production: its handlers can only fail closed on the missing
     /// control, so route behaviour must be asserted through this one.
+    /// One GET through `app`, decoded: the status and the JSON body.
+    async fn get_json(app: &Router, uri: &str) -> (StatusCode, Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header(header::HOST, TEST_DASHBOARD_AUTHORITY)
+                    .body(Body::empty())
+                    .expect("dashboard GET request"),
+            )
+            .await
+            .expect("dashboard GET response");
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("dashboard GET body");
+        let value = serde_json::from_slice(&body).expect("dashboard GET JSON");
+        (status, value)
+    }
+
     fn admitted_router(state: DashboardState) -> Router {
         with_dashboard_http_admission(
             router_with_active_application(state, None, Router::new()),
@@ -2265,20 +2414,6 @@ mod authority_tests {
     }
 
     struct FakeDashboardLcmRead;
-
-    fn dashboard_lcm_test_control() -> DashboardHttpRequestControlV1 {
-        DashboardHttpRequestControlV1 {
-            request_id: tracedecay_contracts::RequestId::new("request.dashboard-lcm-test")
-                .expect("dashboard LCM test request"),
-            deadline: tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(i64::MAX))
-                .expect("dashboard LCM test deadline"),
-            cancellation: tracedecay_contracts::CancellationSignal::active(
-                "cancel.dashboard-lcm-test",
-            )
-            .expect("dashboard LCM test cancellation"),
-            observed_at: tracedecay_domain::UtcMicros(1),
-        }
-    }
 
     impl DashboardLcmReadPortV1 for FakeDashboardLcmRead {
         fn read(
@@ -2408,6 +2543,7 @@ mod authority_tests {
                 lcm_read_authority: None,
                 git_correlation_read_authority: None,
                 delivery_read_authority: None,
+                proximity_attention_read_authority: None,
                 savings_db: None,
                 savings_db_path: String::new(),
                 project_root: project_root.clone(),
@@ -2997,7 +3133,13 @@ mod authority_tests {
             "scope-set.dashboard-capabilities",
         )));
 
-        let Json(capabilities) = capabilities(State(state), None).await;
+        let Json(capabilities) = capabilities(
+            State(state),
+            RequestControl(DashboardHttpRequestControlV1::test_fixture(
+                "dashboard-lcm-test",
+            )),
+        )
+        .await;
 
         assert_eq!(capabilities["features"]["multi_root"], true);
         assert_eq!(capabilities["multi_root"]["status"], "unavailable");
@@ -3017,7 +3159,7 @@ mod authority_tests {
 
         let mounted = multi_root_api::resolve_collection_capability(
             &state,
-            Some(dashboard_lcm_test_control()),
+            DashboardHttpRequestControlV1::test_fixture("dashboard-lcm-test"),
             Some(tracedecay_domain::ScopeSetId::new("scope-set.dashboard-resolve").unwrap()),
         )
         .await;
@@ -3039,7 +3181,7 @@ mod authority_tests {
         // not-persisted state, never a silent fallback to another scope set.
         let missing = multi_root_api::resolve_collection_capability(
             &state,
-            Some(dashboard_lcm_test_control()),
+            DashboardHttpRequestControlV1::test_fixture("dashboard-lcm-test"),
             Some(tracedecay_domain::ScopeSetId::new("scope-set.dashboard-missing").unwrap()),
         )
         .await;
@@ -3069,7 +3211,9 @@ mod authority_tests {
 
         let response = native_integration_api::status(
             State(fixture.state),
-            Some(Extension(dashboard_lcm_test_control())),
+            RequestControl(DashboardHttpRequestControlV1::test_fixture(
+                "dashboard-lcm-test",
+            )),
             axum::extract::Query(native_integration_api::NativeIntegrationStatusQueryV1 {
                 transaction_id: "transaction.dashboard.native".to_owned(),
             }),
@@ -3107,6 +3251,39 @@ mod authority_tests {
                 response.status(),
                 StatusCode::NOT_FOUND,
                 "{path} is not mounted"
+            );
+        }
+    }
+
+    /// A router served without [`with_dashboard_http_admission`] has no request
+    /// control. That is a wiring fault, and every canonical read must answer it
+    /// the same way: one 503 with the shared admission problem body, never a
+    /// 200 carrying fabricated empty data.
+    #[tokio::test]
+    async fn reads_without_request_control_fail_closed_with_one_problem_shape() {
+        let fixture = DashboardStateFixture::open("project.dashboard-missing-control").await;
+        let bare = router_with_active_application(fixture.state, None, Router::new());
+        for path in [
+            "/api/plugins/holographic/projection",
+            "/api/plugins/holographic/similarity",
+            "/api/plugins/holographic/oplog",
+            "/api/plugins/holographic/status",
+            "/api/capabilities",
+        ] {
+            let (status, body) = get_json(&bare, path).await;
+            assert_eq!(
+                status,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{path} must fail closed without request control"
+            );
+            assert_eq!(
+                body,
+                json!({
+                    "status": "unavailable",
+                    "error": DASHBOARD_REQUEST_CONTROL_MISSING_CODE,
+                    "detail": DASHBOARD_REQUEST_CONTROL_MISSING_DETAIL,
+                }),
+                "{path} must carry the shared admission problem body"
             );
         }
     }
@@ -3393,24 +3570,12 @@ mod authority_tests {
         let fixture = DashboardStateFixture::open("project.dashboard-registry-envelope").await;
         let app = router_with_active_application(fixture.state, None, Router::new());
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/projects")
-                    .body(Body::empty())
-                    .expect("project registry request"),
-            )
-            .await
-            .expect("project registry response");
+        let (status, value) = get_json(&app, "/api/projects").await;
         assert_eq!(
-            response.status(),
+            status,
             StatusCode::OK,
             "the daemon answered; source unavailability belongs in the envelope"
         );
-        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
-            .await
-            .expect("project registry body");
-        let value: Value = serde_json::from_slice(&body).expect("project registry json");
 
         assert_eq!(value["schema_revision"], 1);
         assert_eq!(value["domain_state"], "unknown");
@@ -3439,7 +3604,9 @@ mod authority_tests {
                 .oneshot(
                     Request::builder()
                         .uri(uri)
-                        .extension(dashboard_lcm_test_control())
+                        .extension(DashboardHttpRequestControlV1::test_fixture(
+                            "dashboard-lcm-test",
+                        ))
                         .body(Body::empty())
                         .expect("LCM browse request"),
                 )
@@ -3481,7 +3648,9 @@ mod authority_tests {
                 .oneshot(
                     Request::builder()
                         .uri(uri)
-                        .extension(dashboard_lcm_test_control())
+                        .extension(DashboardHttpRequestControlV1::test_fixture(
+                            "dashboard-lcm-test",
+                        ))
                         .body(Body::empty())
                         .expect("LCM aggregate request"),
                 )
@@ -3512,21 +3681,8 @@ mod authority_tests {
             "/api/plugins/analytics/underused",
             "/api/plugins/analytics/diagnostics",
         ] {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri(uri)
-                        .body(Body::empty())
-                        .expect("analytics detail request"),
-                )
-                .await
-                .expect("analytics detail response");
-            assert_eq!(response.status(), StatusCode::OK, "{uri}");
-            let body = axum::body::to_bytes(response.into_body(), 1 << 20)
-                .await
-                .expect("analytics detail body");
-            let value: Value = serde_json::from_slice(&body).expect("analytics detail json");
+            let (status, value) = get_json(&app, uri).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
 
             assert_eq!(value["schema_revision"], 1, "{uri}");
             assert_eq!(value["domain_state"], "unknown", "{uri}");

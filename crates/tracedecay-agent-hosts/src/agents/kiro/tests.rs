@@ -194,10 +194,10 @@ fn duplicate_and_mixed_steering_blocks_converge_deterministically() {
 }
 
 #[test]
-fn steering_doctor_judges_sentinels_and_bytes_not_prose() {
-    fn doctor(home: &Path) -> DoctorCounters {
+fn steering_doctor_emits_migration_advisory_for_retired_owned_blocks() {
+    fn advise(home: &Path) -> DoctorCounters {
         let mut counters = DoctorCounters::new();
-        doctor_check_steering(&mut counters, home);
+        doctor_advise_retired_steering(&mut counters, home);
         counters
     }
     let home = tempfile::tempdir().unwrap();
@@ -209,31 +209,34 @@ fn steering_doctor_judges_sentinels_and_bytes_not_prose() {
         "tracedecay MCP tools are great, use tracedecay_grep\n",
     )
     .unwrap();
+    let prose = advise(home.path());
     assert_eq!(
-        doctor(home.path()).issues,
-        1,
-        "prose mentioning tracedecay without the ownership sentinel is not an install"
+        (prose.issues, prose.warnings),
+        (0, 0),
+        "prose without ownership sentinels is not a retired TraceDecay artifact"
     );
 
     std::fs::write(&steering, shipped_block(SHIPPED_HEADING, "stale mandate")).unwrap();
+    let historical = advise(home.path());
+    assert_eq!(historical.issues, 0);
     assert_eq!(
-        doctor(home.path()).issues,
-        1,
-        "a shipped historical block is outdated until update converges it"
+        historical.warnings, 1,
+        "owned historical steering must surface a migration advisory"
     );
 
     install_steering_rules(&steering).unwrap();
-    let healthy = doctor(home.path());
-    assert_eq!((healthy.issues, healthy.warnings), (0, 0));
-
-    let edited = std::fs::read_to_string(&steering)
-        .unwrap()
-        .replace("tracedecay_grep", "rg");
-    std::fs::write(&steering, edited).unwrap();
+    let current_block = advise(home.path());
+    assert_eq!(current_block.issues, 0);
     assert_eq!(
-        doctor(home.path()).issues,
-        1,
-        "an edited owned block is stale even though its sentinels are intact"
+        current_block.warnings, 1,
+        "current owned steering is still retired globally and must advise migration"
+    );
+
+    std::fs::remove_file(&steering).unwrap();
+    assert_eq!(
+        (advise(home.path()).issues, advise(home.path()).warnings),
+        (0, 0),
+        "absent retired steering emits no advisory"
     );
 }
 
@@ -264,7 +267,7 @@ fn healthcheck_skips_steering_when_legacy_file_is_absent() {
 }
 
 #[test]
-fn healthcheck_flags_shipped_heading_steering_until_convergence() {
+fn healthcheck_advises_shipped_heading_steering_as_retired() {
     let home = tempfile::tempdir().unwrap();
     let mcp_path = mcp_config_path(home.path());
     std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
@@ -290,9 +293,10 @@ fn healthcheck_flags_shipped_heading_steering_until_convergence() {
         },
     );
 
+    assert_eq!(counters.issues, 0);
     assert_eq!(
-        counters.issues, 1,
-        "legacy heading-marked steering must surface as outdated until install converges it"
+        counters.warnings, 1,
+        "legacy heading-marked steering must surface as a migration advisory"
     );
 
     install_steering_rules(&steering).unwrap();
@@ -305,12 +309,16 @@ fn healthcheck_flags_shipped_heading_steering_until_convergence() {
         },
     );
     assert_eq!(counters.issues, 0);
+    assert_eq!(
+        counters.warnings, 1,
+        "converged owned steering is still retired globally and must keep advising migration"
+    );
 }
 
 #[cfg(unix)]
 #[test]
-fn global_activate_converges_legacy_steering_so_doctor_clears() {
-    use crate::agents::host_bundle::HostBundleComponentV1;
+fn global_activate_converges_legacy_steering_but_doctor_still_advises() {
+    use crate::agents::host_bundle::HostComponentV1;
     use crate::agents::{AgentIntegration, InstallContext};
 
     let home = tempfile::tempdir().unwrap();
@@ -329,7 +337,7 @@ fn global_activate_converges_legacy_steering_so_doctor_clears() {
     .unwrap();
 
     let mut counters = DoctorCounters::new();
-    // Pretend MCP is already installed so doctor reaches the steering check.
+    // Pretend MCP is already installed so doctor reaches retired-artifact advisories.
     let mcp_path = mcp_config_path(home.path());
     std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
     std::fs::write(
@@ -344,11 +352,15 @@ fn global_activate_converges_legacy_steering_so_doctor_clears() {
             project_path: home.path().to_path_buf(),
         },
     );
-    assert_eq!(counters.issues, 1, "precondition: legacy steering is red");
+    assert_eq!(counters.issues, 0);
+    assert_eq!(
+        counters.warnings, 1,
+        "precondition: legacy steering emits a migration advisory"
+    );
 
     KiroIntegration
         .activate_deployed_host_component_registration(
-            &[HostBundleComponentV1::ContextMcp],
+            &[HostComponentV1::ContextMcp],
             &InstallContext {
                 home: home.path().to_path_buf(),
                 tracedecay_bin: "/bin/tracedecay".to_string(),
@@ -383,16 +395,17 @@ fn global_activate_converges_legacy_steering_so_doctor_clears() {
             project_path: home.path().to_path_buf(),
         },
     );
+    assert_eq!(counters.issues, 0);
     assert_eq!(
-        counters.issues, 0,
-        "install remedy must clear the doctor failure it reports"
+        counters.warnings, 1,
+        "converged leftover steering remains a retired global artifact until uninstall sweeps it"
     );
 }
 
 #[cfg(unix)]
 #[test]
 fn global_activate_does_not_create_missing_legacy_steering() {
-    use crate::agents::host_bundle::HostBundleComponentV1;
+    use crate::agents::host_bundle::HostComponentV1;
     use crate::agents::{AgentIntegration, InstallContext};
 
     let home = tempfile::tempdir().unwrap();
@@ -407,7 +420,7 @@ fn global_activate_does_not_create_missing_legacy_steering() {
 
     KiroIntegration
         .activate_deployed_host_component_registration(
-            &[HostBundleComponentV1::ContextMcp],
+            &[HostComponentV1::ContextMcp],
             &InstallContext {
                 home: home.path().to_path_buf(),
                 tracedecay_bin: "/bin/tracedecay".to_string(),
@@ -773,7 +786,7 @@ fn add_and_remove_preserve_an_operator_owned_peer_server() {
 fn kiro_component_set() -> crate::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1 {
     crate::agents::host_bundle_registry::verified_embedded_host_component_set_with_tracedecay_bin(
         crate::agents::host_bundle::HostKindV1::Kiro,
-        &[crate::agents::host_bundle::HostBundleComponentV1::ContextMcp],
+        &[crate::agents::host_bundle::HostComponentV1::ContextMcp],
         0,
         "/bin/tracedecay",
         crate::agents::TEST_GENERATOR_COMMIT,
@@ -790,9 +803,7 @@ fn kiro_component_request(
         lifecycle: crate::agents::host_bundle::HostComponentSetLifecycleRequestV1 {
             operation,
             expected_host: crate::agents::host_bundle::HostKindV1::Kiro,
-            expected_components: vec![
-                crate::agents::host_bundle::HostBundleComponentV1::ContextMcp,
-            ],
+            expected_components: vec![crate::agents::host_bundle::HostComponentV1::ContextMcp],
             explicit_confirmation: true,
             hermes_profile_bindings: 0,
             explicit_adoption: false,
@@ -958,6 +969,104 @@ fn detected_kiro_without_a_tracedecay_server_is_a_single_optional_warning() {
 
     assert_eq!(counters.issues, 0);
     assert_eq!(counters.warnings, 1);
+}
+
+#[test]
+fn absent_mcp_entry_still_advises_retired_global_artifacts() {
+    let home = tempfile::tempdir().unwrap();
+    let mcp_path = mcp_config_path(home.path());
+    std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &mcp_path,
+        br#"{"mcpServers":{"operator":{"command":"other","args":[]}}}"#,
+    )
+    .unwrap();
+
+    let steering = steering_path(home.path());
+    std::fs::create_dir_all(steering.parent().unwrap()).unwrap();
+    std::fs::write(
+        &steering,
+        format!(
+            "{}\n",
+            shipped_block(SHIPPED_HEADING, "retired global steering")
+        ),
+    )
+    .unwrap();
+
+    let agent = managed_agent_path(home.path());
+    std::fs::create_dir_all(agent.parent().unwrap()).unwrap();
+    std::fs::write(
+        &agent,
+        serde_json::to_vec(&serde_json::json!({
+            "name": "tracedecay",
+            "description": OWNED_AGENT_DESCRIPTION,
+            "hooks": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let mut counters = DoctorCounters::new();
+    KiroIntegration.healthcheck(
+        &mut counters,
+        &HealthcheckContext {
+            home: home.path().to_path_buf(),
+            project_path: home.path().to_path_buf(),
+        },
+    );
+
+    assert_eq!(counters.issues, 0);
+    assert_eq!(
+        counters.warnings, 3,
+        "absent MCP must still surface the not-installed warning plus steering and managed-agent advisories"
+    );
+}
+
+#[test]
+fn unreadable_cli_json_emits_a_migration_advisory() {
+    let home = tempfile::tempdir().unwrap();
+    let cli = cli_config_path(home.path());
+    std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+    std::fs::write(&cli, "{ not valid JSON").unwrap();
+
+    let mut counters = DoctorCounters::new();
+    doctor_advise_retired_default_agent(&mut counters, home.path());
+
+    assert_eq!(counters.issues, 0);
+    assert_eq!(counters.warnings, 1);
+}
+
+#[test]
+fn remove_retired_global_artifacts_clears_owned_steering_and_managed_agent() {
+    let home = tempfile::tempdir().unwrap();
+    let steering = steering_path(home.path());
+    std::fs::create_dir_all(steering.parent().unwrap()).unwrap();
+    std::fs::write(
+        &steering,
+        format!("keep me\n\n{}\n", shipped_block(SHIPPED_HEADING, "retired")),
+    )
+    .unwrap();
+    let agent = managed_agent_path(home.path());
+    std::fs::create_dir_all(agent.parent().unwrap()).unwrap();
+    std::fs::write(
+        &agent,
+        serde_json::to_vec(&serde_json::json!({
+            "name": "tracedecay",
+            "description": OWNED_AGENT_DESCRIPTION,
+            "hooks": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    remove_retired_global_artifacts(home.path()).unwrap();
+
+    let remaining = std::fs::read_to_string(&steering).unwrap();
+    assert!(
+        remaining.contains("keep me") && !remaining.contains(SHIPPED_HEADING),
+        "owned retired steering must be stripped while operator prose remains: {remaining:?}"
+    );
+    assert!(!agent.exists(), "owned managed agent must be removed");
 }
 
 #[test]

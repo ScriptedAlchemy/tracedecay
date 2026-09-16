@@ -11,9 +11,9 @@ use tracedecay_domain::{
 };
 
 use super::host_bundle::{
-    HostBundleArtifactContentV1, HostBundleArtifactV1, HostBundleComponentV1, HostBundleError,
-    HostBundleManifestV1, HostBundleVerificationAdapterV1, HostComponentSetEntryV1,
-    HostComponentSetV1, HostKindV1, require_component_capabilities,
+    HostBundleArtifactContentV1, HostBundleArtifactV1, HostBundleError, HostBundleManifestV1,
+    HostBundleVerificationAdapterV1, HostComponentSetEntryV1, HostComponentSetV1, HostComponentV1,
+    HostKindV1, require_component_capabilities,
 };
 
 pub const FIRST_PARTY_COMPONENT_CATALOG_VERSION: u64 = 1;
@@ -150,26 +150,22 @@ pub fn unsupported_host_component_set_reason(
 /// component owner. Kimi's Core registration projects MCP into its user config;
 /// hosts with a separable route use Context MCP. The match is exhaustive so a
 /// newly admitted host cannot fall through to a silently empty set.
-pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
+pub fn default_components(host: HostKindV1) -> Vec<HostComponentV1> {
     match host {
-        HostKindV1::ClaudeCode | HostKindV1::Codex => vec![
-            HostBundleComponentV1::Core,
-            HostBundleComponentV1::ContextMcp,
-        ],
-        HostKindV1::Devin | HostKindV1::Zed | HostKindV1::Antigravity => {
-            vec![HostBundleComponentV1::ContextMcp]
+        HostKindV1::ClaudeCode | HostKindV1::Codex => {
+            vec![HostComponentV1::Core, HostComponentV1::ContextMcp]
         }
-        HostKindV1::Vibe => vec![
-            HostBundleComponentV1::ContextMcp,
-            HostBundleComponentV1::Core,
-        ],
+        HostKindV1::Devin | HostKindV1::Zed | HostKindV1::Antigravity => {
+            vec![HostComponentV1::ContextMcp]
+        }
+        HostKindV1::Vibe => vec![HostComponentV1::ContextMcp, HostComponentV1::Core],
         HostKindV1::CursorDesktop | HostKindV1::OpenCode => vec![
-            HostBundleComponentV1::Core,
-            HostBundleComponentV1::Agent,
-            HostBundleComponentV1::ContextMcp,
+            HostComponentV1::Core,
+            HostComponentV1::Agent,
+            HostComponentV1::ContextMcp,
         ],
         HostKindV1::Hermes | HostKindV1::KimiCode => {
-            vec![HostBundleComponentV1::Core]
+            vec![HostComponentV1::Core]
         }
         // Kiro's production integration owns a supported MCP registration.
         // Its hook route stays degraded and therefore is not part of Core.
@@ -187,7 +183,7 @@ pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
         | HostKindV1::Cline
         | HostKindV1::RooCode
         | HostKindV1::Kilo => {
-            vec![HostBundleComponentV1::ContextMcp]
+            vec![HostComponentV1::ContextMcp]
         }
         HostKindV1::CursorCloud | HostKindV1::ClineFamily => Vec::new(),
     }
@@ -197,22 +193,8 @@ pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
 ///
 /// This differs from [`default_components`]: a supported optional component
 /// remains applicable when an operator selects it explicitly.
-pub fn supported_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
-    host.descriptor()
-        .components()
-        .iter()
-        .copied()
-        .map(|component| match component {
-            tracedecay_domain::integration::HostComponentV1::Core => HostBundleComponentV1::Core,
-            tracedecay_domain::integration::HostComponentV1::Agent => HostBundleComponentV1::Agent,
-            tracedecay_domain::integration::HostComponentV1::ContextMcp => {
-                HostBundleComponentV1::ContextMcp
-            }
-            tracedecay_domain::integration::HostComponentV1::OperatorMcp => {
-                HostBundleComponentV1::OperatorMcp
-            }
-        })
-        .collect()
+pub fn supported_components(host: HostKindV1) -> Vec<HostComponentV1> {
+    host.descriptor().components().to_vec()
 }
 
 /// Build the canonical default set for a host. Unsupported hosts return their
@@ -238,7 +220,7 @@ pub fn verified_embedded_default_host_component_set(
 /// commands pass the host's default set through the same transaction input.
 pub fn verified_embedded_host_component_set(
     host: HostKindV1,
-    requested_components: &[HostBundleComponentV1],
+    requested_components: &[HostComponentV1],
     now_unix: u64,
     generator_commit: &str,
 ) -> Result<VerifiedEmbeddedHostComponentSetV1, HostBundleRegistryError> {
@@ -255,7 +237,7 @@ pub fn verified_embedded_host_component_set(
 #[hotpath::measure(label = "host_bundle_registry_component_set")]
 pub fn verified_embedded_host_component_set_with_tracedecay_bin(
     host: HostKindV1,
-    requested_components: &[HostBundleComponentV1],
+    requested_components: &[HostComponentV1],
     now_unix: u64,
     tracedecay_bin: &str,
     generator_commit: &str,
@@ -313,7 +295,7 @@ pub fn verified_embedded_host_component_set_with_tracedecay_bin(
 
 pub fn verified_embedded_host_bundle(
     host: HostKindV1,
-    component: HostBundleComponentV1,
+    component: HostComponentV1,
     now_unix: u64,
     generator_commit: &str,
 ) -> Result<VerifiedEmbeddedHostBundleV1, HostBundleRegistryError> {
@@ -330,7 +312,7 @@ pub fn verified_embedded_host_bundle(
 #[hotpath::measure(label = "host_bundle_registry_verify")]
 fn verified_embedded_host_bundle_with_tracedecay_bin(
     host: HostKindV1,
-    component: HostBundleComponentV1,
+    component: HostComponentV1,
     _now_unix: u64,
     tracedecay_bin: &str,
     generator_commit: &str,
@@ -400,14 +382,14 @@ struct EmbeddedBundleIdentityV1<'a> {
     registry_version: u64,
     purpose: &'a str,
     host: HostKindV1,
-    component: HostBundleComponentV1,
+    component: HostComponentV1,
     artifacts: Vec<HostBundleArtifactV1>,
 }
 
 fn embedded_bundle_identity(
     purpose: &str,
     host: HostKindV1,
-    component: HostBundleComponentV1,
+    component: HostComponentV1,
     artifacts: &[HostBundleArtifactV1],
 ) -> Result<[u8; 32], HostBundleRegistryError> {
     let mut artifacts = artifacts.to_vec();
@@ -426,7 +408,7 @@ fn embedded_bundle_identity(
 
 fn component_assets(
     host: HostKindV1,
-    component: HostBundleComponentV1,
+    component: HostComponentV1,
     tracedecay_bin: &str,
     generator_commit: &str,
 ) -> Result<Vec<(String, Vec<u8>)>, HostBundleRegistryError> {
@@ -437,7 +419,7 @@ fn component_assets(
     // `which_tracedecay()` whenever the running binary lives outside the
     // installed path (for example `./target/release/tracedecay reinstall`) and
     // corrupted every Hermes transaction.
-    if (host, component) == (HostKindV1::Hermes, HostBundleComponentV1::Core) {
+    if (host, component) == (HostKindV1::Hermes, HostComponentV1::Core) {
         let files = super::hermes::rendered_plugin_files(tracedecay_bin, generator_commit)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
         return Ok(files
@@ -457,14 +439,12 @@ fn component_assets(
     if host == HostKindV1::CursorDesktop
         && matches!(
             component,
-            HostBundleComponentV1::Core
-                | HostBundleComponentV1::ContextMcp
-                | HostBundleComponentV1::OperatorMcp
+            HostComponentV1::Core | HostComponentV1::ContextMcp | HostComponentV1::OperatorMcp
         )
     {
         let files = super::cursor::rendered_plugin_files(tracedecay_bin)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
-        let mcp_only = component != HostBundleComponentV1::Core;
+        let mcp_only = component != HostComponentV1::Core;
         return Ok(files
             .into_iter()
             .filter(|(relative, _)| (*relative == "mcp.json") == mcp_only)
@@ -484,14 +464,12 @@ fn component_assets(
     if host == HostKindV1::Codex
         && matches!(
             component,
-            HostBundleComponentV1::Core
-                | HostBundleComponentV1::ContextMcp
-                | HostBundleComponentV1::OperatorMcp
+            HostComponentV1::Core | HostComponentV1::ContextMcp | HostComponentV1::OperatorMcp
         )
     {
         let files = super::codex::rendered_global_plugin_files(tracedecay_bin)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
-        let mcp_only = component != HostBundleComponentV1::Core;
+        let mcp_only = component != HostComponentV1::Core;
         return Ok(files
             .into_iter()
             .filter(|(relative, _)| (*relative == ".mcp.json") == mcp_only)
@@ -510,14 +488,12 @@ fn component_assets(
     if host == HostKindV1::ClaudeCode
         && matches!(
             component,
-            HostBundleComponentV1::Core
-                | HostBundleComponentV1::ContextMcp
-                | HostBundleComponentV1::OperatorMcp
+            HostComponentV1::Core | HostComponentV1::ContextMcp | HostComponentV1::OperatorMcp
         )
     {
         let files = super::claude::rendered_plugin_files(tracedecay_bin)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
-        let mcp_only = component != HostBundleComponentV1::Core;
+        let mcp_only = component != HostComponentV1::Core;
         return Ok(files
             .into_iter()
             .filter(|(relative, _)| (*relative == ".mcp.json") == mcp_only)
@@ -533,7 +509,7 @@ fn component_assets(
     // Kimi's Core bundle owns its plugin hooks and the user-config MCP route as
     // one lifecycle component. Render the complete managed plugin inventory;
     // companion MCP components would duplicate that registration ownership.
-    if (host, component) == (HostKindV1::KimiCode, HostBundleComponentV1::Core) {
+    if (host, component) == (HostKindV1::KimiCode, HostComponentV1::Core) {
         let files = super::kimi::rendered_plugin_files(tracedecay_bin)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
         return Ok(files
@@ -554,7 +530,7 @@ fn component_assets(
     // renderer so the bytes the transaction deploys are byte-identical to the
     // ones staging writes and the doctor reads — two renderers here would let
     // an install and a repair disagree about what was staged.
-    if (host, component) == (HostKindV1::Gemini, HostBundleComponentV1::ContextMcp) {
+    if (host, component) == (HostKindV1::Gemini, HostComponentV1::ContextMcp) {
         let files = super::gemini::rendered_extension_files(tracedecay_bin)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
         return Ok(files
@@ -575,7 +551,7 @@ fn component_assets(
     // uses `std::env::current_exe()`, which can differ from the installed path
     // during an in-tree reinstall. Context MCP and Agent remain disjoint
     // compiled assets.
-    if (host, component) == (HostKindV1::OpenCode, HostBundleComponentV1::Core) {
+    if (host, component) == (HostKindV1::OpenCode, HostComponentV1::Core) {
         let files = super::opencode::rendered_plugin_files(tracedecay_bin)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
         return Ok(files
@@ -588,7 +564,7 @@ fn component_assets(
     // directory (`publisher.name-version`), so both the prefix and the
     // manifest's `version` carry the real release version instead of a
     // frozen `0.0.0` literal.
-    if (host, component) == (HostKindV1::CursorDesktop, HostBundleComponentV1::Agent) {
+    if (host, component) == (HostKindV1::CursorDesktop, HostComponentV1::Agent) {
         let prefix = super::cursor::cursor_native_extension_relative_dir();
         let mut rendered = Vec::new();
         for (path, body) in super::plugin_bundle::cursor_native_extension_files() {
@@ -613,7 +589,7 @@ fn component_assets(
         // adapter's revision recheck read TraceDecay's own bytes as third-party
         // drift and every apply rolled back with `StalePreview`. Own a
         // descriptor under `.kiro/tracedecay` instead.
-        (HostKindV1::Kiro, HostBundleComponentV1::ContextMcp) => (
+        (HostKindV1::Kiro, HostComponentV1::ContextMcp) => (
             ".kiro/tracedecay",
             vec![(
                 "context-mcp.json",
@@ -628,14 +604,14 @@ fn component_assets(
         // `.copilot/tracedecay` instead. It names the registry document the
         // host CLI owns so a receipt reader can find it without the catalog
         // ever claiming to write it.
-        (HostKindV1::Copilot, HostBundleComponentV1::ContextMcp) => (
+        (HostKindV1::Copilot, HostComponentV1::ContextMcp) => (
             ".copilot/tracedecay",
             vec![(
                 "context-mcp.json",
                 r#"{"host":"copilot","registration":"mcp-config.json","registrar":"copilot mcp add|remove","route":"mcp","server":{"command":"__TRACEDECAY_BIN__","args":["serve"]}}"#,
             )],
         ),
-        (HostKindV1::Cline, HostBundleComponentV1::ContextMcp) => (
+        (HostKindV1::Cline, HostComponentV1::ContextMcp) => (
             ".cline/tracedecay",
             vec![(
                 "context-mcp.json",
@@ -645,7 +621,7 @@ fn component_assets(
         // Devin owns the shared user configuration document directly.
         // The component receipt owns this descriptor only; the activation
         // adapter merges its server entry into `mcp_config.json`.
-        (HostKindV1::Devin, HostBundleComponentV1::ContextMcp) => (
+        (HostKindV1::Devin, HostComponentV1::ContextMcp) => (
             ".config/devin/tracedecay",
             vec![(
                 "context-mcp.json",
@@ -655,7 +631,7 @@ fn component_assets(
         // Zed's JSONC settings file is host-owned. The catalog artifact is a
         // descriptor; the activation adapter merges the exact
         // `context_servers.tracedecay` entry and retains the byte snapshot.
-        (HostKindV1::Zed, HostBundleComponentV1::ContextMcp) => (
+        (HostKindV1::Zed, HostComponentV1::ContextMcp) => (
             ".config/zed/tracedecay",
             vec![(
                 "context-mcp.json",
@@ -665,46 +641,46 @@ fn component_assets(
         // One Antigravity component owns both the IDE and CLI documents.
         // The descriptor names both paths; activation publishes them under a
         // shared rollback boundary before the receipt can become current.
-        (HostKindV1::Antigravity, HostBundleComponentV1::ContextMcp) => (
+        (HostKindV1::Antigravity, HostComponentV1::ContextMcp) => (
             ".gemini/antigravity/tracedecay",
             vec![(
                 "context-mcp.json",
                 r#"{"host":"antigravity","registrations":["../mcp_config.json","../../antigravity-cli/plugins/tracedecay.json"],"registrar":"tracedecay managed dual-document merge","route":"mcp","server":{"command":"__TRACEDECAY_BIN__","args":["serve"],"transport":"stdio"}}"#,
             )],
         ),
-        (HostKindV1::Vibe, HostBundleComponentV1::ContextMcp) => (
+        (HostKindV1::Vibe, HostComponentV1::ContextMcp) => (
             ".vibe/tracedecay",
             vec![(
                 "context-mcp.json",
                 r#"{"host":"vibe","registration":"../config.toml","registrar":"tracedecay managed TOML merge","route":"mcp","server":{"name":"tracedecay","transport":"stdio","command":"__TRACEDECAY_BIN__","args":["serve"]}}"#,
             )],
         ),
-        (HostKindV1::Vibe, HostBundleComponentV1::Core) => (
+        (HostKindV1::Vibe, HostComponentV1::Core) => (
             ".vibe/tracedecay",
             vec![(
                 "core.json",
                 r#"{"host":"vibe","registration":"../prompts/cli.md","registrar":"tracedecay managed prompt rules","route":"prompt"}"#,
             )],
         ),
-        (HostKindV1::RooCode, HostBundleComponentV1::ContextMcp) => (
+        (HostKindV1::RooCode, HostComponentV1::ContextMcp) => (
             ".roo/tracedecay",
             vec![(
                 "context-mcp.json",
                 r#"{"host":"roo-code","registration":"VS Code globalStorage/rooveterinaryinc.roo-cline/settings/cline_mcp_settings.json","registrar":"tracedecay managed merge","route":"mcp","server":{"command":"__TRACEDECAY_BIN__","args":["serve"]}}"#,
             )],
         ),
-        (HostKindV1::Kilo, HostBundleComponentV1::ContextMcp) => (
+        (HostKindV1::Kilo, HostComponentV1::ContextMcp) => (
             ".config/kilo/tracedecay",
             vec![(
                 "context-mcp.json",
                 r#"{"host":"kilo","registration":"../kilo.jsonc","registrar":"tracedecay managed merge","route":"mcp","server":{"command":["__TRACEDECAY_BIN__","serve"]}}"#,
             )],
         ),
-        (HostKindV1::OpenCode, HostBundleComponentV1::Agent) => (
+        (HostKindV1::OpenCode, HostComponentV1::Agent) => (
             ".config/opencode",
             super::plugin_bundle::opencode_agent_files(),
         ),
-        (HostKindV1::OpenCode, HostBundleComponentV1::ContextMcp) => (
+        (HostKindV1::OpenCode, HostComponentV1::ContextMcp) => (
             ".config/opencode",
             vec![
                 (
@@ -754,12 +730,12 @@ fn render_compiled_asset(
     Ok(rendered)
 }
 
-fn component_name(component: HostBundleComponentV1) -> &'static str {
+fn component_name(component: HostComponentV1) -> &'static str {
     match component {
-        HostBundleComponentV1::Core => "core",
-        HostBundleComponentV1::Agent => "agent",
-        HostBundleComponentV1::ContextMcp => "context-mcp",
-        HostBundleComponentV1::OperatorMcp => "operator-mcp",
+        HostComponentV1::Core => "core",
+        HostComponentV1::Agent => "agent",
+        HostComponentV1::ContextMcp => "context-mcp",
+        HostComponentV1::OperatorMcp => "operator-mcp",
     }
 }
 
@@ -772,7 +748,7 @@ mod tests {
         let installed = "/opt/tracedecay-distinct/bin/tracedecay";
         let assets = component_assets(
             HostKindV1::CursorDesktop,
-            HostBundleComponentV1::Agent,
+            HostComponentV1::Agent,
             installed,
             crate::agents::TEST_GENERATOR_COMMIT,
         )
@@ -803,7 +779,7 @@ mod tests {
         let rendered = super::super::kimi::rendered_plugin_files(&bin).unwrap();
         let bundle = verified_embedded_host_bundle_with_tracedecay_bin(
             HostKindV1::KimiCode,
-            HostBundleComponentV1::Core,
+            HostComponentV1::Core,
             0,
             &bin,
             crate::agents::TEST_GENERATOR_COMMIT,
@@ -870,7 +846,7 @@ mod tests {
         let rendered = super::super::opencode::rendered_plugin_files(&bin).unwrap();
         let bundle = verified_embedded_host_bundle_with_tracedecay_bin(
             HostKindV1::OpenCode,
-            HostBundleComponentV1::Core,
+            HostComponentV1::Core,
             0,
             &bin,
             crate::agents::TEST_GENERATOR_COMMIT,
@@ -906,7 +882,7 @@ mod tests {
             super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
         let assets = component_assets(
             HostKindV1::OpenCode,
-            HostBundleComponentV1::Core,
+            HostComponentV1::Core,
             &installed,
             crate::agents::TEST_GENERATOR_COMMIT,
         )
@@ -933,7 +909,7 @@ mod tests {
                 .unwrap();
         let bundle = verified_embedded_host_bundle_with_tracedecay_bin(
             HostKindV1::Hermes,
-            HostBundleComponentV1::Core,
+            HostComponentV1::Core,
             0,
             &bin,
             crate::agents::TEST_GENERATOR_COMMIT,
@@ -969,7 +945,7 @@ mod tests {
             super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
         let assets = component_assets(
             HostKindV1::Hermes,
-            HostBundleComponentV1::Core,
+            HostComponentV1::Core,
             &installed,
             crate::agents::TEST_GENERATOR_COMMIT,
         )
@@ -1069,30 +1045,29 @@ mod tests {
     fn supported_component_projection_preserves_optional_components() {
         assert_eq!(
             supported_components(HostKindV1::Cline),
-            vec![HostBundleComponentV1::ContextMcp]
+            vec![HostComponentV1::ContextMcp]
         );
         assert_eq!(
             supported_components(HostKindV1::ClaudeCode),
             vec![
-                HostBundleComponentV1::Core,
-                HostBundleComponentV1::ContextMcp,
-                HostBundleComponentV1::OperatorMcp,
+                HostComponentV1::Core,
+                HostComponentV1::ContextMcp,
+                HostComponentV1::OperatorMcp,
             ]
         );
         assert!(
-            !default_components(HostKindV1::ClaudeCode)
-                .contains(&HostBundleComponentV1::OperatorMcp)
+            !default_components(HostKindV1::ClaudeCode).contains(&HostComponentV1::OperatorMcp)
         );
     }
 
     #[test]
     fn shared_mcp_manifests_have_one_canonical_component_owner() {
         for (host, unsupported) in [
-            (HostKindV1::Hermes, HostBundleComponentV1::ContextMcp),
-            (HostKindV1::Hermes, HostBundleComponentV1::OperatorMcp),
-            (HostKindV1::OpenCode, HostBundleComponentV1::OperatorMcp),
-            (HostKindV1::KimiCode, HostBundleComponentV1::ContextMcp),
-            (HostKindV1::KimiCode, HostBundleComponentV1::OperatorMcp),
+            (HostKindV1::Hermes, HostComponentV1::ContextMcp),
+            (HostKindV1::Hermes, HostComponentV1::OperatorMcp),
+            (HostKindV1::OpenCode, HostComponentV1::OperatorMcp),
+            (HostKindV1::KimiCode, HostComponentV1::ContextMcp),
+            (HostKindV1::KimiCode, HostComponentV1::OperatorMcp),
         ] {
             assert_eq!(
                 verified_embedded_host_bundle(
@@ -1125,10 +1100,7 @@ mod tests {
     #[test]
     fn cline_roo_and_kilo_package_only_documented_mcp_components() {
         for host in [HostKindV1::Cline, HostKindV1::RooCode, HostKindV1::Kilo] {
-            assert_eq!(
-                default_components(host),
-                vec![HostBundleComponentV1::ContextMcp]
-            );
+            assert_eq!(default_components(host), vec![HostComponentV1::ContextMcp]);
             assert_eq!(unsupported_host_component_set_reason(host), None);
             assert!(
                 verified_embedded_default_host_component_set(
@@ -1141,7 +1113,7 @@ mod tests {
             assert_eq!(
                 verified_embedded_host_component_set(
                     host,
-                    &[HostBundleComponentV1::Core],
+                    &[HostComponentV1::Core],
                     0,
                     crate::agents::TEST_GENERATOR_COMMIT
                 ),
@@ -1158,7 +1130,7 @@ mod tests {
         );
         assert_eq!(
             default_components(HostKindV1::Kiro),
-            vec![HostBundleComponentV1::ContextMcp]
+            vec![HostComponentV1::ContextMcp]
         );
         assert_eq!(
             tracedecay_domain::integration::host_descriptor_v1(HostKindV1::Kiro).components(),
@@ -1166,7 +1138,7 @@ mod tests {
         );
         let bundle = verified_embedded_host_bundle_with_tracedecay_bin(
             HostKindV1::Kiro,
-            HostBundleComponentV1::ContextMcp,
+            HostComponentV1::ContextMcp,
             0,
             "/opt/tracedecay-distinct/bin/tracedecay",
             crate::agents::TEST_GENERATOR_COMMIT,
@@ -1191,7 +1163,7 @@ mod tests {
         assert_eq!(
             verified_embedded_host_component_set(
                 HostKindV1::Kiro,
-                &[HostBundleComponentV1::Core],
+                &[HostComponentV1::Core],
                 0,
                 crate::agents::TEST_GENERATOR_COMMIT
             ),
@@ -1214,7 +1186,7 @@ mod tests {
         );
         assert_eq!(
             default_components(HostKindV1::Copilot),
-            vec![HostBundleComponentV1::ContextMcp]
+            vec![HostComponentV1::ContextMcp]
         );
         assert_eq!(
             tracedecay_domain::integration::host_descriptor_v1(HostKindV1::Copilot).components(),
@@ -1224,7 +1196,7 @@ mod tests {
         let installed = "/opt/tracedecay-distinct/bin/tracedecay";
         let bundle = verified_embedded_host_bundle_with_tracedecay_bin(
             HostKindV1::Copilot,
-            HostBundleComponentV1::ContextMcp,
+            HostComponentV1::ContextMcp,
             0,
             installed,
             crate::agents::TEST_GENERATOR_COMMIT,
@@ -1254,7 +1226,7 @@ mod tests {
         assert_eq!(
             verified_embedded_host_component_set(
                 HostKindV1::Copilot,
-                &[HostBundleComponentV1::Core],
+                &[HostComponentV1::Core],
                 0,
                 crate::agents::TEST_GENERATOR_COMMIT
             ),
@@ -1276,7 +1248,7 @@ mod tests {
         );
         assert_eq!(
             default_components(HostKindV1::Gemini),
-            vec![HostBundleComponentV1::ContextMcp]
+            vec![HostComponentV1::ContextMcp]
         );
         assert_eq!(
             tracedecay_domain::integration::host_descriptor_v1(HostKindV1::Gemini).components(),
@@ -1286,7 +1258,7 @@ mod tests {
         let installed = "/opt/tracedecay-distinct/bin/tracedecay";
         let bundle = verified_embedded_host_bundle_with_tracedecay_bin(
             HostKindV1::Gemini,
-            HostBundleComponentV1::ContextMcp,
+            HostComponentV1::ContextMcp,
             0,
             installed,
             crate::agents::TEST_GENERATOR_COMMIT,
@@ -1333,7 +1305,7 @@ mod tests {
         assert_eq!(
             verified_embedded_host_component_set(
                 HostKindV1::Gemini,
-                &[HostBundleComponentV1::Core],
+                &[HostComponentV1::Core],
                 0,
                 crate::agents::TEST_GENERATOR_COMMIT
             ),
@@ -1355,7 +1327,7 @@ mod tests {
             ),
             verified_embedded_host_component_set(
                 HostKindV1::CursorCloud,
-                &[HostBundleComponentV1::Core],
+                &[HostComponentV1::Core],
                 0,
                 crate::agents::TEST_GENERATOR_COMMIT,
             ),

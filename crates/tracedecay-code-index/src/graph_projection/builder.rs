@@ -192,14 +192,24 @@ pub(super) fn build_projection(
                 chunk
                     .validate()
                     .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
-                if chunk.anchor.generation_id != *generation {
-                    return Err(CodeGraphProjectionError::GenerationMismatch);
-                }
-                if production.is_some() && !files.contains_key(&chunk.anchor.file_occurrence_id) {
-                    return Err(CodeGraphProjectionError::Contract(
-                        "code graph chunk refers to a file outside its immutable snapshot"
-                            .to_owned(),
-                    ));
+                // With production inputs, membership in the immutable snapshot is
+                // the serving binding and file-page generation_id is extraction
+                // provenance. Hermetic publishes without a snapshot still require
+                // the chunk to name the serving generation.
+                match production {
+                    Some(_) => {
+                        if !files.contains_key(&chunk.anchor.file_occurrence_id) {
+                            return Err(CodeGraphProjectionError::Contract(
+                                "code graph chunk refers to a file outside its immutable snapshot"
+                                    .to_owned(),
+                            ));
+                        }
+                    }
+                    None => {
+                        if chunk.anchor.generation_id != *generation {
+                            return Err(CodeGraphProjectionError::GenerationMismatch);
+                        }
+                    }
                 }
                 let Some(symbol) = chunk.anchor.symbol_occurrence_id.clone() else {
                     continue;

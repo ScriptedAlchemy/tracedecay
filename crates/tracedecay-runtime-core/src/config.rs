@@ -203,9 +203,7 @@ pub fn discover_project_root(start: &Path) -> Option<PathBuf> {
         let at_worktree_root = worktree_root
             .as_ref()
             .is_some_and(|root| paths_same(&dir, root));
-        let initialized = has_project_database(&dir)
-            || crate::storage::has_path_local_profile_store(&dir)
-            || (at_worktree_root && crate::storage::has_repository_identity_marker(&dir));
+        let initialized = directory_hosts_initialized_project(&dir, at_worktree_root);
         if initialized && !is_ambient_project_root(&dir) {
             return Some(dir);
         }
@@ -216,6 +214,22 @@ pub fn discover_project_root(start: &Path) -> Option<PathBuf> {
             return None;
         }
     }
+}
+
+/// Whether `dir` itself is an initialised project root, judged verbatim: no
+/// ancestor walk and no ambient-root filter. This is the check for an
+/// explicit path (rule 1 of [`discover_project_root`]), where the caller
+/// named the directory and only needs to know whether a project lives there.
+pub fn is_initialized_project_root(dir: &Path) -> bool {
+    let at_worktree_root =
+        crate::worktree::git_worktree_root(dir).is_some_and(|root| paths_same(dir, &root));
+    directory_hosts_initialized_project(dir, at_worktree_root)
+}
+
+fn directory_hosts_initialized_project(dir: &Path, at_worktree_root: bool) -> bool {
+    has_project_database(dir)
+        || crate::storage::has_path_local_profile_store(dir)
+        || (at_worktree_root && crate::storage::has_repository_identity_marker(dir))
 }
 
 /// Returns whether a path is too broad to be an implicit code-project root.

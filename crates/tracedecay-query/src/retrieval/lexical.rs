@@ -7,6 +7,7 @@
 //! The lexical lane is separate from the exact lane; exact and lexical are
 //! independently disableable and inspectable.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
@@ -32,15 +33,16 @@ pub use self::projection::{
     CLONE_NEAR_MATCH_MINIMUM_COVERAGE_MILLIONTHS_V1, CLONE_NEAR_MATCH_TOKEN_WORK_BUDGET_V1,
     CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
-    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CloneArtifactCursorV1, CloneArtifactPageV1,
-    CloneExactArtifactMemberV1, CloneExactFamilyArtifactCandidateV1,
-    CloneExactFamilyArtifactPageV1, CloneFingerprintArtifactReadV1,
-    CloneFingerprintCancellationPointV1, CloneFingerprintPartialReasonV1,
-    CloneFingerprintReadAccountingV1, CloneFingerprintStreamDescriptorV1, CloneNearMatchArtifactV1,
-    CloneNearMatchExtentV1, CloneSelectedBlockArtifactCandidateV1,
-    CloneSelectedBlockArtifactReadV1, CloneSelectedBlockContainmentClassV1, CloneSelectedBlockV1,
-    CodeExactLexicalArtifactReaderV1, CodeLexicalArtifactBatchLimitV1,
-    CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CODE_LEXICAL_ARTIFACT_SQLITE_CACHE_BYTES_V1,
+    CloneArtifactCursorV1, CloneArtifactPageV1, CloneExactArtifactMemberV1,
+    CloneExactFamilyArtifactCandidateV1, CloneExactFamilyArtifactPageV1,
+    CloneFingerprintArtifactReadV1, CloneFingerprintCancellationPointV1,
+    CloneFingerprintPartialReasonV1, CloneFingerprintReadAccountingV1,
+    CloneFingerprintStreamDescriptorV1, CloneNearMatchArtifactV1, CloneNearMatchExtentV1,
+    CloneSelectedBlockArtifactCandidateV1, CloneSelectedBlockArtifactReadV1,
+    CloneSelectedBlockContainmentClassV1, CloneSelectedBlockV1, CodeExactLexicalArtifactReaderV1,
+    CodeLexicalArtifactBatchLimitV1, CodeLexicalArtifactBuildProgressV1,
+    CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
     CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,
     CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactReaderV1,
     CodeLexicalArtifactSectionDigestV1, CodeLexicalArtifactWriterRevisionV1,
@@ -306,15 +308,19 @@ pub struct LexicalSpellingVariantV1 {
 
 /// Typed lexical-lane request for identifier, phrase, proximity, token, field,
 /// and bounded fuzzy retrieval.
+///
+/// Term / proximity / filter collections are [`Cow`] so multi-route callers can
+/// borrow the route plan's parts once per sanitize instead of cloning five
+/// owned vectors on every lane call.
 pub struct LexicalLaneRequest<'a> {
     pub base: RetrievalRequest,
     pub query_view: &'a EphemeralSanitizedQueryViewV1,
     pub generation: CodeGenerationId,
-    pub whole_terms: Vec<String>,
-    pub subtokens: Vec<String>,
-    pub phrases: Vec<String>,
-    pub proximities: Vec<LexicalProximityV1>,
-    pub field_filters: Vec<LexicalFieldFilterV1>,
+    pub whole_terms: Cow<'a, [String]>,
+    pub subtokens: Cow<'a, [String]>,
+    pub phrases: Cow<'a, [String]>,
+    pub proximities: Cow<'a, [LexicalProximityV1]>,
+    pub field_filters: Cow<'a, [LexicalFieldFilterV1]>,
     /// Bounded fuzzy-term budget; the profile revision pins tokenizer and
     /// normalization versions.
     pub fuzzy_budget: u32,
@@ -411,7 +417,7 @@ impl LexicalLaneRequest<'_> {
                 "lexical proximity count exceeds the v1 bound of {MAX_LEXICAL_PROXIMITIES_V1}"
             )));
         }
-        for proximity in &self.proximities {
+        for proximity in self.proximities.iter() {
             proximity.validate()?;
         }
         if self.phrases.len() > MAX_LEXICAL_PHRASES_V1
@@ -439,7 +445,7 @@ impl LexicalLaneRequest<'_> {
             }
         }
         let mut filtered_fields = BTreeSet::new();
-        for filter in &self.field_filters {
+        for filter in self.field_filters.iter() {
             if !filtered_fields.insert(filter.field) {
                 return Err(RetrievalPortError::Contract(
                     "lexical field filters must name each field at most once".to_owned(),
@@ -483,12 +489,20 @@ impl LexicalLaneEvidence {
         }
         for (matched, requested, channel) in [
             (
-                &self.matched_whole_terms,
-                &request.whole_terms,
+                self.matched_whole_terms.as_slice(),
+                request.whole_terms.as_ref(),
                 "whole term",
             ),
-            (&self.matched_subtokens, &request.subtokens, "subtoken"),
-            (&self.matched_phrases, &request.phrases, "phrase"),
+            (
+                self.matched_subtokens.as_slice(),
+                request.subtokens.as_ref(),
+                "subtoken",
+            ),
+            (
+                self.matched_phrases.as_slice(),
+                request.phrases.as_ref(),
+                "phrase",
+            ),
         ] {
             if matched.iter().any(|term| !requested.contains(term)) {
                 return Err(RetrievalPortError::Contract(format!(
@@ -581,22 +595,28 @@ where
                 &LEXICAL_REJECTIONS,
             )?;
             evidence.validate_against_validated_request(request)?;
-            let mut filtered = evidence.clone();
-            filtered
+            // Filter scores first so a field-filter reject never clones the
+            // full evidence (matched terms, binding payload, …) only to drop it.
+            let field_scores: Vec<_> = evidence
                 .field_scores_micros
-                .retain(|(field, _)| field_admitted(&request.field_filters, *field));
-            if filtered.field_scores_micros.is_empty() {
+                .iter()
+                .copied()
+                .filter(|(field, _)| field_admitted(&request.field_filters, *field))
+                .collect();
+            if field_scores.is_empty() {
                 // A candidate scored only on filtered-out fields is excluded
                 // by the typed field filters; it is accounted, never silent.
                 excluded += 1;
                 continue;
             }
             let mut raw_score = FixedPointScore::ZERO;
-            for (_, field_score) in &filtered.field_scores_micros {
+            for (_, field_score) in &field_scores {
                 raw_score = raw_score
                     .checked_add(FixedPointScore(*field_score))
                     .map_err(contract_error)?;
             }
+            let mut filtered = evidence.clone();
+            filtered.field_scores_micros = field_scores;
             admitted.push((candidate.clone(), filtered, raw_score));
         }
         // Canonical deterministic order: recomputed fixed-point score

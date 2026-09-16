@@ -222,7 +222,7 @@
     {
       "name": "root-suites",
       "timeout_minutes": 110,
-      "budget_basis": "root-sessions + root-journeys prior 63.5, plus root-transport test-transport compile/run (~35-40 on Arm estimated until measured); (1 + prior + 32) x1.25 \u2248 110; replace with measured wall after first hosted run; retrigger after unarchive"
+      "budget_basis": "root-sessions + root-journeys prior 63.5, plus root-transport test-transport compile/run (~35-40 on Arm estimated until measured); (1 + prior + 32) x1.25 \u2248 110; replace with measured wall after first hosted run; retrigger after unarchive; Actions re-enable retrigger"
     },
     {
       "name": "runtime-storage",

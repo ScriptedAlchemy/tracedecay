@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::HostKindV1;
+use tracedecay_domain::{HostComponentV1, HostKindV1};
 
-use crate::manifest::{HostBundleComponentV1, HostBundleLifecycleOpV1, HostBundleManifestV1};
+use crate::manifest::{HostBundleLifecycleOpV1, HostBundleManifestV1};
 
 pub const HOST_BUNDLE_RECEIPT_SCHEMA_VERSION: u16 = 1;
 
@@ -21,7 +21,7 @@ pub struct HostBundleInstallReceiptV1 {
     pub schema_version: u16,
     pub operation_id: [u8; 16],
     pub host: HostKindV1,
-    pub component: HostBundleComponentV1,
+    pub component: HostComponentV1,
     pub operation: HostBundleLifecycleOpV1,
     pub manifest_digest: [u8; 32],
     pub artifacts: Vec<HostBundleReceiptArtifactV1>,
@@ -39,7 +39,7 @@ pub struct HostBundleBackupReceiptV1 {
     pub schema_version: u16,
     pub operation_id: [u8; 16],
     pub host: HostKindV1,
-    pub component: HostBundleComponentV1,
+    pub component: HostComponentV1,
     pub manifest: HostBundleManifestV1,
     pub source_receipt_digest: [u8; 32],
     pub artifacts: Vec<HostBundleBackupArtifactV1>,
@@ -119,7 +119,7 @@ pub struct HostBundleJournalV1 {
     pub schema_version: u16,
     pub operation_id: [u8; 16],
     pub host: HostKindV1,
-    pub component: HostBundleComponentV1,
+    pub component: HostComponentV1,
     pub operation: HostBundleLifecycleOpV1,
     pub manifest_digest: [u8; 32],
     pub state: HostBundleJournalStateV1,

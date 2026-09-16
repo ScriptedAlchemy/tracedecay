@@ -91,7 +91,7 @@ fn receipt_and_checked_in_host_evidence_feed_canonical_host_truth() {
         tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentDoctorResultV1 {
             receipt_path: std::path::PathBuf::from("receipt.fixture.json"),
             host: Some(tracedecay_agent_hosts::agents::host_bundle::HostKindV1::Codex),
-            component: Some(tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1::Core),
+            component: Some(tracedecay_agent_hosts::agents::host_bundle::HostComponentV1::Core),
             state: tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentDoctorStateV1::Repairable,
             registration: Some(
                 tracedecay_agent_hosts::agents::host_bundle::HostBundleRegistrationStateV1::Repairable,

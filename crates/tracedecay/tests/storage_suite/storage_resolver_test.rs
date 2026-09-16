@@ -18,6 +18,9 @@ use tracedecay_mcp::response_handles::{
     ResponseHandleLookup, retrieve_response_handle, store_response_handle,
 };
 use tracedecay_runtime_core::branch_meta::{self, BranchMeta};
+use tracedecay_runtime_core::path_safety::{
+    canonical_root_identity, plain_git_args, plain_host_path,
+};
 use tracedecay_runtime_core::storage::{
     EnrollmentMarker, PrivateStoreIo, ProjectPath, STORE_MANIFEST_FILENAME,
     STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreArtifactPath, StoreKind, StoreManifest,
@@ -96,14 +99,17 @@ fn write_enrollment(root: &Path) {
 }
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    canonical_root_identity(path)
 }
 
+/// Compares two host paths by separator, not by spelling.
+///
+/// The verbatim prefix is removed by [`plain_host_path`] before the path
+/// becomes a string: trimming `//?/` off the stringified form instead would
+/// leave any path this fixture cannot read as UTF-8 silently rewritten by the
+/// lossy conversion.
 fn normalize_test_path(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace('\\', "/")
-        .trim_start_matches("//?/")
-        .to_string()
+    plain_host_path(path).to_string_lossy().replace('\\', "/")
 }
 
 fn assert_path_eq(actual: impl AsRef<Path>, expected: impl AsRef<Path>) {
@@ -188,8 +194,8 @@ fn test_home(dir: &TempDir) -> PathBuf {
 
 fn git(cwd: &Path, args: &[&str]) {
     let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
+        .args(plain_git_args(args))
+        .current_dir(plain_host_path(cwd))
         .output()
         .unwrap_or_else(|err| panic!("failed to run git {args:?}: {err}"));
     assert!(

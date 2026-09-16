@@ -104,20 +104,6 @@ impl CodeChunkProjectionSink for ApplyingProjectionSink {
                     output_digest: None,
                 }),
         );
-        decisions.extend(
-            request
-                .changes
-                .reused
-                .iter()
-                .map(|change| ChunkProjectionDecisionV1 {
-                    chunk_id: change.chunk_id.clone(),
-                    prior_chunk_digest: change.prior_digest.clone(),
-                    current_chunk_digest: change.current_digest.clone(),
-                    operation: tracedecay_domain::ProjectionOperationV1::Reused,
-                    outcome: tracedecay_domain::ProjectionOutcomeV1::Reused,
-                    output_digest: None,
-                }),
-        );
         receipt_builder
             .build(&decisions)
             .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
@@ -429,7 +415,8 @@ impl Drop for ForcedWorkerWidth {
 /// every `workers` files instead of every `workers * multiplier` files.
 #[test]
 fn fill_admitted_window_batches_worker_width_times_multiplier_files() {
-    let fixture = fixture_for_source_files(BATCH_FIXTURE_SOURCE, "src/window_fixture.rs", "rust", 40);
+    let fixture =
+        fixture_for_source_files(BATCH_FIXTURE_SOURCE, "src/window_fixture.rs", "rust", 40);
     let _width = ForcedWorkerWidth::install(4);
     let mut source = fixture.open();
     let first_file_offset = source.file_ranges[0].0;
@@ -454,7 +441,12 @@ fn fill_admitted_window_batches_worker_width_times_multiplier_files() {
 #[test]
 fn draining_a_many_file_generation_amortizes_install_calls_by_the_multiplier() {
     let file_count = 40usize;
-    let fixture = fixture_for_source_files(BATCH_FIXTURE_SOURCE, "src/window_fixture.rs", "rust", file_count);
+    let fixture = fixture_for_source_files(
+        BATCH_FIXTURE_SOURCE,
+        "src/window_fixture.rs",
+        "rust",
+        file_count,
+    );
     let workers = 4usize;
     let _width = ForcedWorkerWidth::install(workers);
     let mut source = fixture.open();
@@ -477,7 +469,8 @@ fn draining_a_many_file_generation_amortizes_install_calls_by_the_multiplier() {
 
     let expected_fills = file_count.div_ceil(workers * LEXICAL_DECODE_WINDOW_FILES_PER_WORKER_V1);
     assert_eq!(
-        window_fills, expected_fills,
+        window_fills,
+        expected_fills,
         "draining {file_count} files at worker width {workers} must take {expected_fills} \
          window fills with the multiplier, not {} without it",
         file_count.div_ceil(workers),

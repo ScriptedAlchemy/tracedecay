@@ -80,16 +80,12 @@ mod tests {
     fn request_control(
         cancellation: tracedecay_contracts::CancellationSignal,
     ) -> DashboardHttpRequestControlV1 {
-        DashboardHttpRequestControlV1 {
-            request_id: tracedecay_contracts::RequestId::new(
-                "request.dashboard-memory-read-control-test",
-            )
-            .expect("request identity"),
-            deadline: tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(i64::MAX))
-                .expect("request deadline"),
+        DashboardHttpRequestControlV1::test_fixture_with(
+            "dashboard-memory-read-control-test",
             cancellation,
-            observed_at: tracedecay_domain::UtcMicros(1),
-        }
+            tracedecay_domain::UtcMicros(1),
+            tracedecay_domain::UtcMicros(i64::MAX),
+        )
     }
 
     #[test]

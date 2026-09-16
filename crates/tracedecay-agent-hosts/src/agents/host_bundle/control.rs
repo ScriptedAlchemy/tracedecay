@@ -15,11 +15,11 @@ use super::model::{
 };
 use super::planner::inspect_install_target;
 use super::{
-    HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HostBundleBackupReceiptV1, HostBundleComponentV1,
-    HostBundleError, HostBundleInstallReceiptV1, HostBundleJournalV1, HostBundleLifecycleOpV1,
+    HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HostBundleBackupReceiptV1, HostBundleError,
+    HostBundleInstallReceiptV1, HostBundleJournalV1, HostBundleLifecycleOpV1,
     HostBundleRestoreReceiptV1, HostBundleRollbackBoundaryV1, HostComponentSetJournalV1,
-    HostComponentSetReceiptV1, HostKindV1, MAX_HOST_COMPONENTS, MAX_MANIFEST_ARTIFACTS,
-    stock_host_kinds, validate_identifier, validate_relative_install_path,
+    HostComponentSetReceiptV1, HostComponentV1, HostKindV1, MAX_HOST_COMPONENTS,
+    MAX_MANIFEST_ARTIFACTS, stock_host_kinds, validate_identifier, validate_relative_install_path,
 };
 
 pub(super) const HOST_BUNDLE_CONTROL_DIR: &str = ".tracedecay-host-bundle-v1";
@@ -99,7 +99,7 @@ pub fn host_bundle_backup_root(lifecycle_root: &Path) -> PathBuf {
 pub fn latest_host_component_receipt_at(
     lifecycle_root: &Path,
     host: HostKindV1,
-    component: HostBundleComponentV1,
+    component: HostComponentV1,
 ) -> Result<Option<HostBundleInstallReceiptV1>, HostBundleError> {
     read_receipt_at(lifecycle_root, host, component)
 }
@@ -107,7 +107,7 @@ pub fn latest_host_component_receipt_at(
 pub(super) fn read_receipt_at(
     root: &Path,
     host: HostKindV1,
-    component: HostBundleComponentV1,
+    component: HostComponentV1,
 ) -> Result<Option<HostBundleInstallReceiptV1>, HostBundleError> {
     match fs::symlink_metadata(root) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
@@ -530,10 +530,7 @@ pub(super) fn host_bundle_restore_receipt_file(operation_id: [u8; 16]) -> String
     format!("restore-receipt.{}.v1.json", hex::encode(operation_id))
 }
 
-pub(super) fn component_set_stage_name(
-    component: HostBundleComponentV1,
-    relative_path: &str,
-) -> String {
+pub(super) fn component_set_stage_name(component: HostComponentV1, relative_path: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(component_slug(component).as_bytes());
     hasher.update(relative_path.as_bytes());
@@ -544,7 +541,7 @@ pub(super) fn component_set_stage_name(
     )
 }
 
-pub(super) fn receipt_file(host: HostKindV1, component: HostBundleComponentV1) -> String {
+pub(super) fn receipt_file(host: HostKindV1, component: HostComponentV1) -> String {
     format!(
         "receipt.{}.{}.v1.json",
         host.descriptor().slug(),
@@ -579,12 +576,12 @@ pub(super) fn component_set_receipt_file(operation_id: [u8; 16]) -> String {
 
 pub(super) fn receipt_identity_from_file_name(
     file_name: &str,
-) -> Option<(HostKindV1, HostBundleComponentV1)> {
+) -> Option<(HostKindV1, HostComponentV1)> {
     let components = [
-        HostBundleComponentV1::Core,
-        HostBundleComponentV1::Agent,
-        HostBundleComponentV1::ContextMcp,
-        HostBundleComponentV1::OperatorMcp,
+        HostComponentV1::Core,
+        HostComponentV1::Agent,
+        HostComponentV1::ContextMcp,
+        HostComponentV1::OperatorMcp,
     ];
     stock_host_kinds().into_iter().find_map(|host| {
         components
@@ -595,10 +592,7 @@ pub(super) fn receipt_identity_from_file_name(
     })
 }
 
-pub(super) fn expected_ownership_marker(
-    host: HostKindV1,
-    component: HostBundleComponentV1,
-) -> String {
+pub(super) fn expected_ownership_marker(host: HostKindV1, component: HostComponentV1) -> String {
     format!(
         "tracedecay.{}.{}.v1",
         host.descriptor().slug(),
@@ -606,11 +600,11 @@ pub(super) fn expected_ownership_marker(
     )
 }
 
-pub(super) fn component_slug(component: HostBundleComponentV1) -> &'static str {
+pub(super) fn component_slug(component: HostComponentV1) -> &'static str {
     match component {
-        HostBundleComponentV1::Core => "core",
-        HostBundleComponentV1::Agent => "agent",
-        HostBundleComponentV1::ContextMcp => "context-mcp",
-        HostBundleComponentV1::OperatorMcp => "operator-mcp",
+        HostComponentV1::Core => "core",
+        HostComponentV1::Agent => "agent",
+        HostComponentV1::ContextMcp => "context-mcp",
+        HostComponentV1::OperatorMcp => "operator-mcp",
     }
 }

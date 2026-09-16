@@ -1229,6 +1229,11 @@ pub struct CodeIndexSchedulerRegistryV1 {
     /// advances once per install, after the slot is written, so those waiters
     /// block on a transition instead of polling the slot.
     serving_seats: Arc<tokio::sync::watch::Sender<u64>>,
+    /// Registry-wide mount counter. Per-worktree serving watches exist only
+    /// after a root is inserted into `mounted`; waiters that subscribed before
+    /// activation observe this so they can re-subscribe instead of parking on
+    /// a forever-pending per-worktree arm.
+    root_mounted: Arc<tokio::sync::watch::Sender<u64>>,
     cadence_telemetry: Arc<Mutex<CodeIndexCadenceTelemetryV1>>,
     pub(super) relation_symbol_hydrations: Arc<AtomicU64>,
     activations: Arc<Mutex<BTreeMap<ManifestDigest, Weak<super::CodeIndexActivationV1>>>>,
@@ -2321,10 +2326,22 @@ impl CodeIndexSchedulerRegistryV1 {
         self.serving_seats.subscribe()
     }
 
+    /// Observe worktree root mounts. Each advance means a root was inserted
+    /// into the mounted map; waiters that need a per-worktree watch re-subscribe.
+    pub fn subscribe_root_mounted(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.root_mounted.subscribe()
+    }
+
     /// Record that the serving slot was written. Call this only after the slot
     /// holds the new generation, so a woken waiter observes the seated value.
     fn record_serving_seat(seats: &tokio::sync::watch::Sender<u64>) {
         seats.send_modify(|seats| *seats = seats.wrapping_add(1));
+    }
+
+    /// Record that a worktree root became mounted. Call after the mounted map
+    /// insert commits so subscribe-after-mount waiters observe the root.
+    fn record_root_mounted(roots: &tokio::sync::watch::Sender<u64>) {
+        roots.send_modify(|roots| *roots = roots.wrapping_add(1));
     }
 
     /// Announce a durable publication.

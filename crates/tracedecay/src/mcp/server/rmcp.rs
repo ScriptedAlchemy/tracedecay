@@ -674,6 +674,7 @@ mod tests {
                 cancel_attempts.fetch_add(1, Ordering::SeqCst);
                 false
             },
+            None,
         )
         .await;
 

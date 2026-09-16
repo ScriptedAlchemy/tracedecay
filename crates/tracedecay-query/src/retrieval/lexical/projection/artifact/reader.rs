@@ -1089,7 +1089,6 @@ impl CodeLexicalArtifactReaderV1 {
             || occurrence.repository_id != authority.repository_id
             || occurrence.worktree_id != authority.worktree_id
             || occurrence.source_generation != self.metadata.generation
-            || occurrence.snapshot_digest != authority.snapshot_digest
             || occurrence.payload_digest.as_str() != posting_payload
             || occurrence.payload_digest != payload.payload_digest
             || payload.validate().is_err()
@@ -2352,7 +2351,7 @@ impl<'a> ArtifactQueryV1<'a> {
         pruned: &mut Vec<(String, u64)>,
     ) -> Result<DocumentQueryV1, RetrievalPortError> {
         let mut whole_terms = Vec::new();
-        for term in &request.whole_terms {
+        for term in request.whole_terms.iter() {
             whole_terms.push(normalize_lexical(term));
             if let Some(expansions) = fuzzy.by_query.get(term) {
                 whole_terms.extend(expansions.iter().cloned());

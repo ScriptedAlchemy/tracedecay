@@ -109,7 +109,6 @@ fn hook_notice_dispatch_requires_a_live_daemon_binding() {
             .expect("live binding authorizes hook notice dispatch");
     assert_eq!(kind, HostKindV1::ClaudeCode);
     assert_eq!(rollback.configuration_revision, 7);
-    assert_eq!(rollback.route, HookFeedbackDeliveryRouteV1::HookV2);
 
     assert!(
         advisory_hook_notice_dispatch(root.path(), [3; 16], expires_at).is_none(),

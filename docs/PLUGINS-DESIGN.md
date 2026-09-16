@@ -124,7 +124,7 @@ A `tracedecay-plugin-sdk` crate (published separately) provides:
 
 - A `#[tracedecay_plugin]` proc-macro that generates the C ABI glue from a normal `LanguageExtractor` impl.
 - Safe Rust wrappers around the JSON serialisation / deserialisation boundary.
-- A `grammar!` macro that embeds the tree-sitter grammar and calls `ts_provider::language`.
+- A `grammar!` macro that embeds the tree-sitter grammar and calls `ts_provider::try_language`.
 
 Authors implement the same `LanguageExtractor` trait they would for a built-in, then add two lines:
 

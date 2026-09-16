@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use axum::extract::{Extension, Path, Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use schemars::JsonSchema;
@@ -31,7 +31,7 @@ use super::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
     DashboardLegalActionKindV1, DashboardLegalActionRefV1, now_micros, scope_from_state,
 };
-use super::{DashboardHttpRequestControlV1, DashboardState, graph_service};
+use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl, graph_service};
 use crate::request_identity::{GlobalOpaqueIdentityKind, mint_global_opaque_id};
 use tracedecay_session_memory::context::CancellationToken;
 
@@ -414,7 +414,7 @@ fn find_run(state: &DashboardState, run_id: &str) -> Option<StoredExplorerRun> {
 
 pub async fn create_query(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     Json(mut request): Json<ExplorerQueryRequestV1>,
 ) -> Response {
     hotpath::future!(
@@ -426,13 +426,6 @@ pub async fn create_query(
                 return (
                     StatusCode::SERVICE_UNAVAILABLE,
                     Json(json!({"detail": "exact registered project scope is unavailable"})),
-                )
-                    .into_response();
-            };
-            let Some(Extension(control)) = control else {
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(json!({"detail": "dashboard HTTP request admission is unavailable"})),
                 )
                     .into_response();
             };
@@ -956,18 +949,11 @@ pub(super) struct ExplorerReadContextV1 {
 
 pub async fn session_size(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     Path(session_id): Path<String>,
 ) -> Response {
     hotpath::future!(
         async move {
-            let Some(Extension(control)) = control else {
-                return explorer_session_not_ready::<ExplorerSessionSizeV1>(
-                    &state,
-                    DashboardLcmReadStateV1::Unavailable,
-                    "dashboard_request_admission_unavailable".to_owned(),
-                );
-            };
             let outcome = read_session_page(&state, control, &session_id, 500, None).await;
             match outcome {
                 DashboardLcmReadOutcomeV1::Ready(page) => {
@@ -1015,20 +1001,13 @@ pub async fn session_size(
 
 pub async fn read_context(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     Path(session_id): Path<String>,
     Query(params): Query<ReadContextParams>,
 ) -> Response {
     hotpath::future!(
         async move {
             let limit = params.limit.unwrap_or(100).clamp(1, 500);
-            let Some(Extension(control)) = control else {
-                return explorer_session_not_ready::<ExplorerReadContextV1>(
-                    &state,
-                    DashboardLcmReadStateV1::Unavailable,
-                    "dashboard_request_admission_unavailable".to_owned(),
-                );
-            };
             let offset = params.offset.unwrap_or(0).max(0);
             let order = if params.order.as_deref() == Some("desc") {
                 "desc"

@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use axum::extract::{Extension, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Json;
 use schemars::JsonSchema;
@@ -21,7 +21,7 @@ use super::read_model::{
     DashboardEnvelopeV1, DashboardFreshnessV1, scope_from_state,
 };
 use super::util::{JsonPath, JsonQuery, coerce_limit, http_detail};
-use super::{DashboardHttpRequestControlV1, DashboardState};
+use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl};
 use crate::tracedecay::facts::memory_application_for_db;
 use tracedecay_domain::FactId;
 use tracedecay_store::FactReadControl;
@@ -287,18 +287,11 @@ async fn fact_trust_history_payload(
 /// `GET /api/plugins/holographic/` — overview + facts + entities + graph.
 pub async fn overview(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<OverviewParams>,
 ) -> Json<DashboardEnvelopeV1<Option<MemoryOverviewPayloadV1>>> {
     hotpath::future!(
         async move {
-            let Some(Extension(control)) = control else {
-                return Json(DashboardEnvelopeV1::error(
-                    scope_from_state(&state),
-                    None,
-                    "dashboard HTTP request admission is unavailable",
-                ));
-            };
             let read_control = fact_read_control(&control);
             let limit = coerce_limit(params.limit, 25, memory_service::MEMORY_FACT_LIMIT_MAXIMUM);
             let graph_limit = coerce_limit(params.graph_limit, limit, 1000);
@@ -606,17 +599,10 @@ pub async fn overview(
 /// `GET /api/plugins/holographic/status` — canonical facts and derived-algebra health.
 pub async fn status(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
 ) -> Json<DashboardEnvelopeV1<Option<MemoryStatusPayloadV1>>> {
     hotpath::future!(
         async move {
-            let Some(Extension(control)) = control else {
-                return Json(DashboardEnvelopeV1::error(
-                    scope_from_state(&state),
-                    None,
-                    "dashboard HTTP request admission is unavailable",
-                ));
-            };
             let result = memory_status_payload(&state, &fact_read_control(&control)).await;
             if let Some(state_label) = request_terminal_state(&control) {
                 return Json(read_error_envelope(
@@ -652,18 +638,11 @@ pub async fn status(
 /// complete row — plus linked entities — from here.
 pub async fn fact_detail(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonPath(fact_id): JsonPath<String>,
 ) -> Json<DashboardEnvelopeV1<Option<MemoryFactDetailPayloadV1>>> {
     hotpath::future!(
         async move {
-            let Some(Extension(control)) = control else {
-                return Json(DashboardEnvelopeV1::error(
-                    scope_from_state(&state),
-                    None,
-                    "dashboard HTTP request admission is unavailable",
-                ));
-            };
             let fact_id = match owned_fact_id(&state, fact_id) {
                 Ok(fact_id) => fact_id,
                 Err(error) => {
@@ -722,19 +701,11 @@ pub async fn fact_detail(
 /// feedback audit rows explaining how a fact's trust changed over time.
 pub async fn fact_trust_history(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonPath(fact_id): JsonPath<String>,
 ) -> (StatusCode, Json<Value>) {
     hotpath::future!(
         async move {
-            let Some(Extension(control)) = control else {
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(http_detail(
-                        "dashboard HTTP request admission is unavailable",
-                    )),
-                );
-            };
             let fact_id = match owned_fact_id(&state, fact_id) {
                 Ok(fact_id) => fact_id,
                 Err(error) => {
@@ -781,21 +752,11 @@ pub async fn fact_trust_history(
 /// embedded as `[cos(p), sin(p)]` so wrapped phases compare correctly.
 pub async fn projection(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<ProjectionParams>,
 ) -> Json<Value> {
     hotpath::future!(
         async move {
-            let Some(Extension(control)) = control else {
-                return Json(json!({
-                    "exists": true,
-                    "dim": 0,
-                    "limit": 0,
-                    "method": "none",
-                    "points": [],
-                    "error": "dashboard HTTP request admission is unavailable",
-                }));
-            };
             let limit = coerce_limit(params.limit, 25, memory_service::projection_point_cap());
             let payload = memory_service::projection_payload(
                 &state,
@@ -828,24 +789,11 @@ pub async fn projection(
 /// similarity (`mean(cos(p_i − p_j))`) over query-time derived vectors.
 pub async fn similarity(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<SimilarityParams>,
 ) -> Json<Value> {
     hotpath::future!(
         async move {
-            let Some(Extension(control)) = control else {
-                return Json(json!({
-                    "exists": true,
-                    "dim": 0,
-                    "count": 0,
-                    "limit": 0,
-                    "min_similarity": null,
-                    "total_pairs": 0,
-                    "score_distribution": empty_score_distribution(),
-                    "pairs": [],
-                    "error": "dashboard HTTP request admission is unavailable",
-                }));
-            };
             let min_similarity = memory_service::coerce_similarity_score(
                 params.min_similarity,
                 SIMILARITY_DEFAULT_THRESHOLD,
@@ -885,19 +833,11 @@ pub async fn similarity(
 /// newest first, with optional canonical fact identity.
 pub async fn oplog(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<LimitParams>,
 ) -> Json<Value> {
     hotpath::future!(
         async move {
-            let Some(Extension(control)) = control else {
-                return Json(json!({
-                    "events": [],
-                    "count": 0,
-                    "limit": 0,
-                    "error": "dashboard HTTP request admission is unavailable",
-                }));
-            };
             let limit = coerce_limit(params.limit, 50, 300);
             let payload =
                 memory_service::oplog_payload(&state, limit, &fact_read_control(&control)).await;
@@ -941,16 +881,12 @@ mod tests {
         cancellation: tracedecay_contracts::CancellationSignal,
         deadline: i64,
     ) -> DashboardHttpRequestControlV1 {
-        DashboardHttpRequestControlV1 {
-            request_id: tracedecay_contracts::RequestId::new(
-                "request.dashboard-memory-status-test",
-            )
-            .expect("request identity"),
-            deadline: tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(deadline))
-                .expect("request deadline"),
+        DashboardHttpRequestControlV1::test_fixture_with(
+            "dashboard-memory-status-test",
             cancellation,
-            observed_at: tracedecay_domain::UtcMicros(1),
-        }
+            tracedecay_domain::UtcMicros(1),
+            tracedecay_domain::UtcMicros(deadline),
+        )
     }
 
     #[test]

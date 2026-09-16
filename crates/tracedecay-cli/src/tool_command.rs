@@ -110,6 +110,17 @@ const FIRST_TOUCH_STORE_TOOLS: &[&str] = &[
     "tracedecay_lcm_expand_query",
 ];
 
+/// Tools that read the profile's project registry. They need no mounted
+/// project: a project, when one is connected, only marks the active listing
+/// entry. An explicit `--project` that is not an initialised project therefore
+/// routes projectless instead of being refused for a project the read never
+/// depended on.
+const PROFILE_REGISTRY_TOOLS: &[&str] = &[
+    "tracedecay_project_list",
+    "tracedecay_project_search",
+    "tracedecay_project_context",
+];
+
 const MAX_SURFACE_ATTEMPTS: usize = 3;
 
 fn tool_deadline_range_error() -> TraceDecayError {
@@ -249,7 +260,7 @@ fn run_inner(
             return Ok(());
         }
         let ParsedInvocation {
-            tool_args,
+            mut tool_args,
             project: parsed_project,
             raw_json,
             dry_run,
@@ -290,14 +301,8 @@ fn run_inner(
         // the name, so composing the application catalog again can only return
         // `None`; rebuilding a second advertised-name set likewise repeats the
         // exact membership check that selected `def`.
-        dispatch_compatibility_tool(
-            DaemonToolDispatch::for_tool(explicit_project, &def.name, &tool_args),
-            &def.name,
-            tool_args,
-            raw_json,
-            deadline,
-        )
-        .await
+        let dispatch = DaemonToolDispatch::for_tool(explicit_project, &def.name, &mut tool_args);
+        dispatch_compatibility_tool(dispatch, &def.name, tool_args, raw_json, deadline).await
     })
 }
 
@@ -539,7 +544,9 @@ struct DaemonToolDispatch {
 }
 
 impl DaemonToolDispatch {
-    fn for_tool(explicit_project: Option<String>, tool_name: &str, tool_args: &Value) -> Self {
+    /// `tool_args` may be seeded: a registry read that names an uninitialised
+    /// `--project` but no `path` inherits that project as its `path`.
+    fn for_tool(explicit_project: Option<String>, tool_name: &str, tool_args: &mut Value) -> Self {
         // Profile-authority tools (Hermes user LCM/memory) must never invent a
         // project from cwd. Hermes intentionally runs those calls with cwd=/ so
         // Hermes home is never mistaken for a TraceDecay project.
@@ -549,7 +556,54 @@ impl DaemonToolDispatch {
                 allow_init: false,
             };
         }
+        if PROFILE_REGISTRY_TOOLS.contains(&tool_name) {
+            return Self::registry_scoped(explicit_project, tool_name, tool_args);
+        }
         Self::project_scoped(explicit_project, tool_name)
+    }
+
+    /// Registry reads never initialise anything, and follow the canonical
+    /// resolution order (`tracedecay_runtime_core::config::discover_project_root`):
+    ///
+    /// * An explicit `--project` is honoured verbatim, with no discovery and
+    ///   no ambient-root filter. An initialised root becomes the project
+    ///   connection so the daemon can mark it active. An existing directory
+    ///   that is not an initialised root routes projectless, because the read
+    ///   never depended on that project; `project_context` then inherits the
+    ///   named directory as its `path` unless the caller already gave a
+    ///   `path` or `project_selector`. Anything else (a path that does not
+    ///   exist, or is not a directory) is still handed to the daemon so the
+    ///   caller receives the same typed project-route refusal every
+    ///   project-scoped tool reports, never a silently unscoped success.
+    /// * Without `--project`, cwd walks up to the nearest initialised
+    ///   ancestor, and stays projectless when there is none.
+    fn registry_scoped(
+        explicit_project: Option<String>,
+        tool_name: &str,
+        tool_args: &mut Value,
+    ) -> Self {
+        let project_path = match explicit_project {
+            Some(path) => {
+                let explicit = tracedecay_configuration::resolve_path(Some(path));
+                if explicit.is_dir()
+                    && !tracedecay_runtime_core::config::is_initialized_project_root(&explicit)
+                {
+                    if tool_name == "tracedecay_project_context" {
+                        seed_registry_context_path(tool_args, &explicit);
+                    }
+                    None
+                } else {
+                    Some(explicit)
+                }
+            }
+            None => std::env::current_dir()
+                .ok()
+                .and_then(|cwd| implicit_tool_project_path(&cwd)),
+        };
+        Self {
+            project_path,
+            allow_init: false,
+        }
     }
 
     fn project_scoped(explicit_project: Option<String>, tool_name: &str) -> Self {
@@ -622,6 +676,25 @@ fn requests_profile_authority(tool_name: &str, tool_args: &Value) -> bool {
 
 fn implicit_tool_project_path(cwd: &Path) -> Option<PathBuf> {
     tracedecay::config::discover_project_root(cwd)
+}
+
+/// `project_context` with an explicit uninitialised `--project` and no
+/// selector asks about that directory: seed `path` from it rather than
+/// refusing for a missing parameter the caller did supply.
+fn seed_registry_context_path(tool_args: &mut Value, explicit_project: &Path) {
+    let names_a_project = tool_args.get("path").is_some_and(|path| !path.is_null())
+        || tool_args
+            .get("project_selector")
+            .is_some_and(|selector| !selector.is_null());
+    if names_a_project {
+        return;
+    }
+    if let Some(args) = tool_args.as_object_mut() {
+        args.insert(
+            "path".to_owned(),
+            Value::String(explicit_project.to_string_lossy().into_owned()),
+        );
+    }
 }
 
 fn map_tool_deadline_error(tool_name: &str, error: TraceDecayError) -> TraceDecayError {

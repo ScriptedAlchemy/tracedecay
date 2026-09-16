@@ -31,6 +31,7 @@ use super::run_ledger::{
     latest_record_by_canonical_completion, latest_record_by_canonical_completion_key,
 };
 use crate::ports::session_store::AutomationSessionStore;
+use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const DEFAULT_FAILURE_COOLDOWN_SECS: u64 = 300;
@@ -709,8 +710,8 @@ fn skipped_terminal_failure_class(
     {
         return None;
     }
-    match record.error.as_deref()? {
-        "session_evidence_timed_out" => Some(AgentTaskFailureClass::Timeout),
+    match AutomationSkipReasonV1::from_ledger_reason(record.error.as_deref()?)? {
+        AutomationSkipReasonV1::SessionEvidenceTimedOut => Some(AgentTaskFailureClass::Timeout),
         _ => None,
     }
 }
@@ -2064,6 +2065,16 @@ evidence about it",
         );
 
         assert_eq!(
+            skipped_terminal_failure_class(&timeout),
+            Some(AgentTaskFailureClass::Timeout),
+            "ledger timeout must classify through AutomationSkipReasonV1, not an inline string match",
+        );
+        assert_eq!(
+            AutomationSkipReasonV1::from_ledger_reason("session_evidence_timed_out"),
+            Some(AutomationSkipReasonV1::SessionEvidenceTimedOut),
+        );
+
+        assert_eq!(
             schedule_decision(
                 &config,
                 AgentTaskKind::SessionReflector,
@@ -2092,6 +2103,11 @@ evidence about it",
             AutomationRunStatus::Skipped,
             Some("session_evidence_cancelled"),
             2_000,
+        );
+        assert_eq!(
+            skipped_terminal_failure_class(&cancelled),
+            None,
+            "cancellation must not enter the retryable failure class",
         );
         assert_eq!(
             schedule_decision(

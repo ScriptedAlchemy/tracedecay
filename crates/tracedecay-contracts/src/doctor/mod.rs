@@ -6,6 +6,15 @@
 //! that gathers findings across every family into a [`DoctorReportV1`]. This
 //! module owns no store, transport, provider runtime, or health formula;
 //! source-port implementations and any surface binding are owned elsewhere.
+//!
+//! # Install / doctor parity after host wire renames
+//!
+//! When a host lifecycle retires write targets (for example Kiro's shift to a
+//! global MCP-only install), Doctor must keep install/doctor parity: either
+//! grade the current owned surface, or emit an explicit migration advisory for
+//! leftover retired artifacts. Silent omission of retired steering/agent
+//! checks is schema drift — operators need a truthful advisory, not a green
+//! report that ignores rotting files.
 
 mod adapters;
 mod report;

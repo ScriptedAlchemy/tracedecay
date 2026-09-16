@@ -1,8 +1,8 @@
 use std::path::{Component, Path};
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracedecay_domain::HostComponentV1;
 use tracedecay_domain::HostKindV1;
 use tracedecay_domain::canonical_json_bytes;
 
@@ -17,17 +17,6 @@ pub const MAX_IDENTIFIER_BYTES: usize = 128;
 /// Sized to admit the Cursor desktop native-diagnostics extension
 /// (`plugin/cursor-native-extension/embedded/extension.js`).
 pub const MAX_ARTIFACT_CONTENT_BYTES: usize = 2 * 1024 * 1024;
-
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum HostBundleComponentV1 {
-    Core,
-    Agent,
-    ContextMcp,
-    OperatorMcp,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -54,7 +43,7 @@ pub struct HostBundleArtifactV1 {
 pub struct HostBundleManifestV1 {
     pub schema_version: u16,
     pub host: HostKindV1,
-    pub component: HostBundleComponentV1,
+    pub component: HostComponentV1,
     pub integration_manifest_digest: [u8; 32],
     pub catalog_digest: [u8; 32],
     pub configuration_snapshot_id: String,
@@ -127,7 +116,7 @@ impl HostBundleManifestV1 {
 struct HostBundleCatalogPayloadV1<'a> {
     schema_version: u16,
     host: HostKindV1,
-    component: HostBundleComponentV1,
+    component: HostComponentV1,
     integration_manifest_digest: [u8; 32],
     catalog_digest: [u8; 32],
     configuration_snapshot_id: &'a str,

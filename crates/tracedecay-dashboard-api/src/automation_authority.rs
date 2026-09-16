@@ -273,21 +273,6 @@ impl DashboardAutomationAuthorityV1 {
 mod tests {
     use super::*;
 
-    fn request_control() -> DashboardHttpRequestControlV1 {
-        let observed_at = tracedecay_domain::UtcMicros(1_000_000);
-        DashboardHttpRequestControlV1 {
-            request_id: tracedecay_contracts::RequestId::new("request.dashboard-automation-test")
-                .expect("request identity"),
-            deadline: tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(2_000_000))
-                .expect("request deadline"),
-            cancellation: tracedecay_contracts::CancellationSignal::active(
-                "cancel.dashboard-automation-test",
-            )
-            .expect("request cancellation"),
-            observed_at,
-        }
-    }
-
     fn unavailable_run_port() -> DashboardAutomationRunPortV1 {
         Arc::new(|_| {
             Box::pin(async {
@@ -306,6 +291,16 @@ mod tests {
                 ))
             })
         })
+    }
+
+    fn request_control() -> DashboardHttpRequestControlV1 {
+        DashboardHttpRequestControlV1::test_fixture_with(
+            "dashboard-automation-test",
+            tracedecay_contracts::CancellationSignal::active("cancel.dashboard-automation-test")
+                .expect("request cancellation"),
+            tracedecay_domain::UtcMicros(1_000_000),
+            tracedecay_domain::UtcMicros(2_000_000),
+        )
     }
 
     #[test]
