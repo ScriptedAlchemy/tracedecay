@@ -1112,6 +1112,64 @@ async fn advertised_minimum_session_lookup_request_passes_budget_admission() {
 /// larger than that window must still answer a small page and its cursor must
 /// advance the storage keyset rather than re-reading the same window: every
 /// page returns a full `LIMIT`, no message is served twice, and the walk keeps
+/// A service mounted without a refresh worker cannot know whether the
+/// projection is current. `RequireFresh` must therefore be refused with the
+/// worker-missing reason, never served as if the projection were fresh.
+#[tokio::test]
+async fn require_fresh_without_a_refresh_worker_is_refused_as_worker_missing() {
+    let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "session-lookup-refresh-worker-missing",
+    )
+    .await;
+    let root = real_page_root("root.page");
+    let session_id = "session.page.worker-missing".to_owned();
+    seed_real_page_fixture_in_session(
+        harness.registered.as_ref(),
+        &root,
+        0,
+        "codex".to_owned(),
+        session_id.clone(),
+        true,
+    )
+    .await;
+    let root = registered_profile_retrieval_root(&harness.registered);
+    let scope = root
+        .identity()
+        .session_request_scope()
+        .expect("profile session scope");
+    let service = DaemonSessionRetrievalService::new(harness.registered.clone(), root, None)
+        .expect("registered retrieval service");
+    let context = admitted_lookup_context(scope);
+    let query = SessionTemporalQuery::new(
+        SessionId::new(&session_id).expect("session identity"),
+        None,
+        "",
+        None,
+        TemporalModeV1::Current,
+        tracedecay_domain::RetrievalGrainV1::Occurrence,
+        1,
+        DiversityLimits::unbounded(),
+        ContextBudget {
+            max_bytes: APPLICATION_RETRIEVAL_MAX_BYTES,
+            max_tokens: APPLICATION_RETRIEVAL_MAX_BYTES / 4,
+            estimator_version: "words-v1".to_owned(),
+        },
+    )
+    .expect("temporal query")
+    .with_execution_limits(admitted_execution_limits(1))
+    .with_freshness_policy(SessionFreshnessPolicy::RequireFresh);
+
+    let outcome = service.retrieve_admitted(&context, query).await;
+
+    match outcome {
+        SessionRetrievalServiceOutcome::Unavailable(unavailable) => assert_eq!(
+            unavailable.reason,
+            SessionRetrievalUnavailableReason::RefreshWorkerMissing
+        ),
+        other => panic!("RequireFresh without a worker must be refused, got {other:?}"),
+    }
+}
+
 /// yielding a continuation while records remain.
 #[tokio::test]
 async fn small_lookup_reads_a_session_larger_than_the_response_budget() {
