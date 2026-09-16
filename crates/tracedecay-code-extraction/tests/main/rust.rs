@@ -229,12 +229,18 @@ pub trait Drawable {
         .collect();
     assert_eq!(traits.len(), 1);
     assert_eq!(traits[0].name, "Drawable");
+    assert_eq!(traits[0].visibility, Visibility::Pub);
     let methods: Vec<_> = result
         .nodes
         .iter()
         .filter(|n| n.kind == NodeKind::Method)
         .collect();
     assert_eq!(methods.len(), 2);
+    assert!(
+        methods
+            .iter()
+            .all(|method| method.visibility == Visibility::Pub)
+    );
 }
 
 #[test]

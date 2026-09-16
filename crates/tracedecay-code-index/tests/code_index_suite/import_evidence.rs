@@ -389,6 +389,26 @@ fn rust_generic_inherent_impl_matches_a_nominal_typed_receiver() {
 }
 
 #[test]
+fn rust_public_trait_methods_are_callable_across_crates() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.public-trait.lib",
+            "crates/dep/src/lib.rs",
+            "pub trait PublicTrait {\n    fn work(&self);\n}\n",
+        ),
+        (
+            "file.public-trait.app",
+            "crates/app/src/main.rs",
+            "fn run(value: &dyn dep::PublicTrait) {\n    value.work();\n}\nfn main() {}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::run");
+    let work = symbol_occurrence(&generation, "crates/dep/src/lib.rs::PublicTrait::work");
+
+    assert_resolved_edge(&generation, &caller, &work, RelationEdgeKindV1::Calls);
+}
+
+#[test]
 fn rust_inherent_method_does_not_bind_to_a_same_named_type_in_another_module() {
     let generation = published_rust_workspace(&[
         (
