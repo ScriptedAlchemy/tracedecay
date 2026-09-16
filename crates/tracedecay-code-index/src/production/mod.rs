@@ -1,7 +1,7 @@
 //! Production composition for immutable code-index generation publication.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex, OnceLock, Weak},
 };
 
@@ -680,6 +680,27 @@ impl FileGenerationArtifactsV1 {
         })
     }
 
+    /// True when this file page can be Arc-shared into a successor generation
+    /// without rewriting generation-local anchors. File-page `generation_id`
+    /// is extraction provenance; the published generation owns serving identity.
+    fn can_share_carried_forward(
+        &self,
+        config: &CodeIndexProductionConfigV1,
+        scope: &CodeIndexGenerationScopeV1,
+        file: &SanitizedCodeFileV1,
+        extractor_revision: &ExtractorRevision,
+    ) -> bool {
+        self.authority.project_id == config.project_id
+            && self.authority.repository_id == config.repository
+            && self.authority.worktree_id == scope.worktree
+            && self.authority.reference == scope.reference
+            && self.authority.logical_path == file.logical_path
+            && self.authority.content_digest == file.content_digest
+            && self.extraction.content_digest == file.content_digest
+            && self.extraction.file_occurrence_id == file.file_occurrence_id
+            && &self.extraction.extractor_revision == extractor_revision
+    }
+
     fn rematerialize_carried_forward(
         &self,
         config: &CodeIndexProductionConfigV1,
@@ -689,16 +710,7 @@ impl FileGenerationArtifactsV1 {
         file: &SanitizedCodeFileV1,
         extractor_revision: &ExtractorRevision,
     ) -> Result<Self, ChunkingFailureV1> {
-        if self.authority.project_id != config.project_id
-            || self.authority.repository_id != config.repository
-            || self.authority.worktree_id != scope.worktree
-            || self.authority.reference != scope.reference
-            || self.authority.logical_path != file.logical_path
-            || self.authority.content_digest != file.content_digest
-            || self.extraction.content_digest != file.content_digest
-            || self.extraction.file_occurrence_id != file.file_occurrence_id
-            || &self.extraction.extractor_revision != extractor_revision
-        {
+        if !self.can_share_carried_forward(config, scope, file, extractor_revision) {
             return Err(ChunkingFailureV1::GenerationMismatch);
         }
         let mut artifacts = self
@@ -1291,12 +1303,26 @@ impl CodeIndexPublishedGenerationV1 {
     /// Use this wherever bytes were genuinely re-read (sealed-generation
     /// restore) so the memoized fast path can never mask a real re-read.
     pub(crate) fn validate_fresh(&self) -> Result<(), CodeIndexProductionErrorV1> {
-        self.validate_uncached()?;
+        self.validate_uncached(None)?;
         let _ = self.validated.set(());
         Ok(())
     }
 
-    fn validate_uncached(&self) -> Result<(), CodeIndexProductionErrorV1> {
+    /// Like [`Self::validate_fresh`], but skips deep per-file artifact checks for
+    /// pages Arc-shared from an already-validated parent generation.
+    pub(crate) fn validate_fresh_reusing_parent(
+        &self,
+        parent: Option<&Self>,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        self.validate_uncached(parent)?;
+        let _ = self.validated.set(());
+        Ok(())
+    }
+
+    fn validate_uncached(
+        &self,
+        parent: Option<&Self>,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
         self.manifest
             .validate()
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
@@ -1351,7 +1377,7 @@ impl CodeIndexPublishedGenerationV1 {
             .validate()
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
 
-        let mut files = self.files.iter().map(Arc::as_ref).collect::<Vec<_>>();
+        let mut files = self.files.clone();
         files.sort_by(|left, right| {
             left.artifacts
                 .chunks
@@ -1367,6 +1393,26 @@ impl CodeIndexPublishedGenerationV1 {
                 "published generation repeats a file occurrence".to_owned(),
             ));
         }
+        let shared_occurrences = parent
+            .map(|parent| {
+                parent
+                    .files
+                    .iter()
+                    .filter_map(|prior| {
+                        self.files.iter().find_map(|current| {
+                            Arc::ptr_eq(prior, current).then(|| {
+                                current
+                                    .artifacts
+                                    .chunks
+                                    .document
+                                    .file_occurrence_id
+                                    .clone()
+                            })
+                        })
+                    })
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
         let occurrences_by_id = self
             .snapshot
             .files
@@ -1376,9 +1422,12 @@ impl CodeIndexPublishedGenerationV1 {
         hotpath::measure_block!(
             "code_index.collect.validate_files",
             collect_bounded_ordered(&files, |file, _worker| {
-                file.artifacts
-                    .validate()
-                    .map_err(CodeIndexProductionErrorV1::Chunk)?;
+                let shared = shared_occurrences.contains(&file.artifacts.chunks.document.file_occurrence_id);
+                if !shared {
+                    file.artifacts
+                        .validate()
+                        .map_err(CodeIndexProductionErrorV1::Chunk)?;
+                }
                 let occurrence = occurrences_by_id
                     .get(&file.artifacts.chunks.document.file_occurrence_id)
                     .copied();
@@ -1403,23 +1452,27 @@ impl CodeIndexPublishedGenerationV1 {
                             evidence.logical_path != file.authority.logical_path
                         })
                     || file.extraction.content_digest != file.authority.content_digest
-                    || file.extraction.generation_id != self.manifest.generation_id
                     || file.extraction.file_occurrence_id
                         != file.artifacts.chunks.document.file_occurrence_id
+                    || file.artifacts.chunks.document.generation_id
+                        != file.extraction.generation_id
                 {
                     return Err(CodeIndexProductionErrorV1::Contract(
                     "extraction authority does not match its published project, repository, scope, path, or content"
                         .to_owned(),
                 ));
                 }
-                file.exact_authority
-                    .validate_all(&file.artifacts.chunks.chunks)
-                    .map_err(CodeIndexProductionErrorV1::Chunk)?;
+                if !shared {
+                    file.exact_authority
+                        .validate_all(&file.artifacts.chunks.chunks)
+                        .map_err(CodeIndexProductionErrorV1::Chunk)?;
+                }
                 Ok(())
             })
         )?;
         hotpath::measure_block!("code_index.collect.validate_aggregates", {
-            validate_import_evidence(&files, &self.imports)?;
+            let file_refs = files.iter().map(Arc::as_ref).collect::<Vec<_>>();
+            validate_import_evidence(&file_refs, &self.imports)?;
             let mut chunks = files
                 .iter()
                 .flat_map(|file| file.artifacts.chunks.chunks.iter())
@@ -1930,7 +1983,7 @@ where
             };
             hotpath::measure_block!(
                 "code_index.build.assemble.validate",
-                candidate.validate_fresh()
+                candidate.validate_fresh_reusing_parent(active.as_deref())
             )?;
             Ok::<_, CodeIndexProductionErrorV1>(candidate)
         })?;
@@ -2334,6 +2387,27 @@ where
                                 "validated snapshot language has no descriptor".to_owned(),
                             )
                         })?;
+                        let shared = captured_files.get(file_occurrence_id).is_none()
+                            && prior.can_share_carried_forward(
+                                config,
+                                &scope,
+                                current_file,
+                                &descriptor.extractor_revision,
+                            );
+                        if shared {
+                            crate::hotpath_observe::add_reused_parses(1);
+                            let clone_stats = ClonePayloadBuildStatsV1 {
+                                reused: u64::try_from(prior.artifacts.clone_bodies.len())
+                                    .unwrap_or(u64::MAX),
+                                computed: 0,
+                            };
+                            physical_artifacts
+                                .record_clone_payloads(clone_stats.reused, clone_stats.computed);
+                            return Ok(IncrementFileMaterializationV1::CarryForward {
+                                artifact: Arc::clone(prior),
+                                clone_stats,
+                            });
+                        }
                         let carried = if let Some(captured) = captured_files.get(file_occurrence_id)
                         {
                             let receipt_bound = intake

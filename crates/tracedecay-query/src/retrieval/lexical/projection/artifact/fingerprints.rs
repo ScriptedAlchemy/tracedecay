@@ -404,7 +404,6 @@ pub(super) fn read_clone_fingerprint_page(
                 || occurrence.repository_id != authority.repository_id
                 || occurrence.worktree_id != authority.worktree_id
                 || occurrence.source_generation != *receipt.generation()
-                || occurrence.snapshot_digest != authority.snapshot_digest
                 || occurrence.payload_digest.as_str() != posting_payload
                 || occurrence.payload_digest != payload.payload_digest
                 || payload.body_digest.as_str() != posting_body

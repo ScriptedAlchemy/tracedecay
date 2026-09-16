@@ -1178,11 +1178,23 @@ fn measure_clone_queries(
         .map(|member| member.occurrence.path.clone())
         .collect::<Vec<_>>();
 
+    // Fingerprint authority must come from the artifact (serving-stamped), not
+    // the sealed page's extraction-provenance occurrence.
+    let artifact_source = reader
+        .clone_body(&source.occurrence.symbol_occurrence_id)
+        .map_err(|error| format!("read clone body for fingerprint authority: {error}"))?
+        .ok_or_else(|| {
+            format!(
+                "clone body {} is unavailable for fingerprint authority",
+                source.occurrence.symbol_occurrence_id.as_str()
+            )
+        })?;
+
     let fingerprint = if reader.has_clone_fingerprints() {
         let read = reader
             .clone_fingerprint_page(
-                &source.occurrence,
-                &source.payload,
+                &artifact_source.occurrence,
+                &artifact_source.payload,
                 None,
                 MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1,
                 control,
@@ -1190,8 +1202,8 @@ fn measure_clone_queries(
             .map_err(|error| format!("read clone fingerprints: {error}"))?;
         let cancelled = reader
             .clone_fingerprint_page(
-                &source.occurrence,
-                &source.payload,
+                &artifact_source.occurrence,
+                &artifact_source.payload,
                 None,
                 MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1,
                 &CancelledControl,
