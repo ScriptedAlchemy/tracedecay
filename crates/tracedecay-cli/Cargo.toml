@@ -22,6 +22,8 @@ include = [
 [[bin]]
 name = "tracedecay"
 path = "src/main.rs"
+# The public library owns target/doc/tracedecay; the binary would overwrite it.
+doc = false
 
 # Built explicitly by test workflows. Keeping the fake as an example leaves
 # ordinary product `--bin` / `--bins` builds free of test executables.
