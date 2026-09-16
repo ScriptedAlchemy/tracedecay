@@ -573,6 +573,109 @@ fn helper() {}
     );
 }
 
+/// Every `Calls` reference name the function `function_name` emits.
+fn call_names(result: &ExtractionResult, function_name: &str) -> Vec<String> {
+    let function = result
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Function && node.name == function_name)
+        .unwrap_or_else(|| panic!("function {function_name} is extracted"));
+    let mut names = result
+        .unresolved_refs
+        .iter()
+        .filter(|reference| {
+            reference.reference_kind == EdgeKind::Calls && reference.from_node_id == function.id
+        })
+        .map(|reference| reference.reference_name.clone())
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+#[test]
+fn test_rust_dotted_calls_on_typed_bindings_also_name_the_method_by_type() {
+    let source = r#"
+fn assemble(args: &HiArgs, raw: Vec<u8>) -> Widget {
+    let mut builder = ignore::WalkBuilder::new(&raw);
+    let types = ignore::types::TypesBuilder::new().build()?;
+    let parsed: config::Parsed = config::parse(raw)?;
+    let fallback = Fallback::default().unwrap();
+    let literal = Literal { raw };
+    args.walk_builder();
+    builder.build();
+    types.matched();
+    parsed.entries();
+    fallback.apply();
+    literal.len();
+    raw.len();
+    types.clone().matched();
+}
+"#;
+    let result = RustExtractor.extract("typed.rs", source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let names = call_names(&result, "assemble");
+    // `Vec::len` is stated too: which owners never bind cross-file is the
+    // index's blocklist policy, not the extractor's.
+    for expected in [
+        "HiArgs::walk_builder",
+        "ignore::WalkBuilder::build",
+        "config::Parsed::entries",
+        "Fallback::apply",
+        "Literal::len",
+        "Vec::len",
+    ] {
+        assert!(
+            names.contains(&expected.to_owned()),
+            "{expected} missing from {names:?}"
+        );
+    }
+    assert!(
+        !names.iter().any(|name| name.ends_with("::matched")),
+        "a `let` initialised by a call chain has no stated type: {names:?}"
+    );
+    assert!(
+        names.contains(&"raw.len".to_owned()) && names.contains(&"builder.build".to_owned()),
+        "the receiver-dotted forms stay alongside the typed ones: {names:?}"
+    );
+}
+
+#[test]
+fn test_rust_rebound_or_pattern_bound_receivers_have_no_typed_call() {
+    let source = r#"
+fn rebound(builders: Vec<Builder>, pair: (Builder, Builder), maybe: Option<Builder>) {
+    let builder = Builder::new();
+    builder.build();
+    let builder = Other::new();
+    builder.build();
+    for item in builders {
+        item.build();
+    }
+    let (left, right) = pair;
+    left.build();
+    if let Some(found) = maybe {
+        found.build();
+    }
+    let shadow = Builder::new();
+    let handler = |shadow| shadow.build();
+    let typed = |arg: Builder| arg.build();
+}
+"#;
+    let result = RustExtractor.extract("rebound.rs", source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let names = call_names(&result, "rebound");
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| name.contains("::build"))
+            .collect::<Vec<_>>(),
+        vec!["Builder::build"],
+        "only the typed closure parameter has one stated type; rebound, pattern-bound, \
+         and closure-shadowed receivers have none: {names:?}"
+    );
+    assert!(names.contains(&"Builder::new".to_owned()) && names.contains(&"Other::new".to_owned()));
+}
+
 #[test]
 fn test_rust_trait_impl() {
     let source = r#"

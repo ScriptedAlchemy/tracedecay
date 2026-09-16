@@ -202,10 +202,12 @@ impl StaticLanguageRegistry {
             // exact source span published by chunk projection. Rust v4 added
             // parser-backed import visibility for re-export resolution;
             // TypeScript v3 added variable type-relation evidence; protobuf and
-            // SQL v3 retained canonical schema evidence. Pinning these behaviors
-            // forces older file artifacts to be re-extracted.
+            // SQL v3 retained canonical schema evidence. Rust v6 names dotted
+            // calls on typed bindings by their type and treats restricted
+            // `pub(..) use` rows as re-exports. Pinning these behaviors forces
+            // older file artifacts to be re-extracted.
             let extractor_revision = if language == "rust" {
-                5
+                6
             } else if matches!(language.as_str(), "typescript" | "protobuf" | "sql") {
                 4
             } else {
@@ -410,7 +412,7 @@ mod tests {
         assert!(rust.stable_member_spans);
         assert!(rust.capabilities.extraction);
         assert_eq!(rust.root_markers, vec!["Cargo.toml".to_owned()]);
-        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v5");
+        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v6");
 
         assert_eq!(
             registry
