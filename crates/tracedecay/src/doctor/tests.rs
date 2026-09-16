@@ -558,3 +558,65 @@ fn doctor_warns_on_missing_or_running_disabled_units() {
         "missing-unit advice must make installation intentional, got: {missing}"
     );
 }
+
+#[test]
+fn schema_convergence_severity_tracks_typed_state() {
+    for (state, issues, warnings) in [
+        (SchemaConvergenceStateV1::PendingSchemaMigration, 0, 1),
+        (
+            SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress,
+            0,
+            1,
+        ),
+        (SchemaConvergenceStateV1::Degraded, 1, 0),
+        (SchemaConvergenceStateV1::Completed, 0, 0),
+    ] {
+        let status = serde_json::json!({"doctor_report": {"schema_convergences": [{
+            "store": "profile-sessions", "stage": "registered_schema", "state": state,
+            "progress": {"unit": "pages", "done": 4, "remaining": 7},
+            "started_at_micros": 42, "degraded_row": "observation_id=obs-7"
+        }]}});
+        let mut counters = DoctorCounters::new();
+        render_schema_convergences(&mut counters, &status).unwrap();
+        assert_eq!((counters.issues, counters.warnings), (issues, warnings));
+    }
+    assert!(
+        render_schema_convergences(
+            &mut DoctorCounters::new(),
+            &serde_json::json!({"doctor_report": {"schema_convergences": [{}]}})
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn project_open_severity_tracks_typed_state() {
+    for (state, reason, issues, warnings) in [
+        (
+            ProjectOpenStatusStateV1::Completed,
+            ProjectOpenStatusReasonV1::Ready,
+            0,
+            0,
+        ),
+        (
+            ProjectOpenStatusStateV1::Converging,
+            ProjectOpenStatusReasonV1::Converging,
+            0,
+            1,
+        ),
+        (
+            ProjectOpenStatusStateV1::Stalled,
+            ProjectOpenStatusReasonV1::UnrepairableVerdict,
+            1,
+            0,
+        ),
+    ] {
+        let status = serde_json::json!({"project_open": {
+            "state": state, "reason": reason, "retry_after_ms": null,
+            "detail": "project authority verdict"
+        }});
+        let mut counters = DoctorCounters::new();
+        render_project_open_status(&mut counters, &status).unwrap();
+        assert_eq!((counters.issues, counters.warnings), (issues, warnings));
+    }
+}
