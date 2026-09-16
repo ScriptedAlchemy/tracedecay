@@ -1514,12 +1514,23 @@ impl LatestCodeTextGenerationV1 {
     }
 
     pub(super) fn text_projection_needs_work(&self) -> bool {
-        !self.text_projection_failed.load(Ordering::Acquire)
-            && (!self.query_owners_are_ready()
-                || !matches!(
-                    &*self.text_projection_build.lock_slot(),
-                    CodeTextProjectionSlotV1::Idle
-                ))
+        if self.text_projection_failed.load(Ordering::Acquire) {
+            return false;
+        }
+        if !self.query_owners_are_ready() {
+            return true;
+        }
+        // A read probe must not queue behind an advance: a wake holds the
+        // slot lock for its whole bounded slice, and a clone-fingerprint
+        // backfill slice over a large sealed source runs for seconds. A
+        // contended slot is by definition work in progress.
+        match self.text_projection_build.slot.try_lock() {
+            Ok(slot) => !matches!(&*slot, CodeTextProjectionSlotV1::Idle),
+            Err(std::sync::TryLockError::WouldBlock) => true,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                !matches!(&*poisoned.into_inner(), CodeTextProjectionSlotV1::Idle)
+            }
+        }
     }
 
     pub(super) fn clone_index_status(
@@ -1598,7 +1609,27 @@ impl LatestCodeTextGenerationV1 {
     }
 
     fn clone_successor_progress(&self) -> Option<CloneSuccessorProgressV1> {
-        let slot = self.text_projection_build.lock_slot();
+        // A status read must not queue behind a backfill slice, which holds
+        // the slot for seconds on a large sealed source. A contended slot is
+        // a successor in flight whose exact cursor this sample cannot read:
+        // report it as building from the admission artifact's page count
+        // rather than as absent, which would render the clone index ready.
+        let slot = match self.text_projection_build.slot.try_lock() {
+            Ok(slot) => slot,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                let owners = match self.query_owner_readiness() {
+                    CodeTextQueryOwnerReadinessV1::Ready(owners) => owners,
+                    CodeTextQueryOwnerReadinessV1::Pending
+                    | CodeTextQueryOwnerReadinessV1::Invalid => return None,
+                };
+                return Some(CloneSuccessorProgressV1 {
+                    completed_source_pages: 0,
+                    total_source_pages: owners.hydration.verified_artifact().page_count(),
+                    bytes_on_disk: None,
+                });
+            }
+        };
         match &*slot {
             CodeTextProjectionSlotV1::CloneSuccessorPending => {
                 let owners = match self.query_owner_readiness() {
