@@ -634,8 +634,9 @@ impl McpServer {
             // An accepted admission means the paths really entered a mounted
             // worktree's incremental queue — the exact moment indexing work is
             // created for this project, and the only condition worth lighting.
-            if sink(root.clone(), event.rel_paths.clone()).await
-                == super::CodeIndexAdmission::Accepted
+            if sink(root.clone(), event.rel_paths.clone())
+                .await
+                .is_queued()
                 && let Some(activity_db) = dispatch_server.project_session_db.as_deref()
             {
                 tracedecay_session_memory::event_lane::publish(

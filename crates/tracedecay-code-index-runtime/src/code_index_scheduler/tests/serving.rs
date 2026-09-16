@@ -6102,7 +6102,10 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .last_reconciled_at_micros();
     assert!(
-        registry.notify_hook_overflow(fixture.path()).await,
+        matches!(
+            registry.notify_hook_overflow(fixture.path()).await,
+            super::super::CodeIndexDemandAdmissionV1::Queued
+        ),
         "mounted graph-off worktree accepts the overflow reconcile"
     );
 

@@ -35,7 +35,10 @@ async fn unchanged_reconcile_does_not_reactivate_the_serving_generation() {
     // still reach its Noop receipt by retaining the already-serving graph.
     super::super::graph_activation::set_injected_activation_failures(&worktree_id, usize::MAX);
     assert!(
-        registry.notify_hook_overflow(fixture.path()).await,
+        matches!(
+            registry.notify_hook_overflow(fixture.path()).await,
+            super::super::CodeIndexDemandAdmissionV1::Queued
+        ),
         "mounted worktree accepts an unchanged reconcile"
     );
     drop(admission);

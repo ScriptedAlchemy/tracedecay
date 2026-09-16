@@ -224,6 +224,17 @@ impl HostAdmissionOutcome {
         )
     }
 
+    /// Terminal, non-retryable unavailability that requires an explicit reset
+    /// or remount before the route can accept work again.
+    ///
+    /// Distinct from [`Self::degraded`]: hosts must not treat this as soft
+    /// capacity pressure, and distinct from [`Self::retained_unavailable`]
+    /// which stays retryable.
+    #[hotpath::skip]
+    pub const fn terminal_unavailable(reason_code: &'static str) -> Self {
+        Self::new(HostAdmissionStatus::Unavailable, false, Some(reason_code))
+    }
+
     #[hotpath::skip]
     pub const fn durable_payload_unsupported_version() -> Self {
         Self::retained_unavailable("host_event_payload_unsupported_version")

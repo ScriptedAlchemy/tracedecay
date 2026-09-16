@@ -118,9 +118,12 @@ async fn cold_read_wakes_do_not_cancel_an_in_flight_reconcile_snapshot() {
 
     let invalidation_control = DaemonCodeIndexControlV1::new(epoch, shutting_down);
     assert!(
-        registry
-            .notify_hook_paths(&project, &["src/main.rs".to_owned()])
-            .await,
+        matches!(
+            registry
+                .notify_hook_paths(&project, &["src/main.rs".to_owned()])
+                .await,
+            super::CodeIndexDemandAdmissionV1::Queued
+        ),
         "a real source hint reaches the mounted scheduler"
     );
     assert!(

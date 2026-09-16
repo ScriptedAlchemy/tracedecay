@@ -807,6 +807,7 @@ mod tests {
                 tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1 {
                     reason: "code text artifacts root is not owner-private (mode 775, need 700)"
                         .to_owned(),
+                    blocked_reason: None,
                     remediation: "restore owner-only access".to_owned(),
                     parked_at_micros: 42,
                     observed_passes: 3,
@@ -861,6 +862,7 @@ mod tests {
             parked: Some(
                 tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1 {
                     reason: "code text artifacts root is not owner-private".to_owned(),
+                    blocked_reason: None,
                     remediation: "restore owner-only access".to_owned(),
                     parked_at_micros: 42,
                     observed_passes: 1,
