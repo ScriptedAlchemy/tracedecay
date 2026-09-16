@@ -279,19 +279,22 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
   let readabilityFoldedRegions = 0;
   for (const [depth, band] of byBand) {
     const inBand = [...band].sort((a, b) => a.cluster.order - b.cluster.order);
-    const bandCapacity = maxRegionsWithoutOverlap(
-      usableWidth,
-      inBand.map((draft) => labelOf(draft.cluster.directory)),
-      inBand.map((draft) => ({
-        fileCount: draft.cluster.file_count,
-        density:
-          draft.cluster.file_count > 0
-            ? draft.cluster.internal_edges / draft.cluster.file_count
-            : 0,
-      })),
-    );
-    readableByBand.set(depth, inBand.slice(0, bandCapacity));
-    readabilityFoldedRegions += Math.max(0, inBand.length - bandCapacity);
+    let capacity = inBand.length;
+    let retained = 0;
+    for (const { cluster } of inBand) {
+      capacity = Math.min(capacity, maxRegionsWithoutOverlap(
+        usableWidth,
+        [labelOf(cluster.directory)],
+        [{
+          fileCount: cluster.file_count,
+          density: cluster.file_count > 0 ? cluster.internal_edges / cluster.file_count : 0,
+        }],
+      ));
+      if (retained + 1 > capacity) break;
+      retained += 1;
+    }
+    readableByBand.set(depth, inBand.slice(0, retained));
+    readabilityFoldedRegions += inBand.length - retained;
   }
   const { drawnByBand, capFoldedRegions } = applyGlobalDrawCap(readableByBand);
   const widestBand = [...drawnByBand.values()].reduce((max, band) => Math.max(max, band.length), 1);

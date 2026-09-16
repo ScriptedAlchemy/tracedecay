@@ -267,7 +267,7 @@ function freshnessPollIntervalMs(
   // Quiet-active fallback. code_index_activity is hook admission, not scheduler
   // resume. Freshness samples peaked at 95ms; 4s detects a new progress stamp
   // without 1 Hz on a wedged build. Terminal and idle stay at 30s.
-  if (hasQuietActiveBuild(result)) return QUIET_ACTIVE_POLL_MS;
+  if (allActiveBuildsAreQuiet(result)) return QUIET_ACTIVE_POLL_MS;
   return ACTIVE_POLL_MS;
 }
 
@@ -283,13 +283,13 @@ function worktreeHasActiveBuild(worktree: CodeIndexWorktreeFreshnessV1): boolean
   return true;
 }
 
-function hasQuietActiveBuild(
+function allActiveBuildsAreQuiet(
   result: EnvelopeResult<CodeIndexFreshnessPayloadV1> | undefined,
 ): boolean {
   if (result?.outcome !== 'envelope') return false;
   const observedAt = result.envelope.time.observation_time_micros;
-  return result.envelope.payload.worktrees.some((worktree) => {
-    if (!worktreeHasActiveBuild(worktree)) return false;
+  return result.envelope.payload.worktrees.every((worktree) => {
+    if (!worktreeHasActiveBuild(worktree)) return true;
     const progress = worktree.progress;
     if (progress == null) return false;
     return observedAt - progress.last_progress_micros >= QUIET_AFTER_SECONDS * 1_000_000;

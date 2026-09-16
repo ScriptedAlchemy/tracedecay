@@ -536,6 +536,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 let mut reconcile_pass = Some(super::super::ReconcilePassGuard::enter(
                     &worker_reconcile_in_progress,
                 ));
+                let mut clone_backfill_waiting_for_source = false;
                 let mut text_generation = worker_text_generation
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -601,6 +602,8 @@ impl CodeIndexSchedulerRegistryV1 {
                         });
                     let source_current = worker_source_freshness
                         .ready_without_stat(&worker_project_root, &worker_shutting_down);
+                    clone_backfill_waiting_for_source =
+                        owners_ready && serving_matches_text && !source_current;
                     let drive_retained = !owners_ready || (serving_matches_text && source_current);
                     if drive_retained {
                         // The retained owner projects on its own task, exactly as
@@ -2020,6 +2023,12 @@ impl CodeIndexSchedulerRegistryV1 {
                             .ready_without_stat(&worker_project_root, &worker_shutting_down)
                     {
                         worker_serving_generation_changed.send_replace(());
+                        // The retained slice was checked before reconciliation
+                        // renewed this proof. Preserve its wake now that source
+                        // is current, without requiring another query arrival.
+                        if clone_backfill_waiting_for_source {
+                            Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
+                        }
                     }
                 } else {
                     // Surface bounded non-terminal failure without new project-path data.

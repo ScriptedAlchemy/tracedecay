@@ -15,7 +15,22 @@ use tracedecay_domain::research::DomainError;
 /// Stable reason codes for non-canonical chunk / increment failures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum NonCanonicalReasonCodeV1 {
-    IdentityField,
+    Empty,
+    DomainNonCanonical,
+    DuplicateId,
+    UnknownReference,
+    SnapshotMismatch,
+    UnsafeText,
+    InvalidRange,
+    InvalidConfidence,
+    ActivityFacetOnActivitySubject,
+    SelfSupersession,
+    AuthorshipWithoutProviderLinkage,
+    InvalidTimeInterval,
+    InvalidRedactionCounts,
+    NonCertainDeclaration,
+    DigestMismatch,
+    CanonicalSerialization,
     IdentityValidation,
     DocumentChunkMembershipMismatch,
     ExactAuthorityMismatch,
@@ -68,7 +83,22 @@ pub enum NonCanonicalReasonCodeV1 {
 impl NonCanonicalReasonCodeV1 {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::IdentityField => "identity_field",
+            Self::Empty => "empty",
+            Self::DomainNonCanonical => "domain_non_canonical",
+            Self::DuplicateId => "duplicate_id",
+            Self::UnknownReference => "unknown_reference",
+            Self::SnapshotMismatch => "snapshot_mismatch",
+            Self::UnsafeText => "unsafe_text",
+            Self::InvalidRange => "invalid_range",
+            Self::InvalidConfidence => "invalid_confidence",
+            Self::ActivityFacetOnActivitySubject => "activity_facet_on_activity_subject",
+            Self::SelfSupersession => "self_supersession",
+            Self::AuthorshipWithoutProviderLinkage => "authorship_without_provider_linkage",
+            Self::InvalidTimeInterval => "invalid_time_interval",
+            Self::InvalidRedactionCounts => "invalid_redaction_counts",
+            Self::NonCertainDeclaration => "non_certain_declaration",
+            Self::DigestMismatch => "digest_mismatch",
+            Self::CanonicalSerialization => "canonical_serialization",
             Self::IdentityValidation => "identity_validation",
             Self::DocumentChunkMembershipMismatch => "document_chunk_membership_mismatch",
             Self::ExactAuthorityMismatch => "exact_authority_mismatch",
@@ -197,21 +227,53 @@ impl NonCanonicalCauseV1 {
     }
 
     pub fn from_domain(error: DomainError) -> Self {
-        let field = match &error {
-            DomainError::Empty { field }
-            | DomainError::NonCanonical { field }
-            | DomainError::DuplicateId { field }
-            | DomainError::UnknownReference { field }
-            | DomainError::SnapshotMismatch { field }
-            | DomainError::UnsafeText { field }
-            | DomainError::InvalidRange { field } => Some(*field),
-            _ => None,
-        };
-        match field {
-            Some(field) => Self::new(NonCanonicalReasonCodeV1::IdentityField)
+        match error {
+            DomainError::Empty { field } => Self::new(NonCanonicalReasonCodeV1::Empty)
                 .with(NonCanonicalDetailKeyV1::Field, field),
-            None => Self::new(NonCanonicalReasonCodeV1::IdentityValidation)
-                .with(NonCanonicalDetailKeyV1::Detail, error.to_string()),
+            DomainError::NonCanonical { field } => {
+                Self::new(NonCanonicalReasonCodeV1::DomainNonCanonical)
+                    .with(NonCanonicalDetailKeyV1::Field, field)
+            }
+            DomainError::DuplicateId { field } => Self::new(NonCanonicalReasonCodeV1::DuplicateId)
+                .with(NonCanonicalDetailKeyV1::Field, field),
+            DomainError::UnknownReference { field } => {
+                Self::new(NonCanonicalReasonCodeV1::UnknownReference)
+                    .with(NonCanonicalDetailKeyV1::Field, field)
+            }
+            DomainError::SnapshotMismatch { field } => {
+                Self::new(NonCanonicalReasonCodeV1::SnapshotMismatch)
+                    .with(NonCanonicalDetailKeyV1::Field, field)
+            }
+            DomainError::UnsafeText { field } => Self::new(NonCanonicalReasonCodeV1::UnsafeText)
+                .with(NonCanonicalDetailKeyV1::Field, field),
+            DomainError::InvalidRange { field } => {
+                Self::new(NonCanonicalReasonCodeV1::InvalidRange)
+                    .with(NonCanonicalDetailKeyV1::Field, field)
+            }
+            DomainError::InvalidConfidence => {
+                Self::new(NonCanonicalReasonCodeV1::InvalidConfidence)
+            }
+            DomainError::ActivityFacetOnActivitySubject => {
+                Self::new(NonCanonicalReasonCodeV1::ActivityFacetOnActivitySubject)
+            }
+            DomainError::SelfSupersession => Self::new(NonCanonicalReasonCodeV1::SelfSupersession),
+            DomainError::AuthorshipWithoutProviderLinkage => {
+                Self::new(NonCanonicalReasonCodeV1::AuthorshipWithoutProviderLinkage)
+            }
+            DomainError::InvalidTimeInterval => {
+                Self::new(NonCanonicalReasonCodeV1::InvalidTimeInterval)
+            }
+            DomainError::InvalidRedactionCounts => {
+                Self::new(NonCanonicalReasonCodeV1::InvalidRedactionCounts)
+            }
+            DomainError::NonCertainDeclaration => {
+                Self::new(NonCanonicalReasonCodeV1::NonCertainDeclaration)
+            }
+            DomainError::DigestMismatch => Self::new(NonCanonicalReasonCodeV1::DigestMismatch),
+            DomainError::CanonicalSerialization(detail) => {
+                Self::new(NonCanonicalReasonCodeV1::CanonicalSerialization)
+                    .with(NonCanonicalDetailKeyV1::Detail, detail)
+            }
         }
     }
 }
@@ -246,4 +308,123 @@ pub fn noncanonical_detail(
     error: impl fmt::Display,
 ) -> NonCanonicalCauseV1 {
     NonCanonicalCauseV1::new(reason_code).with(NonCanonicalDetailKeyV1::Detail, error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DomainError, NonCanonicalCauseV1, NonCanonicalDetailKeyV1};
+
+    #[test]
+    fn domain_causes_preserve_discriminants_and_structured_details() {
+        for (error, expected, field, detail) in [
+            (
+                DomainError::Empty { field: "subject" },
+                "empty",
+                Some("subject"),
+                None,
+            ),
+            (
+                DomainError::NonCanonical { field: "subject" },
+                "domain_non_canonical",
+                Some("subject"),
+                None,
+            ),
+            (
+                DomainError::DuplicateId { field: "subject" },
+                "duplicate_id",
+                Some("subject"),
+                None,
+            ),
+            (
+                DomainError::UnknownReference { field: "subject" },
+                "unknown_reference",
+                Some("subject"),
+                None,
+            ),
+            (
+                DomainError::SnapshotMismatch { field: "subject" },
+                "snapshot_mismatch",
+                Some("subject"),
+                None,
+            ),
+            (
+                DomainError::UnsafeText { field: "subject" },
+                "unsafe_text",
+                Some("subject"),
+                None,
+            ),
+            (
+                DomainError::InvalidRange { field: "subject" },
+                "invalid_range",
+                Some("subject"),
+                None,
+            ),
+            (
+                DomainError::InvalidConfidence,
+                "invalid_confidence",
+                None,
+                None,
+            ),
+            (
+                DomainError::ActivityFacetOnActivitySubject,
+                "activity_facet_on_activity_subject",
+                None,
+                None,
+            ),
+            (
+                DomainError::SelfSupersession,
+                "self_supersession",
+                None,
+                None,
+            ),
+            (
+                DomainError::AuthorshipWithoutProviderLinkage,
+                "authorship_without_provider_linkage",
+                None,
+                None,
+            ),
+            (
+                DomainError::InvalidTimeInterval,
+                "invalid_time_interval",
+                None,
+                None,
+            ),
+            (
+                DomainError::InvalidRedactionCounts,
+                "invalid_redaction_counts",
+                None,
+                None,
+            ),
+            (
+                DomainError::NonCertainDeclaration,
+                "non_certain_declaration",
+                None,
+                None,
+            ),
+            (DomainError::DigestMismatch, "digest_mismatch", None, None),
+            (
+                DomainError::CanonicalSerialization("encoding failed".to_owned()),
+                "canonical_serialization",
+                None,
+                Some("encoding failed"),
+            ),
+        ] {
+            let cause = NonCanonicalCauseV1::from_domain(error);
+            assert_eq!(cause.reason_code().as_str(), expected);
+            assert_eq!(
+                cause
+                    .details()
+                    .get(&NonCanonicalDetailKeyV1::Field)
+                    .map(String::as_str),
+                field
+            );
+            assert_eq!(
+                cause
+                    .details()
+                    .get(&NonCanonicalDetailKeyV1::Detail)
+                    .map(String::as_str),
+                detail
+            );
+        }
+    }
 }

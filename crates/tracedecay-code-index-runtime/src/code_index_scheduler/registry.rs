@@ -2570,34 +2570,6 @@ impl CodeIndexSchedulerRegistryV1 {
         self.mounted.lock().await.contains_key(&project_root)
     }
 
-    fn publication_authority_requires_reset(worktree: &MountedCodeIndexWorktreeV1) -> bool {
-        let progress = worktree
-            .build_progress
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        matches!(
-            progress
-                .snapshot()
-                .as_deref()
-                .and_then(|snapshot| snapshot.blocked_reason),
-            Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt)
-        )
-    }
-
-    fn publication_authority_corrupt_admission(
-        worktree: &MountedCodeIndexWorktreeV1,
-    ) -> CodeIndexReconcileAdmissionV1 {
-        worktree
-            .convergence_park
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-            .map_or(
-                CodeIndexReconcileAdmissionV1::Unavailable,
-                CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt,
-            )
-    }
-
     fn publication_authority_reset(
         worktree: &MountedCodeIndexWorktreeV1,
     ) -> Option<CodeIndexConvergenceParkedV1> {
