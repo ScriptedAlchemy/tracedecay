@@ -782,6 +782,86 @@ fn retired_fence_cancels_a_generation_seal_between_segments() {
 }
 
 #[test]
+fn publishing_many_new_segments_syncs_the_segments_directory_once() {
+    // Eight distinct files seal to eight distinct new segment files. POSIX
+    // durability only requires the containing directory to be fsynced once
+    // after all of those segments are renamed into place, so a healthy
+    // publish must not pay for one directory fsync per segment.
+    let sources = (0..8)
+        .map(|file| {
+            (
+                format!("src/module_{file}.rs"),
+                format!("pub fn sealed_{file}() -> u32 {{ {file} }}\n"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(
+        &sources
+            .iter()
+            .map(|(path, source)| (path.as_str(), source.as_str()))
+            .collect::<Vec<_>>(),
+    );
+    let source_store = TempDir::new().expect("source store root");
+    let generation = {
+        let mut scheduler = scheduler(
+            &fixture,
+            source_store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(
+            scheduler
+                .reconcile_now()
+                .expect("build multi-file generation"),
+        );
+        Arc::clone(
+            &scheduler
+                .latest_complete_already_decoded()
+                .expect("multi-file generation remains decoded")
+                .generation,
+        )
+    };
+    assert!(
+        generation.snapshot().files.len() >= 8,
+        "fixture must seal one segment per file"
+    );
+
+    let target_store = TempDir::new().expect("target publication store root");
+    let published_segments = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let segment_observer = Arc::clone(&published_segments);
+    let directory_syncs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let sync_observer = Arc::clone(&directory_syncs);
+    let mut publication = super::super::DaemonCodeIndexPublicationStoreV1::new(
+        target_store.path(),
+        fixture.path(),
+        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+            .expect("sanitizer revision"),
+    )
+    .expect("open target publication store")
+    .with_seal_segment_observer_for_test(Arc::new(move || {
+        segment_observer.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }))
+    .with_segments_dir_sync_observer_for_test(Arc::new(move || {
+        sync_observer.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }));
+
+    publication
+        .publish_atomically(&generation.sealed_scope(), None, Arc::clone(&generation))
+        .expect("publish a fresh multi-segment generation");
+
+    let segment_count = published_segments.load(std::sync::atomic::Ordering::Acquire);
+    assert!(
+        segment_count >= 8,
+        "expected at least 8 newly durable segments, saw {segment_count}"
+    );
+    assert_eq!(
+        directory_syncs.load(std::sync::atomic::Ordering::Acquire),
+        1,
+        "one publish writing {segment_count} new segments must sync the segments \
+         directory exactly once, not once per segment"
+    );
+}
+
+#[test]
 fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
     let source = (0..1_600).fold(String::new(), |mut source, index| {
         writeln!(
