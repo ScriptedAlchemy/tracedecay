@@ -15,8 +15,10 @@
  * A reference that moved past its expected revision answers `stale` with
  * `selected_revision_changed`, and this view says exactly that instead of
  * comparing whatever the branch points at now. Filters are the route's own
- * `file` and `kind` parameters; the counts printed are of the filtered union
- * the daemon returned, not of the repository.
+ * `file` and `kind` parameters — `file` matches an exact logical path or a
+ * path prefix (`code_index_branch_diff.rs`), never a substring — and the
+ * counts printed are of the filtered union the daemon returned, not of the
+ * repository.
  */
 import { useState, type FormEvent } from 'react';
 import {
@@ -141,10 +143,10 @@ function SelectionForm({
       />
       <div className="flex flex-wrap items-end gap-2 md:col-span-2">
         <Field
-          label="File filter"
+          label="File prefix"
           value={draft.file}
           onChange={(file) => setDraft({ ...draft, file })}
-          placeholder="path substring"
+          placeholder="path or path prefix"
         />
         <Field
           label="Kind filter"
@@ -365,14 +367,8 @@ function FileRegions({ layout }: { layout: RevisionPairUnionLayoutV1 }) {
   return (
     <ol className="flex flex-col gap-1.5" aria-label="File regions in identity order">
       {groups.map((group) => (
-        <li key={group.fileIdentity} data-file-identity={group.fileIdentity}>
-          {group.file ? (
-            <FileRegionRow region={group.file} />
-          ) : (
-            <p className="td-legend px-2 py-1 normal-case tracking-normal text-text-muted">
-              symbols whose file region is outside the active filter
-            </p>
-          )}
+        <li key={group.file.file_identity} data-file-identity={group.file.file_identity}>
+          <FileRegionRow region={group.file} />
           {group.symbols.length > 0 ? (
             <ol className="flex flex-col border-l border-edge-subtle pl-2">
               {group.symbols.map((symbol) => (
