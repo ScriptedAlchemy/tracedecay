@@ -196,7 +196,7 @@ pub fn is_configuration_key_token(value: &str) -> bool {
 pub fn is_tool_name_token(value: &str) -> bool {
     matches!(
         value.to_ascii_lowercase().as_str(),
-        "cargo" | "rustc" | "tracedecay" | "pytest" | "kubectl" | "fastembed" | "ast-grep"
+        "cargo" | "rustc" | "tracedecay" | "pytest" | "kubectl" | "ast-grep"
     )
 }
 
