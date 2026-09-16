@@ -353,6 +353,57 @@ describe('Code index freshness', () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
+  it('keeps polling an unchanged active build each second and reports how long it has been quiet', async () => {
+    vi.useFakeTimers();
+    // A stuck scheduler: same epoch and last-progress stamp on every read, and
+    // the daemon's observation clock ten minutes past the last progress.
+    const stalled = {
+      ...envelope('loading', {
+        worktrees: [
+          {
+            ...worktree(),
+            latest_generation_id: null,
+            snapshot_content_identity: null,
+            sealed_at_micros: null,
+            staleness_state: 'indexing',
+            progress: { ...progress(), phase: 'source_scan', completed_files: 0 },
+          },
+        ],
+        note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+      }),
+      time: { valid_time_micros: null, observation_time_micros: NOW_MICROS + 600_000_000 },
+    };
+    const fetch = vi.fn(async () => new Response(JSON.stringify(stalled), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getByText('0 / 500 files')).toBeTruthy();
+    expect(screen.getByText('no progress for')).toBeTruthy();
+    expect(screen.getByText('10m')).toBeTruthy();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(4);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(5);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(6);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(7);
+    expect(screen.getByText('no progress for')).toBeTruthy();
+    expect(screen.getByText('10m')).toBeTruthy();
+  });
+
   it('keeps polling ready progress until the freshness envelope is ready', async () => {
     vi.useFakeTimers();
     const readyProgress = {

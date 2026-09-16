@@ -39,13 +39,17 @@ import { elideStart, formatCount, formatMicrosUtc, splitBytes } from '../../ui/f
 
 type CodeIndexBuildProgress = NonNullable<CodeIndexWorktreeFreshnessV1['progress']>;
 
+const ACTIVE_POLL_MS = 1_000;
+const IDLE_POLL_MS = 30_000;
+const STALLED_AFTER_SECONDS = 30;
+
 export function IndexFreshness() {
   const scope = useScope((s) => s.scope);
   const freshness = useQuery({
     queryKey: ['code-index', 'freshness', scopeKey(scope)],
     queryFn: () =>
       fetchEnvelope(scopedUrl(scope, '/api/code-index/freshness'), CodeIndexFreshnessPayloadV1Schema),
-    refetchInterval: (query) => (hasActiveBuild(query.state.data) ? 1_000 : 30_000),
+    refetchInterval: (query) => (hasActiveBuild(query.state.data) ? ACTIVE_POLL_MS : IDLE_POLL_MS),
   });
 
   return (
@@ -90,6 +94,7 @@ function FreshnessReading({ result }: { result: EnvelopeResult<CodeIndexFreshnes
         <WorktreeReading
           key={worktree.worktree_root}
           progress={latestProgress.get(worktree.worktree_root)}
+          observedAtMicros={envelope.time.observation_time_micros}
           worktree={worktree}
         />
       ))}
@@ -112,9 +117,11 @@ function FreshnessReading({ result }: { result: EnvelopeResult<CodeIndexFreshnes
 function WorktreeReading({
   worktree,
   progress,
+  observedAtMicros,
 }: {
   worktree: CodeIndexWorktreeFreshnessV1;
   progress: CodeIndexBuildProgress | undefined;
+  observedAtMicros: number;
 }) {
   return (
     <div
@@ -130,7 +137,9 @@ function WorktreeReading({
           {worktree.source_reference ?? 'not reported by the scheduler'}
         </span>
       </div>
-      {progress ? <BuildProgressReading progress={progress} /> : null}
+      {progress ? (
+        <BuildProgressReading progress={progress} observedAtMicros={observedAtMicros} />
+      ) : null}
       <dl className="flex flex-col gap-1 text-3xs leading-snug">
         <Row label="staleness">{worktree.staleness_state ?? 'not reported'}</Row>
         <Row label="coverage">{worktree.coverage}</Row>
@@ -169,10 +178,21 @@ function WorktreeReading({
 
 function BuildProgressReading({
   progress,
+  observedAtMicros,
 }: {
   progress: CodeIndexBuildProgress;
+  observedAtMicros: number;
 }) {
   const percentage = progressPercentage(progress);
+  // Both stamps are the daemon's clock, so browser skew cannot invent a stall.
+  // Said plainly once a build that is not ready has been quiet for a while: the
+  // reader sees the stall instead of a frozen percentage (measured: a wedged
+  // scheduler sat at `source_scan 0/151` for ten minutes with no other tell).
+  const quietSeconds =
+    progress.phase !== 'ready' &&
+    observedAtMicros - progress.last_progress_micros >= STALLED_AFTER_SECONDS * 1_000_000
+      ? Math.floor((observedAtMicros - progress.last_progress_micros) / 1_000_000)
+      : null;
   const hasRate =
     progress.files_per_second != null && progress.lexical_units_per_second != null;
   return (
@@ -217,6 +237,9 @@ function BuildProgressReading({
             : 'ETA unavailable'}
         </Row>
         <Row label="last progress">{formatMicros(progress.last_progress_micros)}</Row>
+        {quietSeconds !== null ? (
+          <Row label="no progress for">{formatDurationSeconds(quietSeconds)}</Row>
+        ) : null}
         <Row label="last commit">
           {progress.last_commit_latency_micros != null
             ? formatDurationMicros(progress.last_commit_latency_micros)
