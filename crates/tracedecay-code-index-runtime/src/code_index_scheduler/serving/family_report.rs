@@ -8,8 +8,11 @@ use tracedecay_contracts::retrieval::{
     RedundancyCoverageV1, RedundancyFamilyV1, RedundancyPartialReasonV1, RedundancyRankingV1,
     RedundancyResultV1, SimilarFamilyV1, SimilarMatchClassV1, SimilarOccurrenceV1,
 };
-use tracedecay_query::code_search::CodeIndexRedundancyQueryV1;
-use tracedecay_query::retrieval::lexical::{CloneArtifactCursorV1, CloneExactArtifactMemberV1};
+use tracedecay_domain::canonical_sha256;
+use tracedecay_query::code_search::{CodeIndexRedundancyQueryV1, CodeIndexRedundancyScopeV1};
+use tracedecay_query::retrieval::lexical::{
+    CloneArtifactCursorV1, CloneExactArtifactMemberV1, CodeLexicalArtifactErrorV1,
+};
 
 use super::ProductionCodeIndexQueryOwnersV1;
 use crate::query::retrieval::ports::RetrievalPortError;
@@ -21,19 +24,46 @@ impl ProductionCodeIndexQueryOwnersV1 {
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<RedundancyResultV1, RetrievalPortError> {
         let family_page_limit = request.family_limit.min(request.work_limit / 3).max(1);
+        let pull_request_scope_digest = match &request.scope {
+            CodeIndexRedundancyScopeV1::PullRequest {
+                provider,
+                pull_request_id,
+                head_commit_id,
+                changed_paths,
+            } => Some(
+                canonical_sha256(&(
+                    "tracedecay.redundancy.pull-request-scope.v1",
+                    provider,
+                    pull_request_id,
+                    head_commit_id,
+                    changed_paths,
+                ))
+                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+            ),
+            CodeIndexRedundancyScopeV1::Repository | CodeIndexRedundancyScopeV1::Path(_) => None,
+        };
+        let (path, pull_request_paths) = match &request.scope {
+            CodeIndexRedundancyScopeV1::Repository => (None, None),
+            CodeIndexRedundancyScopeV1::Path(path) => (Some(path.as_str()), None),
+            CodeIndexRedundancyScopeV1::PullRequest { changed_paths, .. } => {
+                (None, Some(changed_paths.as_slice()))
+            }
+        };
         let page = self
             .hydration
             .clone_exact_family_page(
                 &request.project_id,
                 &request.repository_id,
                 &request.match_classes,
-                request.path.as_deref(),
+                path,
+                pull_request_paths,
+                pull_request_scope_digest.as_ref(),
                 request.include_generated_paths,
                 request.cursor.as_deref(),
                 family_page_limit,
                 control,
             )
-            .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?;
+            .map_err(redundancy_artifact_error)?;
         let page_continuation = page.next_cursor.clone();
         let mut families = Vec::with_capacity(page.families.len());
         let mut examined_families = 0usize;
@@ -70,7 +100,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
             let read = self.verified_redundancy_members(
                 &source,
                 &candidate.key,
-                request.path.as_deref(),
+                path,
                 request.include_generated_paths,
                 request.member_limit.saturating_sub(1),
                 remaining_work,
@@ -98,6 +128,11 @@ impl ProductionCodeIndexQueryOwnersV1 {
                 .transpose()
                 .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?;
             let complete = read.complete && members.len() == candidate.member_count;
+            let generated_members = members
+                .iter()
+                .filter(|member| is_generated_path(&member.path))
+                .map(|member| member.symbol_occurrence_id.clone())
+                .collect();
             families.push(RedundancyFamilyV1 {
                 family: SimilarFamilyV1 {
                     match_class,
@@ -111,6 +146,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
                 },
                 total_member_count: candidate.member_count,
                 reviewable_source_bytes: candidate.reviewable_source_bytes,
+                generated_members,
             });
             if work_exhausted {
                 break;
@@ -207,6 +243,17 @@ impl ProductionCodeIndexQueryOwnersV1 {
     }
 }
 
+fn redundancy_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortError {
+    match error {
+        CodeLexicalArtifactErrorV1::Contract(message)
+            if message == "clone family cursor does not match its artifact or request" =>
+        {
+            RetrievalPortError::StaleEvidence
+        }
+        error => RetrievalPortError::AuthorityUnavailable(error.to_string()),
+    }
+}
+
 struct RedundancyMemberReadV1 {
     members: Vec<CloneExactArtifactMemberV1>,
     complete: bool,
@@ -217,16 +264,19 @@ struct RedundancyMemberReadV1 {
 
 fn report_path_matches(path: &str, scope: Option<&str>, include_generated_paths: bool) -> bool {
     tracedecay_domain::repository_path_matches_scope(path, scope)
-        && (include_generated_paths
-            || !Path::new(path).components().any(|component| {
-                matches!(
-                    component,
-                    Component::Normal(segment)
-                        if segment
-                            .to_str()
-                            .is_some_and(tracedecay_domain::is_generated_dir_segment)
-                )
-            }))
+        && (include_generated_paths || !is_generated_path(path))
+}
+
+fn is_generated_path(path: &str) -> bool {
+    Path::new(path).components().any(|component| {
+        matches!(
+            component,
+            Component::Normal(segment)
+                if segment
+                    .to_str()
+                    .is_some_and(tracedecay_domain::is_generated_dir_segment)
+        )
+    })
 }
 
 fn similar_occurrence(
@@ -278,5 +328,17 @@ fn redundancy_coverage(
             },
             None,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_generated_path;
+
+    #[test]
+    fn generated_member_labels_follow_the_canonical_path_policy() {
+        assert!(is_generated_path("vendor/generated.rs"));
+        assert!(is_generated_path("src/node_modules/generated.ts"));
+        assert!(!is_generated_path("src/generated.rs"));
     }
 }

@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 
 use tracedecay_application::advisory::GitHubReleaseReadControlV1;
 use tracedecay_application::delivery::{
-    ProjectDeliveryProviderMountGateV1, ProjectDeliveryReadOutcomeV1, ProjectDeliveryReadRequestV1,
+    ProjectDeliveryProviderMountGateV1, ProjectDeliveryReadKindV1, ProjectDeliveryReadOutcomeV1,
+    ProjectDeliveryReadRequestV1,
 };
 use tracedecay_contracts::feedback::{
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
@@ -106,6 +107,7 @@ async fn project_open_registers_the_typed_delivery_gate_without_a_github_credent
     )
     .expect("delivery read context");
     let request = ProjectDeliveryReadRequestV1 {
+        kind: ProjectDeliveryReadKindV1::Overview,
         expected_head_commit_id: CommitId::new(head_commit).expect("head commit"),
         max_pull_requests: 1,
         max_review_items: 1,

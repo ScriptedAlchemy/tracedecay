@@ -10,13 +10,14 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    CodeGenerationId, ComplexityAnalysisV1, ManifestDigest, ProjectId, RepositoryId, SourceSpan,
-    SymbolOccurrenceId, WorktreeId,
+    CodeGenerationId, CommitId, ComplexityAnalysisV1, ManifestDigest, ProjectId, ProviderId,
+    RepositoryId, SourceSpan, SymbolOccurrenceId, WorktreeId,
 };
 
 use crate::memory::{FactSearchGraphCoverageV1, FactSearchHitV1};
 
 pub const MAX_REDUNDANCY_FAMILIES_V1: u32 = 100;
+pub const MAX_REDUNDANCY_PULL_REQUEST_PATHS_V1: usize = 256;
 pub const MAX_REDUNDANCY_WORK_V1: u32 = 10_000;
 
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -184,12 +185,27 @@ pub struct PortOrderSurfaceRequestV1 {
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RedundancyScopeV1 {
+    Repository,
+    Path {
+        path: String,
+    },
+    PullRequest {
+        provider: ProviderId,
+        pull_request_id: String,
+        head_commit_id: CommitId,
+        changed_paths: Vec<String>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RedundancySurfaceRequestV1 {
     pub project_id: ProjectId,
     pub repository_id: RepositoryId,
     pub match_classes: Vec<SimilarMatchClassV1>,
-    pub path: Option<String>,
+    pub scope: RedundancyScopeV1,
     pub include_generated_paths: bool,
     pub family_limit: u32,
     pub member_limit: u32,
@@ -502,6 +518,7 @@ pub struct RedundancyFamilyV1 {
     pub family: SimilarFamilyV1,
     pub total_member_count: usize,
     pub reviewable_source_bytes: u64,
+    pub generated_members: Vec<SymbolOccurrenceId>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
