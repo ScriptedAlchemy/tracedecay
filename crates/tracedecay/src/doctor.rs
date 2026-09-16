@@ -5,7 +5,9 @@
 
 use std::path::{Path, PathBuf};
 
-use tracedecay_contracts::project_open::{ProjectOpenStatusReasonV1, ProjectOpenStatusV1};
+use tracedecay_contracts::project_open::{
+    ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
+};
 use tracedecay_contracts::storage::{
     SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStateV1,
 };
@@ -123,11 +125,11 @@ pub async fn run_doctor(
         }
         Ok(Some(status)) => {
             render_project_open_status(&mut dc, status)?;
+            render_schema_convergences(&mut dc, status)?;
             match canonical_daemon_doctor_report(status)? {
                 Some(report) => {
                     let storage_health = database_health_from_canonical_report(&report);
                     render_canonical_doctor_report(&mut dc, &report);
-                    render_schema_convergences(&mut dc, status)?;
                     storage_health
                 }
                 None => {
@@ -198,14 +200,20 @@ fn render_project_open_status(
     };
     let project_open: ProjectOpenStatusV1 = serde_json::from_value(value.clone())?;
     let message = format!(
-        "Project open: {:?} ({:?}){}",
+        "Project open: {:?} ({:?}){}{}",
         project_open.state,
         project_open.reason,
         project_open
             .retry_after_ms
-            .map_or_else(String::new, |delay| format!(", retry after {delay} ms"))
+            .map_or_else(String::new, |delay| format!(", retry after {delay} ms")),
+        project_open
+            .detail
+            .as_deref()
+            .map_or_else(String::new, |detail| format!(": {detail}")),
     );
-    if project_open.reason == ProjectOpenStatusReasonV1::UnrepairableVerdict {
+    if project_open.state == ProjectOpenStatusStateV1::Completed {
+        dc.pass(&message);
+    } else if project_open.reason == ProjectOpenStatusReasonV1::UnrepairableVerdict {
         dc.fail(&message);
     } else {
         dc.warn(&message);

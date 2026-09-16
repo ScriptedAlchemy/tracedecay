@@ -607,6 +607,13 @@ fn render_status_md(value: &Value) -> String {
                     } else {
                         md.field(k, &format!("{{{} field(s)}}", o.len()));
                     }
+                    if k == "schema_convergence"
+                        && let Some(findings) = o.get("findings").and_then(Value::as_array)
+                    {
+                        for finding in findings {
+                            md.bullet(&finding.to_string());
+                        }
+                    }
                 }
                 Value::Null => {}
             }
@@ -718,7 +725,8 @@ mod tests {
         render_status_md, schema_convergence_status,
     };
     use tracedecay_contracts::storage::{
-        SchemaConvergenceFindingV1, SchemaConvergenceStageV1, SchemaConvergenceStateV1,
+        SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStageV1,
+        SchemaConvergenceStateV1,
     };
 
     #[test]
@@ -751,7 +759,10 @@ mod tests {
                 store: "profile-sessions".to_owned(),
                 stage: SchemaConvergenceStageV1::RegisteredSchema,
                 state,
-                progress: None,
+                progress: Some(SchemaConvergenceProgressV1::Rows {
+                    done: 3,
+                    remaining: 7,
+                }),
                 started_at_micros: 42,
                 degraded_row: (state == SchemaConvergenceStateV1::Degraded)
                     .then(|| "observation_id=obs-7".to_owned()),
@@ -760,6 +771,14 @@ mod tests {
             assert_eq!(value["status"], expected);
             assert_eq!(value["findings"][0]["state"], serde_json::json!(state));
             assert_eq!(value["findings"][0]["started_at_micros"], 42);
+            let rendered = render_status_md(&serde_json::json!({"schema_convergence": value}));
+            assert!(rendered.contains(state.as_str()));
+            assert!(rendered.contains("profile-sessions"));
+            assert!(rendered.contains(r#""done":3"#));
+            assert!(rendered.contains(r#""remaining":7"#));
+            if state == SchemaConvergenceStateV1::Degraded {
+                assert!(rendered.contains("observation_id=obs-7"));
+            }
         }
     }
 
