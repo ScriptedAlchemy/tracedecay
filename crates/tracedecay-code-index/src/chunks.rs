@@ -229,15 +229,19 @@ where
     if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
         return chunks.iter().try_for_each(&operation);
     }
-    let failure = chunks
-        .par_iter()
-        .enumerate()
-        .filter_map(|(index, chunk)| {
-            admit(&mut || operation(chunk))
-                .err()
-                .map(|error| (index, error))
-        })
-        .min_by_key(|(index, _)| *index);
+    // Leaves are admitted one unit at a time on whichever worker runs them,
+    // so the caller's own unit must not be held across the join.
+    let failure = crate::parallelism::with_yielded_background_cpu_permits(|| {
+        chunks
+            .par_iter()
+            .enumerate()
+            .filter_map(|(index, chunk)| {
+                admit(&mut || operation(chunk))
+                    .err()
+                    .map(|error| (index, error))
+            })
+            .min_by_key(|(index, _)| *index)
+    });
     match failure {
         Some((_, error)) => Err(error),
         None => Ok(()),
@@ -355,10 +359,12 @@ impl ExactExtractionAuthorityV1 {
         if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
             return chunks.into_iter().map(|chunk| self.admit(chunk)).collect();
         }
-        let admitted = chunks
-            .into_par_iter()
-            .map(|chunk| crate::parallelism::with_background_cpu_permit(|| self.admit(chunk)))
-            .collect::<Vec<_>>();
+        let admitted = crate::parallelism::with_yielded_background_cpu_permits(|| {
+            chunks
+                .into_par_iter()
+                .map(|chunk| crate::parallelism::with_background_cpu_permit(|| self.admit(chunk)))
+                .collect::<Vec<_>>()
+        });
         admitted.into_iter().collect()
     }
 
