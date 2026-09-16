@@ -13,8 +13,12 @@ fn graph_handlers_that_await_query() -> &'static [&'static str] {
         "tracedecay_callees",
         "tracedecay_impact",
         "tracedecay_node",
-        "tracedecay_similar",
-        "tracedecay_redundancy",
+        // `tracedecay_similar` / `tracedecay_redundancy` are shared-code
+        // (clone-family) lanes: they bind `code_index_similar_executor` /
+        // `code_index_redundancy_executor`, never `verified_graph_query_port`.
+        // Their absent-executor refusal is covered in tracedecay-mcp graph
+        // search unit tests; listing them here falsely required empty-arg
+        // probes to reach a graph wait they never take.
         "tracedecay_rename_preview",
         "tracedecay_implementations",
         "tracedecay_callers_for",
@@ -64,6 +68,19 @@ fn graph_handlers_that_await_query() -> &'static [&'static str] {
         "tracedecay_diagnose",
         "tracedecay_run_affected_tests",
     ]
+}
+
+#[test]
+fn clone_family_tools_are_not_verified_graph_query_waiters() {
+    // Shared-code tools must not be treated as verified-graph waiters: an
+    // absent query port is not their admission gate, and empty-arg probes
+    // fail request-shape validation before any graph path runs.
+    for tool_name in ["tracedecay_similar", "tracedecay_redundancy"] {
+        assert!(
+            !graph_handlers_that_await_query().contains(&tool_name),
+            "{tool_name} binds the clone-family lane, not verified_graph_query_port"
+        );
+    }
 }
 
 fn lower_level_ports_without_query(cg: &TraceDecay) -> ToolCallRegistryOptions<'_> {
