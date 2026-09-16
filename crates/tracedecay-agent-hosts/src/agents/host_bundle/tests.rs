@@ -131,12 +131,7 @@ fn component_set(host: HostKindV1, core_bytes: &[u8], agent_bytes: &[u8]) -> Hos
         host,
         components: vec![
             component_entry(
-                component_manifest(
-                    host,
-                    HostComponentV1::Core,
-                    "plugins/core.json",
-                    core_bytes,
-                ),
+                component_manifest(host, HostComponentV1::Core, "plugins/core.json", core_bytes),
                 core_bytes,
             ),
             component_entry(
@@ -1909,10 +1904,7 @@ fn profile_owned_receipts_enumerate_only_installed_components_and_retire_backups
         lifecycle
             .path()
             .join(HOST_BUNDLE_CONTROL_DIR)
-            .join(receipt_file(
-                HostKindV1::Hermes,
-                HostComponentV1::Core
-            ))
+            .join(receipt_file(HostKindV1::Hermes, HostComponentV1::Core))
             .is_file()
     );
     assert!(
@@ -1969,10 +1961,7 @@ fn profile_owned_receipts_enumerate_only_installed_components_and_retire_backups
         HostBundleComponentDoctorStateV1::Repairable
     );
     assert_eq!(report.components[0].host, Some(HostKindV1::Hermes));
-    assert_eq!(
-        report.components[0].component,
-        Some(HostComponentV1::Core)
-    );
+    assert_eq!(report.components[0].component, Some(HostComponentV1::Core));
     let repairable = inspect_installed_host_bundle_components_at(
         artifacts.path(),
         lifecycle.path(),
@@ -2139,10 +2128,7 @@ fn receipt_doctor_classifies_missing_conflicting_and_corrupt_components() {
         artifacts: vec![HostBundleReceiptArtifactV1 {
             relative_path: "plugins/tracedecay.json".to_string(),
             artifact_digest: Sha256::digest(b"foreign").into(),
-            ownership_marker: expected_ownership_marker(
-                HostKindV1::Hermes,
-                HostComponentV1::Core,
-            ),
+            ownership_marker: expected_ownership_marker(HostKindV1::Hermes, HostComponentV1::Core),
         }],
         rollback_boundary: HostBundleRollbackBoundaryV1::Passed,
         rollback_history: Vec::new(),
@@ -2150,10 +2136,7 @@ fn receipt_doctor_classifies_missing_conflicting_and_corrupt_components() {
     let foreign_receipt_path = lifecycle
         .path()
         .join(HOST_BUNDLE_CONTROL_DIR)
-        .join(receipt_file(
-            HostKindV1::Hermes,
-            HostComponentV1::Core,
-        ));
+        .join(receipt_file(HostKindV1::Hermes, HostComponentV1::Core));
     std::fs::write(
         &foreign_receipt_path,
         serde_json::to_vec(&foreign_receipt).unwrap(),
@@ -2179,10 +2162,7 @@ fn receipt_doctor_classifies_missing_conflicting_and_corrupt_components() {
     let receipt_path = lifecycle
         .path()
         .join(HOST_BUNDLE_CONTROL_DIR)
-        .join(receipt_file(
-            HostKindV1::OpenCode,
-            HostComponentV1::Core,
-        ));
+        .join(receipt_file(HostKindV1::OpenCode, HostComponentV1::Core));
     std::fs::write(receipt_path, b"{").unwrap();
     let report = inspect_installed_host_bundle_components_at(
         artifacts.path(),
@@ -2439,10 +2419,7 @@ fn doctor_surfaces_restart_safe_feedback_rollback_state() {
     .unwrap();
     assert_eq!(report.components.len(), 1);
     assert_eq!(report.components[0].host, Some(HostKindV1::KimiCode));
-    assert_eq!(
-        report.components[0].component,
-        Some(HostComponentV1::Core)
-    );
+    assert_eq!(report.components[0].component, Some(HostComponentV1::Core));
     assert_eq!(
         report.components[0].state,
         HostBundleComponentDoctorStateV1::Repairable

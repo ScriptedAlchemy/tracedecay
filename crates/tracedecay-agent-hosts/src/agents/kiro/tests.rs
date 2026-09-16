@@ -318,7 +318,7 @@ fn healthcheck_advises_shipped_heading_steering_as_retired() {
 #[cfg(unix)]
 #[test]
 fn global_activate_converges_legacy_steering_but_doctor_still_advises() {
-    use crate::agents::host_bundle::HostBundleComponentV1;
+    use crate::agents::host_bundle::HostComponentV1;
     use crate::agents::{AgentIntegration, InstallContext};
 
     let home = tempfile::tempdir().unwrap();
@@ -360,7 +360,7 @@ fn global_activate_converges_legacy_steering_but_doctor_still_advises() {
 
     KiroIntegration
         .activate_deployed_host_component_registration(
-            &[HostBundleComponentV1::ContextMcp],
+            &[HostComponentV1::ContextMcp],
             &InstallContext {
                 home: home.path().to_path_buf(),
                 tracedecay_bin: "/bin/tracedecay".to_string(),
@@ -405,7 +405,7 @@ fn global_activate_converges_legacy_steering_but_doctor_still_advises() {
 #[cfg(unix)]
 #[test]
 fn global_activate_does_not_create_missing_legacy_steering() {
-    use crate::agents::host_bundle::HostBundleComponentV1;
+    use crate::agents::host_bundle::HostComponentV1;
     use crate::agents::{AgentIntegration, InstallContext};
 
     let home = tempfile::tempdir().unwrap();
@@ -420,7 +420,7 @@ fn global_activate_does_not_create_missing_legacy_steering() {
 
     KiroIntegration
         .activate_deployed_host_component_registration(
-            &[HostBundleComponentV1::ContextMcp],
+            &[HostComponentV1::ContextMcp],
             &InstallContext {
                 home: home.path().to_path_buf(),
                 tracedecay_bin: "/bin/tracedecay".to_string(),
@@ -803,9 +803,7 @@ fn kiro_component_request(
         lifecycle: crate::agents::host_bundle::HostComponentSetLifecycleRequestV1 {
             operation,
             expected_host: crate::agents::host_bundle::HostKindV1::Kiro,
-            expected_components: vec![
-                crate::agents::host_bundle::HostComponentV1::ContextMcp,
-            ],
+            expected_components: vec![crate::agents::host_bundle::HostComponentV1::ContextMcp],
             explicit_confirmation: true,
             hermes_profile_bindings: 0,
             explicit_adoption: false,

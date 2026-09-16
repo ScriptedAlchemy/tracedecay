@@ -194,7 +194,7 @@ impl AgentIntegration for KimiIntegration {
         component: super::host_bundle::HostComponentV1,
         ctx: &HealthcheckContext,
     ) -> super::host_bundle::HostBundleRegistrationStateV1 {
-        use super::host_bundle::{HostComponentV1, HostBundleRegistrationStateV1 as State};
+        use super::host_bundle::{HostBundleRegistrationStateV1 as State, HostComponentV1};
 
         let code_home = kimi_code_home(&ctx.home);
         let installed_path = kimi_installed_json_path(&code_home);
@@ -788,8 +788,9 @@ mod tests {
     #[test]
     fn catalog_install_activates_user_mcp_after_native_plugin_is_ready() {
         use crate::agents::host_bundle::{
-            HostComponentV1, HostBundleLifecycleOpV1, HostComponentSetExecutionRequestV1,
-            HostComponentSetLifecycleRequestV1, HostComponentSetRegistrationV1, HostKindV1,
+            HostBundleLifecycleOpV1, HostComponentSetExecutionRequestV1,
+            HostComponentSetLifecycleRequestV1, HostComponentSetRegistrationV1, HostComponentV1,
+            HostKindV1,
         };
 
         let home = tempfile::tempdir().unwrap();

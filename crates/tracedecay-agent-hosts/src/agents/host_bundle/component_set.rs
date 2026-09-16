@@ -30,12 +30,11 @@ use super::writer::{
     regular_file_exists, remove_if_digest_matches, sync_cap_dir,
 };
 use super::{
-    HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HostComponentV1, HostBundleError,
-    HostBundleInstallReceiptV1, HostBundleJournalEntryV1, HostBundleLifecycleOpV1,
-    HostBundleManifestV1, HostBundleReceiptArtifactV1, HostBundleRollbackBoundaryV1,
-    HostBundleVerificationAdapterV1, HostComponentSetJournalComponentV1,
-    HostComponentSetJournalStateV1, HostComponentSetJournalV1, HostComponentSetReceiptV1,
-    HostKindV1,
+    HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HostBundleError, HostBundleInstallReceiptV1,
+    HostBundleJournalEntryV1, HostBundleLifecycleOpV1, HostBundleManifestV1,
+    HostBundleReceiptArtifactV1, HostBundleRollbackBoundaryV1, HostBundleVerificationAdapterV1,
+    HostComponentSetJournalComponentV1, HostComponentSetJournalStateV1, HostComponentSetJournalV1,
+    HostComponentSetReceiptV1, HostComponentV1, HostKindV1,
 };
 
 /// Public component-set lifecycle façade over the capability-rooted writer.

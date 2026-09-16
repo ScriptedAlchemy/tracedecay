@@ -20,7 +20,7 @@ use serde_json::json;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::host_bundle::{HostComponentV1, HostBundleRegistrationStateV1};
+use super::host_bundle::{HostBundleRegistrationStateV1, HostComponentV1};
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
     McpDoctorLabels, TextFileMutation, config_backup_path, load_jsonc_file,
@@ -375,7 +375,7 @@ fn uninstall_mcp_if_selected(components: &[HostComponentV1], config: &Path) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::host_bundle::{HostComponentV1, HostBundleRegistrationStateV1};
+    use crate::agents::host_bundle::{HostBundleRegistrationStateV1, HostComponentV1};
 
     fn install_context(home: &Path, binary: &str) -> InstallContext {
         InstallContext {

@@ -41,9 +41,7 @@ use tracedecay_domain::{
     LanguageDescriptorRevision, LanguageId, LocatorDigest, ManifestDigest, ProjectId, ProviderId,
     RefId, RepositoryId, RetrievalAnchorId, SourceSpan, UtcMicros, WorktreeId,
 };
-use tracedecay_hooks::{
-    HookFeedbackDeliveryOutcomeV1, HookFeedbackRollbackSwitchV1,
-};
+use tracedecay_hooks::{HookFeedbackDeliveryOutcomeV1, HookFeedbackRollbackSwitchV1};
 use tracedecay_lsp::{
     AdmittedRoot, CanonicalContextProjectionAuthority, CanonicalDiagnosticRefreshRequest,
     CanonicalDiagnosticSnapshotAuthority, ContextProjectionOutcome, ContextProjectionRegistration,
@@ -57,9 +55,8 @@ use tracedecay_tool_catalog::CapabilityId;
 use tracedecay_host_integration::HostKindV1;
 
 use super::{
-    AdvisoryHookDeliveryV1, AdvisoryHookLookupNoticeV1, AdvisoryHookNoticeQueueV1,
-    AdvisoryHostDeliveryErrorV1, AdvisoryHostDeliveryRegistrationV1,
-    new_advisory_hook_delivery_port,
+    AdvisoryHookDeliveryV1, AdvisoryHookNoticeQueueV1, AdvisoryHostDeliveryErrorV1,
+    AdvisoryHostDeliveryRegistrationV1, new_advisory_hook_delivery_port,
 };
 use crate::advisory::{AdvisoryContributionsV1, AdvisoryCycleOutcome};
 use crate::feedback::concrete::{FeedbackRuntime, open_feedback_runtime};

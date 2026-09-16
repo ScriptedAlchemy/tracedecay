@@ -16,10 +16,10 @@ use super::control::{
 };
 use super::planner::{ObservedArtifactKindV1, ObservedHostArtifactV1, observe_artifact_at};
 use super::{
-    HostBundleArtifactV1, HostComponentV1, HostBundleError, HostBundleInstallReceiptV1,
-    HostBundleJournalV1, HostBundleLifecycleOpV1, HostBundleRollbackBoundaryV1,
-    HostComponentSetJournalV1, HostEditStopConformanceEvidenceV1, HostKindV1,
-    HostNativeFixtureEvidenceV1, native_host_edit_stop_conformance_evidence, stock_host_kinds,
+    HostBundleArtifactV1, HostBundleError, HostBundleInstallReceiptV1, HostBundleJournalV1,
+    HostBundleLifecycleOpV1, HostBundleRollbackBoundaryV1, HostComponentSetJournalV1,
+    HostComponentV1, HostEditStopConformanceEvidenceV1, HostKindV1, HostNativeFixtureEvidenceV1,
+    native_host_edit_stop_conformance_evidence, stock_host_kinds,
     supported_host_edit_stop_conformance_evidence,
 };
 

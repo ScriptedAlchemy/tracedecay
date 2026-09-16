@@ -1,7 +1,7 @@
 //! Host-component admission gates derived from canonical host capabilities.
 
 use super::{
-    HostComponentV1, HostBundleError, HostCapabilityStateV1, HostCapabilityV1, HostKindV1,
+    HostBundleError, HostCapabilityStateV1, HostCapabilityV1, HostComponentV1, HostKindV1,
     stock_host_native_fixture_evidence,
 };
 use tracedecay_host_integration::stock_host_capabilities;
@@ -28,8 +28,8 @@ pub fn require_component_capabilities(
     host: HostKindV1,
     component: HostComponentV1,
 ) -> Result<(), HostBundleError> {
-    use HostComponentV1::{Agent, ContextMcp, Core, OperatorMcp};
     use HostCapabilityV1::{Cli, Hooks, Lsp, Mcp, NativeDiagnostics};
+    use HostComponentV1::{Agent, ContextMcp, Core, OperatorMcp};
 
     let required: &[HostCapabilityV1] = match (host, component) {
         (HostKindV1::ClaudeCode, Core) => &[Lsp, Hooks],

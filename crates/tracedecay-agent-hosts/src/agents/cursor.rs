@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::host_bundle::{HostComponentV1, HostBundleRegistrationStateV1};
+use super::host_bundle::{HostBundleRegistrationStateV1, HostComponentV1};
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
     JsonConfigMutation, McpUninstallPolicy, UpdatePluginOutcome, load_json_file,
@@ -533,10 +533,7 @@ fn remove_cursor_managed_skill_overlay(install_dir: &Path) -> Result<()> {
 /// directory carrying tracedecay's own `package.json` (the Agent component).
 /// Arbitrary bytes parked at a cataloged deploy path carry neither anchor and
 /// stay refused without the operator's explicit `--yes --adopt`.
-pub(crate) fn receiptless_component_provenance(
-    home: &Path,
-    component: HostComponentV1,
-) -> bool {
+pub(crate) fn receiptless_component_provenance(home: &Path, component: HostComponentV1) -> bool {
     if component == HostComponentV1::Agent {
         return matches!(
             cursor_native_extension_registration(home),

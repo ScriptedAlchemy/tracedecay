@@ -26,7 +26,7 @@ use serde_json::json;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::host_bundle::{HostComponentV1, HostBundleRegistrationStateV1};
+use super::host_bundle::{HostBundleRegistrationStateV1, HostComponentV1};
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
     McpDoctorLabels, TextFileMutation, config_backup_path, report_mcp_registration,
@@ -287,10 +287,7 @@ fn save_original_if_needed(config: &Path, existing: &str) -> Result<()> {
     Ok(())
 }
 
-fn install_mcp_if_selected(
-    components: &[HostComponentV1],
-    ctx: &InstallContext,
-) -> Result<()> {
+fn install_mcp_if_selected(components: &[HostComponentV1], ctx: &InstallContext) -> Result<()> {
     if !components.contains(&HostComponentV1::ContextMcp) {
         return Ok(());
     }

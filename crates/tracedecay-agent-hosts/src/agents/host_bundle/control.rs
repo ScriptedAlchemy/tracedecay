@@ -15,11 +15,11 @@ use super::model::{
 };
 use super::planner::inspect_install_target;
 use super::{
-    HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HostBundleBackupReceiptV1, HostComponentV1,
-    HostBundleError, HostBundleInstallReceiptV1, HostBundleJournalV1, HostBundleLifecycleOpV1,
+    HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HostBundleBackupReceiptV1, HostBundleError,
+    HostBundleInstallReceiptV1, HostBundleJournalV1, HostBundleLifecycleOpV1,
     HostBundleRestoreReceiptV1, HostBundleRollbackBoundaryV1, HostComponentSetJournalV1,
-    HostComponentSetReceiptV1, HostKindV1, MAX_HOST_COMPONENTS, MAX_MANIFEST_ARTIFACTS,
-    stock_host_kinds, validate_identifier, validate_relative_install_path,
+    HostComponentSetReceiptV1, HostComponentV1, HostKindV1, MAX_HOST_COMPONENTS,
+    MAX_MANIFEST_ARTIFACTS, stock_host_kinds, validate_identifier, validate_relative_install_path,
 };
 
 pub(super) const HOST_BUNDLE_CONTROL_DIR: &str = ".tracedecay-host-bundle-v1";
@@ -530,10 +530,7 @@ pub(super) fn host_bundle_restore_receipt_file(operation_id: [u8; 16]) -> String
     format!("restore-receipt.{}.v1.json", hex::encode(operation_id))
 }
 
-pub(super) fn component_set_stage_name(
-    component: HostComponentV1,
-    relative_path: &str,
-) -> String {
+pub(super) fn component_set_stage_name(component: HostComponentV1, relative_path: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(component_slug(component).as_bytes());
     hasher.update(relative_path.as_bytes());
@@ -595,10 +592,7 @@ pub(super) fn receipt_identity_from_file_name(
     })
 }
 
-pub(super) fn expected_ownership_marker(
-    host: HostKindV1,
-    component: HostComponentV1,
-) -> String {
+pub(super) fn expected_ownership_marker(host: HostKindV1, component: HostComponentV1) -> String {
     format!(
         "tracedecay.{}.{}.v1",
         host.descriptor().slug(),

@@ -13,12 +13,12 @@ use tracedecay_hooks::HookImmediateAdmissionStateV1;
 use tracedecay_hooks::{
     AsyncHookFeedbackDeliveryPortV1, HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1,
     HookConfigurationSnapshotV1, HookConfigurationSubscriberV1, HookEventEnvelopeV2,
-    HookFeedbackDeliveryV1, HookFeedbackRollbackSwitchV1,
-    HookGuidanceStateV1, HookHostV1, HookImmediateAdmissionV1, HookRuntimeControlV1,
-    HookScopeBindingV1, HookSpoolConfigV1, HookSpoolError, HookSpoolV1, HookSynchronousDeadlineV1,
-    HookTransportDispositionV1, NativeContextScoutLifecycleV1, NativeEnvelopeMaterialV1,
-    NativeHookDecodeError, SpoolAppendOutcomeV1, admit_async_exact_scope, deliver_hook_feedback,
-    envelope_identity_hash16, finish_synchronous_hook,
+    HookFeedbackDeliveryV1, HookFeedbackRollbackSwitchV1, HookGuidanceStateV1, HookHostV1,
+    HookImmediateAdmissionV1, HookRuntimeControlV1, HookScopeBindingV1, HookSpoolConfigV1,
+    HookSpoolError, HookSpoolV1, HookSynchronousDeadlineV1, HookTransportDispositionV1,
+    NativeContextScoutLifecycleV1, NativeEnvelopeMaterialV1, NativeHookDecodeError,
+    SpoolAppendOutcomeV1, admit_async_exact_scope, deliver_hook_feedback, envelope_identity_hash16,
+    finish_synchronous_hook,
 };
 
 use crate::agents::context_scout::{

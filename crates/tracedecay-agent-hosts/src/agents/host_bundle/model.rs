@@ -9,9 +9,9 @@ use tracedecay_host_integration::host_bundle_stale_preview;
 
 use super::planner::{HostBundleLifecycleRequestV1, HostBundleMutationPlanV1};
 use super::{
-    HostBundleArtifactContentV1, HostComponentV1, HostBundleError,
-    HostBundleInstallReceiptV1, HostBundleLifecycleOpV1, HostBundleManifestV1,
-    HostBundleVerificationAdapterV1, HostCapabilityV1, HostKindV1,
+    HostBundleArtifactContentV1, HostBundleError, HostBundleInstallReceiptV1,
+    HostBundleLifecycleOpV1, HostBundleManifestV1, HostBundleVerificationAdapterV1,
+    HostCapabilityV1, HostComponentV1, HostKindV1,
 };
 
 /// Execution-specific input kept separate from the public lifecycle request

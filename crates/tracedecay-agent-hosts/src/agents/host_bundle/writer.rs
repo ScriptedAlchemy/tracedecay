@@ -33,12 +33,12 @@ use super::planner::{
 };
 use super::{
     HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HostBundleArtifactContentV1, HostBundleBackupArtifactV1,
-    HostBundleBackupReceiptV1, HostComponentV1, HostBundleError, HostBundleInstallReceiptV1,
+    HostBundleBackupReceiptV1, HostBundleError, HostBundleInstallReceiptV1,
     HostBundleJournalEntryV1, HostBundleJournalStateV1, HostBundleJournalV1,
     HostBundleLifecycleOpV1, HostBundleManifestV1, HostBundleReceiptArtifactV1,
     HostBundleRestoreReceiptV1, HostBundleRollbackBoundaryV1, HostBundleVerificationAdapterV1,
-    HostComponentSetJournalV1, HostComponentSetReceiptV1, HostKindV1, MAX_ARTIFACT_CONTENT_BYTES,
-    stock_host_kinds, validate_relative_install_path,
+    HostComponentSetJournalV1, HostComponentSetReceiptV1, HostComponentV1, HostKindV1,
+    MAX_ARTIFACT_CONTENT_BYTES, stock_host_kinds, validate_relative_install_path,
 };
 
 static HOST_BUNDLE_TEMP_NONCE: AtomicU64 = AtomicU64::new(1);

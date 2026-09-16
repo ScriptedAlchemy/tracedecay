@@ -247,9 +247,7 @@ where
     if cancel_registered_request() {
         return Some(handling.await);
     }
-    let Some(notify) = cancellation_registered else {
-        return None;
-    };
+    let notify = cancellation_registered?;
     // Cancel raced route resolution: keep polling handling while waiting for
     // prepare_dispatch_control to register, same as the legacy connection.
     loop {

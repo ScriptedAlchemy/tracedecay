@@ -11,9 +11,9 @@ use tracedecay_domain::{
 };
 
 use super::host_bundle::{
-    HostBundleArtifactContentV1, HostBundleArtifactV1, HostComponentV1, HostBundleError,
-    HostBundleManifestV1, HostBundleVerificationAdapterV1, HostComponentSetEntryV1,
-    HostComponentSetV1, HostKindV1, require_component_capabilities,
+    HostBundleArtifactContentV1, HostBundleArtifactV1, HostBundleError, HostBundleManifestV1,
+    HostBundleVerificationAdapterV1, HostComponentSetEntryV1, HostComponentSetV1, HostComponentV1,
+    HostKindV1, require_component_capabilities,
 };
 
 pub const FIRST_PARTY_COMPONENT_CATALOG_VERSION: u64 = 1;
@@ -152,17 +152,13 @@ pub fn unsupported_host_component_set_reason(
 /// newly admitted host cannot fall through to a silently empty set.
 pub fn default_components(host: HostKindV1) -> Vec<HostComponentV1> {
     match host {
-        HostKindV1::ClaudeCode | HostKindV1::Codex => vec![
-            HostComponentV1::Core,
-            HostComponentV1::ContextMcp,
-        ],
+        HostKindV1::ClaudeCode | HostKindV1::Codex => {
+            vec![HostComponentV1::Core, HostComponentV1::ContextMcp]
+        }
         HostKindV1::Devin | HostKindV1::Zed | HostKindV1::Antigravity => {
             vec![HostComponentV1::ContextMcp]
         }
-        HostKindV1::Vibe => vec![
-            HostComponentV1::ContextMcp,
-            HostComponentV1::Core,
-        ],
+        HostKindV1::Vibe => vec![HostComponentV1::ContextMcp, HostComponentV1::Core],
         HostKindV1::CursorDesktop | HostKindV1::OpenCode => vec![
             HostComponentV1::Core,
             HostComponentV1::Agent,
@@ -443,9 +439,7 @@ fn component_assets(
     if host == HostKindV1::CursorDesktop
         && matches!(
             component,
-            HostComponentV1::Core
-                | HostComponentV1::ContextMcp
-                | HostComponentV1::OperatorMcp
+            HostComponentV1::Core | HostComponentV1::ContextMcp | HostComponentV1::OperatorMcp
         )
     {
         let files = super::cursor::rendered_plugin_files(tracedecay_bin)
@@ -470,9 +464,7 @@ fn component_assets(
     if host == HostKindV1::Codex
         && matches!(
             component,
-            HostComponentV1::Core
-                | HostComponentV1::ContextMcp
-                | HostComponentV1::OperatorMcp
+            HostComponentV1::Core | HostComponentV1::ContextMcp | HostComponentV1::OperatorMcp
         )
     {
         let files = super::codex::rendered_global_plugin_files(tracedecay_bin)
@@ -496,9 +488,7 @@ fn component_assets(
     if host == HostKindV1::ClaudeCode
         && matches!(
             component,
-            HostComponentV1::Core
-                | HostComponentV1::ContextMcp
-                | HostComponentV1::OperatorMcp
+            HostComponentV1::Core | HostComponentV1::ContextMcp | HostComponentV1::OperatorMcp
         )
     {
         let files = super::claude::rendered_plugin_files(tracedecay_bin)
@@ -1066,8 +1056,7 @@ mod tests {
             ]
         );
         assert!(
-            !default_components(HostKindV1::ClaudeCode)
-                .contains(&HostComponentV1::OperatorMcp)
+            !default_components(HostKindV1::ClaudeCode).contains(&HostComponentV1::OperatorMcp)
         );
     }
 
@@ -1111,10 +1100,7 @@ mod tests {
     #[test]
     fn cline_roo_and_kilo_package_only_documented_mcp_components() {
         for host in [HostKindV1::Cline, HostKindV1::RooCode, HostKindV1::Kilo] {
-            assert_eq!(
-                default_components(host),
-                vec![HostComponentV1::ContextMcp]
-            );
+            assert_eq!(default_components(host), vec![HostComponentV1::ContextMcp]);
             assert_eq!(unsupported_host_component_set_reason(host), None);
             assert!(
                 verified_embedded_default_host_component_set(

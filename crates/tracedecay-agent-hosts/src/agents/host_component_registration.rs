@@ -343,8 +343,7 @@ impl CatalogHostComponentRegistrationAuthority {
     ) -> bool {
         component_set.host == crate::agents::host_bundle::HostKindV1::OpenCode
             && component_set.components.iter().any(|component| {
-                component.manifest.component
-                    == crate::agents::host_bundle::HostComponentV1::Core
+                component.manifest.component == crate::agents::host_bundle::HostComponentV1::Core
             })
     }
 

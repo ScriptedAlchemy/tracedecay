@@ -10,10 +10,11 @@ use serde_json::{Value, json};
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_contracts::retrieval::{
     ContextCodeBlockV1, ContextModeV1, ContextResultV1, ContextSearchMatchV1,
-    ContextSurfaceRequestV1, RedundancyScopeV1, RedundancySurfaceRequestWireV1, RenamePreviewNodeV1,
-    RenamePreviewPrimitiveRequestV1, RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1,
-    RenamePreviewTextOnlyMatchV1, SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1,
-    SimilarOccurrenceV1, SimilarResultV1, SimilarSurfaceRequestWireV1, SimilarTargetV1,
+    ContextSurfaceRequestV1, RedundancyScopeV1, RedundancySurfaceRequestWireV1,
+    RenamePreviewNodeV1, RenamePreviewPrimitiveRequestV1, RenamePreviewPrimitiveResultV1,
+    RenamePreviewReferenceV1, RenamePreviewTextOnlyMatchV1, SimilarCoverageV1, SimilarFamilyV1,
+    SimilarMatchClassV1, SimilarOccurrenceV1, SimilarResultV1, SimilarSurfaceRequestWireV1,
+    SimilarTargetV1,
 };
 use tracedecay_domain::ExactClass;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -1037,8 +1038,7 @@ pub async fn handle_find_exact_symbol(
 
 #[hotpath::measure(label = "mcp.graph.similar.total")]
 pub async fn handle_similar(ctx: &McpToolContext<'_>, args: Value) -> Result<ToolResult> {
-    let wire: SimilarSurfaceRequestWireV1 =
-        decode_primitive_request(&args, "tracedecay_similar")?;
+    let wire: SimilarSurfaceRequestWireV1 = decode_primitive_request(&args, "tracedecay_similar")?;
     let request = match wire {
         SimilarSurfaceRequestWireV1::Current(request) => request,
         SimilarSurfaceRequestWireV1::Legacy(_) => {

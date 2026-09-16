@@ -344,7 +344,7 @@ async fn capture_hermes_profile(
     )
     .await
     .ok_or_else(|| config_error("Hermes transcript source is unavailable"))?;
-    hermes_capture_outcome(outcome)
+    hermes_capture_outcome(&outcome)
 }
 
 async fn capture_kiro_profile(
@@ -392,7 +392,7 @@ async fn capture_hermes_project(
     )
     .await
     .ok_or_else(|| config_error("Hermes transcript source is unavailable"))?;
-    hermes_capture_outcome(outcome)
+    hermes_capture_outcome(&outcome)
 }
 
 async fn capture_codex_project(
@@ -452,7 +452,7 @@ fn cursor_capture_outcome(
 /// Hook capture of one Hermes sweep. A skipped `state.db` is a retryable
 /// source failure. An incomplete projection drain is deferred work, same as
 /// a byte-cap stop.
-fn hermes_capture_outcome(outcome: HermesSweepOutcome) -> Result<TranscriptCaptureOutcome> {
+fn hermes_capture_outcome(outcome: &HermesSweepOutcome) -> Result<TranscriptCaptureOutcome> {
     if outcome.source_failures > 0 {
         return Err(hook_admission_error(
             HostAdmissionStatus::Unavailable,
@@ -607,7 +607,7 @@ mod tests {
         };
         sweep.stats.messages_upserted = 3;
 
-        let error = match hermes_capture_outcome(sweep) {
+        let error = match hermes_capture_outcome(&sweep) {
             Err(error) => error,
             Ok(_) => panic!("skipped Hermes sources must fail the hook capture"),
         };
@@ -620,12 +620,12 @@ mod tests {
 
     #[test]
     fn hermes_deferred_projection_drain_is_source_deferred() {
-        let outcome = match hermes_capture_outcome(HermesSweepOutcome {
+        let outcome = match hermes_capture_outcome(&HermesSweepOutcome {
             projection_drain_deferred: true,
             ..HermesSweepOutcome::default()
         }) {
             Ok(outcome) => outcome,
-            Err(_) => panic!("deferred drain is not a source failure"),
+            Err(error) => panic!("deferred drain is not a source failure: {error}"),
         };
 
         assert!(outcome.source_deferred);

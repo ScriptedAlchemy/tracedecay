@@ -21,9 +21,9 @@ use super::model::{
     HostComponentSetLifecyclePreviewV1, HostComponentSetRegistrationV1, HostComponentSetV1,
 };
 use super::{
-    HostBundleArtifactContentV1, HostBundleArtifactV1, HostComponentV1, HostBundleError,
-    HostBundleInstallReceiptV1, HostBundleLifecycleOpV1, HostBundleManifestV1,
-    HostBundleVerificationAdapterV1, HostKindV1, MAX_ARTIFACT_CONTENT_BYTES, validate_identifier,
+    HostBundleArtifactContentV1, HostBundleArtifactV1, HostBundleError, HostBundleInstallReceiptV1,
+    HostBundleLifecycleOpV1, HostBundleManifestV1, HostBundleVerificationAdapterV1,
+    HostComponentV1, HostKindV1, MAX_ARTIFACT_CONTENT_BYTES, validate_identifier,
     validate_relative_install_path,
 };
 

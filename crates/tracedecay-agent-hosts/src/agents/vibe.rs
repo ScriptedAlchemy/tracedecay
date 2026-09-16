@@ -27,7 +27,7 @@ use tracedecay_automation_runtime::automation::skill_targets::{
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::host_bundle::{HostComponentV1, HostBundleRegistrationStateV1};
+use super::host_bundle::{HostBundleRegistrationStateV1, HostComponentV1};
 use super::prompt_rules::{PROMPT_RULE_MARKER, PromptRulesOptions};
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, TextFileMutation,
@@ -551,10 +551,7 @@ mod tests {
         let install = install_context(home.path(), "/tmp/tracedecay");
 
         VibeIntegration
-            .activate_deployed_host_component_registration(
-                &[HostComponentV1::ContextMcp],
-                &install,
-            )
+            .activate_deployed_host_component_registration(&[HostComponentV1::ContextMcp], &install)
             .unwrap();
 
         let installed = std::fs::read_to_string(&config).unwrap();
@@ -589,20 +586,8 @@ mod tests {
         );
         assert!(!config.exists());
 
-        deactivate_components(
-            &[HostComponentV1::Core],
-            &config,
-            &prompt,
-            home.path(),
-        )
-        .unwrap();
-        activate_components(
-            &[HostComponentV1::ContextMcp],
-            &config,
-            &prompt,
-            &install,
-        )
-        .unwrap();
+        deactivate_components(&[HostComponentV1::Core], &config, &prompt, home.path()).unwrap();
+        activate_components(&[HostComponentV1::ContextMcp], &config, &prompt, &install).unwrap();
         assert_eq!(
             mcp_registration_state(&config, Some("/tmp/tracedecay")),
             HostBundleRegistrationStateV1::Current
@@ -616,10 +601,7 @@ mod tests {
         let config = vibe_config_path(home.path());
         let prompt = vibe_prompt_path(home.path());
         let install = install_context(home.path(), "/tmp/tracedecay");
-        let components = [
-            HostComponentV1::ContextMcp,
-            HostComponentV1::Core,
-        ];
+        let components = [HostComponentV1::ContextMcp, HostComponentV1::Core];
 
         activate_components(&components, &config, &prompt, &install).unwrap();
         deactivate_components(&components, &config, &prompt, home.path()).unwrap();

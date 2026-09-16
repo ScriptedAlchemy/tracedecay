@@ -138,7 +138,7 @@ impl AgentIntegration for OpenCodeIntegration {
         component: super::host_bundle::HostComponentV1,
         ctx: &HealthcheckContext,
     ) -> super::host_bundle::HostBundleRegistrationStateV1 {
-        use super::host_bundle::{HostComponentV1, HostBundleRegistrationStateV1 as State};
+        use super::host_bundle::{HostBundleRegistrationStateV1 as State, HostComponentV1};
 
         let config_path = opencode_config_path(&ctx.home);
         let config = match std::fs::read(&config_path) {
