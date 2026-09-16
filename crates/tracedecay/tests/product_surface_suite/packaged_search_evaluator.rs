@@ -56,8 +56,14 @@ fn packaged_evaluator_binary_validates_without_a_source_checkout() {
     );
     let response: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("typed evaluator JSON");
-    assert_eq!(response["command"], "validate");
     assert_eq!(response["status"], "pass");
-    assert_eq!(response["query_count"], 67);
-    assert_eq!(response["profile_count"], 1);
+    // Without a checkout the binary can only have read its packaged workload,
+    // so its envelope must equal the library's receipt for those same assets.
+    let receipt = tracedecay_search_eval::validate_default_workload()
+        .expect("validate the packaged workload through the library");
+    assert_eq!(
+        response,
+        serde_json::to_value(&receipt).expect("serialize packaged workload receipt"),
+        "the packaged evaluator drifted from the library's packaged-workload receipt"
+    );
 }
