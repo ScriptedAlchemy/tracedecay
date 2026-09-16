@@ -1,6 +1,5 @@
 use tracedecay_contracts::feedback::{
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
-    PROXIMITY_CAPABILITY_ID_V1,
 };
 use tracedecay_contracts::{
     application_catalog_contributions, application_handler_descriptors,
@@ -97,13 +96,12 @@ fn application_contribution_set_uses_registered_feedback_handlers() {
         let provider_contribution = [
             GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
             CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
-            PROXIMITY_CAPABILITY_ID_V1,
         ]
         .contains(&capability.capability_id().as_str());
         assert_eq!(
             capability.binding_ids().is_empty(),
             provider_contribution,
-            "{} must use the combined advisory transport",
+            "{} has no direct bindings only when it is a producer contribution",
             capability.capability_id()
         );
     }

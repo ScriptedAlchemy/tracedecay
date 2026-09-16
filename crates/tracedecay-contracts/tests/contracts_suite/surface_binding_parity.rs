@@ -57,10 +57,6 @@ fn git_and_feedback_bindings_have_declared_surface_parity() {
             "capability.application.feedback.ci-failure-localize",
             NO_SURFACES.as_slice(),
         ),
-        (
-            "capability.application.feedback.proximity",
-            NO_SURFACES.as_slice(),
-        ),
     ];
     assert_surface_contract_parity(
         &feedback,
