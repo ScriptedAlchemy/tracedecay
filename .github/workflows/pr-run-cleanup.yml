@@ -8,7 +8,7 @@
 # 10 GB cache budget until GitHub's least-recently-used eviction removes it —
 # and LRU does not know which entries are dead. Measured 2026-09-08 (PR 707,
 # run 34231734416, 2.5 hours after the previous push's run): CI alone saved
-# 9.6 GB per push, so the `ci-dev`, `ci-clippy-full`, `hawk` and Windows
+# 9.6 GB per push, so the `ci-dev`, `ci-clippy-full`, optional Hawk, and Windows
 # rust-cache lanes (`No cache found`) all rebuilt cold. Deleting the
 # superseded generations here leaves LRU nothing to choose.
 #
