@@ -52,7 +52,18 @@ pub(crate) enum WriterCommand {
     },
 }
 
-const BEGIN_BUSY_ATTEMPT_BUDGET: u8 = 64;
+/// Pause between busy-begin attempts so the acquire deadline is the real bound.
+///
+/// A yield-only loop with a small attempt count burned through in tens of
+/// microseconds while the lock holder was still scheduled, so IMMEDIATE begin
+/// failed closed under ordinary CI contention instead of waiting for the lock.
+const BEGIN_BUSY_RETRY_PAUSE: Duration = Duration::from_millis(1);
+
+/// Writer-side IMMEDIATE lock wait. Kept below the transaction idle lease so a
+/// contended or cancelled begin cannot pin the sole writer for that whole
+/// window. Sized as the prior 64-attempt budget once each attempt sleeps 1ms
+/// (the yield-only budget burned out in ~50µs under CI).
+const EXACT_SQL_WRITE_LOCK_ACQUIRE_LIMIT: Duration = Duration::from_millis(64);
 
 /// Takes SQLite's write lock on the worker thread, retrying while it is busy.
 ///
@@ -66,6 +77,7 @@ pub(super) fn begin_transaction_with_busy_retry<'connection>(
     connection: &'connection Connection,
     behavior: TransactionBehavior,
     shutdown_requested: &AtomicBool,
+    cancelled: impl FnMut() -> bool,
 ) -> rusqlite::Result<Transaction<'connection>> {
     if !matches!(behavior, TransactionBehavior::Immediate) {
         return Transaction::new_unchecked(connection, behavior);
@@ -74,6 +86,7 @@ pub(super) fn begin_transaction_with_busy_retry<'connection>(
         retry_busy_begin(
             || Transaction::new_unchecked(connection, behavior),
             shutdown_requested,
+            cancelled,
         )
     })
 }
@@ -81,19 +94,19 @@ pub(super) fn begin_transaction_with_busy_retry<'connection>(
 pub(super) fn retry_busy_begin<T>(
     mut begin: impl FnMut() -> rusqlite::Result<T>,
     shutdown_requested: &AtomicBool,
+    mut cancelled: impl FnMut() -> bool,
 ) -> rusqlite::Result<T> {
-    let deadline = Instant::now() + EXACT_SQL_TRANSACTION_IDLE_LIMIT;
-    let mut attempts_remaining = BEGIN_BUSY_ATTEMPT_BUDGET;
+    let deadline = Instant::now() + EXACT_SQL_WRITE_LOCK_ACQUIRE_LIMIT;
     let mut original_busy_error = None;
     loop {
-        if shutdown_requested.load(Ordering::Acquire)
+        if (shutdown_requested.load(Ordering::Acquire) || cancelled())
             && let Some(original) = original_busy_error
         {
             return Err(original);
         }
         match begin() {
             Ok(value) => {
-                if shutdown_requested.load(Ordering::Acquire)
+                if (shutdown_requested.load(Ordering::Acquire) || cancelled())
                     && let Some(original) = original_busy_error
                 {
                     return Err(original);
@@ -101,9 +114,8 @@ pub(super) fn retry_busy_begin<T>(
                 return Ok(value);
             }
             Err(error) if sqlite_busy_or_locked(&error) => {
-                attempts_remaining = attempts_remaining.saturating_sub(1);
-                let exhausted = attempts_remaining == 0
-                    || shutdown_requested.load(Ordering::Acquire)
+                let exhausted = shutdown_requested.load(Ordering::Acquire)
+                    || cancelled()
                     || Instant::now() >= deadline;
                 match original_busy_error.take() {
                     Some(original) if exhausted => return Err(original),
@@ -111,7 +123,9 @@ pub(super) fn retry_busy_begin<T>(
                     None if exhausted => return Err(error),
                     None => original_busy_error = Some(error),
                 }
-                std::thread::yield_now();
+                if !exhausted {
+                    std::thread::sleep(BEGIN_BUSY_RETRY_PAUSE);
+                }
             }
             Err(error) => return Err(error),
         }
@@ -262,7 +276,12 @@ pub(crate) fn run_writer_command(
             }
             let completion = {
                 let before = connection.total_changes();
-                match begin_transaction_with_busy_retry(connection, behavior, shutdown_requested) {
+                match begin_transaction_with_busy_retry(
+                    connection,
+                    behavior,
+                    shutdown_requested,
+                    || reply.is_closed(),
+                ) {
                     // The whole writer-thread hold of one interactive
                     // transaction, caller think-time included. Every queued
                     // write and command behind it waits inside this span, so
