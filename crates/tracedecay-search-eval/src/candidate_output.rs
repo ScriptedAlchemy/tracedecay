@@ -964,15 +964,11 @@ fn historical_candidates(
     published: &PublishedCorpus,
     query: &WorkloadQueryV1,
 ) -> Result<(HistoricalQueryExecutionV1, Vec<RankedCandidateRowV1>), CandidateOutputError> {
-    if !query.strata.iter().any(|stratum| {
-        matches!(
-            stratum.as_str(),
-            "incremental_edit"
-                | "incremental_delete"
-                | "incremental_rename"
-                | "renamed_moved_symbol"
-        )
-    }) {
+    if !query
+        .strata
+        .iter()
+        .any(|stratum| stratum.requires_historical_query())
+    {
         return Ok((HistoricalQueryExecutionV1::NotRequested, Vec::new()));
     }
 

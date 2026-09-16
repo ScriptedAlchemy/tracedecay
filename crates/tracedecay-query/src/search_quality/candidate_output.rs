@@ -33,7 +33,7 @@ pub const EVALUATION_CACHE_STATE: &str = "cold_empty_in_memory_publication";
 /// lookups. Every query in it must document where the need came from and
 /// which corpus symbols answer it, so a relevance judgment is never an
 /// unsourced assertion.
-pub const NEED_STRATUM: &str = "natural_language";
+pub const NEED_STRATUM: QueryStratumV1 = QueryStratumV1::NaturalLanguage;
 const CORPUS_DIGEST_DOMAIN: &str = "tracedecay.search-eval.corpus-content.v1";
 
 #[derive(Debug, Error)]
@@ -183,12 +183,105 @@ pub enum RequiredOfflineV1 {
     NoNetworkAndQueryFallbackAvailable,
 }
 
+/// One need class a workload query belongs to.
+///
+/// Closed vocabulary: a stratum decides how a query is judged — whether recall
+/// must be complete, and whether the query re-runs retrieval at a past commit —
+/// so an unrecognized name is refused instead of silently scored as ordinary.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryStratumV1 {
+    AliasRecovery,
+    CommitIdentifier,
+    ConfigKey,
+    ExactError,
+    ExactFlag,
+    ExactPath,
+    ExactSymbol,
+    GeneratedVendorNoise,
+    IdentifierSplit,
+    IncrementalDelete,
+    IncrementalEdit,
+    IncrementalRename,
+    NaturalLanguage,
+    NoAnswer,
+    PrivacyCanary,
+    QualifiedName,
+    QuotedPhrase,
+    RenamedMovedSymbol,
+    SameNameCrossScope,
+    ToolName,
+    UnsupportedLanguage,
+    WrongScope,
+}
+
+impl QueryStratumV1 {
+    /// Whether a miss in this stratum is a defect rather than a ranking cost.
+    ///
+    /// Exact technical needs have one right answer, so their recall must be
+    /// complete; conceptual and adversarial strata are scored on ranking.
+    pub const fn protected(self) -> bool {
+        matches!(
+            self,
+            Self::CommitIdentifier
+                | Self::ConfigKey
+                | Self::ExactError
+                | Self::ExactFlag
+                | Self::ExactPath
+                | Self::ExactSymbol
+                | Self::QualifiedName
+                | Self::QuotedPhrase
+                | Self::ToolName
+        )
+    }
+
+    /// Whether queries in this stratum are answered against a past commit and
+    /// therefore need the historical code-index join.
+    pub const fn requires_historical_query(self) -> bool {
+        matches!(
+            self,
+            Self::IncrementalDelete
+                | Self::IncrementalEdit
+                | Self::IncrementalRename
+                | Self::RenamedMovedSymbol
+        )
+    }
+
+    /// Stable wire name, identical to this stratum's serialized form.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AliasRecovery => "alias_recovery",
+            Self::CommitIdentifier => "commit_identifier",
+            Self::ConfigKey => "config_key",
+            Self::ExactError => "exact_error",
+            Self::ExactFlag => "exact_flag",
+            Self::ExactPath => "exact_path",
+            Self::ExactSymbol => "exact_symbol",
+            Self::GeneratedVendorNoise => "generated_vendor_noise",
+            Self::IdentifierSplit => "identifier_split",
+            Self::IncrementalDelete => "incremental_delete",
+            Self::IncrementalEdit => "incremental_edit",
+            Self::IncrementalRename => "incremental_rename",
+            Self::NaturalLanguage => "natural_language",
+            Self::NoAnswer => "no_answer",
+            Self::PrivacyCanary => "privacy_canary",
+            Self::QualifiedName => "qualified_name",
+            Self::QuotedPhrase => "quoted_phrase",
+            Self::RenamedMovedSymbol => "renamed_moved_symbol",
+            Self::SameNameCrossScope => "same_name_cross_scope",
+            Self::ToolName => "tool_name",
+            Self::UnsupportedLanguage => "unsupported_language",
+            Self::WrongScope => "wrong_scope",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkloadQueryV1 {
     pub query_id: String,
     pub partition: String,
-    pub strata: Vec<String>,
+    pub strata: Vec<QueryStratumV1>,
     pub query: String,
     pub allowed_scopes: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -747,11 +840,12 @@ fn is_canonical_sha256(digest: &str) -> bool {
 /// than scored.
 fn validate_need_provenance(workload: &CandidateWorkloadV1) -> Result<(), CandidateOutputError> {
     for need in &workload.queries {
-        let in_need_stratum = need.strata.iter().any(|name| name == NEED_STRATUM);
+        let in_need_stratum = need.strata.contains(&NEED_STRATUM);
         let Some(provenance) = &need.need_provenance else {
             if in_need_stratum {
                 return Err(CandidateOutputError::Contract(format!(
-                    "{NEED_STRATUM} need {} has no documented provenance",
+                    "{} need {} has no documented provenance",
+                    NEED_STRATUM.as_str(),
                     need.query_id
                 )));
             }
@@ -955,7 +1049,7 @@ mod need_provenance_tests {
         workload
             .queries
             .iter_mut()
-            .find(|query| query.strata.iter().any(|stratum| stratum == NEED_STRATUM))
+            .find(|query| query.strata.contains(&NEED_STRATUM))
             .expect("a natural-language need")
     }
 
