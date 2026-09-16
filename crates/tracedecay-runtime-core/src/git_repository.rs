@@ -242,6 +242,11 @@ struct RepositoryDiscoveryObservation {
     discoveries: u64,
     topology_resolutions: u64,
     delay: Option<std::time::Duration>,
+    /// When set, live discovery pays [`Self::delay`] then returns
+    /// [`GitRepositoryError::UnreadableRepository`] without opening the
+    /// repository, so callers can exercise the Git CLI fallback after a
+    /// slow unreadable authority phase.
+    force_unreadable: bool,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -312,6 +317,36 @@ pub fn delay_repository_discovery_for_test(root: &Path, delay: std::time::Durati
             ..RepositoryDiscoveryObservation::default()
         },
     );
+}
+
+/// Pay `delay` on every live discovery under `root`, then fail as an
+/// unreadable authority so the Git CLI fallback is the only resolution path.
+///
+/// Models a slow in-process phase that returns unreadable while both phases
+/// still share one discovery deadline.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn unreadable_repository_discovery_for_test(root: &Path, delay: std::time::Duration) {
+    forget_retained_checkout_topology_for_test(root);
+    repository_discovery_observations().insert(
+        observed_discovery_root(root),
+        RepositoryDiscoveryObservation {
+            delay: Some(delay),
+            force_unreadable: true,
+            ..RepositoryDiscoveryObservation::default()
+        },
+    );
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn forced_unreadable_repository_discovery(path: &Path) -> bool {
+    let observations = repository_discovery_observations();
+    if observations.is_empty() {
+        return false;
+    }
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    observations.iter().any(|(root, observation)| {
+        observation.force_unreadable && canonical.starts_with(root)
+    })
 }
 
 /// Live `gix` discoveries observed under `root` since observation began.
@@ -406,6 +441,13 @@ impl GitRepositoryAuthority {
     fn discover_uncached(path: &Path) -> Result<Self, GitRepositoryError> {
         #[cfg(any(test, feature = "test-helpers"))]
         observe_repository_discovery(path);
+        #[cfg(any(test, feature = "test-helpers"))]
+        if forced_unreadable_repository_discovery(path) {
+            return Err(GitRepositoryError::UnreadableRepository {
+                path: path.display().to_string(),
+                detail: "test-forced unreadable repository discovery".to_owned(),
+            });
+        }
         let repository = hotpath::measure_block!(
             "runtime_core.git.repository_discover.walk",
             gix::discover_opts(

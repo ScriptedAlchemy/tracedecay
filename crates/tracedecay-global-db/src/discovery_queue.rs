@@ -1,11 +1,8 @@
-//! Host discovery path queue persisted in the global DB.
+//! Durable host transcript discovery path queue in the global DB.
 //!
-//! This queue schedules workspace roots for membership probes. Actual git
-//! identity resolution lives in `tracedecay_runtime_core::git_discovery`, which
-//! already single-flights concurrent probes and honors one request deadline.
-//! Callers must inherit that deadline across fan-out instead of restarting a
-//! fresh default budget per queued path — multiplying probe budgets is the
-//! latency cliff this queue must not recreate.
+//! Hosts (notably Kimi) enqueue session transcript paths for ordered
+//! admission scans. This is not workspace-root git membership discovery —
+//! that lives in `tracedecay_runtime_core::git_discovery`.
 
 use std::path::{Path, PathBuf};
 
