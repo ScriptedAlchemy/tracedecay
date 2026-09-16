@@ -1024,11 +1024,8 @@ pub async fn inbox(
             }
             _ => ProjectDeliveryReadOutcomeV1::Unavailable,
         };
-        let proximity = match (
-            state.proximity_attention_read_authority.as_ref(),
-            control.as_ref(),
-        ) {
-            (Some(authority), Some(Extension(control))) => {
+        let proximity = match state.proximity_attention_read_authority.as_ref() {
+            Some(authority) => {
                 authority
                     .read(
                         control.clone(),
@@ -1041,7 +1038,7 @@ pub async fn inbox(
             }
             // No proximity authority mounted: leave proximity sources
             // Unsupported rather than inventing Clear/Active attention.
-            _ => ProjectDeliveryProximityAttentionSourceV1::Unsupported,
+            None => ProjectDeliveryProximityAttentionSourceV1::Unsupported,
         };
         sources.push(ProjectDeliveryInboxSourceV1 {
             registry: ProjectDeliveryRegistrySourceV1 {
