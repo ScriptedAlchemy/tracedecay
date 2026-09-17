@@ -346,12 +346,9 @@ pub struct McpServer {
     /// prepares under; daemon-owned servers carry the bootstrap worker plan's.
     background_cpu: Option<Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>>,
     project_session_refresh_wake:
-        Option<Arc<dyn tracedecay_contracts::SessionTemporalRefreshWakePort>>,
+        Option<Arc<dyn tracedecay_sessions::serving::SessionRefreshWorkerPort>>,
     user_session_refresh_wake:
-        Option<Arc<dyn tracedecay_contracts::SessionTemporalRefreshWakePort>>,
-    /// Serving-status port of the daemon-mounted profile refresh worker.
-    user_session_refresh_serving:
-        Option<Arc<dyn tracedecay_sessions::serving::SessionProjectionServingStatusPort>>,
+        Option<Arc<dyn tracedecay_sessions::serving::SessionRefreshWorkerPort>>,
     project_session_refresh_service: Option<Arc<dyn SessionRefreshServicePort>>,
     /// Daemon-wide profile session refresh service shared with the projectless
     /// route, so a handle begun on either connection resolves on the other.
@@ -832,8 +829,6 @@ impl McpServer {
             project_session_refresh_wake,
             user_session_refresh_wake,
             profile_session_refresh,
-            project_session_refresh_serving,
-            user_session_refresh_serving,
             own_project_host_admission_replay,
             startup_catch_up_enabled,
             automation_scheduler_reconciler,
@@ -998,7 +993,8 @@ impl McpServer {
             .map(|((database, wake), project_id)| {
                 Arc::new(DaemonSessionRefreshService::new(
                     database.clone(),
-                    Arc::clone(wake),
+                    Arc::clone(wake)
+                        as Arc<dyn tracedecay_contracts::SessionTemporalRefreshWakePort>,
                     Some(project_id),
                 )) as Arc<dyn SessionRefreshServicePort>
             });
@@ -1016,9 +1012,12 @@ impl McpServer {
                 let service = DaemonSessionRetrievalService::new_with_serving_port(
                     database.clone(),
                     root,
-                    project_session_refresh_serving.clone().unwrap_or_else(|| {
-                        Arc::new(tracedecay_sessions::serving::RefreshWorkerMissing)
-                    }),
+                    project_session_refresh_wake
+                        .as_ref()
+                        .map(construction::refresh_worker_serving_port)
+                        .unwrap_or_else(|| {
+                            Arc::new(tracedecay_sessions::serving::RefreshWorkerMissing)
+                        }),
                 )?;
                 Some(MountedProjectApplicationRetrievalV1 {
                     identity,
@@ -1096,7 +1095,6 @@ impl McpServer {
             background_cpu,
             project_session_refresh_wake,
             user_session_refresh_wake,
-            user_session_refresh_serving,
             project_session_refresh_service,
             profile_session_refresh_service: profile_session_refresh,
             project_session_store_id,

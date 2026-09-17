@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use tracedecay_contracts::SessionTemporalRefreshWakePort;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_sessions::serving::SessionRefreshWorkerPort;
 
 const LIVE_TRANSCRIPT_REFRESH_DEADLINE: Duration = Duration::from_secs(5);
 
@@ -66,8 +66,8 @@ pub async fn join_required_live_transcript_refresh(
     tool_name: &str,
     arguments: &Value,
     selected_project_owner: bool,
-    project_wake: Option<&dyn SessionTemporalRefreshWakePort>,
-    user_wake: Option<&dyn SessionTemporalRefreshWakePort>,
+    project_wake: Option<&dyn SessionRefreshWorkerPort>,
+    user_wake: Option<&dyn SessionRefreshWorkerPort>,
 ) -> Result<LiveTranscriptRefreshJoin> {
     let Some(scope) = required_refresh_scope(tool_name, arguments) else {
         return Ok(LiveTranscriptRefreshJoin::NotRequired);

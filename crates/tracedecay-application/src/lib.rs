@@ -80,7 +80,6 @@ pub mod project_open_authorization;
 pub mod settings_control;
 pub mod source_authorization;
 pub mod stack_coordinator;
-pub mod store;
 pub mod tracedecay;
 pub mod work;
 

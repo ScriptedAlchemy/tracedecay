@@ -940,14 +940,6 @@ pub(super) async fn handle_dashboard(
                     );
                 Arc::new(adapter) as Arc<dyn tracedecay_dashboard_api::DashboardDeliveryReadPortV1>
             });
-            let proximity_attention_read_authority =
-                daemon_invocation_service.clone().map(|service| {
-                    let adapter = tracedecay_mcp::handlers::dashboard_delivery::DashboardProximityAttentionReadAdapter::new(
-                        service,
-                    );
-                    Arc::new(adapter)
-                        as Arc<dyn tracedecay_dashboard_api::DashboardProximityAttentionReadPortV1>
-                });
             crate::hooks::install_dashboard_hook_readiness_projection()?;
             // One fetch covers the served bundle and the advertised build
             // version; both come from the registered product runtime.
@@ -965,7 +957,6 @@ pub(super) async fn handle_dashboard(
                     lcm_read_authority,
                     git_correlation_read_authority,
                     delivery_read_authority,
-                    proximity_attention_read_authority,
                     registered_savings_db,
                     automation_scheduler_reconciler,
                     automation_authority,
