@@ -13,10 +13,10 @@ vi.mock('../../data/sse/useEvents.tsx', () => ({
   useEventStreamState: () => ({ state: 'live', lastEventAt: null }),
   useLiveActivity: () => stream,
 }));
-vi.mock('../../viz/graph/GraphCanvas.tsx', () => ({
-  GraphCanvas: (props: { activation: ActivationField; onInspect?: (id: string | null) => void }) => {
+vi.mock('./RegistryScene.tsx', () => ({
+  RegistryScene: (props: { activation: ActivationField; onInspect: (id: string | null) => void }) => {
     graph.activation = props.activation;
-    return <button type="button" onMouseEnter={() => props.onInspect?.('p1')}>Canvas project</button>;
+    return <button type="button" onMouseEnter={() => props.onInspect('p1')}>Canvas project</button>;
   },
 }));
 
