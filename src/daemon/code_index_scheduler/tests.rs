@@ -2428,10 +2428,11 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
     );
 }
 
-/// The artifact build and reader ceilings must reserve through the process
-/// resident-memory authority: an authority too small for the advertised
-/// build ceiling refuses the build as a typed unavailability, and a serving
-/// artifact holds its measured reader charge until its owners are dropped.
+/// The artifact build, reader, and durable-head reopen ceilings must reserve
+/// through the process resident-memory authority: an authority too small for
+/// the advertised build or reopen ceiling refuses that pass as a typed
+/// unavailability, and a serving artifact holds its measured reader charge
+/// until its owners are dropped.
 #[test]
 fn text_artifact_ceilings_reserve_through_process_resident_memory() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn reserved() {}\n")]);
@@ -2505,6 +2506,76 @@ fn text_artifact_ceilings_reserve_through_process_resident_memory() {
         adequate.snapshot().used_bytes,
         0,
         "dropping the serving owners must release every artifact charge"
+    );
+
+    // The durable-head reopen path reserves the reader ceiling before the
+    // published artifact is opened: a restart under an authority too small
+    // for that ceiling refuses the reopen as typed unavailability, without
+    // leaking a charge and without touching the artifact.
+    {
+        let mut scheduler = scheduler(
+            &fixture,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        let tight = Arc::new(ProcessResidentMemoryV1::new(
+            std::num::NonZeroU64::new(1024 * 1024).expect("tight limit"),
+        ));
+        scheduler.bind_resident_memory(Arc::clone(&tight));
+        let latest = scheduler.latest_complete().expect("restored generation");
+        let denied = latest.advance_text_serving(1);
+        assert!(
+            matches!(
+                denied,
+                Err(tracedecay_query::retrieval::RetrievalPortError::AuthorityUnavailable(_))
+            ),
+            "an unreservable reopen ceiling must refuse as typed unavailability: {denied:?}"
+        );
+        assert_eq!(
+            tight.snapshot().used_bytes,
+            0,
+            "a denied reopen reservation must not leak a charge"
+        );
+    }
+
+    // An adequate authority reopens the durable head holding only the
+    // measured reader charge; the reopen ceiling itself is transient.
+    let reopen_authority = Arc::new(ProcessResidentMemoryV1::new(
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+    ));
+    {
+        let mut scheduler = scheduler(
+            &fixture,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        scheduler.bind_resident_memory(Arc::clone(&reopen_authority));
+        let latest = scheduler.latest_complete().expect("restored generation");
+        assert!(
+            latest
+                .advance_text_serving(1)
+                .expect("durable-head reopen under an adequate authority"),
+            "a published durable head must reopen in one bounded pass"
+        );
+        let snapshot = reopen_authority.snapshot();
+        assert!(
+            snapshot.charges.iter().any(|charge| {
+                charge.key.component.as_str() == "code-text-artifact-reader" && charge.bytes > 0
+            }),
+            "reopened artifact owners must hold the measured reader charge: {snapshot:?}"
+        );
+        assert!(
+            !snapshot
+                .charges
+                .iter()
+                .any(|charge| charge.key.component.as_str() == "code-text-artifact-reopen"),
+            "the reopen ceiling must be released once the artifact serves: {snapshot:?}"
+        );
+    }
+    assert_eq!(
+        reopen_authority.snapshot().used_bytes,
+        0,
+        "dropping the reopened owners must release every artifact charge"
     );
 }
 

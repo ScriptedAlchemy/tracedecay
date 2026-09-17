@@ -1986,7 +1986,15 @@ impl LatestCompleteCodeIndexV1 {
             let generation_id = self.generation.manifest().generation_id.clone();
             if let Some(descriptor) = store.published_descriptor(&generation_id)? {
                 // Durable-head reopen: a restart serves the published
-                // artifact without rebuilding it.
+                // artifact without rebuilding it. The reader's advertised
+                // cache ceiling is reserved before the open allocates its
+                // SQLite cache grant and verification working set; the build
+                // path gets the same cover from its still-held build ceiling.
+                let reopen_reservation = store.reserve_resident_memory(
+                    &generation_id,
+                    "code-text-artifact-reopen",
+                    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+                )?;
                 let path = code_text_artifact_path(store.store_root(), &descriptor)
                     .map_err(text_artifact_unavailable)?;
                 let reader = CodeLexicalArtifactReaderV1::open_content_addressed(
@@ -1997,7 +2005,11 @@ impl LatestCompleteCodeIndexV1 {
                     &control,
                 )
                 .map_err(map_text_artifact_error)?;
+                // The reopen ceiling is released only after the serving
+                // reader has reserved its own measured retained bytes inside
+                // `install_artifact_owners`.
                 self.install_artifact_owners(store, reader)?;
+                drop(reopen_reservation);
                 return Ok(true);
             }
             // The builder's advertised memory ceiling is reserved through the
