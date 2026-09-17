@@ -3244,7 +3244,7 @@ fn partitioned_codec_fixture() -> (
 }
 
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:d3b89a0fdf57223c17531f23b9a047749cb73bf5a3aa67bf00bd0017ef67ff25";
+    "sha256:f663d7f751f88046b072e662371222cc9087839b83817076220be3b6fcde7ecf";
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
         "sha256:1204a6eba24babd593276eca6c49c00e468cfc671b30c4c8a3c9fff8a6eb13eb",
