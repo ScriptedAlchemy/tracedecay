@@ -1,6 +1,7 @@
 //! Query-only admission for the exact relational shape created by this binary.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::sync::LazyLock;
 
 use crate::db::engine::QueryExecutor;
@@ -147,6 +148,66 @@ where
         parts.push(sql.as_bytes());
     }
     canonical_framed_sha256(SCHEMA_SHAPE_FINGERPRINT_DOMAIN, &parts)
+}
+
+/// Markdown listing of the canonical final `SQLite` shape this binary creates.
+///
+/// The body is the `sqlite_master` inventory admission already builds from the
+/// migration DDL. Callers that need the schema read this instead of keeping a
+/// second document.
+pub fn render_expected_final_schema_markdown() -> Result<String> {
+    let inventory = EXPECTED_FINAL_SHAPE
+        .as_ref()
+        .map_err(|error| database_error(error.clone()))?;
+    Ok(render_schema_markdown(inventory))
+}
+
+fn render_schema_markdown(inventory: &SchemaInventory) -> String {
+    let mut tables = Vec::new();
+    let mut indexes = Vec::new();
+    let mut triggers = Vec::new();
+    let mut views = Vec::new();
+    for (name, object) in inventory {
+        match object.object_type.as_str() {
+            "table" => tables.push((name.as_str(), object)),
+            "index" => indexes.push((name.as_str(), object)),
+            "trigger" => triggers.push((name.as_str(), object)),
+            "view" => views.push((name.as_str(), object)),
+            _ => {}
+        }
+    }
+    let mut out = String::new();
+    out.push_str("# tracedecay SQLite schema\n\n");
+    out.push_str(
+        "Relational shape this binary creates and admits. Code topology lives in the verified graph generation, not in these tables.\n\n",
+    );
+    let _ = writeln!(out, "schema_version: {}\n", super::SCHEMA_VERSION);
+    write_schema_section(&mut out, "Tables", &tables);
+    write_schema_section(&mut out, "Indexes", &indexes);
+    write_schema_section(&mut out, "Triggers", &triggers);
+    write_schema_section(&mut out, "Views", &views);
+    out
+}
+
+fn write_schema_section(out: &mut String, title: &str, objects: &[(&str, &SchemaObject)]) {
+    let _ = writeln!(out, "## {title}\n");
+    if objects.is_empty() {
+        out.push_str("None.\n\n");
+        return;
+    }
+    for (name, object) in objects {
+        let _ = writeln!(out, "### {title} `{name}`\n");
+        if object.object_type != "table" && !object.table.is_empty() {
+            let _ = writeln!(out, "table: `{}`\n", object.table);
+        }
+        let sql = object.sql.trim();
+        if sql.is_empty() {
+            out.push_str("no stored SQL\n\n");
+            continue;
+        }
+        let fence = if sql.contains("```") { "~~~~" } else { "```" };
+        let _ = writeln!(out, "{fence}sql\n{sql}\n{fence}\n");
+    }
 }
 
 /// The DDL this binary creates for one schema object, or `None` when the
@@ -410,6 +471,41 @@ fn require_final_shape_inventory(
         )));
     }
     Ok(shipped_trigger_found)
+}
+
+#[cfg(test)]
+mod render_tests {
+    use std::collections::BTreeSet;
+
+    use super::{EXPECTED_FINAL_SHAPE, render_expected_final_schema_markdown};
+
+    #[test]
+    fn rendered_schema_markdown_is_the_admission_inventory() {
+        let inventory = EXPECTED_FINAL_SHAPE
+            .as_ref()
+            .expect("canonical schema inventory");
+        let markdown = render_expected_final_schema_markdown().expect("schema markdown");
+        let headings: BTreeSet<&str> = markdown
+            .lines()
+            .filter_map(|line| {
+                let rest = line.strip_prefix("### Tables `")?;
+                rest.strip_suffix('`')
+            })
+            .collect();
+        let tables: BTreeSet<&str> = inventory
+            .iter()
+            .filter(|(_, object)| object.object_type == "table")
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert_eq!(
+            headings, tables,
+            "schema markdown table headings must be exactly the admission inventory"
+        );
+        assert!(
+            markdown.contains("schema_version: "),
+            "schema markdown must name the stamp the migrator writes"
+        );
+    }
 }
 
 #[cfg(test)]

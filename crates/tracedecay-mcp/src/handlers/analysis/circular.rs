@@ -178,10 +178,7 @@ fn render_circular_md(
 #[cfg(test)]
 mod circular_render_tests {
     use super::{CIRCULAR_DEFAULT_MEMBER_LIMIT, bound_cycles, circular_output, render_circular_md};
-
-    /// Mirrors [`tracedecay_mcp_catalog::MAX_RESPONSE_CHARS`], the point at which a
-    /// response is replaced by a preview envelope plus a retrieval handle.
-    const RESPONSE_BUDGET: usize = 15_000;
+    use crate::MAX_RESPONSE_CHARS;
 
     fn cycle(files: &[&str]) -> Vec<String> {
         files.iter().map(|file| (*file).to_string()).collect()
@@ -235,15 +232,15 @@ mod circular_render_tests {
         let payload = circular_output(&page, 1, omitted, 3, CIRCULAR_DEFAULT_MEMBER_LIMIT);
         let serialized = serde_json::to_string_pretty(&payload).expect("payload serializes");
         assert!(
-            serialized.len() <= RESPONSE_BUDGET,
-            "bounded payload is {} chars, over the {RESPONSE_BUDGET} budget",
+            serialized.len() <= MAX_RESPONSE_CHARS,
+            "bounded payload is {} chars, over the {MAX_RESPONSE_CHARS} budget",
             serialized.len()
         );
 
         let markdown = render_circular_md(&page, 1, omitted, 3);
         assert!(
-            markdown.len() <= RESPONSE_BUDGET,
-            "bounded markdown is {} chars, over the {RESPONSE_BUDGET} budget",
+            markdown.len() <= MAX_RESPONSE_CHARS,
+            "bounded markdown is {} chars, over the {MAX_RESPONSE_CHARS} budget",
             markdown.len()
         );
         assert!(

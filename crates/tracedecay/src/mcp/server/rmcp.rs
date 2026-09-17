@@ -496,7 +496,8 @@ mod tests {
             large_envelope["original_chars"]
                 .as_u64()
                 .unwrap_or_default()
-                >= 15_000,
+                >= u64::try_from(tracedecay_mcp::MAX_RESPONSE_CHARS)
+                    .expect("response budget fits u64"),
             "large response must cross the production response budget",
         );
         assert!(
@@ -580,6 +581,17 @@ mod tests {
                 r#"{"jsonrpc":"2.0","id":6,"result":{"contents":[{"mimeType":"text/markdown","text":"#
             ) && schema.ends_with(r#","uri":"tracedecay://schema"}]}}"#),
             "legacy resources/read frame shape changed: {schema}",
+        );
+        let parsed: Value = serde_json::from_str(&schema).expect("schema frame");
+        let text = parsed["result"]["contents"][0]["text"]
+            .as_str()
+            .expect("schema text");
+        let authority =
+            tracedecay_runtime_core::db::migrations::render_expected_final_schema_markdown()
+                .expect("canonical schema");
+        assert_eq!(
+            text, authority,
+            "schema resource must be the migration inventory, not a second document"
         );
 
         // Notifications stay responseless on the legacy transport.

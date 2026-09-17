@@ -68,7 +68,7 @@ use tracedecay_temporal_query::ports::ExecutionControl;
 pub(crate) static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
 #[cfg(feature = "test-transport")]
-pub(crate) const MCP_TEST_RESPONSE_CHAR_LIMIT: usize = 15_000;
+pub(crate) const MCP_TEST_RESPONSE_CHAR_LIMIT: usize = tracedecay_mcp::MAX_RESPONSE_CHARS;
 #[cfg(feature = "test-transport")]
 static NEXT_SOURCE_EDIT_TEST_KEY: AtomicU64 = AtomicU64::new(1);
 

@@ -84,13 +84,82 @@ struct HintCategorySpec {
     skill: &'static str,
     message: &'static str,
     context: &'static str,
-    /// Machine-readable list of the tracedecay MCP tools this hint steers the
-    /// model toward, derived from the tools named in `context`. The
-    /// hint-outcome correlator (`super::hint_outcomes`) treats a hint as
-    /// "acted" when one of these tools fires in the session after the hint,
-    /// instead of re-parsing the prose. Keep in sync with `context`.
+    /// Tools a later call credits as acting on this hint. Each name must be an
+    /// exact token in `message` or `context`; [`HintCategorySpec::checked`]
+    /// refuses the spec otherwise, so a slash-joined shorthand such as
+    /// `tracedecay_context/search` cannot silently drop `tracedecay_search`.
     expected_tools: &'static [&'static str],
     nonblocking: bool,
+}
+
+const fn is_tool_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// True when `needle` appears in `haystack` as a whole tool token, not as a
+/// slash-joined shorthand or a prefix of a longer name.
+const fn contains_tool_token(haystack: &str, needle: &str) -> bool {
+    let haystack = haystack.as_bytes();
+    let needle = needle.as_bytes();
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return false;
+    }
+    let mut start = 0;
+    while start + needle.len() <= haystack.len() {
+        let mut offset = 0;
+        while offset < needle.len() && haystack[start + offset] == needle[offset] {
+            offset += 1;
+        }
+        if offset == needle.len() {
+            let preceded = start > 0 && is_tool_token_byte(haystack[start - 1]);
+            let followed = start + needle.len() < haystack.len()
+                && is_tool_token_byte(haystack[start + needle.len()]);
+            if !preceded && !followed {
+                return true;
+            }
+        }
+        start += 1;
+    }
+    false
+}
+
+impl HintCategorySpec {
+    const fn names_every_expected_tool(&self) -> bool {
+        let mut index = 0;
+        while index < self.expected_tools.len() {
+            let tool = self.expected_tools[index];
+            if !contains_tool_token(self.message, tool) && !contains_tool_token(self.context, tool)
+            {
+                return false;
+            }
+            index += 1;
+        }
+        true
+    }
+
+    const fn checked(self) -> Self {
+        assert!(
+            self.names_every_expected_tool(),
+            "hint expected_tools must appear as exact tool tokens in message or context"
+        );
+        self
+    }
+}
+
+#[cfg(test)]
+mod expected_tool_token_tests {
+    use super::contains_tool_token;
+
+    #[test]
+    fn slash_joined_shorthand_does_not_name_the_second_tool() {
+        let prose =
+            "pass project_path to tracedecay_context/search before scanning parent directories";
+        assert!(contains_tool_token(prose, "tracedecay_context"));
+        assert!(
+            !contains_tool_token(prose, "tracedecay_search"),
+            "a slash-joined shorthand must not count as naming tracedecay_search"
+        );
+    }
 }
 
 const CATEGORY_SPECS: &[HintCategorySpec] = &[
@@ -108,7 +177,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
             "tracedecay_context",
         ],
         nonblocking: false,
-    },
+    }.checked(),
     HintCategorySpec {
         category: HintCategory::SemanticSearch,
         key: "semantic_search",
@@ -118,7 +187,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         context: "tracedecay_context answers concept-level queries from the pre-built code graph (add keywords to expand synonyms); tracedecay_search ranks symbols by name/keyword; tracedecay_grep matches a literal or regex string when you want exact text, not a concept.",
         expected_tools: &["tracedecay_context", "tracedecay_search", "tracedecay_grep"],
         nonblocking: true,
-    },
+    }.checked(),
     HintCategorySpec {
         category: HintCategory::FileRead,
         key: "file_read",
@@ -133,7 +202,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
             "tracedecay_grep",
         ],
         nonblocking: true,
-    },
+    }.checked(),
     HintCategorySpec {
         category: HintCategory::ToolDescriptorRead,
         key: "tool_descriptor_read",
@@ -147,7 +216,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
             "tracedecay_callees",
         ],
         nonblocking: true,
-    },
+    }.checked(),
     HintCategorySpec {
         category: HintCategory::BroadRead,
         key: "broad_read",
@@ -157,7 +226,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         context: "tracedecay_context gathers relevant code slices without reading entire directories or the whole repository; tracedecay_grep sweeps the indexed tree for a literal or regex string when you are hunting for exact text rather than a concept.",
         expected_tools: &["tracedecay_context", "tracedecay_grep"],
         nonblocking: false,
-    },
+    }.checked(),
     HintCategorySpec {
         category: HintCategory::CallGraph,
         key: "call_graph",
@@ -173,7 +242,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
             "tracedecay_impact",
         ],
         nonblocking: false,
-    },
+    }.checked(),
     HintCategorySpec {
         category: HintCategory::Impact,
         key: "impact",
@@ -188,7 +257,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
             "tracedecay_test_map",
         ],
         nonblocking: false,
-    },
+    }.checked(),
     HintCategorySpec {
         category: HintCategory::SymbolLookup,
         key: "symbol_lookup",
@@ -198,7 +267,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         context: "tracedecay_context and tracedecay_node can locate definitions and nearby relationships from the code graph.",
         expected_tools: &["tracedecay_context", "tracedecay_node"],
         nonblocking: false,
-    },
+    }.checked(),
     HintCategorySpec {
         category: HintCategory::FileLookup,
         key: "file_lookup",
@@ -208,14 +277,14 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         context: "tracedecay_files can list indexed files and narrow file lookup before opening individual files.",
         expected_tools: &["tracedecay_files"],
         nonblocking: false,
-    },
+    }.checked(),
     HintCategorySpec {
         category: HintCategory::ProjectContext,
         key: "project_context",
         label: "project context",
         skill: "code-health",
         message: "For other repos or registered projects, consider TraceDecay project registry tools.",
-        context: "tracedecay_project_list shows known projects; tracedecay_project_search can find a sibling repo by name/path/remote; pass project_path or project_id to tracedecay_context/search for cross-project code context before scanning parent directories.",
+        context: "tracedecay_project_list shows known projects; tracedecay_project_search can find a sibling repo by name/path/remote; pass project_path or project_id to tracedecay_context or tracedecay_search for cross-project code context before scanning parent directories.",
         expected_tools: &[
             "tracedecay_project_list",
             "tracedecay_project_search",
@@ -223,7 +292,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
             "tracedecay_search",
         ],
         nonblocking: false,
-    },
+    }.checked(),
     HintCategorySpec {
         category: HintCategory::SessionRecall,
         key: "session_recall",
@@ -233,14 +302,14 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         context: "tracedecay_message_search searches ingested agent transcripts across providers; tracedecay_lcm_grep can search bounded raw-message snippets and summaries when you need session-level recall before re-discovering context.",
         expected_tools: &["tracedecay_message_search", "tracedecay_lcm_grep"],
         nonblocking: false,
-    },
+    }.checked(),
     HintCategorySpec {
         category: HintCategory::AtomicEdit,
         key: "atomic_edit",
         label: "atomic edit",
         skill: "editing-safely",
         message: "For safe mechanical edits, use TraceDecay's anchored edit tools.",
-        context: "Use tracedecay_str_replace for one exact swap, tracedecay_multi_str_replace for an all-or-nothing batch, tracedecay_insert_at or tracedecay_insert_at_symbol for anchored insertion, tracedecay_replace_symbol for one resolved symbol, and tracedecay_ast_grep_rewrite for structural rewrites.",
+        context: "Use tracedecay_str_replace for one exact swap, tracedecay_multi_str_replace for an all-or-nothing batch, tracedecay_insert_at or tracedecay_insert_at_symbol for anchored insertion, tracedecay_replace_symbol for one resolved symbol, tracedecay_move_symbol to relocate one resolved symbol, and tracedecay_ast_grep_rewrite for structural rewrites.",
         expected_tools: &[
             "tracedecay_str_replace",
             "tracedecay_multi_str_replace",
@@ -251,7 +320,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
             "tracedecay_move_symbol",
         ],
         nonblocking: false,
-    },
+    }.checked(),
     HintCategorySpec {
         category: HintCategory::TypeOrientation,
         key: "type_orientation",
@@ -267,7 +336,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
             "tracedecay_type_hierarchy",
         ],
         nonblocking: false,
-    },
+    }.checked(),
     HintCategorySpec {
         category: HintCategory::ExploreSubagent,
         key: "explore_subagent",
@@ -282,7 +351,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
             "tracedecay_impact",
         ],
         nonblocking: true,
-    },
+    }.checked(),
     HintCategorySpec {
         category: HintCategory::SubagentStartContext,
         key: "subagent_start_context",
@@ -296,7 +365,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
             "tracedecay_impact",
         ],
         nonblocking: true,
-    },
+    }.checked(),
     HintCategorySpec {
         category: HintCategory::BuildDiagnostics,
         key: "build_diagnostics",
@@ -306,7 +375,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         context: "tracedecay_diagnostics runs (or reads) the project's diagnostics and maps each error to its enclosing symbol; tracedecay_diagnose adds caller/impact context for a specific failure so you fix the root cause, not just the line the compiler points at.",
         expected_tools: &["tracedecay_diagnostics", "tracedecay_diagnose"],
         nonblocking: false,
-    },
+    }.checked(),
     HintCategorySpec {
         category: HintCategory::ReviewChanges,
         key: "review_changes",
@@ -316,7 +385,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         context: "tracedecay_diff_context maps local changed files to touched symbols, dependents, and tests; tracedecay_pr_context does the same for a PR branch when available, so use GitHub only for review comments, metadata, and CI state.",
         expected_tools: &["tracedecay_diff_context", "tracedecay_pr_context"],
         nonblocking: false,
-    },
+    }.checked(),
     HintCategorySpec {
         category: HintCategory::MemoryStore,
         key: "memory_store",
@@ -326,7 +395,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         context: "tracedecay_fact_store_add persists a trust-ranked project/user fact that survives across sessions and is recalled by tracedecay_context and tracedecay_recall; a memory markdown edit is only visible to the current harness. Keep secrets and unnecessary PII out of stored facts.",
         expected_tools: &["tracedecay_fact_store_add"],
         nonblocking: false,
-    },
+    }.checked(),
     HintCategorySpec {
         category: HintCategory::EditRedundancy,
         key: "edit_redundancy",
@@ -336,7 +405,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         context: "tracedecay_search finds existing helpers by name, signature, or body text and tracedecay_similar finds similarly named symbols; if a match exists, reuse or refactor the existing helper instead of keeping a second copy.",
         expected_tools: &["tracedecay_search", "tracedecay_similar"],
         nonblocking: true,
-    },
+    }.checked(),
     HintCategorySpec {
         category: HintCategory::UnexpectedChanges,
         key: "unexpected_changes",
@@ -351,7 +420,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
             "tracedecay_message_search",
         ],
         nonblocking: false,
-    },
+    }.checked(),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

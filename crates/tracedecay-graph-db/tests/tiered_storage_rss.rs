@@ -57,7 +57,7 @@
 //! records) and panicked. The fork this workspace patches in spans an epoch
 //! arena across chunks, so the page commits instead of aborting.
 //!
-//! [`MAX_NATIVE_GENERATION_STAGE_MUTATIONS`]: (crate-private; mirrored below)
+//! [`MAX_NATIVE_GENERATION_STAGE_MUTATIONS`]: tracedecay_graph_db::MAX_NATIVE_GENERATION_STAGE_MUTATIONS
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -66,7 +66,8 @@ use std::time::Instant;
 use tempfile::TempDir;
 use tracedecay_graph_db::{
     GraphCancellation, GraphEntity, GraphEntityId, GraphMutation, GraphNamespace,
-    GraphProjectionId, GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration,
+    GraphProjectionId, GraphWatermark, GraphWriteBatch, MAX_NATIVE_GENERATION_STAGE_MUTATIONS,
+    NeverCancelled, SourceGeneration,
 };
 
 mod support;
@@ -79,12 +80,6 @@ const ENTITY_COUNT: usize = 100_000;
 /// Entities per write batch in the small probe. Deliberately far below the
 /// production staging page so the two probes bracket the arena behaviour.
 const SMALL_BATCH_SIZE: usize = 5_000;
-
-/// Mirrors the crate-private `limits::MAX_NATIVE_GENERATION_STAGE_MUTATIONS`.
-/// The native generation runtime flushes a staging page once it reaches this
-/// many mutations, so this is the largest single-epoch commit production ever
-/// performs. Kept in sync by hand; it is a measurement input, not a contract.
-const PRODUCTION_STAGE_PAGE: usize = 65_536;
 
 /// Total entities in the production-shaped probe. Override with
 /// `TRACEDECAY_RSS_ENTITIES` to scale the sweep without a rebuild.
@@ -266,6 +261,6 @@ fn production_page_generation_rss() {
     measure(
         "tiered storage peak RSS probe (production staging page)",
         entity_count,
-        PRODUCTION_STAGE_PAGE,
+        MAX_NATIVE_GENERATION_STAGE_MUTATIONS,
     );
 }

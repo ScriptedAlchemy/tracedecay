@@ -3705,7 +3705,7 @@ mod tests {
             SourceGeneration::new("source-wide-native-stage").unwrap(),
             GraphWatermark::new("watermark-wide-native-stage").unwrap(),
             vec![],
-            (0..65_536)
+            (0..MAX_NATIVE_GENERATION_STAGE_MUTATIONS)
                 .map(|index| {
                     GraphEntity::new(
                         GraphEntityId::new(format!("entity:{index:05}")).unwrap(),
@@ -3723,7 +3723,7 @@ mod tests {
         assert_eq!(
             pages.len(),
             1,
-            "native generation staging must avoid a full-graph Grafeo commit scan every 4,096 rows"
+            "native generation staging must avoid a full-graph Grafeo commit scan every {MAX_VERIFIED_GENERATION_BATCH_MUTATIONS} rows"
         );
 
         let temp = TempDir::new().unwrap();
