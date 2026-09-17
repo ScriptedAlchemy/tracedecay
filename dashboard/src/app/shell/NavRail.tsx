@@ -24,8 +24,10 @@ import {
   type DashboardScope,
 } from '../../data/scope/store.ts';
 import { cn } from '../../ui/cn';
-import { CHANNELS, channelNumber, type ChannelGroup } from '../channels.ts';
+import { CHANNELS, channelNumber } from '../channels.ts';
 
+/** 14-16px monoline glyphs (DESIGN-SYSTEM.md "Brand"). An anatomical Brain
+ * icon identifies channel 01; it is never the product logo. */
 const ICONS: Record<string, LucideIcon> = {
   brain: Brain,
   explorer: Compass,
@@ -44,14 +46,6 @@ const ICONS: Record<string, LucideIcon> = {
   // mark so the two channels stay distinguishable at a glance.
   workflows: Waypoints,
 };
-
-/** The dock's two scrolling registers, in rail order. `config` (Settings) is
- * pinned to the rail's foot rather than filed here. Channels keep their
- * numbers — grouping arranges the dock, it never renumbers an instrument. */
-const REGISTERS: readonly { group: ChannelGroup; label: string }[] = [
-  { group: 'workspace', label: 'Workspace' },
-  { group: 'ops', label: 'Ops' },
-];
 
 /**
  * What the app-wide Doctor dot is allowed to say.
@@ -113,9 +107,15 @@ function kindHealth(status: StorageFindingKindStatusV1): DoctorHealth {
   }
 }
 
-/** A channel selector, not a menu: numbered, letterspaced, hairline-divided.
- * The active channel is marked by a solid signal bar in the gutter — colour
- * used as position, not decoration. */
+/**
+ * One channel on the rail (NAVIGATION.md "Behavior").
+ *
+ * Selected: a 3px cyan gutter, the raised face, a cyan channel number and a
+ * white label — position marked by colour, not decoration. Hover inspects:
+ * the face rises and the text brightens, and nothing about selection, scope
+ * or any measured value changes. Keyboard focus is the design system's 2px
+ * cyan outline from the base layer; hover never substitutes for it.
+ */
 function RailLink({
   path,
   label,
@@ -134,14 +134,13 @@ function RailLink({
       aria-label={label}
       className={({ isActive }) =>
         cn(
-          // A workspace link is the most-used control in the product and it
-          // rendered 41x28 — under the minimum on both axes once the rail
-          // collapses to icons. The row is the target, so the row carries the
-          // minimum rather than the glyph growing.
+          // The row is the target, so the row carries the 44px minimum rather
+          // than the glyph growing. Compact, the rail is 48px wide and the
+          // link fills it, so the row clears the minimum on both axes.
           'group relative flex min-h-[var(--touch-target-min)] items-center gap-2.5 border-b border-edge-subtle pl-3.5 pr-2',
           'text-text-secondary transition-colors duration-[var(--dur-state)]',
           'hover:bg-surface-2 hover:text-text-primary max-md:justify-center max-md:px-0',
-          isActive && 'bg-surface-2 text-text-primary',
+          isActive && 'td-raised text-text-primary',
         )
       }
     >
@@ -157,16 +156,14 @@ function RailLink({
           <span
             aria-hidden
             className={cn(
-              'td-value w-4 shrink-0 text-3xs max-md:hidden',
+              'td-value w-5 shrink-0 text-2xs max-md:hidden',
               isActive ? 'text-accent' : 'text-text-muted',
             )}
           >
             {channelNumber(path)}
           </span>
-          <Icon aria-hidden size={13} strokeWidth={1.75} className="shrink-0" />
-          <span className="truncate text-3xs font-medium uppercase tracking-[0.14em] max-md:hidden">
-            {label}
-          </span>
+          <Icon aria-hidden size={14} strokeWidth={1.5} className="shrink-0" />
+          <span className="truncate text-sm">{label}</span>
           {health ? <DoctorDot health={health} /> : null}
         </>
       )}
@@ -222,72 +219,65 @@ function useDoctorHealth(): DoctorHealth {
   return 'healthy';
 }
 
-/** Navigation only: no status, no badges except the single Doctor health
- * dot. */
+/**
+ * The brand block (NAVIGATION.md "Persistent regions" 1): the trace-tail
+ * glyph and the wordmark at the top of the rail.
+ *
+ * Identity only. It is not a link — Brain is reached through channel 01, and
+ * the shipping shell exposes no logo action — and it never visualizes
+ * activity, health, connectivity, feed or work. The glyph is static CSS with
+ * no state input by construction; nothing here can be wired to a reading
+ * without becoming a different component. Sized to the register beside it so
+ * the hairline under both runs unbroken across the shell.
+ */
+function BrandBlock() {
+  return (
+    <div
+      data-brand
+      className="flex min-h-[var(--shell-register)] shrink-0 flex-col justify-center gap-2 border-b border-edge-frame px-3.5 max-md:items-center max-md:px-0"
+    >
+      <span className="td-wordmark max-md:hidden">TraceDecay</span>
+      <span aria-hidden className="td-trace-tail">
+        <i />
+        <i />
+        <i />
+        <i />
+      </span>
+    </div>
+  );
+}
+
+/**
+ * The navigation rail (NAVIGATION.md "Persistent regions" 2): all fourteen
+ * numbered workspaces in their fixed order, 192px expanded or 48px compact.
+ *
+ * Navigation only: no status, no badges except the single Doctor health dot
+ * on Observatory, which is where Doctor lives. One flat register — the rail
+ * used to file channels under group dividers and pin Settings to its foot,
+ * which drew channel 12 below channel 14; the canonical rail draws them in
+ * numeric order and nowhere else.
+ */
 export function NavRail() {
   const health = useDoctorHealth();
   const scope = useScope((state) => state.scope);
   return (
     <nav
       aria-label="Workspaces"
-      // Collapsed to icons the rail was `w-12` — 42px, so every link in it was
-      // 41px wide against a 44px minimum. The collapsed width is the link
-      // width, so it comes from the token plus the rail's own hairline.
-      className="group/rail relative flex w-48 shrink-0 flex-col border-r border-edge-subtle bg-surface-1 max-md:w-[calc(var(--touch-target-min)+1px)]"
+      className="group/rail relative flex w-[var(--shell-rail)] shrink-0 flex-col border-r border-edge-frame bg-surface-1 max-md:w-[var(--shell-rail-compact)]"
       data-collapsed="false"
     >
-      {/* Matches the `ScopeBar` floor beside it, which is sized from the same
-        * token so its stretched controls clear the minimum. A floor rather than
-        * a height for the same reason: the bar grows under text-only zoom rather
-        * than clipping its scope, and a fixed brand block would hold this
-        * hairline at 45px while the one beside it moved. */}
-      <div className="flex min-h-[calc(var(--touch-target-min)+1px)] shrink-0 items-center gap-2.5 border-b border-edge-subtle px-3 max-md:justify-center max-md:px-0">
-        <span aria-hidden className="relative size-3 shrink-0 border border-accent">
-          <span className="absolute inset-[3px] bg-accent" />
-        </span>
-        <span className="min-w-0 max-md:hidden">
-          <span className="block truncate text-2xs font-semibold uppercase tracking-[0.2em] text-text-primary">
-            TraceDecay
-          </span>
-        </span>
-      </div>
+      <BrandBlock />
       <div className="min-h-0 flex-1 overflow-auto">
-        {REGISTERS.map((register) => (
-          <section key={register.group} aria-label={register.label}>
-            <RailRegisterLabel label={register.label} />
-            {CHANNELS.filter((channel) => channel.group === register.group).map(
-              (channel) => (
-                <RailLink
-                  key={channel.path}
-                  path={channel.path}
-                  label={channel.label}
-                  health={channel.path === 'observatory' ? health : undefined}
-                  scope={scope}
-                />
-              ),
-            )}
-          </section>
+        {CHANNELS.map((channel) => (
+          <RailLink
+            key={channel.path}
+            path={channel.path}
+            label={channel.label}
+            health={channel.path === 'observatory' ? health : undefined}
+            scope={scope}
+          />
         ))}
       </div>
-      <div className="shrink-0 border-t border-edge-subtle">
-        <RailRegisterLabel label="Config" />
-        <RailLink path="settings" label="Settings" scope={scope} />
-      </div>
     </nav>
-  );
-}
-
-/** A register divider: the engraved group stamp over its channels. Collapsed
- * rails keep the hairline so the grouping survives at icon width, they just
- * lose the word. */
-function RailRegisterLabel({ label }: { label: string }) {
-  return (
-    <div
-      aria-hidden
-      className="flex h-6 items-center gap-2 border-b border-edge-subtle bg-surface-0 px-3.5 max-md:justify-center max-md:px-0"
-    >
-      <span className="td-legend text-3xs text-text-muted max-md:hidden">{label}</span>
-      <span aria-hidden className="td-rule opacity-60" />
-    </div>
   );
 }

@@ -170,8 +170,11 @@ describe('shared shell truthfulness', () => {
 
     expect(await findByText('Project One Hundred And One')).toBeTruthy();
     expect(queryByText('Stale Bookmark Name')).toBeNull();
-    // Not renamed to the id, and not annotated as missing.
-    expect(queryByText('proj-page-101')).toBeNull();
+    // Not renamed to the id, and not annotated as missing. The register does
+    // print the canonical ID, in its own labelled field beside the name; what
+    // must never happen is the id standing IN for the name.
+    expect(scopeLabelText()).toBe('Project One Hundred And One');
+    expect(scopeIdText()).toBe('proj-page-101');
     expect(document.querySelector('[data-scope-label-annotation]')).toBeNull();
     expect(scopeWritable(useScope.getState().scope)).toEqual({
       state: 'writable',
@@ -223,7 +226,8 @@ describe('shared shell truthfulness', () => {
     expect(annotation).toContain('not in registry');
     expect(annotation).toContain('no project registered with id proj-ghost');
     // Never renamed to the raw id, which is a correction no reading supports.
-    expect(queryByText('proj-ghost')).toBeNull();
+    expect(scopeLabelText()).toBe('Looks Legitimate');
+    expect(queryByText('proj-ghost', { selector: '[data-scope-label]' })).toBeNull();
 
     // A settled refusal rather than a pending one: there is nothing here to
     // write to, and saying "not known yet" would be false once the answer is in.
@@ -284,7 +288,8 @@ describe('shared shell truthfulness', () => {
     expect(annotation).toContain('registry unavailable');
     expect(annotation).toContain('registry database could not be opened');
     expect(annotation).not.toContain('not in registry');
-    expect(queryByText('proj-real')).toBeNull();
+    expect(scopeLabelText()).toBe('Looks Legitimate');
+    expect(queryByText('proj-real', { selector: '[data-scope-label]' })).toBeNull();
 
     // Unknown, not read-only: the dashboard has no answer to refuse a write on.
     expect(useScope.getState().scope).toMatchObject({ activation: 'unresolved' });
@@ -403,6 +408,16 @@ describe('shared shell truthfulness', () => {
     expect(unscoped).toEqual([]);
   });
 });
+
+/** The register's project name — the one field a raw id must never occupy. */
+function scopeLabelText(): string | null {
+  return document.querySelector('[data-scope-label]')?.textContent ?? null;
+}
+
+/** The register's canonical-ID field, printed beside the name, never as it. */
+function scopeIdText(): string | null {
+  return document.querySelector('[data-scope-id]')?.textContent ?? null;
+}
 
 function projectRecord(projectId: string, label: string): PublicCodeProject {
   return {

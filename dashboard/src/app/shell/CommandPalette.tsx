@@ -3,6 +3,7 @@ import { Command as CommandIcon, CornerDownLeft, Search } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { WORKSPACES } from '../routes';
+import { channelNumber } from '../channels.ts';
 import { cn } from '../../ui/cn';
 import { useProjectRegistry, projectRegistryPayload } from '../../data/query/projectRegistry.ts';
 import {
@@ -15,6 +16,8 @@ interface CommandPaletteRow {
   id: string;
   label: string;
   hint: string;
+  /** The channel number for a workspace row; project rows have none. */
+  channel: string | null;
   action: () => void;
 }
 
@@ -63,6 +66,7 @@ export function CommandPalette({
       id: `nav:${w.path}`,
       label: w.label,
       hint: 'workspace',
+      channel: channelNumber(w.path),
       action: () => {
         navigate(scopedWorkspacePath(scope, w.path));
         onOpenChange(false);
@@ -76,6 +80,7 @@ export function CommandPalette({
               id: `scope:${project.project_id}:${project.canonical_root}`,
               label: project.label,
               hint: `project · ${group.label}`,
+              channel: null,
               action: () => {
                 // The listing already measured `is_active`, against the same
                 // `active_project_id` the gateway accepts writes on, so the
@@ -162,15 +167,18 @@ export function CommandPalette({
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 bg-black/40" />
+        <Dialog.Overlay className="fixed inset-0 bg-black/55" />
+        {/* An overlay, not channel 15 (NAVIGATION.md): the same framed
+          * night-glass panel as the shell, set over it. */}
         <Dialog.Content
           className={cn(
             'fixed left-1/2 top-24 w-[min(560px,90vw)] -translate-x-1/2',
-            'overflow-hidden rounded-[var(--radius-standard)] border border-edge-strong bg-surface-1 shadow-2xl',
+            'overflow-hidden rounded-[var(--radius-panel)] border border-edge-frame bg-surface-1 shadow-2xl',
           )}
           onKeyDown={onKeyDown}
           aria-label="Command palette"
         >
+          <span aria-hidden className="td-corners pointer-events-none absolute inset-[4px] z-10" />
           <Dialog.Title className="sr-only">Command palette</Dialog.Title>
           <div className="flex items-center gap-2 border-b border-edge-subtle px-3">
             <Search aria-hidden size={14} className="text-text-muted" />
@@ -193,7 +201,7 @@ export function CommandPalette({
             ref={listRef}
             id="td-palette-list"
             role="listbox"
-            className="max-h-72 overflow-auto p-1"
+            className="td-well max-h-72 overflow-auto"
           >
             {filtered.length === 0 ? (
               <li className="px-3 py-6 text-center text-sm text-text-muted">No matches</li>
@@ -207,12 +215,27 @@ export function CommandPalette({
                   onMouseEnter={() => setActive(i)}
                   onClick={entry.action}
                   className={cn(
-                    'flex min-h-[var(--touch-target-min)] cursor-pointer items-center justify-between rounded-[var(--radius-chip)] px-2.5 text-sm',
-                    i === activeIndex ? 'bg-surface-2 text-text-primary' : 'text-text-secondary',
+                    // The same selection grammar as the rail: a cyan position
+                    // bar in the gutter and the raised face, never a glow.
+                    'relative flex min-h-[var(--touch-target-min)] cursor-pointer items-center gap-2.5 border-b border-edge-subtle pl-3.5 pr-2.5 text-sm',
+                    i === activeIndex
+                      ? 'td-raised text-text-primary before:absolute before:inset-y-0 before:left-0 before:w-[3px] before:bg-accent'
+                      : 'text-text-secondary',
                   )}
                 >
-                  <span>{entry.label}</span>
-                  <span className="flex items-center gap-2 text-2xs text-text-muted">
+                  {/* Hidden from the option's accessible name: the row is
+                    * announced as "Brain", not "01 Brain workspace". */}
+                  <code
+                    aria-hidden
+                    className={cn(
+                      'td-value w-5 shrink-0 text-2xs',
+                      i === activeIndex ? 'text-accent' : 'text-text-muted',
+                    )}
+                  >
+                    {entry.channel ?? ''}
+                  </code>
+                  <span className="min-w-0 flex-1 truncate">{entry.label}</span>
+                  <span className="flex shrink-0 items-center gap-2 text-2xs text-text-muted">
                     {entry.hint}
                     {i === activeIndex ? <CornerDownLeft aria-hidden size={11} /> : null}
                   </span>

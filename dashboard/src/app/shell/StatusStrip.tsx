@@ -1,5 +1,12 @@
 import { useCallback, useSyncExternalStore, type ReactNode } from 'react';
+import type { LucideIcon } from 'lucide-react';
+import { FolderTree, HardDrive, Link2, Rss, Search } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
+import type { ProjectsPayloadV1 } from '../../contracts/generated.ts';
+import {
+  type ProjectRegistryResult,
+  useProjectRegistry,
+} from '../../data/query/projectRegistry.ts';
 import {
   useEventStreamState,
   useProjectionSync,
@@ -54,36 +61,37 @@ function feedReading(sync: ProjectionSync): {
 }
 
 /**
- * Telemetry bar for the real `/api/events` connection state, drawn as a
- * segmented subsystem header: every cell is a numbered register (01 LINK,
- * 02 FEED, 03 SOURCE, 04 QUERY) so the strip reads as the instrument's own
- * status word rather than as a footer of prose.
+ * The bottom status strip (NAVIGATION.md "Persistent regions" 6): a 32px
+ * strip separating Link, Feed, Source, Query and Registry authority. Each is
+ * its own labelled cell with its own reading; none vouches for another.
+ * `Link live` says the `/api/events` socket is open — not that data is
+ * synced, not that any activity was accepted, not that anything is healthy.
  */
 export function StatusStrip({ queryActivity }: { queryActivity?: ReactNode } = {}) {
   const { state } = useEventStreamState();
   const feed = feedReading(useProjectionSync());
   const link =
     state === 'live'
-      ? { value: 'live', tone: 'bg-state-ready', live: true }
+      ? { value: 'live', tone: 'bg-state-ready', ink: 'text-accent', live: true }
       : state === 'connecting'
-        ? { value: 'connecting', tone: 'bg-state-loading', live: true }
-        : { value: 'down', tone: 'bg-state-offline', live: false };
+        ? { value: 'connecting', tone: 'bg-state-loading', ink: 'text-text-primary', live: true }
+        : { value: 'down', tone: 'bg-state-offline', ink: 'text-text-muted', live: false };
   return (
     <footer
-      className="flex min-h-8 shrink-0 items-stretch border-t border-edge-subtle bg-surface-1"
+      className="flex min-h-[var(--shell-status)] shrink-0 items-stretch border-t border-edge-frame bg-surface-1"
       aria-label="Status"
     >
-      <Cell code="01" label="Link">
+      <Cell icon={Link2} label="Link">
         <span
           aria-hidden
-          className={cn('size-2 shrink-0', link.tone, link.live && 'td-signal')}
+          className={cn('size-1.5 shrink-0', link.tone, link.live && 'td-signal')}
         />
-        <span className="td-value text-2xs uppercase" role="status">
+        <span className={cn('td-value text-2xs uppercase', link.ink)} role="status">
           {link.value}
         </span>
       </Cell>
-      <Cell code="02" label="Feed">
-        <span aria-hidden className={cn('size-2 shrink-0', feed.tone)} />
+      <Cell icon={Rss} label="Feed">
+        <span aria-hidden className={cn('size-1.5 shrink-0', feed.tone)} />
         {/*
          * One region over the state and its reason together.
          *
@@ -142,8 +150,8 @@ export function SourceProvenance() {
         ? { value: 'captured', tone: 'bg-alert', ink: 'text-alert' }
         : { value: 'no source', tone: 'bg-state-offline', ink: 'text-text-muted' };
   return (
-    <Cell code="03" label="Source">
-      <span aria-hidden className={cn('size-2 shrink-0', source.tone)} />
+    <Cell icon={HardDrive} label="Source">
+      <span aria-hidden className={cn('size-1.5 shrink-0', source.tone)} />
       <span
         role="status"
         data-source-provenance={source.value}
@@ -182,7 +190,7 @@ export function QueryActivityStatus() {
 
   if (activeQuery !== undefined) {
     return (
-      <Cell code="04" label="Query">
+      <Cell icon={Search} label="Query">
         <span className="td-value max-w-64 truncate text-2xs" role="status">
           {activeQuery.label}
         </span>
@@ -192,6 +200,10 @@ export function QueryActivityStatus() {
           </span>
         ) : null}
         {activeQuery.cancelable ? (
+          // The one control on the strip, so the one thing that can push the
+          // strip past its 32px: a 44px target does not fit a 32px strip, and
+          // the strip grows for the duration of a cancelable query rather than
+          // the target shrinking under the minimum.
           <button
             type="button"
             aria-label={`Cancel ${activeQuery.label}`}
@@ -206,7 +218,7 @@ export function QueryActivityStatus() {
   }
 
   return lastCancellation === null ? null : (
-    <Cell code="04" label="Query">
+    <Cell icon={Search} label="Query">
       <span className="td-value max-w-72 truncate text-2xs" role="status">
         cancelled · {lastCancellation.label}
       </span>
@@ -214,22 +226,141 @@ export function QueryActivityStatus() {
   );
 }
 
-/** One numbered register of the strip: segment number engraved first, the
- * subsystem stamp beside it, the reading after the hairline. */
+/**
+ * The project registry's own state, read off the listing the shell already
+ * depends on for scope and the command palette.
+ *
+ * Distinct from Link and Feed: the socket can be live and the projection
+ * synced while the registry — the authority that says which projects exist —
+ * is missing, unopenable, or refusing this caller. It is also distinct from
+ * the scope register's per-project reconciliation, which asks about one id;
+ * this asks whether the registry can be read at all. The typed-state
+ * vocabulary is DESIGN-SYSTEM.md's: `ready` is green and solid; `truncated`
+ * is degraded, because a page is not the registry; `unavailable` and
+ * `offline` are disconnected; refusals and unreadable bodies are their own
+ * words. Nothing here is ever folded into a blank or a green zero.
+ */
+export interface RegistryAuthority {
+  value: string;
+  tone: string;
+  detail: string | null;
+}
+
+export function registryAuthorityReading(
+  result: ProjectRegistryResult<ProjectsPayloadV1> | undefined,
+): RegistryAuthority {
+  if (result === undefined) return { value: 'loading', tone: 'bg-state-loading', detail: null };
+  switch (result.outcome) {
+    case 'envelope': {
+      const payload = result.envelope.payload;
+      switch (payload.status) {
+        case 'ok':
+          return payload.truncated === true
+            ? {
+                value: 'truncated',
+                tone: 'bg-state-partial',
+                detail: `first ${payload.limit} projects only`,
+              }
+            : { value: 'ready', tone: 'bg-state-ready', detail: null };
+        case 'missing_registry':
+          return {
+            value: 'unavailable',
+            tone: 'bg-state-offline',
+            detail: payload.error ?? 'no registry on this profile',
+          };
+        case 'registry_unavailable':
+          return {
+            value: 'unavailable',
+            tone: 'bg-state-offline',
+            detail: payload.error ?? 'the registry could not be opened',
+          };
+        default:
+          return {
+            value: 'unexpected status',
+            tone: 'bg-state-error',
+            detail: payload.status,
+          };
+      }
+    }
+    case 'transport':
+      switch (result.state) {
+        case 'offline':
+          return { value: 'offline', tone: 'bg-state-offline', detail: null };
+        case 'unauthorized':
+          return { value: 'unauthorized', tone: 'bg-state-unauthorized', detail: null };
+        case 'denied':
+          return { value: 'denied', tone: 'bg-state-denied', detail: null };
+        case 'locked':
+          return { value: 'locked', tone: 'bg-state-locked', detail: result.detail ?? null };
+        case 'unsupported_schema':
+        case 'unsupported':
+          return { value: 'unsupported schema', tone: 'bg-state-unsupported-schema', detail: null };
+        case 'error':
+          return { value: 'error', tone: 'bg-state-error', detail: result.detail ?? null };
+        case 'cancelled':
+        case 'complete_zero_findings':
+        case 'conflicting':
+        case 'loading':
+        case 'partial':
+        case 'ready':
+        case 'redacted':
+        case 'stale':
+        case 'timed_out':
+        case 'unknown':
+          // `fetchProjectRegistry` never produces these for a transport
+          // failure; a future one that does is shown by its own name rather
+          // than as any softer word.
+          return { value: result.state.replace('_', ' '), tone: 'bg-state-unknown', detail: null };
+        default: {
+          const unhandled: never = result.state;
+          return unhandled;
+        }
+      }
+    default: {
+      const unhandled: never = result;
+      return unhandled;
+    }
+  }
+}
+
+/** Registry-authority cell mounted by Shell, inside QueryClientProvider, for
+ * the same reason {@link QueryActivityStatus} is. */
+export function RegistryAuthorityStatus() {
+  const registry = registryAuthorityReading(useProjectRegistry().data);
+  return (
+    <Cell icon={FolderTree} label="Registry">
+      <span aria-hidden className={cn('size-1.5 shrink-0', registry.tone)} />
+      <span
+        role="status"
+        data-registry-authority={registry.value}
+        className="flex min-w-0 items-center gap-1.5"
+      >
+        <span className="td-value text-2xs uppercase">{registry.value}</span>
+        {registry.detail !== null && (
+          <span className="td-value min-w-0 truncate text-3xs normal-case text-text-muted">
+            {registry.detail}
+          </span>
+        )}
+      </span>
+    </Cell>
+  );
+}
+
+/** One register of the strip: a 14px monoline glyph, the engraved subsystem
+ * stamp, and the reading after it. The glyph identifies the subsystem
+ * alongside the word; it never carries the state on its own. */
 function Cell({
-  code,
+  icon: Icon,
   label,
   children,
 }: {
-  code: string;
+  icon: LucideIcon;
   label: string;
   children: ReactNode;
 }) {
   return (
     <div className="flex min-w-0 shrink-0 items-center gap-2 border-r border-edge-subtle px-3">
-      <span aria-hidden className="td-value text-3xs text-text-muted" data-cell="numeric">
-        {code}
-      </span>
+      <Icon aria-hidden size={14} strokeWidth={1.5} className="shrink-0 text-text-muted" />
       <span className="td-legend">{label}</span>
       <span className="flex min-w-0 items-center gap-1.5">{children}</span>
     </div>
