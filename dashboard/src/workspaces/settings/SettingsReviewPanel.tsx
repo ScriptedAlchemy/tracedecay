@@ -39,7 +39,12 @@ import {
   type SettingsBinding,
   type WriteCapability,
 } from './settingsRows.ts';
-import { ORIGIN_WORD, ValueCell } from './SettingsValues.tsx';
+import {
+  ApplyRequirementText,
+  ORIGIN_WORD,
+  ValueCell,
+  reviewStatusWord,
+} from './SettingsValues.tsx';
 
 export function SettingsReviewPanel({
   row,
@@ -160,6 +165,7 @@ function PanelBody({
             <span className="text-text-secondary">Read-only · </span>
             {capability.reason}
           </p>
+          <HeldReviewUnderLock scope={capability.binding.scope} editor={editor} />
         </>
       );
     case 'writable':
@@ -178,6 +184,40 @@ function PanelBody({
       return exhaustive;
     }
   }
+}
+
+/**
+ * A frozen review that outlived its gate: the scope moved, or the authority
+ * withdrew, after a change was staged. The locked branch cannot apply it, but
+ * it must still be able to let go of it — otherwise `review_dismissed` is
+ * unreachable and the machine sits in a verdict no control can leave.
+ */
+function HeldReviewUnderLock({
+  scope,
+  editor,
+}: {
+  scope: SettingsScope;
+  editor: SettingsEditorHandle;
+}) {
+  const review = settingsReviewOf(editor.state);
+  if (review === null || review.scope !== scope) return null;
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2" data-settings-stage={editor.state.status}>
+      <span className="text-2xs text-text-muted">
+        A {scopeNoun(scope)} review is {reviewStatusWord(editor.state.status)} against revision{' '}
+        <span className="td-value">{review.expectedRevisionId}</span>; this scope can no longer
+        apply it.
+      </span>
+      <button
+        type="button"
+        className={secondarySettingsButtonClass}
+        disabled={editor.state.status === 'submitting'}
+        onClick={editor.dismiss}
+      >
+        Cancel review
+      </button>
+    </div>
+  );
 }
 
 /* ------------------------------------------------------------ writable --*/
@@ -274,12 +314,16 @@ function WritableBody({
       </Readouts>
 
       {otherReview ? (
-        <p className="text-2xs text-text-muted">
-          A {scopeNoun(otherReview)} review is pending. Editing this value withdraws it.
+        <p className="text-2xs text-text-muted" data-settings-other-review={state.status}>
+          A {scopeNoun(otherReview)} review is {reviewStatusWord(state.status)}. Editing this
+          value withdraws it.
         </p>
       ) : null}
 
-      {applied?.scope === scope ? (
+      {/* The receipt describes the last write; once a new proposal exists for
+        * this scope it describes something other than what is on screen, so
+        * it yields to the proposal rather than sitting above it. */}
+      {applied?.scope === scope && plan?.outcome === 'unchanged' ? (
         <p
           role="status"
           data-settings-receipt={scope}
@@ -518,33 +562,6 @@ function Validation({
     }
     default: {
       const exhaustive: never = plan;
-      return exhaustive;
-    }
-  }
-}
-
-function ApplyRequirementText({ requirement }: { requirement: ReturnType<typeof applyRequirement> }) {
-  switch (requirement.kind) {
-    case 'restart':
-      return (
-        <>
-          <span className="td-value text-2xs text-state-stale">daemon restart</span>
-          <span className="mt-0.5 block text-3xs leading-relaxed text-text-muted">
-            {requirement.detail}
-          </span>
-        </>
-      );
-    case 'reported_on_apply':
-      return (
-        <>
-          <span className="td-value text-2xs text-text-secondary">reported on apply</span>
-          <span className="mt-0.5 block text-3xs leading-relaxed text-text-muted">
-            the write authority states resync or restart requirements in its response
-          </span>
-        </>
-      );
-    default: {
-      const exhaustive: never = requirement;
       return exhaustive;
     }
   }

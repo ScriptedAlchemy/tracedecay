@@ -21,7 +21,7 @@ import { formatMicrosUtc } from '../../ui/format.ts';
 import { StateChip } from '../../ui/StateChip.tsx';
 import { MultiRootPanel } from './MultiRootPanel.tsx';
 import { RemoteBrainPanel } from './RemoteBrainPanel.tsx';
-import type { SettingsEditorState } from './settingsEditorMachine.ts';
+import { settingsReviewOf, type SettingsEditorState } from './settingsEditorMachine.ts';
 import type { WritableScopes } from './settingsGates.ts';
 import { settingsRevisionId, type SettingsModel } from './settingsModel.ts';
 import {
@@ -33,10 +33,13 @@ import {
   type EffectiveRow,
 } from './settingsRows.ts';
 import {
+  ApplyRequirementText,
   ORIGIN_WORD,
   ProvenanceChip,
   ValueCell,
   WriteCell,
+  provenanceSentence,
+  reviewStatusWord,
   type RowProvenance,
 } from './SettingsValues.tsx';
 
@@ -80,6 +83,7 @@ export function SettingsInspector({
             model={model}
             readUrl={readUrl}
             writability={writability}
+            state={state}
             emphasized={row === null}
           />
         </div>
@@ -156,7 +160,7 @@ function RowInspection({
         </Fact>
         {binding ? (
           <Fact term="apply requirement">
-            <ApplyRequirementFact binding={binding} />
+            <ApplyRequirementText requirement={applyRequirement(binding)} />
           </Fact>
         ) : null}
         {revision !== null && binding ? (
@@ -167,49 +171,6 @@ function RowInspection({
       </dl>
     </section>
   );
-}
-
-function ApplyRequirementFact({ binding }: { binding: NonNullable<ReturnType<typeof bindingFor>> }) {
-  const requirement = applyRequirement(binding);
-  switch (requirement.kind) {
-    case 'restart':
-      return (
-        <>
-          <span className="td-value text-2xs text-state-stale">daemon restart</span>
-          <span className="mt-0.5 block text-3xs leading-relaxed text-text-muted">{requirement.detail}</span>
-        </>
-      );
-    case 'reported_on_apply':
-      return (
-        <>
-          <span className="td-value text-2xs text-text-secondary">reported on apply</span>
-          <span className="mt-0.5 block text-3xs leading-relaxed text-text-muted">
-            the write authority states resync or restart requirements in its response
-          </span>
-        </>
-      );
-    default: {
-      const exhaustive: never = requirement;
-      return exhaustive;
-    }
-  }
-}
-
-function provenanceSentence(kind: RowProvenance): string {
-  switch (kind) {
-    case 'unserved':
-      return 'The API states the effective value. The layer that supplied it is not on the wire, so none is claimed.';
-    case 'explicit':
-      return "Set in the daemon's process environment: this override is in force.";
-    case 'default':
-      return "Unset in the daemon's process environment: the default applies.";
-    case 'edited':
-      return 'Your proposal differs from the effective value. It is not applied until the write authority accepts it and the read comes back.';
-    default: {
-      const exhaustive: never = kind;
-      return exhaustive;
-    }
-  }
 }
 
 function writeSentence(
@@ -242,12 +203,14 @@ function SnapshotFacts({
   model,
   readUrl,
   writability,
+  state,
   emphasized,
 }: {
   envelope: DashboardEnvelopeV1<SettingsPayloadV1>;
   model: SettingsModel;
   readUrl: string;
   writability: ScopeWritability;
+  state: SettingsEditorState;
   emphasized: boolean;
 }) {
   const { payload, freshness } = envelope;
@@ -294,6 +257,7 @@ function SnapshotFacts({
         <Fact term="scope">
           <ScopeFact writability={writability} />
         </Fact>
+        <HeldReviewFact state={state} />
         {model.overrides.length > 0 ? (
           <Fact term="environment overrides">
             <span className="td-value text-2xs text-text-secondary" data-cell="numeric">
@@ -310,6 +274,26 @@ function SnapshotFacts({
         </Fact>
       </dl>
     </section>
+  );
+}
+
+/**
+ * The one review the editor can hold, stated here so a verdict — a conflict,
+ * a withdrawn authority, a failed write — stays visible after its row's panel
+ * is closed, rather than surviving only as a word in the register.
+ */
+function HeldReviewFact({ state }: { state: SettingsEditorState }) {
+  const review = settingsReviewOf(state);
+  if (review === null) return null;
+  return (
+    <Fact term="held review">
+      <span className="text-2xs leading-relaxed text-text-secondary" data-settings-held-review={state.status}>
+        <span className="td-value text-text-primary">{reviewStatusWord(state.status)}</span> ·{' '}
+        {scopeNoun(review.scope)} change against revision{' '}
+        <span className="td-value">{review.expectedRevisionId}</span>. Select a{' '}
+        {scopeNoun(review.scope)} key to resolve it.
+      </span>
+    </Fact>
   );
 }
 

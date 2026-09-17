@@ -11,6 +11,7 @@ import { Lock, PenLine } from 'lucide-react';
 import { Fragment, type ReactNode } from 'react';
 import { cn } from '../../ui/cn';
 import { Lamp } from '../../ui/instrument.tsx';
+import type { SettingsEditorState } from './settingsEditorMachine.ts';
 import {
   selectionText,
   splitPath,
@@ -18,12 +19,31 @@ import {
   type OriginKind,
   type ServedProvenance,
 } from './settingsModel.ts';
-import { isWorkerSelection, type WriteCapability } from './settingsRows.ts';
+import { isWorkerSelection, type ApplyRequirement, type WriteCapability } from './settingsRows.ts';
 
 /** The provenance column's vocabulary: what the wire served, plus the one
  * client-side state — a proposal not yet applied — that is never confused
  * with it. */
 export type RowProvenance = ServedProvenance | 'edited';
+
+/** What each provenance word means, in one sentence. The chip's title and the
+ * inspector's explanation are the same sentence, so they cannot drift. */
+export function provenanceSentence(kind: RowProvenance): string {
+  switch (kind) {
+    case 'unserved':
+      return 'The API states the effective value. The layer that supplied it is not on the wire, so none is claimed.';
+    case 'explicit':
+      return "Set in the daemon's process environment: this override is in force.";
+    case 'default':
+      return "Unset in the daemon's process environment: the default applies.";
+    case 'edited':
+      return 'Your proposal differs from the effective value. It is not applied until the write authority accepts it and the read comes back.';
+    default: {
+      const exhaustive: never = kind;
+      return exhaustive;
+    }
+  }
+}
 
 const ORIGIN_GLYPH: Readonly<Record<OriginKind, string>> = {
   file: 'F',
@@ -187,7 +207,7 @@ export function ProvenanceChip({ kind }: { kind: RowProvenance }) {
       return (
         <span
           className="td-value inline-flex items-center gap-1.5 border border-dashed border-edge-strong px-1.5 py-px text-3xs text-text-muted"
-          title="the API states the effective value but not the layer that supplied it"
+          title={provenanceSentence(kind)}
         >
           unserved
         </span>
@@ -196,7 +216,7 @@ export function ProvenanceChip({ kind }: { kind: RowProvenance }) {
       return (
         <span
           className="td-value inline-flex items-center gap-1.5 border border-edge-strong px-1.5 py-px text-3xs text-text-primary"
-          title="set in the daemon's process environment: this override is in force"
+          title={provenanceSentence(kind)}
         >
           <Lamp tone="bg-state-ready" />
           explicit
@@ -206,7 +226,7 @@ export function ProvenanceChip({ kind }: { kind: RowProvenance }) {
       return (
         <span
           className="td-value inline-flex items-center gap-1.5 border border-edge-subtle px-1.5 py-px text-3xs text-text-muted"
-          title="unset in the daemon's process environment: the default applies"
+          title={provenanceSentence(kind)}
         >
           <Lamp tone="bg-surface-3" />
           default
@@ -216,13 +236,71 @@ export function ProvenanceChip({ kind }: { kind: RowProvenance }) {
       return (
         <span
           className="td-value inline-flex items-center gap-1.5 border border-accent px-1.5 py-px text-3xs text-accent"
-          title="your proposal differs from the effective value and is not applied"
+          title={provenanceSentence(kind)}
         >
           edited
         </span>
       );
     default: {
       const exhaustive: never = kind;
+      return exhaustive;
+    }
+  }
+}
+
+/**
+ * When a persisted change takes effect, as the product states it: the one
+ * documented requirement in its own register, or the statement that the write
+ * authority reports it on apply. Shared by the review panel and the inspector.
+ */
+export function ApplyRequirementText({ requirement }: { requirement: ApplyRequirement }) {
+  switch (requirement.kind) {
+    case 'restart':
+      return (
+        <>
+          <span className="td-value text-2xs text-state-stale">daemon restart</span>
+          <span className="mt-0.5 block text-3xs leading-relaxed text-text-muted">
+            {requirement.detail}
+          </span>
+        </>
+      );
+    case 'reported_on_apply':
+      return (
+        <>
+          <span className="td-value text-2xs text-text-secondary">reported on apply</span>
+          <span className="mt-0.5 block text-3xs leading-relaxed text-text-muted">
+            the write authority states resync or restart requirements in its response
+          </span>
+        </>
+      );
+    default: {
+      const exhaustive: never = requirement;
+      return exhaustive;
+    }
+  }
+}
+
+/** The held review's state as one word a sentence can carry. */
+export function reviewStatusWord(status: SettingsEditorState['status']): string {
+  switch (status) {
+    case 'reviewing':
+    case 'confirmed':
+      return 'pending';
+    case 'submitting':
+      return 'applying';
+    case 'conflicted':
+      return 'in conflict';
+    case 'review_superseded':
+      return 'superseded';
+    case 'authority_withdrawn':
+      return 'withdrawn';
+    case 'submit_failed':
+      return 'failed';
+    case 'editor_unavailable':
+    case 'editing':
+      return 'not held';
+    default: {
+      const exhaustive: never = status;
       return exhaustive;
     }
   }
