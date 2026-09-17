@@ -13,27 +13,82 @@
  */
 
 :root {
+  /* ---- V2 night-glass palette (mockups/ui-concept-v2/DESIGN-SYSTEM.md) ----
+   *
+   * The lookbook's named constants, verbatim. They are the SOURCE of the dark
+   * theme: the `--raw-*` ramp below reads them, so the shipping shell and the
+   * concept authority cannot drift apart on a number. They do not change with
+   * `data-theme` — the light theme overrides the `--raw-*` layer, not these —
+   * and components never read them directly; they go through the semantic
+   * utilities like everything else. */
+  --night-void: oklch(0.045 0.012 272);
+  --night-substrate: oklch(0.105 0.018 268);
+  --night-well: oklch(0.118 0.004 262);
+  --night-face: oklch(0.145 0.003 260);
+  --night-raised: oklch(0.228 0.004 260);
+
+  --ink-primary: oklch(0.945 0.002 260);
+  --ink-secondary: oklch(0.79 0.003 260);
+  --ink-muted: oklch(0.685 0.004 260);
+  --edge-subtle: oklch(0.315 0.004 260);
+  --edge-strong: oklch(0.46 0.006 260);
+
+  --signal-cyan: oklch(0.75 0.15 200);
+  --signal-cyan-hot: oklch(0.82 0.16 205);
+  --activity-amber: oklch(0.78 0.14 85);
+  --state-ready: oklch(0.72 0.14 155);
+  --state-danger: oklch(0.62 0.18 25);
+  --state-violet: oklch(0.68 0.1 300);
+
+  --radius-panel: 2px;
+  --radius-chip: 1px;
+  --grid-cell: 32px;
+  --target-min: 44px;
+
+  /* ---- shell geometry (mockups/ui-concept-v2/NAVIGATION.md) ----
+   * The persistent regions have fixed CSS-pixel dimensions, named here so the
+   * rail, register and strip are sized from the same numbers the concept
+   * plates and their briefs use. Pixels, not rem: `html { font-size: 14px }`
+   * makes every rem-derived width land short of the number it was written
+   * for (a `w-48` rail rendered 168px against a 192px spec). */
+  --shell-rail: 192px;
+  --shell-rail-compact: 48px;
+  --shell-register: 52px;
+  --shell-status: 32px;
+
   /* ---- raw scales: dark is the default theme ----
    * Chroma is deliberately near-zero on the surface ramp: an instrument face
    * is grey so the lit segments mean something. */
-  --raw-surface-0: oklch(0.145 0.003 260);
+  --raw-surface-0: var(--night-face);
   --raw-surface-1: oklch(0.178 0.0035 260);
   --raw-surface-2: oklch(0.215 0.004 260);
   --raw-surface-3: oklch(0.262 0.0045 260);
-  --raw-text-primary: oklch(0.945 0.002 260);
-  --raw-text-secondary: oklch(0.79 0.003 260);
+  --raw-text-primary: var(--ink-primary);
+  --raw-text-secondary: var(--ink-secondary);
   /* ≥4.5:1 on surface-0..3 for small text (axe color-contrast). */
-  --raw-text-muted: oklch(0.685 0.004 260);
-  --raw-edge-subtle: oklch(0.315 0.004 260);
-  --raw-edge-strong: oklch(0.46 0.006 260);
-  --raw-accent: oklch(0.75 0.15 200);
+  --raw-text-muted: var(--ink-muted);
+  --raw-edge-subtle: var(--edge-subtle);
+  --raw-edge-strong: var(--edge-strong);
+  --raw-accent: var(--signal-cyan);
   --raw-accent-emphasis: oklch(0.64 0.16 200);
   /* The second signal hue: amber is ALERT AND ACTIVITY — elevated but not
    * broken. Cyan stays the live/selected signal, red stays critical-only;
    * amber is the register in between, for captured provenance, attention
    * counts, and activity that wants an eye without an alarm. */
-  --raw-alert: oklch(0.78 0.15 75);
+  --raw-alert: var(--activity-amber);
   --raw-alert-emphasis: oklch(0.68 0.16 65);
+  /* The chassis hairline: where the shell's persistent regions meet, the edge
+   * carries a trace of the signal hue. Cyan is otherwise reserved for
+   * identity, focus, selection and measured signal, and the frame is allowed
+   * it because it IS the identity of the instrument — a machined edge lit
+   * from within, not a reading. Mixed from the theme's own accent and edge so
+   * it follows `data-theme` without a second value. */
+  --edge-frame: color-mix(in oklab, var(--raw-accent) 22%, var(--raw-edge-subtle));
+  /* The chassis: what shows around and behind the framed shell. The concept
+   * plates set the frame into a void that lifts slightly at the top, as if the
+   * instrument were lit from above; this is that lift, and nothing more. */
+  --raw-chassis:
+    radial-gradient(120% 80% at 50% 0%, oklch(0.13 0.02 268) 0%, oklch(0.07 0.014 270) 55%, var(--night-void) 100%);
 
   /* Graticule: the instrument grid drawn behind canvases and readout fields.
    * Must stay at the edge of visibility — discipline, never texture. */
@@ -42,11 +97,11 @@
 
   /* ---- domain-state hues (plan 11 sixteen-state taxonomy) ---- */
   --raw-state-loading: oklch(0.65 0.02 260);
-  --raw-state-ready: oklch(0.72 0.14 155);
-  --raw-state-complete-zero: oklch(0.72 0.14 155);
-  --raw-state-partial: oklch(0.78 0.14 85);
+  --raw-state-ready: var(--state-ready);
+  --raw-state-complete-zero: var(--state-ready);
+  --raw-state-partial: var(--activity-amber);
   --raw-state-stale: oklch(0.74 0.11 85);
-  --raw-state-locked: oklch(0.68 0.1 300);
+  --raw-state-locked: var(--state-violet);
   --raw-state-denied: oklch(0.64 0.16 25);
   --raw-state-unauthorized: oklch(0.64 0.16 25);
   --raw-state-redacted: oklch(0.6 0.04 300);
@@ -55,7 +110,7 @@
   --raw-state-unknown: oklch(0.6 0.015 260);
   --raw-state-cancelled: oklch(0.62 0.04 260);
   --raw-state-timed-out: oklch(0.7 0.11 55);
-  --raw-state-error: oklch(0.62 0.18 25);
+  --raw-state-error: var(--state-danger);
   --raw-state-unsupported-schema: oklch(0.65 0.1 320);
 
   /* ---- severity ramp (single hue, five ordered steps) ---- */
@@ -95,10 +150,10 @@
    * either shell theme. Its rendering palette is therefore explicit instead
    * of borrowing shell text and surface tokens.
    */
-  --raw-graph-substrate: oklch(0.105 0.018 268);
+  --raw-graph-substrate: var(--night-substrate);
   --raw-graph-text: oklch(0.84 0.035 248);
   --raw-graph-edge: oklch(0.43 0.075 245);
-  --raw-graph-accent: oklch(0.82 0.16 205);
+  --raw-graph-accent: var(--signal-cyan-hot);
   --raw-graph-alert: oklch(0.8 0.15 75);
   --raw-graph-dim: oklch(0.28 0.035 252);
   /* Five layers, front to back: a vignette that pulls the corners down so the
@@ -149,13 +204,13 @@
    *
    * The recipe is fixed and tiny: one inset hairline of light along the top
    * edge, one soft shadow below. Never a bevel, never a stack. */
-  --raw-well: oklch(0.118 0.0035 262);
+  --raw-well: var(--night-well);
   /* A raised face catches the light, so it moves AWAY from the substrate in
    * whichever direction "toward the lamp" means for the current theme. On
    * graphite that is upward in lightness; on paper it is upward too, which is
    * why this cannot simply be surface-2 -- on the light ramp surface-2 is
    * DARKER than the panel it sits on and a raised readout read as a recess. */
-  --raw-raised: oklch(0.228 0.004 260);
+  --raw-raised: var(--night-raised);
   --shadow-well:
     inset 0 1px 3px var(--raw-depth), inset 0 -1px 0 var(--raw-membrane-lift);
   --shadow-raised:
@@ -178,8 +233,9 @@
    * 4px reads as 44, and they render at 38.5. Four controls in this codebase
    * asked for 44 that way and silently got 38.5. A px token cannot be rescaled
    * by the root font size, so a control sized from it is 44 whatever the type
-   * scale does. */
-  --touch-target-min: 44px;
+   * scale does. The design system names the same number `--target-min`; this
+   * is that token under the name every control in the codebase already reads. */
+  --touch-target-min: var(--target-min);
   /* The data row is also the largest control on most surfaces — selecting a
    * row IS the interaction — so its height is the touch minimum rather than a
    * separately chosen number. It was 36px, which is under that minimum in
@@ -199,13 +255,12 @@
    * 240px is roughly five data rows plus a caption — enough that the pane
    * reads as a list with more below it rather than as a sliver. */
   --pane-min-height: 240px;
-  /* Instrument geometry: bezels are milled square. Both radius token names
-   * survive so existing call sites keep compiling; both resolve to a hard
-   * corner now. */
-  --radius-standard: 2px;
-  --radius-chip: 1px;
-  --radius-card: 2px;
-  --grid-cell: 32px;
+  /* Instrument geometry: bezels are milled square. The design system's name
+   * for the panel corner is `--radius-panel`; both legacy names resolve to it
+   * so existing call sites keep compiling. `--radius-chip` and `--grid-cell`
+   * are defined once, in the palette block above. */
+  --radius-standard: var(--radius-panel);
+  --radius-card: var(--radius-panel);
   /* How far the display face is expanded at the uppercase engraved tiers.
    * Measured, not chosen by eye: across all twelve surfaces at 1440 and 768,
    * 112% clips one more label than the unexpanded baseline and 125% clips
@@ -297,6 +352,9 @@
    * lightness from surface-0 by about the same step the dark theme goes. */
   --raw-well: oklch(0.945 0.0018 260);
   --raw-raised: oklch(1 0 0);
+  /* Paper has no void to set the frame into: the chassis is the next step
+   * down the surface ramp, so the frame still reads as a frame. */
+  --raw-chassis: var(--raw-surface-3);
 }
 
 [data-contrast='more'] {
@@ -304,6 +362,9 @@
   --raw-text-muted: var(--raw-text-secondary);
   --raw-edge-subtle: var(--raw-edge-strong);
   --raw-grid: var(--raw-edge-subtle);
+  /* A tinted hairline is atmosphere; contrast asks for a ruled one. */
+  --edge-frame: var(--raw-edge-strong);
+  --raw-chassis: var(--raw-surface-0);
   /* Atmosphere is the first thing to go when the user asks for contrast: the
    * graph window flattens to a single plate and loses its lift. */
   --raw-graph-field: var(--raw-surface-0);
@@ -365,6 +426,118 @@
  * field: it draws no points or lines that could be read as graph entities. */
 .td-graph-field {
   background: var(--raw-graph-field);
+}
+
+/** The chassis: the ground the framed shell sits on. */
+.td-chassis {
+  background: var(--raw-chassis);
+}
+
+/** Frame corner marks: four 9px L-shaped ticks at the corners of a region.
+ *
+ * Applied to an `aria-hidden`, `pointer-events: none` overlay positioned inside
+ * the region (`absolute inset-[5px]`), never to the region itself, so it
+ * composes with whatever background the region has. Eight gradient tiles on
+ * one element — a horizontal and a vertical hairline per corner — rather than
+ * four bordered children, so the mark costs no DOM and no layout.
+ *
+ * Decoration in the strict sense: it says "this is a framed region" and
+ * nothing about state. Forced colors drops background images, and with them
+ * the marks, which is correct — the frame is then the border the UA draws. */
+.td-corners {
+  --corner-size: 9px;
+  --corner-ink: var(--raw-edge-strong);
+  background-image:
+    linear-gradient(var(--corner-ink), var(--corner-ink)),
+    linear-gradient(var(--corner-ink), var(--corner-ink)),
+    linear-gradient(var(--corner-ink), var(--corner-ink)),
+    linear-gradient(var(--corner-ink), var(--corner-ink)),
+    linear-gradient(var(--corner-ink), var(--corner-ink)),
+    linear-gradient(var(--corner-ink), var(--corner-ink)),
+    linear-gradient(var(--corner-ink), var(--corner-ink)),
+    linear-gradient(var(--corner-ink), var(--corner-ink));
+  background-size:
+    var(--corner-size) 1px,
+    1px var(--corner-size),
+    var(--corner-size) 1px,
+    1px var(--corner-size),
+    var(--corner-size) 1px,
+    1px var(--corner-size),
+    var(--corner-size) 1px,
+    1px var(--corner-size);
+  background-position:
+    left top,
+    left top,
+    right top,
+    right top,
+    left bottom,
+    left bottom,
+    right bottom,
+    right bottom;
+  background-repeat: no-repeat;
+}
+
+/** The brand glyph: one origin point and three trace-tail points, each smaller
+ * and dimmer than the last, on a hairline. Identity only — it never animates,
+ * never changes with connectivity, health, feed or work, and is not a control.
+ * The dots are drawn in the signal hue because the mark IS the signal's
+ * identity; nothing about their brightness is a reading. */
+.td-trace-tail {
+  display: inline-flex;
+  align-items: center;
+  position: relative;
+  height: 14px;
+  flex: none;
+}
+.td-trace-tail::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  right: 2px;
+  top: 50%;
+  height: 1px;
+  background: color-mix(in oklab, var(--raw-accent) 55%, transparent);
+}
+.td-trace-tail > i {
+  display: block;
+  position: relative;
+  flex: none;
+  border-radius: 50%;
+  background: var(--raw-accent);
+}
+.td-trace-tail > i:nth-child(1) {
+  width: 12px;
+  height: 12px;
+  box-shadow: 0 0 8px color-mix(in oklab, var(--raw-accent) 70%, transparent);
+}
+.td-trace-tail > i:nth-child(2) {
+  width: 6px;
+  height: 6px;
+  margin-left: 8px;
+  opacity: 0.9;
+}
+.td-trace-tail > i:nth-child(3) {
+  width: 4px;
+  height: 4px;
+  margin-left: 7px;
+  opacity: 0.7;
+}
+.td-trace-tail > i:nth-child(4) {
+  width: 3px;
+  height: 3px;
+  margin-left: 6px;
+  opacity: 0.5;
+}
+/* Compact rail (Tailwind's `max-md`, spelled the same way): the origin point
+ * alone identifies the mark at 48px. */
+@media (width < 48rem) {
+  .td-trace-tail > i:nth-child(n + 2),
+  .td-trace-tail::before {
+    display: none;
+  }
+}
+[data-contrast='more'] .td-trace-tail > i:nth-child(1) {
+  box-shadow: none;
 }
 
 /** The night optical window: EVERY analytical drawing in the product — chart,

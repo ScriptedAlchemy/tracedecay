@@ -16,6 +16,7 @@
   --color-text-muted: var(--raw-text-muted);
   --color-edge-subtle: var(--raw-edge-subtle);
   --color-edge-strong: var(--raw-edge-strong);
+  --color-edge-frame: var(--edge-frame);
   --color-accent: var(--raw-accent);
   --color-accent-emphasis: var(--raw-accent-emphasis);
   --color-alert: var(--raw-alert);
@@ -66,9 +67,11 @@
    * costs nothing to deliver. */
   --font-sans: 'IBM Plex Sans Variable', system-ui, sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', monospace;
-  /* The engraved tier. Only ever reached through this token — never a
+  /* The engraved tier: the design system's display face, Archivo Variable,
+   * whose width axis is what lets `--display-width` (112%) actually expand
+   * the wordmark and legends. Only ever reached through this token — never a
    * hard-coded family in a component. */
-  --font-display: 'Chakra Petch', 'IBM Plex Sans Variable', system-ui, sans-serif;
+  --font-display: 'Archivo Variable', 'IBM Plex Sans Variable', system-ui, sans-serif;
 
   /* Instrument type scale. `3xs` is the annotation size — used only for
    * letterspaced uppercase legends and units, never for prose.
@@ -130,13 +133,11 @@
    * wears this — small, letterspaced, uppercase, quiet.
    *
    * This is where the display face earns its keep. At 10px uppercase almost
-   * nothing of a face's personality survives except weight and STROKE GEOMETRY,
-   * and Chakra Petch's chamfered terminals are exactly the detail that does
-   * survive: under heavy tracking the legends read as machine-engraved stamps,
-   * the register a round grotesque cannot reach. `font-stretch` stays declared
-   * so a future variable face with a width axis picks the tuned width up
-   * without touching every call site; Chakra Petch ships one width and
-   * ignores it. */
+   * nothing of a face's personality survives except weight and WIDTH, and
+   * Archivo's width axis is the detail that does survive: expanded to
+   * `--display-width` under heavy tracking, the legends read as engraved
+   * stamps on a wide plate, the register a static-width grotesque cannot
+   * reach because it cannot be asked to widen. */
   .td-legend {
     font-family: var(--font-display);
     font-stretch: var(--display-width);
@@ -190,6 +191,22 @@
     letter-spacing: -0.035em;
     line-height: 0.92;
     color: var(--raw-text-primary);
+  }
+
+  /* The wordmark: `TRACEDECAY` in the expanded display face, ice white,
+   * generously tracked (DESIGN-SYSTEM.md "Brand"). One class because there is
+   * one wordmark; it is identity, so it carries no state and no colour but
+   * ink. */
+  .td-wordmark {
+    font-family: var(--font-display);
+    font-stretch: var(--display-width);
+    font-size: var(--text-sm);
+    line-height: 1;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    font-weight: 500;
+    color: var(--raw-text-primary);
+    white-space: nowrap;
   }
 
   /* The title tier: what names a region a reader is meant to navigate by, as
