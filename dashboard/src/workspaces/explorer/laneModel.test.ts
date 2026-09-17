@@ -191,6 +191,8 @@ describe('laneFromSourceProgress', () => {
       reportedTotal: 0,
       unreadableRows: 0,
       hasMore: false,
+      freshness: 'unknown',
+      watermark: null,
     });
     expect(new Set([...states, readyEmpty.state]).size).toBe(4);
   });
@@ -248,7 +250,18 @@ describe('laneFromSourceProgress', () => {
       reportedTotal: null,
       unreadableRows: 0,
       hasMore: null,
+      freshness: 'unknown',
+      watermark: null,
     });
+  });
+
+  it('carries the source\u2019s own freshness word and watermark verbatim', () => {
+    const fresh = laneFromSourceProgress(
+      'code',
+      progress({ freshness: 'fresh', watermark: 'g-42' }),
+      [],
+    );
+    expect(fresh).toMatchObject({ state: 'ready', freshness: 'fresh', watermark: 'g-42' });
   });
 
   it('reports rows it could not read instead of silently returning fewer', () => {
