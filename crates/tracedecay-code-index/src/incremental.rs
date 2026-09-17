@@ -600,9 +600,17 @@ fn placeholder_digest() -> ManifestDigest {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChunkIncrementErrorV1, GenerationChunkManifestV1};
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    use super::{ChunkIncrementErrorV1, GenerationChunkManifestV1, plan_chunk_increment_arc_shared};
     use crate::parallelism::{CodeIndexParallelismErrorV1, force_install_failure_for_test};
-    use tracedecay_domain::CodeGenerationId;
+    use tracedecay_domain::{
+        BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
+        CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1, ContentDigest,
+        FileOccurrenceId, LanguageDescriptorRevision, PolicyRevisionId, SanitizerRevision,
+        SensitivityDecision, SensitivityLevelV1, SourceSpan,
+    };
 
     #[test]
     fn pool_failure_remains_a_typed_parallelism_error() {
@@ -621,5 +629,94 @@ mod tests {
                 CodeIndexParallelismErrorV1::PoolBuild { .. }
             ))
         ));
+    }
+
+    fn generation(label: &str) -> CodeGenerationId {
+        CodeGenerationId::new(label).expect("generation id")
+    }
+
+    fn identity<T>(value: &str) -> T
+    where
+        T: TryFrom<String>,
+        <T as TryFrom<String>>::Error: std::fmt::Debug,
+    {
+        T::try_from(value.to_owned()).expect("fixture identity")
+    }
+
+    fn row(file: &FileOccurrenceId, chunk_id: &str, text: &str) -> Arc<CodeSearchChunkV1> {
+        Arc::new(CodeSearchChunkV1 {
+            id: identity::<CodeSearchChunkId>(chunk_id),
+            anchor: CodeSearchChunkAnchorV1 {
+                generation_id: generation("generation.row"),
+                file_occurrence_id: file.clone(),
+                symbol_occurrence_id: None,
+                parent_chunk_id: None,
+                source_span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: text.len() as u64,
+                },
+                grain: CodeSearchChunkGrainV1::FileWindow,
+                ordinal: 0,
+            },
+            content_digest: ContentDigest::of_bytes(text.as_bytes()),
+            language_descriptor_revision: identity::<LanguageDescriptorRevision>("descriptor.v1"),
+            chunker_revision: identity::<ChunkerRevision>("chunker.v1"),
+            sanitizer_revision: identity::<SanitizerRevision>("sanitizer.v1"),
+            sensitivity: SensitivityDecision {
+                level: SensitivityLevelV1::Public,
+                policy_revision: identity::<PolicyRevisionId>("policy.v1"),
+            },
+            exact_terms: vec![],
+            subtokens: vec![],
+            sanitized_text: BoundedSanitizedText::new(text).expect("bounded fixture text"),
+        })
+    }
+
+    /// Known-good Arc-share rows seal. One divergent shared-file row must be
+    /// named and must stop the plan before `reused_digest` is sealed. A later
+    /// divergent row must not become the reported unit.
+    #[test]
+    fn arc_share_plan_stops_at_the_divergent_chunk_before_sealing() {
+        let file = identity::<FileOccurrenceId>("file.shared");
+        let stable = row(&file, "chunk.a-stable", "stable");
+        let early = row(&file, "chunk.m-diverged", "before");
+        let later = row(&file, "chunk.z-later", "before-later");
+        let prior = GenerationChunkManifestV1::from_sorted_arcs(
+            generation("generation.prior"),
+            vec![Arc::clone(&stable), Arc::clone(&early), Arc::clone(&later)],
+        )
+        .expect("prior rows");
+        let shared = BTreeSet::from([file.clone()]);
+        let parent = super::placeholder_digest();
+
+        let carried = GenerationChunkManifestV1::from_sorted_arcs(
+            generation("generation.current"),
+            vec![Arc::clone(&stable), Arc::clone(&early), Arc::clone(&later)],
+        )
+        .expect("pointer-equal carry");
+        let sealed = plan_chunk_increment_arc_shared(&prior, &carried, &shared, &parent)
+            .expect("pointer-equal shared rows are a known-good seal");
+        assert_eq!(sealed.reused_count, 3);
+
+        let diverged_early = row(&file, "chunk.m-diverged", "after");
+        let diverged_later = row(&file, "chunk.z-later", "after-later");
+        assert_ne!(diverged_early.content_digest, early.content_digest);
+        assert!(!Arc::ptr_eq(&diverged_early, &early));
+        let current = GenerationChunkManifestV1::from_sorted_arcs(
+            generation("generation.current"),
+            vec![stable, diverged_early, diverged_later],
+        )
+        .expect("divergent current rows");
+        let error = plan_chunk_increment_arc_shared(&prior, &current, &shared, &parent)
+            .expect_err("a divergent shared chunk must not seal");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("chunk.m-diverged"),
+            "the lowest-id divergent chunk must be named before the seal, got {rendered}"
+        );
+        assert!(
+            !rendered.contains("chunk.z-later"),
+            "a later divergent chunk must not bury the first, got {rendered}"
+        );
     }
 }
