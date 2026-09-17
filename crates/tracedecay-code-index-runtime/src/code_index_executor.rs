@@ -1525,6 +1525,12 @@ where
                     code_search::CodeIndexSimilarOutcomeV1::Complete(Box::new(result))
                 }
                 Ok(Ok(None)) => code_search::CodeIndexSimilarOutcomeV1::NotFound,
+                Ok(Err(RetrievalPortError::Cancelled)) => {
+                    unavailable(code_search::CodeIndexSearchUnavailableReasonV1::Cancelled)
+                }
+                Ok(Err(RetrievalPortError::BudgetExceeded)) => {
+                    unavailable(code_search::CodeIndexSearchUnavailableReasonV1::TimedOut)
+                }
                 Ok(Err(_)) | Err(_) => {
                     unavailable(code_search::CodeIndexSearchUnavailableReasonV1::Internal)
                 }

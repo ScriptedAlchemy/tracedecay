@@ -682,6 +682,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
             .into_iter()
             .filter(|key| request.match_classes.contains(&key.class))
         {
+            family_report::interrupt_family_batch(control)?;
             if remaining_results == 0 || remaining_work == 0 {
                 break;
             }
@@ -737,6 +738,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
         let mut cursor = start_cursor.cloned();
         let mut complete = false;
         while members.len() < limit {
+            family_report::interrupt_family_batch(control)?;
             let page = self
                 .hydration
                 .clone_exact_page(&source.occurrence, key, cursor.as_ref(), limit, control)
