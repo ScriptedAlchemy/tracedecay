@@ -8,9 +8,12 @@
  */
 
 import { useId } from 'react';
-import type { CodeIndexWorkerStatusV1 } from '../../contracts/generated.ts';
+import type {
+  CodeIndexWorkerSelectionV1,
+  CodeIndexWorkerStatusV1,
+} from '../../contracts/generated.ts';
 import { settingsCheckboxRowClass, settingsInputClass } from './settingsChrome.ts';
-import type { SettingsBinding } from './settingsRows.ts';
+import { isWorkerSelection, type SettingsBinding } from './settingsRows.ts';
 
 export function SettingsRowEditor({
   binding,
@@ -204,14 +207,8 @@ function WorkerSelectionEditor({
   );
 }
 
-function readSelection(value: unknown): { mode: 'automatic' } | { mode: 'exact'; workers: number } {
-  if (typeof value === 'object' && value !== null) {
-    const candidate = value as { mode?: unknown; workers?: unknown };
-    if (candidate.mode === 'exact' && typeof candidate.workers === 'number') {
-      return { mode: 'exact', workers: candidate.workers };
-    }
-  }
-  return { mode: 'automatic' };
+function readSelection(value: unknown): CodeIndexWorkerSelectionV1 {
+  return isWorkerSelection(value) ? value : { mode: 'automatic' };
 }
 
 export function FieldError({ id, error }: { id?: string; error?: string | undefined }) {

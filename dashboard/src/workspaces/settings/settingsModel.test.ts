@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { FIXTURES } from '../../../stories/fixtures/data.ts';
 import { CodeIndexWorkerSelectionV1Schema } from '../../contracts/generated.ts';
-import { buildSettingsEditor, buildSettingsModel, filterOverrides, filterRows, isPathLike, planCodeIndexWorkerChangeAgainst, planProjectChangeAgainst, planUserChangeAgainst, readSettingsEnvelope, settingsRevisionConflict } from './settingsModel.ts';
+import { buildSettingsEditor, buildSettingsModel, isPathLike, planCodeIndexWorkerChangeAgainst, planProjectChangeAgainst, planUserChangeAgainst, readSettingsEnvelope, settingsRevisionConflict } from './settingsModel.ts';
 
 // `/api/settings` answers a DashboardEnvelopeV1; the read model addresses the
 // settings groups inside its payload. Reading it through the generated
@@ -122,37 +122,6 @@ describe('Settings read model', () => {
     ).toBe('null');
   });
 
-  /** A live payload's project and user groups routinely pin the SAME snapshot
-   * and revision ids. One identity is one stamp — repeating it rendered the
-   * header strip twice and collided its `label:value` React keys — while two
-   * groups pinned to DIFFERENT snapshots still both appear, because that
-   * disagreement is a reading. */
-  it('states a snapshot identity shared by several groups exactly once', () => {
-    const model = buildSettingsModel({
-      project: {
-        configuration_snapshot_id: 'snap-shared',
-        configuration_revision_id: 'rev-shared',
-      },
-      user: {
-        configuration_snapshot_id: 'snap-shared',
-        configuration_revision_id: 'rev-shared',
-      },
-    });
-    expect(model.stamps).toEqual([
-      { label: 'snapshot', value: 'snap-shared' },
-      { label: 'revision', value: 'rev-shared' },
-    ]);
-
-    const disagreeing = buildSettingsModel({
-      project: { configuration_snapshot_id: 'snap-a' },
-      user: { configuration_snapshot_id: 'snap-b' },
-    });
-    expect(disagreeing.stamps).toEqual([
-      { label: 'snapshot', value: 'snap-a' },
-      { label: 'snapshot', value: 'snap-b' },
-    ]);
-  });
-
   it('returns an empty model for a payload that is not an object', () => {
     for (const bad of [null, undefined, 42, 'nope', []]) {
       const model = buildSettingsModel(bad);
@@ -198,37 +167,6 @@ describe('Settings read model', () => {
     expect(automation?.rows.find((row) => row.id === 'availability.reason')?.text).toBe(
       'project automation configuration could not be read',
     );
-  });
-});
-
-describe('Settings filtering', () => {
-  it('keeps ancestors of a matching row so nesting still reads', () => {
-    const rows = buildSettingsModel(payload).sections.find((s) => s.id === 'project')!.rows;
-    const filtered = filterRows(rows, 'auto_track_pr_poll_secs');
-    expect(filtered.map((row) => row.id)).toEqual([
-      'config',
-      'config.sync',
-      'config.sync.auto_track_pr_poll_secs',
-    ]);
-  });
-
-  it('keeps the whole subtree of a group that matches by name', () => {
-    const rows = buildSettingsModel(payload).sections.find((s) => s.id === 'project')!.rows;
-    const filtered = filterRows(rows, 'telemetry');
-    expect(filtered.map((row) => row.id)).toEqual([
-      'config',
-      'config.telemetry',
-      'config.telemetry.timings',
-    ]);
-  });
-
-  it('filters overrides across name, value and description', () => {
-    const overrides = buildSettingsModel(payload).overrides;
-    expect(filterOverrides(overrides, 'DATA_DIR').map((o) => o.name)).toEqual([
-      'TRACEDECAY_DATA_DIR',
-    ]);
-    expect(filterOverrides(overrides, 'pricing')).toEqual([]);
-    expect(filterOverrides(overrides, '')).toHaveLength(2);
   });
 });
 

@@ -9,6 +9,7 @@
  * printed as `unserved`, an origin it did not name as not served.
  */
 
+import type { ReactNode } from 'react';
 import type {
   CodeIndexWorkerStatusV1,
   DashboardEnvelopeV1,
@@ -18,7 +19,6 @@ import type { ScopeWritability } from '../../data/scope/store.ts';
 import { Legend } from '../../ui/instrument.tsx';
 import { formatMicrosUtc } from '../../ui/format.ts';
 import { StateChip } from '../../ui/StateChip.tsx';
-import { ProvenanceChip, WriteCell, type RowProvenance } from './EffectiveConfigTable.tsx';
 import { MultiRootPanel } from './MultiRootPanel.tsx';
 import { RemoteBrainPanel } from './RemoteBrainPanel.tsx';
 import type { SettingsEditorState } from './settingsEditorMachine.ts';
@@ -32,7 +32,13 @@ import {
   writeCapability,
   type EffectiveRow,
 } from './settingsRows.ts';
-import { ORIGIN_WORD, ValueCell } from './SettingsValues.tsx';
+import {
+  ORIGIN_WORD,
+  ProvenanceChip,
+  ValueCell,
+  WriteCell,
+  type RowProvenance,
+} from './SettingsValues.tsx';
 
 export function SettingsInspector({
   envelope,
@@ -96,7 +102,7 @@ function RowInspection({
   workerStatus: CodeIndexWorkerStatusV1 | null;
 }) {
   const binding = bindingFor(row.key);
-  const capability = writeCapability(row.key, gates);
+  const capability = writeCapability(row.key, gates, state.status !== 'editor_unavailable');
   const edited =
     binding !== null &&
     state.status !== 'editor_unavailable' &&
@@ -365,7 +371,7 @@ function RevisionLine({ label, value }: { label: string; value: string }) {
   );
 }
 
-function Fact({ term, children }: { term: string; children: React.ReactNode }) {
+function Fact({ term, children }: { term: string; children: ReactNode }) {
   return (
     <div className="flex min-w-0 flex-col gap-1">
       <dt className="td-legend">{term}</dt>

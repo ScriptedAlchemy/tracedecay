@@ -47,6 +47,7 @@ export function SettingsReviewPanel({
   editor,
   workerStatus,
   query,
+  closable,
   onClose,
 }: {
   row: EffectiveRow;
@@ -54,6 +55,8 @@ export function SettingsReviewPanel({
   editor: SettingsEditorHandle;
   workerStatus: CodeIndexWorkerStatusV1 | null;
   query: string;
+  /** False while a write is in flight: the panel stays until the verdict lands. */
+  closable: boolean;
   onClose: () => void;
 }) {
   return (
@@ -74,8 +77,9 @@ export function SettingsReviewPanel({
         <button
           type="button"
           onClick={onClose}
+          disabled={!closable}
           aria-label="Close review"
-          className="td-hit group -my-2 -mr-2 shrink-0"
+          className="td-hit group -my-2 -mr-2 shrink-0 disabled:cursor-wait disabled:opacity-50"
         >
           <span className="inline-flex size-6 items-center justify-center text-text-muted group-hover:text-text-primary">
             <X aria-hidden size={14} />
@@ -212,6 +216,8 @@ function WritableBody({
   // The input wears whichever refusal names its field: a verdict the editor is
   // resting on first, else the live plan's, so `aria-invalid` is true the
   // moment the value would be refused rather than only after a review attempt.
+  // (An edit clears a resting refusal in the machine, so the two never
+  // describe different drafts.)
   const liveErrors = plan?.outcome === 'invalid' ? plan.errors : [];
   const fieldError = [...scopeErrors, ...liveErrors].find(
     (error) => error.field === binding.field,
@@ -281,7 +287,9 @@ function WritableBody({
         >
           <StateChip kind="ready" detail="applied" />
           <strong className="font-semibold text-text-primary">{applied.message}</strong>
-          <span className="td-value text-2xs text-text-muted">revision now {revision}</span>
+          <span className="td-value text-2xs text-text-muted">
+            revision now {applied.revisionId}
+          </span>
           {applied.resyncRecommended ? <span>Resync recommended</span> : null}
           {applied.restartRecommended ? <span>Restart recommended</span> : null}
         </p>
@@ -306,7 +314,7 @@ function WritableBody({
           <button
             type="button"
             className={secondarySettingsButtonClass}
-            disabled={!edited}
+            disabled={!edited || applying}
             onClick={() => editor.revert(binding)}
           >
             Discard proposal
@@ -314,7 +322,7 @@ function WritableBody({
           <button
             type="button"
             className={settingsButtonClass}
-            disabled={plan?.outcome !== 'ready'}
+            disabled={plan?.outcome !== 'ready' || applying}
             onClick={() => editor.review(scope)}
           >
             Review {scopeNoun(scope)} change
@@ -474,8 +482,8 @@ function Validation({
   if (rejection && errors.length > 0) {
     return (
       <ul className="grid gap-0.5" data-settings-validation="rejected">
-        {errors.map((error) => (
-          <li key={`${error.field}:${error.message}`} className="text-2xs text-state-error">
+        {errors.map((error, index) => (
+          <li key={`${index}:${error.field}`} className="text-2xs text-state-error">
             <span className="td-value">{error.field}</span> · {error.message}
           </li>
         ))}
@@ -493,8 +501,8 @@ function Validation({
     case 'invalid':
       return (
         <ul className="grid gap-0.5" data-settings-validation="invalid">
-          {plan.errors.map((error) => (
-            <li key={`${error.field}:${error.message}`} className="text-2xs text-state-error">
+          {plan.errors.map((error, index) => (
+            <li key={`${index}:${error.field}`} className="text-2xs text-state-error">
               <span className="td-value">{error.field}</span> · {error.message}
             </li>
           ))}

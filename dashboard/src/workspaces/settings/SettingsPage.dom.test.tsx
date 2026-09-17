@@ -172,7 +172,7 @@ describe('SettingsPage effective configuration review', () => {
     // The proposal is a proposal: the effective value stands beside it.
     expect(row(MAX_FILE_SIZE).dataset['provenance']).toBe('edited');
     expect(within(row(MAX_FILE_SIZE)).getByText('1,048,576')).toBeTruthy();
-    expect(within(row(MAX_FILE_SIZE)).getByText('2097152')).toBeTruthy();
+    expect(within(row(MAX_FILE_SIZE)).getByText('2,097,152')).toBeTruthy();
     expect(document.querySelector('[data-settings-validation]')?.getAttribute('data-settings-validation')).toBe('ready');
     expect(reviewReadout()).toBe('proposal');
 
@@ -541,6 +541,57 @@ describe('SettingsPage effective configuration review', () => {
     ]);
   });
 
+  it('pins the review while its write is in flight so the verdict cannot be hidden', async () => {
+    let releasePatch: (() => void) | null = null;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        if (url === '/api/settings' && method === 'GET') return jsonResponse(settings());
+        if (url === '/api/settings/project' && method === 'PATCH') {
+          await new Promise<void>((resolve) => {
+            releasePatch = resolve;
+          });
+          return jsonResponse(
+            { code: 'configuration_authority_unavailable', detail: 'configuration authority is unavailable' },
+            503,
+          );
+        }
+        throw new Error(`unexpected request ${method} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    renderSettings();
+
+    await openReview(user, MAX_FILE_SIZE);
+    const input = proposal(MAX_FILE_SIZE);
+    await user.clear(input);
+    await user.type(input, '2097152');
+    await user.click(screen.getByRole('button', { name: 'Review project change' }));
+    await user.click(
+      screen.getByRole('checkbox', {
+        name: /I confirm this change against configuration revision rev-42/,
+      }),
+    );
+    await user.click(screen.getByRole('button', { name: 'Apply project settings' }));
+    await waitFor(() => expect(reviewReadout()).toBe('applying'));
+
+    // Neither the close control, Escape, nor selecting another row may take
+    // the panel away while the write is out.
+    expect(screen.getByRole('button', { name: 'Close review' }).hasAttribute('disabled')).toBe(true);
+    await user.keyboard('{Escape}');
+    await user.click(row(POLL_SECS));
+    expect(document.querySelector(`[data-settings-review="${MAX_FILE_SIZE}"]`)).toBeTruthy();
+    expect(row(POLL_SECS).getAttribute('aria-selected')).toBe('false');
+
+    act(() => releasePatch?.());
+    expect(
+      await screen.findByText('Nothing was applied: configuration authority is unavailable.'),
+    ).toBeTruthy();
+    expect(reviewReadout()).toBe('withdrawn');
+  });
+
   it('states a key without a write path as read-only rather than locked or denied', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(settings())));
     const user = userEvent.setup();
@@ -878,12 +929,16 @@ describe('Settings response authority', () => {
     expect(reviewReadout()).toBeUndefined();
     await findRow(MAX_FILE_SIZE);
     expect(reviewReadout()).toBe('unavailable');
+    // Every bound key is locked, by the read rather than by a scope gate; an
+    // unbound key still has no write path.
+    expect(row(MAX_FILE_SIZE).dataset['write']).toBe('locked');
+    expect(row(WORKERS).dataset['write']).toBe('locked');
+    expect(row('storage.store_root').dataset['write']).toBe('no_write_path');
     const panel = await openReview(user, MAX_FILE_SIZE);
-    expect(
-      within(panel).getByText(
-        'Settings editing requires project configuration values and configuration_revision_id from GET /api/settings, plus user settings and configuration_revision_id from the same authority. The response omitted at least one required field.',
-      ),
-    ).toBeTruthy();
+    expect(panel.querySelector('[data-settings-gate="editor_unavailable"]')?.textContent).toContain(
+      'GET /api/settings named no configuration revision to hold a write against',
+    );
+    expect(screen.queryByLabelText(`Proposed value for ${MAX_FILE_SIZE}`)).toBeNull();
     // The inspector prints the empty revision as a stated absence.
     expect(screen.getAllByText('not stated').length).toBeGreaterThan(0);
   });

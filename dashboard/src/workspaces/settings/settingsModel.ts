@@ -124,16 +124,9 @@ export interface EnvOverride {
   readonly description: string;
 }
 
-export interface ConfigStamp {
-  readonly label: string;
-  readonly value: string;
-}
-
 export interface SettingsModel {
   readonly sections: readonly ConfigSection[];
   readonly settingCount: number;
-  /** Identity of the configuration snapshot being displayed, when present. */
-  readonly stamps: readonly ConfigStamp[];
   /** Environment overrides, reported verbatim. Empty when absent. */
   readonly overrides: readonly EnvOverride[];
   /** How many of `overrides` are actually in force. */
@@ -384,7 +377,7 @@ export function readSettingsEnvelope(body: unknown): SettingsPayloadRead {
  */
 export function buildSettingsModel(payload: unknown): SettingsModel {
   if (!isRecord(payload)) {
-    return { sections: [], settingCount: 0, stamps: [], overrides: [], activeOverrides: 0 };
+    return { sections: [], settingCount: 0, overrides: [], activeOverrides: 0 };
   }
   const sections: ConfigSection[] = [];
   for (const [key, value] of Object.entries(payload)) {
@@ -403,7 +396,6 @@ export function buildSettingsModel(payload: unknown): SettingsModel {
   return {
     sections: ordered,
     settingCount: ordered.reduce((total, s) => total + s.settingCount, 0),
-    stamps: readStamps(payload),
     overrides,
     activeOverrides: overrides.filter((item) => item.active).length,
   };
@@ -849,34 +841,6 @@ function readNotes(value: unknown): string[] {
   return notes;
 }
 
-/** Identity of the displayed snapshot, if the payload carries one.
- *
- * One stamp per distinct (label, value): the project and user groups of a live
- * payload routinely carry the SAME snapshot and revision ids, and repeating an
- * identity does not say more about it — it rendered the header strip twice and
- * collided the strip's `label:value` React keys. Distinct values under one
- * label (two groups pinned to different snapshots) still both appear, because
- * that disagreement is a reading. */
-function readStamps(payload: Record<string, unknown>): ConfigStamp[] {
-  const stamps: ConfigStamp[] = [];
-  const push = (label: string, value: unknown) => {
-    if (typeof value !== 'string' || value.length === 0) return;
-    if (stamps.some((stamp) => stamp.label === label && stamp.value === value)) return;
-    stamps.push({ label, value });
-  };
-  for (const group of Object.values(payload)) {
-    if (!isRecord(group)) continue;
-    push('snapshot', group['configuration_snapshot_id']);
-    push('revision', group['configuration_revision_id']);
-  }
-  const version = payload['version'];
-  if (isRecord(version)) {
-    push('version', version['version']);
-    push('channel', version['channel']);
-  }
-  return stamps;
-}
-
 /**
  * Reads `environment.variables[]` verbatim. Entries without a usable `name` are
  * dropped rather than guessed at; `active` is taken only from a literal `true`.
@@ -1063,65 +1027,6 @@ export function isPathLike(value: string): boolean {
 function scalarText(value: unknown): string {
   if (value === null || value === undefined) return 'null';
   return String(value);
-}
-
-/**
- * Filter rows to those matching `query`, keeping the ancestors that give a
- * match its context and the full subtree of any group that matches by name.
- */
-export function filterRows(rows: readonly ConfigRow[], query: string): ConfigRow[] {
-  const needle = query.trim().toLowerCase();
-  if (needle === '') return [...rows];
-  const keep = new Array<boolean>(rows.length).fill(false);
-  rows.forEach((row, index) => {
-    if (!matches(row, needle)) return;
-    keep[index] = true;
-    if (row.kind === 'group') {
-      for (let i = index + 1; i < rows.length && rows[i]!.depth > row.depth; i += 1) {
-        keep[i] = true;
-      }
-    }
-  });
-  // Ancestors of every kept row, so nesting still reads.
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    if (!keep[index]) continue;
-    let depth = rows[index]!.depth;
-    for (let i = index - 1; i >= 0 && depth > 0; i -= 1) {
-      if (rows[i]!.depth < depth) {
-        keep[i] = true;
-        depth = rows[i]!.depth;
-      }
-    }
-  }
-  return rows.filter((_, index) => keep[index]!);
-}
-
-/** Environment overrides matching `query`, over name, value and description. */
-export function filterOverrides(
-  overrides: readonly EnvOverride[],
-  query: string,
-): EnvOverride[] {
-  const needle = query.trim().toLowerCase();
-  if (needle === '') return [...overrides];
-  return overrides.filter(
-    (item) =>
-      item.name.toLowerCase().includes(needle) ||
-      item.description.toLowerCase().includes(needle) ||
-      (item.value ?? '').toLowerCase().includes(needle),
-  );
-}
-
-function matches(row: ConfigRow, needle: string): boolean {
-  return (
-    row.label.toLowerCase().includes(needle) ||
-    row.id.toLowerCase().includes(needle) ||
-    row.text.toLowerCase().includes(needle)
-  );
-}
-
-/** Scalar settings among a filtered row slice. */
-export function countSettings(rows: readonly ConfigRow[]): number {
-  return rows.reduce((total, row) => total + (row.kind === 'group' ? 0 : 1), 0);
 }
 
 /** Split a path into its directory prefix and the segment worth reading. */

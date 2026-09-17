@@ -14,7 +14,6 @@
  * write authority has applied it and the read has come back.
  */
 
-import { Lock, PenLine } from 'lucide-react';
 import {
   Fragment,
   useCallback,
@@ -27,11 +26,10 @@ import {
 import type { CodeIndexWorkerStatusV1 } from '../../contracts/generated.ts';
 import { cn } from '../../ui/cn';
 import { elideStart } from '../../ui/format.ts';
-import { Lamp } from '../../ui/instrument.tsx';
 import type { SettingsEditorHandle } from './SettingsEditorController.tsx';
 import type { SettingsEditorState } from './settingsEditorMachine.ts';
 import type { WritableScopes } from './settingsGates.ts';
-import { selectionText, type ConfigSection, type ServedProvenance } from './settingsModel.ts';
+import type { ConfigSection } from './settingsModel.ts';
 import { SettingsReviewPanel } from './SettingsReviewPanel.tsx';
 import {
   bindingFor,
@@ -41,26 +39,34 @@ import {
   type EffectiveRow,
   type WriteCapability,
 } from './settingsRows.ts';
-import { KeyText, ORIGIN_WORD, OriginMark, PathText, ValueCell } from './SettingsValues.tsx';
+import {
+  KeyText,
+  ORIGIN_WORD,
+  OriginMark,
+  PathText,
+  ProvenanceChip,
+  ValueCell,
+  WriteCell,
+  proposalText,
+  type RowProvenance,
+} from './SettingsValues.tsx';
 
 export interface SectionGroup {
   readonly section: ConfigSection;
   readonly rows: readonly EffectiveRow[];
 }
 
-/** The provenance column's vocabulary: what the wire served, plus the one
- * client-side state — a proposal not yet applied — that is never confused
- * with it. */
-export type RowProvenance = ServedProvenance | 'edited';
-
 /**
  * Column tracks switch on the TABLE's own width, not the viewport's: at `lg`
  * the table sits between the sections rail and the inspector and may be
- * narrower than it is at `md` with both stacked. Below `@xl` (36rem) each row
- * stacks its cells with the column name printed beside each value.
+ * narrower than it is at `md` with both stacked. The breakpoint is the sum of
+ * the minimum tracks, the four column gaps, and the row padding, so a table
+ * that shows columns can always fit them; narrower than that each row stacks
+ * its cells with the column name printed beside each value.
  */
 const COLUMNS =
-  '@xl:grid-cols-[minmax(10rem,1.3fr)_minmax(8rem,1.4fr)_6rem_minmax(8rem,1fr)_4.5rem]';
+  '@min-[41rem]:grid-cols-[minmax(9rem,1.3fr)_minmax(8rem,1.2fr)_6.5rem_minmax(9.5rem,1.2fr)_4.5rem]';
+const COLUMN_GAP = 'gap-x-2';
 
 /** The machine states in which a frozen review, and its controls, are on screen. */
 const REVIEW_BEARING: ReadonlySet<SettingsEditorState['status']> = new Set([
@@ -96,21 +102,37 @@ export function EffectiveConfigTable({
   onSelect: (key: string | null) => void;
   scrollRef: RefObject<HTMLDivElement | null>;
 }) {
+  const visible = (key: string | null) =>
+    key !== null && groups.some((group) => group.rows.some((row) => row.key === key));
+  // Roving tabindex: the row focus last rested on (focus sets `inspectedKey`),
+  // else the selected row, else the first — so Tab out and Shift+Tab back lands
+  // where the reader left, not at the top of the table.
   const firstKey = groups[0]?.rows[0]?.key ?? null;
-  const selectedVisible = groups.some((group) => group.rows.some((row) => row.key === selectedKey));
-  const tabbableKey = selectedVisible ? selectedKey : firstKey;
+  const tabbableKey = visible(inspectedKey)
+    ? inspectedKey
+    : visible(selectedKey)
+      ? selectedKey
+      : firstKey;
+  const editorAvailable = editor.state.status !== 'editor_unavailable';
+  // While a write is in flight the selection is pinned: closing the panel would
+  // hide the verdict the reader is waiting for.
+  const pinned = editor.state.status === 'submitting';
 
-  // Focus returns to the edited row when a frozen review resolves: the Apply,
-  // Retry, or Load-current-values control the reader was on unmounts with the
-  // review stage, and focus dropped to the document body — which is where the
-  // next Escape or arrow key would have gone unheard.
+  // Focus returns to the edited row when a frozen review resolves and the
+  // control the reader was on — Apply, Retry, Load current values — unmounts
+  // with the review stage. Only when focus was actually lost to the document:
+  // a keystroke in another scope's input also ends a staged review, and that
+  // input must keep its focus.
   const status = editor.state.status;
   const previousStatus = useRef(status);
   useEffect(() => {
     const wasStaged = REVIEW_BEARING.has(previousStatus.current);
     previousStatus.current = status;
-    if (wasStaged && status === 'editing' && selectedKey !== null) {
-      focusRow(scrollRef.current, selectedKey);
+    if (!wasStaged || status !== 'editing' || selectedKey === null) return;
+    const active = document.activeElement;
+    const container = scrollRef.current;
+    if (active === null || active === document.body || !container?.contains(active)) {
+      focusRow(container, selectedKey);
     }
   }, [status, selectedKey, scrollRef]);
 
@@ -120,6 +142,7 @@ export function EffectiveConfigTable({
       if (!container) return;
       if (event.key === 'Escape') {
         if (selectedKey !== null) {
+          if (pinned) return;
           event.preventDefault();
           onSelect(null);
           focusRow(container, selectedKey);
@@ -166,7 +189,7 @@ export function EffectiveConfigTable({
       rows[next]?.focus();
       rows[next]?.scrollIntoView({ block: 'nearest' });
     },
-    [scrollRef, selectedKey, inspectedKey, onSelect, onInspect],
+    [scrollRef, selectedKey, inspectedKey, pinned, onSelect, onInspect],
   );
 
   return (
@@ -174,19 +197,19 @@ export function EffectiveConfigTable({
       ref={scrollRef}
       role="grid"
       aria-label="Effective configuration"
-      aria-rowcount={groups.reduce((total, group) => total + group.rows.length, 0)}
       onKeyDown={onKeyDown}
       className="@container relative min-h-[var(--pane-min-height)] min-w-0 flex-1 overflow-auto td-well"
     >
       <div
         role="row"
         className={cn(
-          'sticky top-0 z-20 hidden border-b border-edge-subtle bg-surface-1 px-3 @xl:grid',
+          'sticky top-0 z-20 hidden border-b border-edge-subtle bg-surface-1 px-3 @min-[41rem]:grid',
           COLUMNS,
+          COLUMN_GAP,
         )}
       >
         {['key', 'value', 'provenance', 'origin', 'write'].map((column) => (
-          <span key={column} role="columnheader" className="td-legend py-2 pr-3">
+          <span key={column} role="columnheader" className="td-legend py-2">
             {column}
           </span>
         ))}
@@ -195,7 +218,7 @@ export function EffectiveConfigTable({
         <div key={section.id} role="rowgroup" data-section={section.id} className="min-w-0">
           <SectionRow section={section} count={rows.length} />
           {rows.map((row) => {
-            const capability = writeCapability(row.key, gates);
+            const capability = writeCapability(row.key, gates, editorAvailable);
             const selected = row.key === selectedKey;
             return (
               <Fragment key={row.key}>
@@ -207,6 +230,7 @@ export function EffectiveConfigTable({
                   inspected={row.key === inspectedKey}
                   selected={selected}
                   tabbable={row.key === tabbableKey}
+                  pinned={pinned}
                   onInspect={onInspect}
                   onSelect={onSelect}
                 />
@@ -219,6 +243,7 @@ export function EffectiveConfigTable({
                         editor={editor}
                         workerStatus={workerStatus}
                         query={query}
+                        closable={!pinned}
                         onClose={() => {
                           onSelect(null);
                           focusRow(scrollRef.current, row.key);
@@ -244,20 +269,21 @@ function focusRow(container: HTMLElement | null, key: string | null): void {
   row?.focus();
 }
 
-/** The section's own line: origin glyph and word, the location the payload
- * names, and how many of its keys are shown under the current filter. */
+/** The section's own line: origin glyph and word, what the group is, the
+ * location the payload names, and how many of its keys the filter shows. */
 function SectionRow({ section, count }: { section: ConfigSection; count: number }) {
-  const headingId = `settings-${section.id}-heading`;
   return (
     <div
       role="row"
-      className="sticky top-0 z-10 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 border-y border-edge-subtle bg-surface-2 px-3 py-1.5 @xl:top-7"
+      className="sticky top-0 z-10 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 border-y border-edge-subtle bg-surface-2 px-3 py-1.5 @min-[41rem]:top-7"
     >
-      <div role="gridcell" aria-colspan={5} className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2.5 gap-y-0.5">
+      <div
+        role="gridcell"
+        aria-colspan={5}
+        className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2.5 gap-y-0.5"
+      >
         <OriginMark origin={section.origin} />
-        <h2 id={headingId} className="text-xs font-semibold tracking-tight">
-          {section.title}
-        </h2>
+        <h2 className="text-xs font-semibold tracking-tight">{section.title}</h2>
         <span className="td-legend">{ORIGIN_WORD[section.origin]}</span>
         <span className="min-w-0 truncate text-3xs text-text-muted">{section.blurb}</span>
         {section.location ? (
@@ -270,7 +296,10 @@ function SectionRow({ section, count }: { section: ConfigSection; count: number 
           </span>
         ) : null}
         {section.notes.map((note) => (
-          <span key={note} className="border border-edge-subtle px-1.5 py-px text-3xs text-text-secondary">
+          <span
+            key={note}
+            className="border border-edge-subtle px-1.5 py-px text-3xs text-text-secondary"
+          >
             {note}
           </span>
         ))}
@@ -290,6 +319,7 @@ function ConfigRowLine({
   inspected,
   selected,
   tabbable,
+  pinned,
   onInspect,
   onSelect,
 }: {
@@ -300,6 +330,7 @@ function ConfigRowLine({
   inspected: boolean;
   selected: boolean;
   tabbable: boolean;
+  pinned: boolean;
   onInspect: (key: string | null) => void;
   onSelect: (key: string | null) => void;
 }) {
@@ -312,7 +343,10 @@ function ConfigRowLine({
       ? proposalText(draftValue(state.draft, binding))
       : null;
   const provenance: RowProvenance = proposed !== null ? 'edited' : row.row.provenance;
-  const toggle = () => onSelect(selected ? null : row.key);
+  const toggle = () => {
+    if (pinned) return;
+    onSelect(selected ? null : row.key);
+  };
   return (
     <div
       role="row"
@@ -331,8 +365,9 @@ function ConfigRowLine({
         }
       }}
       className={cn(
-        'relative grid min-h-[var(--row-height-data)] cursor-pointer grid-cols-1 items-center gap-x-3 gap-y-1 border-b border-edge-subtle/60 px-3 py-1.5 text-left outline-none',
+        'relative grid min-h-[var(--row-height-data)] cursor-pointer grid-cols-1 items-center gap-y-1 border-b border-edge-subtle/60 px-3 py-1.5 text-left outline-none',
         COLUMNS,
+        COLUMN_GAP,
         'hover:bg-surface-1 focus-visible:bg-surface-1',
         inspected && !selected && 'bg-surface-1',
         selected && 'bg-surface-2',
@@ -341,7 +376,10 @@ function ConfigRowLine({
     >
       <span
         aria-hidden
-        className={cn('absolute inset-y-0 left-0 w-[3px]', selected ? 'bg-accent' : 'bg-transparent')}
+        className={cn(
+          'absolute inset-y-0 left-0 w-[3px]',
+          selected ? 'bg-accent' : 'bg-transparent',
+        )}
       />
       <Cell column="key">
         <span
@@ -373,69 +411,19 @@ function ConfigRowLine({
   );
 }
 
-/** One cell; below `md` the column name is printed beside the value so a
- * stacked row still reads as key/value/provenance/origin/write. */
+/** One cell; in the stacked layout the column name is printed beside the value
+ * so a row still reads as key/value/provenance/origin/write. */
 function Cell({ column, children }: { column: string; children: ReactNode }) {
   return (
-    <div role="gridcell" data-col={column} className="flex min-w-0 items-baseline gap-2 @xl:block @xl:pr-3">
-      <span className="td-legend w-24 shrink-0 @xl:hidden">{column}</span>
+    <div
+      role="gridcell"
+      data-col={column}
+      className="flex min-w-0 items-baseline gap-2 @min-[41rem]:block"
+    >
+      <span className="td-legend w-24 shrink-0 @min-[41rem]:hidden">{column}</span>
       <div className="min-w-0 flex-1">{children}</div>
     </div>
   );
-}
-
-/**
- * The typed-state treatment for provenance, per the design system's ladder:
- * `unserved` is the gray dashed disconnected family (the layer is not on the
- * wire), `explicit` and `default` are solid served facts, `edited` is cyan
- * because it is this reader's own unapplied proposal. Colour never carries the
- * state alone: every chip prints its word.
- */
-export function ProvenanceChip({ kind }: { kind: RowProvenance }) {
-  switch (kind) {
-    case 'unserved':
-      return (
-        <span
-          className="td-value inline-flex items-center gap-1.5 border border-dashed border-edge-strong px-1.5 py-px text-3xs text-text-muted"
-          title="the API states the effective value but not the layer that supplied it"
-        >
-          unserved
-        </span>
-      );
-    case 'explicit':
-      return (
-        <span
-          className="td-value inline-flex items-center gap-1.5 border border-edge-strong px-1.5 py-px text-3xs text-text-primary"
-          title="set in the daemon's process environment: this override is in force"
-        >
-          <Lamp tone="bg-state-ready" />
-          explicit
-        </span>
-      );
-    case 'default':
-      return (
-        <span
-          className="td-value inline-flex items-center gap-1.5 border border-edge-subtle px-1.5 py-px text-3xs text-text-muted"
-          title="unset in the daemon's process environment: the default applies"
-        >
-          <Lamp tone="bg-surface-3" />
-          default
-        </span>
-      );
-    case 'edited':
-      return (
-        <span
-          className="td-value inline-flex items-center gap-1.5 border border-accent px-1.5 py-px text-3xs text-accent"
-          title="your proposal differs from the effective value and is not applied"
-        >
-          edited
-        </span>
-      );
-    default: {
-      const exhaustive: never = kind;
-      return exhaustive;
-    }
-  }
 }
 
 /** The group's origin on every row, elided from the START: a path's tail is
@@ -457,45 +445,7 @@ function OriginCell({ section }: { section: ConfigSection }) {
       )}
       title={section.location}
     >
-      {elideStart(section.location, 30)}
+      {elideStart(section.location, 26)}
     </span>
   );
-}
-
-export function WriteCell({ capability }: { capability: WriteCapability }) {
-  switch (capability.kind) {
-    case 'writable':
-      return (
-        <span className="inline-flex items-center gap-1 text-2xs text-text-secondary">
-          <PenLine aria-hidden size={11} />
-          editable
-        </span>
-      );
-    case 'locked':
-      return (
-        <span className="inline-flex items-center gap-1 text-2xs text-state-locked" title={capability.reason}>
-          <Lock aria-hidden size={11} />
-          locked
-        </span>
-      );
-    case 'no_write_path':
-      return (
-        <span className="td-value text-2xs text-text-muted" title="no write path">
-          —<span className="sr-only">no write path</span>
-        </span>
-      );
-    default: {
-      const exhaustive: never = capability;
-      return exhaustive;
-    }
-  }
-}
-
-function proposalText(value: unknown): string {
-  if (Array.isArray(value)) return value.length === 0 ? 'empty list' : value.map(String).join(', ');
-  if (typeof value === 'object' && value !== null && 'mode' in value) {
-    const selection = value as { mode: 'automatic' } | { mode: 'exact'; workers: number };
-    return selectionText(selection);
-  }
-  return String(value);
 }

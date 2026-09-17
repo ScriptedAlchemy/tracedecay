@@ -5,6 +5,7 @@ import { writableScopes, type WritableScopes } from './settingsGates.ts';
 import { buildSettingsEditor, buildSettingsModel, readSettingsEnvelope } from './settingsModel.ts';
 import {
   applyRequirement,
+  authorityValue,
   bindingFor,
   boundKeys,
   effectiveRows,
@@ -78,29 +79,29 @@ describe('write bindings', () => {
 
   it('answers no write path for keys no PATCH route addresses', () => {
     expect(bindingFor('storage.store_root')).toBeNull();
-    expect(writeCapability('storage.store_root', ALL_WRITABLE)).toEqual({ kind: 'no_write_path' });
+    expect(writeCapability('storage.store_root', ALL_WRITABLE, true)).toEqual({ kind: 'no_write_path' });
     expect(bindingFor('automation.enabled')).toBeNull();
     expect(bindingFor('project.configuration_revision_id')).toBeNull();
   });
 
   it('answers writable with the gate target, and locked with the gate reason', () => {
-    expect(writeCapability('project.config.max_file_size', ALL_WRITABLE)).toMatchObject({
+    expect(writeCapability('project.config.max_file_size', ALL_WRITABLE, true)).toMatchObject({
       kind: 'writable',
       target: 'the active project',
       binding: { scope: 'project', field: 'max_file_size', input: 'integer' },
     });
-    expect(writeCapability('user.code_index_workers', ALL_WRITABLE)).toMatchObject({
+    expect(writeCapability('user.code_index_workers', ALL_WRITABLE, true)).toMatchObject({
       kind: 'writable',
       target: 'your TraceDecay profile',
     });
 
     const unauthorized = writableScopes([], { state: 'writable', target: 'x' });
-    expect(writeCapability('project.config.include', unauthorized)).toMatchObject({
+    expect(writeCapability('project.config.include', unauthorized, true)).toMatchObject({
       kind: 'locked',
       gate: 'unauthorized',
       reason: 'this dashboard is not authorized to apply project settings',
     });
-    expect(writeCapability('user.code_index_workers', unauthorized)).toMatchObject({
+    expect(writeCapability('user.code_index_workers', unauthorized, true)).toMatchObject({
       kind: 'locked',
       gate: 'unauthorized',
       reason: 'this dashboard is not authorized to apply code-index worker settings',
@@ -113,13 +114,47 @@ describe('write bindings', () => {
       ],
       { state: 'read_only', reason: 'Other is not the active project.' },
     );
-    expect(writeCapability('user.watcher_debounce', readOnly)).toMatchObject({
+    expect(writeCapability('user.watcher_debounce', readOnly, true)).toMatchObject({
       kind: 'locked',
       gate: 'read_only',
       reason: 'Other is not the active project.',
     });
     // The profile worker resource never inherits the project gateway's refusal.
-    expect(writeCapability('user.code_index_workers', readOnly)).toMatchObject({ kind: 'writable' });
+    expect(writeCapability('user.code_index_workers', readOnly, true)).toMatchObject({ kind: 'writable' });
+  });
+
+  it('locks every bound key, and no unbound one, while the read names no revision', () => {
+    expect(writeCapability('project.config.include', ALL_WRITABLE, false)).toMatchObject({
+      kind: 'locked',
+      gate: 'editor_unavailable',
+    });
+    expect(writeCapability('user.code_index_workers', ALL_WRITABLE, false)).toMatchObject({
+      kind: 'locked',
+      gate: 'editor_unavailable',
+    });
+    expect(writeCapability('storage.store_root', ALL_WRITABLE, false)).toEqual({
+      kind: 'no_write_path',
+    });
+  });
+
+  /** A binding's control must match the draft field's runtime type, or
+   * `withFieldValue` silently ignores every edit made through it. */
+  it('pairs every binding with the control its draft field can take', () => {
+    for (const key of boundKeys()) {
+      const binding = bindingFor(key)!;
+      const sample =
+        binding.input === 'globs'
+          ? ['a/**']
+          : binding.input === 'boolean'
+            ? authorityValue(authority, binding) !== true
+            : binding.input === 'workers'
+              ? { mode: 'exact', workers: 2 }
+              : '7';
+      const next = withFieldValue(draft, binding, sample);
+      expect(fieldEdited(next, authority, binding), `${key} ignored a ${binding.input} value`).toBe(
+        true,
+      );
+    }
   });
 
   it('states the apply requirement only where the product documents it', () => {
