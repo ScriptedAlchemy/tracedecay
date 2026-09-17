@@ -640,11 +640,11 @@ fn process_is_dead(pid: u32) -> bool {
         if unsafe { unix_kill(pid, 0) } == 0 {
             return false;
         }
-        return std::io::Error::last_os_error().raw_os_error() == Some(UNIX_ESRCH);
+        std::io::Error::last_os_error().raw_os_error() == Some(UNIX_ESRCH)
     }
     #[cfg(windows)]
     {
-        return windows_process_is_dead(pid);
+        windows_process_is_dead(pid)
     }
     #[cfg(not(any(unix, windows)))]
     {
