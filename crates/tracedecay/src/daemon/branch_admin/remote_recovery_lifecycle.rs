@@ -14,8 +14,8 @@ use tracedecay_store_runtime::{
 use super::{
     DatabaseOwnerRegistry, StoreAdministration, StoreWriterClass, StoreWriterGates, WriterScope,
 };
+use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationServiceRegistry;
 use tracedecay_daemon_identity::authority;
-use tracedecay_daemon_service::DaemonNativeIntegrationRuntimeRegistrar;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry;
 use tracedecay_store_runtime::WriterAdmissionGuard;
@@ -35,7 +35,7 @@ pub(in crate::daemon) struct RemoteRecoveryProjectLifecycleV1 {
     git_index_transaction_services: Arc<
         tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry,
     >,
-    native_integration_services: Arc<DaemonNativeIntegrationRuntimeRegistrar>,
+    native_integration_services: Arc<DaemonNativeIntegrationServiceRegistry>,
     session_sync_service: Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>,
     store_telemetry_sampling: StoreTelemetrySamplingRegistry,
     project_server_retirements:

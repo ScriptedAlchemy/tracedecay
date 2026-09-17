@@ -91,14 +91,6 @@ pub(crate) enum DaemonClientAdmissionClass {
     ReservedControl,
 }
 
-/// How long a park may keep its admission permit before surrendering it.
-///
-/// A request that finishes inside this grace never touches the semaphore, so
-/// the hot path costs one timer registration and nothing else. Only a request
-/// that is genuinely parked — waiting on a project open, on the writer gate, or
-/// on a single-flight generation decode — gives its slot back.
-pub(crate) const ADMISSION_PARK_GRACE: Duration = Duration::from_millis(50);
-
 /// The admission slot one accepted connection currently holds.
 ///
 /// Live defect this exists for: the 60 general admission slots were held by
@@ -193,33 +185,19 @@ where
 
 /// Run `future` without holding a general admission slot across a long park.
 ///
-/// Wrap the wait, never the work: the returned future keeps its slot for
-/// [`ADMISSION_PARK_GRACE`], and only surrenders it if the wait outlives that
-/// grace. Nesting is safe — the innermost park that still finds a held permit is
-/// the one that releases and re-acquires it.
+/// Wrap the wait, never the work. The grace, release, and reacquire live in
+/// [`tracedecay_code_index_runtime::park_admission`], which reads the runtime
+/// task-local [`with_dual_connection_admission_scope`] installs beside this
+/// module's lease. Nesting is safe — the innermost park that still finds a
+/// held permit releases and re-acquires it.
 ///
 /// Outside a connection scope (tests, background tasks, reserved-control
 /// clients) this is a transparent passthrough.
-#[hotpath::measure(label = "daemon.engine.admission.park", future = true)]
 pub(crate) async fn park_admission<F>(future: F) -> F::Output
 where
     F: std::future::Future,
 {
-    // The same pinned future is resumed after the grace expires, so the grace is
-    // an observation of the wait, never a cancellation of it.
-    let mut future = std::pin::pin!(future);
-    if let Ok(output) = timeout(ADMISSION_PARK_GRACE, &mut future).await {
-        return output;
-    }
-    let Ok(lease) = CONNECTION_ADMISSION.try_with(Arc::clone) else {
-        return future.await;
-    };
-    if !lease.release() {
-        return future.await;
-    }
-    let output = future.await;
-    lease.reacquire().await;
-    output
+    tracedecay_code_index_runtime::park_admission(future).await
 }
 
 /// Capture the calling connection's admission lease, if it has one.

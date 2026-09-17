@@ -279,6 +279,12 @@ pub trait LspAnalyzerCancellationAuthority: Send + Sync {
     fn cancel_request(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool;
 }
 
+impl LspAnalyzerCancellationAuthority for SemanticProviderAdapter {
+    fn cancel_request(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool {
+        SemanticProviderAdapter::cancel_request(self, root, request_id)
+    }
+}
+
 impl<T> LspAnalyzerCancellationAuthority for Arc<T>
 where
     T: LspAnalyzerCancellationAuthority + ?Sized,

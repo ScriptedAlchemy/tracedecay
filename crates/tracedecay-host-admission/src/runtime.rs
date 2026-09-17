@@ -138,7 +138,7 @@ impl HostAdmissionRuntime {
     /// The daemon replay mutex guarantees no live worker owns them at this boundary.
     pub(crate) fn recover_leases(&mut self) -> Result<usize, HostAdmissionOutcome> {
         self.spool
-            .ensure_replay_allowed()
+            .ensure_mutations_allowed()
             .map_err(|error| error.to_outcome())?;
         let count = self.leased.len();
         if count > 0 {

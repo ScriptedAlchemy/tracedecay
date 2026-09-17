@@ -10,18 +10,13 @@ use tracedecay_lsp::analyzer::broker::{
     CodeDiagnostic, DiagnosticBroker, DiagnosticSeverity as BrokerDiagnosticSeverity,
     RefreshCommitOutcome,
 };
-use tracedecay_lsp::analyzer::client::{
-    LspDocument, LspSemanticRequest as AnalyzerSemanticRequest, decode_semantic_request,
-};
+use tracedecay_lsp::analyzer::client::LspDocument;
 use tracedecay_lsp::{
     AdmittedRoot, CanonicalDiagnosticRefreshRequest, CanonicalDiagnosticSnapshotAuthority,
     CanonicalWorkspaceDiagnosticRefreshRequest, DiagnosticSource, GatewayDiagnostic,
-    GenerationDiagnostics, LspAnalyzerCancellationAuthority, LspPosition, LspRange, LspRequestId,
-    LspRuntimeFailure, LspRuntimeFuture, LspRuntimeSpawner, LspRuntimeTask,
-    LspSemanticOperationOutcome, LspSemanticRequest,
-    LspSemanticRequestAuthority as ProtocolSemanticRequestAuthority, ManagedDiagnosticSnapshotPort,
-    SemanticProviderAdapter, SemanticProviderOutcome, SemanticProviderPort, SemanticRequest,
-    SemanticResponse, WorkspaceDocumentDiagnostics, WorkspaceGenerationDiagnostics,
+    GenerationDiagnostics, LspPosition, LspRange, LspRuntimeFailure, LspRuntimeFuture,
+    LspRuntimeSpawner, LspRuntimeTask, ManagedDiagnosticSnapshotPort, WorkspaceDocumentDiagnostics,
+    WorkspaceGenerationDiagnostics,
 };
 
 pub(crate) fn managed_diagnostic_authority_digest(
@@ -390,97 +385,6 @@ fn broker_diagnostic(document_uri: &str, diagnostic: CodeDiagnostic) -> GatewayD
         source: DiagnosticSource::Upstream,
         related_information: Vec::new(),
         data: None,
-    }
-}
-
-/// Existing daemon analyzer authorities retain their `lsp-types` DTO boundary.
-pub trait LspSemanticRequestAuthority: Send + Sync {
-    fn start(
-        &self,
-        root: AdmittedRoot,
-        request_id: LspRequestId,
-        request: AnalyzerSemanticRequest,
-    ) -> LspRuntimeFuture<LspSemanticOperationOutcome>;
-
-    fn cancel_request(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool;
-}
-
-struct SemanticAuthorityAdapter {
-    inner: Arc<dyn LspSemanticRequestAuthority>,
-}
-
-impl tracedecay_lsp::LspSemanticRequestAuthority for SemanticAuthorityAdapter {
-    fn start(
-        &self,
-        root: AdmittedRoot,
-        request_id: LspRequestId,
-        request: LspSemanticRequest,
-    ) -> LspRuntimeFuture<LspSemanticOperationOutcome> {
-        let decoded = decode_semantic_request(request);
-        let authority = Arc::clone(&self.inner);
-        Box::pin(async move {
-            match decoded {
-                Ok(request) => authority.start(root, request_id, request).await,
-                Err(_) => LspSemanticOperationOutcome::Partial {
-                    value: serde_json::Value::Null,
-                    coverage: "semantic-request-invalid".to_owned(),
-                    detail: None,
-                },
-            }
-        })
-    }
-
-    fn cancel_request(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool {
-        self.inner.cancel_request(root, request_id)
-    }
-}
-
-pub struct DaemonSemanticProviderAdapter {
-    inner: Arc<SemanticProviderAdapter>,
-}
-
-impl DaemonSemanticProviderAdapter {
-    pub fn new(runtime: Handle, authority: Arc<dyn LspSemanticRequestAuthority>) -> Self {
-        Self {
-            inner: SemanticProviderAdapter::shared(
-                runtime_spawner(runtime),
-                Arc::new(SemanticAuthorityAdapter { inner: authority }),
-            ),
-        }
-    }
-
-    pub fn shared(runtime: Handle, authority: Arc<dyn LspSemanticRequestAuthority>) -> Arc<Self> {
-        Arc::new(Self::new(runtime, authority))
-    }
-
-    pub fn shared_protocol(
-        runtime: Handle,
-        authority: Arc<dyn ProtocolSemanticRequestAuthority>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            inner: SemanticProviderAdapter::shared(runtime_spawner(runtime), authority),
-        })
-    }
-
-    pub fn cancel_request(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool {
-        self.inner.cancel_request(root, request_id)
-    }
-}
-
-impl SemanticProviderPort for DaemonSemanticProviderAdapter {
-    fn request(
-        &self,
-        root: &AdmittedRoot,
-        request_id: &LspRequestId,
-        request: &SemanticRequest,
-    ) -> SemanticProviderOutcome<SemanticResponse> {
-        self.inner.request(root, request_id, request)
-    }
-}
-
-impl LspAnalyzerCancellationAuthority for DaemonSemanticProviderAdapter {
-    fn cancel_request(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool {
-        DaemonSemanticProviderAdapter::cancel_request(self, root, request_id)
     }
 }
 

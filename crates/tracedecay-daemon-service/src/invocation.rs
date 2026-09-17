@@ -255,9 +255,9 @@ pub use registrars::{
     DaemonAdvisoryRuntimeRegistrar, DaemonAdvisoryRuntimeRegistrationError,
     DaemonConfigurationGrantAuthority, DaemonConfigurationRuntimeRegistrar,
     DaemonFeedbackRuntimeRegistrar, DaemonFeedbackRuntimeRegistrationError,
-    DaemonLspOwnerRegistrar, DaemonNativeIntegrationRuntimeRegistrar,
-    DaemonRetainedRuntimeRegistrar, DaemonSourceEditOwnerRegistrationError,
-    DaemonWorkRuntimeRegistrar, FeedbackCycleRuntimeBuilderV1,
+    DaemonLspOwnerRegistrar, DaemonRetainedRuntimeRegistrar,
+    DaemonSourceEditOwnerRegistrationError, DaemonWorkRuntimeRegistrar,
+    FeedbackCycleRuntimeBuilderV1,
 };
 #[cfg(any(test, feature = "test-helpers"))]
 pub use types::{

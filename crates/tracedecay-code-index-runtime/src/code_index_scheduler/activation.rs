@@ -243,19 +243,14 @@ impl CodeIndexActivationV1 {
         self.activate_with_demand(ActivationDemandV1::Explicit)
     }
 
-    /// Start the demand-driven mount for a reconciliation an operator asked
-    /// for by name (`tracedecay init`, `tracedecay sync`, the daemon-only
-    /// `tracedecay_admin_sync` entry point).
+    /// Start automatic or explicit activation.
     ///
-    /// [`CodeIndexAutomaticAdmissionV1`] answers "may the daemon start
-    /// indexing this route on its own?" — it is a watcher policy, not an
-    /// authorization boundary. Explicit demand skips exactly that question and
-    /// nothing else: route liveness, the indexing identity check inside the
-    /// mount, and the activation state machine all still apply.
-    pub fn activate_on_explicit_demand(&self) -> bool {
-        self.activate_with_demand(ActivationDemandV1::Explicit)
-    }
-
+    /// [`CodeIndexAutomaticAdmissionV1`] answers "may the daemon start indexing
+    /// this route on its own?" — a watcher policy, not an authorization
+    /// boundary. Explicit demand (an operator-named reconcile: `tracedecay
+    /// init`, `tracedecay sync`, `tracedecay_admin_sync`) skips exactly that
+    /// question and nothing else: route liveness, the indexing identity check
+    /// inside the mount, and the activation state machine all still apply.
     #[hotpath::measure(label = "daemon.code_index.activation.activate")]
     fn activate_with_demand(&self, demand: ActivationDemandV1) -> bool {
         if (demand == ActivationDemandV1::Automatic
