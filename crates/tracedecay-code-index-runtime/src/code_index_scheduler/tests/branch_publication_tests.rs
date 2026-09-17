@@ -54,9 +54,9 @@ fn not_applicable_branch_refresh_is_observed_immediately() {
     assert_eq!(
         error.project_route_context(),
         Some((
-            "code_index_not_applicable",
+            "code_index_scheduler_identity_mismatch",
             false,
-            "code indexing does not apply for branch worktree '/tmp/not-a-repository'; no repository identity was admitted and no generation was queued",
+            "branch generation publication does not apply to '/tmp/not-a-repository': the route has no repository identity",
         ))
     );
     assert!(

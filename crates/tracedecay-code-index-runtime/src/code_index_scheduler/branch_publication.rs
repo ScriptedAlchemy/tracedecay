@@ -25,7 +25,6 @@ use super::{
     ServingGenerationInstallationOutcomeV1, ServingGenerationRollbackOutcomeV1,
 };
 
-const CODE_INDEX_NOT_APPLICABLE: &str = "code_index_not_applicable";
 const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
 const CODE_INDEX_ACTIVATION_UNAVAILABLE: &str = "code_index_activation_unavailable";
 const CODE_INDEX_IDENTITY_MISMATCH: &str = "code_index_scheduler_identity_mismatch";
@@ -46,10 +45,10 @@ pub(super) fn branch_refresh_admission_error(
     match admission {
         CodeIndexDemandAdmissionV1::Queued => None,
         CodeIndexDemandAdmissionV1::NotApplicable => Some(TraceDecayError::project_route(
-            CODE_INDEX_NOT_APPLICABLE,
+            CODE_INDEX_IDENTITY_MISMATCH,
             false,
             format!(
-                "code indexing does not apply for branch worktree '{}'; no repository identity was admitted and no generation was queued",
+                "branch generation publication does not apply to '{}': the route has no repository identity",
                 canonical_worktree_root.display()
             ),
         )),
