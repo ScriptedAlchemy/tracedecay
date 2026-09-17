@@ -116,11 +116,14 @@ async fn search(
     project: &Path,
     query: &str,
 ) -> Value {
+    // Keep the page tiny: a generation-scale refresh batch otherwise returns
+    // multi-dozen-KiB candidate bodies that MCP truncates into a handle, and
+    // the wait helpers never see top-level `results` / `code_generation`.
     tool(
         harness,
         project,
         "tracedecay_search",
-        json!({"query": query, "limit": 20, "format": "json"}),
+        json!({"query": query, "limit": 3, "format": "json"}),
     )
     .await
 }

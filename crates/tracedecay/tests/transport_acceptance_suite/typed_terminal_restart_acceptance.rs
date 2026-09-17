@@ -175,6 +175,11 @@ fn add_fact_settling_after_its_deadline(
     barrier_dir: &Path,
     content: &str,
 ) -> Value {
+    // One-shot markers: clear a previous park so a leftover `arrived` cannot
+    // make this helper release before the CLI request reaches the boundary.
+    for marker in ["armed", "claimed", "arrived", "release"] {
+        let _ = std::fs::remove_file(barrier_dir.join(marker));
+    }
     std::fs::write(barrier_dir.join("armed"), b"armed\n").expect("arm the fact commit barrier");
 
     let mut command = tool_command(
@@ -226,8 +231,18 @@ fn add_fact_settling_after_its_deadline(
     // test spawned it, so `spawn + deadline` can still be earlier than the real
     // expiry. Arrival is strictly after that clock started, so holding a full
     // deadline plus a margin beyond arrival always outlives it.
+    //
+    // Keep asserting the CLI is still blocked: an early success here means the
+    // commit path skipped the barrier (or a foreign claim wrote `arrived`).
     let release_at = arrived_at + PARTIAL_EFFECT_DEADLINE + Duration::from_secs(1);
     while Instant::now() < release_at {
+        assert!(
+            child
+                .try_wait()
+                .expect("inspect the parked fact_store add")
+                .is_none(),
+            "the fact_store add settled before its request deadline could expire at the commit barrier"
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
     std::fs::write(barrier_dir.join("release"), b"release\n")

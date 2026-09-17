@@ -169,6 +169,27 @@ impl DaemonSessionRetrievalService {
     /// projection is pending — so the worker's own serving state, with its
     /// backlog and blocker, is the answer instead. Once the worker is current
     /// the temporal outcome stands: nothing is going to project the session.
+    ///
+    /// A missing refresh worker is not convergence: core/direct mounts never
+    /// attach one, and zero rows there are evidence of absence, not a pending
+    /// catch-up. Only historical-convergence staleness remaps absence.
+    fn historically_converging_unavailable(&self) -> Option<SessionRetrievalUnavailable> {
+        let unavailable = self.refresh_not_current()?;
+        match unavailable.reason {
+            SessionRetrievalUnavailableReason::HistoricalConvergence
+            | SessionRetrievalUnavailableReason::HistoricalRetry
+            | SessionRetrievalUnavailableReason::HistoricalBlocked => Some(unavailable),
+            SessionRetrievalUnavailableReason::ServiceNotConfigured
+            | SessionRetrievalUnavailableReason::RefreshWorkerMissing
+            | SessionRetrievalUnavailableReason::RefreshWorkerRecovering
+            | SessionRetrievalUnavailableReason::RefreshWorkerStalled
+            | SessionRetrievalUnavailableReason::RefreshWorkerStopped
+            | SessionRetrievalUnavailableReason::TemporalStoreUnavailable
+            | SessionRetrievalUnavailableReason::TemporalStoreReadFailed
+            | SessionRetrievalUnavailableReason::HydrationUnavailable => None,
+        }
+    }
+
     fn converging_projection_unavailable(
         &self,
         unavailable: &SessionRetrievalUnavailable,
@@ -176,7 +197,7 @@ impl DaemonSessionRetrievalService {
         if unavailable.reason != SessionRetrievalUnavailableReason::TemporalStoreUnavailable {
             return None;
         }
-        self.refresh_not_current()
+        self.historically_converging_unavailable()
     }
 
     #[hotpath::measure(label = "daemon.session_retrieval.lcm_describe", future = true)]
@@ -302,11 +323,12 @@ impl DaemonSessionRetrievalService {
                 (Some(result), retrieval)
             }
             // Zero temporal rows for the session is only evidence of absence
-            // once the refresh worker is current; while it is still
-            // converging history the honest answer is that state, not a
-            // complete description at generation zero.
+            // once history is not still converging. A missing worker (core /
+            // direct mounts) is not convergence — treat CompleteZero as
+            // absence there. While historical catch-up is in flight, surface
+            // that state instead of a complete description at generation zero.
             SessionRetrievalOutcome::CompleteZero { .. }
-                if direct.is_none() && self.refresh_not_current().is_some() =>
+                if direct.is_none() && self.historically_converging_unavailable().is_some() =>
             {
                 return describe_retrieval_outcome(
                     outcome,
