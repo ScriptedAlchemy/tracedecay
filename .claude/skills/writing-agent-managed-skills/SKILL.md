@@ -18,8 +18,10 @@ and repository development skills follow their own source release path.
   record advertises, through `tracedecay_automation_run_artifact_view` or
   `tracedecay automation runs artifact <run_id> <kind> --json`.
 - For source-owned guidance, edit its source `SKILL.md` and relevant support
-  files. Reconcile shared text across repository host copies while preserving
-  host metadata. Do not edit hash-tracked managed materializations as source.
+  files in one host tree, then run `scripts/check-dev-skill-mirrors.py sync
+  --from claude` or `--from codex`. Do not reconcile shared text by hand.
+  Host-private `agents/openai.yaml` and `*.test.sh` files stay put. Do not
+  edit hash-tracked managed materializations as source.
 - For a requested managed-skill administrative change, use the supported skill
   administration surface for the exact target. A writer-run audit alone does
   not authorize create, update, disable, archive, or restore operations.

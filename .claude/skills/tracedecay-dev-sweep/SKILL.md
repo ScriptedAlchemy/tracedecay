@@ -33,8 +33,11 @@ ones rather than abandoning the sweep.
 
 Apply improvements within the user's scope. Keep code ownership explicit in
 shared checkouts and follow repository worktree/build rules. For source skill
-edits, reconcile `.agents/skills`, `.codex/skills`, and `.claude/skills` copies
-that exist; preserve host metadata. For profile-managed skills, use
+edits, change one host tree and run `scripts/check-dev-skill-mirrors.py sync
+--from claude` or `--from codex`, then `scripts/check-dev-skill-mirrors.py
+check`. Do not copy shared files by hand. The script leaves host-private
+`agents/openai.yaml` and `*.test.sh` files alone and includes `.agents/skills`
+when that tree exists. For profile-managed skills, use
 `writing-agent-managed-skills` and the canonical administrative/writer path.
 An audit does not itself authorize deleting memory or changing schedules.
 
