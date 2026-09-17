@@ -743,7 +743,9 @@ where
             let inherent = many
                 .iter()
                 .copied()
-                .filter(|(_, symbol)| !rust_qualified_name_is_ufcs_trait_impl(&symbol.qualified_name))
+                .filter(|(_, symbol)| {
+                    !rust_qualified_name_is_ufcs_trait_impl(&symbol.qualified_name)
+                })
                 .collect::<Vec<_>>();
             match inherent.as_slice() {
                 [_] => inherent,
@@ -1738,8 +1740,8 @@ fn rust_inherent_method_owner<'a>(
     if target_member != member {
         return None;
     }
-    let owner = rust_ufcs_impl_type_name(target_owner)
-        .or_else(|| nominal_rust_impl_owner(target_owner))?;
+    let owner =
+        rust_ufcs_impl_type_name(target_owner).or_else(|| nominal_rust_impl_owner(target_owner))?;
     (owner.rsplit("::").next() == Some(type_name)).then_some(owner)
 }
 

@@ -1012,12 +1012,10 @@ impl McpServer {
                 let service = DaemonSessionRetrievalService::new_with_serving_port(
                     database.clone(),
                     root,
-                    project_session_refresh_wake
-                        .as_ref()
-                        .map(construction::refresh_worker_serving_port)
-                        .unwrap_or_else(|| {
-                            Arc::new(tracedecay_sessions::serving::RefreshWorkerMissing)
-                        }),
+                    project_session_refresh_wake.as_ref().map_or_else(
+                        || Arc::new(tracedecay_sessions::serving::RefreshWorkerMissing),
+                        construction::refresh_worker_serving_port,
+                    ),
                 )?;
                 Some(MountedProjectApplicationRetrievalV1 {
                     identity,

@@ -50,7 +50,7 @@ pub(super) async fn update_record(
             &skill_id,
             |record| {
                 mutate(record);
-                record.skill_id = skill_id.clone();
+                record.skill_id.clone_from(&skill_id);
                 Ok(true)
             },
             seed_timestamp,
@@ -156,6 +156,7 @@ fn with_skill_lock(
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(&lock_path)
         .map_err(|error| {
             config_error(format!(
@@ -165,8 +166,7 @@ fn with_skill_lock(
         })?;
     lock.lock_exclusive().map_err(|error| {
         config_error(format!(
-            "failed to lock skill usage record '{}': {error}",
-            skill_id
+            "failed to lock skill usage record '{skill_id}': {error}"
         ))
     })?;
     let path = skill_usage_record_path(profile_root, skill_id);
@@ -203,6 +203,7 @@ fn migrate_legacy(profile_root: &Path) -> Result<()> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(&lock_path)
         .map_err(|error| {
             config_error(format!(

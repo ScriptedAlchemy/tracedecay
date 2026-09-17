@@ -2120,10 +2120,7 @@ pub(crate) fn rust_type_path_alias_for_trait_impl_method(path: &str) -> Option<S
                 }
             }
             _ => {
-                if depth == 1
-                    && as_split.is_none()
-                    && path[index..].starts_with(" as ")
-                {
+                if depth == 1 && as_split.is_none() && path[index..].starts_with(" as ") {
                     as_split = Some(index);
                 }
             }
@@ -2230,12 +2227,11 @@ fn resolve_file_references(
         // path and trait-impl aliases do not steal it.
         if let Some(alias) = rust_type_path_alias_for_trait_impl_method(relative_name) {
             type_path_aliases.push((alias.clone(), symbol));
-            if let Some((type_name, method)) = alias.rsplit_once("::") {
-                if let Some(simple) = type_name.rsplit("::").next() {
-                    if simple != type_name {
-                        type_path_aliases.push((format!("{simple}::{method}"), symbol));
-                    }
-                }
+            if let Some((type_name, method)) = alias.rsplit_once("::")
+                && let Some(simple) = type_name.rsplit("::").next()
+                && simple != type_name
+            {
+                type_path_aliases.push((format!("{simple}::{method}"), symbol));
             }
         }
     }
@@ -4375,17 +4371,13 @@ pub fn real_symbol() {}
     #[test]
     fn rust_type_path_alias_parses_ufcs_trait_impl_methods() {
         assert_eq!(
-            rust_type_path_alias_for_trait_impl_method(
-                "<WalkEventIter as From<WalkDir>>::from"
-            )
-            .as_deref(),
+            rust_type_path_alias_for_trait_impl_method("<WalkEventIter as From<WalkDir>>::from")
+                .as_deref(),
             Some("WalkEventIter::from")
         );
         assert_eq!(
-            rust_type_path_alias_for_trait_impl_method(
-                "<crate::Builder as crate::First>::build"
-            )
-            .as_deref(),
+            rust_type_path_alias_for_trait_impl_method("<crate::Builder as crate::First>::build")
+                .as_deref(),
             Some("crate::Builder::build")
         );
         assert_eq!(
@@ -4421,8 +4413,7 @@ pub fn real_symbol() {}
             .symbols
             .iter()
             .find(|symbol| {
-                symbol.qualified_name
-                    == "src/walk.rs::<WalkEventIter as From<WalkDir>>::from"
+                symbol.qualified_name == "src/walk.rs::<WalkEventIter as From<WalkDir>>::from"
             })
             .expect("UFCS From::from method");
         let build = artifacts
@@ -4440,9 +4431,10 @@ pub fn real_symbol() {}
             "WalkEventIter::from must bind to <WalkEventIter as From<WalkDir>>::from"
         );
         assert!(
-            !artifacts.unresolved_references.iter().any(|reference| {
-                reference.reference_name == "WalkEventIter::from"
-            }),
+            !artifacts
+                .unresolved_references
+                .iter()
+                .any(|reference| { reference.reference_name == "WalkEventIter::from" }),
             "type-path call must resolve same-file rather than remain for sealing"
         );
     }
@@ -4475,9 +4467,7 @@ pub fn real_symbol() {}
         let trait_impl = artifacts
             .symbols
             .iter()
-            .find(|symbol| {
-                symbol.qualified_name == "src/lib.rs::<Builder as First>::build"
-            })
+            .find(|symbol| symbol.qualified_name == "src/lib.rs::<Builder as First>::build")
             .expect("trait-impl build");
         let assemble = artifacts
             .symbols

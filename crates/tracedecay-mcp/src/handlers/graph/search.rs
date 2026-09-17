@@ -2072,7 +2072,7 @@ mod tests {
                 let freshness_order = std::sync::Arc::clone(&freshness_order);
                 Box::pin(async move {
                     freshness_order.lock().expect("order").push("freshness");
-                    None
+                    Ok(None)
                 })
             });
         let temp = tempfile::tempdir().expect("temp root");

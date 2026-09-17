@@ -3646,7 +3646,7 @@ fn checkpoint_text_artifact_control(
     }
 }
 
-/// Drop a leftover SQLite journal before a fresh staging file is created.
+/// Drop a leftover `SQLite` journal before a fresh staging file is created.
 ///
 /// DELETE-mode recovery applies `path-journal` into whatever file is later
 /// opened at `path`. A crash that unlinked the database and left the journal
@@ -3709,6 +3709,20 @@ fn clear_text_artifact_staging_sidecars(staging_path: &Path) -> std::io::Result<
     Ok(())
 }
 
+/// Divide the single process reservation between the source's concurrently
+/// retained decode window and the `SQLite` builder. Each component fitting the
+/// ceiling independently is insufficient because both remain live while a
+/// page is admitted.
+pub(super) fn text_artifact_builder_budget(
+    build_memory_budget: usize,
+    source_window_bytes: usize,
+) -> Result<usize, RetrievalPortError> {
+    build_memory_budget
+        .checked_sub(source_window_bytes)
+        .filter(|remaining| *remaining > 0)
+        .ok_or(RetrievalPortError::BudgetExceeded)
+}
+
 #[cfg(test)]
 mod staging_sidecar_tests {
     use super::{
@@ -3737,18 +3751,4 @@ mod staging_sidecar_tests {
         clear_text_artifact_staging_sidecars(&staging).expect("clear wal");
         assert!(!root.path().join(".text-artifact-ab.staging-wal").exists());
     }
-}
-
-/// Divide the single process reservation between the source's concurrently
-/// retained decode window and the `SQLite` builder. Each component fitting the
-/// ceiling independently is insufficient because both remain live while a
-/// page is admitted.
-pub(super) fn text_artifact_builder_budget(
-    build_memory_budget: usize,
-    source_window_bytes: usize,
-) -> Result<usize, RetrievalPortError> {
-    build_memory_budget
-        .checked_sub(source_window_bytes)
-        .filter(|remaining| *remaining > 0)
-        .ok_or(RetrievalPortError::BudgetExceeded)
 }

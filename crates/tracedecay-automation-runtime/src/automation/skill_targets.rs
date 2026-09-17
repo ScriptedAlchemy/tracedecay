@@ -602,10 +602,9 @@ fn parse_overlay_sibling(
     let rest = name.strip_prefix(&prefix)?;
     let (kind, rest) = if let Some(rest) = rest.strip_prefix("previous-") {
         (OverlaySiblingKind::Previous, rest)
-    } else if let Some(rest) = rest.strip_prefix("tmp-") {
-        (OverlaySiblingKind::Temporary, rest)
     } else {
-        return None;
+        let rest = rest.strip_prefix("tmp-")?;
+        (OverlaySiblingKind::Temporary, rest)
     };
     let (pid, nonce) = rest.split_once('-')?;
     Some((kind, pid.parse().ok()?, nonce.parse().ok()?))
