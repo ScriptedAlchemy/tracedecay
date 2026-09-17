@@ -7,10 +7,7 @@
 
 use std::fmt;
 use std::num::NonZeroUsize;
-use std::sync::{
-    Arc, Mutex, OnceLock,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tracedecay_domain::configuration::{
     CodeIndexWorkerLimitingReasonV1, CodeIndexWorkerSelectionV1, CodeIndexWorkerStatusV1,
@@ -550,9 +547,11 @@ impl fmt::Display for CodeIndexParallelismErrorV1 {
 
 impl std::error::Error for CodeIndexParallelismErrorV1 {}
 
-/// 0 means "use the configured host width".
-static FORCED_WORKERS: AtomicUsize = AtomicUsize::new(0);
 thread_local! {
+    /// Test-only worker width. Thread-scoped so one equivalence or batching
+    /// test cannot change a sibling test's scheduling policy.
+    static FORCED_WORKERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+
     /// Test-only: force [`install`] on this thread to return
     /// [`CodeIndexParallelismErrorV1::PoolBuild`]. Thread-scoped so a fault
     /// test cannot leak into sibling tests running in the same process.
@@ -564,7 +563,7 @@ thread_local! {
 /// inline".
 #[must_use]
 pub fn indexing_workers() -> usize {
-    match FORCED_WORKERS.load(Ordering::Relaxed) {
+    match FORCED_WORKERS.with(std::cell::Cell::get) {
         0 => WORKER_RUNTIME.get().map_or_else(
             || indexing_worker_target(detected_cores()),
             |runtime| runtime.plan.effective_workers,
@@ -582,13 +581,13 @@ pub fn indexing_workers() -> usize {
 /// comes from [`indexing_workers`].
 #[doc(hidden)]
 pub fn force_indexing_workers_for_test(workers: usize) {
-    FORCED_WORKERS.store(workers.max(1), Ordering::Relaxed);
+    FORCED_WORKERS.with(|forced| forced.set(workers.max(1)));
 }
 
 /// Restore production sizing after [`force_indexing_workers_for_test`].
 #[doc(hidden)]
 pub fn clear_forced_indexing_workers_for_test() {
-    FORCED_WORKERS.store(0, Ordering::Relaxed);
+    FORCED_WORKERS.with(|forced| forced.set(0));
 }
 
 /// Force [`install`] to fail so callers can assert operational pool errors stay

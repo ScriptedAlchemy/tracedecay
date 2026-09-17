@@ -773,15 +773,13 @@ mod tests {
             .extract(&file, &descriptor, &NeverCancelled)
             .expect("extraction succeeds");
 
-        // extractor.rust.v8 records unrestricted vs restricted `pub` re-exports
-        // on separate bits (`is_restricted_public`), so import-row bytes diverge
-        // from v4–v7. Prior revision labels no longer reproduce historical
-        // digests from the current artifact; pin only the shipped current
-        // identity rather than re-recording superseded ones.
+        // extractor.rust.v8 records restricted `pub` re-export scope as a
+        // typed value and no longer fabricates receiver types for method
+        // initializers. Pin the resulting current artifact identity.
         assert_eq!(descriptor.extractor_revision.as_str(), "extractor.rust.v8");
         assert_eq!(
             extraction.batch().rows_digest.as_str(),
-            "sha256:596cd09bc6642163992b51d996d218ce3ff2ea8edfbceb52d7846ef00a83dfd9"
+            "sha256:da811677a89babc024b19ae5b99dad72fb2f3ccc88a3d53f97f22488cc88219d"
         );
     }
 
