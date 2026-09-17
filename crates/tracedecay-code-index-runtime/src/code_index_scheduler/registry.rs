@@ -813,6 +813,18 @@ fn is_terminal_publication_authority_park(parked: &CodeIndexConvergenceParkedV1)
     parked.blocked_reason == Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt)
 }
 
+/// The shared park is the worker's publication-authority gate. A loop-local
+/// bool would miss a park this worker has not yet observed, and would keep
+/// suppressing after the park was cleared.
+fn convergence_park_is_terminal_publication_authority(
+    slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>,
+) -> bool {
+    slot.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(is_terminal_publication_authority_park)
+}
+
 /// Record one observation of a deterministic contract violation on a mounted
 /// worktree's park slot.
 ///
@@ -953,6 +965,32 @@ mod terminal_publication_park_tests {
         assert_eq!(
             parked.blocked_reason,
             Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt)
+        );
+    }
+
+    #[test]
+    fn worker_gate_reads_the_typed_park_not_a_side_bool() {
+        let slot = RwLock::new(None);
+        assert!(!convergence_park_is_terminal_publication_authority(&slot));
+        *slot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(terminal_park("already corrupt"));
+        assert!(convergence_park_is_terminal_publication_authority(&slot));
+        *slot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(CodeIndexConvergenceParkedV1 {
+                reason: "chmod".to_owned(),
+                blocked_reason: Some(CodeIndexBuildBlockedReasonV1::ArtifactStoreUnavailable),
+                remediation: "fix permissions".to_owned(),
+                parked_at_micros: 1,
+                observed_passes: 1,
+                retries_on_wake: true,
+            });
+        assert!(
+            !convergence_park_is_terminal_publication_authority(&slot),
+            "a retryable park must not suppress the worker"
         );
     }
 

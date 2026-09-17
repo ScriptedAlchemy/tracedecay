@@ -170,6 +170,16 @@ impl Fixture {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Default::default();
     }
 
+    async fn clear_convergence_park_for_test(&self) {
+        let canonical = self.project.canonicalize().expect("canonical project");
+        let mounted = self.registry.mounted.lock().await;
+        let worktree = mounted.get(&canonical).expect("mounted worktree");
+        *worktree
+            .convergence_park
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
     async fn plant_terminal_publication_park(&self, reason: &str) {
         use tracedecay_contracts::code_index_freshness::{
             CodeIndexBuildBlockedReasonV1, CodeIndexConvergenceParkedV1,
@@ -199,6 +209,22 @@ impl Fixture {
             self.wake_without_new_input().await;
             tokio::time::sleep(WAKE_ROUND_SPACING).await;
         }
+    }
+}
+
+/// Poll until the worker has taken the pending arrival, or the deadline expires.
+///
+/// Zero means the wake was observed (suppressed or consumed by a pass). A
+/// non-zero result means the worker never ran, so an attempts-equals-zero
+/// assertion would be vacuous.
+async fn wait_until_pending_wake_drained(fixture: &Fixture) -> u64 {
+    let deadline = tokio::time::Instant::now() + SETTLE_DEADLINE;
+    loop {
+        let micros = fixture.pending_wake_micros().await;
+        if micros == 0 || tokio::time::Instant::now() >= deadline {
+            return micros;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -567,6 +593,77 @@ async fn corrupt_publication_without_build_progress_returns_terminal_admission()
             .await,
         CodeIndexDemandAdmissionV1::Terminal(_)
     ));
+    fixture.registry.shutdown().await;
+}
+
+/// The typed park is the mount's publication-authority, not a bool this worker
+/// latches after it personally observes the error. A park already present —
+/// planted by admission, a previous owner, or a test of that contract — must
+/// stop the loop before it dispatches another reconcile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_publication_park_stops_the_worker_without_a_local_latch() {
+    let fixture = Fixture::mount("project.reconcile-park-is-worker-authority").await;
+    fixture
+        .plant_terminal_publication_park("store already corrupt before this worker observed it")
+        .await;
+    let fault = fixture
+        .install_fault(ReconcileFaultKindV1::PublicationCorruption, usize::MAX)
+        .await;
+
+    fixture.wake_with_pending_arrival().await;
+    assert_eq!(
+        wait_until_pending_wake_drained(&fixture).await,
+        0,
+        "the worker must observe the terminal wake before the assertion"
+    );
+    fixture.drive_external_wakes().await;
+    fixture.settle_for(TERMINATION_QUIET_WINDOW).await;
+
+    assert_eq!(
+        fault.attempts(),
+        0,
+        "a terminal publication park must stop the worker; a private bool misses a park this loop has not yet observed"
+    );
+    assert_eq!(
+        fixture.pending_wake_micros().await,
+        0,
+        "terminal suppression must consume the arrival so status is not rebuilding"
+    );
+    let freshness = fixture
+        .registry
+        .dashboard_freshness(&fixture.project)
+        .await
+        .expect("mounted freshness");
+    assert!(
+        !freshness.rebuild_in_flight,
+        "a pre-existing terminal park is blocked, not in flight: {freshness:?}"
+    );
+    let parked = freshness.parked.expect("terminal convergence state");
+    assert_eq!(
+        parked.blocked_reason,
+        Some(
+            tracedecay_contracts::code_index_freshness::CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt
+        )
+    );
+    assert_eq!(
+        parked.observed_passes, 1,
+        "the worker must not re-observe a park it did not cause"
+    );
+    assert!(
+        !parked.retries_on_wake,
+        "stopping the worker must not rewrite the park into a retryable failure"
+    );
+
+    // The loop must re-read the slot. A worker-local bool would stay set
+    // after this clear and keep the next wake suppressed.
+    fixture.clear_convergence_park_for_test().await;
+    fixture.wake_with_pending_arrival().await;
+    let seen = wait_for_attempts(&fault, 1).await;
+    assert!(
+        seen >= 1,
+        "clearing the typed park must admit the worker again; a sticky latch would not"
+    );
+
     fixture.registry.shutdown().await;
 }
 

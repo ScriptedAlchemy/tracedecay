@@ -1241,6 +1241,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- *(code-index)* the background worker consults the typed publication-authority
+  park instead of a loop-local bool, so a park it has not yet observed still
+  stops reconcile. Branch publication handles `NotApplicable` as a closed
+  refusal, and projection receipts no longer invent a per-chunk reused list
+  the parent-delta contract removed.
+
 - *(store)* classify Windows `ERROR_LOCK_VIOLATION` (33) as typed lock
   contention at the graph-replay pool and quarantine decision locks. One
   non-blocking acquire still runs before an expired held-lock deadline
