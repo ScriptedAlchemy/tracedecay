@@ -16,7 +16,8 @@ use tempfile::TempDir;
 use tracedecay_contracts::ResolvedScope;
 
 use super::super::{
-    CodeIndexCadenceTriggerV1, CodeIndexDemandAdmissionV1, CodeIndexReconcileAdmissionV1,
+    CodeIndexBuildProgressSlotStateV1, CodeIndexCadenceTriggerV1, CodeIndexDemandAdmissionV1,
+    CodeIndexReconcileAdmissionV1,
     reconcile_panic_guard::{
         MAX_CONSECUTIVE_CAPACITY_RETRIES_V1, MAX_CONSECUTIVE_RECONCILE_PANICS_V1,
         ReconcileFaultInjectionV1, ReconcileFaultKindV1,
@@ -167,7 +168,8 @@ impl Fixture {
         *worktree
             .build_progress
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Default::default();
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            CodeIndexBuildProgressSlotStateV1::default();
     }
 
     async fn clear_convergence_park_for_test(&self) {

@@ -868,7 +868,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .active_path
             .parent()
             .ok_or_else(|| Self::unavailable("active code-generation pointer has no store root"))?;
-        acquire_code_generation_store_lock(store_root).map_err(Self::unavailable)
+        acquire_code_generation_store_read_lock(store_root).map_err(Self::unavailable)
     }
 
     fn remove_abandoned_evidence_packs(
@@ -2634,9 +2634,9 @@ impl CodeChunkProjectionSink for DaemonProjectionSinkV1 {
                     output_digest: None,
                 }),
         );
-        // Reused chunks are authenticated by `reused_count` / `reused_digest`.
-        // The receipt builder counts that complement; it does not want a
-        // reconstructed per-chunk list.
+        // Unchanged chunks are not a list. `reused_count` / `reused_digest`
+        // authenticate them, and the receipt builder records that count.
+        // Emitting per-chunk Reused decisions is now ExtraChunkReceipt.
         decisions.sort_by(|left, right| left.chunk_id.cmp(&right.chunk_id));
         receipt_builder
             .build(&decisions)
