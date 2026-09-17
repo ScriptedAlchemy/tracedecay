@@ -400,6 +400,7 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
     );
     let exact = owners
         .retrieve_exact(&ExactLaneRequest {
+            control: &ReadyRetrievalControlV1,
             literals: authority.parse_literals(&query_view, &base),
             generation: generation.clone(),
             budget: base.budget,

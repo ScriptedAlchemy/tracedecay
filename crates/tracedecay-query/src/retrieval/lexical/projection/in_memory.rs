@@ -21,7 +21,6 @@ use tracedecay_domain::{
 use super::super::{
     LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest, LexicalSpellingVariantV1,
     MAX_FUZZY_TERM_EXPANSIONS_V1, admit_candidate_sources, candidate_admission_outcome,
-    lexical_checkpoint,
 };
 use super::{
     CodeLexicalProjectionMetadataV1, ECHO_SCORE_MILLIS, ExactMatchRowViewV1, FUZZY_SCORE_MILLIS,
@@ -35,7 +34,7 @@ use super::{
 use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest};
 use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, ExactTermPostingReadPort, LexicalPostingReadPort,
-    RetrievalPortError, contract_error,
+    RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalPortError, contract_error, retrieval_checkpoint,
 };
 
 mod postings;
@@ -850,8 +849,10 @@ impl CodeLexicalProjectionAdapterV1 {
                 .lexical_documents(request, &fuzzy, &phrase_candidates, &mut pruned);
         let mut pairs = Vec::new();
         let mut excluded = self.rows.len() as u64 - documents.len();
-        for document in documents {
-            lexical_checkpoint(request.control)?;
+        for (ordinal, document) in documents.into_iter().enumerate() {
+            if ordinal.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
+                retrieval_checkpoint(request.control)?;
+            }
             let row = &self.rows[document as usize];
             let score = self.score_row(
                 document,
@@ -896,6 +897,7 @@ impl CodeLexicalProjectionAdapterV1 {
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);
         }
+        retrieval_checkpoint(request.control)?;
         hotpath::gauge!("query.lane.lexical.candidates").set(candidates.len());
         hotpath::gauge!("query.lane.lexical.examined").set(self.rows.len());
         Ok(candidate_admission_outcome(
@@ -1258,6 +1260,7 @@ where
         &self,
         request: &ExactLaneRequest,
     ) -> Result<RetrieverOutcome<RetrieverBatch<ExactLaneEvidence>>, RetrievalPortError> {
+        retrieval_checkpoint(request.control)?;
         self.projection.validate_generation(&request.generation)?;
         if let Some(outcome) = self.projection.stale_outcome() {
             return Ok(outcome);
@@ -1266,7 +1269,10 @@ where
         let mut pairs = Vec::new();
         let mut excluded = self.projection.rows.len() as u64 - documents.len();
         let mut proofs = LiteralProofCacheV1::new(request.literals.len());
-        for document in documents {
+        for (ordinal, document) in documents.into_iter().enumerate() {
+            if ordinal.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
+                retrieval_checkpoint(request.control)?;
+            }
             let row = &self.projection.rows[document as usize];
             let (matched_literals, matched_kinds) = exact_matches(row.exact_match_view(), request);
             if matched_literals.is_empty() {
@@ -1310,6 +1316,7 @@ where
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);
         }
+        retrieval_checkpoint(request.control)?;
         Ok(RetrieverOutcome::Complete(RetrieverBatch {
             coverage: RetrieverCoverage {
                 examined: self.projection.rows.len() as u64,

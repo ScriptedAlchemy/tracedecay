@@ -748,6 +748,7 @@ fn compose_production_query(
 
     let budget = retrieval_budget();
     let exact_request = ExactLaneRequest {
+        control: &ActiveControl,
         base: request.clone(),
         query_view: &query_view,
         generation: generation_id.clone(),

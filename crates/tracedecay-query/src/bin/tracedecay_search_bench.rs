@@ -940,6 +940,7 @@ where
         let exact_started = Instant::now();
         let exact_outcome = exact_lane
             .retrieve_exact(&ExactLaneRequest {
+                control: &ActiveControl,
                 base: request.clone(),
                 query_view,
                 generation: generation.clone(),

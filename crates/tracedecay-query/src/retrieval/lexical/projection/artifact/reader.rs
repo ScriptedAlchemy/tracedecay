@@ -59,7 +59,8 @@ use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneEvidence, ExactL
 use crate::retrieval::ports::RetrievalExecutionControl;
 use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, ExactTermPostingReadPort, LexicalPostingReadPort,
-    RetrievalPortError, contract_error, lane_candidate_cap,
+    RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalPortError, contract_error, lane_candidate_cap,
+    retrieval_checkpoint,
 };
 
 use super::super::{
@@ -72,7 +73,7 @@ use super::super::{
 use crate::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest,
     LexicalSpellingVariantV1, MAX_FUZZY_TERM_EXPANSIONS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1,
-    admit_candidate_sources, candidate_admission_outcome, field_admitted, lexical_checkpoint,
+    admit_candidate_sources, candidate_admission_outcome, field_admitted,
 };
 
 impl LexicalFieldTextV1 for ArtifactRowV1 {
@@ -777,9 +778,12 @@ impl CodeLexicalArtifactReaderV1 {
             .map_err(sqlite_error)?;
         let mut members = Vec::with_capacity(fetch);
         while let Some(row) = rows.next().map_err(sqlite_error)? {
-            checkpoint(control)?;
+            if members.len().is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
+                checkpoint(control)?;
+            }
             members.push(self.verified_clone_member(authority, key, row)?);
         }
+        checkpoint(control)?;
         let next_cursor = (members.len() > limit)
             .then(|| {
                 members.get(limit - 1).map(|member| CloneArtifactCursorV1 {
@@ -1475,6 +1479,7 @@ fn rewrite_union_query_parameters(
 fn visit_document_ids(
     connection: &Connection,
     query: &DocumentQueryV1,
+    control: &dyn RetrievalExecutionControl,
     mut visitor: impl FnMut(u32) -> Result<(), RetrievalPortError>,
 ) -> Result<(), RetrievalPortError> {
     hotpath::measure_block!("query.stream.visit_documents", {
@@ -1493,10 +1498,14 @@ fn visit_document_ids(
             .map_err(map_query_sql_error)?;
         let mut visited = 0u64;
         while let Some(row) = rows.next().map_err(map_query_sql_error)? {
+            if visited.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE as u64) {
+                retrieval_checkpoint(control)?;
+            }
             let document = row.get::<_, i64>(0).map_err(map_query_sql_error)?;
             visitor(u32::try_from(document).map_err(contract_error)?)?;
             visited += 1;
         }
+        retrieval_checkpoint(control)?;
         hotpath::gauge!("query.stream.rows_total").inc(visited);
         Ok(())
     })
@@ -1506,9 +1515,8 @@ fn visit_document_ids(
 /// one SQLite statement. The correlated posting lookup seeks the maintained
 /// document index; it never emits the row BLOB once per matching term.
 ///
-/// `control` is consulted before every row leaves SQLite, so a cancelled or
-/// expired request stops after the row already stepped instead of decoding
-/// and scoring the rest of its admitted candidate set.
+/// Request authority is consulted before each page-sized batch and at stream
+/// completion, bounding abandoned work without a route lookup per candidate.
 fn visit_lexical_rows(
     connection: &Connection,
     documents: &DocumentQueryV1,
@@ -1623,7 +1631,9 @@ fn visit_lexical_rows(
             .map_err(map_query_sql_error)?;
         let mut visited = 0u64;
         while let Some(row) = rows.next().map_err(map_query_sql_error)? {
-            lexical_checkpoint(control)?;
+            if visited.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE as u64) {
+                retrieval_checkpoint(control)?;
+            }
             let document = u32::try_from(row.get::<_, i64>(0).map_err(map_query_sql_error)?)
                 .map_err(contract_error)?;
             let chunk_id: String = row.get(1).map_err(map_query_sql_error)?;
@@ -1665,6 +1675,7 @@ fn visit_lexical_rows(
             visited = visited.saturating_add(1);
         }
         drop(rows);
+        retrieval_checkpoint(control)?;
         metrics.observe_statement(&statement)?;
         metrics.rows(visited);
         Ok(())
@@ -2090,7 +2101,7 @@ impl<'a> ArtifactQueryV1<'a> {
         let prepared = PreparedLexicalQueryV1::new(request);
         let terms = lexical_terms(&prepared, &fuzzy);
         let stats = self.lexical_stats(&terms)?;
-        lexical_checkpoint(control)?;
+        retrieval_checkpoint(control)?;
         let mut phrase_queries = BTreeMap::new();
         for (_, normalized) in &prepared.phrases {
             let query = ngram_document_query(
@@ -2178,6 +2189,9 @@ impl<'a> ArtifactQueryV1<'a> {
         let mut candidates = Vec::with_capacity(selected.len());
         let mut evidence_by_occurrence = BTreeMap::new();
         for (ordinal, entry) in selected.into_iter().enumerate() {
+            if ordinal.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
+                retrieval_checkpoint(control)?;
+            }
             let RankedLexicalEntryV1 {
                 key: (_, _, _),
                 score,
@@ -2206,6 +2220,7 @@ impl<'a> ArtifactQueryV1<'a> {
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);
         }
+        retrieval_checkpoint(control)?;
         Ok(candidate_admission_outcome(
             capped_batch(
                 self.document_count,
@@ -2224,6 +2239,7 @@ impl<'a> ArtifactQueryV1<'a> {
         request: &ExactLaneRequest,
         authority: &A,
     ) -> Result<RetrieverOutcome<RetrieverBatch<ExactLaneEvidence>>, RetrievalPortError> {
+        retrieval_checkpoint(request.control)?;
         let documents = self.exact_documents(request)?;
         // Same bounded selection as the lexical lane: keys mirror the exact
         // lane's canonical order (admitted literal count, then occurrence),
@@ -2239,7 +2255,7 @@ impl<'a> ArtifactQueryV1<'a> {
         let mut eligible = 0u64;
         let mut ranked = BinaryHeap::new();
         let mut proofs = LiteralProofCacheV1::new(request.literals.len());
-        self.visit_documents(&documents, |document| {
+        self.visit_documents(&documents, request.control, |document| {
             let row = self.row(document)?;
             let (matched_literals, matched_kinds) = exact_matches_artifact(&row, request);
             if matched_literals.is_empty() {
@@ -2268,11 +2284,15 @@ impl<'a> ArtifactQueryV1<'a> {
             );
             Ok(())
         })?;
+        retrieval_checkpoint(request.control)?;
         let selected = ranked.into_sorted_vec();
         let truncated = eligible - selected.len() as u64;
         let mut candidates = Vec::with_capacity(selected.len());
         let mut evidence_by_occurrence = BTreeMap::new();
         for (ordinal, entry) in selected.into_iter().enumerate() {
+            if ordinal.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
+                retrieval_checkpoint(request.control)?;
+            }
             let RankedExactEntryV1 {
                 key: (_, _, document),
                 admitted_ordinal,
@@ -2302,6 +2322,7 @@ impl<'a> ArtifactQueryV1<'a> {
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);
         }
+        retrieval_checkpoint(request.control)?;
         Ok(RetrieverOutcome::Complete(capped_batch(
             self.document_count,
             eligible,
@@ -2492,10 +2513,11 @@ impl<'a> ArtifactQueryV1<'a> {
     fn visit_documents(
         &self,
         query: &DocumentQueryV1,
+        control: &dyn RetrievalExecutionControl,
         visitor: impl FnMut(u32) -> Result<(), RetrievalPortError>,
     ) -> Result<(), RetrievalPortError> {
         self.metrics.probe();
-        visit_document_ids(self.connection, query, visitor)
+        visit_document_ids(self.connection, query, control, visitor)
     }
 
     #[hotpath::measure(label = "query.lane.fuzzy.expand")]
@@ -3778,7 +3800,7 @@ mod tests {
 
     fn streamed_documents(connection: &Connection, query: &DocumentQueryV1) -> Vec<u32> {
         let mut documents = Vec::new();
-        visit_document_ids(connection, query, |document| {
+        visit_document_ids(connection, query, &AlwaysActiveControl, |document| {
             documents.push(document);
             Ok(())
         })
@@ -4386,18 +4408,45 @@ mod tests {
         (connection, field)
     }
 
-    /// Cancellation reaches the row stream between rows: a request cancelled
-    /// after `k` consultations decodes exactly `k - 1` rows, unwinds with the
-    /// typed cancellation error, and never visits the remaining candidates.
+    #[test]
+    fn lexical_candidate_batches_bound_cancellation_probes() {
+        let (connection, field) = lexical_row_stream_fixture(256);
+        let documents = DocumentQueryV1::term(field, "alpha".to_owned());
+        let terms = BTreeSet::from(["alpha".to_owned()]);
+        let control = CancelAtObservation::new(usize::MAX);
+        let mut visited = 0;
+        visit_lexical_rows(
+            &connection,
+            &documents,
+            &terms,
+            &ArtifactQueryMetricsV1::default(),
+            LexicalArtifactLayoutV1::V10,
+            &control,
+            |_, _, _, _| {
+                visited += 1;
+                Ok(())
+            },
+        )
+        .expect("active request visits its candidates");
+        assert_eq!(visited, 256);
+        assert!(
+            control.observations() <= 5,
+            "request authority must be consulted per batch, not per candidate: {} probes",
+            control.observations()
+        );
+    }
+
+    /// A request cancelled between batches unwinds before decoding the next
+    /// page's candidates, with a typed error rather than partial success.
     /// The same stream under an active control visits every row, so the
     /// checkpoint changes nothing for an uncancelled request.
     #[test]
     fn lexical_row_stream_unwinds_at_the_first_checkpoint_after_cancellation() {
-        let (connection, field) = lexical_row_stream_fixture(256);
+        let (connection, field) = lexical_row_stream_fixture(512);
         let documents = DocumentQueryV1::term(field, "alpha".to_owned());
         let terms = BTreeSet::from(["alpha".to_owned()]);
 
-        let control = CancelAtObservation::new(8);
+        let control = CancelAtObservation::new(2);
         let mut visited = 0usize;
         let error = visit_lexical_rows(
             &connection,
@@ -4414,12 +4463,12 @@ mod tests {
         .expect_err("a cancelled request must not stream to completion");
         assert_eq!(error, RetrievalPortError::Cancelled);
         assert_eq!(
-            visited, 7,
+            visited, 128,
             "every row before the cancelling checkpoint is visited and none after it"
         );
         assert_eq!(
             control.observations(),
-            8,
+            2,
             "the stream stops consulting the control once it reports cancellation"
         );
 
@@ -4437,7 +4486,23 @@ mod tests {
             },
         )
         .expect("an uncancelled request streams every candidate row");
-        assert_eq!(complete, 256);
+        assert_eq!(complete, 512);
+    }
+
+    #[test]
+    fn exact_document_stream_cancels_before_the_next_candidate_batch() {
+        let (connection, field) = lexical_row_stream_fixture(512);
+        let documents = DocumentQueryV1::term(field, "alpha".to_owned());
+        let control = CancelAtObservation::new(2);
+        let mut visited = Vec::new();
+        let error = visit_document_ids(&connection, &documents, &control, |document| {
+            visited.push(document);
+            Ok(())
+        })
+        .expect_err("the next candidate batch must not start");
+        assert_eq!(error, RetrievalPortError::Cancelled);
+        assert_eq!(visited, (0..128).collect::<Vec<_>>());
+        assert_eq!(control.observations(), 2);
     }
 
     #[test]

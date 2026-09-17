@@ -84,7 +84,7 @@ use crate::{
             LexicalLaneEvidence, LexicalLaneRequest, LexicalLaneRetriever,
             code_lexical_artifact_build_memory_budget_for,
         },
-        ports::RetrievalPortError,
+        ports::{RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalPortError},
     },
 };
 
@@ -92,7 +92,7 @@ use super::{DaemonCodeIndexPublicationStoreV1, ProfiledStdMutex, queries};
 
 /// Page bounds for streaming one sealed generation into the durable lexical
 /// text artifact. One page is one bounded unit of background build progress.
-pub(super) const TEXT_ARTIFACT_PAGE_CHUNKS_V1: usize = 128;
+pub(super) const TEXT_ARTIFACT_PAGE_CHUNKS_V1: usize = RETRIEVAL_CANDIDATE_BATCH_SIZE;
 const TEXT_ARTIFACT_PAGE_BYTES_V1: usize = 4 * 1024 * 1024;
 const CLONE_SUCCESSOR_MEMORY_BUDGET_BYTES_V1: usize = 128 * 1024 * 1024;
 const TEXT_ARTIFACT_BASE_BATCH_PAGES_V1: usize = 64;
@@ -659,6 +659,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
         Option<tracedecay_query::code_search::CodeIndexSimilarCompletedV1>,
         RetrievalPortError,
     > {
+        checkpoint_text_artifact_control(control)?;
         let source = match &request.target {
             tracedecay_query::code_search::CodeIndexSimilarTargetV1::SymbolOccurrence(
                 occurrence,
@@ -667,7 +668,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
                 self.hydration.clone_body_by_source_range(path, *span)
             }
         }
-        .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?;
+        .map_err(family_report::clone_artifact_error)?;
         let Some(source) = source else {
             return Ok(None);
         };
@@ -709,6 +710,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
                 );
             }
         }
+        checkpoint_text_artifact_control(control)?;
         Ok(Some(
             tracedecay_query::code_search::CodeIndexSimilarCompletedV1 {
                 source,
@@ -737,11 +739,15 @@ impl ProductionCodeIndexQueryOwnersV1 {
         let mut cursor = start_cursor.cloned();
         let mut complete = false;
         while members.len() < limit {
+            checkpoint_text_artifact_control(control)?;
             let page = self
                 .hydration
                 .clone_exact_page(&source.occurrence, key, cursor.as_ref(), limit, control)
-                .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?;
-            for member in page.members {
+                .map_err(family_report::clone_artifact_error)?;
+            for (ordinal, member) in page.members.into_iter().enumerate() {
+                if ordinal.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
+                    checkpoint_text_artifact_control(control)?;
+                }
                 if member.occurrence.symbol_occurrence_id == source.occurrence.symbol_occurrence_id
                 {
                     continue;
@@ -758,6 +764,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
                     break;
                 }
             }
+            checkpoint_text_artifact_control(control)?;
             match page.next_cursor {
                 Some(next) if members.len() < limit => cursor = Some(next),
                 Some(next) => return Ok((members, false, Some(next))),

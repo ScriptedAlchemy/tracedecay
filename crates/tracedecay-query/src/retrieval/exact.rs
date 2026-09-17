@@ -22,8 +22,9 @@ use tracedecay_domain::{
 
 use super::ports::{
     CodeCandidateBindingV1, ExactTermPostingReadPort, LaneBoundEvidence, LaneEvidenceRejections,
-    RetrievalPortError, candidate_checkpoint_prefix, checkpoint_digest, contract_error,
-    lane_bound_evidence, lane_candidate_cap,
+    RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalExecutionControl, RetrievalPortError,
+    candidate_checkpoint_prefix, checkpoint_digest, contract_error, lane_bound_evidence,
+    lane_candidate_cap, retrieval_checkpoint,
 };
 
 /// Wording the exact lane uses when a port-emitted batch fails the shared
@@ -36,7 +37,6 @@ const EXACT_REJECTIONS: LaneEvidenceRejections = LaneEvidenceRejections {
 
 /// Exact technical literals are parsed under a versioned exact-admission
 /// specification before any lane executes.
-#[derive(Debug, PartialEq, Eq)]
 pub struct ExactLaneRequest<'a> {
     pub base: RetrievalRequest,
     pub query_view: &'a EphemeralSanitizedQueryViewV1,
@@ -45,6 +45,8 @@ pub struct ExactLaneRequest<'a> {
     /// admission validator. The lane never re-derives exact status.
     pub literals: Vec<ExactLiteralV1>,
     pub budget: RetrievalBudget,
+    /// The same live request authority used by the other retrieval lanes.
+    pub control: &'a dyn RetrievalExecutionControl,
 }
 
 impl ExactLaneRequest<'_> {
@@ -631,7 +633,10 @@ where
         // every candidate still compares against the verified minted proof.
         let mut verified_proofs: BTreeMap<(ExactFieldV1, Vec<u8>, Vec<u8>), ExactAdmissionProof> =
             BTreeMap::new();
-        for candidate in &batch.candidates {
+        for (ordinal, candidate) in batch.candidates.iter().enumerate() {
+            if ordinal.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
+                retrieval_checkpoint(request.control)?;
+            }
             let evidence = lane_bound_evidence(
                 batch,
                 candidate,
@@ -742,6 +747,9 @@ where
         let mut candidates = Vec::with_capacity(admitted.len());
         let mut evidence_by_occurrence = BTreeMap::new();
         for (ordinal, (mut candidate, evidence)) in admitted.into_iter().enumerate() {
+            if ordinal.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
+                retrieval_checkpoint(request.control)?;
+            }
             candidate.ordinal_rank = ordinal as u32;
             candidate.raw_score = FixedPointScore(
                 (evidence.matched_literals.len() as u64)
@@ -750,6 +758,7 @@ where
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);
         }
+        retrieval_checkpoint(request.control)?;
         let checkpoint_digest = exact_checkpoint_digest(&request.generation, &candidates)?;
         let rebuilt = RetrieverBatch {
             candidates,
@@ -783,6 +792,7 @@ where
         request: &ExactLaneRequest<'_>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<ExactLaneEvidence>>, RetrievalPortError> {
         request.validate()?;
+        retrieval_checkpoint(request.control)?;
         self.enforce_request_literals(request)?;
         let outcome = match self.postings.read_exact_postings(request) {
             Ok(outcome) => outcome,
