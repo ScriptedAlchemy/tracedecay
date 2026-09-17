@@ -13,6 +13,7 @@ use tracedecay_domain::ProjectId;
 use super::super::graph_activation::install_injected_activation_gate;
 use super::{
     CodeIndexCadenceOutcomeV1, CodeIndexSchedulerRegistryV1, dashboard_generation_is_ready,
+    serving_seat_matches_advertised_generation, terminal_status_from_lanes,
 };
 
 /// Failure bound on an owner pass finishing once the worker is parked. Nothing
@@ -50,6 +51,45 @@ fn dashboard_ready_requires_text_and_graph_lane_owners() {
             "freshness must not report ready while graph lane coverage is incomplete: {graph:?}"
         );
     }
+}
+
+/// The graph-rebuild receipt (transport acceptance, both ~90s attempts): lane
+/// owners were ready on the replacement text generation while search still
+/// served the predecessor. Status must not call that split terminal.
+#[test]
+fn graph_rebuild_split_is_not_terminal_freshness() {
+    let lanes_ready =
+        dashboard_generation_is_ready(None, true, true, &Some(CodeGraphServingReadinessV1::Ready));
+    assert!(
+        lanes_ready,
+        "the receipt's text owner and graph activation were ready"
+    );
+    assert!(
+        !serving_seat_matches_advertised_generation(
+            Some("generation.predecessor"),
+            Some("generation.head"),
+        ),
+        "search served the predecessor while status advertised the head"
+    );
+    assert!(
+        !serving_seat_matches_advertised_generation(None, Some("generation.head")),
+        "a text owner installed before the serving swap is not yet the served generation"
+    );
+    assert!(serving_seat_matches_advertised_generation(
+        Some("generation.head"),
+        Some("generation.head"),
+    ));
+    assert!(serving_seat_matches_advertised_generation(
+        Some("generation.head"),
+        None,
+    ));
+    assert!(serving_seat_matches_advertised_generation(None, None));
+    assert!(
+        !terminal_status_from_lanes(lanes_ready, false),
+        "ready lanes must not be terminal while search serves the predecessor"
+    );
+    assert!(terminal_status_from_lanes(lanes_ready, true));
+    assert!(!terminal_status_from_lanes(false, true));
 }
 
 /// Park the background worker and wait out whatever pass is already in flight.
