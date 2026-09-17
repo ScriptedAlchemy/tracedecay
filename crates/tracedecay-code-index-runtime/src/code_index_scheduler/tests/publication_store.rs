@@ -11,10 +11,10 @@ use std::{
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay_code_index_retention::code_index_generations::{
-    CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1, DurablePublicationPointerV1,
-    MAX_CODE_GENERATION_RETENTION_BATCH_V1, acquire_code_generation_store_lock,
-    acquire_code_generation_store_read_lock, durable_generation_index_digest,
-    execute_code_generation_retention_cancellable,
+    CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1, DurableGenerationIndexEntryV1,
+    DurablePublicationPointerV1, MAX_CODE_GENERATION_RETENTION_BATCH_V1,
+    acquire_code_generation_store_lock, acquire_code_generation_store_read_lock,
+    durable_generation_index_digest, execute_code_generation_retention_cancellable,
     prepare_next_code_generation_retention_cancellable, run_code_generation_retention,
 };
 use tracedecay_domain::{
@@ -2515,4 +2515,97 @@ fn publication_over_an_undecodable_active_generation_refuses_a_moved_pointer() {
     admitting
         .publish_atomically(&scope, None, seeded)
         .expect("the observed identity still admits the rebuild");
+}
+
+fn same_length_publication_pointer(
+    generation_id: &str,
+    digest_byte: u8,
+) -> DurablePublicationPointerV1 {
+    let digest = format!("sha256:{}", hex_byte(digest_byte));
+    let entry = DurableGenerationIndexEntryV1 {
+        generation_id: generation_id.to_owned(),
+        snapshot_content_identity: digest.clone(),
+        sealed_at_micros: 1,
+        size_bytes: 1,
+        segment_bytes: 0,
+        generation_file: format!("generation-{}.json", hex_byte(digest_byte)),
+        state_digest: digest.clone(),
+        source_reference: None,
+        source_revision: None,
+        source_tree: None,
+        cardinality: None,
+        text_artifact: None,
+    };
+    let generation_index = vec![entry];
+    DurablePublicationPointerV1 {
+        generation_id: generation_id.to_owned(),
+        snapshot_content_identity: digest.clone(),
+        publication_digest: digest.clone(),
+        sealed_at_micros: 1,
+        generation_file: generation_index[0].generation_file.clone(),
+        state_digest: digest,
+        generation_index_truncated: false,
+        generation_index_digest: Some(
+            durable_generation_index_digest(&generation_index, false).expect("index digest"),
+        ),
+        generation_index,
+    }
+}
+
+fn hex_byte(byte: u8) -> String {
+    format!("{byte:02x}{}", "ab".repeat(31))
+}
+
+#[test]
+fn publication_pointer_memo_follows_bytes_when_size_and_mtime_stay_put() {
+    let store = TempDir::new().expect("store root");
+    let project = TempDir::new().expect("project root");
+    let publication = super::super::DaemonCodeIndexPublicationStoreV1::new(
+        store.path(),
+        project.path(),
+        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+            .expect("sanitizer revision"),
+    )
+    .expect("open publication store");
+    let pointer_path = store.path().join("active-code-generation-v1.json");
+    let first = same_length_publication_pointer("generation.memo-aaaa", 0x11);
+    let second = same_length_publication_pointer("generation.memo-bbbb", 0x22);
+    let first_bytes = serde_json::to_vec(&first).expect("encode first pointer");
+    let second_bytes = serde_json::to_vec(&second).expect("encode second pointer");
+    assert_eq!(
+        first_bytes.len(),
+        second_bytes.len(),
+        "the replacement must not be distinguishable by size"
+    );
+    assert_ne!(first_bytes, second_bytes);
+    std::fs::write(&pointer_path, &first_bytes).expect("write first pointer");
+    let loaded = publication
+        .read_publication_pointer()
+        .expect("read first pointer")
+        .expect("first pointer exists");
+    assert_eq!(loaded.generation_id, first.generation_id);
+
+    let mtime = std::fs::metadata(&pointer_path)
+        .expect("pointer metadata")
+        .modified()
+        .expect("pointer mtime");
+    std::fs::write(&pointer_path, &second_bytes).expect("replace pointer bytes");
+    let file = std::fs::File::options()
+        .write(true)
+        .open(&pointer_path)
+        .expect("reopen pointer");
+    file.set_modified(mtime).expect("restore pointer mtime");
+    drop(file);
+    let replaced = std::fs::metadata(&pointer_path).expect("replaced metadata");
+    assert_eq!(replaced.len(), first_bytes.len() as u64);
+    assert_eq!(replaced.modified().ok(), Some(mtime));
+
+    let reread = publication
+        .read_publication_pointer()
+        .expect("reread pointer by content")
+        .expect("replaced pointer exists");
+    assert_eq!(
+        reread.generation_id, second.generation_id,
+        "equal size and mtime must not reuse the previous pointer"
+    );
 }

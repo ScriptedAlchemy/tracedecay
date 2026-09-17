@@ -509,8 +509,12 @@ fn live_owner_matches(owner: &str, inherited_token: &str) -> bool {
         .is_none_or(|recorded| recorded.parse::<u64>().ok() == Some(live_start_time))
 }
 
-#[cfg(not(windows))]
-fn process_start_time(pid: u32) -> Option<u64> {
+/// Start time of `pid`, in the units `sysinfo` reports for that process.
+///
+/// Callers store this beside a PID so a later probe can tell the original
+/// owner from a reused PID. `None` means the start time could not be read
+/// and must not be treated as a mismatch.
+pub fn process_start_time(pid: u32) -> Option<u64> {
     let pid = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();
     system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);

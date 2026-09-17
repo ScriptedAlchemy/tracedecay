@@ -1222,7 +1222,7 @@ impl DaemonCodeTextArtifactStoreV1 {
                 "incompatible text-artifact staging path is not a regular file".to_owned(),
             ));
         }
-        std::fs::remove_file(staging_path).map_err(text_artifact_unavailable)?;
+        retire_text_artifact_staging_family(staging_path).map_err(text_artifact_unavailable)?;
         DaemonCodeIndexPublicationStoreV1::sync_directory(&artifacts_root)
             .map_err(text_artifact_unavailable)
     }
@@ -1396,10 +1396,13 @@ impl DaemonCodeTextArtifactStoreV1 {
                             "existing code text artifact contains different bytes".to_owned(),
                         ));
                     }
-                    std::fs::remove_file(staging_path).map_err(text_artifact_unavailable)?;
+                    retire_text_artifact_staging_family(staging_path)
+                        .map_err(text_artifact_unavailable)?;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     std::fs::rename(staging_path, &final_path)
+                        .map_err(text_artifact_unavailable)?;
+                    clear_text_artifact_staging_sidecars(staging_path)
                         .map_err(text_artifact_unavailable)?;
                 }
                 Err(error) => return Err(text_artifact_unavailable(error)),
@@ -2536,6 +2539,7 @@ impl LatestCodeTextGenerationV1 {
             )
         })?;
         let staging_path = artifacts_root.join(format!(".text-artifact-{sealed_hex}.staging"));
+        prepare_absent_text_artifact_staging(&staging_path).map_err(text_artifact_unavailable)?;
         let metadata = self.text_projection_metadata()?;
         let open_builder = || {
             CodeLexicalCloneSuccessorV1::open_or_create(
@@ -2699,6 +2703,7 @@ impl LatestCodeTextGenerationV1 {
         let artifacts_root = code_text_artifacts_root(store.store_root());
         ensure_private_text_artifacts_root(&artifacts_root)?;
         let staging_path = artifacts_root.join(format!(".text-artifact-{sealed_hex}.staging"));
+        prepare_absent_text_artifact_staging(&staging_path).map_err(text_artifact_unavailable)?;
         let mut source = self.take_preopened_source_or_open(&sealed_identity, control)?;
         let builder_budget =
             text_artifact_builder_budget(build_memory_budget, source.staging_window_bytes())?;
@@ -3396,6 +3401,8 @@ impl LatestCodeTextGenerationV1 {
         drop(build.builder.take());
         self.text_artifact_store
             .discard_incompatible_staging(&build.staging_path, control)?;
+        prepare_absent_text_artifact_staging(&build.staging_path)
+            .map_err(text_artifact_unavailable)?;
         let prior_path = code_text_artifact_path(
             self.text_artifact_store.store_root(),
             &build.prior_descriptor,
@@ -3625,6 +3632,99 @@ fn checkpoint_text_artifact_control(
         Err(RetrievalPortError::BudgetExceeded)
     } else {
         Ok(())
+    }
+}
+
+/// Drop a leftover SQLite journal before a fresh staging file is created.
+///
+/// DELETE-mode recovery applies `path-journal` into whatever file is later
+/// opened at `path`. A crash that unlinked the database and left the journal
+/// would otherwise roll that journal into the next successor copy.
+fn prepare_absent_text_artifact_staging(staging_path: &Path) -> std::io::Result<()> {
+    match staging_path.symlink_metadata() {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "text-artifact staging path is not a regular file",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            clear_text_artifact_staging_sidecars(staging_path)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Retire a staging database and its hot journal together.
+///
+/// Sidecars go first. A crash after that leaves a database with no journal,
+/// which the next discard can unlink. The reverse order leaves a journal that
+/// the next create applies into a new file.
+fn retire_text_artifact_staging_family(staging_path: &Path) -> std::io::Result<()> {
+    clear_text_artifact_staging_sidecars(staging_path)?;
+    match staging_path.symlink_metadata() {
+        Ok(metadata) if metadata.file_type().is_file() => std::fs::remove_file(staging_path),
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "text-artifact staging path is not a regular file",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn clear_text_artifact_staging_sidecars(staging_path: &Path) -> std::io::Result<()> {
+    let Some(name) = staging_path.file_name() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "text-artifact staging path has no file name",
+        ));
+    };
+    for suffix in ["-journal", "-wal", "-shm"] {
+        let mut sidecar_name = name.to_os_string();
+        sidecar_name.push(suffix);
+        let sidecar = staging_path.with_file_name(sidecar_name);
+        match sidecar.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_file() => std::fs::remove_file(sidecar)?,
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "text-artifact staging sidecar is not a regular file",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod staging_sidecar_tests {
+    use super::{
+        clear_text_artifact_staging_sidecars, prepare_absent_text_artifact_staging,
+        retire_text_artifact_staging_family,
+    };
+
+    #[test]
+    fn absent_staging_database_does_not_keep_a_hot_journal_for_the_next_create() {
+        let root = tempfile::tempdir().expect("staging root");
+        let staging = root.path().join(".text-artifact-ab.staging");
+        let journal = root.path().join(".text-artifact-ab.staging-journal");
+        std::fs::write(&journal, b"rollback").expect("plant hot journal");
+
+        prepare_absent_text_artifact_staging(&staging).expect("clear orphan journal");
+        assert!(!journal.exists());
+
+        std::fs::write(&staging, b"prior-copy").expect("fresh successor copy");
+        std::fs::write(&journal, b"rollback").expect("replant journal");
+        retire_text_artifact_staging_family(&staging).expect("retire family");
+        assert!(!staging.exists());
+        assert!(!journal.exists());
+
+        std::fs::write(root.path().join(".text-artifact-ab.staging-wal"), b"wal")
+            .expect("plant wal");
+        clear_text_artifact_staging_sidecars(&staging).expect("clear wal");
+        assert!(!root.path().join(".text-artifact-ab.staging-wal").exists());
     }
 }
 

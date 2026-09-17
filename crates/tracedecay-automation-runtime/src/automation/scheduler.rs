@@ -1056,10 +1056,18 @@ fn prepare_task_lock_publication(
         options.mode(0o600);
         parent.open_with(&staging_name, &options)?
     };
-    let payload = format!(
-        "pid={}\ncreated_at={now_secs}\ntoken={ownership_token}\n",
-        std::process::id()
-    );
+    let started_at =
+        tracedecay_runtime_core::lifecycle_lease::process_start_time(std::process::id());
+    let payload = match started_at {
+        Some(started_at) => format!(
+            "pid={}\ncreated_at={now_secs}\nstarted_at={started_at}\ntoken={ownership_token}\n",
+            std::process::id()
+        ),
+        None => format!(
+            "pid={}\ncreated_at={now_secs}\ntoken={ownership_token}\n",
+            std::process::id()
+        ),
+    };
     let write_result = file
         .write_all(payload.as_bytes())
         .and_then(|()| file.sync_all());
@@ -1252,6 +1260,10 @@ fn acquire_task_lock_coordination(path: &Path) -> std::io::Result<std::fs::File>
 struct AutomationTaskLockSnapshot {
     pid: Option<u32>,
     created_at: Option<i64>,
+    /// Process start time recorded when the lock was published. Absent on
+    /// locks written before start-time fencing, and when the publisher could
+    /// not read its own start time.
+    started_at: Option<u64>,
     ownership_token: Option<String>,
 }
 
@@ -1292,6 +1304,9 @@ fn read_task_lock_snapshot(path: &Path) -> std::io::Result<Option<AutomationTask
     let payload_created_at = contents
         .and_then(|contents| parse_unique_lock_field(contents, "created_at="))
         .and_then(|value| value.parse::<i64>().ok());
+    let started_at = contents
+        .and_then(|contents| parse_unique_lock_field(contents, "started_at="))
+        .and_then(|value| value.parse::<u64>().ok());
     let ownership_token = contents
         .and_then(|contents| parse_unique_lock_field(contents, "token="))
         .filter(|value| valid_automation_task_lock_token(value))
@@ -1307,6 +1322,7 @@ fn read_task_lock_snapshot(path: &Path) -> std::io::Result<Option<AutomationTask
     Ok(Some(AutomationTaskLockSnapshot {
         pid,
         created_at,
+        started_at,
         ownership_token,
     }))
 }
@@ -1331,34 +1347,65 @@ fn task_lock_is_reclaimable(
     stale_after_secs: Option<u64>,
     now_secs: i64,
 ) -> bool {
-    let Some(stale_after_secs) = stale_after_secs else {
-        return false;
-    };
     match snapshot.pid {
         Some(pid) => match process_state(pid) {
-            // A live (or unknown-liveness, kept conservative) owner still
-            // holds the lock regardless of age.
-            ProcessState::Live | ProcessState::Unknown => false,
-            // A confirmed-dead owner's lock is reclaimable once it is stale.
-            ProcessState::Dead => snapshot
-                .created_at
-                .is_some_and(|created_at| elapsed_secs(created_at, now_secs) >= stale_after_secs),
+            // A confirmed-dead owner cannot still be inside the critical
+            // section. Age is irrelevant: a reused PID would look live, not
+            // dead, so waiting `stale_after_secs` only delays the retry.
+            ProcessState::Dead => true,
+            // Unknown liveness stays on the age gate. A missing age bound
+            // means the caller disabled that fallback.
+            ProcessState::Unknown => {
+                age_lock_is_reclaimable(snapshot.created_at, stale_after_secs, now_secs)
+            }
+            // A live PID is the owner only when its start time matches the
+            // one published with the lock. A mismatch is PID reuse (including
+            // a process this user cannot signal). A live PID with no recorded
+            // start time is a legacy lock and is not stolen.
+            ProcessState::Live => recorded_owner_was_reused(pid, snapshot.started_at),
         },
         // The payload could not yield a pid (missing, oversized, non-UTF-8,
         // or duplicate `pid=` lines). Fall back to age-based staleness using
         // `created_at`, which `read_task_lock_snapshot` already backfills
         // from the file's mtime when the payload has no parseable
         // `created_at=` field.
-        None => match snapshot.created_at {
-            Some(created_at) => elapsed_secs(created_at, now_secs) >= stale_after_secs,
-            // Crash-debris escape hatch: no parseable pid AND no readable
-            // creation time (payload and mtime both unavailable) means the
-            // lock can never be aged by any other path, so treat it as
-            // reclaimable rather than permanently wedging the scheduler
-            // tick behind garbage lock contents.
-            None => true,
-        },
+        None => age_lock_is_reclaimable(snapshot.created_at, stale_after_secs, now_secs),
     }
+}
+
+fn age_lock_is_reclaimable(
+    created_at: Option<i64>,
+    stale_after_secs: Option<u64>,
+    now_secs: i64,
+) -> bool {
+    let Some(stale_after_secs) = stale_after_secs else {
+        return false;
+    };
+    match created_at {
+        Some(created_at) => elapsed_secs(created_at, now_secs) >= stale_after_secs,
+        // Crash-debris escape hatch: no parseable pid AND no readable
+        // creation time (payload and mtime both unavailable) means the
+        // lock can never be aged by any other path, so treat it as
+        // reclaimable rather than permanently wedging the scheduler
+        // tick behind garbage lock contents.
+        None => true,
+    }
+}
+
+fn recorded_owner_was_reused(pid: u32, recorded_started_at: Option<u64>) -> bool {
+    let Some(recorded_started_at) = recorded_started_at else {
+        return false;
+    };
+    tracedecay_runtime_core::lifecycle_lease::process_start_time(pid)
+        .is_some_and(|live_started_at| live_started_at != recorded_started_at)
+}
+
+/// Confirmed-dead process, as opposed to a live or unreadable one.
+///
+/// Skill-overlay crash residue and other convergent startup scans use this
+/// so they adopt a dead exporter's backup without stealing a live one's.
+pub(crate) fn foreign_process_is_dead(pid: u32) -> bool {
+    pid != std::process::id() && matches!(process_state(pid), ProcessState::Dead)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2323,6 +2370,7 @@ evidence about it",
         let snapshot = AutomationTaskLockSnapshot {
             pid: None,
             created_at: Some(100),
+            started_at: None,
             ownership_token: None,
         };
         assert!(
@@ -2336,6 +2384,7 @@ evidence about it",
         let snapshot = AutomationTaskLockSnapshot {
             pid: None,
             created_at: Some(195),
+            started_at: None,
             ownership_token: None,
         };
         assert!(
@@ -2349,6 +2398,7 @@ evidence about it",
         let snapshot = AutomationTaskLockSnapshot {
             pid: None,
             created_at: None,
+            started_at: None,
             ownership_token: None,
         };
         assert!(
@@ -2363,11 +2413,76 @@ evidence about it",
         let snapshot = AutomationTaskLockSnapshot {
             pid: Some(std::process::id()),
             created_at: Some(0),
+            started_at: None,
             ownership_token: None,
         };
         assert!(
             !task_lock_is_reclaimable(&snapshot, Some(10), 200),
             "a live owner must never be reclaimed, no matter how old the lock is"
+        );
+    }
+
+    fn reapable_process_program() -> &'static str {
+        if cfg!(windows) { "cmd" } else { "true" }
+    }
+
+    fn reapable_process_args() -> &'static [&'static str] {
+        if cfg!(windows) { &["/C", "exit"] } else { &[] }
+    }
+
+    #[test]
+    fn task_lock_is_reclaimable_for_a_fresh_confirmed_dead_pid() {
+        let mut child = std::process::Command::new(reapable_process_program())
+            .args(reapable_process_args())
+            .spawn()
+            .expect("spawn a process to reap");
+        let dead_pid = child.id();
+        child.wait().expect("reap lock owner");
+        assert!(
+            matches!(process_state(dead_pid), ProcessState::Dead),
+            "the reaped child must be a confirmed-dead owner"
+        );
+        let snapshot = AutomationTaskLockSnapshot {
+            pid: Some(dead_pid),
+            created_at: Some(200),
+            started_at: None,
+            ownership_token: None,
+        };
+        assert!(
+            task_lock_is_reclaimable(&snapshot, Some(6 * 60 * 60), 200),
+            "a confirmed-dead owner must be reclaimed immediately, not after the age gate"
+        );
+        assert!(
+            task_lock_is_reclaimable(&snapshot, None, 200),
+            "disabling the age fallback must not keep a dead owner's lock"
+        );
+    }
+
+    #[test]
+    fn task_lock_is_reclaimable_when_a_live_pid_start_time_does_not_match() {
+        let Some(live_started_at) =
+            tracedecay_runtime_core::lifecycle_lease::process_start_time(std::process::id())
+        else {
+            return;
+        };
+        let mismatched = live_started_at.saturating_add(1);
+        let snapshot = AutomationTaskLockSnapshot {
+            pid: Some(std::process::id()),
+            created_at: Some(200),
+            started_at: Some(mismatched),
+            ownership_token: None,
+        };
+        assert!(
+            task_lock_is_reclaimable(&snapshot, None, 200),
+            "a reused PID must not keep a lock published by a different process start"
+        );
+        let same_owner = AutomationTaskLockSnapshot {
+            started_at: Some(live_started_at),
+            ..snapshot
+        };
+        assert!(
+            !task_lock_is_reclaimable(&same_owner, Some(0), 10_000),
+            "a matching start time is the same owner even when the lock is old"
         );
     }
 

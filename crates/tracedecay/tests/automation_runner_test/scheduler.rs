@@ -1214,6 +1214,33 @@ async fn task_lock_reclaims_stale_dead_pid_lock_file() {
     assert!(!lock_path.exists());
 }
 
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn task_lock_reclaims_a_fresh_dead_pid_without_waiting_out_the_age_gate() {
+    let temp = tempdir().unwrap();
+    let lock_dir = temp.path().join("automation_locks");
+    std::fs::create_dir_all(&lock_dir).unwrap();
+    let lock_path = lock_dir.join("memory_curator.lock");
+    let dead_pid = reaped_task_lock_child_pid();
+    std::fs::write(
+        &lock_path,
+        format!("pid={dead_pid}\ncreated_at=200\ntoken={}\n", "a".repeat(64)),
+    )
+    .unwrap();
+
+    let lock =
+        AutomationTaskLock::try_acquire(temp.path(), AgentTaskKind::MemoryCurator, Some(10), 200)
+            .await
+            .unwrap();
+
+    assert!(
+        lock.is_some(),
+        "a confirmed-dead owner must not block the next scheduler tick for stale_lock_secs"
+    );
+    drop(lock);
+    assert!(!lock_path.exists());
+}
+
 #[tokio::test]
 async fn task_lock_keeps_live_pid_lock_file() {
     let temp = tempdir().unwrap();
