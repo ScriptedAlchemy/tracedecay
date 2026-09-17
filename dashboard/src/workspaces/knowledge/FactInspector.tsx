@@ -31,7 +31,12 @@ import { formatMicrosUtc } from '../../ui/format.ts';
 import { Readout } from '../../ui/instrument.tsx';
 import { StateChip } from '../../ui/StateChip.tsx';
 import { TrustHistorySection } from './FactTrustHistory.tsx';
-import { detailLadder, payloadAccessState, type InspectorMode } from './inspector.ts';
+import {
+  MISSING_IDENTITY,
+  detailLadder,
+  payloadAccessState,
+  type InspectorMode,
+} from './inspector.ts';
 import { shortFactId } from './ledger.ts';
 
 export function FactInspector({
@@ -88,10 +93,16 @@ export function FactInspector({
   }, [onDismiss]);
 
   return (
+    <div
+      className="flex h-full min-h-0 flex-col"
+      data-testid="fact-inspector"
+      data-fact-id={factId}
+      data-inspector-mode={mode}
+    >
     <InspectorPanel
       title={shortFactId(factId)}
       eyebrow={
-        <span className="flex items-center gap-1.5" data-inspector-mode={mode}>
+        <span className="flex items-center gap-1.5">
           <span
             aria-hidden
             className={cn('size-1.5 shrink-0', selected ? 'bg-accent' : 'border border-accent')}
@@ -101,7 +112,7 @@ export function FactInspector({
       }
       onClose={onDismiss}
     >
-      <div className="flex flex-col gap-4" data-testid="fact-inspector" data-fact-id={factId}>
+      <div className="flex flex-col gap-4">
         {!selected ? (
           <div className="flex flex-wrap items-center gap-2 border border-edge-subtle bg-surface-2 px-2 py-1.5">
             <p className="min-w-0 flex-1 text-2xs leading-relaxed text-text-muted">
@@ -178,6 +189,7 @@ export function FactInspector({
         </Section>
       </div>
     </InspectorPanel>
+    </div>
   );
 }
 
@@ -251,9 +263,15 @@ function ContentBlock({
     );
   }
   if (detail?.outcome === 'transport') {
+    // A null payload under `complete_zero_findings` is the route's answer for
+    // an identity the store does not hold — an absence, not a green complete.
+    const missing = detail.state === 'complete_zero_findings';
     return (
-      <div className="flex flex-col gap-2">
-        <StateChip kind={detail.state} detail={detail.detail ?? 'canonical detail transport failed'} />
+      <div className="flex flex-col gap-2" data-content-state={missing ? 'missing' : 'transport'}>
+        <StateChip
+          kind={missing ? 'unavailable' : detail.state}
+          detail={missing ? MISSING_IDENTITY : (detail.detail ?? 'canonical detail transport failed')}
+        />
         {row ? <RetainedContent row={row} bounded /> : null}
       </div>
     );
@@ -261,13 +279,17 @@ function ContentBlock({
   const fact = canonical?.payload?.fact ?? null;
   if (!canonical || fact == null) {
     return (
-      <div className="flex flex-col gap-2">
+      <div className="flex flex-col gap-2" data-content-state="missing">
         <StateChip
-          kind={canonical?.domain_state === 'complete_zero_findings' || !canonical ? 'unavailable' : canonical.domain_state}
+          kind={
+            !canonical || canonical.domain_state === 'complete_zero_findings'
+              ? 'unavailable'
+              : canonical.domain_state
+          }
           detail={
             canonical?.payload?.error && canonical.payload.error !== ''
               ? canonical.payload.error
-              : 'the store holds no fact under this identity in the current scope'
+              : MISSING_IDENTITY
           }
         />
         {row ? <RetainedContent row={row} bounded /> : null}
