@@ -1,6 +1,7 @@
 //! Query-only admission for the exact relational shape created by this binary.
 
 use std::collections::BTreeMap;
+use std::fmt::Write;
 use std::sync::LazyLock;
 
 use crate::db::engine::QueryExecutor;
@@ -171,6 +172,95 @@ pub fn expected_final_schema_fingerprint() -> Result<String> {
     Ok(fingerprint_schema_objects(inventory.iter().map(
         |(name, object)| (name.as_str(), object.sql.as_str()),
     )))
+}
+
+const SCHEMA_RESOURCE_OBJECT_ORDER: &[&str] = &["table", "index", "trigger", "view"];
+
+/// Markdown for `tracedecay://schema`, rendered from the admitted fresh-store
+/// inventory.
+///
+/// This is the only schema document the resource may serve. A hand-maintained
+/// table list cannot stay aligned with [`super::create_schema`]: the install
+/// path and this inventory already fail closed when they disagree, and the
+/// resource just prints the inventory.
+pub fn schema_resource_markdown() -> Result<String> {
+    let inventory = EXPECTED_FINAL_SHAPE
+        .as_ref()
+        .map_err(|error| schema_resource_error(error.clone()))?;
+    let mut markdown = String::new();
+    markdown.push_str("# TraceDecay project store schema\n\n");
+    markdown.push_str(
+        "Generated from the canonical fresh-store shape this binary installs and admits. \
+The DDL below is that shape's `sqlite_master` SQL, not a hand-maintained second schema. \
+Code topology is not stored in these tables.\n\n",
+    );
+    let _ = writeln!(markdown, "Schema version: {}.", super::SCHEMA_VERSION);
+    markdown.push('\n');
+
+    let mut object_types: Vec<String> = SCHEMA_RESOURCE_OBJECT_ORDER
+        .iter()
+        .map(|object_type| (*object_type).to_owned())
+        .collect();
+    for object in inventory.values() {
+        if !object_types
+            .iter()
+            .any(|known| known == &object.object_type)
+        {
+            object_types.push(object.object_type.clone());
+        }
+    }
+
+    for object_type in object_types {
+        let objects: Vec<_> = inventory
+            .iter()
+            .filter(|(_, object)| object.object_type == object_type)
+            .collect();
+        if objects.is_empty() {
+            continue;
+        }
+        let _ = writeln!(markdown, "## {}", schema_resource_section(&object_type));
+        markdown.push('\n');
+        for (name, object) in objects {
+            let _ = writeln!(markdown, "### `{name}`");
+            markdown.push('\n');
+            if object.sql.is_empty() {
+                markdown.push_str("(no SQL)\n\n");
+                continue;
+            }
+            let fence = markdown_sql_fence(&object.sql);
+            let _ = writeln!(markdown, "{fence}sql");
+            markdown.push_str(object.sql.trim_end());
+            markdown.push('\n');
+            let _ = writeln!(markdown, "{fence}");
+            markdown.push('\n');
+        }
+    }
+    Ok(markdown)
+}
+
+fn schema_resource_section(object_type: &str) -> &str {
+    match object_type {
+        "table" => "Tables",
+        "index" => "Indexes",
+        "trigger" => "Triggers",
+        "view" => "Views",
+        _ => object_type,
+    }
+}
+
+fn markdown_sql_fence(sql: &str) -> String {
+    let mut fence = "```".to_owned();
+    while sql.contains(fence.as_str()) {
+        fence.push('`');
+    }
+    fence
+}
+
+fn schema_resource_error(message: String) -> TraceDecayError {
+    TraceDecayError::Database {
+        message,
+        operation: "render project store schema resource".to_owned(),
+    }
 }
 
 pub(super) fn require_admissible_final_shape_rusqlite(
@@ -444,5 +534,55 @@ mod fingerprint_tests {
             fingerprint_schema_objects(different_ddl),
             "a DDL change must produce a different cache key"
         );
+    }
+}
+
+#[cfg(test)]
+mod schema_resource_tests {
+    use super::{EXPECTED_FINAL_SHAPE, schema_resource_markdown};
+
+    #[test]
+    fn schema_resource_is_the_admitted_inventory_not_a_retired_graph_essay() {
+        let markdown = schema_resource_markdown().expect("schema resource");
+        let again = schema_resource_markdown().expect("schema resource");
+        assert_eq!(markdown, again, "the resource must be deterministic");
+        assert!(
+            markdown.starts_with("# TraceDecay project store schema\n"),
+            "hosts pin a markdown heading: {markdown}"
+        );
+        assert!(
+            markdown.contains("not a hand-maintained second schema"),
+            "the resource must say it is generated from the admitted shape"
+        );
+
+        let inventory = EXPECTED_FINAL_SHAPE.as_ref().expect("canonical inventory");
+        assert!(
+            !inventory.is_empty(),
+            "an empty inventory would make the resource vacuously pass"
+        );
+        for (name, object) in inventory {
+            let heading = format!("### `{name}`");
+            assert!(
+                markdown.contains(&heading),
+                "admitted object {name} is missing from the schema resource"
+            );
+            if !object.sql.is_empty() {
+                assert!(
+                    markdown.contains(object.sql.trim_end()),
+                    "admitted DDL for {name} is missing from the schema resource"
+                );
+            }
+        }
+
+        for retired in ["nodes", "edges", "unresolved_refs", "files"] {
+            assert!(
+                !inventory.contains_key(retired),
+                "retired graph table {retired} is back in the admitted shape; update this fence"
+            );
+            assert!(
+                !markdown.contains(&format!("### `{retired}`")),
+                "schema resource still documents retired graph table {retired}"
+            );
+        }
     }
 }

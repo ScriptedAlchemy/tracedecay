@@ -105,4 +105,19 @@ fn resource_catalog_remains_transport_owned() {
             "tracedecay://schema",
         ]
     );
+    let schema = resources["resources"]
+        .as_array()
+        .expect("resource catalog")
+        .iter()
+        .find(|resource| resource["uri"] == "tracedecay://schema")
+        .expect("schema resource");
+    let description = schema["description"].as_str().expect("schema description");
+    assert!(
+        description.contains("create_schema"),
+        "schema catalog must point at the installed shape, not a hand essay: {description}"
+    );
+    assert!(
+        !description.to_ascii_lowercase().contains("raw sql"),
+        "schema catalog must not invite queries against a retired hand schema: {description}"
+    );
 }
