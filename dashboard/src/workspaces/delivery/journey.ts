@@ -246,7 +246,11 @@ function laneSource(lane: JourneyLaneId): SourceClass {
   }
 }
 
-function projectionValue<T>(projection: { state: string; value?: T | null }): T | null {
+/** The served value of a projection, or `null` when the variant carries none. */
+export function projectionValue<T>(projection: {
+  readonly state: string;
+  readonly value?: T | null;
+}): T | null {
   return projection.value ?? null;
 }
 

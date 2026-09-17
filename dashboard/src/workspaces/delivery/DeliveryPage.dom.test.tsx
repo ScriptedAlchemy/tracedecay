@@ -260,9 +260,11 @@ describe('DeliveryPage · local-first wing', () => {
       { route: '/delivery?project=project.alpha', overview: OVERVIEW_LOCAL_ONLY },
     );
     const wing = await screen.findByRole('region', { name: /Local-first/i });
-    expect(within(wing).getAllByText(/requires github_read_authority/).length).toBeGreaterThan(0);
-    expect(within(wing).getByText(/feature\/delivery/)).toBeTruthy();
-    expect(within(wing).getByText(/feat\(ingest\): add retry backoff/)).toBeTruthy();
     expect(within(wing).getByRole('link', { name: /Open Settings · Provider authority/ })).toBeTruthy();
+    expect(await within(wing).findByText(/feat\(ingest\): add retry backoff/)).toBeTruthy();
+    expect(within(wing).getByText(/feature\/delivery/)).toBeTruthy();
+    expect(within(wing).getAllByText(/requires github_read_authority/).length).toBeGreaterThan(0);
+    expect(within(wing).getByText(/not_published · requires github_read_authority/)).toBeTruthy();
+    expect(within(wing).queryByRole('button', { name: /merge|rerun|post|approve/i })).toBeNull();
   });
 });

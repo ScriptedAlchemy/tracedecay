@@ -8,7 +8,7 @@ import { CenteredState } from '../../ui/ReadSection.tsx';
 import { StateChip } from '../../ui/StateChip.tsx';
 import { ReadoutBar } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn.ts';
-import type { DeliveryContext } from './DeliveryPage.tsx';
+import type { DeliveryContext } from './deliveryContext.ts';
 import { GradeMark, ProviderStateChip } from './deliveryChrome.tsx';
 import type { DeliveryLocation } from './deliveryLocation.ts';
 import { membershipGrade, membershipSourceClass, providerServes } from './evidence.ts';

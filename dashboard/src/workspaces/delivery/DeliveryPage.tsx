@@ -2,7 +2,6 @@ import { useCallback, useMemo } from 'react';
 import { useSearchParams } from 'react-router';
 import {
   DeliveryInboxV1Schema,
-  DeliveryOverviewV1Schema,
   type DeliveryInboxPullRequestV1,
   type DeliveryInboxV1,
 } from '../../contracts/generated.ts';
@@ -12,6 +11,7 @@ import { CenteredState, ReadSection, type ReadState } from '../../ui/ReadSection
 import { WorkspaceHeader } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn.ts';
 import { ReadOnlyProviderBadge } from './deliveryChrome.tsx';
+import { useProjectOverview, type DeliveryContext } from './deliveryContext.ts';
 import {
   DELIVERY_MODES,
   modeLabel,
@@ -23,7 +23,7 @@ import {
 } from './deliveryLocation.ts';
 import { edgesFor, filterInbox, projectFor } from './inboxFilter.ts';
 import { providerServes } from './evidence.ts';
-import { buildUmbrellas, type UmbrellaProjection } from './umbrella.ts';
+import { buildUmbrellas } from './umbrella.ts';
 import { InboxWorkspace } from './InboxWorkspace.tsx';
 import { UmbrellaWorkspace } from './UmbrellaWorkspace.tsx';
 import { JourneyWorkspace } from './JourneyWorkspace.tsx';
@@ -195,25 +195,6 @@ function inboxReadState(
     };
   }
   return { kind: 'ready', value: result.envelope.payload };
-}
-
-export interface DeliveryContext {
-  readonly inbox: DeliveryInboxV1;
-  readonly umbrellas: UmbrellaProjection;
-  readonly location: DeliveryLocation;
-  readonly params: URLSearchParams;
-  readonly navigate: (patch: DeliveryLocationPatch) => void;
-}
-
-/** The project-scoped overview read: `/api/projects/{id}/…` is never rewritten
- * by the shell scope, so the selected PR's project is always the one read. */
-export function useProjectOverview(projectId: string | null) {
-  return useEnvelope(
-    ['delivery', 'overview', projectId ?? 'none'],
-    `/api/projects/${encodeURIComponent(projectId ?? '')}/delivery/overview`,
-    DeliveryOverviewV1Schema,
-    { enabled: projectId !== null },
-  );
 }
 
 function DeliveryBody({

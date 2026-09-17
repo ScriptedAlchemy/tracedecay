@@ -150,7 +150,7 @@ export function UmbrellaField({
               tabIndex={0}
               aria-label={`Pull request #${node.row.pull_request.pull_request_id} · ${title} · ${node.active} active attention`}
               aria-pressed={selected}
-              className="cursor-pointer outline-none"
+              className="cursor-pointer outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
               opacity={dim ? 0.3 : 1}
               onClick={() => onSelectRow(node.row)}
               onKeyDown={(event) => activate(event, () => onSelectRow(node.row))}
@@ -213,7 +213,7 @@ export function UmbrellaField({
               tabIndex={0}
               aria-label={`Umbrella ${root.umbrella.basisLabel} ${root.umbrella.identity} · ${root.umbrella.members.length} pull requests · ${gradeLabel(root.umbrella.grade)}`}
               aria-pressed={selected}
-              className="cursor-pointer outline-none"
+              className="cursor-pointer outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
               opacity={dim ? 0.3 : 1}
               onClick={() => onSelectUmbrella(root.umbrella.id)}
               onKeyDown={(event) => activate(event, () => onSelectUmbrella(root.umbrella.id))}

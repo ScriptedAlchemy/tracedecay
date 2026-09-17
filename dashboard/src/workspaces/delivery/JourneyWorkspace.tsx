@@ -8,7 +8,7 @@ import { ReadSection } from '../../ui/ReadSection.tsx';
 import { StateChip } from '../../ui/StateChip.tsx';
 import { ReadoutBar } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn.ts';
-import { useProjectOverview, type DeliveryContext } from './DeliveryPage.tsx';
+import { useProjectOverview, type DeliveryContext } from './deliveryContext.ts';
 import {
   ControlLink,
   GradeMark,
