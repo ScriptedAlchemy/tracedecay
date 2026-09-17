@@ -133,13 +133,6 @@ impl AuthenticatedFirstRequest {
 pub(crate) const PROJECT_OPEN_RETRY_GRACE: Duration = Duration::from_secs(15);
 pub(crate) const PROJECT_OPEN_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Message fragments emitted when a daemon request misses its read deadline.
-const DAEMON_READ_DEADLINE_MESSAGES: [&str; 3] = [
-    "before deadline",
-    "deadline already elapsed",
-    "did not answer after",
-];
-
 /// True when a daemon error is the typed project/profile/owner warming refusal.
 pub(crate) fn error_is_project_warming(error: &TraceDecayError) -> bool {
     matches!(
@@ -201,20 +194,15 @@ pub fn tool_call_transport_error_is_retryable(error: &TraceDecayError) -> bool {
     )
 }
 
-/// True when a daemon error message reports a missed read deadline.
-pub fn error_message_is_read_deadline(message: &str) -> bool {
-    DAEMON_READ_DEADLINE_MESSAGES
-        .iter()
-        .any(|deadline| message.contains(deadline))
-}
-
-/// True when a daemon client missed its read deadline, including the typed
-/// `daemon_response_stalled` reason code.
+/// True when a daemon client missed its read deadline.
+///
+/// Keys only on [`tracedecay_daemon_protocol::DAEMON_RESPONSE_STALLED`]. English
+/// detail, including the stalled wait phrase, is not a second classifier.
 pub fn error_is_read_deadline(error: &TraceDecayError) -> bool {
     matches!(
         error.project_route_context(),
         Some((tracedecay_daemon_protocol::DAEMON_RESPONSE_STALLED, _, _))
-    ) || error_message_is_read_deadline(&error.to_string())
+    )
 }
 
 mod bootstrap;

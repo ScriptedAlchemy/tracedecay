@@ -221,9 +221,12 @@ fn read_deadline_classifier_accepts_typed_stalled() {
         super::super::error_is_read_deadline(&error),
         "typed stalled must classify as a read deadline"
     );
+    let prose = tracedecay_domain::errors::TraceDecayError::Config {
+        message: "daemon did not answer after 5s; stalled or saturated".to_owned(),
+    };
     assert!(
-        super::super::error_message_is_read_deadline(&error.to_string()),
-        "stalled Display must still match the string classifier"
+        !super::super::error_is_read_deadline(&prose),
+        "stalled English prose must not classify as a read deadline"
     );
     let down = tracedecay_daemon_protocol::daemon_connect_failure(
         "/tmp/daemon.sock",
