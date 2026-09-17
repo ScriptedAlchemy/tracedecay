@@ -53,6 +53,7 @@ export function GraphCanvas({
   ariaLabel,
   fallbackDescription,
   extent,
+  overlay,
 }: {
   nodes: GraphCanvasNode[];
   edges: GraphCanvasEdge[];
@@ -97,6 +98,11 @@ export function GraphCanvas({
    * the absence. With it, an empty part of the axis stays empty on screen,
    * which is the finding. */
   extent?: FieldExtent;
+  /** HUD drawn over the canvas box and nothing else — legends, scale, the
+   * rule that chose the slice. Pointer-transparent so it never steals a drag;
+   * a child that must be operable re-enables its own pointer events. Rendered
+   * only while a field is drawn, so a failure state is never decorated. */
+  overlay?: ReactNode;
 }) {
   const unknownDegreeCount = nodes.filter((node) => node.degree == null).length;
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -476,29 +482,40 @@ export function GraphCanvas({
   }
   return (
     <figure className={cn('relative flex flex-col gap-1.5', fill && 'h-full min-h-0')}>
-      <div
-        ref={attachContainer}
-        style={fill ? undefined : { height }}
-        className={cn(
-          'relative overflow-hidden rounded-[var(--radius-card)] border border-edge-subtle/60',
-          // Three composed layers, none of which draws an entity: the nebula
-          // field belongs to the network, the grain denies it a perfectly even
-          // surface, and the bezel screen ruling belongs to the chassis.
-          // Together the canvas reads as a lit instrument screen rather than a
-          // picture pasted onto a panel.
-          'td-graph-field td-grain td-scanlines',
-          // The aperture's own depth, now a design-system token rather than an
-          // arbitrary value spelled out here.
-          'shadow-[var(--shadow-field)]',
-          fill && 'min-h-0 flex-1',
-          canvasClassName,
-        )}
-        role="img"
-        aria-label={
-          ariaLabel ??
-          `Code graph: ${nodes.length} symbols, ${edges.length} relations. The symbol list alongside is the accessible equivalent.`
-        }
-      />
+      {/* The canvas box and its HUD share one frame so the overlay is measured
+        * against the field alone and never drifts down over the caption. The
+        * frame carries the fill geometry; the container inside it keeps the
+        * box Sigma measures, exactly as before. */}
+      <div className={cn('relative', fill && 'flex min-h-0 flex-1 flex-col')}>
+        <div
+          ref={attachContainer}
+          style={fill ? undefined : { height }}
+          className={cn(
+            'relative overflow-hidden rounded-[var(--radius-card)] border border-edge-subtle/60',
+            // Three composed layers, none of which draws an entity: the nebula
+            // field belongs to the network, the grain denies it a perfectly even
+            // surface, and the bezel screen ruling belongs to the chassis.
+            // Together the canvas reads as a lit instrument screen rather than a
+            // picture pasted onto a panel.
+            'td-graph-field td-grain td-scanlines',
+            // The aperture's own depth, now a design-system token rather than an
+            // arbitrary value spelled out here.
+            'shadow-[var(--shadow-field)]',
+            fill && 'min-h-0 flex-1',
+            canvasClassName,
+          )}
+          role="img"
+          aria-label={
+            ariaLabel ??
+            `Code graph: ${nodes.length} symbols, ${edges.length} relations. The symbol list alongside is the accessible equivalent.`
+          }
+        />
+        {overlay ? (
+          <div className="pointer-events-none absolute inset-0 z-[5]" data-graph-overlay>
+            {overlay}
+          </div>
+        ) : null}
+      </div>
       {layoutPendingFor === nodes ? (
         <p role="status" data-state="loading" className="absolute left-3 top-3 bg-surface-0/90 p-2 text-2xs text-text-secondary">
           Calculating graph positions. The symbol list remains available.
