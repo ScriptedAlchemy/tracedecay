@@ -113,7 +113,7 @@ export function LifecyclePanel({
 
   return (
     <Panel
-      legend="Lifecycle controls · daemon-validated CAS"
+      legend="Lifecycle · daemon-validated CAS"
       bodyClassName="flex min-w-0 flex-col gap-3 p-2.5"
       actions={
         <span className="td-legend shrink-0 text-text-muted" data-testid="workflow-scope-writability">
@@ -162,14 +162,18 @@ export function LifecyclePanel({
               data-lifecycle-action={entry.action}
             >
               <Lamp tone={lifecycleStateTone(lifecycleTarget(entry.action))} />
-              <span className="td-value shrink-0 text-2xs text-text-primary">
-                {entry.label} v{definition.definition_version}
-              </span>
-              <span className="td-value shrink-0 text-3xs text-text-muted" data-cell="numeric">
-                expected_rev = {validRevision ? parsedRevision : '?'}
-              </span>
-              <span className="min-w-0 truncate text-3xs text-text-muted">
-                {entry.from} → {lifecycleTarget(entry.action)} · confirm before send
+              <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span className="flex min-w-0 flex-wrap items-baseline gap-x-2">
+                  <span className="td-value text-2xs text-text-primary">
+                    {entry.label} v{definition.definition_version}
+                  </span>
+                  <span className="td-value text-3xs text-text-muted" data-cell="numeric">
+                    expected_rev = {validRevision ? parsedRevision : '?'}
+                  </span>
+                </span>
+                <span className="min-w-0 text-3xs text-text-muted">
+                  {entry.from} → {lifecycleTarget(entry.action)} · confirm before send
+                </span>
               </span>
             </button>
           </li>
