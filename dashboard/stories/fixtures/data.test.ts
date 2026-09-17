@@ -49,6 +49,7 @@ import {
   ProjectContextPayloadV1Schema,
   ProjectsPayloadV1Schema,
   RemoteOperationalStatusPayloadV1Schema,
+  SavingsModelsPayloadV1Schema,
   SavingsOverviewPayloadV1Schema,
   SavingsSessionsPayloadV1Schema,
   SettingsPayloadV1Schema,
@@ -114,6 +115,7 @@ const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
   '/api/delivery/overview': DashboardEnvelopeV1Schema(DeliveryOverviewV1Schema),
   '/api/plugins/savings/overview': DashboardEnvelopeV1Schema(SavingsOverviewPayloadV1Schema),
   '/api/plugins/savings/sessions': SavingsSessionsPayloadV1Schema,
+  '/api/plugins/savings/models': SavingsModelsPayloadV1Schema,
   '/api/plugins/analytics/overview': DashboardEnvelopeV1Schema(AnalyticsOverviewPayloadV1Schema),
   '/api/plugins/analytics/usage': DashboardEnvelopeV1Schema(AnalyticsUsageSummaryV1Schema),
   '/api/plugins/analytics/agents': DashboardEnvelopeV1Schema(AnalyticsAgentsPayloadV1Schema),
@@ -211,6 +213,18 @@ const DYNAMIC: ReadonlyArray<{
     pathname: '/api/plugins/graph/shared-code/family',
     search: '?symbol_occurrence_id=sym-0&match_class=rename_normalized_exact&limit=100',
     schema: DashboardEnvelopeV1Schema(SimilarResultV1Schema),
+  },
+  {
+    label: 'savings_api::models today',
+    pathname: '/api/plugins/savings/models',
+    search: '?range=today',
+    schema: SavingsModelsPayloadV1Schema,
+  },
+  {
+    label: 'savings_api::models 30d',
+    pathname: '/api/plugins/savings/models',
+    search: '?range=30d',
+    schema: SavingsModelsPayloadV1Schema,
   },
 ];
 

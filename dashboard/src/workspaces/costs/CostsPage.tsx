@@ -1,559 +1,660 @@
-import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
-import { ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
-import { StateChip } from '../../ui/StateChip.tsx';
-import { Meter, MeterRow, ReadoutBar } from '../../ui/instrument.tsx';
-import { formatCount, splitCount } from '../../ui/format.ts';
-import { useEnvelope } from '../../data/query/useEnvelope.ts';
+import { useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import {
+  SavingsModelsPayloadV1Schema,
   SavingsOverviewPayloadV1Schema,
+  type DashboardEnvelopeV1,
+  type SavingsLedgerSummaryV1,
+  type SavingsModelsPayloadV1,
+  type SavingsOverviewPayloadV1,
+  type SavingsSumV1,
 } from '../../contracts/generated.ts';
-import { logFraction } from '../../viz/scale.ts';
+import { useEnvelope } from '../../data/query/useEnvelope.ts';
+import { usePayload } from '../../data/query/usePayload.ts';
+import { cn } from '../../ui/cn.ts';
+import { formatCount, splitCount } from '../../ui/format.ts';
+import { Meter, Panel, Readout, WorkspaceHeader } from '../../ui/instrument.tsx';
 import {
-  costPerUsageEvent,
-  summarizeCoverage,
-  summarizeProjectSpread,
-  summarizeTokenMix,
-  type ProjectSpread,
-  type TokenMix,
-} from './spend.ts';
+  ReadModelState,
+  envelopeReadState,
+  payloadReadState,
+  type PayloadReadState,
+  type ReadState,
+} from '../../ui/ReadSection.tsx';
+import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
+import {
+  buildSpendSeries,
+  formatShare,
+  formatUsd,
+  sumReportedTokens,
+  summarizeProviderLedger,
+  type ProviderLedger,
+} from './attribution.ts';
 import { CanonicalCosts } from './CanonicalCosts.tsx';
+import { CostsInspector } from './CostsInspector.tsx';
+import {
+  COSTS_RANGES,
+  costsRangeLabel,
+  costsRangeNote,
+  useCostsQuery,
+  type CostsRange,
+} from './costsQuery.ts';
+import { PricingAuthority } from './PricingAuthority.tsx';
+import { ProviderLedgerTable } from './ProviderLedgerTable.tsx';
+import { ProviderSpendField } from './ProviderSpendField.tsx';
 import { TopologyMetricsCosts } from './TopologyMetricsCosts.tsx';
 
 const BASE = '/api/plugins/savings';
 
 /**
- * Costs: what was actually spent, what the tokens went on, and what the cache
- * saved — in that order, because that is the order of the questions.
+ * Costs — channel 11: actual provider spend, attributed.
  *
- * The page previously opened with four savings figures at display size, then
- * plotted those same four figures again as a bar chart directly underneath,
- * and put actual spend — the only number on this surface anyone acts on — in
- * the third panel of a grid as a three-row definition list. The pricing
- * provenance (source, model count, offline) held a whole panel of its own,
- * which is a legend's worth of information given a plate's worth of space.
+ * Two independent reads compose the surface. `/overview` carries the all-time
+ * usage totals, the savings ledger windows, the pricing authority's identity,
+ * and the canonical cost projection; `/models?range=` carries the exact
+ * provider usage of the selected range priced by that same authority, grouped
+ * by provider, model, and UTC day. A failure in one must not blank the other,
+ * so every panel resolves its own read and reports its own typed state.
+ *
+ * The one invariant every panel shares: no dollar figure is manufactured.
+ * Priced, partially priced, unpriced, null-identity, undated, and unavailable
+ * usage stay independently visible, and every total says what it includes.
  */
 export function CostsPage() {
+  const query = useCostsQuery();
+  const [inspected, setInspected] = useState<string | null>(null);
+
+  const overview = useEnvelope(
+    ['savings', 'overview'],
+    `${BASE}/overview`,
+    SavingsOverviewPayloadV1Schema,
+  );
+  const models = usePayload(
+    ['savings', 'models', query.range],
+    `${BASE}/models?range=${query.range}`,
+    SavingsModelsPayloadV1Schema,
+  );
+
+  const overviewRead: OverviewRead = envelopeReadState(overview.isPending, overview.data, {
+    loading: 'reading the savings overview',
+    transport: 'the savings overview could not be read',
+  });
+  const attribution = useMemo(
+    () => resolveAttribution(payloadReadState(models.isPending, models.data)),
+    [models.isPending, models.data],
+  );
+  const ledger = attribution.kind === 'ready' ? attribution.ledger : null;
+  const series = useMemo(
+    () =>
+      attribution.kind === 'ready'
+        ? buildSpendSeries(
+            attribution.payload.provider_usage.by_provider_day,
+            attribution.ledger.rows.map((row) => row.provider),
+          )
+        : null,
+    [attribution],
+  );
+
+  // A scoped provider the current range no longer carries is still a real
+  // query — the address says so — but nothing here can be scoped to it, so
+  // the selection is shown as such rather than silently dropped.
+  const selectedPresent =
+    query.provider !== null && ledger !== null
+      ? ledger.rows.some((row) => row.provider === query.provider)
+      : query.provider !== null;
+
+  const overviewPayload = overviewRead.kind === 'ready' ? overviewRead.value.payload : null;
+  const canonicalTotalUsd =
+    query.range === 'all' &&
+    overviewPayload?.provider_usage.available === true &&
+    overviewPayload.provider_usage.status === 'complete'
+      ? overviewPayload.provider_usage.total_cost_usd
+      : null;
+
   return (
-    <div
-      className="flex h-full flex-col overflow-auto"
-      tabIndex={0}
-      role="region"
-      aria-label="Costs content"
-    >
-      <div className="flex items-baseline gap-3 border-b border-edge-subtle px-4 py-2">
-        <h1 className="text-sm font-semibold tracking-tight">Costs</h1>
-        <span className="min-w-0 truncate text-2xs text-text-muted">
-          priced provider usage, cache savings, and canonical cost observations
-        </span>
+    <div className="flex h-full flex-col" role="region" aria-label="Costs content">
+      <WorkspaceHeader
+        path="costs"
+        title="Costs"
+        note="actual provider spend · canonical pricing · usage facts independent of price"
+      />
+      <QueryRegister
+        range={query.range}
+        onRange={query.setRange}
+        provider={query.provider}
+        selectedPresent={selectedPresent}
+        onClearProvider={() => query.setProvider(null)}
+        states={registerStates(overviewRead, attribution, ledger)}
+      />
+
+      <div className="grid gap-2 p-2 md:grid-cols-2 xl:grid-cols-12">
+        <Panel
+          legend="Actual provider spend"
+          className="md:col-span-2 xl:col-span-9"
+          actions={
+            <span className="td-value text-2xs text-text-primary" data-cell="numeric" data-priced-total>
+              {ledger === null ? '—' : formatUsd(ledger.pricedTotalUsd)}
+              <span className="td-unit ml-1.5">
+                {ledger === null
+                  ? ''
+                  : ledger.complete
+                    ? 'priced total · complete'
+                    : `priced total · ${formatShare(ledger.coverage)} coverage`}
+              </span>
+            </span>
+          }
+        >
+          <AttributionBody attribution={attribution}>
+            {(ready) => (
+              <ProviderSpendField
+                ledger={ready.ledger}
+                series={series}
+                rangeNote={costsRangeNote(query.range)}
+                inspected={inspected}
+                selected={query.provider}
+                onInspect={setInspected}
+                onSelect={query.setProvider}
+              />
+            )}
+          </AttributionBody>
+        </Panel>
+
+        <Panel legend="Provider pricing authority" className="xl:col-span-3">
+          <OverviewBody read={overviewRead}>
+            {(payload) => (
+              <PricingAuthority
+                pricing={payload.pricing}
+                ledger={ledger}
+                coverageStatus={
+                  attribution.kind === 'ready'
+                    ? attribution.payload.provider_usage_coverage
+                    : attribution.kind === 'unavailable'
+                      ? attribution.payload?.provider_usage_coverage ?? null
+                      : null
+                }
+              />
+            )}
+          </OverviewBody>
+        </Panel>
+
+        <Panel legend="Usage · facts independent of price" className="xl:col-span-3">
+          <UsageReadouts
+            ledger={ledger}
+            attribution={attribution}
+            overview={overviewRead}
+            range={query.range}
+          />
+        </Panel>
+
+        <Panel
+          legend="Provider spend detail · canonical pricing"
+          className="md:col-span-2 xl:col-span-6"
+          elevation="well"
+          bodyClassName="p-0"
+        >
+          <AttributionBody attribution={attribution}>
+            {(ready) => (
+              <div className="flex flex-col gap-2 p-3">
+                <ProviderLedgerTable
+                  ledger={ready.ledger}
+                  inspected={inspected}
+                  selected={query.provider}
+                  canonicalTotalUsd={canonicalTotalUsd}
+                  onInspect={setInspected}
+                  onSelect={query.setProvider}
+                />
+              </div>
+            )}
+          </AttributionBody>
+        </Panel>
+
+        <Panel legend="Inspector" className="xl:col-span-3">
+          <AttributionBody attribution={attribution}>
+            {(ready) => (
+              <CostsInspector
+                ledger={ready.ledger}
+                byModel={ready.payload.provider_usage.by_model}
+                inspected={inspected}
+                selected={selectedPresent ? query.provider : null}
+                pricingRevision={ready.payload.provider_usage.pricing_revision}
+              />
+            )}
+          </AttributionBody>
+        </Panel>
       </div>
-      {/* Two independent reads. The savings overview and the canonical Plan 26
-        * projection answer with different stores behind them, so a
-        * failure in one must not blank the other — which is exactly what
-        * happened while the whole page sat inside a single boundary. */}
-      <SavingsLedger />
+
       <CanonicalCosts />
       <TopologyMetricsCosts />
     </div>
   );
 }
 
-/**
- * One savings source that did not answer, in the shared typed-state
- * vocabulary.
- *
- * A carried `error` (or an explicit `read_failed` status) is a real failure
- * and renders as `error` with the daemon's own sentence. `available: false`
- * without an error is a different fact — the source is not mounted or has no
- * scope — and rendering it as a red "read failed" invented a failure the wire
- * never reported.
- */
-function SourceReadState({
-  source,
-  status,
-  error,
-  band = false,
-}: {
-  source: string;
-  status?: string | null | undefined;
-  error?: string | null | undefined;
-  band?: boolean;
-}) {
-  const failed = error != null || status === 'read_failed';
-  return (
-    <div role="status" className={band ? 'border-b border-edge-subtle px-4 py-2' : undefined}>
-      <StateChip
-        kind={failed ? 'error' : 'unavailable'}
-        detail={
-          failed
-            ? `${source} read failed${error ? `: ${error}` : ''}`
-            : `${source} — the daemon reported this source unavailable without an error`
-        }
-      />
-    </div>
-  );
-}
+/* ------------------------------------------------------------------------ */
+/* Attribution read                                                          */
+/* ------------------------------------------------------------------------ */
 
-function SavingsLedger() {
-  const overview = useEnvelope(
-    ['savings', 'overview'],
-    `${BASE}/overview`,
-    SavingsOverviewPayloadV1Schema,
-  );
+type OverviewRead = ReadState<DashboardEnvelopeV1<SavingsOverviewPayloadV1>>;
 
-  return (
-    <ReadSection
-      title="Costs"
-      chrome="centered"
-      state={envelopeReadState(overview.isPending, overview.data, {
-        loading: 'reading savings ledger',
-        transport: 'savings ledger could not be read',
-      })}
-    >
-      {(envelope) => {
-        const data = envelope.payload;
-        const ledger = data.savings.available ? data.savings.ledger : undefined;
-        const lifetime = data.savings.lifetime_counters;
-        const spread = summarizeProjectSpread(lifetime?.projects ?? []);
-        const mix =
-          data.sessions.available && data.sessions.provider_actual
-            ? summarizeTokenMix(data.sessions.provider_actual)
-            : null;
-        const coverage = data.sessions.available ? summarizeCoverage(data.sessions) : null;
-        const perUsageEvent = data.provider_usage.available
-          ? costPerUsageEvent(
-              data.provider_usage.total_cost_usd,
-              data.provider_usage.usage_event_count,
-            )
-          : null;
-        // The truncated title needs both counts to say anything; the contract
-        // makes them non-null whenever the counters block itself is, so the
-        // rows served stand in only when the slice came back empty. Neither end
-        // is coalesced to zero — "top 0 of 0 projects" is a sentence about no
-        // data, not about a capped slice.
-        const shownProjects = lifetime
-          ? lifetime.projects.length || lifetime.projects_limit
-          : null;
-        const projectTitle =
-          lifetime?.projects_truncated && shownProjects != null
-            ? `Savings by project (top ${shownProjects.toLocaleString()} of ${lifetime.project_total.toLocaleString()} projects)`
-            : 'Savings by project (lifetime)';
-        return (
-          <>
-            <p className="border-b border-edge-subtle px-4 py-1.5 text-2xs text-text-muted">
-              {data.provider_usage.available
-                ? `provider usage · ${data.provider_usage.cost_basis ?? 'unknown'} cost basis`
-                : 'provider usage unavailable'}
-            </p>
-
-            {/* Spend first, and at the display tier. Everything below it is
-              * either an explanation of this number or a counterfactual about
-              * it; neither outranks it. */}
-            <ReadoutBar
-              label="Actual spend"
-              size="xl"
-              elevation="raised"
-              items={[
-                {
-                  label: 'total cost',
-                  value:
-                    data.provider_usage.available && data.provider_usage.total_cost_usd != null
-                      ? `$${data.provider_usage.total_cost_usd.toLocaleString(undefined, {
-                          minimumFractionDigits: 2,
-                          maximumFractionDigits: 2,
-                        })}`
-                      : '—',
-                  note: data.provider_usage.cost_basis
-                    ? `${data.provider_usage.cost_basis} basis`
-                    : 'basis unreported',
-                },
-                {
-                  label: 'per usage event',
-                  value: perUsageEvent != null ? `$${perUsageEvent.toFixed(3)}` : '—',
-                  note: 'derived: cost ÷ provider usage events',
-                },
-                {
-                  label: 'usage events',
-                  ...splitTokens(
-                    data.provider_usage.available
-                      ? data.provider_usage.usage_event_count
-                      : undefined,
-                  ),
-                  note: 'canonical provider usage',
-                },
-                {
-                  label: 'tokens',
-                  ...splitTokens(
-                    data.provider_usage.available ? data.provider_usage.total_tokens : undefined,
-                  ),
-                  note: 'across those usage events',
-                },
-              ]}
-            />
-            {!data.provider_usage.available ? (
-              <SourceReadState
-                band
-                source="priced provider usage"
-                status={data.provider_usage.status}
-                error={data.provider_usage.error}
-              />
-            ) : null}
-
-            {/* The four windows are nested: today is inside 7d is inside 30d
-             * is inside all-time. So each one's rail is truthfully its share
-             * of the lifetime figure, and all-time is by definition full --
-             * the row reads as one accumulating quantity seen at four depths
-             * rather than four unrelated tiles. The bar chart that used to sit
-             * under this row plotted these same four numbers a second time,
-             * which is not a second reading. */}
-            <ReadoutBar
-              label="Saved tokens by window"
-              size="md"
-              items={[
-                {
-                  label: 'saved today',
-                  ...splitTokens(ledger?.today.saved_tokens),
-                  fraction: share(ledger?.today.saved_tokens, ledger?.all_time.saved_tokens),
-                  note: perCall(ledger?.today),
-                },
-                {
-                  label: 'saved 7d',
-                  ...splitTokens(ledger?.last_7d.saved_tokens),
-                  fraction: share(ledger?.last_7d.saved_tokens, ledger?.all_time.saved_tokens),
-                  note: perCall(ledger?.last_7d),
-                },
-                {
-                  label: 'saved 30d',
-                  ...splitTokens(ledger?.last_30d.saved_tokens),
-                  fraction: share(ledger?.last_30d.saved_tokens, ledger?.all_time.saved_tokens),
-                  note: perCall(ledger?.last_30d),
-                },
-                {
-                  label: 'saved all-time',
-                  ...splitTokens(ledger?.all_time.saved_tokens),
-                  fraction: ledger ? 1 : null,
-                  note: perCall(ledger?.all_time),
-                },
-              ]}
-            />
-            {!data.savings.available ? (
-              <SourceReadState band source="savings ledger" error={data.savings.error} />
-            ) : null}
-
-            <OverviewGrid>
-              <OverviewCard title="Where the tokens go">
-                {!data.sessions.available ? (
-                  <SourceReadState
-                    source="session ledger"
-                    status={data.sessions.status}
-                    error={data.sessions.error}
-                  />
-                ) : mix ? (
-                  <TokenMixPlate mix={mix} />
-                ) : (
-                  <p className="text-2xs text-text-muted">
-                    the session ledger reported no token breakdown
-                  </p>
-                )}
-              </OverviewCard>
-
-              <OverviewCard title={projectTitle}>
-                {!data.savings.available ? (
-                  <SourceReadState source="savings ledger" error={data.savings.error} />
-                ) : spread ? (
-                  <ProjectSpreadPlate spread={spread} />
-                ) : (
-                  <p className="text-2xs text-text-muted">no per-project savings recorded</p>
-                )}
-              </OverviewCard>
-
-              <OverviewCard title="How content tokens were counted">
-                {!data.sessions.available ? (
-                  <SourceReadState
-                    source="session ledger"
-                    status={data.sessions.status}
-                    error={data.sessions.error}
-                  />
-                ) : coverage ? (
-                  <figure className="flex flex-col gap-2">
-                    <p className="text-xs leading-relaxed text-text-primary">
-                      The ledger holds {coverage.messages.toLocaleString()} content messages.
-                      Local tokenization and explicit estimates form its{' '}
-                      <span className="td-value">
-                        {String(data.sessions.cost_basis ?? 'estimated')}
-                      </span>{' '}
-                      counting basis. Provider billing events are reported separately above.
-                    </p>
-                    <ShareRow
-                      label="tokenized"
-                      value={coverage.tokenized}
-                      total={coverage.messages}
-                    />
-                    <ShareRow
-                      label="estimated"
-                      value={coverage.estimated}
-                      total={coverage.messages}
-                    />
-                    <ShareRow
-                      label="model not identified"
-                      value={coverage.unknownModel}
-                      total={coverage.messages}
-                    />
-                    {data.sessions.estimated ? (
-                      <p className="text-2xs leading-relaxed text-text-secondary">
-                        The estimated side accounts for{' '}
-                        {formatTokens(data.sessions.estimated.input_tokens)} input and{' '}
-                        {formatTokens(data.sessions.estimated.output_tokens)} output tokens —
-                        the part of the spend above that is inferred rather than reported.
-                      </p>
-                    ) : null}
-                    <figcaption className="text-3xs leading-relaxed text-text-muted">
-                      Model-not-identified overlaps the two rows above it: it counts
-                      messages whose model could not be resolved, whatever their token
-                      source. It is drawn against the same total, not stacked on them.
-                    </figcaption>
-                  </figure>
-                ) : (
-                  <p className="text-2xs text-text-muted">the session ledger reported no messages</p>
-                )}
-              </OverviewCard>
-            </OverviewGrid>
-
-            {/* Provenance, as a legend. Source, model count and offline state
-              * are things you check once and then stop looking at; they were
-              * holding a full panel in a three-panel grid. */}
-            <p className="flex flex-wrap items-baseline gap-x-4 gap-y-1 border-t border-edge-subtle px-4 py-2 text-3xs text-text-muted">
-              <span className="td-legend">pricing</span>
-              <span>source {String(data.pricing.source ?? '—')}</span>
-              <span>{String(data.pricing.model_count ?? '—')} models priced</span>
-              <span>offline {String(data.pricing.offline ?? '—')}</span>
-              {data.sessions.scope ? <span>scope {String(data.sessions.scope)}</span> : null}
-              {data.sessions.model_count != null ? (
-                <span>{data.sessions.model_count.toLocaleString()} models seen</span>
-              ) : null}
-            </p>
-          </>
-        );
-      }}
-    </ReadSection>
-  );
-}
+type AttributionRead =
+  | { kind: 'ready'; payload: SavingsModelsPayloadV1; ledger: ProviderLedger }
+  | {
+      kind: 'unavailable';
+      state: DomainStateKind;
+      detail: string;
+      payload: SavingsModelsPayloadV1 | null;
+    }
+  | { kind: 'blocked'; state: DomainStateKind; detail: string | undefined };
 
 /**
- * The token mix, which is where the spend actually comes from and which this
- * page never showed.
+ * The `/models` payload resolved to what the attribution panels can render.
  *
- * Cache reads are around 98% of every token the session ledger holds. Drawn on
- * one linear axis the other three classes are invisible, so the leader is
- * stated and the remainder gets a log band — captioned as logarithmic, because
- * a length a reader cannot compare linearly has to say so.
+ * Three ways it fails to yield a ledger, and they are told apart: the read
+ * itself blocked (transport, refusal, schema); the payload arrived and says
+ * the store is not mounted or the read failed; the payload arrived and the
+ * provider-usage aggregate behind it could not serve exact deltas — the
+ * session store is there, but its usage projection is partial or absent.
  */
-function TokenMixPlate({
-  mix,
-}: {
-  mix: TokenMix;
-}) {
-  const rest = mix.dominant ? mix.classes.slice(1) : mix.classes;
-  const ceiling = rest.reduce((max, entry) => Math.max(max, entry.tokens), 0);
-  return (
-    <div className="flex flex-col gap-3">
-      {mix.dominant && mix.leader ? (
-        <p className="text-xs leading-relaxed text-text-primary">
-          <span className="td-value">{mix.leader.label}</span> is{' '}
-          <span className="td-value">{Math.round(mix.leader.share * 100)}%</span> of every
-          token in the session ledger — {formatTokens(mix.leader.tokens)} of{' '}
-          {formatTokens(mix.total)}.
-        </p>
-      ) : null}
-      <figure className="flex flex-col gap-1.5">
-        <figcaption className="td-legend">
-          {mix.dominant ? 'everything else · log scale' : 'token classes'}
-        </figcaption>
-        {rest.map((entry) => (
-          <MeterRow
-            key={entry.label}
-            label={entry.label}
-            fraction={
-              mix.dominant ? logFraction(entry.tokens, ceiling) : entry.tokens / ceiling
-            }
-            value={formatTokens(entry.tokens)}
-            figureWidth="wide"
-          />
-        ))}
-        <figcaption className="text-3xs leading-relaxed text-text-muted">
-          The canonical provider-reported token breakdown. Its usage-event denominator is
-          reported in the spend readout above and is never inferred from session message
-          counts.
-        </figcaption>
-      </figure>
-    </div>
-  );
-}
-
-/**
- * Per-project savings, drawn only where they differ.
- *
- * Twenty-five rows of which twenty are the same length is not a useful plot.
- * The sameness is stated without inventing a cause the wire does not provide,
- * and only the rows that genuinely deviate are plotted — against their
- * deviation, which is the quantity that varies.
- */
-function ProjectSpreadPlate({ spread }: { spread: ProjectSpread }) {
-  if (!spread.flat) {
-    const ceiling = spread.deviations.reduce((max, row) => Math.max(max, row.tokens), 0);
-    return (
-      <figure className="flex flex-col gap-1.5">
-        <figcaption className="td-legend">{spread.count} projects</figcaption>
-        {spread.deviations.map((row) => (
-          <div key={row.path} className="flex items-center gap-2">
-            <span
-              className="min-w-0 flex-1 truncate font-mono text-2xs text-text-secondary"
-              title={row.path}
-            >
-              {shortPath(row.path)}
-            </span>
-            <Meter
-              fraction={ceiling > 0 ? row.tokens / ceiling : null}
-              className="w-24 shrink-0 max-sm:hidden"
-            />
-            <span
-              className="td-value w-14 shrink-0 text-right text-2xs text-text-muted"
-              data-cell="numeric"
-            >
-              {formatTokens(row.tokens)}
-            </span>
-          </div>
-        ))}
-      </figure>
-    );
+function resolveAttribution(read: PayloadReadState<SavingsModelsPayloadV1>): AttributionRead {
+  if (read.kind === 'blocked') {
+    if (read.state === 'unavailable' && read.payload !== undefined) {
+      return {
+        kind: 'unavailable',
+        state: read.payload.status === 'read_failed' ? 'error' : 'unavailable',
+        detail: read.payload.error ?? read.detail ?? 'the daemon could not serve provider attribution',
+        payload: read.payload,
+      };
+    }
+    return { kind: 'blocked', state: read.state, detail: read.detail };
   }
-  const ceiling = spread.deviations.reduce(
-    (max, row) => Math.max(max, Math.abs(row.deviation)),
-    0,
-  );
+  const payload = read.value;
+  if (!payload.available) {
+    return {
+      kind: 'unavailable',
+      state: payload.status === 'read_failed' ? 'error' : 'unavailable',
+      detail:
+        payload.error ??
+        (payload.status === 'read_failed'
+          ? 'the session store read failed'
+          : 'the session store is not mounted for this scope'),
+      payload,
+    };
+  }
+  const ledger = summarizeProviderLedger(payload.provider_usage);
+  if (ledger === null) {
+    const coverage = payload.provider_usage_coverage;
+    return {
+      kind: 'unavailable',
+      state: coverage === 'partial' ? 'partial' : 'unavailable',
+      detail:
+        coverage === null
+          ? 'no exact provider usage scope resolved for this dashboard'
+          : `the provider usage aggregate is ${coverage}; exact per-provider attribution needs a complete aggregate`,
+      payload,
+    };
+  }
+  return { kind: 'ready', payload, ledger };
+}
+
+function AttributionBody({
+  attribution,
+  children,
+}: {
+  attribution: AttributionRead;
+  children: (ready: Extract<AttributionRead, { kind: 'ready' }>) => ReactNode;
+}) {
+  if (attribution.kind === 'ready') return <>{children(attribution)}</>;
+  return <ReadModelState kind={attribution.state} detail={attribution.detail} />;
+}
+
+function OverviewBody({
+  read,
+  children,
+}: {
+  read: OverviewRead;
+  children: (payload: SavingsOverviewPayloadV1) => ReactNode;
+}) {
+  if (read.kind === 'ready') return <>{children(read.value.payload)}</>;
+  return <ReadModelState kind={read.state} detail={read.detail} />;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Query register: range control + authority states                          */
+/* ------------------------------------------------------------------------ */
+
+interface RegisterState {
+  label: string;
+  kind: DomainStateKind;
+  detail?: string;
+}
+
+function registerStates(
+  overview: OverviewRead,
+  attribution: AttributionRead,
+  ledger: ProviderLedger | null,
+): RegisterState[] {
+  const spend: RegisterState =
+    attribution.kind === 'ready'
+      ? {
+          label: 'provider spend',
+          kind: ledger === null || ledger.usageEvents === 0
+            ? 'complete_zero_findings'
+            : ledger.complete
+              ? 'ready'
+              : 'partial',
+          detail:
+            ledger === null || ledger.usageEvents === 0
+              ? 'no usage in range'
+              : `${formatShare(ledger.coverage)} priced`,
+        }
+      : { label: 'provider spend', kind: attribution.state, detail: attribution.detail };
+
+  const usage: RegisterState =
+    overview.kind !== 'ready'
+      ? { label: 'usage', kind: overview.state, detail: overview.detail }
+      : usageState(overview.value.payload);
+
+  const savings: RegisterState =
+    overview.kind !== 'ready'
+      ? { label: 'savings ledger', kind: overview.state }
+      : overview.value.payload.savings.available
+        ? { label: 'savings ledger', kind: 'ready' }
+        : overview.value.payload.savings.error != null
+          ? { label: 'savings ledger', kind: 'error', detail: overview.value.payload.savings.error }
+          : { label: 'savings ledger', kind: 'unavailable', detail: 'not mounted' };
+
+  return [spend, usage, savings];
+}
+
+function usageState(payload: SavingsOverviewPayloadV1): RegisterState {
+  const usage = payload.provider_usage;
+  if (!usage.available) {
+    return usage.status === 'read_failed' || usage.error != null
+      ? { label: 'usage', kind: 'error', detail: usage.error ?? 'read failed' }
+      : { label: 'usage', kind: 'unavailable', detail: usage.status ?? 'not served' };
+  }
+  return usage.status === 'complete'
+    ? { label: 'usage', kind: 'ready', detail: 'complete aggregate' }
+    : { label: 'usage', kind: 'partial', detail: usage.status ?? 'partial aggregate' };
+}
+
+function QueryRegister({
+  range,
+  onRange,
+  provider,
+  selectedPresent,
+  onClearProvider,
+  states,
+}: {
+  range: CostsRange;
+  onRange: (range: CostsRange) => void;
+  provider: string | null;
+  selectedPresent: boolean;
+  onClearProvider: () => void;
+  states: RegisterState[];
+}) {
   return (
-    <div className="flex flex-col gap-3">
-      <p className="text-xs leading-relaxed text-text-primary">
-        {spread.typicalCount} of {spread.count} projects saved between{' '}
-        {formatTokens(spread.typicalLow)} and {formatTokens(spread.typicalHigh)} — within a
-        tenth of the {formatTokens(spread.median)} median. The wire does not report why
-        these values cluster, so no cache topology is inferred.
-      </p>
-      {spread.deviations.length > 0 ? (
-        <figure className="flex flex-col gap-1.5">
-          <figcaption className="td-legend">
-            the {spread.deviations.length} that differ · vs median
-          </figcaption>
-          {spread.deviations.map((row) => (
-            <div key={row.path} className="flex items-center gap-2">
-              <span
-                className="min-w-0 flex-1 truncate font-mono text-2xs text-text-secondary"
-                title={row.path}
-              >
-                {shortPath(row.path)}
+    <div
+      className="flex min-h-[52px] flex-wrap items-center gap-x-4 gap-y-2 border-b border-edge-subtle bg-surface-1 px-3 py-1"
+      data-costs-register
+    >
+      <RangeControl range={range} onRange={onRange} />
+      <span className="min-w-0 truncate text-3xs text-text-muted">{costsRangeNote(range)}</span>
+      <span aria-hidden className="td-rule max-md:hidden" />
+      <ul className="flex flex-wrap items-center gap-x-3 gap-y-1" aria-label="Costs authority states">
+        {states.map((state) => (
+          <li key={state.label} className="flex items-center gap-1.5">
+            <span className="td-legend">{state.label}</span>
+            <StateChip kind={state.kind} detail={state.detail} />
+          </li>
+        ))}
+        <li className="flex items-center gap-1.5" data-costs-selection={provider ?? 'all'}>
+          <span className="td-legend">selection</span>
+          <span className="td-value text-2xs text-text-secondary">
+            Costs / {provider ?? 'all'}
+            {provider !== null && !selectedPresent ? (
+              <span className="text-text-muted"> · not in this range</span>
+            ) : null}
+          </span>
+          {provider !== null ? (
+            <button
+              type="button"
+              className="td-hit -my-2 px-1 text-2xs text-text-secondary underline-offset-2 hover:underline"
+              onClick={onClearProvider}
+              aria-label={`Clear provider scope ${provider}`}
+            >
+              clear
+            </button>
+          ) : null}
+        </li>
+      </ul>
+    </div>
+  );
+}
+
+/** The range tabs: ARIA tablist with a roving tabindex, the same pattern the
+ * Observatory wings use, so the keyboard contract is one contract. */
+function RangeControl({
+  range,
+  onRange,
+}: {
+  range: CostsRange;
+  onRange: (range: CostsRange) => void;
+}) {
+  const tabs = useRef<(HTMLButtonElement | null)[]>([]);
+  const move = (from: number, delta: number) => {
+    const count = COSTS_RANGES.length;
+    const to = (from + delta + count) % count;
+    const next = COSTS_RANGES[to];
+    if (next === undefined) return;
+    onRange(next);
+    tabs.current[to]?.focus();
+  };
+  const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>, position: number) => {
+    switch (event.key) {
+      case 'ArrowRight':
+      case 'ArrowDown':
+        event.preventDefault();
+        move(position, 1);
+        break;
+      case 'ArrowLeft':
+      case 'ArrowUp':
+        event.preventDefault();
+        move(position, -1);
+        break;
+      case 'Home':
+        event.preventDefault();
+        move(0, 0);
+        break;
+      case 'End':
+        event.preventDefault();
+        move(COSTS_RANGES.length - 1, 0);
+        break;
+      default:
+        break;
+    }
+  };
+  return (
+    <div
+      role="tablist"
+      aria-label="Spend range"
+      aria-orientation="horizontal"
+      className="flex items-center gap-1 border border-edge-subtle bg-surface-1 p-1"
+      data-costs-range={range}
+    >
+      {COSTS_RANGES.map((candidate, position) => {
+        const selected = candidate === range;
+        return (
+          <button
+            key={candidate}
+            ref={(node) => {
+              tabs.current[position] = node;
+            }}
+            type="button"
+            role="tab"
+            aria-selected={selected}
+            tabIndex={selected ? 0 : -1}
+            onClick={() => onRange(candidate)}
+            onKeyDown={(event) => onKeyDown(event, position)}
+            className={cn(
+              'flex min-h-[44px] items-center gap-2 border px-3 text-2xs',
+              'focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
+              selected
+                ? 'border-edge-strong bg-surface-3 text-text-primary'
+                : 'border-transparent text-text-secondary hover:bg-surface-2',
+            )}
+          >
+            <span
+              aria-hidden
+              className={cn('h-3 w-px shrink-0', selected ? 'bg-accent' : 'bg-edge-strong')}
+            />
+            {costsRangeLabel(candidate)}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------------ */
+/* Usage readouts                                                            */
+/* ------------------------------------------------------------------------ */
+
+function UsageReadouts({
+  ledger,
+  attribution,
+  overview,
+  range,
+}: {
+  ledger: ProviderLedger | null;
+  attribution: AttributionRead;
+  overview: OverviewRead;
+  range: CostsRange;
+}) {
+  const tokens = ledger === null ? null : sumReportedTokens(ledger.rows);
+  const savings = overview.kind === 'ready' ? overview.value.payload.savings : null;
+  const windows = savings?.available ? savings.ledger : null;
+  return (
+    <div className="flex flex-col gap-4">
+      {ledger === null ? (
+        <div role="status">
+          <StateChip
+            kind={attribution.kind === 'ready' ? 'unavailable' : attribution.state}
+            detail={attribution.kind === 'ready' ? undefined : attribution.detail}
+          />
+        </div>
+      ) : (
+        <>
+          <Readout
+            label="usage events"
+            size="xl"
+            value={ledger.usageEvents.toLocaleString()}
+            note={`${ledger.pricedEvents.toLocaleString()} priced · ${ledger.unpricedEvents.toLocaleString()} unpriced · ${ledger.undatedEvents.toLocaleString()} undated`}
+          />
+          <Readout
+            label="tokens consumed"
+            size="xl"
+            {...splitCount(tokens?.tokens, 1_000)}
+            note={
+              tokens === null || tokens.reported === 0
+                ? 'no provider reported a token total'
+                : tokens.unreported > 0
+                  ? `input + output over ${tokens.reported.toLocaleString()} of ${ledger.rows.length.toLocaleString()} providers`
+                  : 'input + output, provider-reported'
+            }
+          />
+        </>
+      )}
+
+      <div className="flex flex-col gap-2 border-t border-edge-subtle pt-3">
+        <div className="flex items-center gap-2">
+          <span className="td-legend">saved-token windows</span>
+          <span aria-hidden className="td-rule" />
+          <span className="td-legend text-text-muted">count only</span>
+        </div>
+        {savings === null ? (
+          <ReadModelState
+            kind={overview.kind === 'ready' ? 'unknown' : overview.state}
+            detail={overview.kind === 'ready' ? undefined : overview.detail}
+          />
+        ) : !savings.available || windows == null ? (
+          <div role="status">
+            <StateChip
+              kind={savings.error != null ? 'error' : 'unavailable'}
+              detail={
+                savings.error != null
+                  ? `savings ledger read failed: ${savings.error}`
+                  : 'the savings ledger is not mounted'
+              }
+            />
+          </div>
+        ) : (
+          <SavedWindows windows={windows} range={range} />
+        )}
+        <p className="text-3xs leading-relaxed text-text-muted">
+          Saved tokens are counts from the savings ledger. They are not priced: no authority prices
+          the avoided usage on the same basis as the observed usage.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+const WINDOW_ORDER: readonly { key: keyof SavingsLedgerSummaryV1; label: string; range: CostsRange }[] = [
+  { key: 'today', label: 'today', range: 'today' },
+  { key: 'last_7d', label: '7d', range: '7d' },
+  { key: 'last_30d', label: '30d', range: '30d' },
+  { key: 'all_time', label: 'all time', range: 'all' },
+];
+
+/** The four nested windows as one accumulating quantity seen at four depths;
+ * the window matching the range control is the headline. */
+function SavedWindows({
+  windows,
+  range,
+}: {
+  windows: SavingsLedgerSummaryV1;
+  range: CostsRange;
+}) {
+  const active = WINDOW_ORDER.find((entry) => entry.range === range) ?? WINDOW_ORDER[3];
+  const headline = active === undefined ? null : windows[active.key];
+  const ceiling = windows.all_time.saved_tokens;
+  return (
+    <div className="flex flex-col gap-2">
+      {headline && active ? (
+        <Readout
+          label={`saved · ${active.label}`}
+          size="lg"
+          {...splitCount(headline.saved_tokens, 1_000)}
+          note={perCall(headline)}
+        />
+      ) : null}
+      <ul className="flex flex-col gap-1">
+        {WINDOW_ORDER.map((entry) => {
+          const window = windows[entry.key];
+          return (
+            <li key={entry.key} className="flex items-center gap-2 text-2xs" data-saved-window={entry.key}>
+              <span className={cn('w-14 shrink-0 td-legend', entry.range === range && 'text-accent')}>
+                {entry.label}
               </span>
               <Meter
-                fraction={ceiling > 0 ? Math.abs(row.deviation) / ceiling : null}
-                className="w-16 shrink-0 max-sm:hidden"
-                tone={row.deviation < 0 ? 'bg-state-stale' : undefined}
+                fraction={ceiling > 0 ? window.saved_tokens / ceiling : null}
+                height="row"
+                className="min-w-0 flex-1"
               />
-              <span
-                className="td-value w-12 shrink-0 text-right text-2xs text-text-secondary"
-                data-cell="numeric"
-              >
-                {row.deviation > 0 ? '+' : '−'}
-                {Math.round(Math.abs(row.deviation) * 100)}%
+              <span className="td-value w-16 shrink-0 text-right text-text-secondary" data-cell="numeric">
+                {formatCount(window.saved_tokens, 1_000)}
               </span>
-              <span
-                className="td-value w-14 shrink-0 text-right text-2xs text-text-muted max-md:hidden"
-                data-cell="numeric"
-              >
-                {formatTokens(row.tokens)}
-              </span>
-            </div>
-          ))}
-        </figure>
-      ) : (
-        <p className="text-2xs text-text-muted">
-          No project deviates from the median by more than a tenth.
-        </p>
-      )}
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }
 
-/** One part of a known whole, printed and given a length.
- *
- * A `null` value is a class the ledger never reported, which is a different
- * fact from a class it counted at zero: the row says so in words, prints an em
- * dash rather than a figure, and leaves the rail unfilled. */
-function ShareRow({
-  label,
-  value,
-  total,
-}: {
-  label: string;
-  value: number | null;
-  total: number;
-}) {
-  return (
-    <div className="flex items-center gap-2 text-xs">
-      <span className="min-w-0 flex-1 truncate text-text-primary">{label}</span>
-      {value == null ? (
-        <span className="td-legend shrink-0 text-text-muted">not reported</span>
-      ) : null}
-      <Meter
-        fraction={value != null && total > 0 ? value / total : null}
-        height="row"
-        className="w-20 shrink-0 max-sm:hidden"
-      />
-      <span
-        className="td-value w-14 shrink-0 text-right text-2xs text-text-secondary"
-        data-cell="numeric"
-      >
-        {value != null ? value.toLocaleString() : '—'}
-      </span>
-    </div>
-  );
-}
-
-/** Tokens abbreviate from a thousand rather than the ten thousand the shared
- * magnitude language defaults to, because four-figure token counts are the
- * exception on this surface. That threshold is the only thing this ledger
- * disagrees with the rest of the dashboard about, so it is all this states —
- * the ladder itself, and `null` in / em dash out, come from `format.ts`. */
-function formatTokens(tokens: number | null | undefined): string {
-  return formatCount(tokens, 1_000);
-}
-
-/** The same magnitude language with the unit split off, so the display tier can
- * set the figure large and its unit small on the shared baseline. */
-function splitTokens(tokens: number | null | undefined): {
-  value: string;
-  unit?: string;
-} {
-  return splitCount(tokens, 1_000);
-}
-
-/** A window's share of the lifetime figure it is nested inside. Null whenever
- * either end is missing — an absent denominator must never render as a full
- * bar. */
-function share(part: number | undefined, whole: number | undefined): number | null {
-  if (part == null || whole == null || !Number.isFinite(whole) || whole <= 0) return null;
-  return part / whole;
-}
-
-/** A window's second channel: how many cache hits produced its saving, and
- * what each one was worth. The ledger has carried `calls` all along and the row
- * printed only `saved_tokens`, so the reader could not tell a window with a few
- * enormous hits from one with very many small ones. */
-function perCall(window: { saved_tokens: number; calls: number } | undefined): string {
-  if (!window || !Number.isFinite(window.calls) || window.calls <= 0) return 'no calls recorded';
-  return `${window.calls.toLocaleString()} calls · ${formatTokens(
+function perCall(window: SavingsSumV1): string {
+  if (!Number.isFinite(window.calls) || window.calls <= 0) return 'no calls recorded';
+  return `${window.calls.toLocaleString()} calls · ${formatCount(
     Math.round(window.saved_tokens / window.calls),
+    1_000,
   )}/call`;
-}
-
-function shortPath(path: string): string {
-  const parts = path.split('/').filter(Boolean);
-  return parts.slice(-2).join('/') || path;
 }

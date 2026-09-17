@@ -43,13 +43,27 @@ function themedOption(
   const muted = text;
   const edge = token('--raw-graph-edge', '#333a46');
   const accent = token('--raw-graph-accent', '#7aa2f7');
+  // The series palette, in the order ECharts assigns it. Cyan stays first so
+  // a single-series chart keeps reading as signal; the rest are the design
+  // system's own registers (measured amber, ready green, restricted violet,
+  // informational blue, ink) so a multi-series chart is drawn in tokens the
+  // legend beside it can reproduce. Colour is never the sole encoding: callers
+  // pair each series with a line style, and the legend names it.
+  const palette = [
+    accent,
+    token('--raw-graph-alert', '#e0b25a'),
+    token('--raw-state-ready', '#5fbf8a'),
+    token('--raw-state-locked', '#a58ad6'),
+    token('--raw-sev-info', '#7d9ac9'),
+    text,
+  ];
   // The chart's type has to come from the same token as the rest of the app.
   // This used to name Inter directly, which meant a chart axis silently kept
   // typing in the old face after the design system changed its body face --
   // exactly the drift a token layer exists to prevent.
   const sans = token('--font-sans', 'system-ui, sans-serif');
   return {
-    color: [accent],
+    color: palette,
     // `false`, not a shortened duration: ECharts' entry animation grows bars and
     // sweeps lines from zero toward their real value, which on a chart of
     // measured quantities is a sequence of numbers the daemon never reported.
