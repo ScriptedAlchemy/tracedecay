@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useScope } from '../../data/scope/store.ts';
@@ -34,16 +34,19 @@ afterEach(() => {
 });
 
 describe('the mounted Observatory accounting surface', () => {
-  it('mounts all three accounting views and keeps capped and suppressed family states distinct', async () => {
-    renderObservatory();
+  it('mounts the adoption views on one diagnostics snapshot and keeps a suppressed family distinct', async () => {
+    renderObservatory('adoption');
 
-    for (const heading of ['Adoption coverage', 'Adoption outcomes', 'Retrieval quality']) {
-      expect(await screen.findByRole('heading', { name: heading })).toBeTruthy();
+    // The inspector titles the selected source and the exact evidence titles
+    // its own section, so the source name is a heading in both landmarks.
+    for (const heading of ['Adoption coverage', 'Adoption outcomes']) {
+      expect((await screen.findAllByRole('heading', { name: heading })).length).toBeGreaterThan(0);
     }
 
-    // All three panels bind to one diagnostics snapshot. Separate panel-local
-    // query keys would issue three calls and could put their ledgers under
-    // different watermarks.
+    // The overview summaries, both adoption ledgers, and the retrieval summary
+    // all bind to one diagnostics snapshot. Separate panel-local query keys
+    // would issue several calls and could put ledgers under different
+    // watermarks.
     const diagnosticsCalls = vi
       .mocked(fetch)
       .mock.calls.filter(([input]) => new URL(String(input), 'http://localhost').pathname === '/api/plugins/analytics/diagnostics');
@@ -67,22 +70,31 @@ describe('the mounted Observatory accounting surface', () => {
     expect(suppressed?.getAttribute('data-family-state')).toBe('redacted');
     expect(suppressed?.textContent).toContain('fewer than 5 units observed');
     expect(suppressed?.textContent).not.toContain('4 records observed');
+  });
 
-    const censored = document.querySelector(
-      '[data-family-ledger="retrieval"] [data-family="retrieval.query.completed.v1"]',
-    );
+  it('keeps a capped retrieval family distinct from a silent one', async () => {
+    renderObservatory('retrieval');
+
+    expect((await screen.findAllByRole('heading', { name: 'Retrieval quality' })).length).toBeGreaterThan(0);
+    const censored = await waitFor(() => {
+      const row = document.querySelector(
+        '[data-family-ledger="retrieval"] [data-family="retrieval.query.completed.v1"]',
+      );
+      expect(row).toBeTruthy();
+      return row;
+    });
     expect(censored?.getAttribute('data-family-state')).toBe('partial');
     expect(censored?.textContent).toContain('cannot tell a family that produced nothing');
     expect(censored?.querySelector('[data-cell="numeric"]')?.textContent).toBe('—');
   });
 });
 
-function renderObservatory() {
+function renderObservatory(inspect: 'adoption' | 'retrieval') {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
-  // The accounting ledgers live on the Adoption wing, so this file opens the
-  // page with the camera already positioned there.
+  // The accounting ledgers are the exact evidence of their source, so the page
+  // opens with that source selected.
   return render(
-    <MemoryRouter initialEntries={['/observatory?wing=adoption']}>
+    <MemoryRouter initialEntries={[`/observatory?inspect=${inspect}`]}>
       <QueryClientProvider client={client}>
         <ObservatoryPage />
       </QueryClientProvider>

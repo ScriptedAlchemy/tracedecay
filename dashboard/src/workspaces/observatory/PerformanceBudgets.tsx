@@ -1,10 +1,6 @@
 /** Plan 26 performance budgets from `GET /api/observatory`. */
 import type { ReactNode } from 'react';
-import {
-  ObservatoryReadModelV1Schema,
-  type ObservatoryReadModelV1,
-} from '../../contracts/generated.ts';
-import { useEnvelope } from '../../data/query/useEnvelope.ts';
+import type { ObservatoryReadModelV1 } from '../../contracts/generated.ts';
 import { EnvelopeTruth, OmissionReasons } from '../../ui/EnvelopeTruth.tsx';
 import { EnvelopeSection } from '../../ui/ReadSection.tsx';
 import { Field } from '../../ui/instrument.tsx';
@@ -12,14 +8,10 @@ import { formatMicrosUtc } from '../../ui/format.ts';
 import { PlanDimensionGrid } from './PlanDimensionCard.tsx';
 import { planDimensionPresentation } from './planDimension.ts';
 import { budgetAnchors, budgetCoverage, performanceBudgetBands } from './performanceBudgets.ts';
+import { useObservatoryReadModel } from './observatoryReadModel.ts';
 
 export function PerformanceBudgets() {
-  const read = useEnvelope(
-    ['observatory', 'performance-budgets'],
-    '/api/observatory',
-    ObservatoryReadModelV1Schema,
-    { staleTime: 30_000 },
-  );
+  const read = useObservatoryReadModel();
 
   return (
     <EnvelopeSection
