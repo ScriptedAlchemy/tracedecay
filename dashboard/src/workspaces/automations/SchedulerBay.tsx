@@ -74,17 +74,19 @@ export function SchedulerBay({
             </div>
             <SchedulerControl paused={status.paused} {...control} />
           </div>
-          <dl className="grid grid-cols-2 gap-x-3 gap-y-2 border-t border-edge-subtle pt-2 sm:grid-cols-3">
+          <dl className="grid grid-cols-2 gap-x-3 gap-y-2 border-t border-edge-subtle pt-2">
             <Term label="automation">{status.enabled ? 'enabled' : 'disabled'}</Term>
             <Term label="tick interval" mono>{status.scheduler_tick_secs}s</Term>
             <Term label="daemon clock (utc)" mono>{formatUtc(status.now)}</Term>
-            <Term label="last session activity" mono>
+            <Term label="session activity" mono>
               {status.last_session_activity === null ? (
                 <Absent>none recorded</Absent>
               ) : (
                 relativeAge(status.last_session_activity, status.now) ?? String(status.last_session_activity)
               )}
             </Term>
+          </dl>
+          <dl className="grid gap-y-2">
             <Term label="configuration revision" mono>{status.configuration_revision_id}</Term>
             <Term label="control path" mono>{status.control_path}</Term>
           </dl>
@@ -118,7 +120,13 @@ export function SchedulerBay({
           </span>
         </div>
         <LedgerTable
-          columns={['task', 'due', 'skip reason', 'last scheduler run', 'outcome']}
+          columns={[
+            { label: 'task', width: 27 },
+            { label: 'due', width: 11 },
+            { label: 'skip reason', width: 30 },
+            { label: 'last scheduler run', width: 32 },
+          ]}
+          minWidth="min-w-[30rem]"
           caption="Scheduler tasks with their due flag, skip reason and last scheduler-triggered run"
           onPointerLeave={onLeave}
         >
@@ -172,7 +180,7 @@ function TaskLine({
       selected={selected}
       onInspect={onInspect}
       onSelect={onSelect}
-      identity={<span className="td-value truncate text-2xs text-text-primary">{task.task}</span>}
+      identity={<span className="td-value break-all text-2xs text-text-primary">{task.task}</span>}
     >
       <Cell>{task.due ? <span className="text-accent">due</span> : <span className="text-text-muted">not due</span>}</Cell>
       <Cell>
@@ -182,36 +190,34 @@ function TaskLine({
           <Absent>none</Absent>
         )}
       </Cell>
-      <Cell numeric>
+      <Cell>
         {last.kind === 'run' ? (
-          <LastRunStamp completedAt={last.run.completed_at} />
+          <LastRunCell status={last.run.status} completedAt={last.run.completed_at} />
         ) : last.kind === 'unreadable' ? (
           <Absent>record unreadable</Absent>
         ) : fallback ? (
-          <span className="flex flex-col gap-0.5">
-            <LastRunStamp completedAt={fallback.completed_at} />
-            <span className="text-3xs text-text-muted">from loaded ledger page</span>
-          </span>
+          <LastRunCell status={fallback.status} completedAt={fallback.completed_at} note="from loaded ledger page" />
         ) : (
           <Absent>none recorded</Absent>
-        )}
-      </Cell>
-      <Cell>
-        {last.kind === 'run' ? (
-          <ToneWord tone={runStatusTone(last.run.status)} word={last.run.status} />
-        ) : fallback ? (
-          <ToneWord tone={runStatusTone(fallback.status)} word={fallback.status} />
-        ) : (
-          <Absent>n/a</Absent>
         )}
       </Cell>
     </InspectRow>
   );
 }
 
-function LastRunStamp({ completedAt }: { completedAt: string }) {
+/** The outcome word over the completion stamp, so one column carries both
+ * without the row growing a fifth column it has no width for. */
+function LastRunCell({ status, completedAt, note }: { status: string; completedAt: string; note?: string }) {
   const secs = epochSeconds(completedAt);
-  return <>{secs === null ? completedAt || <Absent>empty stamp</Absent> : formatUtc(secs)}</>;
+  return (
+    <span className="flex min-w-0 flex-col gap-0.5">
+      <ToneWord tone={runStatusTone(status)} word={status} />
+      <span className="td-value text-3xs text-text-muted">
+        {secs === null ? completedAt || 'empty stamp' : formatUtc(secs)}
+        {note ? ` · ${note}` : ''}
+      </span>
+    </span>
+  );
 }
 
 /** Pause / resume: the one scheduler mutation the daemon exposes to the
@@ -235,7 +241,7 @@ function SchedulerControl({
   const blocked = writability.state !== 'writable';
   return (
     <div className="flex min-w-0 flex-col items-end gap-1">
-      <div className="flex items-center gap-1" role="group" aria-label="Scheduler control">
+      <div className="flex flex-wrap items-center justify-end gap-1" role="group" aria-label="Scheduler control">
         <ControlButton
           label="Pause scheduler"
           icon={<Pause aria-hidden size={11} />}
@@ -292,7 +298,7 @@ function ControlButton({
     >
       <span
         className={cn(
-          'inline-flex h-6 items-center gap-1.5 border px-2 text-2xs',
+          'inline-flex h-6 items-center gap-1.5 whitespace-nowrap border px-2 text-2xs',
           active
             ? 'border-accent/60 bg-accent/10 text-text-primary group-hover:bg-accent/20'
             : 'border-edge-subtle text-text-muted group-hover:bg-surface-2',

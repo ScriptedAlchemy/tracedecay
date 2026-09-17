@@ -20,18 +20,31 @@ import type { Tone } from './ledger.ts';
  *   Absent       a typed absence, printed as a reason rather than a blank
  */
 
+/** A column: its engraved legend and the share of the table it is given.
+ * Shares are percentages of the table width under `table-layout: fixed`, so
+ * long identifiers wrap inside their column instead of widening it and
+ * pushing the trailing columns out of the panel. */
+export interface LedgerColumn {
+  readonly label: string;
+  readonly width: number;
+}
+
 export function LedgerTable({
   columns,
   caption,
   children,
   className,
+  minWidth,
   onPointerLeave,
 }: {
-  columns: readonly string[];
+  columns: readonly LedgerColumn[];
   /** Screen-reader caption naming the table and its window. */
   caption: string;
   children: ReactNode;
   className?: string;
+  /** Utility class fixing the table's floor width, below which the panel
+   * scrolls horizontally rather than crushing every column. */
+  minWidth?: string;
   /** Fired when the pointer leaves the table body — the moment a hover
    * preview should yield back to the pinned selection. */
   onPointerLeave?: () => void;
@@ -75,18 +88,23 @@ export function LedgerTable({
         ref={tableRef}
         onKeyDown={onKeyDown}
         onPointerLeave={leave}
-        className="w-full min-w-0 border-collapse text-2xs"
+        className={cn('w-full table-fixed border-collapse text-2xs', minWidth ?? 'min-w-[36rem]')}
       >
         <caption className="sr-only">{caption}</caption>
+        <colgroup>
+          {columns.map((column) => (
+            <col key={column.label} style={{ width: `${column.width}%` }} />
+          ))}
+        </colgroup>
         <thead>
           <tr>
             {columns.map((column) => (
               <th
-                key={column}
+                key={column.label}
                 scope="col"
-                className="td-legend border-b border-edge-subtle px-2 pb-1.5 pt-1 text-left"
+                className="td-legend whitespace-normal border-b border-edge-subtle px-2 pb-1.5 pt-1 text-left leading-tight"
               >
-                {column}
+                {column.label}
               </th>
             ))}
           </tr>
@@ -173,7 +191,7 @@ export function Cell({
   return (
     <td
       data-cell={numeric ? 'numeric' : undefined}
-      className={cn('px-2 py-1 align-middle', numeric && 'td-value text-2xs', className)}
+      className={cn('break-words px-2 py-1 align-middle', numeric && 'td-value text-2xs', className)}
     >
       {children}
     </td>
@@ -193,9 +211,9 @@ export function ToneWord({
   className?: string;
 }) {
   return (
-    <span className={cn('inline-flex min-w-0 items-center gap-1.5', className)}>
-      <ToneLamp tone={tone} />
-      <span className={cn('truncate', tone.text)}>{word}</span>
+    <span className={cn('inline-flex min-w-0 items-baseline gap-1.5', className)}>
+      <ToneLamp tone={tone} className="relative top-px" />
+      <span className={cn('break-words', tone.text)}>{word}</span>
     </span>
   );
 }
@@ -251,7 +269,7 @@ export function Term({
 }) {
   return (
     <div className="flex min-w-0 flex-col gap-0.5">
-      <dt className="td-legend">{label}</dt>
+      <dt className="td-legend whitespace-normal leading-tight">{label}</dt>
       <dd className={cn('min-w-0 break-words text-2xs text-text-secondary', mono && 'td-value text-2xs')}>
         {children}
       </dd>

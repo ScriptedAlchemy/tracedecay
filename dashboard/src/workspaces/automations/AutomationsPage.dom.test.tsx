@@ -154,7 +154,7 @@ describe("AutomationsPage ledgers", () => {
     expect(within(slop).getByText(/skill_writer · run-sw-1/)).toBeTruthy();
     const bare = within(skills).getByTestId("skill-row-bare");
     expect(within(bare).getByText("disabled")).toBeTruthy();
-    expect(within(bare).getAllByText(/not served/).length).toBe(2);
+    expect(within(bare).getByText(/not served/)).toBeTruthy();
   });
 
   it("renders terminal fact receipts with their state and files them under their run", async () => {
@@ -203,7 +203,7 @@ describe("AutomationsPage ledgers", () => {
     expect(within(running).getByText(/no artifact to verify/)).toBeTruthy();
     const curator = within(ledger).getByTestId("run-row-run-mc-1");
     expect(within(curator).getByText("00:04:00")).toBeTruthy();
-    expect(within(curator).getByText("3")).toBeTruthy();
+    expect(within(curator).getByText("3 artifacts")).toBeTruthy();
     expect(within(curator).getByText(/unchecked · inspect run/)).toBeTruthy();
     expect(within(ledger).getByText(/newest 3 runs served by the daemon · complete/)).toBeTruthy();
   });

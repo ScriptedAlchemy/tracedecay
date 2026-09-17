@@ -1716,10 +1716,10 @@ function analyticsHintsPayload(): Record<string, unknown> {
  * ========================================================================== */
 
 /** `AutomationSchedulerStatusV1` (automation_scheduler_api.rs). */
-function schedulerStatusPayload(): Record<string, unknown> {
+function schedulerStatusPayload(paused = false): Record<string, unknown> {
   return {
-    status: 'configured',
-    paused: false,
+    status: paused ? 'paused' : 'configured',
+    paused,
     enabled: true,
     scheduler_tick_secs: 900,
     now: nowSecs,
@@ -1873,6 +1873,93 @@ function automationRunsPayload(): Record<string, unknown> {
     has_more: false,
     malformed_row_count: 0,
     completeness: 'known',
+    error: '',
+  };
+}
+
+/** The artifact kinds the memory-curator ledger row records, with the digest
+ * each one was published under. Shared by the artifact list and the payload
+ * route so the dashboard's identity guard sees one consistent chain. */
+const CURATOR_RUN_ID = 'run-20260805-193042-memory-curator';
+const CURATOR_ARTIFACTS: ReadonlyArray<Record<string, unknown>> = [
+  {
+    schema_version: 1,
+    kind: 'traces',
+    path: `automation_artifacts/${CURATOR_RUN_ID}/traces.json`,
+    sha256: '9c1b2e6f5d4a7e8b3c2d1f0a6e7b8c9d5e2f1a0b3c4d5e6f7a8b9c0d1e2f3a4b',
+    summary: '6 candidate facts reviewed · 4 accepted · 2 rejected',
+    created_at: String(nowSecs - 2 * DAY + 240),
+  },
+  {
+    schema_version: 1,
+    kind: 'feedback',
+    path: `automation_artifacts/${CURATOR_RUN_ID}/feedback.json`,
+    sha256: '7a3f1d4c9b2e6f8a1d3c4b5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a',
+    created_at: String(nowSecs - 2 * DAY + 241),
+  },
+  {
+    schema_version: 1,
+    kind: 'validation_gate',
+    path: `automation_artifacts/${CURATOR_RUN_ID}/validation_gate.json`,
+    sha256: '2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e',
+    summary: 'gate passed · 0 blocking findings',
+    created_at: String(nowSecs - 2 * DAY + 242),
+  },
+];
+
+/** `automation_run_api::artifact_list` for the one fixture run that recorded
+ * artifacts. The daemon's own verdict word: the published chain re-read from
+ * disk did not match the ledger entry, which is the state a plate must show
+ * beside present artifacts without upgrading it. Any other run id answers the
+ * route's 404 body. */
+function automationRunArtifactsPayload(runId: string): Record<string, unknown> {
+  if (runId !== CURATOR_RUN_ID) {
+    return { detail: `automation run '${runId}' not found` };
+  }
+  const expected = ['traces', 'feedback', 'generated_evals', 'validation_gate', 'optimizer_diagnosis', 'codex_handoff'];
+  const present = CURATOR_ARTIFACTS.map((artifact) => artifact['kind']);
+  return {
+    run_id: runId,
+    artifacts: CURATOR_ARTIFACTS,
+    artifact_chain: {
+      expected_kinds: expected,
+      present_kinds: present,
+      metadata_complete: false,
+      complete: false,
+      integrity_status: 'ledger_publication_mismatch',
+    },
+    count: CURATOR_ARTIFACTS.length,
+    error: '',
+  };
+}
+
+/** `automation_run_api::artifact_payload`: the recorded artifact plus its
+ * JSON body. The kind owns the payload shape, so this is illustrative JSON in
+ * the daemon's envelope, not a contract. */
+function automationRunArtifactPayload(runId: string, kind: string): Record<string, unknown> {
+  const artifact = runId === CURATOR_RUN_ID ? CURATOR_ARTIFACTS.find((row) => row['kind'] === kind) : undefined;
+  if (!artifact) {
+    return { detail: `automation run artifact '${kind}' not found for run '${runId}'` };
+  }
+  return {
+    run_id: runId,
+    artifact,
+    payload: {
+      schema_version: 1,
+      run_id: runId,
+      kind,
+      curation_result: {
+        status: 'succeeded',
+        reviewed_count: 6,
+        accepted_count: 4,
+        rejected_count: 2,
+        applied_ops: [
+          { op: 'normalize_tags', fact_id: 'fact.project.story.0' },
+          { op: 'link_facts', source_fact_id: 'fact.project.story.0', target_fact_id: 'fact.project.story.1' },
+        ],
+        rejected_ops: [{ op: 'merge', reason: 'evidence unavailable' }],
+      },
+    },
     error: '',
   };
 }
@@ -3369,6 +3456,10 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/plugins/analytics/diagnostics': envelope(analyticsDiagnosticsPayload()),
   // Automation.
   '/api/automation/scheduler/status': schedulerStatusPayload(),
+  // The two controls answer with the reading the daemon took after applying
+  // the change; the fixture is stateless, so each answers its own state.
+  '/api/automation/scheduler/pause': schedulerStatusPayload(true),
+  '/api/automation/scheduler/resume': schedulerStatusPayload(false),
   '/api/automation/jobs': jobsPayload(),
   '/api/automation/skills': skillsPayload(),
   '/api/automation/automatic-fact-receipts': automaticFactReceiptsPayload(),
@@ -4578,6 +4669,18 @@ export function resolveFixture(pathname: string, search = ''): unknown {
   // fixture, so without this branch every neighbors read would resolve to the
   // overview payload and the TRACE drill-in would be audited against a shape
   // the daemon never sends on this route.
+  // Per-run artifact evidence: the list with the daemon's chain verdict, and
+  // one artifact's payload. Both are read lazily — only once a run is
+  // inspected — so they are keyed on the run id rather than served flat.
+  const artifactPayload = /^\/api\/automation\/runs\/([^/]+)\/artifacts\/([^/]+)$/.exec(pathname);
+  if (artifactPayload) {
+    return automationRunArtifactPayload(
+      decodeURIComponent(artifactPayload[1]!),
+      decodeURIComponent(artifactPayload[2]!),
+    );
+  }
+  const artifactList = /^\/api\/automation\/runs\/([^/]+)\/artifacts$/.exec(pathname);
+  if (artifactList) return automationRunArtifactsPayload(decodeURIComponent(artifactList[1]!));
   const neighbors = /^\/api\/plugins\/graph\/node\/([^/]+)\/neighbors$/.exec(pathname);
   if (neighbors) {
     // `coerce_limit(params.limit, 50, 200)` in graph_api.rs: default 50, hard

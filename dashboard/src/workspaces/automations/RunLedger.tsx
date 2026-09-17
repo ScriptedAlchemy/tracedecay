@@ -68,7 +68,15 @@ export function RunLedger({
             </p>
           )}
           <LedgerTable
-            columns={['start (utc)', 'task', 'duration', 'outcome', 'fact receipts', 'artifacts', 'integrity']}
+            columns={[
+              { label: 'start (utc)', width: 20 },
+              { label: 'task', width: 22 },
+              { label: 'duration', width: 10 },
+              { label: 'outcome', width: 15 },
+              { label: 'fact receipts', width: 13 },
+              { label: 'artifacts · integrity', width: 20 },
+            ]}
+            minWidth="min-w-[44rem]"
             caption={`Run ledger: ${window.loaded} loaded runs, newest first`}
             onPointerLeave={onLeave}
           >
@@ -142,14 +150,14 @@ function RunLine({
           <span className="td-value text-2xs text-text-primary">
             {timing.kind === 'unparsed' ? timing.startedAt : formatUtc(timing.startedAt)}
           </span>
-          <span className="truncate text-3xs text-text-muted">{run.run_id}</span>
+          <span className="break-all text-3xs text-text-muted">{run.run_id}</span>
         </span>
       }
     >
       <Cell>
         <span className="flex min-w-0 flex-col gap-0.5">
-          <span className="td-value truncate text-2xs text-text-primary">{run.task_key ?? run.task}</span>
-          <span className="truncate text-3xs text-text-muted">
+          <span className="td-value break-all text-2xs text-text-primary">{run.task_key ?? run.task}</span>
+          <span className="break-words text-3xs text-text-muted">
             {run.trigger} · {run.backend}
             {run.model ? ` · ${run.model}` : ''}
           </span>
@@ -178,11 +186,17 @@ function RunLine({
           </span>
         )}
       </Cell>
-      <Cell numeric>
-        {run.artifact_kinds.length === 0 ? <Absent>none recorded</Absent> : run.artifact_kinds.length}
-      </Cell>
       <Cell>
-        <IntegrityCell runId={run.run_id} artifactCount={run.artifact_kinds.length} />
+        <span className="flex min-w-0 flex-col gap-0.5">
+          <span className="td-value text-2xs">
+            {run.artifact_kinds.length === 0 ? (
+              <Absent>none recorded</Absent>
+            ) : (
+              `${run.artifact_kinds.length} ${run.artifact_kinds.length === 1 ? 'artifact' : 'artifacts'}`
+            )}
+          </span>
+          <IntegrityCell runId={run.run_id} artifactCount={run.artifact_kinds.length} />
+        </span>
       </Cell>
     </InspectRow>
   );
@@ -211,10 +225,12 @@ function Duration({ timing }: { timing: ReturnType<typeof runTiming> }) {
  * and once cached the verdict appears here for as long as the cache holds. */
 function IntegrityCell({ runId, artifactCount }: { runId: string; artifactCount: number }) {
   const artifacts = useAutomationRunArtifacts(runId, false);
-  if (artifactCount === 0) return <Absent>no artifact to verify</Absent>;
+  if (artifactCount === 0) return <Absent className="text-3xs">no artifact to verify</Absent>;
   const result = artifacts.data;
-  if (result === undefined) return <Absent>unchecked · inspect run</Absent>;
-  if (result.outcome !== 'ok') return <Absent>verdict {result.outcome.replaceAll('_', ' ')}</Absent>;
+  if (result === undefined) return <Absent className="text-3xs">unchecked · inspect run</Absent>;
+  if (result.outcome !== 'ok') {
+    return <Absent className="text-3xs">verdict {result.outcome.replaceAll('_', ' ')}</Absent>;
+  }
   const status = result.data.artifact_chain.integrity_status;
-  return <ToneWord tone={integrityTone(status)} word={status.replaceAll('_', ' ')} />;
+  return <ToneWord tone={integrityTone(status)} word={status.replaceAll('_', ' ')} className="text-3xs" />;
 }

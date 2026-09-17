@@ -68,7 +68,13 @@ export function UserJobsLedger({
         reading.complete ? <EmptyNotice>no automation jobs defined</EmptyNotice> : null
       ) : (
         <LedgerTable
-          columns={['job', 'schedule', 'state', 'last run (loaded page)', 'outcome']}
+          columns={[
+            { label: 'job', width: 36 },
+            { label: 'schedule', width: 20 },
+            { label: 'state', width: 16 },
+            { label: 'last run · in page', width: 28 },
+          ]}
+          minWidth="min-w-[30rem]"
           caption={`User-defined automation jobs: ${reading.rows.length} listed`}
           onPointerLeave={inspect.onLeave}
         >
@@ -86,8 +92,8 @@ export function UserJobsLedger({
                 onSelect={() => inspect.onSelect(identity)}
                 identity={
                   <span className="flex min-w-0 flex-col gap-0.5">
-                    <span className="truncate text-2xs text-text-primary">{job.name}</span>
-                    <span className="td-value truncate text-3xs text-text-muted">{jobTaskKey(job.id)}</span>
+                    <span className="break-words text-2xs text-text-primary">{job.name}</span>
+                    <span className="td-value break-all text-3xs text-text-muted">{jobTaskKey(job.id)}</span>
                   </span>
                 }
               >
@@ -98,17 +104,19 @@ export function UserJobsLedger({
                     word={job.enabled ? 'enabled' : 'disabled'}
                   />
                 </Cell>
-                <Cell numeric>
+                <Cell>
                   {runs === null ? (
                     <Absent>ledger read blocked</Absent>
                   ) : latest === undefined ? (
                     <Absent>none in loaded page</Absent>
                   ) : (
-                    <Stamp stamp={latest.started_at} />
+                    <span className="flex min-w-0 flex-col gap-0.5">
+                      <ToneWord tone={runStatusTone(latest.status)} word={latest.status} />
+                      <span className="td-value text-3xs text-text-muted">
+                        <Stamp stamp={latest.started_at} />
+                      </span>
+                    </span>
                   )}
-                </Cell>
-                <Cell>
-                  {latest ? <ToneWord tone={runStatusTone(latest.status)} word={latest.status} /> : <Absent>n/a</Absent>}
                 </Cell>
               </InspectRow>
             );
@@ -121,7 +129,7 @@ export function UserJobsLedger({
 
 function Stamp({ stamp }: { stamp: string }) {
   const secs = epochSeconds(stamp);
-  return <>{secs === null ? stamp || <Absent>empty stamp</Absent> : formatUtc(secs)}</>;
+  return <>{secs === null ? stamp || 'empty stamp' : formatUtc(secs)}</>;
 }
 
 /* ---- managed skills ----------------------------------------------------- */
@@ -134,17 +142,26 @@ export function SkillsLedger({ skills, count }: { skills: readonly SkillRow[]; c
       {reading.rows.length === 0 ? (
         reading.complete ? <EmptyNotice>no managed skills have been activated</EmptyNotice> : null
       ) : (
-        <LedgerTable columns={['skill', 'state', 'authority', 'targets']} caption={`Managed skills: ${reading.rows.length} listed`}>
+        <LedgerTable
+          columns={[
+            { label: 'skill', width: 50 },
+            { label: 'state', width: 20 },
+            { label: 'authority', width: 30 },
+          ]}
+          minWidth="min-w-[22rem]"
+          caption={`Managed skills: ${reading.rows.length} listed`}
+        >
           {reading.rows.map((skill) => {
             const meta = skill.metadata;
             return (
               <tr key={meta.id} className="border-b border-edge-subtle last:border-b-0" data-testid={`skill-row-${meta.id}`}>
                 <Cell className="py-2">
                   <span className="flex min-w-0 flex-col gap-0.5">
-                    <span className="truncate text-2xs text-text-primary">{meta.title}</span>
-                    <span className="td-value truncate text-3xs text-text-muted">
+                    <span className="break-words text-2xs text-text-primary">{meta.title}</span>
+                    <span className="td-value break-all text-3xs text-text-muted">
                       {meta.id}
                       {meta.category ? ` · ${meta.category}` : ''}
+                      {meta.targets && meta.targets.length > 0 ? ` · ${meta.targets.join(', ')}` : ''}
                     </span>
                   </span>
                 </Cell>
@@ -154,19 +171,14 @@ export function SkillsLedger({ skills, count }: { skills: readonly SkillRow[]; c
                 <Cell>
                   {meta.provenance ? (
                     <span className="flex min-w-0 flex-col gap-0.5">
-                      <span className="td-value text-2xs text-text-secondary">{meta.provenance.source.replaceAll('_', ' ')}</span>
-                      <span className="truncate text-3xs text-text-muted">
+                      <span className="td-value text-2xs text-text-secondary">
+                        {meta.provenance.source.replaceAll('_', ' ')}
+                      </span>
+                      <span className="break-all text-3xs text-text-muted">
                         {meta.provenance.actor}
                         {meta.provenance.run_id ? ` · ${meta.provenance.run_id}` : ''}
                       </span>
                     </span>
-                  ) : (
-                    <Absent>not served</Absent>
-                  )}
-                </Cell>
-                <Cell>
-                  {meta.targets && meta.targets.length > 0 ? (
-                    <span className="td-value text-3xs text-text-secondary">{meta.targets.join(' · ')}</span>
                   ) : (
                     <Absent>not served</Absent>
                   )}
@@ -200,7 +212,14 @@ export function FactOutcomesLedger({
         reading.complete ? <EmptyNotice>no fact application outcomes are recorded</EmptyNotice> : null
       ) : (
         <LedgerTable
-          columns={['recorded (utc)', 'run', 'state', 'fact', 'evidence']}
+          columns={[
+            { label: 'recorded (utc)', width: 18 },
+            { label: 'run', width: 24 },
+            { label: 'state', width: 12 },
+            { label: 'fact', width: 34 },
+            { label: 'evidence', width: 12 },
+          ]}
+          minWidth="min-w-[40rem]"
           caption={`Automatic fact outcomes: ${reading.rows.length} receipts, newest first`}
           onPointerLeave={inspect.onLeave}
         >
@@ -221,24 +240,24 @@ export function FactOutcomesLedger({
                     <span className="td-value text-2xs text-text-primary">
                       {formatUtc(Math.floor(receipt.recorded_at_micros / 1_000_000))}
                     </span>
-                    <span className="td-value truncate text-3xs text-text-muted">{receipt.apply_id}</span>
+                    <span className="td-value break-all text-3xs text-text-muted">{receipt.apply_id}</span>
                   </span>
                 }
               >
                 <Cell numeric>
-                  <span className="truncate">{receipt.run_id}</span>
+                  <span className="block break-all">{receipt.run_id}</span>
                 </Cell>
                 <Cell>
                   <ToneWord tone={receiptStateTone(receipt.state)} word={receipt.state} />
                 </Cell>
-                <Cell className="max-w-[28rem]">
+                <Cell>
                   {content !== undefined ? (
-                    <span className="line-clamp-2 break-words text-2xs text-text-secondary">{content}</span>
+                    <span className="line-clamp-3 break-words text-2xs text-text-secondary">{content}</span>
                   ) : (
                     <Absent>receipt carries no fact text</Absent>
                   )}
                   {receipt.quarantine_reason ? (
-                    <span className="block truncate text-3xs text-state-error">quarantine: {receipt.quarantine_reason}</span>
+                    <span className="block break-words text-3xs text-state-error">quarantine: {receipt.quarantine_reason}</span>
                   ) : null}
                 </Cell>
                 <Cell numeric>

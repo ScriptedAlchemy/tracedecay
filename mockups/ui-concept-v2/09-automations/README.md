@@ -12,7 +12,7 @@ Route: `/automations`.
 
 - [NAVIGATION.md](../NAVIGATION.md) owns shell, route, scope behavior, and persistent regions.
 - [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual/typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
-- At `975a0acb`, `dashboard/src/workspaces/automations/AutomationsPage.tsx`, `RunHistory.tsx`, and `AutomationsPage.transport.dom.test.tsx` own the scheduler/run read models and transport states.
+- `dashboard/src/workspaces/automations/AutomationsPage.tsx`, `SchedulerBay.tsx`, `RunLedger.tsx`, `RunInspector.tsx`, `AutomationLedgers.tsx`, and the pure model in `ledger.ts` own the scheduler/run read models; `AutomationsPage.transport.dom.test.tsx` holds the transport states. `RunHistory.tsx` remains the compact disclosure list the Knowledge curation console embeds.
 - The concept plate remains synthetic; these source paths identify the production authority, not a claim that the pictured fixture data is live.
 
 ## Canonical semantic-state matrix

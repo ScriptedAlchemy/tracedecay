@@ -27,6 +27,7 @@ import {
   missingArtifactKinds,
   readLastSchedulerRun,
   receiptStateTone,
+  runIsTerminal,
   runStatusTone,
   runTiming,
   type Inspected,
@@ -193,7 +194,7 @@ function InspectLink({ onClick, children }: { onClick: () => void; children: Rea
       onClick={onClick}
       className="group inline-flex min-h-[var(--touch-target-min)] min-w-0 max-w-full items-center text-left"
     >
-      <span className="truncate border-b border-accent/50 text-2xs text-accent group-hover:border-accent">{children}</span>
+      <span className="break-all border-b border-accent/50 text-2xs text-accent group-hover:border-accent">{children}</span>
     </button>
   );
 }
@@ -218,7 +219,7 @@ function RunDetail({
           {timing.kind === 'unparsed' ? timing.startedAt : `${formatUtc(timing.startedAt)} UTC`}
         </span>
         <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-          <span className="td-value min-w-0 truncate text-2xs text-text-secondary">{run.task_key ?? run.task}</span>
+          <span className="td-value min-w-0 break-all text-2xs text-text-secondary">{run.task_key ?? run.task}</span>
           <ToneWord tone={tone} word={run.status} className="text-2xs" />
         </div>
         <span className="td-value break-all text-3xs text-text-muted">{run.run_id}</span>
@@ -388,10 +389,10 @@ function ArtifactLine({
       >
         <span aria-hidden className={cn('absolute inset-y-0 left-0 w-[3px]', selected ? 'bg-accent' : 'bg-transparent')} />
         <span className="flex min-w-0 items-baseline justify-between gap-2">
-          <span className="td-value truncate text-2xs text-text-primary">{artifact.kind.replaceAll('_', ' ')}</span>
+          <span className="td-value break-words text-2xs text-text-primary">{artifact.kind.replaceAll('_', ' ')}</span>
           <span className="td-value shrink-0 text-3xs text-text-muted">{artifact.sha256.slice(0, 12)}</span>
         </span>
-        <span className="truncate text-3xs text-text-muted">
+        <span className="break-words text-3xs text-text-muted">
           {artifact.summary ?? 'no summary recorded'}
           {created !== null ? ` · ${formatUtc(created)}` : ''}
         </span>
@@ -495,7 +496,13 @@ function LastRunSummary({
         <ToneWord tone={runStatusTone(run.status)} word={run.status} />
       </Term>
       <Term label="completed" mono>
-        {completed !== null ? formatUtc(completed) : run.completed_at || <Absent>empty stamp</Absent>}
+        {!runIsTerminal(run.status) ? (
+          <Absent>not settled</Absent>
+        ) : completed !== null ? (
+          formatUtc(completed)
+        ) : (
+          run.completed_at || <Absent>empty stamp</Absent>
+        )}
       </Term>
       <Term label="error">
         {run.error ? <span className="text-state-error">{run.error}</span> : <Absent>none</Absent>}
@@ -520,9 +527,9 @@ function JobDetail({
   return (
     <>
       <div className="flex min-w-0 flex-col gap-1 border-b border-edge-subtle pb-2">
-        <span className="truncate text-sm text-text-primary">{job.name}</span>
+        <span className="break-words text-sm text-text-primary">{job.name}</span>
         <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-          <span className="td-value min-w-0 truncate text-2xs text-text-secondary">{key}</span>
+          <span className="td-value min-w-0 break-all text-2xs text-text-secondary">{key}</span>
           <ToneWord
             tone={job.enabled ? runStatusTone('succeeded') : runStatusTone('skipped')}
             word={job.enabled ? 'enabled' : 'disabled'}
@@ -588,7 +595,7 @@ function ReceiptDetail({
       <div className="flex min-w-0 flex-col gap-1 border-b border-edge-subtle pb-2">
         <span className="td-value text-sm text-text-primary">{formatUtc(recorded)} UTC</span>
         <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-          <span className="td-value min-w-0 truncate text-2xs text-text-secondary">{receipt.apply_id}</span>
+          <span className="td-value min-w-0 break-all text-2xs text-text-secondary">{receipt.apply_id}</span>
           <ToneWord tone={receiptStateTone(receipt.state)} word={receipt.state} className="text-2xs" />
         </div>
       </div>
