@@ -202,40 +202,6 @@ fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface
     }
 }
 
-/// Similar/redundancy cut over to the family wire schema. Protocol revisions
-/// share one (surface, operation) key; `ProtocolRevisionRange` carries the
-/// accepted revisions. Do not mint a second binding for the same spelling;
-/// `index_bindings` rejects duplicate surface-operation keys.
-fn clone_family_surface_bindings(
-    capability_id: &CapabilityId,
-    operation: &str,
-    surfaces: &[BindingSurface],
-) -> Result<(Vec<SurfaceBindingV1>, Vec<BindingId>), ApplicationContractError> {
-    use crate::surface_binding::surface_name;
-
-    let mut bindings = Vec::with_capacity(surfaces.len());
-    let mut binding_ids = Vec::with_capacity(surfaces.len());
-    for surface in surfaces.iter().copied() {
-        let binding_id = BindingId::new(format!(
-            "binding.{}.{}.v1",
-            surface_name(surface),
-            operation
-        ))?;
-        bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
-            binding_id: binding_id.clone(),
-            capability_id: capability_id.clone(),
-            surface,
-            operation: SurfaceOperationName::new(operation)?,
-            protocol_revisions: ProtocolRevisionRange::new(1, 2)?,
-            required_features: Vec::new(),
-            status: BindingStatus::Current,
-            alias_of: None,
-        })?);
-        binding_ids.push(binding_id);
-    }
-    Ok((bindings, binding_ids))
-}
-
 fn primitive_read_description(operation: &str) -> &'static str {
     match operation {
         "code_signature_search" => {
@@ -380,19 +346,13 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
         ))?;
         let surfaces = primitive_read_surfaces(spec);
         let (surface_bindings, mut binding_ids) =
-            if matches!(spec.operation, "similar" | "redundancy") {
-                clone_family_surface_bindings(&capability_id, spec.operation, surfaces)?
-            } else {
-                match ApplicationSurfaceOperation::from_catalog_name(spec.operation) {
-                    Some(operation) => current_application_bindings(
-                        &capability_id,
-                        operation,
-                        surfaces.iter().copied(),
-                    )?,
-                    None => {
-                        current_bindings(&capability_id, spec.operation, surfaces.iter().copied())?
-                    }
-                }
+            match ApplicationSurfaceOperation::from_catalog_name(spec.operation) {
+                Some(operation) => current_application_bindings(
+                    &capability_id,
+                    operation,
+                    surfaces.iter().copied(),
+                )?,
+                None => current_bindings(&capability_id, spec.operation, surfaces.iter().copied())?,
             };
         bindings.extend(surface_bindings);
         binding_ids.reserve(primitive_lsp_methods(spec.operation).len());
