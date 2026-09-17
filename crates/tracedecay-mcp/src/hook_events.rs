@@ -4,6 +4,7 @@
 //! effects such as branch tracking, sync execution, and token-map refreshes.
 
 use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -636,8 +637,12 @@ fn plan_session_start_hook_event(
     current_branch: Option<&str>,
 ) -> HookEventPlan {
     let cwd = event.cwd.as_deref().unwrap_or(project_root);
-    if let Some(plan) = plan_linked_worktree_branch_add(event, cwd, project_root) {
-        return plan;
+    match plan_linked_worktree_branch_add(event, cwd, project_root) {
+        Ok(Some(plan)) => return plan,
+        Ok(None) => {}
+        // Discovery did not decide membership. Do not sync the registered
+        // project's branch as if this cwd were the main checkout.
+        Err(_) => return HookEventPlan::Noop,
     }
     current_branch
         .filter(|branch| !branch.is_empty())
@@ -655,27 +660,76 @@ fn plan_linked_worktree_branch_add(
     event: &HookEvent,
     cwd: &Path,
     project_root: &Path,
-) -> Option<HookEventPlan> {
-    let worktree_root = tracedecay_runtime_core::worktree::git_worktree_root(cwd)?;
+) -> Result<Option<HookEventPlan>, tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown> {
+    let budget = hook_discovery_budget();
+    let identity = match hook_repository_identity(cwd, &budget) {
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Resolved(
+            identity,
+        ) => identity,
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::NotRepository => {
+            return Ok(None);
+        }
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Unknown(reason) => {
+            return Err(reason);
+        }
+    };
+    let worktree_root = identity.worktree_root;
     // A linked worktree's git common dir lives outside its own working tree
     // (it points back at the main checkout's `.git`). In the main checkout the
     // common dir is `<root>/.git`, so the two paths match and we bail out.
-    let common_dir = tracedecay_runtime_core::worktree::git_common_dir(&worktree_root)?;
+    let common_dir = identity.common_dir;
     if path_is_inside(&common_dir, &worktree_root) {
-        return None;
+        return Ok(None);
     }
-    if !git_roots_share_common_dir(&worktree_root, project_root) {
-        return None;
+    let project_common = match hook_repository_identity(project_root, &budget) {
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Resolved(
+            identity,
+        ) => identity.common_dir,
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::NotRepository => {
+            return Ok(None);
+        }
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Unknown(reason) => {
+            return Err(reason);
+        }
+    };
+    if !paths_same(&common_dir, &project_common) {
+        return Ok(None);
     }
-    let branch = tracedecay_runtime_core::branch::current_branch(&worktree_root)?;
+    let Some(branch) = tracedecay_runtime_core::branch::current_branch(&worktree_root) else {
+        return Ok(None);
+    };
     if branch.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some(HookEventPlan::AddBranchAt {
+    Ok(Some(HookEventPlan::AddBranchAt {
         root: worktree_root,
         branch,
         agent: event.agent,
-    })
+    }))
+}
+
+fn hook_discovery_budget() -> (
+    tracedecay_runtime_core::cancellation::MonotonicDeadline,
+    tracedecay_runtime_core::cancellation::CancellationToken,
+) {
+    (
+        tracedecay_runtime_core::cancellation::MonotonicDeadline::at(
+            Instant::now() + Duration::from_secs(2),
+        ),
+        tracedecay_runtime_core::cancellation::CancellationToken::new(),
+    )
+}
+
+fn hook_repository_identity(
+    path: &Path,
+    budget: &(
+        tracedecay_runtime_core::cancellation::MonotonicDeadline,
+        tracedecay_runtime_core::cancellation::CancellationToken,
+    ),
+) -> tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome {
+    tracedecay_runtime_core::git_discovery::discover_repository_identity_with_control(
+        path, budget.0, &budget.1,
+    )
 }
 
 /// Effect-time authorization failure for durable branch-write plans
@@ -691,6 +745,7 @@ pub enum AddBranchAtRootAuthError {
     Unbounded,
     Unresolvable,
     Unauthorized,
+    DiscoveryUnavailable,
 }
 
 impl AddBranchAtRootAuthError {
@@ -702,6 +757,7 @@ impl AddBranchAtRootAuthError {
             | Self::Unbounded
             | Self::Unresolvable
             | Self::Unauthorized => "stale_branch_authorization",
+            Self::DiscoveryUnavailable => "repository_discovery_unavailable",
         }
     }
 }
@@ -722,16 +778,43 @@ pub fn authorize_add_branch_at_root(
     let canonical = bounded
         .canonicalize()
         .map_err(|_| AddBranchAtRootAuthError::Unresolvable)?;
-    let live_worktree_root = tracedecay_runtime_core::worktree::git_worktree_root(&canonical)
-        .and_then(|root| root.canonicalize().ok())
-        .ok_or(AddBranchAtRootAuthError::Unauthorized)?;
+    let budget = hook_discovery_budget();
+    let live = match hook_repository_identity(&canonical, &budget) {
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Resolved(
+            identity,
+        ) => identity,
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::NotRepository => {
+            return Err(AddBranchAtRootAuthError::Unauthorized);
+        }
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Unknown(_) => {
+            return Err(AddBranchAtRootAuthError::DiscoveryUnavailable);
+        }
+    };
+    let live_worktree_root = live
+        .worktree_root
+        .canonicalize()
+        .map_err(|_| AddBranchAtRootAuthError::Unresolvable)?;
     if live_worktree_root != canonical {
         return Err(AddBranchAtRootAuthError::Unauthorized);
     }
     let project_canonical = project_root
         .canonicalize()
         .map_err(|_| AddBranchAtRootAuthError::Unresolvable)?;
-    if !root_belongs_to_project(&canonical, &project_canonical) {
+    if paths_same(&canonical, &project_canonical) {
+        return Ok(canonical);
+    }
+    let project_common = match hook_repository_identity(&project_canonical, &budget) {
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Resolved(
+            identity,
+        ) => identity.common_dir,
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::NotRepository => {
+            return Err(AddBranchAtRootAuthError::Unauthorized);
+        }
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Unknown(_) => {
+            return Err(AddBranchAtRootAuthError::DiscoveryUnavailable);
+        }
+    };
+    if !paths_same(&live.common_dir, &project_common) {
         return Err(AddBranchAtRootAuthError::Unauthorized);
     }
     Ok(canonical)
@@ -786,23 +869,10 @@ fn bound_absolute_add_branch_at_root(path: &Path) -> Result<PathBuf, AddBranchAt
     Ok(normalized)
 }
 
-fn root_belongs_to_project(root: &Path, project_root: &Path) -> bool {
-    paths_same(root, project_root) || git_roots_share_common_dir(root, project_root)
-}
-
 fn path_is_inside(path: &Path, root: &Path) -> bool {
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     path.starts_with(root)
-}
-
-fn git_roots_share_common_dir(a: &Path, b: &Path) -> bool {
-    let a_common = tracedecay_runtime_core::worktree::git_common_dir(a);
-    let b_common = tracedecay_runtime_core::worktree::git_common_dir(b);
-    a_common
-        .as_ref()
-        .zip(b_common.as_ref())
-        .is_some_and(|(a_common, b_common)| paths_same(a_common, b_common))
 }
 
 fn paths_same(a: &Path, b: &Path) -> bool {
@@ -823,6 +893,19 @@ fn read_marker_secs(path: &Path) -> Option<i64> {
 mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
+
+    #[test]
+    fn cancelled_hook_discovery_is_unknown_not_absent() {
+        let budget = super::hook_discovery_budget();
+        budget.1.cancel();
+        let outcome = super::hook_repository_identity(Path::new("."), &budget);
+        assert_eq!(
+            outcome,
+            tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Unknown(
+                tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown::Cancelled
+            )
+        );
+    }
 
     use serde_json::json;
 
