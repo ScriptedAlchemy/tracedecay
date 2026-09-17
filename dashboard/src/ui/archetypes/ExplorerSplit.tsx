@@ -196,6 +196,7 @@ export function BayLegend({ children }: { children: ReactNode }) {
 export function DataRow({
   selected,
   onSelect,
+  onInspect,
   children,
   className,
   height,
@@ -204,6 +205,7 @@ export function DataRow({
 }: {
   selected?: boolean;
   onSelect?: () => void;
+  onInspect?: () => void;
   children: ReactNode;
   className?: string;
   /**
@@ -222,6 +224,8 @@ export function DataRow({
     <button
       type="button"
       onClick={onSelect}
+      onPointerEnter={onInspect}
+      onFocus={onInspect}
       aria-pressed={selected ?? false}
       style={{ height: height != null ? `${height}px` : 'var(--row-height-data)' }}
       className={cn(

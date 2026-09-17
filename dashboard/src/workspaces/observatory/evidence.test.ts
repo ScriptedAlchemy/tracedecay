@@ -185,7 +185,7 @@ describe('summaries', () => {
       staleness_state: 'indexing',
       rebuild_in_flight: false,
       hook_hint_count: 0,
-      coverage: 'partial',
+      coverage: 'partial_source_verification',
       parked: null,
       progress: {
         generation_id: 'g1',

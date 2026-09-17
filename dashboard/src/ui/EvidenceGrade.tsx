@@ -44,6 +44,7 @@ export function GradeTag({
         className,
       )}
       data-grade={grade}
+      data-evidence-grade={grade}
     >
       <span aria-hidden className={cn('size-1.5 shrink-0', visual.lamp)} />
       {source ? (

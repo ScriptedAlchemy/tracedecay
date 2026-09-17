@@ -409,7 +409,7 @@ function freshnessPayload() {
         staleness_state: 'indexing',
         rebuild_in_flight: false,
         hook_hint_count: 0,
-        coverage: 'partial',
+        coverage: 'partial_refresh_in_progress',
         parked: null,
         progress: {
           generation_id: 'generation.catchup.01',
