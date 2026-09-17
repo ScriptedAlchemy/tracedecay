@@ -336,6 +336,13 @@ impl VerifiedGraphQuery {
         self.reader.generation()
     }
 
+    pub fn has_unresolved_callers(&self, targets: &[SymbolOccurrenceId]) -> Result<bool> {
+        self.refuse_if_bound_closed()?;
+        self.reader
+            .has_unresolved_callers(targets, None, Arc::clone(&self.cancellation))
+            .map_err(graph_projection_error)
+    }
+
     pub fn symbol_summary(
         &self,
         occurrence: &SymbolOccurrenceId,

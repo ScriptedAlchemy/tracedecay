@@ -548,6 +548,12 @@ where
     T: AsRef<FileGenerationArtifactsV1>,
 {
     let file = files[index].as_ref();
+    if file.extraction.language.as_str() == "rust"
+        && reference.kind == RelationEdgeKindV1::Calls
+        && reference.reference_name.contains('.')
+    {
+        return None;
+    }
     let qualified = reference.reference_name.contains("::");
     let import = (!qualified)
         .then(|| unique_import(file, &reference.reference_name, reference.kind))

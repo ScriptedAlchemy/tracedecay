@@ -3342,7 +3342,28 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     prepared.generation().clone(),
                 );
             };
-            finish_generation_candidate_page(
+            let mut traversed = vec![start];
+            traversed.extend(
+                found
+                    .keys
+                    .iter()
+                    .filter(|key| key.depth < request.maximum_depth)
+                    .map(|key| key.occurrence.clone()),
+            );
+            let unsupported = match prepared.reader.has_unresolved_callers(
+                &traversed,
+                request.scope.path_prefix.as_deref(),
+                Arc::clone(&cancellation),
+            ) {
+                Ok(unsupported) => unsupported,
+                Err(_) => {
+                    return unavailable_for_generation(
+                        query_finished_at(),
+                        prepared.generation().clone(),
+                    );
+                }
+            };
+            let outcome = finish_generation_candidate_page(
                 &prepared,
                 &context,
                 "code_callers",
@@ -3359,7 +3380,25 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 &request.meta.page,
                 "callers",
                 found.complete,
-            )
+            );
+            match outcome {
+                RetrievalPortOutcome::Completed(mut evidence)
+                | RetrievalPortOutcome::Partial(mut evidence)
+                    if unsupported =>
+                {
+                    evidence.coverage.completeness = CoverageCompleteness::Partial;
+                    for domain in &mut evidence.coverage.domains {
+                        domain.completeness = CoverageCompleteness::Partial;
+                    }
+                    evidence.omissions.push(Omission {
+                        domain: EvidenceDomain::Symbol,
+                        count: 1,
+                        reason: OmissionReason::Unsupported,
+                    });
+                    RetrievalPortOutcome::Partial(evidence)
+                }
+                outcome => outcome,
+            }
         })
     }
 

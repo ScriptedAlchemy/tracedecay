@@ -97,6 +97,7 @@ pub(super) fn import_manifest(
             files,
             symbols: &symbols,
             imports,
+            unresolved_calls: &[],
         }),
         &GraphProjectorRevision::try_from(revision.to_owned()).expect("projector revision"),
         &|| Ok(()),

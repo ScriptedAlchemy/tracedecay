@@ -46,6 +46,7 @@ use self::schema::{
     serialize, stable_identity,
 };
 use self::traversal::{FrontierPath, admit_frontier_path, best_frontier_path, compare_paths};
+use crate::chunks::CodeIndexUnresolvedReferenceV1;
 use crate::lineage::LineageSymbolRecordV1;
 
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
@@ -65,7 +66,8 @@ const TARGET_EDGE_KIND: &str = "CodeRelationTarget";
 /// than mixing row shapes under one identity. v6 stopped projecting one
 /// `CodeChunk` entity and one `CodeChunkDescribesSymbol` relation per chunk
 /// and stores record payloads as JSON strings instead of byte properties.
-pub const CODE_GRAPH_PROJECTOR_REVISION: &str = "code-graph-projector.v6";
+/// v7 carries unresolved receiver-call limitations on each source symbol.
+pub const CODE_GRAPH_PROJECTOR_REVISION: &str = "code-graph-projector.v7";
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum CodeGraphProjectionError {
@@ -165,10 +167,12 @@ pub struct CodeGraphSymbolBindingV1 {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct SymbolRecordV1 {
     occurrence: SymbolOccurrenceId,
     binding: Option<CodeGraphSymbolBindingV1>,
     metadata: Option<LineageSymbolRecordV1>,
+    unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -431,6 +435,7 @@ impl InMemoryCodeGraphProjectionBuilder {
                 files,
                 symbols,
                 imports: &[],
+                unresolved_calls: &[],
             }),
             &revision,
             &check,
@@ -887,6 +892,28 @@ fn validate_symbol_record(record: &SymbolRecordV1) -> Result<(), CodeGraphProjec
     }
     if let Some(metadata) = &record.metadata {
         builder::validate_symbol_metadata(metadata, &record.occurrence)?;
+    }
+    for reference in &record.unresolved_calls {
+        reference
+            .validate()
+            .map_err(|error| CodeGraphProjectionError::Corrupt(error.to_string()))?;
+        if reference.from_occurrence != record.occurrence
+            || reference.kind != RelationEdgeKindV1::Calls
+            || !reference.reference_name.contains('.')
+        {
+            return Err(CodeGraphProjectionError::Corrupt(
+                "unresolved receiver call does not belong to its source symbol".to_owned(),
+            ));
+        }
+    }
+    if record
+        .unresolved_calls
+        .windows(2)
+        .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(CodeGraphProjectionError::Corrupt(
+            "unresolved receiver calls are not canonically ordered".to_owned(),
+        ));
     }
     Ok(())
 }

@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex, RwLock, TryLockError};
 
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, FileOccurrenceId, RelationEdgeKindV1,
-    SanitizedCodeFileV1, SymbolOccurrenceId,
+    SanitizedCodeFileV1, SymbolOccurrenceId, repository_path_matches_scope,
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphEntity, GraphEntityId, GraphProjectionIdentity, GraphRelation,
@@ -296,6 +296,56 @@ impl CodeGraphInteractiveReader {
             kind,
             limit,
         ))
+    }
+
+    /// Whether unresolved receiver sites can name one of the queried methods.
+    /// Matching a member name establishes uncertainty only, never a target edge.
+    pub fn has_unresolved_callers(
+        &self,
+        targets: &[SymbolOccurrenceId],
+        scope_prefix: Option<&str>,
+        request_cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<bool, CodeGraphProjectionError> {
+        let cancellation = self.read_cancellation(request_cancellation)?;
+        let catalog = self.catalog(Arc::clone(&cancellation))?;
+        let mut methods = BTreeSet::new();
+        for target in targets {
+            catalog::check_cancelled(cancellation.as_ref())?;
+            let metadata = catalog
+                .symbols
+                .get(target)
+                .and_then(|symbol| symbol.metadata.as_ref())
+                .ok_or_else(|| {
+                    CodeGraphProjectionError::Unavailable(
+                        "caller target has no admitted symbol metadata".to_owned(),
+                    )
+                })?;
+            if !methods.insert(&metadata.simple_name) {
+                continue;
+            }
+            for source in catalog
+                .unresolved_call_sources
+                .get(&metadata.simple_name)
+                .into_iter()
+                .flatten()
+            {
+                catalog::check_cancelled(cancellation.as_ref())?;
+                let path = catalog
+                    .symbols
+                    .get(source)
+                    .and_then(|symbol| symbol.binding.as_ref())
+                    .and_then(|binding| binding.logical_path.as_deref())
+                    .ok_or_else(|| {
+                        CodeGraphProjectionError::Corrupt(
+                            "unresolved caller source has no bound logical path".to_owned(),
+                        )
+                    })?;
+                if repository_path_matches_scope(path, scope_prefix) {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// Lists the symbols bound to one file occurrence.

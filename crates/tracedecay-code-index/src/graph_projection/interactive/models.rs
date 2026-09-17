@@ -8,7 +8,7 @@ use tracedecay_domain::{
 };
 
 use super::super::CodeGraphSymbolBindingV1;
-use crate::chunks::CodeIndexImportEvidenceV1;
+use crate::chunks::{CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1};
 use crate::lineage::LineageSymbolRecordV1;
 
 /// One symbol as the interactive surface knows it. `metadata` is present for
@@ -94,6 +94,7 @@ pub struct CodeGraphPathSearchV1 {
 pub(super) struct CatalogSymbol {
     pub(super) binding: Option<CodeGraphSymbolBindingV1>,
     pub(super) metadata: Option<LineageSymbolRecordV1>,
+    pub(super) unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
 }
 
 /// Generation-pinned catalog of every file, symbol, and import entity in one
@@ -115,6 +116,7 @@ pub(in crate::graph_projection) struct InteractiveCatalog {
     pub(super) by_logical_path: BTreeMap<String, FileOccurrenceId>,
     pub(super) files: BTreeMap<FileOccurrenceId, SanitizedCodeFileV1>,
     pub(super) imports: Vec<CodeIndexImportEvidenceV1>,
+    pub(super) unresolved_call_sources: BTreeMap<String, Vec<SymbolOccurrenceId>>,
 }
 
 impl InteractiveCatalog {
@@ -127,10 +129,23 @@ impl InteractiveCatalog {
             by_logical_path: BTreeMap::new(),
             files: BTreeMap::new(),
             imports: Vec::new(),
+            unresolved_call_sources: BTreeMap::new(),
         }
     }
 
     pub(super) fn insert(&mut self, occurrence: SymbolOccurrenceId, record: CatalogSymbol) {
+        for reference in &record.unresolved_calls {
+            if let Some(member) = reference.reference_name.rsplit('.').next() {
+                let method = member.split("::").next().unwrap_or(member);
+                let sources = self
+                    .unresolved_call_sources
+                    .entry(method.to_owned())
+                    .or_default();
+                if sources.last() != Some(&occurrence) {
+                    sources.push(occurrence.clone());
+                }
+            }
+        }
         if let Some(metadata) = &record.metadata {
             self.by_qualified_name
                 .entry(metadata.qualified_name.clone())
