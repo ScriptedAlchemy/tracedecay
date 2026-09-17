@@ -209,7 +209,13 @@ function WritableBody({
   const plan = settingsScopePlan(state, scope);
   const rejection = settingsRejection(state);
   const scopeErrors = rejection?.scope === scope ? rejection.errors : [];
-  const fieldError = scopeErrors.find((error) => error.field === binding.field)?.message;
+  // The input wears whichever refusal names its field: a verdict the editor is
+  // resting on first, else the live plan's, so `aria-invalid` is true the
+  // moment the value would be refused rather than only after a review attempt.
+  const liveErrors = plan?.outcome === 'invalid' ? plan.errors : [];
+  const fieldError = [...scopeErrors, ...liveErrors].find(
+    (error) => error.field === binding.field,
+  )?.message;
   const applied = settingsApplied(state);
   const revision = settingsRevisionId(state.authority, scope);
   const proposed = draftValue(state.draft, binding);

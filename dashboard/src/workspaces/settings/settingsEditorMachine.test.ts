@@ -21,6 +21,7 @@ import {
   settingsRejection,
   settingsReviewOf,
   settingsScopeDirty,
+  settingsScopePlan,
   settingsSubmission,
   type SettingsEditorAction,
   type SettingsEditorState,
@@ -69,6 +70,33 @@ describe('settings editor: reaching a confirmed change', () => {
     });
     expect(settingsScopeDirty(confirmed, 'project')).toBe(true);
     expect(settingsScopeDirty(confirmed, 'user')).toBe(false);
+  });
+
+  /** The inline review states validity while the value is still being typed,
+   * from the same plan `review_requested` would freeze — never a second one. */
+  it('replans a scope live without freezing a review', () => {
+    const untouched = initialSettingsEditorState(AUTHORITY);
+    expect(settingsScopePlan(untouched, 'project')).toMatchObject({ outcome: 'unchanged' });
+    expect(settingsScopePlan(initialSettingsEditorState(null), 'project')).toBeNull();
+
+    const edited = run(untouched, {
+      type: 'project_drafted',
+      values: draftMaxFileSize('2097152'),
+    });
+    expect(edited.status).toBe('editing');
+    expect(settingsScopePlan(edited, 'project')).toMatchObject({
+      outcome: 'ready',
+      expectedRevisionId: 'rev-42',
+      patch: { max_file_size: 2_097_152 },
+    });
+    expect(settingsReviewOf(edited)).toBeNull();
+
+    const invalid = run(untouched, { type: 'project_drafted', values: draftMaxFileSize('0') });
+    expect(settingsScopePlan(invalid, 'project')).toMatchObject({
+      outcome: 'invalid',
+      errors: [{ field: 'max_file_size', message: 'max_file_size must be at least 1 byte' }],
+    });
+    expect(settingsRejection(invalid)).toBeNull();
   });
 
   it('issues a submit that names the held revision and the scope authority', () => {

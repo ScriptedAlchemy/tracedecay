@@ -259,6 +259,7 @@ function SectionRow({ section, count }: { section: ConfigSection; count: number 
           {section.title}
         </h2>
         <span className="td-legend">{ORIGIN_WORD[section.origin]}</span>
+        <span className="min-w-0 truncate text-3xs text-text-muted">{section.blurb}</span>
         {section.location ? (
           <span className="td-value min-w-0 truncate text-3xs">
             {section.locationKind === 'path' ? (
