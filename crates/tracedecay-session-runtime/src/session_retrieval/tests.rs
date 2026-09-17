@@ -1188,8 +1188,9 @@ async fn describe_without_a_refresh_worker_does_not_pretend_history_is_convergin
         DaemonSessionRetrievalService::new_without_refresh_worker(harness.registered.clone(), root)
             .expect("registered retrieval service");
     let context = admitted_lookup_context(scope);
-    let cancellation = tracedecay_contracts::CancellationSignal::active("cancellation.session-lookup")
-        .expect("cancellation");
+    let cancellation =
+        tracedecay_contracts::CancellationSignal::active("cancellation.session-lookup")
+            .expect("cancellation");
     let command = LcmDescribeServiceCommand::new(
         "codex",
         SessionId::new("session.describe.worker-missing").expect("session identity"),

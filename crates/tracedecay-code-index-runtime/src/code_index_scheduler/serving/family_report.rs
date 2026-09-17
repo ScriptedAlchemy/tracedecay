@@ -3,7 +3,7 @@ use std::path::{Component, Path};
 use tracedecay_code_index::clones::{
     CloneExactKeyV1, CloneNormalizationClassV1, CodeIndexCloneBodyV1,
 };
-use tracedecay_code_index::production::CodeIndexExecutionControlV1;
+use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexInterruptionV1};
 use tracedecay_contracts::retrieval::{
     RedundancyCoverageV1, RedundancyFamilyV1, RedundancyPartialReasonV1, RedundancyRankingV1,
     RedundancyResultV1, SimilarFamilyV1, SimilarMatchClassV1, SimilarOccurrenceV1,
@@ -14,8 +14,8 @@ use tracedecay_query::retrieval::lexical::{
     CloneArtifactCursorV1, CloneExactArtifactMemberV1, CodeLexicalArtifactErrorV1,
 };
 
-use super::ProductionCodeIndexQueryOwnersV1;
-use crate::query::retrieval::ports::RetrievalPortError;
+use super::{ProductionCodeIndexQueryOwnersV1, checkpoint_text_artifact_control};
+use crate::query::retrieval::ports::{RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalPortError};
 
 impl ProductionCodeIndexQueryOwnersV1 {
     pub(crate) fn redundancy(
@@ -23,6 +23,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
         request: &CodeIndexRedundancyQueryV1,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<RedundancyResultV1, RetrievalPortError> {
+        checkpoint_text_artifact_control(control)?;
         let family_page_limit = request.family_limit.min(request.work_limit / 3).max(1);
         let pull_request_scope_digest = match &request.scope {
             CodeIndexRedundancyScopeV1::PullRequest {
@@ -63,7 +64,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
                 family_page_limit,
                 control,
             )
-            .map_err(redundancy_artifact_error)?;
+            .map_err(clone_artifact_error)?;
         let page_continuation = page.next_cursor.clone();
         let mut families = Vec::with_capacity(page.families.len());
         let mut examined_families = 0usize;
@@ -72,7 +73,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
         let mut work_exhausted = false;
         let mut report_continuation = request.cursor.clone();
         for candidate in page.families {
-            interrupt_family_batch(control)?;
+            checkpoint_text_artifact_control(control)?;
             if work_spent.saturating_add(3) > request.work_limit {
                 work_exhausted = true;
                 break;
@@ -82,7 +83,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
             let source = self
                 .hydration
                 .clone_body(&candidate.representative)
-                .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?
+                .map_err(clone_artifact_error)?
                 .ok_or_else(|| {
                     RetrievalPortError::AuthorityUnavailable(
                         "clone family representative is unavailable".to_owned(),
@@ -153,6 +154,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
                 break;
             }
         }
+        checkpoint_text_artifact_control(control)?;
         let source_generation = self.hydration.metadata().generation.clone();
         let (coverage, next_cursor) = redundancy_coverage(
             work_exhausted,
@@ -185,6 +187,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
         let mut cursor = None;
         let mut work_spent = 0usize;
         loop {
+            checkpoint_text_artifact_control(control)?;
             if members.len() >= result_limit {
                 return Ok(RedundancyMemberReadV1 {
                     members,
@@ -215,9 +218,12 @@ impl ProductionCodeIndexQueryOwnersV1 {
                     page_limit,
                     control,
                 )
-                .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?;
+                .map_err(clone_artifact_error)?;
             work_spent = work_spent.saturating_add(page.members.len());
-            for member in page.members {
+            for (ordinal, member) in page.members.into_iter().enumerate() {
+                if ordinal.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
+                    checkpoint_text_artifact_control(control)?;
+                }
                 if report_path_matches(&member.occurrence.path, path, include_generated_paths)
                     && tracedecay_code_index::clones::verify_exact_clone_payload(
                         &source.payload,
@@ -228,6 +234,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
                     members.push(member);
                 }
             }
+            checkpoint_text_artifact_control(control)?;
             match page.next_cursor {
                 Some(next) => cursor = Some(next),
                 None => {
@@ -244,8 +251,14 @@ impl ProductionCodeIndexQueryOwnersV1 {
     }
 }
 
-fn redundancy_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortError {
+pub(super) fn clone_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortError {
     match error {
+        CodeLexicalArtifactErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled) => {
+            RetrievalPortError::Cancelled
+        }
+        CodeLexicalArtifactErrorV1::Interrupted(CodeIndexInterruptionV1::DeadlineExceeded) => {
+            RetrievalPortError::BudgetExceeded
+        }
         CodeLexicalArtifactErrorV1::Contract(message)
             if message == "clone family cursor does not match its artifact or request" =>
         {
@@ -266,18 +279,6 @@ struct RedundancyMemberReadV1 {
 fn report_path_matches(path: &str, scope: Option<&str>, include_generated_paths: bool) -> bool {
     tracedecay_domain::repository_path_matches_scope(path, scope)
         && (include_generated_paths || !is_generated_path(path))
-}
-
-pub(super) fn interrupt_family_batch(
-    control: &dyn CodeIndexExecutionControlV1,
-) -> Result<(), RetrievalPortError> {
-    if control.is_cancelled() {
-        Err(RetrievalPortError::Cancelled)
-    } else if control.is_deadline_exceeded() {
-        Err(RetrievalPortError::BudgetExceeded)
-    } else {
-        Ok(())
-    }
 }
 
 fn is_generated_path(path: &str) -> bool {
@@ -346,26 +347,17 @@ fn redundancy_coverage(
 
 #[cfg(test)]
 mod tests {
-    use super::{RetrievalPortError, interrupt_family_batch, is_generated_path};
-    use tracedecay_code_index::production::CodeIndexExecutionControlV1;
-
-    struct CancelledControl;
-
-    impl CodeIndexExecutionControlV1 for CancelledControl {
-        fn is_cancelled(&self) -> bool {
-            true
-        }
-
-        fn is_deadline_exceeded(&self) -> bool {
-            false
-        }
-    }
+    use super::{clone_artifact_error, is_generated_path};
+    use tracedecay_code_index::production::CodeIndexInterruptionV1;
+    use tracedecay_query::retrieval::{RetrievalPortError, lexical::CodeLexicalArtifactErrorV1};
 
     #[test]
-    fn a_cancelled_family_batch_stops_before_the_next_family() {
+    fn clone_page_interruption_preserves_cancellation() {
         assert_eq!(
-            interrupt_family_batch(&CancelledControl).unwrap_err(),
-            RetrievalPortError::Cancelled
+            clone_artifact_error(CodeLexicalArtifactErrorV1::Interrupted(
+                CodeIndexInterruptionV1::Cancelled,
+            )),
+            RetrievalPortError::Cancelled,
         );
     }
 

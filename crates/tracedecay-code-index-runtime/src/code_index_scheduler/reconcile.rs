@@ -1520,32 +1520,34 @@ impl CodeIndexWorktreeSchedulerV1 {
         };
         // Equal metadata is not currency. A quiet Noop is only honest when
         // this pass decoded the generation and re-derived every sealed digest.
-        // Otherwise return None so the caller runs the content proof now;
-        // a later wake is not a substitute, because this empty-slot seat is
-        // the first branch and would keep swallowing the pass.
+        // A dirty remount (hints, config drift, or a moved frontier) must still
+        // seat from the durable pointer without joining the publication decode
+        // barrier — activation may already own that flight.
+        let frontier_sweep = self.retained_frontier_stat_sweep(&pointer);
         let content_matches = decoded.as_ref().is_some_and(|generation| {
-            self.retained_frontier_stat_sweep(&pointer)
-                .is_some_and(|sweep| {
-                    sweep.content_matches(
-                        &self.project_root,
-                        &SourceContentManifestV1::for_snapshot(generation.snapshot()),
-                        &self.shutting_down,
-                    )
-                })
+            frontier_sweep.as_ref().is_some_and(|sweep| {
+                sweep.content_matches(
+                    &self.project_root,
+                    &SourceContentManifestV1::for_snapshot(generation.snapshot()),
+                    &self.shutting_down,
+                )
+            })
         });
-        if !retained_empty_seat_settles_source(decoded.is_some(), content_matches) {
-            return Ok(None);
-        }
-        let Some(generation) = decoded else {
-            return Ok(None);
-        };
         let dirty = {
             let hints = self
                 .hints
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             hints.overflow || !hints.paths.is_empty()
-        } || configuration_changed;
+        } || configuration_changed
+            || frontier_sweep.is_none()
+            || (decoded.is_some() && !content_matches);
+        if !dirty && !retained_empty_seat_settles_source(decoded.is_some(), content_matches) {
+            // Quiet + undecoded (or unproven) must not settle: a later wake is
+            // not a substitute, because this empty-slot seat is the first
+            // branch and would keep swallowing the content-proof pass.
+            return Ok(None);
+        }
         if dirty {
             self.request_background_reconcile();
         }
@@ -1553,8 +1555,13 @@ impl CodeIndexWorktreeSchedulerV1 {
         // `load_active_shared` here parked remount on the publication
         // barrier while activation owned it, so the seated event never
         // published and the dirty successor extract never started.
-        self.adopt_ignored_source_roster(&generation);
-        let snapshot_content_identity = generation.snapshot().content_identity.clone();
+        let snapshot_content_identity = if let Some(generation) = decoded {
+            self.adopt_ignored_source_roster(&generation);
+            generation.snapshot().content_identity.clone()
+        } else {
+            ContentDigest::new(pointer.snapshot_content_identity.clone())
+                .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?
+        };
         self.latest_content_identity = Some(snapshot_content_identity.clone());
         Ok(Some(CodeIndexReconcileOutcomeV1::Noop(
             CodeIndexNoopEvidenceV1 {
@@ -3787,8 +3794,9 @@ fn changed_paths_between_trees(
 /// A quiet empty-slot seat may end the pass only when the generation was
 /// decoded and its sealed file digests still match the bytes on disk.
 ///
-/// Equal stat metadata with no decoded generation is not currency. Callers
-/// that treat `false` as a settled Noop will skip the content proof.
+/// Equal stat metadata with no decoded generation is not currency. Dirty
+/// remount seating bypasses this gate and may emit a Noop from the durable
+/// pointer without joining the publication decode barrier.
 pub(crate) fn retained_empty_seat_settles_source(
     generation_decoded: bool,
     content_matches: bool,

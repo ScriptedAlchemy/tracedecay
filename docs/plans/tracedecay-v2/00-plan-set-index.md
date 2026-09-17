@@ -227,10 +227,7 @@ records the rejected mechanism, the reason, and the retained replacement:
 6. **The Cargo shim and `cargo-slot` are rejected.** The earlier local build
    shim was removed by explicit direction and is not product, contributor, CI,
    or release architecture. Stock Cargo behavior and portable repository
-   configuration supersede it. Machine-local cargo-conductor brokers `cargo`
-   invocations; `kache` remains the `rustc-wrapper` compile cache, not a
-   cargo prefix. Neither is a revived cargo-slot, and neither is product or
-   CI architecture.
+   configuration supersede it. Run ordinary `cargo` commands.
 7. **Delivery choreography is not product authority.** Capability plans,
    production callers, direct behavior, and ordinary CI define completion;
    branch, worktree, or pull-request layouts do not.

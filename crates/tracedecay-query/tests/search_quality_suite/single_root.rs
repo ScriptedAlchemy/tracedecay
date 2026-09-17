@@ -323,6 +323,7 @@ fn fixture(disposition: GraphDisposition) -> SingleRootFixture {
         CentralExactAdmissionAuthorityV1::new(id::<ExactAdmissionRuleRevision>("exact-rules.v1"));
     let exact_query_view = query_view("--release");
     let exact_request = ExactLaneRequest {
+        control: &FixtureRetrievalExecutionControl,
         literals: authority.parse_literals(&exact_query_view, &request),
         base: request.clone(),
         query_view: &exact_query_view,

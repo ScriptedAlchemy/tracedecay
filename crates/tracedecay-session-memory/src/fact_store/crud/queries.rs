@@ -1025,7 +1025,15 @@ impl DatabaseFactStore<'_> {
                 // settled yet. Acceptance harnesses park exactly here to make a
                 // budget that expires after the commit point reproducible.
                 #[cfg(feature = "test-transport")]
-                crate::fact_store::commit_barrier::wait_after_durable_fact_commit().await;
+                {
+                    let barrier_content = batch
+                        .assertion()
+                        .map(|assertion| assertion.payload().content().to_owned());
+                    crate::fact_store::commit_barrier::wait_after_durable_fact_commit(
+                        barrier_content.as_deref(),
+                    )
+                    .await;
+                }
             } else {
                 transaction
                     .rollback()

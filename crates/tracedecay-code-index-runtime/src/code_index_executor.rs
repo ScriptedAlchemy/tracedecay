@@ -1515,11 +1515,15 @@ where
                     );
                 }
             };
+            let read_control = Arc::clone(&control);
             let read = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                owners.similar(&request, control.as_ref())
+                owners.similar(&request, read_control.as_ref())
             })
             .await;
+            if let Some(reason) = control.request_termination() {
+                return unavailable(reason);
+            }
             match read {
                 Ok(Ok(Some(result))) => {
                     code_search::CodeIndexSimilarOutcomeV1::Complete(Box::new(result))
@@ -1707,11 +1711,15 @@ where
                     );
                 }
             };
+            let read_control = Arc::clone(&control);
             let read = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                owners.redundancy(&request, control.as_ref())
+                owners.redundancy(&request, read_control.as_ref())
             })
             .await;
+            if let Some(reason) = control.request_termination() {
+                return unavailable(reason);
+            }
             match read {
                 Ok(Ok(outcome)) => Ok(outcome),
                 Ok(Err(

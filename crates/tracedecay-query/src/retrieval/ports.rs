@@ -29,6 +29,20 @@ pub trait RetrievalExecutionControl: Send + Sync {
     fn elapsed_micros(&self) -> u64;
 }
 
+/// One sealed lexical artifact page's worth of candidate work. Readers keep
+/// streaming rows, but consult request authority before starting the next page.
+pub const RETRIEVAL_CANDIDATE_BATCH_SIZE: usize = 128;
+
+pub(crate) fn retrieval_checkpoint(
+    control: &dyn RetrievalExecutionControl,
+) -> Result<(), RetrievalPortError> {
+    if control.is_cancelled() {
+        Err(RetrievalPortError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
 /// Incompatible indexes or models never trigger silent fallback.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum RetrievalPortError {

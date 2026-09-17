@@ -45,14 +45,14 @@ The installed artifact identified itself as:
 tracedecay 0.1.0-beta.37+2314bd9a349479e965bc43030713ca2580b8b6d0
 ```
 
-Hauler built and installed the artifact:
+The artifact was built and installed with these recorded commands:
 
 - `cc-21907` ran `cargo build --release -p tracedecay-cli --bin tracedecay`.
 - `cc-21908` ran `cargo install --path crates/tracedecay-cli --root /fast/tmp/td-1281-dogfood-state-2314bd9/install --locked --force` after `cc-21907`.
 
 The earlier `cc-21881` build completed before the branch rebase. The replacement
-build and install tickets `cc-21900` and `cc-21902` were killed when the Hauler
-daemon stopped, so this journey did not use their artifacts.
+build and install attempts `cc-21900` and `cc-21902` were interrupted, so this
+journey did not use their artifacts.
 
 ## Typed state results
 

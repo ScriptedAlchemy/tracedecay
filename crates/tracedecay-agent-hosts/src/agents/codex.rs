@@ -89,6 +89,23 @@ impl AgentIntegration for CodexIntegration {
         ctx: &InstallContext,
     ) -> Result<NonInteractiveInstallOutcome> {
         install_codex_plugin(&ctx.home, &ctx.tracedecay_bin)?;
+        // Core apply drives `codex plugin add` when the host CLI is present.
+        // When it is not, stop with the same backtick remediation preflight
+        // uses so operators (and lifecycle tests) can activate natively.
+        if plugin_registry::require_codex_plugin_cli().is_err() {
+            let marketplace_name = codex_exact_personal_marketplace_name(&ctx.home)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| codex_cached_marketplace_name(&ctx.home));
+            return Ok(NonInteractiveInstallOutcome::DeferredUserAction(
+                DeferredUserAction {
+                    remediation: format!(
+                        "Codex activates plugins through its native cache. Run `codex plugin add tracedecay@{marketplace_name}` after TraceDecay stages the source package."
+                    ),
+                    staged_paths: Vec::new(),
+                },
+            ));
+        }
         Ok(NonInteractiveInstallOutcome::Ready)
     }
 

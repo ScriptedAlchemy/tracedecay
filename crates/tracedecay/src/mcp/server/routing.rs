@@ -217,13 +217,9 @@ async fn resolve_initialize_roots_project_route(
     }
     let discovery = repository_discovery();
     for root in roots {
-        let route = resolve_private_project_route_within(
-            &root,
-            registry_db,
-            resolver.clone(),
-            &discovery,
-        )
-        .await;
+        let route =
+            resolve_private_project_route_within(&root, registry_db, resolver.clone(), &discovery)
+                .await;
         if !matches!(
             &route,
             WorkspaceProjectRoute::Failed(ProjectRouteFailure {
@@ -255,6 +251,38 @@ pub(crate) async fn resolve_private_project_route(
     .await
 }
 
+async fn resolve_private_selected_path(
+    requested_path: &Path,
+    registry_db: &RegisteredGlobalDb,
+    discovery: &RepositoryDiscovery,
+) -> Result<PathBuf, ProjectRouteFailure> {
+    match resolve_initialize_root_project_path(requested_path, registry_db, discovery).await {
+        Ok(Some(path)) => Ok(path),
+        Ok(None) => Err(ProjectRouteFailure {
+            kind: ProjectRouteFailureKind::NotFound,
+            detail: format!(
+                "workspace {} did not resolve to a registered project",
+                requested_path.display()
+            ),
+        }),
+        Err(InitializeRootResolutionError::AmbiguousIdentity) => Err(ProjectRouteFailure {
+            kind: ProjectRouteFailureKind::Ambiguous,
+            detail: format!(
+                "workspace {} matches multiple registered projects",
+                requested_path.display()
+            ),
+        }),
+        Err(InitializeRootResolutionError::AuthorityUnavailable) => Err(ProjectRouteFailure {
+            kind: ProjectRouteFailureKind::Unavailable,
+            detail: "private project route authority is unavailable".to_owned(),
+        }),
+        Err(InitializeRootResolutionError::Discovery(reason)) => Err(ProjectRouteFailure {
+            kind: ProjectRouteFailureKind::Unavailable,
+            detail: format!("repository discovery {reason}"),
+        }),
+    }
+}
+
 async fn resolve_private_project_route_within(
     requested_path: &Path,
     registry_db: Option<&RegisteredGlobalDb>,
@@ -268,38 +296,9 @@ async fn resolve_private_project_route_within(
         });
     };
     let selected_path =
-        match resolve_initialize_root_project_path(requested_path, registry_db, discovery).await {
-            Ok(Some(path)) => path,
-            Ok(None) => {
-                return WorkspaceProjectRoute::Failed(ProjectRouteFailure {
-                    kind: ProjectRouteFailureKind::NotFound,
-                    detail: format!(
-                        "workspace {} did not resolve to a registered project",
-                        requested_path.display()
-                    ),
-                });
-            }
-            Err(InitializeRootResolutionError::AmbiguousIdentity) => {
-                return WorkspaceProjectRoute::Failed(ProjectRouteFailure {
-                    kind: ProjectRouteFailureKind::Ambiguous,
-                    detail: format!(
-                        "workspace {} matches multiple registered projects",
-                        requested_path.display()
-                    ),
-                });
-            }
-            Err(InitializeRootResolutionError::AuthorityUnavailable) => {
-                return WorkspaceProjectRoute::Failed(ProjectRouteFailure {
-                    kind: ProjectRouteFailureKind::Unavailable,
-                    detail: "private project route authority is unavailable".to_owned(),
-                });
-            }
-            Err(InitializeRootResolutionError::Discovery(reason)) => {
-                return WorkspaceProjectRoute::Failed(ProjectRouteFailure {
-                    kind: ProjectRouteFailureKind::Unavailable,
-                    detail: format!("repository discovery {reason}"),
-                });
-            }
+        match resolve_private_selected_path(requested_path, registry_db, discovery).await {
+            Ok(path) => path,
+            Err(failure) => return WorkspaceProjectRoute::Failed(failure),
         };
     let context = match registry_db
         .project_registry_context_by_alias(&selected_path)
@@ -376,7 +375,9 @@ async fn resolve_initialize_roots_project_path(
     }
     let registry_db = registry_db?;
     for root in roots {
-        match resolve_initialize_root_project_path(&root, registry_db, &repository_discovery()).await {
+        match resolve_initialize_root_project_path(&root, registry_db, &repository_discovery())
+            .await
+        {
             Ok(Some(project_path)) => return Some(project_path),
             Ok(None) => {}
             Err(_) => return None,
@@ -417,7 +418,7 @@ async fn resolve_initialize_root_project_path(
                 .await
             {
                 Ok(Some(context)) => {
-                    candidates.push((identity.worktree_root, context.project.project_id))
+                    candidates.push((identity.worktree_root, context.project.project_id));
                 }
                 Ok(None) => {}
                 Err(_) => return Err(InitializeRootResolutionError::AuthorityUnavailable),

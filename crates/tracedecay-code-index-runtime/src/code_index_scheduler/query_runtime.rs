@@ -743,6 +743,7 @@ where
             generation: generation.clone(),
             literals: parser.parse_literals(query_view, request),
             budget: request.budget,
+            control: graph_control.as_ref(),
         })
     })?;
     let route_plan = LexicalRoutePlanV1::plan(query_view.as_str(), &input.lexical_routing)?;

@@ -20,8 +20,9 @@ use tracedecay_domain::{
 
 use super::ports::{
     CodeCandidateBindingV1, LaneBoundEvidence, LaneEvidenceRejections, LexicalPostingReadPort,
-    RetrievalExecutionControl, RetrievalPortError, candidate_checkpoint_prefix, checkpoint_digest,
-    contract_error, lane_bound_evidence, lane_candidate_cap,
+    RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalExecutionControl, RetrievalPortError,
+    candidate_checkpoint_prefix, checkpoint_digest, contract_error, lane_bound_evidence,
+    lane_candidate_cap, retrieval_checkpoint,
 };
 
 mod projection;
@@ -328,28 +329,13 @@ pub struct LexicalLaneRequest<'a> {
     pub score_domain: ScoreDomainId,
     pub budget: RetrievalBudget,
     /// The live request authority the lane consults between bounded units of
-    /// row work ([`lexical_checkpoint`]). The candidate-source bound keeps one
+    /// row work. The candidate-source bound keeps one
     /// request's hydration finite, but a caller that has already settled —
     /// cancelled, past its deadline, or revoked — must not keep the shared
     /// search execution permit occupied while the remaining rows decode and
     /// score. Cancellation unwinds the scan with
     /// [`RetrievalPortError::Cancelled`] instead of an empty or partial batch.
     pub control: &'a dyn RetrievalExecutionControl,
-}
-
-/// The lexical lane's cooperative cancellation checkpoint.
-///
-/// Called before each candidate row is decoded and scored, and between the
-/// scan's phases, so cancellation performs at most one further row visit
-/// after the signal. An uncancelled request never observes it, which keeps
-/// candidate order, evidence, and coverage identical to an unchecked scan.
-pub(crate) fn lexical_checkpoint(
-    control: &dyn RetrievalExecutionControl,
-) -> Result<(), RetrievalPortError> {
-    if control.is_cancelled() {
-        return Err(RetrievalPortError::Cancelled);
-    }
-    Ok(())
 }
 
 /// Per-occurrence lexical-lane evidence with its field score breakdown.
@@ -587,7 +573,10 @@ where
         let mut admitted: Vec<(CompactCandidate, LexicalLaneEvidence, FixedPointScore)> =
             Vec::with_capacity(batch.candidates.len());
         let mut excluded = 0_u64;
-        for candidate in &batch.candidates {
+        for (ordinal, candidate) in batch.candidates.iter().enumerate() {
+            if ordinal.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
+                retrieval_checkpoint(request.control)?;
+            }
             let evidence = lane_bound_evidence(
                 batch,
                 candidate,
@@ -642,6 +631,9 @@ where
         let mut candidates = Vec::with_capacity(admitted.len());
         let mut evidence_by_occurrence = BTreeMap::new();
         for (ordinal, (mut candidate, evidence, raw_score)) in admitted.into_iter().enumerate() {
+            if ordinal.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
+                retrieval_checkpoint(request.control)?;
+            }
             candidate.ordinal_rank = ordinal as u32;
             candidate.raw_score = raw_score;
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
@@ -655,6 +647,7 @@ where
         let eligible = batch.coverage.eligible.max(seen).saturating_sub(excluded);
         let capped = batch.coverage.capped.saturating_add(truncated as u64);
         let exhausted = truncated == 0 && batch.coverage.capped == 0;
+        retrieval_checkpoint(request.control)?;
         let checkpoint_digest = lexical_checkpoint_digest(&request.generation, &candidates)?;
         let rebuilt = RetrieverBatch {
             candidates,
@@ -687,7 +680,7 @@ where
         request: &LexicalLaneRequest<'_>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalPortError> {
         request.validate()?;
-        lexical_checkpoint(request.control)?;
+        retrieval_checkpoint(request.control)?;
         let outcome = match self.postings.read_lexical_postings(request) {
             Ok(outcome) => outcome,
             // A missing lexical authority rejects the request as a typed

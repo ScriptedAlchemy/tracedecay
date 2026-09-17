@@ -21,8 +21,20 @@ use super::{
     ExactLaneRequest, ExactLaneRetriever, ExactLiteralV1,
 };
 use crate::retrieval::ports::{
-    CodeCandidateBindingV1, CodeOccurrenceRefV1, ExactTermPostingReadPort, RetrievalPortError,
+    CodeCandidateBindingV1, CodeOccurrenceRefV1, ExactTermPostingReadPort,
+    RetrievalExecutionControl, RetrievalPortError,
 };
+
+struct ActiveControl;
+
+impl RetrievalExecutionControl for ActiveControl {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+    fn elapsed_micros(&self) -> u64 {
+        0
+    }
+}
 
 fn id<T>(value: &str) -> T
 where
@@ -179,6 +191,7 @@ fn exact_request(
         .expect("query sanitizes"),
     ));
     ExactLaneRequest {
+        control: &ActiveControl,
         literals: authority.parse_literals(query_view, &base),
         base,
         query_view,

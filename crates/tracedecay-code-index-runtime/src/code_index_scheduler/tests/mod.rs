@@ -69,7 +69,7 @@ fn canonical_temp_root() -> std::path::PathBuf {
     canonical_root_identity(&std::env::temp_dir())
 }
 
-struct GitFixture {
+pub(super) struct GitFixture {
     root: TempDir,
 }
 
@@ -81,7 +81,7 @@ const RETAINED_REVISION_0: &[(&str, &str)] =
     &[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")];
 
 impl GitFixture {
-    fn new(files: &[(&str, &str)]) -> Self {
+    pub(super) fn new(files: &[(&str, &str)]) -> Self {
         if files == ALPHA_LIB_V1 {
             return Self::from_template(alpha_lib_v1_template());
         }
@@ -130,7 +130,7 @@ impl GitFixture {
         Self { root }
     }
 
-    fn path(&self) -> &Path {
+    pub(super) fn path(&self) -> &Path {
         self.root.path()
     }
 
@@ -619,7 +619,7 @@ impl RetrievalExecutionControl for ReadyRetrievalControlV1 {
     }
 }
 
-fn application_context(
+pub(super) fn application_context(
     operation: &tracedecay_contracts::ApplicationOperation,
     repository: RepositoryId,
     worktree: WorktreeId,
@@ -655,7 +655,7 @@ fn application_context(
     .expect("request context")
 }
 
-fn query_meta() -> RetrievalRequestMeta {
+pub(super) fn query_meta() -> RetrievalRequestMeta {
     RetrievalRequestMeta::current(
         PageRequest::first(16).expect("page"),
         ResultProjection::Evidence,
@@ -1014,7 +1014,7 @@ fn core_search_request(query: &str) -> super::query_runtime::QuerySearchExecutio
 
 /// Mount one worktree, publish an initial generation, and mount the core
 /// query authority for its exact scope.
-async fn mounted_core_query_worktree(
+pub(super) async fn mounted_core_query_worktree(
     fixture: &GitFixture,
     store: &TempDir,
 ) -> (CodeIndexSchedulerRegistryV1, ResolvedScope) {
@@ -1509,7 +1509,25 @@ async fn wait_for_dashboard_ready(registry: &CodeIndexSchedulerRegistryV1, path:
                         && freshness.coverage == tracedecay_contracts::code_index_freshness::CodeIndexFreshnessCoverageV1::Complete
                 });
             if ready {
-                break;
+                // Fresh is projected whenever refresh_in_flight is briefly
+                // false between owner passes. Join the seating pass and
+                // re-sample so ready is not a trough before Verifying.
+                wait_for_quiescent_owner_pass(registry, path).await;
+                let still_ready = registry
+                    .dashboard_freshness(path)
+                    .await
+                    .is_some_and(|freshness| {
+                        freshness.staleness_state
+                            == Some(
+                                tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh,
+                            )
+                            && freshness.coverage
+                                == tracedecay_contracts::code_index_freshness::CodeIndexFreshnessCoverageV1::Complete
+                    });
+                if still_ready && !registry.reconcile_in_progress_for_test(path).await {
+                    break;
+                }
+                continue;
             }
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
@@ -1525,7 +1543,7 @@ async fn wait_for_dashboard_ready(registry: &CodeIndexSchedulerRegistryV1, path:
 /// through the text owner, so that slot is the typed receipt this wait joins.
 /// The text lane publishes the per-worktree serving-generation watch, so
 /// [`wait_until_serving_seat`] blocks on that signal rather than sampling.
-async fn wait_for_queryable_text_generation(
+pub(super) async fn wait_for_queryable_text_generation(
     registry: &CodeIndexSchedulerRegistryV1,
     path: &Path,
 ) -> super::LatestCodeTextGenerationV1 {

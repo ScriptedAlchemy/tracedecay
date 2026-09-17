@@ -59,4 +59,3 @@ matching guide instead of copying its rules here:
 - Read the `discovering-tracedecay` skill (tracedecay plugin) for TraceDecay
   operations.
 - Read the `ripwire-router` skill (Ripwire agent skills) for Ripwire task routing.
-- Read the `cargo-hauler` skill (cargo-hauler plugin) for Cargo execution.
