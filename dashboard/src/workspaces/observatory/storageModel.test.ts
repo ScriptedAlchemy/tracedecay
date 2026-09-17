@@ -135,7 +135,6 @@ describe('Observatory storage read models', () => {
       stores: [
         {
           store: 'graph.db',
-          role: 'graph',
           roles: ['graph', 'memory'],
           path: '/profile/graph.db',
           read: {

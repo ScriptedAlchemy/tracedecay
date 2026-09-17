@@ -21487,10 +21487,6 @@
           "$ref": "#/$defs/StorageTelemetryReadV1",
           "description": "The typed telemetry read: `observed` with a sample, or `unknown` when the\npragma read failed. Never silently healthy."
         },
-        "role": {
-          "description": "The dashboard's primary role label for the store (`graph` / `memory` /\n`lcm` / `savings`). Retained for compatibility; see `roles` for the\ncomplete set.",
-          "type": "string"
-        },
         "roles": {
           "description": "Every dashboard role served by this one store file. More than one role\nhere means the roles share a database, not that a store was duplicated.",
           "items": {
@@ -21517,7 +21513,6 @@
       },
       "required": [
         "store",
-        "role",
         "roles",
         "path",
         "read",

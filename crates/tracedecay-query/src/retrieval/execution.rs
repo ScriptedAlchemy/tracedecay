@@ -69,8 +69,6 @@ pub struct NativeSymbolRecordV1 {
     pub kind: String,
     pub path: String,
     pub span: SourceSpan,
-    pub start_line_zero_based: u32,
-    pub end_line_zero_based: u32,
     pub line: u32,
     pub end_line: u32,
     pub signature: Option<String>,

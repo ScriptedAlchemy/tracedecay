@@ -1054,7 +1054,9 @@ async fn expired_source_proof_reschedules_pending_clone_backfill() {
         settled.is_ok(),
         "the source refresh stranded clone backfill: pending_wake={:?} reconcile_in_progress={} source_age={:?} receipts={:?}",
         registry.pending_wake_micros_for_scope(&scope).await,
-        registry.reconcile_in_progress_for_test(fixture.path()).await,
+        registry
+            .reconcile_in_progress_for_test(fixture.path())
+            .await,
         source_freshness
             .state
             .lock()
@@ -4542,8 +4544,6 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
             assert_eq!(callee.edge_kind, "calls");
             assert_eq!(callee.symbol.name, "callee");
             assert_eq!(callee.symbol.file, "src/lib.rs");
-            assert_eq!(callee.symbol.start_line_zero_based, 13);
-            assert_eq!(callee.symbol.end_line_zero_based, 13);
             assert_eq!(callee.symbol.line, 14);
             assert_eq!(callee.symbol.end_line, 14);
         }

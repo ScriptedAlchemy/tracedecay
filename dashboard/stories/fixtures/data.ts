@@ -2193,7 +2193,6 @@ const storageTelemetry = envelope({
       // Shared store file: graph + project memory, budget within its soft
       // limit. A dashboard status read does not create a growth baseline.
       store: 'graph.db',
-      role: 'graph',
       roles: ['graph', 'memory'],
       path: '/fast/projects/tracedecay/.tracedecay/graph.db',
       read: {
@@ -2224,7 +2223,6 @@ const storageTelemetry = envelope({
     {
       // Over its owner-configured soft limit, with a real overage.
       store: 'lcm.db',
-      role: 'lcm',
       roles: ['lcm'],
       path: '/home/zack/.tracedecay/lcm.db',
       read: {
@@ -2256,7 +2254,6 @@ const storageTelemetry = envelope({
     {
       // No owner entry: a missing *setting*, never a fabricated pass.
       store: 'savings.db',
-      role: 'savings',
       roles: ['savings'],
       path: '/home/zack/.tracedecay/savings.db',
       read: {
@@ -2283,7 +2280,6 @@ const storageTelemetry = envelope({
       // The configured budget is unreadable, so the budget is unknown — the
       // dashboard never renders that as "within budget".
       store: 'sessions.db',
-      role: 'sessions',
       roles: ['sessions'],
       path: '/home/zack/.tracedecay/sessions.db',
       read: {
@@ -2310,7 +2306,6 @@ const storageTelemetry = envelope({
       // The pragma read failed: sizes stay null and both dimensions are typed
       // unknown rather than collapsing to zero.
       store: 'incident.db',
-      role: 'incident',
       roles: ['incident'],
       path: '/home/zack/.tracedecay/incident.db',
       read: { kind: 'unknown', store: 'incident.db' },

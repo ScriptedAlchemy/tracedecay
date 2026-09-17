@@ -64,9 +64,6 @@ pub struct SymbolPrimitiveRecord {
     pub qualified_name: String,
     pub kind: String,
     pub file: String,
-    /// Canonical tree-sitter row retained for compatibility adapters.
-    pub start_line_zero_based: u32,
-    pub end_line_zero_based: u32,
     /// One-based user-facing line.
     pub line: u32,
     pub end_line: u32,
