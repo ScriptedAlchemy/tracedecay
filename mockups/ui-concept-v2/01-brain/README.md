@@ -14,7 +14,7 @@ historical iterations and are not the final product contract.
 
 - [NAVIGATION.md](../NAVIGATION.md) owns shell, route, scope behavior, and persistent regions.
 - [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual/typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
-- `dashboard/src/workspaces/brain/BrainPage.tsx`, `dashboard/src/workspaces/brain/ScopedBrain.tsx`, and `dashboard/src/viz/graph/GraphCanvas.propagation.dom.test.tsx` are the named scoping and propagation authority.
+- `dashboard/src/workspaces/brain/BrainPage.tsx`, `dashboard/src/workspaces/brain/ScopedBrain.tsx`, `dashboard/src/workspaces/brain/RegistryScene.tsx` and `dashboard/src/viz/scene/` are the named scoping, field and propagation authority; `dashboard/src/viz/graph/GraphCanvas.propagation.dom.test.tsx` covers the legacy scoped graph renderer.
 - The concept plate remains synthetic; these source paths identify the production authority, not a claim that the pictured fixture data is live.
 
 ## Canonical semantic-state matrix

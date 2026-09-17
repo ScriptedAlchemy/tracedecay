@@ -1,0 +1,16 @@
+{
+  "cwd": "<PROJECT_ROOT>",
+  "extra": {
+    "completed": true,
+    "interrupted": false,
+    "model": "<MODEL>",
+    "platform": "cli",
+    "task_id": "<TASK_ID>",
+    "telemetry_schema_version": "hermes.observer.v1",
+    "turn_id": "<TURN_ID>"
+  },
+  "hook_event_name": "on_session_end",
+  "session_id": "<SESSION_ID>",
+  "tool_input": null,
+  "tool_name": null
+}

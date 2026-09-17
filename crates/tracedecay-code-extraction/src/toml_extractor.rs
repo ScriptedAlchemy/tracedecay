@@ -4,54 +4,77 @@
 /// `table`, and `table_array_element` nodes. Tables and table-arrays are
 /// emitted as `Module` nodes; key-value pairs become `Const` nodes
 /// parented to their enclosing table (or to the file if at top level).
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
-use tree_sitter::{Node as TsNode, Parser, Tree};
+use tree_sitter::{Node as TsNode, Tree};
 
-use tracedecay_domain::code_intelligence::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility, generate_node_id,
+use crate::common::local_node_id;
+use crate::types::{
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility,
+    generate_node_id,
 };
 
 pub struct TomlExtractor;
 
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     file_node_id: String,
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
+        let timestamp = crate::common::unix_timestamp_secs();
         let file_node_id = generate_node_id(file_path, &NodeKind::File, file_path, 0);
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             file_node_id,
             timestamp,
         }
     }
 
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
 impl TomlExtractor {
-    pub fn extract_toml(file_path: &str, source: &str) -> ExtractionResult {
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
         let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
+        let mut state = Self::initialize_state(
+            file_path,
+            source,
+            crate::common::file_end_line(source, tree),
+        );
 
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            Self::visit_node(&mut state, child);
+        });
+
+        crate::parsed_extraction::ParsedExtraction::complete(
+            Self::build_result(state, start),
+            scope,
+            metrics,
+        )
+    }
+
+    fn initialize_state<'s>(
+        file_path: &str,
+        source: &'s str,
+        end_line: u32,
+    ) -> ExtractionState<'s> {
+        let mut state = ExtractionState::new(file_path, source);
         let file_node = Node {
             id: state.file_node_id.clone(),
             kind: NodeKind::File,
@@ -60,7 +83,7 @@ impl TomlExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line,
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -74,15 +97,15 @@ impl TomlExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
         state.nodes.push(file_node);
+        state
+    }
 
-        if let Ok(tree) = Self::parse(source) {
-            Self::visit_document(&mut state, tree.root_node());
-        }
-
+    fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
         ExtractionResult {
             nodes: state.nodes,
             edges: state.edges,
@@ -92,34 +115,13 @@ impl TomlExtractor {
         }
     }
 
-    fn parse(source: &str) -> Result<Tree, String> {
-        let mut parser = Parser::new();
-        let language = crate::ts_provider::try_language("toml")?;
-        parser
-            .set_language(&language)
-            .map_err(|e| format!("failed to load TOML grammar: {e}"))?;
-        parser
-            .parse(source, None)
-            .ok_or_else(|| "tree-sitter parse returned None".to_string())
-    }
-
-    fn visit_document(state: &mut ExtractionState, root: TsNode<'_>) {
-        let mut cursor = root.walk();
-        if !cursor.goto_first_child() {
-            return;
-        }
+    fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         let file_id = state.file_node_id.clone();
         let file_qn = state.file_path.clone();
-        loop {
-            let child = cursor.node();
-            match child.kind() {
-                "pair" => Self::emit_pair(state, child, &file_id, &file_qn),
-                "table" | "table_array_element" => Self::emit_table(state, child),
-                _ => {}
-            }
-            if !cursor.goto_next_sibling() {
-                break;
-            }
+        match node.kind() {
+            "pair" => Self::emit_pair(state, node, &file_id, &file_qn),
+            "table" | "table_array_element" => Self::emit_table(state, node),
+            _ => {}
         }
     }
 
@@ -130,7 +132,13 @@ impl TomlExtractor {
         let start_line = table_node.start_position().row as u32;
         let end_line = table_node.end_position().row as u32;
         let qualified_name = format!("{}::{}", state.file_path, name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Module, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Module,
+            &name,
+            table_node,
+        );
 
         let module = Node {
             id: id.clone(),
@@ -154,6 +162,7 @@ impl TomlExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -189,7 +198,7 @@ impl TomlExtractor {
             loop {
                 let child = cursor.node();
                 if matches!(child.kind(), "bare_key" | "dotted_key" | "quoted_key") {
-                    return Some(state.node_text(child));
+                    return Some(state.node_text(child).to_string());
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -212,12 +221,18 @@ impl TomlExtractor {
         let start_line = pair_node.start_position().row as u32;
         let end_line = pair_node.end_position().row as u32;
         let qualified_name = format!("{parent_qn}::{name}");
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Const,
+            name,
+            pair_node,
+        );
 
         let pair = Node {
             id: id.clone(),
             kind: NodeKind::Const,
-            name,
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -243,6 +258,7 @@ impl TomlExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -281,7 +297,16 @@ impl crate::LanguageExtractor for TomlExtractor {
         "TOML"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_toml(file_path, source)
+    fn extract_parsed_artifact_prepared(
+        &self,
+        file_path: &str,
+        source: &str,
+        _parsed_source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(Self::extract_tree(
+            file_path, source, tree, scope,
+        ))
     }
 }

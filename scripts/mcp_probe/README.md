@@ -32,7 +32,7 @@ Each module exposes a `probes_for(discovered)` function that returns
 
 ```sh
 # 1. Build the release binary (driver shells out to ../../target/release/tracedecay)
-cargo build --release --bin tracedecay
+cargo build -p tracedecay-cli --release --bin tracedecay
 
 # 2. Run the matrix
 python3 scripts/mcp_probe/probe.py

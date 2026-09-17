@@ -1,0 +1,560 @@
+/**
+ * COMPARE — two exact local revisions in one identity-stable union layout.
+ *
+ * `GET /api/plugins/graph/compare/union-layout` (code_read_api.rs) resolves two
+ * local branch references against the revisions the reader expects them to
+ * hold, reads both retained generations under the bounded-read caps, and
+ * returns one union sorted by identity. The view draws that union in the
+ * daemon's order and never re-sorts it:
+ *
+ *   unchanged / changed   in place, on both sides
+ *   added                 head side only, inserted at its identity position so
+ *                         no existing landmark moves
+ *   removed               base side only, keeping an outlined former space
+ *
+ * A reference that moved past its expected revision answers `stale` with
+ * `selected_revision_changed`, and this view says exactly that instead of
+ * comparing whatever the branch points at now. Filters are the route's own
+ * `file` and `kind` parameters — `file` matches an exact logical path or a
+ * path prefix (`code_index_branch_diff.rs`), never a substring — and the
+ * counts printed are of the filtered union the daemon returned, not of the
+ * repository.
+ */
+import { useEffect, useState, type FormEvent } from 'react';
+import {
+  CodeIndexFreshnessPayloadV1Schema,
+  RevisionPairUnionLayoutV1Schema,
+  type RevisionPairChangeV1,
+  type RevisionPairFileRegionV1,
+  type RevisionPairRevisionV1,
+  type RevisionPairSymbolRegionV1,
+  type RevisionPairUnionLayoutV1,
+} from '../../contracts/generated.ts';
+import { envelopePayload, useEnvelope } from '../../data/query/useEnvelope.ts';
+import { authorizationState } from '../../ui/EnvelopeTruth.tsx';
+import { CenteredState, ReadSection } from '../../ui/ReadSection.tsx';
+import { StateChip } from '../../ui/StateChip.tsx';
+import { cn } from '../../ui/cn';
+import { elideStart } from '../../ui/format.ts';
+import { codeReadState } from './codeRead.ts';
+import {
+  COMPARE_CHANGE_RULES,
+  branchFromReference,
+  compareUnionLayoutUrl,
+  countChanges,
+  groupSymbolsByFile,
+  isCompareSelectionComplete,
+  type CompareSelection,
+} from './compareLayout.ts';
+
+export function CompareView({
+  selection,
+  onSelectionChange,
+}: {
+  selection: CompareSelection;
+  onSelectionChange: (selection: CompareSelection) => void;
+}) {
+  const complete = isCompareSelectionComplete(selection);
+  const freshness = useEnvelope(
+    ['code-index', 'freshness', 'all'],
+    '/api/code-index/freshness',
+    CodeIndexFreshnessPayloadV1Schema,
+  );
+  const indexed = indexedPrefill(envelopePayload(freshness.data)?.worktrees);
+  const indexedBranch = indexed.status === 'unique' ? indexed.branch : undefined;
+  const indexedRevision = indexed.status === 'unique' ? indexed.revision : undefined;
+  const [draft, setDraft] = useState<CompareSelection>(selection);
+  // Primitive deps: a fresh object identity each render must not re-run this
+  // and refill a head the reader just cleared.
+  useEffect(() => {
+    if (indexedBranch === undefined || indexedRevision === undefined) return;
+    setDraft((current) =>
+      current.head.branch === '' && current.head.revision === ''
+        ? { ...current, head: { branch: indexedBranch, revision: indexedRevision } }
+        : current,
+    );
+  }, [indexedBranch, indexedRevision]);
+  return (
+    <div className="flex min-h-full flex-col" data-compare-selected={complete}>
+      <header className="flex flex-col gap-1 border-b border-edge-subtle px-3 py-2">
+        <h2 className="text-sm font-semibold tracking-tight">Compare</h2>
+        <p className="text-3xs leading-relaxed text-text-muted">
+          Two exact revisions of local branches in one union layout. Identity order is the
+          daemon's: added regions appear without moving old landmarks, removed regions keep
+          their outlined former space. A branch that has moved past its expected revision is
+          reported as stale, never compared as whatever it points at now.
+        </p>
+      </header>
+      <SelectionForm draft={draft} onDraftChange={setDraft} indexed={indexed} onSubmit={onSelectionChange} />
+      {complete ? (
+        <UnionLayoutReading selection={selection} />
+      ) : (
+        <SelectionGuidance draft={draft} indexed={indexed} />
+      )}
+    </div>
+  );
+}
+
+type IndexedPrefill =
+  | { status: 'unique'; branch: string; revision: string }
+  | { status: 'ambiguous' }
+  | { status: 'not-fresh' }
+  | { status: 'unreported' };
+
+function indexedPrefill(
+  worktrees: ReadonlyArray<{
+    source_reference: string | null;
+    source_revision: string | null;
+    staleness_state: string | null;
+  }> | undefined,
+): IndexedPrefill {
+  if (worktrees === undefined || worktrees.length === 0) return { status: 'unreported' };
+  const identified = worktrees.filter(
+    (worktree) => worktree.source_reference !== null && worktree.source_revision !== null,
+  );
+  if (identified.length === 0) return { status: 'unreported' };
+  const fresh = identified.filter((worktree) => worktree.staleness_state === 'fresh');
+  if (fresh.length === 1) {
+    const only = fresh[0]!;
+    return {
+      status: 'unique',
+      branch: branchFromReference(only.source_reference!),
+      revision: only.source_revision!,
+    };
+  }
+  if (fresh.length > 1) return { status: 'ambiguous' };
+  return { status: 'not-fresh' };
+}
+
+function prefillGuidance(indexed: IndexedPrefill): string {
+  switch (indexed.status) {
+    case 'unique':
+      return 'Name the base branch and the exact commit it should hold, then press Compare. A branch that has moved past that commit is reported as stale rather than compared.';
+    case 'ambiguous':
+      return 'Several fresh indexed worktrees are mounted, so nothing is prefilled.';
+    case 'not-fresh':
+      return 'The daemon reported an indexed worktree that is not fresh, so nothing is prefilled.';
+    case 'unreported':
+      return 'The daemon has not reported an indexed worktree revision, so nothing is prefilled.';
+    default: {
+      const _exhaustive: never = indexed;
+      return _exhaustive;
+    }
+  }
+}
+
+/**
+ * What stands between the reader and a comparison, said in terms of the two
+ * fields: which side is already exact and which is still to be named. The
+ * indexed worktree is the only revision this surface can assert; nothing else
+ * is claimed about what the daemon holds.
+ */
+function SelectionGuidance({
+  draft,
+  indexed,
+}: {
+  draft: CompareSelection;
+  indexed: IndexedPrefill;
+}) {
+  const unique = indexed.status === 'unique' ? indexed : undefined;
+  const side = (value: CompareSelection['base']) => {
+    if (value.branch === '' && value.revision === '') return 'not named yet';
+    if (value.branch === '' || value.revision === '') return 'needs both a branch and its exact commit';
+    const exact = unique && value.branch === unique.branch && value.revision === unique.revision;
+    return `${value.branch} @ ${value.revision.slice(0, 12)}${exact ? ' — the indexed worktree' : ''}`;
+  };
+  return (
+    <div
+      className="td-graticule @container flex h-full min-h-48 items-center justify-center bg-surface-0 p-3 @md:p-8"
+      data-compare-guidance
+    >
+      <div className="relative flex w-full max-w-md flex-col gap-3 border border-edge-subtle bg-surface-1 px-4 py-4 @md:w-auto @md:px-8 @md:py-6">
+        <h1 className="text-2xs font-semibold uppercase tracking-[0.2em] text-text-primary">
+          Compare needs two exact revisions
+        </h1>
+        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-2xs">
+          <dt className="td-legend">base</dt>
+          <dd className="min-w-0 break-all text-text-primary" title={side(draft.base)}>
+            {side(draft.base)}
+          </dd>
+          <dt className="td-legend">head</dt>
+          <dd className="min-w-0 break-all text-text-primary" title={side(draft.head)}>
+            {side(draft.head)}
+          </dd>
+        </dl>
+        <p className="text-3xs leading-relaxed text-text-muted">
+          {prefillGuidance(indexed)}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/** The four identity fields and two lens filters. Submission writes the URL;
+ * nothing is read until every identity field is present. */
+function SelectionForm({
+  draft,
+  onDraftChange: setDraft,
+  indexed,
+  onSubmit,
+}: {
+  draft: CompareSelection;
+  onDraftChange: (draft: CompareSelection) => void;
+  indexed: IndexedPrefill;
+  onSubmit: (selection: CompareSelection) => void;
+}) {
+  const unique = indexed.status === 'unique' ? indexed : undefined;
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    onSubmit({
+      base: { branch: draft.base.branch.trim(), revision: draft.base.revision.trim() },
+      head: { branch: draft.head.branch.trim(), revision: draft.head.revision.trim() },
+      file: draft.file.trim(),
+      kind: draft.kind.trim(),
+    });
+  };
+  return (
+    <form
+      onSubmit={submit}
+      aria-label="Revision selection"
+      className="grid grid-cols-1 gap-x-3 gap-y-2 border-b border-edge-subtle px-3 py-2 md:grid-cols-2"
+    >
+      <RevisionFields
+        legend="Base"
+        value={draft.base}
+        onChange={(base) => setDraft({ ...draft, base })}
+      />
+      <RevisionFields
+        legend="Head"
+        value={draft.head}
+        onChange={(head) => setDraft({ ...draft, head })}
+        fill={
+          unique
+            ? {
+                label: `Use indexed ${unique.branch}`,
+                apply: () =>
+                  setDraft({
+                    ...draft,
+                    head: { branch: unique.branch, revision: unique.revision },
+                  }),
+              }
+            : null
+        }
+      />
+      <div className="flex flex-wrap items-end gap-2 md:col-span-2">
+        <Field
+          label="File prefix"
+          value={draft.file}
+          onChange={(file) => setDraft({ ...draft, file })}
+          placeholder="path or path prefix"
+        />
+        <Field
+          label="Kind filter"
+          value={draft.kind}
+          onChange={(kind) => setDraft({ ...draft, kind })}
+          placeholder="symbol kind"
+        />
+        <button
+          type="submit"
+          className="min-h-[var(--touch-target-min)] rounded-[var(--radius-standard)] border border-edge-strong bg-surface-2 px-3 text-2xs text-text-primary hover:bg-surface-3"
+        >
+          Compare
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function RevisionFields({
+  legend,
+  value,
+  onChange,
+  fill,
+}: {
+  legend: string;
+  value: CompareSelection['base'];
+  onChange: (value: CompareSelection['base']) => void;
+  fill?: { label: string; apply: () => void } | null;
+}) {
+  return (
+    <fieldset className="flex min-w-0 flex-col gap-1.5 border border-edge-subtle p-2">
+      <legend className="td-legend px-1">{legend}</legend>
+      <Field
+        label={`${legend} branch`}
+        value={value.branch}
+        onChange={(branch) => onChange({ ...value, branch })}
+        placeholder="local branch name"
+      />
+      <Field
+        label={`${legend} revision`}
+        value={value.revision}
+        onChange={(revision) => onChange({ ...value, revision })}
+        placeholder="expected commit object id"
+        mono
+      />
+      {fill ? (
+        <button
+          type="button"
+          onClick={fill.apply}
+          className="self-start text-3xs text-text-secondary underline-offset-2 hover:text-text-primary hover:underline"
+        >
+          {fill.label}
+        </button>
+      ) : null}
+    </fieldset>
+  );
+}
+
+function Field({
+  label,
+  value,
+  onChange,
+  placeholder,
+  mono,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  mono?: boolean;
+}) {
+  return (
+    <label className="flex min-w-0 flex-1 flex-col gap-0.5 text-3xs text-text-muted">
+      <span className="uppercase tracking-[0.08em]">{label}</span>
+      <input
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        spellCheck={false}
+        autoComplete="off"
+        className={cn(
+          'min-h-[var(--touch-target-min)] min-w-0 max-w-full break-all rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-0 px-2 text-2xs text-text-primary placeholder:text-text-muted focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
+          mono && 'td-value',
+        )}
+      />
+    </label>
+  );
+}
+
+function UnionLayoutReading({ selection }: { selection: CompareSelection }) {
+  const url = compareUnionLayoutUrl(selection);
+  const read = useEnvelope(['graph', 'compare', 'union-layout', url], url, RevisionPairUnionLayoutV1Schema, {
+    activity: { id: 'compare-union-layout', label: 'Reading the revision union', cancelable: true },
+  });
+  return (
+    <ReadSection
+      title="Union layout"
+      chrome="panel"
+      className="border-0"
+      state={codeReadState(read.isPending, read.data, {
+        loading: 'resolving both revisions and reading their generations',
+        transport: 'the revision comparison could not be completed',
+      })}
+    >
+      {(envelope) => {
+        const layout = envelope.payload;
+        const authorization = authorizationState(envelope.authorization);
+        return (
+          <div className="flex flex-col gap-3 px-3 pb-3" data-compare-files={layout.files.length}>
+            <div className="flex flex-wrap items-center gap-2">
+              <StateChip kind={envelope.domain_state} />
+              {authorization ? <StateChip kind={authorization} detail="read authorization" /> : null}
+            </div>
+            <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+              <RevisionIdentity side="base" revision={layout.base} />
+              <RevisionIdentity side="head" revision={layout.head} />
+            </div>
+            {layout.files.length === 0 ? (
+              <CenteredState
+                title="No file regions in this union"
+                kind="complete_zero_findings"
+                detail={
+                  selection.file !== '' || selection.kind !== ''
+                    ? 'Both generations were read; nothing matched the active filters.'
+                    : 'Both generations were read and contain no indexed files.'
+                }
+              />
+            ) : (
+              <>
+                <ChangeLegend layout={layout} />
+                <FileRegions layout={layout} />
+              </>
+            )}
+          </div>
+        );
+      }}
+    </ReadSection>
+  );
+}
+
+/** One resolved side: the reference, the commit the daemon confirmed it holds,
+ * its tree, and the generation the reading came from. */
+function RevisionIdentity({ side, revision }: { side: 'base' | 'head'; revision: RevisionPairRevisionV1 }) {
+  return (
+    <dl
+      className="td-raised flex flex-col gap-0.5 border border-edge-subtle px-2.5 py-2 text-3xs leading-snug"
+      data-compare-side={side}
+    >
+      <Row label={side}>{revision.reference}</Row>
+      <Row label="revision" mono>
+        {revision.revision}
+      </Row>
+      <Row label="tree" mono>
+        {revision.tree}
+      </Row>
+      <Row label="generation" mono>
+        {revision.generation}
+      </Row>
+    </dl>
+  );
+}
+
+function Row({ label, children, mono }: { label: string; children: string; mono?: boolean }) {
+  return (
+    <div className="flex min-w-0 items-baseline gap-1.5">
+      <dt className="shrink-0 uppercase tracking-[0.08em] text-text-muted">{label}</dt>
+      <dd className={cn('min-w-0 flex-1 truncate text-right text-text-secondary', mono && 'td-value')} title={children}>
+        {children}
+      </dd>
+    </div>
+  );
+}
+
+/** The change vocabulary with the counts of this union, so a mark on a row is
+ * read against a stated rule and a stated total. */
+function ChangeLegend({ layout }: { layout: RevisionPairUnionLayoutV1 }) {
+  const files = countChanges(layout.files);
+  const symbols = countChanges(layout.symbols);
+  return (
+    <dl className="grid grid-cols-2 gap-x-3 gap-y-1 text-3xs leading-snug md:grid-cols-4">
+      {(Object.keys(COMPARE_CHANGE_RULES) as RevisionPairChangeV1[]).map((change) => (
+        <div key={change} className="flex min-w-0 flex-col gap-0.5" data-compare-change={change}>
+          <div className="flex items-center gap-1.5">
+            <ChangeMark change={change} />
+            <dt className="td-legend">{COMPARE_CHANGE_RULES[change].label}</dt>
+          </div>
+          <dd className="td-value text-text-secondary" data-cell="numeric">
+            {files[change].toLocaleString()} files · {symbols[change].toLocaleString()} symbols
+          </dd>
+          <dd className="text-text-muted">{COMPARE_CHANGE_RULES[change].rule}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+/** The mark itself. `removed` is an outline with no fill — the former space —
+ * and `added` is filled; `changed` and `unchanged` differ by weight. Colour
+ * never carries the class alone: every row also prints its label. */
+function ChangeMark({ change }: { change: RevisionPairChangeV1 }) {
+  return (
+    <span
+      aria-hidden
+      data-change-mark={change}
+      className={cn(
+        'inline-block size-2.5 shrink-0',
+        change === 'removed' && 'border border-dashed border-edge-strong',
+        change === 'added' && 'bg-accent',
+        change === 'changed' && 'border-2 border-edge-strong',
+        change === 'unchanged' && 'border border-edge-subtle',
+      )}
+    />
+  );
+}
+
+function FileRegions({ layout }: { layout: RevisionPairUnionLayoutV1 }) {
+  const groups = groupSymbolsByFile(layout);
+  return (
+    <ol className="flex flex-col gap-1.5" aria-label="File regions in identity order">
+      {groups.map((group) => (
+        <li key={group.file.file_identity} data-file-identity={group.file.file_identity}>
+          <FileRegionRow region={group.file} />
+          {group.symbols.length > 0 ? (
+            <ol className="flex flex-col border-l border-edge-subtle pl-2">
+              {group.symbols.map((symbol) => (
+                <SymbolRegionRow key={symbol.symbol_identity} region={symbol} />
+              ))}
+            </ol>
+          ) : null}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+/** Both sides of one file identity. A side with no file is drawn as its
+ * outlined former (or not-yet) space, so the column keeps its geometry. */
+function FileRegionRow({ region }: { region: RevisionPairFileRegionV1 }) {
+  const path = (region.head ?? region.base)?.path ?? region.file_identity;
+  return (
+    <div
+      className={cn(
+        'grid grid-cols-[auto_1fr_1fr] items-center gap-2 border px-2 py-1.5',
+        region.change === 'removed' ? 'border-dashed border-edge-strong' : 'border-edge-subtle td-raised',
+      )}
+      data-region-change={region.change}
+    >
+      <span className="flex items-center gap-1.5">
+        <ChangeMark change={region.change} />
+        <span className="td-legend w-20 shrink-0">{COMPARE_CHANGE_RULES[region.change].label}</span>
+      </span>
+      <SideCell side="base" file={region.base} fallbackPath={path} />
+      <SideCell side="head" file={region.head} fallbackPath={path} />
+    </div>
+  );
+}
+
+function SideCell({
+  side,
+  file,
+  fallbackPath,
+}: {
+  side: 'base' | 'head';
+  file: RevisionPairFileRegionV1['base'];
+  fallbackPath: string;
+}) {
+  if (file === null) {
+    return (
+      <span
+        className="td-value min-w-0 truncate border border-dashed border-edge-subtle px-1.5 py-0.5 text-3xs text-text-muted"
+        data-side={side}
+        title={`${fallbackPath} is not present in ${side}`}
+      >
+        not in {side}
+      </span>
+    );
+  }
+  return (
+    <span className="flex min-w-0 flex-col" data-side={side}>
+      <span className="td-value min-w-0 truncate text-2xs text-text-primary" title={file.path}>
+        {elideStart(file.path, 40)}
+      </span>
+      <span className="td-value min-w-0 truncate text-3xs text-text-muted" title={file.content_digest}>
+        {file.disposition} · {file.symbol_identities.length.toLocaleString()} symbols ·{' '}
+        {file.content_digest.slice(0, 19)}
+      </span>
+    </span>
+  );
+}
+
+function SymbolRegionRow({ region }: { region: RevisionPairSymbolRegionV1 }) {
+  const shown = region.head ?? region.base;
+  return (
+    <li
+      className="flex min-w-0 items-center gap-2 border-b border-edge-subtle px-2 py-1 text-2xs last:border-b-0"
+      data-region-change={region.change}
+    >
+      <ChangeMark change={region.change} />
+      <span className="td-legend w-20 shrink-0">{COMPARE_CHANGE_RULES[region.change].label}</span>
+      <span className="td-legend w-20 shrink-0 truncate max-md:hidden">{shown?.kind ?? '—'}</span>
+      <span className="td-value min-w-0 flex-1 truncate text-text-primary" title={shown?.qualified_name}>
+        {shown?.qualified_name ?? region.symbol_identity}
+      </span>
+      {region.change === 'changed' && region.base && region.head ? (
+        <span className="td-value shrink-0 text-3xs text-text-muted" title="content digests differ between base and head">
+          {region.base.content_digest.slice(0, 11)} → {region.head.content_digest.slice(0, 11)}
+        </span>
+      ) : null}
+    </li>
+  );
+}

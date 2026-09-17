@@ -1,0 +1,46 @@
+{
+  "capture": {
+    "captured_at": "2026-07-21T22:04:00Z",
+    "method": "GET",
+    "url": "https://api.github.com/repos/ScriptedAlchemy/tracedecay/pulls/comments/3556767423",
+    "api_version": "2022-11-28",
+    "documentation": "https://docs.github.com/en/rest/pulls/comments#get-a-review-comment-for-a-pull-request"
+  },
+  "response": {
+    "url": "https://api.github.com/repos/ScriptedAlchemy/tracedecay/pulls/comments/3556767423",
+    "pull_request_review_id": 4669021204,
+    "id": 3556767423,
+    "node_id": "PRRC_kwDOSzKG2s7T__a_",
+    "path": "docs/plans/2026-07-09-tracedecay-brain-rewrite.md",
+    "position": 1,
+    "original_position": 1949,
+    "commit_id": "e9170a2df3c6be51d25454c2e84592c6915be136",
+    "original_commit_id": "986f25cca6d2e703e889fb57326696b0d92c965f",
+    "in_reply_to_id": null,
+    "html_url": "https://github.com/ScriptedAlchemy/tracedecay/pull/421#discussion_r3556767423",
+    "pull_request_url": "https://api.github.com/repos/ScriptedAlchemy/tracedecay/pulls/421",
+    "author_association": "NONE",
+    "created_at": "2026-07-10T06:16:13Z",
+    "updated_at": "2026-07-10T06:16:13Z",
+    "body": "**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Schedule the catalog before generated-metadata consumers**\n\nWhen the Phase 3 ladder is followed literally, this schedules PR 22F–22H before PR 22A even though the 22F–22H checklist requires plan 08's generated `SurfaceKind` everywhere. PR 22A is the step that creates the generated capability/tool catalog and its surface/availability artifacts, so the accounting/adoption work either blocks or has to invent duplicate local surface metadata; move 22A ahead of the first generated-catalog consumer or split the dependent 22H work after it.\n\nUseful? React with 👍 / 👎.",
+    "start_line": null,
+    "original_start_line": 1946,
+    "start_side": "RIGHT",
+    "line": null,
+    "original_line": 1949,
+    "side": "RIGHT",
+    "subject_type": "line",
+    "user": {
+      "id": 199175422,
+      "node_id": "BOT_kgDOC98s_g",
+      "type": "Bot",
+      "site_admin": false
+    }
+  },
+  "redacted": {
+    "diff_hunk": "omitted_source_content"
+  },
+  "integrity": {
+    "body_sha256": "sha256:ba50df4c458fcd57f99df2d01017141f0ef686cf600f2a8ff615e2fb85c2adbc"
+  }
+}

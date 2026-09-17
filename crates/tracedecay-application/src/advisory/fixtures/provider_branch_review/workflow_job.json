@@ -1,0 +1,85 @@
+{
+  "capture": {
+    "captured_at": "2026-07-21T22:04:13Z",
+    "method": "GET",
+    "url": "https://api.github.com/repos/ScriptedAlchemy/tracedecay/actions/jobs/88773147767",
+    "api_version": "2022-11-28",
+    "documentation": "https://docs.github.com/en/rest/actions/workflow-jobs#get-a-job-for-a-workflow-run"
+  },
+  "response": {
+    "id": 88773147767,
+    "run_id": 29871723703,
+    "run_url": "https://api.github.com/repos/ScriptedAlchemy/tracedecay/actions/runs/29871723703",
+    "run_attempt": 1,
+    "node_id": "CR_kwDOSzKG2s8AAAAUq0q8dw",
+    "head_sha": "e29900448db98ae58e90d08770a3bb8bfa710846",
+    "url": "https://api.github.com/repos/ScriptedAlchemy/tracedecay/actions/jobs/88773147767",
+    "html_url": "https://github.com/ScriptedAlchemy/tracedecay/actions/runs/29871723703/job/88773147767",
+    "status": "completed",
+    "conclusion": "failure",
+    "created_at": "2026-07-21T21:53:32Z",
+    "started_at": "2026-07-21T21:53:34Z",
+    "completed_at": "2026-07-21T21:54:08Z",
+    "name": "Format",
+    "steps": [
+      {
+        "completed_at": "2026-07-21T21:53:36Z",
+        "conclusion": "success",
+        "name": "Set up job",
+        "number": 1,
+        "started_at": "2026-07-21T21:53:35Z",
+        "status": "completed"
+      },
+      {
+        "completed_at": "2026-07-21T21:53:38Z",
+        "conclusion": "success",
+        "name": "Run actions/checkout@v7",
+        "number": 2,
+        "started_at": "2026-07-21T21:53:36Z",
+        "status": "completed"
+      },
+      {
+        "completed_at": "2026-07-21T21:53:48Z",
+        "conclusion": "success",
+        "name": "Run dtolnay/rust-toolchain@stable",
+        "number": 3,
+        "started_at": "2026-07-21T21:53:38Z",
+        "status": "completed"
+      },
+      {
+        "completed_at": "2026-07-21T21:54:05Z",
+        "conclusion": "failure",
+        "name": "Run cargo fmt --all -- --check",
+        "number": 4,
+        "started_at": "2026-07-21T21:53:48Z",
+        "status": "completed"
+      },
+      {
+        "completed_at": "2026-07-21T21:54:05Z",
+        "conclusion": "success",
+        "name": "Post Run actions/checkout@v7",
+        "number": 8,
+        "started_at": "2026-07-21T21:54:05Z",
+        "status": "completed"
+      },
+      {
+        "completed_at": "2026-07-21T21:54:05Z",
+        "conclusion": "success",
+        "name": "Complete job",
+        "number": 9,
+        "started_at": "2026-07-21T21:54:05Z",
+        "status": "completed"
+      }
+    ],
+    "check_run_url": "https://api.github.com/repos/ScriptedAlchemy/tracedecay/check-runs/88773147767",
+    "labels": [
+      "ubuntu-latest"
+    ],
+    "runner_id": 1000131229,
+    "runner_name": "GitHub Actions 1000131229",
+    "runner_group_id": 0,
+    "runner_group_name": "GitHub Actions",
+    "workflow_name": "CI",
+    "head_branch": "codex/tracedecay-total-redesign-plan"
+  }
+}

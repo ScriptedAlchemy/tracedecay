@@ -6,92 +6,33 @@
 /// from REM-labelled sections that end with RETURN, and extracts LET
 /// assignments as constants, GOSUB/GOTO as call references, and REM
 /// lines as docstrings.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
-use tree_sitter::{Node as TsNode, Parser, Tree};
+use tree_sitter::{Node as TsNode, Tree};
 
 use crate::basic_common::{
     BasicLine, derive_function_name, find_subroutine_ranges, for_each_top_level_line,
 };
+use crate::common::{ExtractionState, local_node_id};
 use crate::traversal::find_direct_child_by_kind;
-use tracedecay_domain::code_intelligence::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+use crate::types::{
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+    Visibility, generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from MS BASIC 2.0 source files using tree-sitter.
 pub struct MsBasic2Extractor;
 
-/// Internal state used during AST traversal.
-struct ExtractionState {
-    nodes: Vec<Node>,
-    edges: Vec<Edge>,
-    unresolved_refs: Vec<UnresolvedRef>,
-    errors: Vec<String>,
-    /// Stack of (name, `node_id`) for building qualified names and parent edges.
-    node_stack: Vec<(String, String)>,
-    file_path: String,
-    source: Vec<u8>,
-    timestamp: u64,
-}
-
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        Self {
-            nodes: Vec::new(),
-            edges: Vec::new(),
-            unresolved_refs: Vec::new(),
-            errors: Vec::new(),
-            node_stack: Vec::new(),
-            file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
-            timestamp,
-        }
-    }
-
-    /// Returns the current qualified name prefix from the node stack.
-    fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
-    }
-
-    /// Returns the current parent node ID, or None if at file root level.
-    fn parent_node_id(&self) -> Option<&str> {
-        self.node_stack.last().map(|(_, id)| id.as_str())
-    }
-
-    /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
-    }
-}
-
 impl MsBasic2Extractor {
-    /// Extract code graph nodes and edges from an MS BASIC 2.0 source file.
-    ///
-    /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the BASIC source code to parse.
-    pub fn extract_msbasic2(file_path: &str, source: &str) -> ExtractionResult {
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
 
-        let tree = match Self::parse_source(source) {
-            Ok(tree) => tree,
-            Err(msg) => {
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-
-        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -100,7 +41,7 @@ impl MsBasic2Extractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -114,6 +55,7 @@ impl MsBasic2Extractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -121,9 +63,13 @@ impl MsBasic2Extractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        // Collect all lines from the AST.
-        let root = tree.root_node();
-        let lines = Self::collect_lines(&state, root);
+        let mut selected_lines = Vec::new();
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            if child.kind() == "line" {
+                selected_lines.push((child.start_byte(), child.end_byte()));
+            }
+        });
+        let lines = Self::collect_selected_lines(&state, tree, &selected_lines);
 
         // First pass: extract top-level LET constants (before the first subroutine).
         Self::extract_top_level_lets(&mut state, &lines);
@@ -136,32 +82,29 @@ impl MsBasic2Extractor {
 
         state.node_stack.pop();
 
-        Self::build_result(state, start)
+        crate::parsed_extraction::ParsedExtraction::complete(
+            Self::build_result(state, start),
+            scope,
+            metrics,
+        )
     }
 
-    /// Parse source code into a tree-sitter AST.
-    fn parse_source(source: &str) -> Result<Tree, String> {
-        let mut parser = Parser::new();
-        let language = crate::ts_provider::try_language("msbasic2")?;
-        parser
-            .set_language(&language)
-            .map_err(|e| format!("failed to load MS BASIC 2.0 grammar: {e}"))?;
-        parser
-            .parse(source, None)
-            .ok_or_else(|| "tree-sitter parse returned None".to_string())
-    }
-
-    /// Collect all lines from the program into a structured list.
-    fn collect_lines<'a>(state: &ExtractionState, root: TsNode<'a>) -> Vec<BasicLine<'a>> {
+    fn collect_selected_lines<'tree>(
+        state: &ExtractionState,
+        tree: &'tree Tree,
+        selected_lines: &[(usize, usize)],
+    ) -> Vec<BasicLine<'tree>> {
         let mut lines = Vec::new();
+        let root = tree.root_node();
         let mut cursor = root.walk();
         if cursor.goto_first_child() {
             loop {
                 let node = cursor.node();
-                if node.kind() == "line" {
-                    if let Some(basic_line) = Self::parse_line(state, node) {
-                        lines.push(basic_line);
-                    }
+                if node.kind() == "line"
+                    && selected_lines.contains(&(node.start_byte(), node.end_byte()))
+                    && let Some(basic_line) = Self::parse_line(state, node)
+                {
+                    lines.push(basic_line);
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -196,7 +139,7 @@ impl MsBasic2Extractor {
                 let stripped = text
                     .get(..3)
                     .filter(|p| p.eq_ignore_ascii_case("REM"))
-                    .map_or(text.as_str(), |_| &text[3..])
+                    .map_or(text, |_| &text[3..])
                     .trim()
                     .to_string();
                 comment_text = Some(stripped);
@@ -258,13 +201,19 @@ impl MsBasic2Extractor {
         let start_column = basic_line.node.start_position().column as u32;
         let end_column = basic_line.node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Const,
+            name,
+            basic_line.node,
+        );
         let text = state.node_text(basic_line.node);
 
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Const,
-            name,
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -283,12 +232,12 @@ impl MsBasic2Extractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -360,11 +309,12 @@ impl MsBasic2Extractor {
                     let start_column = first_node.start_position().column as u32;
                     let end_column = last_node.end_position().column as u32;
                     let qualified_name = format!("{}::{}", state.qualified_prefix(), fn_name);
-                    let fn_id = generate_node_id(
+                    let fn_id = local_node_id(
                         &state.file_path,
+                        state.source,
                         &NodeKind::Function,
                         &fn_name,
-                        start_line,
+                        first_node,
                     );
 
                     // Count complexity by walking body lines' AST nodes.
@@ -418,12 +368,12 @@ impl MsBasic2Extractor {
                         unsafe_blocks: 0,
                         unchecked_calls: 0,
                         assertions: 0,
+                        complexity_analysis: ComplexityAnalysisV1::Complete,
                         updated_at: state.timestamp,
                         parent_id: None,
                     };
                     state.nodes.push(graph_node);
 
-                    // Contains edge from parent.
                     if let Some(parent_id) = state.parent_node_id() {
                         state.edges.push(Edge {
                             source: parent_id.to_string(),
@@ -433,7 +383,6 @@ impl MsBasic2Extractor {
                         });
                     }
 
-                    // Extract GOSUB/GOTO call sites from the body.
                     for line in &lines[body_start..body_end] {
                         Self::extract_calls_from_line(state, line, &fn_id);
                     }
@@ -475,12 +424,11 @@ impl MsBasic2Extractor {
         let kind = node.kind();
         match kind {
             "gosub_statement" | "goto_statement" => {
-                // Extract the target line number.
                 if let Some(ln_node) = find_direct_child_by_kind(node, "line_number") {
                     let target = state.node_text(ln_node);
                     state.unresolved_refs.push(UnresolvedRef {
                         from_node_id: from_node_id.to_string(),
-                        reference_name: target,
+                        reference_name: target.to_string(),
                         reference_kind: EdgeKind::Calls,
                         line: node.start_position().row as u32,
                         column: node.start_position().column as u32,
@@ -490,7 +438,6 @@ impl MsBasic2Extractor {
             }
             _ => {}
         }
-        // Recurse into children.
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
@@ -524,7 +471,16 @@ impl crate::LanguageExtractor for MsBasic2Extractor {
         "MS BASIC 2.0"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_msbasic2(file_path, source)
+    fn extract_parsed_artifact_prepared(
+        &self,
+        file_path: &str,
+        source: &str,
+        _parsed_source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(Self::extract_tree(
+            file_path, source, tree, scope,
+        ))
     }
 }

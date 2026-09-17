@@ -1,59 +1,42 @@
 ---
 name: self-improving-from-usage-logs
-description: 'TraceDecay Dev: Use when mining TraceDecay session logs, analytics, diagnostics, automation artifacts, or agent transcripts to improve TraceDecay code, tools, or packaged skills.'
+description: "Find repeated TraceDecay tool or skill friction in session logs and turn supported patterns into scoped fixes."
 ---
 
-# TraceDecay Dev: Self-Improving From Usage Logs
+# Self-Improving From Usage Logs
 
-Use real agent behavior as an eval surface: logs reveal where tools are
-confusing, silent, too hard to discover, or missing a safe command.
+Start from the reported symptom or a bounded session window. Search with
+`tracedecay_message_search`, then use `tracedecay_lcm_grep` or
+`tracedecay_lcm_expand_query` for the relevant context. Check analytics or
+health only when needed to distinguish a behavior gap from an unavailable
+service; a full cross-project scan is not a prerequisite.
 
-## Workflow
+For automation failures, use the repo-local `inspecting-automation-cycles`
+skill. For managed-skill writer outcomes, use `writing-agent-managed-skills`.
+Read only the evidence relevant to the suspected failure.
 
-1. Start with adoption and health:
-   `tracedecay analytics diagnostics --all --no-sync`, `tracedecay doctor`,
-   and `tracedecay tool lcm_status --provider all --json`.
-2. Search transcripts for friction phrases, tool failures, and bypasses:
-   `tracedecay_message_search`, then narrow with `tracedecay_lcm_grep` or
-   `tracedecay_lcm_expand_query`.
-3. Inspect automation evidence with `tracedecay:inspecting-automation-cycles`
-   and managed-skill evidence with `tracedecay:writing-agent-managed-skills`.
-4. Turn patterns into the smallest durable fix: CLI affordance, clearer
-   diagnostic field, better skill trigger, missing dashboard summary, or test.
-5. Verify with the narrow command that failed in the logs plus the owning Rust
-   test or plugin validation suite.
+## Choose the smallest durable fix
 
-## Opportunity Ranking
-
-| Pattern | Prefer this fix |
+| Observed pattern | Investigate |
 |---|---|
-| Repeated invalid flag or command | Accept alias or improve CLI help. |
-| Counts interpreted incorrectly | Add explicit field names and sample limits. |
-| Agents query stores directly | Add/read skill guardrail and expose CLI summary. |
-| Skill exists but is not invoked | Improve description trigger and analytics events. |
-| Automation skips look like failures | Add grouped run/status summary. |
-| Same fact proposed repeatedly | Deduplicate before validation/apply. |
+| Repeated invalid command | Misleading help, trigger text, or a missing affordance. |
+| Misinterpreted counts | Field semantics, scope, and sample limits. |
+| Direct store queries | Missing supported retrieval or analytics surface. |
+| Missed useful skill | Trigger specificity and task relevance. |
+| Healthy skips treated as failures | Status explanations and grouping. |
+| Repeated fact proposals | The canonical deduplication/validation path. |
 
-## Guardrails
+Corroborate a broad rule with repeated sessions or direct reproducible evidence.
+A single failing command can justify its own narrow fix. Do not add compatibility
+aliases or redesign a subsystem merely because an agent used it incorrectly.
+Keep secrets, transient failures, and progress notes out of durable memory.
 
-- Do not store secrets, transient failures, or one-off progress as memory.
-- Do not convert a single anecdote into a broad rule without at least two
-  corroborating sessions, an automation artifact, or a failing command.
-- Keep code fixes smaller than the evidence. If logs show a CLI paper cut,
-  ship the CLI compatibility fix before redesigning the subsystem.
+Use supported CLI, MCP, or dashboard retrieval. The legacy
+`scripts/friction-scan.sh` reads profile databases directly; do not run it as
+an analytics fallback. Missing metrics are a limitation, not successful empty
+results or a reason to bypass the public authority.
 
-## Helper script
-
-Start the pass with [scripts/friction-scan.sh](scripts/friction-scan.sh): it
-turns the durable `analytics_events` log and memory store into the signals the
-Opportunity Ranking table wants — hook-vs-tool adoption ratio, per-tool error
-rates (worst first), least-invoked tools (discovery/trigger gaps), the
-seen-vs-rated feedback-loop health, and the sessions carrying the most tool
-errors to cite as evidence. It reads via the CLI where it can and drops to SQL
-only for the gaps, resolving paths from `tracedecay tool storage_status`. Add
-`--all` to scan every project.
-
-## Deliverable
-
-Report the evidence source, repeated pattern, ranked opportunity, code or skill
-change made, verification command, and any residual adoption gap.
+When improvement is authorized, apply the smallest supported change and verify
+the behavior that failed. Use the relevant code or skill validation once;
+review-only work does not require builds. Report the cited pattern, change or
+recommendation, verification, and remaining uncertainty.

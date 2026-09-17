@@ -1,0 +1,49 @@
+name: Tune Windows runner I/O
+description: >-
+  Disable Defender real-time scanning for the hot build/test paths and,
+  optionally, move TMP/TEMP onto the fast workspace drive.
+
+inputs:
+  redirect-temp:
+    description: >-
+      Point TMP/TEMP at RUNNER_TEMP so tempfile::TempDir in nextest test
+      processes lands on the fast workspace drive. Build-only jobs leave this
+      off; they create few temp files and do not run the product.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Exclude hot paths from Defender
+      shell: pwsh
+      run: |
+        # Defender real-time scanning taxes the compiler's many short-lived
+        # object/incremental files and the many short-lived SQLite/tempdir
+        # files these tests create; hosted runners are elevated, so turn it
+        # off and exclude the hot paths as a fallback.
+        Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
+        $exclusions = @(
+          $env:GITHUB_WORKSPACE,
+          $env:RUNNER_TEMP,
+          [System.IO.Path]::GetTempPath(),
+          $env:CARGO_HOME,
+          $env:RUSTUP_HOME,
+          "$env:USERPROFILE\.cargo",
+          "$env:USERPROFILE\.rustup"
+        ) | Where-Object { $_ } | Select-Object -Unique
+        foreach ($path in $exclusions) {
+          Add-MpPreference -ExclusionPath $path -ErrorAction SilentlyContinue
+        }
+
+    - name: Redirect TMP/TEMP to the fast workspace drive
+      if: inputs.redirect-temp == 'true'
+      shell: pwsh
+      run: |
+        # Default user TEMP is on the slow C: drive; RUNNER_TEMP shares the
+        # faster workspace drive. Point TMP/TEMP there so tempfile::TempDir in
+        # the nextest test processes follows.
+        $fastTemp = Join-Path $env:RUNNER_TEMP "tmp"
+        New-Item -ItemType Directory -Path $fastTemp -Force | Out-Null
+        "TMP=$fastTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        "TEMP=$fastTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append

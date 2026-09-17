@@ -1,0 +1,18 @@
+{
+  "id": "routing_local_edit",
+  "category": "routing",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "In src/inventory.rs, suggest a clearer replacement for the comment above check_availability. Return the proposed comment only; do not change the implementation.",
+  "ground_truth": [
+    "sku",
+    "qty"
+  ],
+  "max_tool_calls": 2,
+  "allowed_skills": [],
+  "max_tracedecay_calls": 0
+}

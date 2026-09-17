@@ -1,14 +1,16 @@
 use tree_sitter::Node as TsNode;
 
-use tracedecay_domain::code_intelligence::{
-    Edge, EdgeKind, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+use crate::common::local_node_id;
+use crate::types::{
+    ComplexityAnalysisV1, Edge, EdgeKind, Node, NodeKind, UnresolvedRef, Visibility,
 };
 
 pub(crate) trait AnnotationEmitterState {
     fn extract_annotation_name(&self, annotation_node: TsNode<'_>) -> String;
     fn file_path(&self) -> &str;
+    fn source(&self) -> &[u8];
     fn qualified_prefix(&self) -> String;
-    fn node_text(&self, node: TsNode<'_>) -> String;
+    fn node_str(&self, node: TsNode<'_>) -> &str;
     fn timestamp(&self) -> u64;
     fn push_node(&mut self, node: Node);
     fn push_edge(&mut self, edge: Edge);
@@ -27,11 +29,12 @@ pub(crate) fn emit_annotation_usage<S: AnnotationEmitterState>(
     let start_column = annotation_node.start_position().column as u32;
     let end_column = annotation_node.end_position().column as u32;
     let qualified_name = format!("{}::@{}", state.qualified_prefix(), annot_name);
-    let id = generate_node_id(
+    let id = local_node_id(
         state.file_path(),
+        state.source(),
         &NodeKind::AnnotationUsage,
         &annot_name,
-        start_line,
+        annotation_node,
     );
 
     state.push_node(Node {
@@ -45,7 +48,7 @@ pub(crate) fn emit_annotation_usage<S: AnnotationEmitterState>(
         end_line,
         start_column,
         end_column,
-        signature: Some(state.node_text(annotation_node).trim().to_string()),
+        signature: Some(state.node_str(annotation_node).trim().to_string()),
         docstring: None,
         visibility: Visibility::Private,
         is_async: false,
@@ -56,6 +59,7 @@ pub(crate) fn emit_annotation_usage<S: AnnotationEmitterState>(
         unsafe_blocks: 0,
         unchecked_calls: 0,
         assertions: 0,
+        complexity_analysis: ComplexityAnalysisV1::Complete,
         updated_at: state.timestamp(),
         parent_id: None,
     });
@@ -106,6 +110,3 @@ pub(crate) fn scan_children_for_annotation_kinds<'tree>(
         }
     }
 }
-
-#[cfg(test)]
-mod tests;

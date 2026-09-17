@@ -1,0 +1,58 @@
+[package]
+name = "tracedecay-session-memory"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+description = "Session retrieval, project memory, provider usage, and runtime telemetry use cases shared by CLI, MCP, and host-admission adapters"
+include = ["/src/**"]
+
+[features]
+# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
+# `hotpath/hotpath` backend (cargo unifies the proc-macro's features); this
+# feature only selects the on-mode hotpath test/bench targets of this crate.
+hotpath = ["hotpath/hotpath"]
+default = []
+# Forwarded from the root package: compiles the fact-commit acceptance barrier
+# in `fact_store::commit_barrier` alongside the kernel's in-process transport
+# doubles.
+test-transport = ["tracedecay-runtime-core/test-transport"]
+
+[dependencies]
+amari-holographic = "0.23.0"
+hex = "0.4"
+regex = "1.12.3"
+hotpath.workspace = true
+memmap2 = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+toml = "1"
+tracing = "0.1"
+tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
+tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
+tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
+tracedecay-privacy = { path = "../tracedecay-privacy", version = "0.1.0" }
+tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
+tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+
+[dev-dependencies]
+# Test-only helper surfaces reached across crate boundaries by this crate's
+# test targets. Feature unification supplies them to the test build only.
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+rusqlite = { version = "0.40.1", default-features = false }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }

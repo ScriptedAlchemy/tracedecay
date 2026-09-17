@@ -1,0 +1,1097 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { act, render, screen } from '@testing-library/react';
+import { MemoryRouter } from 'react-router';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { useScope } from '../../data/scope/store.ts';
+import type { EvidenceSourceId } from './evidence.ts';
+import { ObservatoryPage } from './ObservatoryPage.tsx';
+
+/**
+ * Store-telemetry rendering against the current `/api/storage/telemetry`
+ * contract (src/dashboard/storage_telemetry_api.rs).
+ *
+ * The endpoint's honesty rules are the assertions here: an unconfigured budget
+ * is a missing owner *setting* and never reads as unsupported or as a pass;
+ * size is live but growth stays explicitly unknown until an execution-owned
+ * sampler exists; and roles that share one database appear once, naming every
+ * role.
+ */
+
+const SETTING_KEY = 'sync.retention.v1 store_soft_budgets_bytes';
+/** Two watermarks an hour apart, so the rendered pair is a real UTC instant
+ * rather than the epoch and the two ends are distinguishable. */
+const SAMPLE_PREVIOUS_MICROS = 1_753_000_000_000_000;
+const SAMPLE_CURRENT_MICROS = 1_753_003_600_000_000;
+const SAMPLE_PREVIOUS_ISO = '2025-07-20T08:26:40.000Z';
+const SAMPLE_CURRENT_ISO = '2025-07-20T09:26:40.000Z';
+
+describe('ObservatoryPage store telemetry', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    useScope.getState().selectAllProjects();
+    vi.useRealTimers();
+  });
+
+  it('renders every budget and growth state honestly, and merges shared-file roles', async () => {
+    stubTelemetry(telemetryPayload());
+    renderObservatory('telemetry');
+
+    // Shared store file: one card, both roles named.
+    const shared = await screen.findByText('graph · memory (shared store file)');
+    expect(shared).toBeTruthy();
+
+    // Evaluated · within budget shows the real observed size and soft limit.
+    expect(screen.getByText(/within budget · 204\.7 MiB of 512\.0 MiB soft limit/)).toBeTruthy();
+    // Evaluated · over budget shows the real overage.
+    expect(
+      screen.getByText(/over budget · 704\.0 MiB of 512\.0 MiB soft limit · over by 192\.0 MiB/),
+    ).toBeTruthy();
+
+    // Unset: a missing setting, named exactly, and never "unsupported".
+    const unsetRow = document.querySelector('[data-dimension-state="unset"]');
+    expect(unsetRow?.textContent).toContain(`no budget configured · set ${SETTING_KEY}`);
+    // The setting is a mono token, so a missing setting is structurally — not
+    // only chromatically — distinct from an undetermined read.
+    expect(unsetRow?.querySelector(`[data-setting-key="${SETTING_KEY}"]`)).toBeTruthy();
+    expect(screen.queryByText(/budget.*unsupported/i)).toBeNull();
+
+    // Unknown budget never renders as a pass.
+    expect(screen.getAllByText('budget could not be determined').length).toBe(2);
+
+    // A live size read does not manufacture a growth baseline. Every store is
+    // explicit about the missing execution-owned history.
+    expect(screen.getAllByText('growth could not be determined').length).toBe(5);
+    expect(screen.getByText(/telemetry could not be determined for this store/)).toBeTruthy();
+  });
+
+  it('removes an unmounted worktree before switching to the next scope pipeline', async () => {
+    vi.useFakeTimers();
+    const first = codeIndexFreshnessEnvelope();
+    const firstWorktree = first.payload.worktrees[0]!;
+    const firstProgress = firstWorktree.progress;
+    const aggregate = {
+      ...first,
+      payload: {
+        ...first.payload,
+        worktrees: [
+          {
+            ...firstWorktree,
+            worktree_root: '/worktrees/aggregate-alpha',
+            progress: { ...firstProgress, generation_id: 'generation.scope.alpha' },
+          },
+        ],
+      },
+    };
+    const unmounted = {
+      ...aggregate,
+      payload: { ...aggregate.payload, worktrees: [] },
+    };
+    const projectBeta = {
+      ...aggregate,
+      scope: { project_id: 'project.beta', storage_mode: 'project', store_root: '/stores/beta' },
+      payload: {
+        ...aggregate.payload,
+        worktrees: [
+          {
+            ...firstWorktree,
+            worktree_root: '/worktrees/project-beta',
+            progress: { ...firstProgress, generation_id: 'generation.scope.beta' },
+          },
+        ],
+      },
+    };
+    let aggregateResponse = 0;
+    stubTelemetry(telemetryPayload(), emptyStorageFindingsPayload(), (url: string) => {
+      if (url.startsWith('/api/projects/project.beta/')) return projectBeta;
+      return [aggregate, unmounted][Math.min(aggregateResponse++, 1)]!;
+    });
+    renderObservatory('pipeline');
+
+    await advanceTimers(0);
+    expect(screen.getByText('generation.scope.alpha')).toBeTruthy();
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(screen.queryByText('generation.scope.alpha')).toBeNull();
+
+    act(() => useScope.getState().selectProject('project.beta', 'Project Beta', 'selected'));
+    await advanceTimers(0);
+    expect(screen.getByText('generation.scope.beta')).toBeTruthy();
+    expect(screen.queryByText('generation.scope.alpha')).toBeNull();
+    expect(document.querySelectorAll('[data-code-index-generation]').length).toBe(1);
+  });
+
+  it('clears an active scope pipeline before accepting a direct active scope replacement', async () => {
+    vi.useFakeTimers();
+    const first = codeIndexFreshnessEnvelope();
+    const firstWorktree = first.payload.worktrees[0]!;
+    const firstProgress = firstWorktree.progress;
+    const projectAlpha = {
+      ...first,
+      scope: { project_id: 'project.alpha', storage_mode: 'project', store_root: '/stores/alpha' },
+      payload: {
+        ...first.payload,
+        worktrees: [
+          {
+            ...firstWorktree,
+            worktree_root: '/worktrees/project-alpha',
+            progress: { ...firstProgress, generation_id: 'generation.scope.alpha' },
+          },
+        ],
+      },
+    };
+    const projectBeta = {
+      ...projectAlpha,
+      scope: { project_id: 'project.beta', storage_mode: 'project', store_root: '/stores/beta' },
+      payload: {
+        ...projectAlpha.payload,
+        worktrees: [
+          {
+            ...firstWorktree,
+            worktree_root: '/worktrees/project-beta',
+            progress: { ...firstProgress, generation_id: 'generation.scope.beta' },
+          },
+        ],
+      },
+    };
+    stubTelemetry(telemetryPayload(), emptyStorageFindingsPayload(), (url: string) =>
+      url.startsWith('/api/projects/project.alpha/') ? projectAlpha : projectBeta,
+    );
+    act(() => useScope.getState().selectProject('project.alpha', 'Project Alpha', 'active'));
+    renderObservatory('pipeline');
+
+    await advanceTimers(0);
+    expect(screen.getByText('generation.scope.alpha')).toBeTruthy();
+    act(() => useScope.getState().selectProject('project.beta', 'Project Beta', 'active'));
+    await advanceTimers(0);
+    expect(screen.getByText('generation.scope.beta')).toBeTruthy();
+    expect(screen.queryByText('generation.scope.alpha')).toBeNull();
+    expect(document.querySelectorAll('[data-code-index-generation]').length).toBe(1);
+  });
+
+  it('renders table-growth unavailable states distinctly without zero measurements', async () => {
+    stubTelemetry(telemetryPayload());
+    renderObservatory('telemetry');
+
+    await screen.findByText('graph · memory (shared store file)');
+    for (const [state, label] of [
+      ['unknown', 'Unknown'],
+      ['denied', 'Denied'],
+      ['unsupported', 'Unsupported'],
+    ] as const) {
+      const panel = document.querySelector(`[data-table-growth-state="${state}"]`);
+      expect(panel).toBeTruthy();
+      expect(panel?.textContent).toContain(label);
+      expect(panel?.querySelector('[data-table-growth-sample]')).toBeNull();
+      expect(panel?.textContent).not.toContain('+0 B');
+    }
+  });
+
+  it('renders an observed significant table row with its measured bytes and window', async () => {
+    stubTelemetry(telemetryPayload());
+    renderObservatory('telemetry');
+
+    await screen.findByText('graph · memory (shared store file)');
+    const row = document.querySelector('[data-table-growth-sample="messages"]');
+    expect(row).toBeTruthy();
+    // The whole point of the observed state: a real delta, the byte window it
+    // was measured over, and the two watermarks it spans. If any of it stops
+    // rendering, observed growth has silently disappeared.
+    expect(row?.textContent).toContain('+1.0 MiB');
+    expect(row?.textContent).toContain('10.0 MiB → 11.0 MiB');
+    expect(row?.textContent).toContain(`${SAMPLE_PREVIOUS_ISO} → ${SAMPLE_CURRENT_ISO}`);
+    expect(row?.textContent).not.toContain('NaN');
+    expect(row?.textContent).not.toContain('Invalid Date');
+  });
+
+  it('states table-growth coverage across all stores separately from each store', async () => {
+    stubTelemetry(telemetryPayload());
+    renderObservatory('telemetry');
+
+    const fleet = await screen.findByLabelText('Table growth coverage across all stores');
+    expect(fleet.getAttribute('data-table-growth-coverage')).toBe('partial');
+    expect(fleet.textContent).toContain('1 of 5 store_table_growth_reads fully compared');
+    for (const reason of [
+      'lcm.db: denied',
+      'savings.db: no baseline yet',
+      'sessions.db: unsupported',
+      'incident.db: unavailable',
+    ]) {
+      expect(fleet.textContent).toContain(reason);
+    }
+    // Aggregate scope and per-store scope are separate regions, so a partial
+    // fleet cannot hide behind one healthy-looking store card.
+    expect(fleet.querySelector('[data-table-growth-state]')).toBeNull();
+    expect(
+      document.querySelector('[data-table-growth-state="observed"]')?.textContent,
+    ).toContain('Coverage · this store');
+  });
+
+  it('gives every per-store table-growth region a distinct accessible name', async () => {
+    stubTelemetry(telemetryPayload());
+    renderObservatory('telemetry');
+
+    await screen.findByText('graph · memory (shared store file)');
+    const labels = Array.from(document.querySelectorAll('[data-table-growth-state]')).map(
+      (region) => region.getAttribute('aria-label'),
+    );
+    expect(labels.length).toBeGreaterThan(1);
+    expect(new Set(labels).size).toBe(labels.length);
+    expect(labels).toContain('Per-table growth · graph.db');
+  });
+
+  it('gives a byte-only store its size and an unknown free-page reading', async () => {
+    stubTelemetry({ ...telemetryPayload(), stores: [byteOnlyStore()] });
+    renderObservatory('telemetry');
+
+    // The size is a real measurement and is printed as one — on the overview
+    // row and again on the exact store card.
+    expect((await screen.findAllByText('40.0 MiB')).length).toBeGreaterThan(0);
+    // The capacity bar is drawn for this store rather than withheld, and says
+    // what it does not know instead of filling to 100% at "0.0% free pages".
+    expect(screen.getByText('free pages unknown')).toBeTruthy();
+    expect(
+      screen.getByText(/no page-level sample, so free pages are unmeasured rather than zero/),
+    ).toBeTruthy();
+    // Nothing may announce a measured free-page share for pages nobody sampled.
+    expect(screen.queryByRole('img', { name: /free pages/ })).toBeNull();
+    expect(screen.queryByText(/^0\.0%$/)).toBeNull();
+  });
+
+  it('renders every finding producer source state without treating partial as clean', async () => {
+    stubTelemetry(telemetryPayload(), sourceStatusFindingsPayload());
+    renderObservatory('findings');
+
+    expect(await screen.findByLabelText('Storage finding source status')).toBeTruthy();
+    const statusFor = (kind: string) =>
+      document.querySelector(`[data-storage-source-kind="${kind}"]`);
+
+    expect(statusFor('over_budget_store')?.getAttribute('data-storage-source-state')).toBe(
+      'partial',
+    );
+    expect(statusFor('over_budget_store')?.textContent).toContain(
+      'the canonical report did not carry per-producer completion evidence',
+    );
+    expect(statusFor('orphan_store')?.getAttribute('data-storage-source-state')).toBe('partial');
+    expect(statusFor('incident_debris_present')?.getAttribute('data-storage-source-state')).toBe(
+      'real',
+    );
+    expect(statusFor('retention_backlog')?.getAttribute('data-storage-source-state')).toBe(
+      'partial',
+    );
+    expect(screen.queryByText(/all storage checks clean/i)).toBeNull();
+  });
+
+  it('renders clone coverage, budgets, resources, and a designed zero', async () => {
+    const ready = readyCodeIndexFreshnessEnvelope();
+    const emptyObservation = {
+      ...cloneIndexObservation(),
+      generation_id: 'generation.empty',
+      coverage: {
+        ...cloneIndexObservation().coverage,
+        source_bodies: 0,
+        eligible_source_bodies: 0,
+        conservative_normalized_bodies: 0,
+        rename_normalized_bodies: 0,
+        unique_payloads: 0,
+        payloads_reused: 0,
+        exact_postings: 0,
+        near_fingerprint_bodies: 0,
+        near_fingerprint_postings: 0,
+        hot_postings_skipped: 0,
+        hot_posting_rows_skipped: 0,
+        excluded_too_small_bodies: 0,
+        excluded_incomplete_tokenization_bodies: 0,
+        rename_partial_bodies: 0,
+        rename_unsupported_bodies: 0,
+      },
+    };
+    stubTelemetry(telemetryPayload(), emptyStorageFindingsPayload(), {
+      ...ready,
+      payload: {
+        ...ready.payload,
+        worktrees: [
+          ready.payload.worktrees[0],
+          {
+            ...ready.payload.worktrees[0],
+            worktree_root: '/worktrees/empty',
+            clone_index: { state: 'ready', observation: emptyObservation },
+          },
+        ],
+      },
+    });
+    renderObservatory('pipeline');
+
+    await screen.findByText('5 occurrences');
+    const panel = await screen.findByLabelText('Clone index');
+    expect(panel.textContent).toContain('6 / 8');
+    expect(panel.textContent).toContain('6 / 6');
+    expect(panel.textContent).toContain('4 / 6');
+    expect(panel.textContent).toContain('prior payload reuse5 occurrences');
+    expect(panel.textContent).toContain('unique payloads5');
+    expect(panel.textContent).toContain('16,384 posting rows');
+    expect(panel.textContent).toContain('64 body comparisons');
+    expect(panel.textContent).toContain('minimum directional coverage · 70.0%');
+    expect(panel.textContent).toContain('2.0 MiB on disk');
+    expect(panel.textContent).toContain('2.40ms');
+    expect(panel.textContent).toContain('generation.empty');
+    expect(panel.textContent).toContain('0 / 0');
+  });
+
+  it('keeps partial, backfilling, stale, and unavailable clone states distinct', async () => {
+    const ready = readyCodeIndexFreshnessEnvelope();
+    const observation = cloneIndexObservation();
+    stubTelemetry(telemetryPayload(), emptyStorageFindingsPayload(), {
+      ...ready,
+      payload: {
+        ...ready.payload,
+        worktrees: [
+          {
+            ...ready.payload.worktrees[0],
+            worktree_root: '/worktrees/partial',
+            code_graph_serving: {
+              state: 'unavailable',
+              reason: 'graph artifact unreadable',
+            },
+            clone_index: {
+              state: 'partial',
+              observation: {
+                ...observation,
+                coverage: {
+                  ...observation.coverage,
+                  near_fingerprint_bodies: null,
+                  near_fingerprint_postings: null,
+                },
+              },
+              omission_reasons: ['positional fingerprint successor is missing'],
+            },
+          },
+          {
+            ...ready.payload.worktrees[0],
+            worktree_root: '/worktrees/backfilling',
+            clone_index: {
+              state: 'backfilling',
+              observation: {
+                ...observation,
+                coverage: {
+                  ...observation.coverage,
+                  completed_source_pages: 2,
+                  total_source_pages: 5,
+                  near_fingerprint_bodies: null,
+                  near_fingerprint_postings: null,
+                },
+              },
+            },
+          },
+          {
+            ...ready.payload.worktrees[0],
+            worktree_root: '/worktrees/stale',
+            clone_index: {
+              state: 'stale',
+              observation,
+              reason: 'the clone artifact belongs to the last sealed source generation',
+            },
+          },
+          {
+            ...ready.payload.worktrees[0],
+            worktree_root: '/worktrees/unavailable',
+            clone_index: {
+              state: 'unavailable',
+              reason: 'the sealed lexical artifact is unreadable',
+            },
+          },
+        ],
+      },
+    });
+    renderObservatory('pipeline');
+
+    await screen.findByText('positional fingerprint successor is missing');
+    for (const state of ['partial', 'backfilling', 'stale', 'unavailable']) {
+      expect(document.querySelector(`[data-clone-index-state="${state}"]`)).toBeTruthy();
+    }
+    expect(screen.getByText('positional fingerprint successor is missing')).toBeTruthy();
+    expect(screen.getByText('2 / 5 sealed pages')).toBeTruthy();
+    expect(screen.getByText('the sealed lexical artifact is unreadable')).toBeTruthy();
+    // Said on the overview rail and again in the exact readiness list.
+    expect(screen.getAllByText('unavailable · graph artifact unreadable').length).toBeGreaterThan(0);
+  });
+});
+
+/** Opens the page with one authority selected (`?inspect=`), so its exact
+ * read model is mounted beneath the grid — every assertion in this file is
+ * about that exact evidence, not the overview summary. */
+function renderObservatory(inspect: EvidenceSourceId) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  return render(
+    <MemoryRouter initialEntries={[`/observatory?inspect=${inspect}`]}>
+      <QueryClientProvider client={client}>
+        <ObservatoryPage />
+      </QueryClientProvider>
+    </MemoryRouter>,
+  );
+}
+
+async function advanceTimers(milliseconds: number): Promise<void> {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(milliseconds);
+  });
+}
+
+function stubTelemetry(
+  payload: unknown,
+  findingsPayload: unknown = emptyStorageFindingsPayload(),
+  codeIndexFreshnessPayload: unknown | ((url: string) => unknown) = readyCodeIndexFreshnessEnvelope(),
+) {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const route = url.replace(/^\/api\/projects\/[^/]+/, '/api');
+      if (route === '/api/storage/telemetry') return jsonResponse(envelope(payload));
+      if (route === '/api/storage/findings') {
+        return jsonResponse(envelope(findingsPayload));
+      }
+      if (route === '/api/code-index/freshness') {
+        return jsonResponse(
+          typeof codeIndexFreshnessPayload === 'function'
+            ? codeIndexFreshnessPayload(url)
+            : codeIndexFreshnessPayload,
+        );
+      }
+      if (route === '/api/doctor/findings') {
+        return jsonResponse(
+          envelope({
+            family_filter: null,
+            entries: [],
+            report_coverage: null,
+            known_families: ['storage'],
+            schema_convergences: [],
+            note: 'no admitted Doctor report source is available for this dashboard scope',
+          }),
+        );
+      }
+      // The other authorities the overview reads are not under test here.
+      // They answer as an unreachable source, which the page must render as a
+      // typed absence — never as a crash and never as an empty success.
+      if (
+        route === '/api/observatory' ||
+        route === '/api/plugins/analytics/diagnostics' ||
+        route === '/api/plugins/analytics/hints' ||
+        route.startsWith('/api/work/')
+      ) {
+        return new Response('{}', { status: 503, headers: { 'content-type': 'application/json' } });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    }),
+  );
+}
+
+function codeIndexFreshnessEnvelope() {
+  return {
+    ...readyCodeIndexFreshnessEnvelope(),
+    domain_state: 'loading',
+    coverage: {
+      completeness: 'unknown',
+      eligible: null,
+      examined: null,
+      matched: null,
+      excluded: null,
+      omitted: null,
+      unknown: null,
+      denominator: null,
+      unit: 'mounted_worktree',
+      omission_reasons: [],
+    },
+    payload: {
+      worktrees: [
+        {
+          ...codeIndexWorktree(),
+          latest_generation_id: null,
+          snapshot_content_identity: null,
+          sealed_at_micros: null,
+          staleness_state: 'indexing',
+          progress: {
+            generation_id: 'generation.catchup.01',
+            daemon_incarnation: 1,
+            producer_incarnation: 1,
+            progress_epoch: 1,
+            sealed_source_digest: 'sha256:sealed-source-catchup',
+            phase: 'bulk_commit',
+            committed_pages: 16,
+            committed_chunks: 10_000,
+            committed_imports: 480,
+            committed_payload_bytes: 16 * 1024 * 1024,
+            completed_files: 250,
+            total_files: 500,
+            completed_lexical_units: 32 * 1024 * 1024,
+            total_lexical_units: 64 * 1024 * 1024,
+            current_batch_pages: 4,
+            current_batch_payload_bytes: 4 * 1024 * 1024,
+            elapsed_micros: 120_000_000,
+            last_commit_latency_micros: 240_000,
+            files_per_second: 250,
+            lexical_units_per_second: 16 * 1024 * 1024,
+            estimated_remaining_seconds: 120,
+            last_progress_micros: SAMPLE_CURRENT_MICROS,
+            blocked_reason: null,
+          },
+        },
+      ],
+      note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+    },
+  };
+}
+
+function readyCodeIndexFreshnessEnvelope() {
+  return {
+    schema_revision: 1,
+    scope: { project_id: 'tracedecay', storage_mode: 'project', store_root: '/store' },
+    version: { entity_version: null, graph_version: null },
+    time: { valid_time_micros: null, observation_time_micros: SAMPLE_CURRENT_MICROS },
+    source_watermark: null,
+    authorization: { outcome: 'authorized' },
+    coverage: {
+      completeness: 'complete',
+      eligible: 1,
+      examined: 1,
+      matched: 1,
+      excluded: 0,
+      omitted: 0,
+      unknown: 0,
+      denominator: 1,
+      unit: 'mounted_worktree',
+      omission_reasons: [],
+    },
+    freshness: { state: 'fresh', observed_at_micros: SAMPLE_CURRENT_MICROS, watermark: null },
+    domain_state: 'ready',
+    legal_actions: [
+      { kind: 'refresh', operation: 'use-case.dashboard.code-index.freshness.refresh' },
+    ],
+    payload: {
+      worktrees: [{ ...codeIndexWorktree(), progress: null }],
+      note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+    },
+  };
+}
+
+function codeIndexWorktree() {
+  return {
+    worktree_root: '/fast/projects/tracedecay',
+    repository_id: 'repository.tracedecay',
+    worktree_id: 'worktree.primary',
+    source_reference: 'refs/heads/main',
+    source_revision: null,
+    latest_generation_id: 'generation.2f8c41ab',
+    code_graph_serving: { state: 'ready' },
+    clone_index: { state: 'ready', observation: cloneIndexObservation() },
+    snapshot_content_identity: 'sha256:9c1f4a2e7b05',
+    sealed_at_micros: SAMPLE_CURRENT_MICROS - 214_000_000,
+    last_reconcile_micros: SAMPLE_CURRENT_MICROS - 8_400_000,
+    staleness_state: 'fresh',
+    rebuild_in_flight: false,
+    hook_hint_count: 0,
+    coverage: 'complete',
+    parked: null,
+  };
+}
+
+function cloneIndexObservation() {
+  return {
+    generation_id: 'generation.2f8c41ab',
+    source_revision: 'commit.2f8c41ab',
+    artifact_format_revision: 16,
+    conservative_normalization_revision: 1,
+    rename_normalization_revision: 1,
+    coverage: {
+      source_bodies: 8,
+      eligible_source_bodies: 6,
+      conservative_normalized_bodies: 6,
+      rename_normalized_bodies: 4,
+      unique_payloads: 5,
+      payloads_reused: 5,
+      exact_postings: 10,
+      near_fingerprint_bodies: 6,
+      near_fingerprint_postings: 72,
+      hot_postings_skipped: 1,
+      hot_posting_rows_skipped: 1_025,
+      excluded_too_small_bodies: 1,
+      excluded_incomplete_tokenization_bodies: 1,
+      rename_partial_bodies: 1,
+      rename_unsupported_bodies: 1,
+      completed_source_pages: 2,
+      total_source_pages: 2,
+    },
+    budgets: {
+      posting_rows: 16_384,
+      candidate_bodies: 256,
+      verification_bodies: 64,
+      verification_token_work: 2_000_000,
+      hot_posting_rows: 1_024,
+      minimum_body_tokens: 30,
+      minimum_directional_coverage_millionths: 700_000,
+    },
+    resources: {
+      bytes_on_disk: 2_097_152,
+      peak_scratch_memory_bytes: 32_768,
+      changed_symbol_update_micros: 2_400,
+      stale_invalidations: 1,
+    },
+  };
+}
+
+function emptyStorageFindingsPayload() {
+  return {
+    family_filter: 'storage',
+    entries: [],
+    report_coverage: null,
+    known_families: ['storage'],
+    schema_convergences: [],
+    note: 'canonical Doctor storage family contained no entries',
+    kind_statuses: sourceStatuses(),
+  };
+}
+
+function sourceStatusFindingsPayload() {
+  return {
+    ...emptyStorageFindingsPayload(),
+    kind_statuses: sourceStatuses({
+      over_budget_store: {
+        state: 'partial',
+        observed_entries: 0,
+        reason: 'the canonical report did not carry per-producer completion evidence',
+      },
+      orphan_store: {
+        state: 'partial',
+        observed_entries: 0,
+        reason: 'the canonical report did not carry per-producer completion evidence',
+      },
+      incident_debris_present: {
+        state: 'real',
+        observed_entries: 1,
+        reason: 'canonical Doctor producer returned observed evidence',
+      },
+      retention_backlog: {
+        state: 'partial',
+        observed_entries: 0,
+        reason: 'retention watermark was stale',
+      },
+    }),
+  };
+}
+
+type SourceStatus = {
+  state: 'real' | 'unset' | 'partial' | 'unsupported';
+  observed_entries: number;
+  reason: string;
+};
+
+function sourceStatuses(overrides: Partial<Record<string, SourceStatus>> = {}) {
+  return [
+    'over_budget_store',
+    'orphan_store',
+    'incident_debris_present',
+    'retention_backlog',
+    'table_growth',
+  ].map((kind) => ({
+    kind,
+    ...(overrides[kind] ?? {
+      state: 'unsupported',
+      observed_entries: 0,
+      reason: 'no admitted Doctor report source is available for this dashboard scope',
+    }),
+  }));
+}
+
+function telemetryPayload() {
+  const tableGrowth = [
+    {
+      state: 'observed',
+      // Two of the three current tables had a previous watermark to compare
+      // against, so this observed read is deliberately partial.
+      coverage: partialCoverage(3, 2, 'current_tables', [
+        'embeddings: no previous table watermark exists; baseline pending',
+      ]),
+      significant_samples: [
+        {
+          table: 'messages',
+          previous_bytes: 10_485_760,
+          current_bytes: 11_534_336,
+          growth_bytes: 1_048_576,
+          previous_observed_at: SAMPLE_PREVIOUS_MICROS,
+          current_observed_at: SAMPLE_CURRENT_MICROS,
+        },
+      ],
+      omissions: [
+        {
+          kind: 'below_threshold',
+          table: 'metadata',
+          previous_bytes: 104_857_600,
+          current_bytes: 105_381_888,
+          growth_bytes: 524_288,
+          previous_observed_at: SAMPLE_PREVIOUS_MICROS,
+          current_observed_at: SAMPLE_CURRENT_MICROS,
+          reason: 'observed growth was below the informational significance threshold',
+        },
+        {
+          kind: 'baseline_pending',
+          table: 'embeddings',
+          current_bytes: 4_194_304,
+          observed_at: SAMPLE_CURRENT_MICROS,
+          reason: 'embeddings: no previous table watermark exists; baseline pending',
+        },
+      ],
+      omission_reasons: [
+        'metadata: observed growth was below the informational significance threshold',
+        'embeddings: no previous table watermark exists; baseline pending',
+      ],
+    },
+    {
+      state: 'denied',
+      coverage: partialTableGrowthCoverage('per-table payload growth measurement was denied'),
+      omission_reasons: ['per-table payload growth measurement was denied for this store'],
+    },
+    {
+      state: 'baseline_established',
+      coverage: partialTableGrowthCoverage('no baseline yet'),
+      observed_at: 100,
+      tables_observed: 7,
+      omission_reasons: [
+        'no baseline yet; this read established the first per-table payload watermark',
+      ],
+    },
+    {
+      state: 'unsupported',
+      coverage: partialTableGrowthCoverage(
+        'per-table payload growth measurement is unsupported',
+      ),
+      omission_reasons: ['per-table payload growth measurement is unsupported for this store'],
+    },
+    {
+      state: 'unknown',
+      coverage: partialTableGrowthCoverage(
+        'per-table payload growth measurement is unavailable',
+      ),
+      omission_reasons: ['per-table payload growth measurement is unavailable for this store'],
+    },
+  ];
+  let tableGrowthIndex = 0;
+  return {
+    stores: [
+      {
+        store: 'graph.db',
+        roles: ['graph', 'memory'],
+        path: '/project/.tracedecay/graph.db',
+        read: {
+          kind: 'observed',
+          sample: {
+            store: 'graph.db',
+            page_size_bytes: 4096,
+            page_count: 52_400,
+            freelist_pages: 1_280,
+            observed_at: 100,
+          },
+        },
+        total_bytes: 214_630_400,
+        free_bytes: 5_242_880,
+        free_page_ratio: 0.024,
+        budget: {
+          state: 'evaluated',
+          evaluation: { state: 'within_budget', observed: 214_630_400, soft_limit: 536_870_912 },
+          setting_key: SETTING_KEY,
+          reason: 'evaluated against the owner-configured soft limit of 536870912 bytes',
+        },
+        growth: {
+          state: 'unknown',
+          reason: 'no execution-owned store-size watermark is available',
+        },
+      },
+      {
+        store: 'lcm.db',
+        roles: ['lcm'],
+        path: '/profile/lcm.db',
+        read: {
+          kind: 'observed',
+          sample: {
+            store: 'lcm.db',
+            page_size_bytes: 4096,
+            page_count: 180_224,
+            freelist_pages: 2_048,
+            observed_at: 100,
+          },
+        },
+        total_bytes: 738_197_504,
+        free_bytes: 8_388_608,
+        free_page_ratio: 0.011,
+        budget: {
+          state: 'evaluated',
+          evaluation: {
+            state: 'over_budget',
+            observed: 738_197_504,
+            soft_limit: 536_870_912,
+            overage: 201_326_592,
+          },
+          setting_key: SETTING_KEY,
+          reason: 'evaluated against the owner-configured soft limit of 536870912 bytes',
+        },
+        growth: {
+          state: 'unknown',
+          reason: 'no execution-owned store-size watermark is available',
+        },
+      },
+      {
+        store: 'savings.db',
+        roles: ['savings'],
+        path: '/profile/savings.db',
+        read: {
+          kind: 'observed',
+          sample: {
+            store: 'savings.db',
+            page_size_bytes: 4096,
+            page_count: 18_200,
+            freelist_pages: 420,
+            observed_at: 100,
+          },
+        },
+        total_bytes: 74_547_200,
+        free_bytes: 1_720_320,
+        free_page_ratio: 0.023,
+        budget: {
+          state: 'unset',
+          reason: 'no soft size budget is configured by the owner for this store',
+          setting_key: SETTING_KEY,
+        },
+        growth: {
+          state: 'unknown',
+          reason: 'no execution-owned store-size watermark is available',
+        },
+      },
+      {
+        store: 'sessions.db',
+        roles: ['sessions'],
+        path: '/profile/sessions.db',
+        read: {
+          kind: 'observed',
+          sample: {
+            store: 'sessions.db',
+            page_size_bytes: 4096,
+            page_count: 9_600,
+            freelist_pages: 96,
+            observed_at: 100,
+          },
+        },
+        total_bytes: 39_321_600,
+        free_bytes: 393_216,
+        free_page_ratio: 0.01,
+        budget: {
+          state: 'unknown',
+          reason: 'the resolved runtime configuration could not be read',
+        },
+        growth: {
+          state: 'unknown',
+          reason: 'no execution-owned store-size watermark is available',
+        },
+      },
+      {
+        store: 'incident.db',
+        roles: ['incident'],
+        path: '/profile/incident.db',
+        read: { kind: 'unknown', store: 'incident.db' },
+        total_bytes: null,
+        free_bytes: null,
+        free_page_ratio: null,
+        budget: {
+          state: 'unknown',
+          reason: 'no observed size sample, so a configured budget could not be evaluated',
+        },
+        growth: {
+          state: 'unknown',
+          reason: 'no execution-owned store-size watermark is available',
+        },
+      },
+    ].map((store) => ({ ...store, table_growth: tableGrowth[tableGrowthIndex++] })),
+    budget_note: 'budgets are owner configuration: sync.retention.v1 store_soft_budgets_bytes',
+    growth_note: 'growth is measured over the watermarks this daemon has recorded since it started',
+    table_growth_threshold: {
+      absolute_bytes: 67_108_864,
+      relative_floor_bytes: 1_048_576,
+      relative_percent: 10,
+    },
+    table_growth_coverage: {
+      completeness: 'partial',
+      eligible: 5,
+      examined: 1,
+      matched: null,
+      excluded: null,
+      omitted: 4,
+      unknown: null,
+      denominator: 5,
+      unit: 'store_table_growth_reads',
+      omission_reasons: [
+        'lcm.db: denied',
+        'savings.db: no baseline yet',
+        'sessions.db: unsupported',
+        'incident.db: unavailable',
+      ],
+    },
+  };
+}
+
+/** A store whose size read produced a byte total with no page-level sample —
+ * the one read kind that has a real size and no free-page figure at all. */
+function byteOnlyStore() {
+  return {
+    store: 'savings.db',
+    roles: ['savings'],
+    path: '/profile/savings.db',
+    read: {
+      kind: 'observed_bytes',
+      store: 'savings.db',
+      total_bytes: 41_943_040,
+      observed_at: SAMPLE_CURRENT_MICROS,
+    },
+    total_bytes: 41_943_040,
+    free_bytes: null,
+    free_page_ratio: null,
+    budget: {
+      state: 'unknown',
+      reason: 'no page sample, so a configured budget could not be evaluated',
+    },
+    growth: {
+      state: 'unknown',
+      reason: 'no execution-owned store-size watermark is available',
+    },
+    table_growth: {
+      state: 'unknown',
+      coverage: partialTableGrowthCoverage(
+        'per-table payload growth measurement is unavailable',
+      ),
+      omission_reasons: ['per-table payload growth measurement is unavailable for this store'],
+    },
+  };
+}
+
+function partialCoverage(
+  denominator: number,
+  examined: number,
+  unit: string,
+  omissionReasons: string[],
+) {
+  return {
+    completeness: 'partial',
+    eligible: denominator,
+    examined,
+    matched: null,
+    excluded: null,
+    omitted: denominator - examined,
+    unknown: null,
+    denominator,
+    unit,
+    omission_reasons: omissionReasons,
+  };
+}
+
+function partialTableGrowthCoverage(reason: string) {
+  return {
+    completeness: 'partial',
+    eligible: 1,
+    examined: 0,
+    matched: null,
+    excluded: null,
+    omitted: 1,
+    unknown: null,
+    denominator: 1,
+    unit: 'store_table_growth_reads',
+    omission_reasons: [reason],
+  };
+}
+
+function jsonResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+function envelope<T>(payload: T) {
+  return {
+    schema_revision: 1,
+    scope: { project_id: 'project.observatory', storage_mode: 'project_local', store_root: '/p' },
+    version: { entity_version: null, graph_version: null },
+    time: { valid_time_micros: null, observation_time_micros: 100 },
+    source_watermark: null,
+    authorization: { outcome: 'authorized' },
+    coverage: {
+      completeness: 'partial',
+      eligible: 5,
+      examined: 4,
+      matched: null,
+      excluded: null,
+      omitted: 1,
+      unknown: null,
+      denominator: 5,
+      unit: 'stores',
+      omission_reasons: ['store telemetry read failed (pragma unavailable)'],
+    },
+    freshness: { state: 'fresh', observed_at_micros: 100, watermark: null },
+    domain_state: 'ready',
+    legal_actions: [
+      { kind: 'refresh', operation: 'use-case.dashboard.storage.telemetry.refresh' },
+    ],
+    payload,
+  };
+}
+
+describe('ObservatoryPage duplicate finding identities', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * The live regression: a real report can carry two findings of one kind
+   * whose first evidence names the same reference (observed live: repeated
+   * retention_backlog rows for one store). Both must render as cards, under
+   * unique React keys — the old `kind:reference` key collided and React
+   * warned about two children with the same key.
+   */
+  it('renders same-kind same-reference findings as distinct cards with unique keys', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const repeated = (statement: string) => ({
+      finding: {
+        family: 'storage',
+        state: 'stale',
+        evidence: [
+          { family: 'storage', reference: 'storage.retention_backlog.sessions.db.no-backlog' },
+          // The same reference twice inside one finding, which the evidence
+          // list must also key uniquely.
+          { family: 'storage', reference: 'storage.retention_backlog.sessions.db.no-backlog' },
+        ],
+        coverage: { completeness: 'complete', statement },
+      },
+      storage_kind: 'retention_backlog',
+    });
+    stubTelemetry(telemetryPayload(), {
+      ...emptyStorageFindingsPayload(),
+      entries: [repeated('first reading'), repeated('second reading')],
+      note: 'storage retention and size authorities were consulted',
+    });
+    renderObservatory('findings');
+
+    // One card per entry, told apart by their coverage statements — the label
+    // text alone also appears in the source-status strip.
+    expect(await screen.findByText('first reading')).toBeTruthy();
+    expect(await screen.findByText('second reading')).toBeTruthy();
+    expect(document.querySelectorAll('[data-storage-finding-kind="retention_backlog"]')).toHaveLength(
+      2,
+    );
+
+    const duplicateKeyWarnings = consoleError.mock.calls.filter((call) =>
+      String(call[0]).includes('two children with the same key'),
+    );
+    expect(duplicateKeyWarnings).toEqual([]);
+    consoleError.mockRestore();
+  });
+});

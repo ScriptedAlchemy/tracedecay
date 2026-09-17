@@ -28,6 +28,10 @@ reconstructs private reasoning.
 
 ## Shared interaction contract
 
+- The measured structural atlas/treemap remains a Brain view option. It keeps
+  source containment geometry stable across structure, dependency, change,
+  cycle, forwarding, churn, exact-blob duplicate, and coverage lenses. It is an
+  exact source-oriented complement to the neural registry and scoped graph.
 - Project-body area encodes indexed holdings or another explicitly named mass
   measure; it never encodes popularity, importance, health, or activity.
 - Horizontal placement encodes measured recency. Unknown or stale timestamps
@@ -39,11 +43,15 @@ reconstructs private reasoning.
   relation. Inferred or ambiguous relations use their own line treatment and
   remain labelled.
 - An activity synapse exists only for admitted activity with exact touched
-  identities. The path may traverse only evidenced hops. Heat decays while the
+  identities. The path may traverse at most one evidenced drawn relation and
+  never continue onward or light sibling checkouts. Heat decays while the
   underlying graph remains stable; idle nodes do not shimmer or pulse.
 - Source-private chain-of-thought is never a node, edge, field, or tooltip.
   Visible persisted messages or reasoning summaries may appear only with their
   source class and evidence grade.
+- Atlas churn means commit/file touches in its stated window, and duplicate
+  groups mean byte-identical nonempty source files. Neither establishes code
+  quality, semantic duplication, importance, defect risk, or runtime reachability.
 
 ## Browser and accessibility contract
 
@@ -72,8 +80,13 @@ reconstructs private reasoning.
   timestamp, exact touched project, and supported propagation relation.
 - `dashboard/src/workspaces/brain/BrainPage.tsx` and
   `dashboard/src/workspaces/brain/ScopedBrain.tsx` are the V2 route and scope
-  composition targets. `dashboard/src/viz/graph/GraphCanvas.propagation.dom.test.tsx`
-  names the existing propagation behavior that the shared high-fidelity scene
-  layer must preserve or replace with equivalent production evidence.
+  composition targets. The registry field (plates 01, 02, 03 and 05) renders
+  through `dashboard/src/workspaces/brain/RegistryScene.tsx` over the shared
+  scene layer in `dashboard/src/viz/scene/` (renderer-neutral model, Three.js
+  runtime); `dashboard/src/workspaces/brain/BrainInteraction.dom.test.tsx` and
+  `RegistryScene.dom.test.tsx` carry the exact-identity and one-hop evidence.
+  The scoped code graph (plate 04) still renders through the legacy
+  `dashboard/src/viz/graph/GraphCanvas.tsx`, whose propagation behavior
+  `GraphCanvas.propagation.dom.test.tsx` names.
 - [`IMPLEMENTATION.md`](../../IMPLEMENTATION.md) owns the hybrid DOM/scene
   architecture and renderer proof-of-capability decision.

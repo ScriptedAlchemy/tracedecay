@@ -84,7 +84,7 @@ class CrateLane(str, Enum):
     QUERY = "tracedecay-query"
     CODE_INDEX = "tracedecay-code-index"
     CAPTURE = "tracedecay-capture"
-    APPLICATION = "tracedecay-application"
+    CONTRACTS = "tracedecay-contracts"
     HOOKS = "tracedecay-hooks"
     API = "tracedecay-api"
     RUSQLITE_RUNTIME = "tracedecay-rusqlite-runtime"
@@ -395,22 +395,22 @@ def _remote(i: WorkloadInputs) -> JsonObject:
     return {"provider": i.provider, "session_id": i.session_id, "format": "json"}
 
 
-QUERY = (CrateLane.QUERY, CrateLane.APPLICATION, CrateLane.INTEGRATED)
+QUERY = (CrateLane.QUERY, CrateLane.CONTRACTS, CrateLane.INTEGRATED)
 CODE = (
     CrateLane.CODE_INDEX,
     CrateLane.QUERY,
-    CrateLane.APPLICATION,
+    CrateLane.CONTRACTS,
     CrateLane.INTEGRATED,
 )
 SESSION = (
     CrateLane.CAPTURE,
     CrateLane.RUSQLITE_RUNTIME,
-    CrateLane.APPLICATION,
+    CrateLane.CONTRACTS,
     CrateLane.INTEGRATED,
 )
 API = (
     CrateLane.CODE_INDEX,
-    CrateLane.APPLICATION,
+    CrateLane.CONTRACTS,
     CrateLane.API,
     CrateLane.INTEGRATED,
 )
@@ -430,9 +430,9 @@ WORKLOADS = (
     Workload("query-context", "context-assembly", WorkloadKind.CONTEXT, "tracedecay_context", _context, CODE),
     Workload("payload-stress", "transport-dispatch", WorkloadKind.PAYLOAD, "tracedecay_context", _payload, API),
     Workload("concurrency-burst", "transport-dispatch", WorkloadKind.CONCURRENCY, "tracedecay_search", _search, API, DigestSemantics.UNORDERED_JSON),
-    Workload("hook-delivery", "hook-delivery", WorkloadKind.PAYLOAD, "tracedecay_hook_dispatch", _hook, (CrateLane.HOOKS, CrateLane.APPLICATION, CrateLane.API, CrateLane.INTEGRATED)),
-    Workload("remote-capture", "remote-capture", WorkloadKind.SESSION, "tracedecay_remote_capture", _remote, (CrateLane.CAPTURE, CrateLane.APPLICATION, CrateLane.API, CrateLane.INTEGRATED), is_remote=True),
-    Workload("remote-recovery", "remote-recovery", WorkloadKind.SESSION, "tracedecay_remote_recovery", _remote, (CrateLane.CAPTURE, CrateLane.RUSQLITE_RUNTIME, CrateLane.APPLICATION, CrateLane.API, CrateLane.INTEGRATED), is_remote=True),
+    Workload("hook-delivery", "hook-delivery", WorkloadKind.PAYLOAD, "tracedecay_hook_dispatch", _hook, (CrateLane.HOOKS, CrateLane.CONTRACTS, CrateLane.API, CrateLane.INTEGRATED)),
+    Workload("remote-capture", "remote-capture", WorkloadKind.SESSION, "tracedecay_remote_capture", _remote, (CrateLane.CAPTURE, CrateLane.CONTRACTS, CrateLane.API, CrateLane.INTEGRATED), is_remote=True),
+    Workload("remote-recovery", "remote-recovery", WorkloadKind.SESSION, "tracedecay_remote_recovery", _remote, (CrateLane.CAPTURE, CrateLane.RUSQLITE_RUNTIME, CrateLane.CONTRACTS, CrateLane.API, CrateLane.INTEGRATED), is_remote=True),
 )
 
 

@@ -1,0 +1,350 @@
+use tracedecay_code_extraction::LanguageExtractor;
+use tracedecay_code_extraction::{
+    ExtractedSchemaFactV1, ProtoExtractor, SchemaEvidenceIssueV1, SchemaEvidenceStatusV1,
+};
+use tracedecay_domain::*;
+
+fn extract_sample() -> ExtractionResult {
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.proto")
+        .expect("failed to read sample.proto");
+    let extractor = ProtoExtractor;
+    extractor.extract("sample.proto", &source)
+}
+
+#[test]
+fn schema_evidence_retains_qualified_messages_fields_services_and_rpcs() {
+    let source = r#"syntax = "proto3";
+package acme.billing.v1;
+
+message Invoice {
+  string id = 7;
+  map<string, int32> totals = 8;
+}
+
+service Billing {
+  rpc GetInvoice (Invoice) returns (Invoice);
+}
+"#;
+    let artifact = ProtoExtractor.extract_artifact("api/billing.proto", source);
+    let evidence = artifact.schema_evidence.expect("protobuf schema evidence");
+    assert_eq!(evidence.status, SchemaEvidenceStatusV1::Complete);
+    assert!(evidence.issues.is_empty());
+    assert!(evidence.facts.iter().any(|fact| matches!(
+        fact,
+        ExtractedSchemaFactV1::ProtobufMessage { qualified_name, span }
+            if qualified_name == "acme.billing.v1.Invoice"
+                && &source[span.start_byte as usize..span.end_byte as usize]
+                    == "message Invoice {\n  string id = 7;\n  map<string, int32> totals = 8;\n}"
+    )));
+    assert!(evidence.facts.iter().any(|fact| matches!(
+        fact,
+        ExtractedSchemaFactV1::ProtobufField {
+            message_qualified_name,
+            name,
+            type_name,
+            tag: 7,
+            ..
+        } if message_qualified_name == "acme.billing.v1.Invoice"
+            && name == "id"
+            && type_name == "string"
+    )));
+    assert!(evidence.facts.iter().any(|fact| matches!(
+        fact,
+        ExtractedSchemaFactV1::ProtobufRpc {
+            service_qualified_name,
+            name,
+            request_type,
+            response_type,
+            ..
+        } if service_qualified_name == "acme.billing.v1.Billing"
+            && name == "GetInvoice"
+            && request_type == "Invoice"
+            && response_type == "Invoice"
+    )));
+
+    let malformed = ProtoExtractor.extract_artifact(
+        "api/broken.proto",
+        "syntax = \"proto3\"; message Broken { string id = ; }",
+    );
+    let malformed = malformed.schema_evidence.expect("partial schema evidence");
+    assert_eq!(malformed.status, SchemaEvidenceStatusV1::Partial);
+    assert_eq!(malformed.issues, vec![SchemaEvidenceIssueV1::ParseError]);
+
+    let late_package_source = r#"syntax = "proto3";
+message Early { string id = 1; }
+package acme.late.v1;
+service Late { rpc Get (Early) returns (Early); }
+"#;
+    let late_package = ProtoExtractor.extract_artifact("api/late.proto", late_package_source);
+    let late_package = late_package
+        .schema_evidence
+        .expect("late package schema evidence");
+    assert!(late_package.facts.iter().any(|fact| matches!(
+        fact,
+        ExtractedSchemaFactV1::ProtobufMessage { qualified_name, .. }
+            if qualified_name == "acme.late.v1.Early"
+    )));
+    assert!(late_package.facts.iter().any(|fact| matches!(
+        fact,
+        ExtractedSchemaFactV1::ProtobufService { qualified_name, .. }
+            if qualified_name == "acme.late.v1.Late"
+    )));
+
+    let enum_schema = ProtoExtractor.extract_artifact(
+        "api/status.proto",
+        "syntax = \"proto3\"; package acme; enum Status { UNKNOWN = 0; READY = 1; }",
+    );
+    let enum_schema = enum_schema
+        .schema_evidence
+        .expect("partial enum schema evidence");
+    assert_eq!(enum_schema.status, SchemaEvidenceStatusV1::Partial);
+    assert_eq!(
+        enum_schema.issues,
+        vec![SchemaEvidenceIssueV1::UnsupportedSyntax]
+    );
+}
+
+#[test]
+fn test_proto_imports() {
+    let result = extract_sample();
+    let imports: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Use)
+        .collect();
+    assert_eq!(
+        imports.len(),
+        2,
+        "expected 2 imports, got {}",
+        imports.len()
+    );
+    assert!(
+        imports
+            .iter()
+            .any(|n| n.name == "google/protobuf/timestamp.proto")
+    );
+    assert!(
+        imports
+            .iter()
+            .any(|n| n.name == "google/protobuf/empty.proto")
+    );
+}
+
+#[test]
+fn test_proto_messages() {
+    let result = extract_sample();
+    let msgs: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::ProtoMessage)
+        .collect();
+    assert!(
+        msgs.len() >= 7,
+        "expected >= 7 messages, got {} : {:?}",
+        msgs.len(),
+        msgs.iter().map(|m| &m.name).collect::<Vec<_>>()
+    );
+    assert!(msgs.iter().any(|m| m.name == "Endpoint"));
+    assert!(msgs.iter().any(|m| m.name == "ConnectionConfig"));
+    assert!(msgs.iter().any(|m| m.name == "ConnectionStatus"));
+    assert!(msgs.iter().any(|m| m.name == "DisconnectRequest"));
+    assert!(msgs.iter().any(|m| m.name == "HealthCheckRequest"));
+    assert!(msgs.iter().any(|m| m.name == "HealthCheckResponse"));
+}
+
+#[test]
+fn test_proto_nested_message() {
+    let result = extract_sample();
+    let auth = result
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::ProtoMessage && n.name == "AuthConfig");
+    assert!(auth.is_some(), "nested AuthConfig message not found");
+
+    let conn_config = result
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::ProtoMessage && n.name == "ConnectionConfig")
+        .unwrap();
+    let auth_config = auth.unwrap();
+    assert!(
+        result.edges.iter().any(|e| e.source == conn_config.id
+            && e.target == auth_config.id
+            && e.kind == EdgeKind::Contains),
+        "expected Contains edge from ConnectionConfig to AuthConfig"
+    );
+}
+
+#[test]
+fn test_proto_enum() {
+    let result = extract_sample();
+    let enums: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Enum)
+        .collect();
+    assert_eq!(enums.len(), 1);
+    assert_eq!(enums[0].name, "LogLevel");
+    assert!(
+        enums[0].docstring.is_some(),
+        "LogLevel should have docstring"
+    );
+    assert!(
+        enums[0].docstring.as_ref().unwrap().contains("log level"),
+        "docstring: {:?}",
+        enums[0].docstring
+    );
+}
+
+#[test]
+fn test_proto_enum_variants() {
+    let result = extract_sample();
+    let variants: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::EnumVariant)
+        .collect();
+    assert_eq!(
+        variants.len(),
+        5,
+        "expected 5 enum variants, got {} : {:?}",
+        variants.len(),
+        variants.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+    assert!(variants.iter().any(|v| v.name == "LOG_LEVEL_UNSPECIFIED"));
+    assert!(variants.iter().any(|v| v.name == "LOG_LEVEL_DEBUG"));
+    assert!(variants.iter().any(|v| v.name == "LOG_LEVEL_INFO"));
+    assert!(variants.iter().any(|v| v.name == "LOG_LEVEL_WARNING"));
+    assert!(variants.iter().any(|v| v.name == "LOG_LEVEL_ERROR"));
+}
+
+#[test]
+fn test_proto_service() {
+    let result = extract_sample();
+    let services: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::ProtoService)
+        .collect();
+    assert_eq!(services.len(), 1);
+    assert_eq!(services[0].name, "ConnectionService");
+    assert!(
+        services[0].docstring.is_some(),
+        "ConnectionService should have docstring"
+    );
+}
+
+#[test]
+fn test_proto_rpcs() {
+    let result = extract_sample();
+    let rpcs: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::ProtoRpc)
+        .collect();
+    assert_eq!(
+        rpcs.len(),
+        3,
+        "expected 3 rpcs, got {} : {:?}",
+        rpcs.len(),
+        rpcs.iter().map(|r| &r.name).collect::<Vec<_>>()
+    );
+    assert!(rpcs.iter().any(|r| r.name == "Connect"));
+    assert!(rpcs.iter().any(|r| r.name == "Disconnect"));
+    assert!(rpcs.iter().any(|r| r.name == "HealthCheck"));
+
+    let connect = rpcs.iter().find(|r| r.name == "Connect").unwrap();
+    assert!(
+        connect.docstring.is_some(),
+        "Connect rpc should have docstring"
+    );
+}
+
+#[test]
+fn test_proto_fields() {
+    let result = extract_sample();
+    let fields: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Field)
+        .collect();
+    assert!(
+        fields.len() >= 15,
+        "expected >= 15 fields, got {}",
+        fields.len()
+    );
+    assert!(fields.iter().any(|f| f.name == "host"));
+    assert!(fields.iter().any(|f| f.name == "port"));
+    assert!(fields.iter().any(|f| f.name == "tls"));
+    assert!(fields.iter().any(|f| f.name == "connection_id"));
+
+    let host = fields.iter().find(|f| f.name == "host").unwrap();
+    assert!(
+        host.signature.as_ref().unwrap().contains("string"),
+        "host signature should contain type"
+    );
+    assert!(
+        host.signature.as_ref().unwrap().contains("1"),
+        "host signature should contain field number"
+    );
+}
+
+#[test]
+fn test_proto_oneof_fields() {
+    let result = extract_sample();
+    let fields: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Field)
+        .collect();
+    assert!(fields.iter().any(|f| f.name == "round_robin"));
+    assert!(fields.iter().any(|f| f.name == "least_connections"));
+}
+
+#[test]
+fn test_proto_docstrings() {
+    let result = extract_sample();
+
+    let endpoint = result
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::ProtoMessage && n.name == "Endpoint")
+        .unwrap();
+    assert!(
+        endpoint.docstring.is_some(),
+        "Endpoint should have docstring"
+    );
+    assert!(
+        endpoint
+            .docstring
+            .as_ref()
+            .unwrap()
+            .contains("network endpoint"),
+        "docstring: {:?}",
+        endpoint.docstring
+    );
+}
+
+#[test]
+fn test_proto_service_contains_rpcs() {
+    let result = extract_sample();
+    let service = result
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::ProtoService && n.name == "ConnectionService")
+        .unwrap();
+    let rpcs: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::ProtoRpc)
+        .collect();
+    for rpc in &rpcs {
+        assert!(
+            result.edges.iter().any(|e| e.source == service.id
+                && e.target == rpc.id
+                && e.kind == EdgeKind::Contains),
+            "expected Contains edge from service to rpc '{}'",
+            rpc.name
+        );
+    }
+}

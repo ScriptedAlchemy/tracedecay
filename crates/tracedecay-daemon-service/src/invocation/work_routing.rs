@@ -1,0 +1,248 @@
+//! Pinned configuration authority for Work proposal routes.
+
+use tracedecay_configuration::config::PinnedRuntimeConfiguration;
+use tracedecay_configuration::config::work_executable_binding::{
+    PinnedWorkExecutableBindingResolver, WorkExecutableBindingResolver,
+};
+use tracedecay_contracts::{
+    CapabilityGrantSnapshot, RequestContext, ResolvedScope, WORK_APPLICATION_OPERATION_IDS_V1,
+    WorkRoutingSnapshotErrorV1, WorkRoutingSnapshotPortV1, WorkRoutingSnapshotV1,
+};
+use tracedecay_domain::configuration::{
+    ConfigurationRevisionId, ConfigurationSnapshotId, ConfigurationValueV1, SettingKey,
+    WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WorkExecutableBindingV1,
+};
+use tracedecay_domain::{
+    ManifestDigest, TaskId, UtcMicros, WorkExecutionSnapshot, WorkExecutionSnapshotInput,
+    WorkFallbackTopology, WorkProposalV1, WorkRouteCandidateV1, WorkTopologyPolicyV1,
+};
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+
+/// The project-open-pinned authority for one Work proposal's routing state.
+///
+/// Routes are explicit configuration facts. Mount verifies the exact pinned
+/// executable for every declared route before any request can observe it.
+#[derive(Clone, Debug)]
+pub struct DaemonWorkProposalRoutingAuthorityV1 {
+    scope: ResolvedScope,
+    configuration_revision: ConfigurationRevisionId,
+    configuration_snapshot: ConfigurationSnapshotId,
+    configuration_digest: ManifestDigest,
+    resolution_provenance_digest: ManifestDigest,
+    grant_digest: ManifestDigest,
+    generate_proposal_capability: CapabilityId,
+    generate_proposal_use_case: UseCaseId,
+    eligible_routes: Vec<WorkRouteCandidateV1>,
+    executable_bindings: Vec<WorkExecutableBindingV1>,
+    pub(super) executable_binding_resolver: PinnedWorkExecutableBindingResolver,
+}
+
+impl DaemonWorkProposalRoutingAuthorityV1 {
+    pub fn mount(
+        scope: ResolvedScope,
+        configuration: &PinnedRuntimeConfiguration,
+        expected_configuration_digest: &ManifestDigest,
+        grant: &CapabilityGrantSnapshot,
+    ) -> Result<Self, WorkRoutingSnapshotErrorV1> {
+        let configuration_snapshot = configuration.snapshot();
+        if configuration_snapshot.validate().is_err()
+            || &configuration_snapshot.effective_behavior_digest != expected_configuration_digest
+            || grant.validate().is_err()
+            || grant.scope != scope
+        {
+            return Err(WorkRoutingSnapshotErrorV1::Unavailable);
+        }
+        let (_, capability, use_case) = WORK_APPLICATION_OPERATION_IDS_V1
+            .iter()
+            .find(|(operation, _, _)| *operation == "generate_proposal")
+            .ok_or(WorkRoutingSnapshotErrorV1::Unavailable)?;
+        let generate_proposal_capability =
+            CapabilityId::new(*capability).map_err(|_| WorkRoutingSnapshotErrorV1::Unavailable)?;
+        let generate_proposal_use_case =
+            UseCaseId::new(*use_case).map_err(|_| WorkRoutingSnapshotErrorV1::Unavailable)?;
+        if !grant
+            .allowed_capabilities
+            .contains(&generate_proposal_capability)
+            || !grant
+                .allowed_use_cases
+                .contains(&generate_proposal_use_case)
+        {
+            return Err(WorkRoutingSnapshotErrorV1::Unavailable);
+        }
+        let binding_key = SettingKey::new(WORK_EXECUTABLE_BINDINGS_SETTING_KEY)
+            .map_err(|_| WorkRoutingSnapshotErrorV1::Unavailable)?;
+        let Some(ConfigurationValueV1::WorkExecutableBindings(bindings)) =
+            configuration_snapshot.effective_values.get(&binding_key)
+        else {
+            return Err(WorkRoutingSnapshotErrorV1::Unavailable);
+        };
+        let resolver = PinnedWorkExecutableBindingResolver::from_configuration(configuration)
+            .map_err(|_| WorkRoutingSnapshotErrorV1::Unavailable)?;
+        let mut eligible_routes = Vec::new();
+        for binding in bindings {
+            for route in binding.routes() {
+                let capability = binding
+                    .capabilities()
+                    .iter()
+                    .copied()
+                    .find(|candidate| {
+                        candidate.provider_id().as_str() == route.provider_capability_id
+                    })
+                    .ok_or(WorkRoutingSnapshotErrorV1::Unavailable)?;
+                resolver
+                    .resolve(
+                        binding.executable(),
+                        capability.backend(),
+                        capability.protocol(),
+                    )
+                    .map_err(|_| WorkRoutingSnapshotErrorV1::Unavailable)?;
+                eligible_routes.push(route.clone());
+            }
+        }
+        Ok(Self {
+            scope,
+            configuration_revision: configuration.revision_id().clone(),
+            configuration_snapshot: configuration_snapshot.snapshot_id.clone(),
+            configuration_digest: expected_configuration_digest.clone(),
+            resolution_provenance_digest: configuration_snapshot
+                .resolution_provenance_digest
+                .clone(),
+            grant_digest: grant.digest.clone(),
+            generate_proposal_capability,
+            generate_proposal_use_case,
+            eligible_routes,
+            executable_bindings: bindings.clone(),
+            executable_binding_resolver: resolver,
+        })
+    }
+
+    pub(super) fn same_configuration_as(&self, other: &Self) -> bool {
+        self.scope == other.scope
+            && self.configuration_revision == other.configuration_revision
+            && self.configuration_snapshot == other.configuration_snapshot
+            && self.configuration_digest == other.configuration_digest
+            && self.resolution_provenance_digest == other.resolution_provenance_digest
+            && self.grant_digest == other.grant_digest
+            && self.eligible_routes == other.eligible_routes
+            && self.executable_bindings == other.executable_bindings
+    }
+
+    pub(super) fn matches_scope(&self, scope: &ResolvedScope) -> bool {
+        &self.scope == scope
+    }
+
+    pub(super) fn configuration_digest(&self) -> &ManifestDigest {
+        &self.configuration_digest
+    }
+
+    pub(super) fn configuration_revision(&self) -> &ConfigurationRevisionId {
+        &self.configuration_revision
+    }
+
+    pub(super) fn execution_snapshot(
+        &self,
+        proposal: &WorkProposalV1,
+        topology: &WorkTopologyPolicyV1,
+        admitted_at: UtcMicros,
+    ) -> Result<WorkExecutionSnapshot, WorkRoutingSnapshotErrorV1> {
+        if proposal.configuration_digest() != &self.configuration_digest {
+            return Err(WorkRoutingSnapshotErrorV1::Unavailable);
+        }
+        let route = proposal
+            .route()
+            .recommended()
+            .ok_or(WorkRoutingSnapshotErrorV1::Unavailable)?;
+        let (binding, candidate) = self
+            .executable_bindings
+            .iter()
+            .find_map(|binding| {
+                binding
+                    .routes()
+                    .iter()
+                    .find(|candidate| {
+                        candidate.route_id == route.route_id().as_str()
+                            && candidate.provider_capability_id == route.provider_id().as_str()
+                    })
+                    .map(|candidate| (binding, candidate))
+            })
+            .ok_or(WorkRoutingSnapshotErrorV1::Unavailable)?;
+        let capability = binding
+            .capabilities()
+            .iter()
+            .copied()
+            .find(|capability| capability.provider_id() == route.provider_id())
+            .ok_or(WorkRoutingSnapshotErrorV1::Unavailable)?;
+        self.executable_binding_resolver
+            .resolve(
+                binding.executable(),
+                capability.backend(),
+                capability.protocol(),
+            )
+            .map_err(|_| WorkRoutingSnapshotErrorV1::Unavailable)?;
+        if let WorkFallbackTopology::CodexCli { executable, .. } = &candidate.execution.fallback {
+            self.executable_binding_resolver
+                .resolve(
+                    executable,
+                    tracedecay_domain::WorkProviderBackendV1::CodexCli,
+                    tracedecay_domain::WorkProviderProtocol::CodexExecJson,
+                )
+                .map_err(|_| WorkRoutingSnapshotErrorV1::Unavailable)?;
+        }
+        let duration = i64::try_from(candidate.execution.maximum_duration_micros)
+            .map_err(|_| WorkRoutingSnapshotErrorV1::Unavailable)?;
+        let deadline = admitted_at
+            .0
+            .checked_add(duration)
+            .filter(|deadline| *deadline > 0)
+            .ok_or(WorkRoutingSnapshotErrorV1::Unavailable)?;
+        WorkExecutionSnapshot::new(WorkExecutionSnapshotInput {
+            configuration_revision_id: self.configuration_revision.clone(),
+            configuration_snapshot_id: self.configuration_snapshot.clone(),
+            effective_behavior_digest: self.configuration_digest.clone(),
+            resolution_provenance_digest: self.resolution_provenance_digest.clone(),
+            route: route.clone(),
+            backend: capability.backend(),
+            protocol: capability.protocol(),
+            model: candidate.model_id.clone(),
+            executable: binding.executable().clone(),
+            sandbox: candidate.execution.sandbox,
+            approval: candidate.execution.approval,
+            filesystem: candidate.execution.filesystem,
+            egress: candidate.execution.egress,
+            environment_allowlist: candidate.execution.environment_allowlist.clone(),
+            credential_references: candidate.execution.credential_references.clone(),
+            limits: candidate.execution.limits,
+            deadline: UtcMicros(deadline),
+            fallback: candidate.execution.fallback.clone(),
+            topology: topology.clone(),
+        })
+        .map_err(|_| WorkRoutingSnapshotErrorV1::Unavailable)
+    }
+}
+
+impl WorkRoutingSnapshotPortV1 for DaemonWorkProposalRoutingAuthorityV1 {
+    fn routing_snapshot(
+        &self,
+        context: &RequestContext,
+        _task_id: &TaskId,
+    ) -> Result<WorkRoutingSnapshotV1, WorkRoutingSnapshotErrorV1> {
+        if context.validate().is_err()
+            || context.scope() != &self.scope
+            || context.grant().digest != self.grant_digest
+            || !context.allows(
+                &self.generate_proposal_capability,
+                &self.generate_proposal_use_case,
+            )
+        {
+            return Err(WorkRoutingSnapshotErrorV1::NotFoundOrNotAuthorized);
+        }
+        Ok(WorkRoutingSnapshotV1 {
+            configuration_revision: Some(self.configuration_revision.clone()),
+            eligible_routes: self.eligible_routes.clone(),
+            budget: None,
+            content_location: None,
+            prior_outcomes: Vec::new(),
+            human_override: None,
+        })
+    }
+}

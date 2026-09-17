@@ -1,0 +1,919 @@
+//! Capability-relative quarantine for whole code-index scope roots.
+//!
+//! The retention journal stores the exact filesystem identity captured before
+//! quarantine. Recovery reopens every component without following symlinks and
+//! requires that identity before either restoring or recursively unlinking it.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
+use std::io;
+use std::path::Path;
+
+use cap_fs_ext::{DirExt, ambient_authority};
+use cap_std::fs::Dir;
+#[cfg(any(unix, windows))]
+use cap_std::fs::MetadataExt;
+use serde::{Deserialize, Serialize};
+use tracedecay_private_fs::capability_dir::{
+    remove_open_dir_all_nofollow, rename_noreplace, sync_directory,
+};
+#[cfg(windows)]
+use tracedecay_private_fs::windows_file;
+
+use super::{
+    CodeGenerationRetentionErrorV1, SCOPE_RETENTION_QUARANTINE_DIRECTORY, StrandedCodeIndexScopeV1,
+    is_code_index_scope_hash, storage,
+};
+
+/// Rename-stable identity for one scope root, stated in the same terms as the
+/// verified-marker container fence: `(device, inode)` is the durable file-id
+/// pair — the Unix device and inode, or the Windows volume serial number and
+/// by-handle file index. Timestamps only supplement it.
+///
+/// The persisted shape is platform-neutral, so one journal row means the same
+/// thing wherever it is read, and every field defaults. Both parts must be
+/// nonzero, and the inode/file index must not be the unsupported `u64::MAX`
+/// sentinel. Anything else is the absence of a provable identity, including a
+/// row written before this fence. Identity unknown fails closed to a full
+/// re-proof — [`super::scope_roots::validate_scope_transaction`] refuses such
+/// a row by name at the journal read, rather than letting a bare deserialize
+/// error surface as unsafe state or letting timestamps alone authorize a
+/// destructive rename.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct ScopeDirectoryIdentityV1 {
+    modified_secs: i64,
+    modified_nanos: u32,
+    /// Windows creation stamp in 100ns ticks; always `0` on other platforms.
+    created_100ns: u64,
+    device: u64,
+    inode: u64,
+}
+
+impl ScopeDirectoryIdentityV1 {
+    /// The durable file id is the only part of this fence a same-timestamp
+    /// replacement cannot forge, so incomplete and sentinel pairs are treated
+    /// as no identity rather than as an identity unidentified directories can
+    /// share.
+    pub(super) fn has_durable_file_id(&self) -> bool {
+        self.device != 0 && self.inode != 0 && self.inode != u64::MAX
+    }
+}
+
+/// Already-open authority for the store root and its exact quarantine tree.
+/// Ambient paths are used only to acquire the store handle; every directory
+/// below it is opened no-follow and every mutation is relative to a handle.
+pub(super) struct ScopeQuarantineAuthority {
+    store: Dir,
+    quarantine: Option<Dir>,
+    stage: Option<Dir>,
+    receipt_digest: String,
+    scope_identities: BTreeMap<String, ScopeDirectoryIdentityV1>,
+    source_handles: BTreeMap<String, Dir>,
+}
+
+impl ScopeQuarantineAuthority {
+    pub(super) fn prepare(
+        store_root: &Path,
+        receipt_digest: &str,
+        scopes: &[StrandedCodeIndexScopeV1],
+    ) -> Result<Self, CodeGenerationRetentionErrorV1> {
+        validate_digest(receipt_digest)?;
+        let store = open_store_root(store_root)?;
+        let mut scope_identities = BTreeMap::new();
+        let mut source_handles = BTreeMap::new();
+        for scope in scopes {
+            validate_scope_name(&scope.scope_hash)?;
+            let source = store
+                .open_dir_nofollow(&scope.scope_hash)
+                .map_err(storage)?;
+            let identity = directory_identity(&source).map_err(storage)?;
+            scope_identities.insert(scope.scope_hash.clone(), identity);
+            source_handles.insert(scope.scope_hash.clone(), source);
+        }
+        let mut authority = Self {
+            store,
+            quarantine: None,
+            stage: None,
+            receipt_digest: receipt_digest.to_owned(),
+            scope_identities,
+            source_handles,
+        };
+        authority.open_or_create_stage()?;
+        Ok(authority)
+    }
+
+    pub(super) fn recover(
+        store_root: &Path,
+        receipt_digest: &str,
+        scope_identities: BTreeMap<String, ScopeDirectoryIdentityV1>,
+    ) -> Result<Self, CodeGenerationRetentionErrorV1> {
+        validate_digest(receipt_digest)?;
+        if scope_identities
+            .keys()
+            .any(|scope_hash| !is_code_index_scope_hash(scope_hash))
+        {
+            return Err(unsafe_state(
+                "scope quarantine journal contains a non-scope identity",
+            ));
+        }
+        let store = open_store_root(store_root)?;
+        let quarantine = open_optional_dir(&store, SCOPE_RETENTION_QUARANTINE_DIRECTORY)?;
+        let stage = match quarantine.as_ref() {
+            Some(quarantine) => open_optional_dir(quarantine, receipt_digest)?,
+            None => None,
+        };
+        Ok(Self {
+            store,
+            quarantine,
+            stage,
+            receipt_digest: receipt_digest.to_owned(),
+            scope_identities,
+            source_handles: BTreeMap::new(),
+        })
+    }
+
+    pub(super) fn scope_identities(&self) -> &BTreeMap<String, ScopeDirectoryIdentityV1> {
+        &self.scope_identities
+    }
+
+    #[hotpath::measure(label = "code_index_retention.quarantine")]
+    pub(super) fn stage(
+        &mut self,
+        scopes: &[StrandedCodeIndexScopeV1],
+    ) -> Result<(), CodeGenerationRetentionErrorV1> {
+        self.require_exact_scopes(scopes)?;
+        self.open_or_create_stage()?;
+        let stage = self.stage.as_ref().ok_or_else(|| {
+            unsafe_state("scope reconciliation quarantine stage could not be opened")
+        })?;
+        for scope in scopes {
+            let expected = self.expected_identity(&scope.scope_hash)?.clone();
+            let source = open_child_directory(&self.store, &scope.scope_hash)?;
+            let staged = open_child_directory(stage, &scope.scope_hash)?;
+            match (source, staged) {
+                (Some((source, actual)), None) => {
+                    if actual != expected
+                        || directory_identity(&source).map_err(storage)? != expected
+                    {
+                        return Err(identity_changed(&scope.scope_hash, "before quarantine"));
+                    }
+                    drop(source);
+                    // Verify through the capability opened at `prepare` — the
+                    // proof that nothing swapped this directory since the
+                    // collection decision — and only then release it. cap-std
+                    // opens directories without `FILE_SHARE_DELETE`, so Windows
+                    // refuses to rename one while the handle is live.
+                    //
+                    // The lookup belongs inside this arm, not ahead of the
+                    // match: a scope already moved to the stage has spent its
+                    // capability legitimately and must report that it is
+                    // already quarantined, not a lost-capability unsafe state.
+                    let held_source =
+                        self.source_handles
+                            .remove(&scope.scope_hash)
+                            .ok_or_else(|| {
+                                unsafe_state(
+                                    "scope quarantine lost its pre-rename source capability",
+                                )
+                            })?;
+                    let held_identity = directory_identity(&held_source).map_err(storage)?;
+                    drop(held_source);
+                    if held_identity != expected {
+                        return Err(identity_changed(&scope.scope_hash, "before quarantine"));
+                    }
+                    if let Err(error) = rename_noreplace(
+                        &self.store,
+                        OsStr::new(&scope.scope_hash),
+                        stage,
+                        OsStr::new(&scope.scope_hash),
+                    ) {
+                        // The rename is the one failure that leaves the source
+                        // in place with its capability already closed. Reopen
+                        // an equivalent one so a retry still holds a pre-rename
+                        // fence instead of refusing itself as unsafe state.
+                        if let Ok(reopened) = self.store.open_dir_nofollow(&scope.scope_hash) {
+                            self.source_handles
+                                .insert(scope.scope_hash.clone(), reopened);
+                        }
+                        return Err(mutation_failed(
+                            "scope quarantine rename",
+                            &scope.scope_hash,
+                            &error,
+                        ));
+                    }
+                    let (moved, moved_identity) = open_child_directory(stage, &scope.scope_hash)?
+                        .ok_or_else(|| {
+                        unsafe_state("scope quarantine rename did not publish its destination")
+                    })?;
+                    if moved_identity != expected
+                        || directory_identity(&moved).map_err(storage)? != expected
+                    {
+                        return Err(identity_changed(&scope.scope_hash, "after quarantine"));
+                    }
+                    sync_directory(&self.store).map_err(storage)?;
+                    sync_directory(stage).map_err(storage)?;
+                }
+                (None, None) => {
+                    return Err(unsafe_state(format!(
+                        "stranded scope '{}' is missing before quarantine",
+                        scope.scope_hash
+                    )));
+                }
+                (None, Some(_)) => {
+                    return Err(unsafe_state(format!(
+                        "stranded scope '{}' was already quarantined",
+                        scope.scope_hash
+                    )));
+                }
+                (Some(_), Some(_)) => {
+                    return Err(unsafe_state(format!(
+                        "stranded scope '{}' exists in both source and quarantine",
+                        scope.scope_hash
+                    )));
+                }
+            }
+        }
+        self.source_handles.clear();
+        crate::hotpath_observe::retention_scopes_quarantined(scopes.len());
+        Ok(())
+    }
+
+    pub(super) fn rollback(
+        &mut self,
+        scopes: &[StrandedCodeIndexScopeV1],
+    ) -> Result<(), CodeGenerationRetentionErrorV1> {
+        self.require_exact_scopes(scopes)?;
+        for scope in scopes {
+            let expected = self.expected_identity(&scope.scope_hash)?.clone();
+            let source = open_child_directory(&self.store, &scope.scope_hash)?;
+            let staged = match self.stage.as_ref() {
+                Some(stage) => open_child_directory(stage, &scope.scope_hash)?,
+                None => None,
+            };
+            match (source, staged) {
+                (Some((_, actual)), None) if actual == expected => {}
+                (None, Some((staged, actual))) => {
+                    if actual != expected
+                        || directory_identity(&staged).map_err(storage)? != expected
+                    {
+                        return Err(identity_changed(&scope.scope_hash, "during rollback"));
+                    }
+                    drop(staged);
+                    let stage = self.stage.as_ref().ok_or_else(|| {
+                        unsafe_state("scope rollback lost its quarantine capability")
+                    })?;
+                    rename_noreplace(
+                        stage,
+                        OsStr::new(&scope.scope_hash),
+                        &self.store,
+                        OsStr::new(&scope.scope_hash),
+                    )
+                    .map_err(|error| {
+                        mutation_failed("scope rollback rename", &scope.scope_hash, &error)
+                    })?;
+                    let (_, restored) = open_child_directory(&self.store, &scope.scope_hash)?
+                        .ok_or_else(|| unsafe_state("scope rollback did not restore its source"))?;
+                    if restored != expected {
+                        return Err(identity_changed(&scope.scope_hash, "after rollback"));
+                    }
+                    sync_directory(&self.store).map_err(storage)?;
+                    sync_directory(stage).map_err(storage)?;
+                }
+                (None, None) => {
+                    return Err(unsafe_state(format!(
+                        "scope reconciliation rollback cannot find '{}'",
+                        scope.scope_hash
+                    )));
+                }
+                (Some(_), Some(_)) => {
+                    return Err(unsafe_state(format!(
+                        "scope reconciliation rollback found duplicate '{}'",
+                        scope.scope_hash
+                    )));
+                }
+                (Some(_), None) => {
+                    return Err(identity_changed(&scope.scope_hash, "during rollback"));
+                }
+            }
+        }
+        crate::hotpath_observe::retention_scopes_restored(scopes.len());
+        self.remove_empty_stage()
+    }
+
+    pub(super) fn cleanup_committed(
+        &mut self,
+        scopes: &[StrandedCodeIndexScopeV1],
+    ) -> Result<(), CodeGenerationRetentionErrorV1> {
+        self.require_exact_scopes(scopes)?;
+        for scope in scopes {
+            let expected = self.expected_identity(&scope.scope_hash)?.clone();
+            if open_child_directory(&self.store, &scope.scope_hash)?.is_some() {
+                return Err(unsafe_state(format!(
+                    "scope reconciliation receipt is durable but '{}' returned to the store root",
+                    scope.scope_hash
+                )));
+            }
+            let staged = match self.stage.as_ref() {
+                Some(stage) => open_child_directory(stage, &scope.scope_hash)?,
+                None => None,
+            };
+            if let Some((staged, actual)) = staged {
+                if actual != expected || directory_identity(&staged).map_err(storage)? != expected {
+                    return Err(identity_changed(&scope.scope_hash, "before unlink"));
+                }
+                remove_open_dir_all_nofollow(staged, &mut || Ok(())).map_err(|error| {
+                    mutation_failed("scope quarantine unlink", &scope.scope_hash, &error)
+                })?;
+                if let Some(stage) = self.stage.as_ref() {
+                    sync_directory(stage).map_err(storage)?;
+                }
+                crate::hotpath_observe::retention_scopes_deleted(1);
+            }
+        }
+        self.remove_empty_stage()
+    }
+
+    fn expected_identity(
+        &self,
+        scope_hash: &str,
+    ) -> Result<&ScopeDirectoryIdentityV1, CodeGenerationRetentionErrorV1> {
+        validate_scope_name(scope_hash)?;
+        self.scope_identities.get(scope_hash).ok_or_else(|| {
+            unsafe_state(format!(
+                "scope quarantine journal has no filesystem identity for '{scope_hash}'"
+            ))
+        })
+    }
+
+    fn require_exact_scopes(
+        &self,
+        scopes: &[StrandedCodeIndexScopeV1],
+    ) -> Result<(), CodeGenerationRetentionErrorV1> {
+        let requested = scopes
+            .iter()
+            .map(|scope| scope.scope_hash.as_str())
+            .collect::<BTreeSet<_>>();
+        let fenced = self
+            .scope_identities
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if requested.len() != scopes.len() || requested != fenced {
+            return Err(unsafe_state(
+                "scope quarantine candidates do not match the durable identity fence",
+            ));
+        }
+        Ok(())
+    }
+
+    fn open_or_create_stage(&mut self) -> Result<(), CodeGenerationRetentionErrorV1> {
+        if self.stage.is_some() {
+            return Ok(());
+        }
+        let quarantine = open_or_create_dir(&self.store, SCOPE_RETENTION_QUARANTINE_DIRECTORY)?;
+        let stage = open_or_create_dir(&quarantine, &self.receipt_digest)?;
+        sync_directory(&quarantine).map_err(storage)?;
+        sync_directory(&self.store).map_err(storage)?;
+        self.quarantine = Some(quarantine);
+        self.stage = Some(stage);
+        Ok(())
+    }
+
+    fn remove_empty_stage(&mut self) -> Result<(), CodeGenerationRetentionErrorV1> {
+        let Some(stage) = self.stage.take() else {
+            return Ok(());
+        };
+        if stage.read_dir(".").map_err(storage)?.next().is_some() {
+            self.stage = Some(stage);
+            return Err(unsafe_state(
+                "scope reconciliation quarantine contains unexpected entries",
+            ));
+        }
+        // The stage is the one directory a peer daemon is most likely to be
+        // holding open on Windows, and that refusal reads identically to a
+        // corrupt store unless it names itself.
+        stage
+            .remove_open_dir()
+            .map_err(|error| mutation_failed("scope stage unlink", &self.receipt_digest, &error))?;
+        if let Some(quarantine) = self.quarantine.as_ref() {
+            sync_directory(quarantine).map_err(storage)?;
+        }
+        Ok(())
+    }
+}
+
+fn open_store_root(store_root: &Path) -> Result<Dir, CodeGenerationRetentionErrorV1> {
+    let canonical = store_root.canonicalize().map_err(storage)?;
+    Dir::open_ambient_dir(canonical, ambient_authority()).map_err(storage)
+}
+
+fn open_or_create_dir(parent: &Dir, name: &str) -> Result<Dir, CodeGenerationRetentionErrorV1> {
+    match parent.open_dir_nofollow(name) {
+        Ok(directory) => Ok(directory),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            match parent.create_dir(name) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(storage(error)),
+            }
+            parent.open_dir_nofollow(name).map_err(storage)
+        }
+        Err(error) => Err(storage(error)),
+    }
+}
+
+fn open_optional_dir(
+    parent: &Dir,
+    name: &str,
+) -> Result<Option<Dir>, CodeGenerationRetentionErrorV1> {
+    match parent.open_dir_nofollow(name) {
+        Ok(directory) => Ok(Some(directory)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(storage(error)),
+    }
+}
+
+fn open_child_directory(
+    parent: &Dir,
+    name: &str,
+) -> Result<Option<(Dir, ScopeDirectoryIdentityV1)>, CodeGenerationRetentionErrorV1> {
+    match parent.open_dir_nofollow(name) {
+        Ok(directory) => {
+            let identity = directory_identity(&directory).map_err(storage)?;
+            Ok(Some((directory, identity)))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(storage(error)),
+    }
+}
+
+/// The durable `(device, inode)` file-id pair for an already-open directory.
+///
+/// This is the pair the verified-marker container fence records: the Unix
+/// device and inode, or the Windows volume serial number and by-handle file
+/// index from `GetFileInformationByHandle`. `(0, 0)` means the filesystem
+/// declines to report a durable id.
+#[cfg(unix)]
+fn durable_file_id(_directory: &Dir, metadata: &cap_std::fs::Metadata) -> io::Result<(u64, u64)> {
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(windows)]
+fn durable_file_id(directory: &Dir, _metadata: &cap_std::fs::Metadata) -> io::Result<(u64, u64)> {
+    let information = windows_file::information(directory)?;
+    Ok((
+        u64::from(information.volume_serial_number),
+        information.file_index,
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn durable_file_id(_directory: &Dir, _metadata: &cap_std::fs::Metadata) -> io::Result<(u64, u64)> {
+    Ok((0, 0))
+}
+
+fn directory_identity(directory: &Dir) -> io::Result<ScopeDirectoryIdentityV1> {
+    let metadata = directory.metadata(".")?;
+    #[cfg(unix)]
+    let (modified_secs, modified_nanos) = {
+        (
+            metadata.mtime(),
+            u32::try_from(metadata.mtime_nsec())
+                .map_err(|_| io::Error::other("invalid scope mtime nanoseconds"))?,
+        )
+    };
+    #[cfg(not(unix))]
+    let (modified_secs, modified_nanos) = {
+        let modified = metadata
+            .modified()?
+            .into_std()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| io::Error::other("scope metadata precedes the Unix epoch"))?;
+        (
+            i64::try_from(modified.as_secs())
+                .map_err(|_| io::Error::other("scope mtime exceeds supported range"))?,
+            modified.subsec_nanos(),
+        )
+    };
+    let (device, inode) = durable_file_id(directory, &metadata)?;
+    let identity = ScopeDirectoryIdentityV1 {
+        modified_secs,
+        modified_nanos,
+        #[cfg(windows)]
+        created_100ns: metadata.creation_time(),
+        #[cfg(not(windows))]
+        created_100ns: 0,
+        device,
+        inode,
+    };
+    // Refuse to fence a directory the filesystem cannot identify. Writing an
+    // unprovable identity into the journal would only defer the refusal to a
+    // recovery that can no longer tell the scope from a replacement.
+    if !identity.has_durable_file_id() {
+        return Err(io::Error::other(
+            "scope directory has no durable filesystem identity",
+        ));
+    }
+    Ok(identity)
+}
+
+fn validate_scope_name(scope_hash: &str) -> Result<(), CodeGenerationRetentionErrorV1> {
+    if is_code_index_scope_hash(scope_hash) {
+        Ok(())
+    } else {
+        Err(unsafe_state(
+            "scope quarantine received a non-scope directory name",
+        ))
+    }
+}
+
+fn validate_digest(receipt_digest: &str) -> Result<(), CodeGenerationRetentionErrorV1> {
+    if receipt_digest.len() == 64
+        && receipt_digest
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        Ok(())
+    } else {
+        Err(unsafe_state(
+            "scope quarantine received an invalid receipt digest",
+        ))
+    }
+}
+
+/// Names the destructive step, its exact target scope, and the native error
+/// the platform reported.
+///
+/// These three renames and the recursive unlink are the steps another owner's
+/// live handle can refuse: Windows answers a held directory with
+/// `ERROR_SHARING_VIOLATION` (32) or `ERROR_ACCESS_DENIED` (5) and Unix with
+/// `EACCES`/`EBUSY`. Collapsing that into a bare storage string erases both
+/// which mutation was refused and the code an operator would use to find the
+/// holder, so the failure reads identically to a corrupt store.
+fn mutation_failed(
+    operation: &str,
+    scope_hash: &str,
+    error: &io::Error,
+) -> CodeGenerationRetentionErrorV1 {
+    let native = error
+        .raw_os_error()
+        .map_or_else(|| "none".to_owned(), |code| code.to_string());
+    storage(format!(
+        "{operation} for scope '{scope_hash}' failed (native error {native}): {error}"
+    ))
+}
+
+fn identity_changed(scope_hash: &str, boundary: &str) -> CodeGenerationRetentionErrorV1 {
+    unsafe_state(format!(
+        "stranded scope '{scope_hash}' changed filesystem identity {boundary}"
+    ))
+}
+
+fn unsafe_state(message: impl Into<String>) -> CodeGenerationRetentionErrorV1 {
+    CodeGenerationRetentionErrorV1::UnsafeState(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_rename_leaves_a_source_capability_for_the_retry() {
+        let (store, scope) = fixture();
+        let mut authority = ScopeQuarantineAuthority::prepare(
+            store.path(),
+            RECEIPT_DIGEST,
+            std::slice::from_ref(&scope),
+        )
+        .expect("open quarantine authority");
+        let stage = store
+            .path()
+            .join(SCOPE_RETENTION_QUARANTINE_DIRECTORY)
+            .join(RECEIPT_DIGEST);
+        // An unwritable stage refuses the rename and leaves the source scope
+        // exactly where it was: the one failure that strands a scope whose
+        // pre-rename capability has already been released.
+        std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o555))
+            .expect("seal the quarantine stage");
+        let error = authority
+            .stage(std::slice::from_ref(&scope))
+            .expect_err("a sealed stage must refuse the quarantine rename");
+        let CodeGenerationRetentionErrorV1::Storage(message) = &error else {
+            panic!("a refused rename is a storage failure, got {error:?}");
+        };
+        assert!(
+            message.contains("scope quarantine rename"),
+            "the refused mutation must name itself, got {message}"
+        );
+        assert!(
+            message.contains(SCOPE_HASH),
+            "the refused mutation must name its target scope, got {message}"
+        );
+        assert!(
+            message.contains("native error") && !message.contains("native error none"),
+            "the refused mutation must carry the platform's own code, got {message}"
+        );
+        assert!(store.path().join(SCOPE_HASH).is_dir());
+        std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o755))
+            .expect("reopen the quarantine stage");
+
+        authority
+            .stage(std::slice::from_ref(&scope))
+            .expect("a retry after a transient rename failure keeps its source capability");
+
+        assert!(!store.path().join(SCOPE_HASH).exists());
+        assert_eq!(
+            std::fs::read(stage.join(SCOPE_HASH).join("payload")).expect("quarantined payload"),
+            b"owned"
+        );
+    }
+
+    /// The Windows codes a live handle produces cannot be raised on this host,
+    /// but the surfacing that has to carry them is platform-independent.
+    #[test]
+    fn a_refused_mutation_names_its_operation_scope_and_native_code() {
+        for (code, native) in [(32, "32"), (5, "5")] {
+            let error = mutation_failed(
+                "scope quarantine unlink",
+                SCOPE_HASH,
+                &io::Error::from_raw_os_error(code),
+            );
+            let CodeGenerationRetentionErrorV1::Storage(message) = &error else {
+                panic!("a refused mutation is a storage failure, got {error:?}");
+            };
+            assert!(message.contains("scope quarantine unlink"), "{message}");
+            assert!(message.contains(SCOPE_HASH), "{message}");
+            assert!(
+                message.contains(&format!("native error {native}")),
+                "a held-target code must reach the operator verbatim, got {message}"
+            );
+        }
+
+        let without_code = mutation_failed(
+            "scope rollback rename",
+            SCOPE_HASH,
+            &io::Error::other("no native code"),
+        );
+        let CodeGenerationRetentionErrorV1::Storage(message) = &without_code else {
+            panic!("a refused mutation is a storage failure, got {without_code:?}");
+        };
+        assert!(
+            message.contains("native error none"),
+            "an error with no platform code must say so rather than invent one, got {message}"
+        );
+    }
+
+    #[test]
+    fn a_journal_row_without_a_durable_file_id_is_not_an_identity() {
+        // The shape of a row written before the durable file-id fence. It has
+        // to deserialize so the journal read can name its refusal, instead of
+        // failing as a bare serde error surfacing as unsafe state.
+        let legacy: ScopeDirectoryIdentityV1 =
+            serde_json::from_str(r#"{"modified_secs":7,"modified_nanos":11,"created_100ns":13}"#)
+                .expect("a row missing the durable file id still deserializes");
+        assert!(
+            !legacy.has_durable_file_id(),
+            "an absent file id must not read as an identity every unproven directory shares"
+        );
+
+        let fixture = tempfile::TempDir::new().expect("create identity fixture");
+        let directory =
+            Dir::open_ambient_dir(fixture.path(), ambient_authority()).expect("open the fixture");
+        assert!(
+            directory_identity(&directory)
+                .expect("a real directory has a durable identity")
+                .has_durable_file_id()
+        );
+    }
+
+    #[test]
+    fn durable_file_id_requires_a_complete_nonsentinel_persisted_pair() {
+        let nonzero_device_zero_inode: ScopeDirectoryIdentityV1 =
+            serde_json::from_str(r#"{"device":17,"inode":0}"#).unwrap();
+        assert!(!nonzero_device_zero_inode.has_durable_file_id());
+
+        let zero_device_nonzero_inode: ScopeDirectoryIdentityV1 =
+            serde_json::from_str(r#"{"device":0,"inode":41}"#).unwrap();
+        assert!(!zero_device_nonzero_inode.has_durable_file_id());
+
+        let sentinel_inode: ScopeDirectoryIdentityV1 =
+            serde_json::from_str(r#"{"device":17,"inode":18446744073709551615}"#).unwrap();
+        assert!(!sentinel_inode.has_durable_file_id());
+
+        let valid: ScopeDirectoryIdentityV1 =
+            serde_json::from_str(r#"{"device":17,"inode":41}"#).unwrap();
+        assert!(valid.has_durable_file_id());
+    }
+
+    const SCOPE_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const RECEIPT_DIGEST: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn fixture() -> (tempfile::TempDir, StrandedCodeIndexScopeV1) {
+        let store = tempfile::TempDir::new().expect("create scope quarantine store");
+        std::fs::create_dir(store.path().join(SCOPE_HASH)).expect("create scope root");
+        std::fs::write(store.path().join(SCOPE_HASH).join("payload"), b"owned")
+            .expect("write scope payload");
+        (
+            store,
+            StrandedCodeIndexScopeV1 {
+                scope_hash: SCOPE_HASH.to_owned(),
+                size_bytes: 5,
+                newest_mtime_secs: 0,
+                root_missing: false,
+            },
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rename_uses_open_quarantine_parent_after_ambient_parent_becomes_symlink() {
+        let (store, scope) = fixture();
+        let external = tempfile::TempDir::new().expect("create external target");
+        let mut authority = ScopeQuarantineAuthority::prepare(
+            store.path(),
+            RECEIPT_DIGEST,
+            std::slice::from_ref(&scope),
+        )
+        .expect("open quarantine authority");
+        let quarantine = store.path().join(SCOPE_RETENTION_QUARANTINE_DIRECTORY);
+        let held = store.path().join("quarantine-held");
+        std::fs::rename(&quarantine, &held).expect("swap quarantine parent");
+        symlink(external.path(), &quarantine).expect("replace quarantine parent with symlink");
+
+        authority
+            .stage(std::slice::from_ref(&scope))
+            .expect("rename remains bound to the already-open quarantine parent");
+
+        assert!(!store.path().join(SCOPE_HASH).exists());
+        assert!(held.join(RECEIPT_DIGEST).join(SCOPE_HASH).is_dir());
+        assert!(
+            std::fs::read_dir(external.path())
+                .expect("read external target")
+                .next()
+                .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unlink_uses_open_stage_after_ambient_parent_becomes_symlink() {
+        let (store, scope) = fixture();
+        let external = tempfile::TempDir::new().expect("create external target");
+        let external_scope = external.path().join(RECEIPT_DIGEST).join(SCOPE_HASH);
+        std::fs::create_dir_all(&external_scope).expect("create external sentinel tree");
+        std::fs::write(external_scope.join("sentinel"), b"preserve")
+            .expect("write external sentinel");
+        let mut authority = ScopeQuarantineAuthority::prepare(
+            store.path(),
+            RECEIPT_DIGEST,
+            std::slice::from_ref(&scope),
+        )
+        .expect("open quarantine authority");
+        authority
+            .stage(std::slice::from_ref(&scope))
+            .expect("stage scope");
+        let quarantine = store.path().join(SCOPE_RETENTION_QUARANTINE_DIRECTORY);
+        let held = store.path().join("quarantine-held");
+        std::fs::rename(&quarantine, &held).expect("swap quarantine parent");
+        symlink(external.path(), &quarantine).expect("replace quarantine parent with symlink");
+
+        authority
+            .cleanup_committed(std::slice::from_ref(&scope))
+            .expect("unlink remains bound to the already-open stage");
+
+        assert!(!held.join(RECEIPT_DIGEST).exists());
+        assert_eq!(
+            std::fs::read(external_scope.join("sentinel")).expect("external sentinel survives"),
+            b"preserve"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rename_refuses_a_replacement_scope_with_the_same_name() {
+        let (store, scope) = fixture();
+        let mut authority = ScopeQuarantineAuthority::prepare(
+            store.path(),
+            RECEIPT_DIGEST,
+            std::slice::from_ref(&scope),
+        )
+        .expect("open quarantine authority");
+        let source = store.path().join(SCOPE_HASH);
+        let displaced = store.path().join("scope-held");
+        std::fs::rename(&source, &displaced).expect("displace fenced scope");
+        std::fs::create_dir(&source).expect("create replacement scope");
+        std::fs::write(source.join("payload"), b"replacement").expect("write replacement scope");
+
+        let error = authority
+            .stage(std::slice::from_ref(&scope))
+            .expect_err("replacement identity must not inherit the collection decision");
+
+        assert!(matches!(
+            error,
+            CodeGenerationRetentionErrorV1::UnsafeState(_)
+        ));
+        assert_eq!(
+            std::fs::read(source.join("payload")).expect("replacement survives"),
+            b"replacement"
+        );
+        assert_eq!(
+            std::fs::read(displaced.join("payload")).expect("fenced scope survives"),
+            b"owned"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unlink_refuses_a_replacement_at_the_quarantined_name() {
+        let (store, scope) = fixture();
+        let mut authority = ScopeQuarantineAuthority::prepare(
+            store.path(),
+            RECEIPT_DIGEST,
+            std::slice::from_ref(&scope),
+        )
+        .expect("open quarantine authority");
+        authority
+            .stage(std::slice::from_ref(&scope))
+            .expect("stage scope");
+        let staged = store
+            .path()
+            .join(SCOPE_RETENTION_QUARANTINE_DIRECTORY)
+            .join(RECEIPT_DIGEST)
+            .join(SCOPE_HASH);
+        let displaced = store.path().join("staged-held");
+        std::fs::rename(&staged, &displaced).expect("displace fenced quarantine");
+        std::fs::create_dir(&staged).expect("create replacement quarantine");
+        std::fs::write(staged.join("payload"), b"replacement")
+            .expect("write replacement quarantine");
+
+        let error = authority
+            .cleanup_committed(std::slice::from_ref(&scope))
+            .expect_err("replacement quarantine must never be unlinked");
+
+        assert!(matches!(
+            error,
+            CodeGenerationRetentionErrorV1::UnsafeState(_)
+        ));
+        assert_eq!(
+            std::fs::read(staged.join("payload")).expect("replacement survives"),
+            b"replacement"
+        );
+        assert_eq!(
+            std::fs::read(displaced.join("payload")).expect("fenced scope survives"),
+            b"owned"
+        );
+    }
+
+    #[test]
+    fn rollback_retains_a_mismatched_staged_identity() {
+        let (store, scope) = fixture();
+        let mut authority = ScopeQuarantineAuthority::prepare(
+            store.path(),
+            RECEIPT_DIGEST,
+            std::slice::from_ref(&scope),
+        )
+        .expect("open quarantine authority");
+        authority
+            .stage(std::slice::from_ref(&scope))
+            .expect("stage exact scope");
+        let staged = store
+            .path()
+            .join(SCOPE_RETENTION_QUARANTINE_DIRECTORY)
+            .join(RECEIPT_DIGEST)
+            .join(SCOPE_HASH);
+        let displaced = store.path().join("staged-original");
+        std::fs::rename(&staged, &displaced).expect("displace staged original");
+        std::fs::create_dir(&staged).expect("create staged replacement");
+        std::fs::write(staged.join("payload"), b"replacement-exact-bytes")
+            .expect("write staged replacement");
+
+        let error = authority
+            .rollback(std::slice::from_ref(&scope))
+            .expect_err("a replacement at the staged name cannot be restored");
+
+        let CodeGenerationRetentionErrorV1::UnsafeState(message) = error else {
+            panic!("identity mismatch must fail as unsafe state");
+        };
+        assert_eq!(
+            message,
+            format!("stranded scope '{SCOPE_HASH}' changed filesystem identity during rollback")
+        );
+        assert_eq!(
+            std::fs::read(staged.join("payload")).expect("staged replacement survives"),
+            b"replacement-exact-bytes"
+        );
+        assert_eq!(
+            std::fs::read(displaced.join("payload")).expect("displaced original survives"),
+            b"owned"
+        );
+        assert!(
+            !store.path().join(SCOPE_HASH).exists(),
+            "rollback must not promote the mismatched staged identity"
+        );
+    }
+}

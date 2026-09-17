@@ -1,0 +1,938 @@
+//! Canonical CLI/MCP wire contracts for the established primitive tools.
+//!
+//! These types own the JSON decoded by the daemon handlers and the JSON
+//! schemas projected into both public SDKs. Presentation-only transport keys
+//! such as `format` and registered-project selectors are removed before these
+//! request bodies are decoded.
+
+use std::collections::BTreeMap;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use tracedecay_domain::{
+    CodeGenerationId, CommitId, ComplexityAnalysisV1, ManifestDigest, ProjectId, ProviderId,
+    RepositoryId, SourceSpan, SymbolOccurrenceId, WorktreeId,
+};
+
+use crate::code_index_freshness::CodeIndexStalenessStateV1;
+use crate::memory::{FactSearchGraphCoverageV1, FactSearchHitV1};
+
+pub const MAX_REDUNDANCY_FAMILIES_V1: u32 = 100;
+pub const MAX_REDUNDANCY_PULL_REQUEST_PATHS_V1: usize = 256;
+pub const MAX_REDUNDANCY_WORK_V1: u32 = 10_000;
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextModeV1 {
+    Explore,
+    Plan,
+}
+
+impl ContextModeV1 {
+    #[hotpath::skip]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Explore => "explore",
+            Self::Plan => "plan",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextSurfaceRequestV1 {
+    pub task: String,
+    pub max_nodes: Option<u32>,
+    pub include_code: Option<bool>,
+    pub max_code_blocks: Option<u32>,
+    pub mode: Option<ContextModeV1>,
+    pub include_memory: Option<bool>,
+    pub memory_limit: Option<u32>,
+    pub memory_min_trust: Option<f64>,
+    /// Exact identifiers or technical terms ranked through the lexical lane as
+    /// additional routes fused with the task text. Bounded and validated by
+    /// the retrieval kernel; a violation is a typed request rejection.
+    pub lexical_anchors: Option<Vec<String>>,
+    /// Add a symbol-name lexical route for the identifier-shaped words of the
+    /// task text.
+    pub prefer_symbol: Option<bool>,
+}
+
+/// Whether the served code generation is known current at serve time.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrimitiveFreshnessStateV1 {
+    Fresh,
+    PossiblyStale,
+}
+
+impl PrimitiveFreshnessStateV1 {
+    #[hotpath::skip]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::PossiblyStale => "possibly_stale",
+        }
+    }
+}
+
+/// The indexing state behind a `possibly_stale` verdict: the served
+/// generation, the scheduler's latest sealed generation, its staleness-ladder
+/// state, and the lanes that answered from an older generation. `summary` is
+/// the one-line rendering agents read.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrimitiveIndexingStateV1 {
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub served_generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staleness_state: Option<CodeIndexStalenessStateV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebuild_in_flight: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stale_lanes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Freshness verdict carried by every search and context response. `indexing`
+/// is present exactly when the state is `possibly_stale`.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrimitiveSearchFreshnessV1 {
+    pub state: PrimitiveFreshnessStateV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexing: Option<PrimitiveIndexingStateV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeDepthSurfaceRequestV1 {
+    pub node_id: String,
+    pub max_depth: Option<u32>,
+}
+
+pub type ImpactSurfaceRequestV1 = NodeDepthSurfaceRequestV1;
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CalleesSurfaceRequestV1 {
+    pub node_id: String,
+    pub max_depth: Option<u32>,
+    pub resolve_dispatch: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeSurfaceRequestV1 {
+    pub node_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SimilarTargetV1 {
+    SymbolOccurrence {
+        symbol_occurrence_id: SymbolOccurrenceId,
+    },
+    SourceRange {
+        path: String,
+        span: SourceSpan,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SimilarMatchClassV1 {
+    ConservativeExact,
+    RenameNormalizedExact,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SimilarSurfaceRequestV1 {
+    pub project_id: ProjectId,
+    pub repository_id: RepositoryId,
+    pub target: SimilarTargetV1,
+    pub match_classes: Vec<SimilarMatchClassV1>,
+    /// Preferred result page size.
+    pub result_limit: u32,
+    pub work_limit: u32,
+    pub cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenamePreviewPrimitiveRequestV1 {
+    pub node_id: String,
+    pub new_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortStatusSurfaceRequestV1 {
+    pub source_dir: String,
+    pub target_dir: String,
+    pub kinds: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortOrderSurfaceRequestV1 {
+    pub source_dir: String,
+    pub kinds: Option<Vec<String>>,
+    pub limit: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RedundancyScopeV1 {
+    Repository,
+    Path {
+        path: String,
+    },
+    PullRequest {
+        provider: ProviderId,
+        pull_request_id: String,
+        head_commit_id: CommitId,
+        changed_paths: Vec<String>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RedundancySurfaceRequestV1 {
+    pub project_id: ProjectId,
+    pub repository_id: RepositoryId,
+    pub match_classes: Vec<SimilarMatchClassV1>,
+    pub scope: RedundancyScopeV1,
+    pub include_generated_paths: bool,
+    /// Preferred family page size.
+    pub family_limit: u32,
+    pub member_limit: u32,
+    pub work_limit: u32,
+    pub cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TodosSurfaceRequestV1 {
+    pub kinds: Option<Vec<String>>,
+    pub path: Option<String>,
+    pub limit: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrimitiveSymbolLocationV1 {
+    pub node_id: String,
+    pub name: String,
+    pub qualified_name: String,
+    pub kind: String,
+    pub file: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub unavailable_fields: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextCodeBlockV1 {
+    pub node_id: String,
+    pub file: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub code: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextSearchMatchV1 {
+    pub anchor_id: String,
+    pub name: String,
+    pub qualified_name: String,
+    pub kind: String,
+    pub file: String,
+    pub exact_class: String,
+    pub rank: u32,
+    pub utility_micros: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrimitiveUnavailableStatusV1 {
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrimitiveUnavailableEvidenceV1 {
+    pub status: PrimitiveUnavailableStatusV1,
+    pub reason_code: String,
+    pub retryable: bool,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrimitiveLaneStateV1 {
+    Stale,
+    Partial,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum PrimitiveLaneStatusV1 {
+    Complete(PrimitiveLaneCompleteV1),
+    State {
+        status: PrimitiveLaneStateV1,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        generation: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrimitiveLaneCompleteV1 {
+    Complete,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrimitiveRecallV1 {
+    Full,
+    Partial,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrimitiveSearchCoverageV1 {
+    pub exact: PrimitiveLaneStatusV1,
+    pub lexical: PrimitiveLaneStatusV1,
+    pub graph: PrimitiveLaneStatusV1,
+    pub recall: PrimitiveRecallV1,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextResultV1 {
+    pub task: String,
+    pub mode: ContextModeV1,
+    /// Freshness of the served code generation, derived from the typed lane
+    /// coverage and the daemon scheduler's worktree state.
+    pub freshness: PrimitiveSearchFreshnessV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub search_matches: Vec<ContextSearchMatchV1>,
+    pub symbols: Vec<PrimitiveSymbolLocationV1>,
+    pub related_symbols: Vec<PrimitiveSymbolLocationV1>,
+    pub code: Vec<ContextCodeBlockV1>,
+    pub coverage: PrimitiveSearchCoverageV1,
+    pub memory_matches: Vec<FactSearchHitV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_graph_coverage: Option<FactSearchGraphCoverageV1>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_matches_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_graph_evidence: Option<PrimitiveUnavailableEvidenceV1>,
+}
+
+impl ContextResultV1 {
+    pub fn with_memory_graph_coverage(
+        mut self,
+        memory_graph_coverage: Option<FactSearchGraphCoverageV1>,
+    ) -> Self {
+        self.memory_graph_coverage = memory_graph_coverage;
+        self
+    }
+
+    pub fn memory_graph_coverage(&self) -> Option<FactSearchGraphCoverageV1> {
+        self.memory_graph_coverage
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CalleeV1 {
+    pub node_id: String,
+    pub name: String,
+    pub kind: String,
+    pub file: String,
+    pub line: u32,
+    pub edge_kind: String,
+    pub dispatch_via_trait: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depth: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dispatch_from: Option<String>,
+}
+
+pub type CalleesResultV1 = Vec<CalleeV1>;
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImpactNodeV1 {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub file: String,
+    pub line: u32,
+    pub depth: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImpactResultV1 {
+    pub node_count: usize,
+    pub complete: bool,
+    pub unavailable_fields: Vec<String>,
+    pub nodes: Vec<ImpactNodeV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeExpansionCostV1 {
+    pub body: u64,
+    pub full_file: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeDetailsV1 {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub qualified_name: String,
+    pub file: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub signature: Option<String>,
+    pub docstring: Option<String>,
+    pub is_async: bool,
+    pub derives: Vec<String>,
+    pub visibility: String,
+    /// Exact counters; `None`, and listed in `unavailable_fields`, when
+    /// `complexity_analysis` reports the bounded walk did not cover the body.
+    pub branches: Option<u32>,
+    pub loops: Option<u32>,
+    pub max_nesting: Option<u32>,
+    pub cyclomatic_complexity: Option<u32>,
+    pub complexity_analysis: ComplexityAnalysisV1,
+    pub cost_to_expand: NodeExpansionCostV1,
+    pub unavailable_fields: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrimitiveNotFoundV1 {
+    pub status: String,
+    pub reason_code: String,
+    pub node_id: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum NodeResultV1 {
+    Found(Box<NodeDetailsV1>),
+    NotFound(PrimitiveNotFoundV1),
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SimilarOccurrenceV1 {
+    pub project_id: ProjectId,
+    pub repository_id: RepositoryId,
+    pub worktree_id: Option<WorktreeId>,
+    pub source_generation: CodeGenerationId,
+    pub snapshot_digest: ManifestDigest,
+    pub symbol_occurrence_id: SymbolOccurrenceId,
+    pub path: String,
+    pub body_span: SourceSpan,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SimilarFamilyV1 {
+    pub match_class: SimilarMatchClassV1,
+    pub normalization_revision: u16,
+    pub family_digest: ManifestDigest,
+    pub representative_payload_digest: ManifestDigest,
+    pub member_count: usize,
+    pub members: Vec<SimilarOccurrenceV1>,
+    pub complete: bool,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SimilarCoverageV1 {
+    Complete,
+    Partial,
+    ExcludedTooSmall { minimum_tokens: u32 },
+    ExcludedIncompleteTokenization,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SimilarResultV1 {
+    pub source: SimilarOccurrenceV1,
+    pub families: Vec<SimilarFamilyV1>,
+    pub source_generation: CodeGenerationId,
+    pub coverage: SimilarCoverageV1,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RedundancyRankingV1 {
+    ReviewableSourceBytes,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RedundancyPartialReasonV1 {
+    FamilyLimit,
+    WorkLimit,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RedundancyCoverageV1 {
+    Complete {
+        examined_families: usize,
+        examined_members: usize,
+    },
+    Partial {
+        reason: RedundancyPartialReasonV1,
+        examined_families: usize,
+        examined_members: usize,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RedundancyFamilyV1 {
+    pub family: SimilarFamilyV1,
+    pub total_member_count: usize,
+    pub reviewable_source_bytes: u64,
+    pub generated_members: Vec<SymbolOccurrenceId>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RedundancyResultV1 {
+    pub source_generation: CodeGenerationId,
+    pub ranked_by: RedundancyRankingV1,
+    pub families: Vec<RedundancyFamilyV1>,
+    pub coverage: RedundancyCoverageV1,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenamePreviewNodeV1 {
+    pub id: String,
+    pub name: String,
+    pub qualified_name: String,
+    pub kind: String,
+    pub file: String,
+    pub line: u32,
+    pub snippet: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenamePreviewReferenceV1 {
+    pub from_node_id: String,
+    pub from_name: String,
+    pub from_kind: String,
+    pub edge_kind: String,
+    pub file: String,
+    pub line: u32,
+    pub snippet: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenamePreviewTextOnlyMatchV1 {
+    pub file: String,
+    pub text_only_count: usize,
+    pub note: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenamePreviewPrimitiveResultV1 {
+    pub read_only: bool,
+    pub note: String,
+    pub symbol: String,
+    pub new_name: Option<String>,
+    pub node: RenamePreviewNodeV1,
+    pub reference_count: usize,
+    pub references: Vec<RenamePreviewReferenceV1>,
+    pub text_only_matches: Vec<RenamePreviewTextOnlyMatchV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum RenamePreviewPrimitiveOutcomeV1 {
+    Preview(RenamePreviewPrimitiveResultV1),
+    NotFound(PrimitiveNotFoundV1),
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortMatchedSymbolV1 {
+    pub name: String,
+    pub source_kind: String,
+    pub target_kind: String,
+    pub source_file: String,
+    pub target_file: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortUnmatchedSymbolV1 {
+    pub name: String,
+    pub kind: String,
+    pub line: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortTargetOnlySymbolV1 {
+    pub name: String,
+    pub kind: String,
+    pub file: String,
+    pub line: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortStatusResultV1 {
+    pub source_dir: String,
+    pub target_dir: String,
+    pub source_count: usize,
+    pub target_count: usize,
+    pub matched: usize,
+    pub unmatched: usize,
+    pub target_only: usize,
+    pub coverage_percent: f64,
+    pub unmatched_by_file: BTreeMap<String, Vec<PortUnmatchedSymbolV1>>,
+    pub matched_symbols: Vec<PortMatchedSymbolV1>,
+    pub target_only_symbols: Vec<PortTargetOnlySymbolV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortOrderSymbolV1 {
+    pub name: String,
+    pub kind: String,
+    pub file: String,
+    pub line: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depends_on: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortOrderLevelV1 {
+    pub level: usize,
+    pub description: String,
+    pub symbols: Vec<PortOrderSymbolV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortCycleFileV1 {
+    pub file: String,
+    pub members_in_cycle: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortCycleSymbolV1 {
+    pub name: String,
+    pub kind: String,
+    pub file: String,
+    pub line: u32,
+    pub in_cycle_out_degree: usize,
+    pub in_cycle_in_degree: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortCycleAnchorV1 {
+    pub name: String,
+    pub file: String,
+    pub line: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortCycleV1 {
+    pub size: usize,
+    pub files: Vec<PortCycleFileV1>,
+    pub symbols: Vec<PortCycleSymbolV1>,
+    pub entry_point: Option<PortCycleAnchorV1>,
+    pub break_point_candidate: Option<PortCycleAnchorV1>,
+    pub note: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortOrderResultV1 {
+    pub source_dir: String,
+    pub total_symbols: usize,
+    pub returned: usize,
+    pub levels: Vec<PortOrderLevelV1>,
+    pub cycles: Vec<PortCycleV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TodoMarkerV1 {
+    pub kind: String,
+    pub file: String,
+    pub line: u32,
+    pub text: String,
+    pub enclosing: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TodosResultV1 {
+    pub match_count: usize,
+    pub by_kind: BTreeMap<String, u64>,
+    pub markers: Vec<TodoMarkerV1>,
+}
+
+#[cfg(test)]
+mod tests {
+    use schemars::schema_for;
+    use serde_json::{Value, json};
+
+    use super::{
+        ContextModeV1, ContextResultV1, ContextSurfaceRequestV1, PrimitiveFreshnessStateV1,
+        PrimitiveIndexingStateV1, PrimitiveLaneCompleteV1, PrimitiveLaneStatusV1,
+        PrimitiveRecallV1, PrimitiveSearchCoverageV1, PrimitiveSearchFreshnessV1,
+        RedundancySurfaceRequestV1, SimilarSurfaceRequestV1,
+    };
+    use crate::code_index_freshness::CodeIndexStalenessStateV1;
+    use crate::memory::{FactSearchGraphCoverageV1, FactSearchGraphDegradationV1};
+
+    fn context_result() -> ContextResultV1 {
+        ContextResultV1 {
+            task: "explain memory".to_owned(),
+            mode: ContextModeV1::Explore,
+            freshness: PrimitiveSearchFreshnessV1 {
+                state: PrimitiveFreshnessStateV1::Fresh,
+                indexing: None,
+            },
+            code_generation: Some("generation.test".to_owned()),
+            search_matches: vec![],
+            symbols: vec![],
+            related_symbols: vec![],
+            code: vec![],
+            coverage: PrimitiveSearchCoverageV1 {
+                exact: PrimitiveLaneStatusV1::Complete(PrimitiveLaneCompleteV1::Complete),
+                lexical: PrimitiveLaneStatusV1::Complete(PrimitiveLaneCompleteV1::Complete),
+                graph: PrimitiveLaneStatusV1::Complete(PrimitiveLaneCompleteV1::Complete),
+                recall: PrimitiveRecallV1::Full,
+            },
+            memory_matches: vec![],
+            memory_graph_coverage: None,
+            memory_matches_error: None,
+            verified_graph_evidence: None,
+        }
+    }
+
+    #[test]
+    fn context_result_preserves_optional_memory_graph_coverage() {
+        let absent = context_result().with_memory_graph_coverage(None);
+        assert_eq!(absent.memory_graph_coverage(), None);
+        assert!(
+            serde_json::to_value(&absent)
+                .expect("context result serializes")
+                .get("memory_graph_coverage")
+                .is_none()
+        );
+
+        for (coverage, expected) in [
+            (
+                FactSearchGraphCoverageV1::NotMounted,
+                json!({"kind": "not_mounted"}),
+            ),
+            (
+                FactSearchGraphCoverageV1::Complete {
+                    root_count: 2,
+                    relation_count: 3,
+                    expanded_fact_count: 4,
+                },
+                json!({
+                    "kind": "complete",
+                    "root_count": 2,
+                    "relation_count": 3,
+                    "expanded_fact_count": 4
+                }),
+            ),
+            (
+                FactSearchGraphCoverageV1::Degraded {
+                    reason: FactSearchGraphDegradationV1::BudgetExhausted,
+                },
+                json!({"kind": "degraded", "reason": "budget_exhausted"}),
+            ),
+        ] {
+            let result = context_result().with_memory_graph_coverage(Some(coverage));
+            assert_eq!(result.memory_graph_coverage(), Some(coverage));
+            assert_eq!(
+                serde_json::to_value(result).expect("context result serializes")["memory_graph_coverage"],
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn context_result_schema_exposes_optional_typed_memory_graph_coverage() {
+        let schema = serde_json::to_value(schema_for!(ContextResultV1))
+            .expect("context result schema serializes");
+        assert!(schema["properties"]["memory_graph_coverage"].is_object());
+        assert!(schema["required"].as_array().is_none_or(|required| {
+            !required.contains(&Value::String("memory_graph_coverage".to_owned()))
+        }));
+    }
+
+    #[test]
+    fn context_contract_carries_freshness_and_lexical_routing() {
+        let request: ContextSurfaceRequestV1 = serde_json::from_value(json!({
+            "task": "how is stock reserved",
+            "lexical_anchors": ["reserve_stock"],
+            "prefer_symbol": true,
+        }))
+        .expect("context request decodes routing fields");
+        assert_eq!(
+            request.lexical_anchors.as_deref(),
+            Some(&["reserve_stock".to_owned()][..])
+        );
+        assert_eq!(request.prefer_symbol, Some(true));
+
+        let fresh = serde_json::to_value(context_result()).expect("context result serializes");
+        assert_eq!(fresh["freshness"], json!({"state": "fresh"}));
+
+        let mut stale = context_result();
+        stale.freshness = PrimitiveSearchFreshnessV1 {
+            state: PrimitiveFreshnessStateV1::PossiblyStale,
+            indexing: Some(PrimitiveIndexingStateV1 {
+                summary: "state=refreshing".to_owned(),
+                served_generation: Some("generation.old".to_owned()),
+                latest_generation: Some("generation.new".to_owned()),
+                staleness_state: Some(CodeIndexStalenessStateV1::Refreshing),
+                rebuild_in_flight: Some(true),
+                stale_lanes: vec!["lexical".to_owned()],
+                reason: None,
+            }),
+        };
+        let stale = serde_json::to_value(stale).expect("context result serializes");
+        assert_eq!(stale["freshness"]["state"], "possibly_stale");
+        assert_eq!(
+            stale["freshness"]["indexing"]["summary"],
+            "state=refreshing"
+        );
+        assert_eq!(
+            stale["freshness"]["indexing"]["stale_lanes"],
+            json!(["lexical"])
+        );
+
+        let schema = serde_json::to_value(schema_for!(ContextResultV1))
+            .expect("context result schema serializes");
+        assert!(
+            schema["required"]
+                .as_array()
+                .is_some_and(|required| required.contains(&Value::String("freshness".to_owned()))),
+            "freshness is part of every context result"
+        );
+    }
+
+    #[test]
+    fn similar_and_redundancy_reject_retired_request_shapes() {
+        let current_similar = json!({
+            "project_id": "project.demo",
+            "repository_id": "repo.demo",
+            "target": {"kind": "symbol_occurrence", "symbol_occurrence_id": "symbol.v1.demo"},
+            "match_classes": ["conservative_exact"],
+            "result_limit": 3,
+            "work_limit": 100,
+            "cursor": null
+        });
+        let request: SimilarSurfaceRequestV1 =
+            serde_json::from_value(current_similar).expect("current similar schema decodes");
+        assert_eq!(request.result_limit, 3);
+
+        assert!(
+            serde_json::from_value::<SimilarSurfaceRequestV1>(json!({"symbol": "foo", "limit": 5}))
+                .is_err(),
+            "retired {{symbol, limit}} is not a similar request"
+        );
+        assert!(
+            serde_json::from_value::<SimilarSurfaceRequestV1>(json!({
+                "project_id": "project.demo",
+                "repository_id": "repo.demo",
+                "target": {"kind": "symbol_occurrence", "symbol_occurrence_id": "symbol.v1.demo"},
+                "match_classes": ["conservative_exact"],
+                "limit": 3,
+                "work_limit": 100
+            }))
+            .is_err(),
+            "limit is not an alias of result_limit"
+        );
+
+        let current_redundancy = json!({
+            "project_id": "project.demo",
+            "repository_id": "repo.demo",
+            "match_classes": ["conservative_exact"],
+            "scope": {"kind": "repository"},
+            "include_generated_paths": false,
+            "family_limit": 4,
+            "member_limit": 2,
+            "work_limit": 8,
+            "cursor": null
+        });
+        let request: RedundancySurfaceRequestV1 =
+            serde_json::from_value(current_redundancy).expect("current redundancy schema decodes");
+        assert_eq!(request.family_limit, 4);
+        assert!(
+            serde_json::from_value::<RedundancySurfaceRequestV1>(json!({
+                "path": "src/",
+                "min_lines": 10,
+                "max_pairs": 20,
+                "similarity_threshold": 0.9,
+                "include_naming_only": false,
+                "include_generated_paths": true
+            }))
+            .is_err(),
+            "retired path/min_lines/max_pairs shape is not a redundancy request"
+        );
+        assert!(
+            serde_json::from_value::<RedundancySurfaceRequestV1>(json!({
+                "project_id": "project.demo",
+                "repository_id": "repo.demo",
+                "match_classes": ["conservative_exact"],
+                "scope": {"kind": "repository"},
+                "include_generated_paths": false,
+                "max_pairs": 4,
+                "member_limit": 2,
+                "work_limit": 8
+            }))
+            .is_err(),
+            "max_pairs is not an alias of family_limit"
+        );
+    }
+}

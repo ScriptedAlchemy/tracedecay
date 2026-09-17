@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="src/resources/logo.png" alt="TraceDecay" width="300">
+  <img src="crates/tracedecay-cli/src/resources/logo.png" alt="TraceDecay" width="300">
 </p>
 
 <h3 align="center">Semantic code intelligence for AI coding agents</h3>
@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://github.com/ScriptedAlchemy/tracedecay/releases/latest"><img src="https://img.shields.io/github/v/release/ScriptedAlchemy/tracedecay" alt="GitHub release"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
-  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-1.70+-orange.svg" alt="Rust"></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-1.97.1-orange.svg" alt="Rust 1.97.1"></a>
   <img src="https://img.shields.io/badge/macOS-supported-blue.svg" alt="macOS">
   <img src="https://img.shields.io/badge/Linux-supported-blue.svg" alt="Linux">
   <img src="https://img.shields.io/badge/Windows-supported-blue.svg" alt="Windows">
@@ -21,12 +21,13 @@ Instead of repeated `grep`, `glob`, and file reads, agents use MCP tools such as
 
 ## Highlights
 
-- 70+ MCP tools for discovery, call graphs, impact analysis, code health, test mapping, PR context, and anchored edits.
-- 50+ languages through Rust tree-sitter extractors, with lite/medium/full Cargo feature tiers.
-- Native integrations for Claude Code, Codex, Cursor, Gemini, Hermes, Kiro, OpenCode, Copilot, Cline, Roo Code, Zed, Antigravity, Kilo, Kimi, and Vibe.
-- Local libSQL storage. Your code and project memory stay on your machine.
-- On-demand freshness checks, optional per-branch databases, and linked git worktree support.
-- Local dashboard for code graph, memory, LCM sessions, savings, and cost analytics.
+- Typed MCP operations for discovery, call graphs, impact analysis, code health, test mapping, repository context, and anchored edits.
+- Rust tree-sitter extractors with lite/medium/full Cargo feature tiers; `Cargo.toml` is the exact language authority.
+- Native integrations for supported Claude Code, Codex, Cursor, Hermes, Kiro, Kimi Code, OpenCode, and Cline-family hosts.
+- Daemon-owned local storage through the `rusqlite` runtime and embedded Grafeo graph store. Local operation is the default; configured remote sources and authorities follow explicit policy rather than an implicit local-only guarantee.
+- On-demand freshness checks with exact repository, worktree, ref, commit, and generation provenance across linked git worktrees.
+- Project-wide facts, sessions, and lossless LCM history remain available across branches; historical host transcripts enter through the same sanitized daemon ingestion path.
+- Local dashboard for evidence, memory, LCM sessions, savings, and cost analytics.
 
 ## Install
 
@@ -34,14 +35,20 @@ Instead of repeated `grep`, `glob`, and file reads, agents use MCP tools such as
 # Linux and Apple silicon macOS
 curl -fsSL https://github.com/ScriptedAlchemy/tracedecay/releases/latest/download/install.sh | bash
 
-# Windows
-scoop bucket add tracedecay https://github.com/ScriptedAlchemy/scoop-bucket
-scoop install tracedecay
+# Windows: download the x86_64 Windows archive from the latest release,
+# extract tracedecay.exe, and place it on PATH.
 ```
 
 The installer defaults to `~/.local/bin`. Set `TRACEDECAY_INSTALL_DIR` to
 choose another directory. Prebuilt archives are available on the
 [latest release](https://github.com/ScriptedAlchemy/tracedecay/releases/latest).
+
+## Final V2 storage model
+
+`tracedecay-graph-db` is the sole Grafeo dependency boundary. Final V2 accepts
+only its exact persisted shape: an incompatible store returns `ResetRequired`
+and requires explicit reset or recreation, never conversion. See [the V2
+operating model](docs/V2-OPERATING-MODEL.md).
 
 ## Quick Start
 
@@ -58,6 +65,7 @@ tracedecay status
 tracedecay install --agent claude
 tracedecay install --agent codex
 tracedecay install --agent cursor
+tracedecay install --agent devin
 tracedecay install --agent gemini
 tracedecay install --agent hermes
 ```
@@ -67,35 +75,37 @@ Project-local setup:
 ```bash
 tracedecay install --local --agent cursor
 tracedecay install --local --agent codex
+tracedecay install --local --agent devin
 ```
 
 After setup, restart the agent so it loads the MCP server, plugin, hooks, or rules written for that host.
 
-Codex first-time installs print one extra step:
-
-```bash
-codex plugin add tracedecay@personal
-```
-
-Run it once before starting a new Codex session so Codex copies the generated plugin into its installed cache.
+Codex first-time installs drive `codex plugin add tracedecay@personal` themselves.
+Trust new command hooks inside Codex with `/hooks`, then start a new session so
+the installed cache is loaded.
 
 ## Common Commands
 
 ```bash
-tracedecay init [path]              # initialize a project store
-tracedecay sync [path]              # incremental index update
-tracedecay sync --force [path]      # full re-index
+tracedecay init [path]              # enroll a project and publish its first generation
+tracedecay sync [path]              # explicit administrative refresh
+tracedecay sync --force [path]      # explicit full generation refresh
 tracedecay status [path]            # graph stats, freshness, savings, cost
-tracedecay query <search> [path]    # CLI symbol search
-tracedecay files                    # indexed files
-tracedecay affected <files...>      # impacted tests/files
+tracedecay tool                     # list every MCP tool
+tracedecay tool search "<query>"    # CLI symbol search
+tracedecay tool files               # indexed files
+tracedecay tool affected --args -   # impacted tests/files ({"files":[...]})
 tracedecay serve                    # MCP server
-tracedecay doctor [--agent NAME]    # installation health check
+tracedecay doctor                   # read-only installation health check
 tracedecay dashboard [--open]       # local dashboard
 tracedecay monitor                  # live MCP savings/cost TUI
 tracedecay update                   # refresh binary, plugins, daemon
 tracedecay upgrade                  # self-upgrade current channel
 ```
+
+Every MCP tool is reachable from the shell as `tracedecay tool <name>`; there
+are no separate per-tool subcommands. Run `tracedecay tool` for the grouped
+list and `tracedecay tool <name> --help` for one tool's parameters.
 
 ## Agent Tools
 
@@ -103,29 +113,33 @@ The MCP server exposes tools grouped around normal coding workflows:
 
 - Discovery: `tracedecay_context`, `tracedecay_search`, `tracedecay_outline`, `tracedecay_files`
 - Graph traversal: `tracedecay_callers`, `tracedecay_callees`, `tracedecay_impact`, `tracedecay_affected`
-- Code health: `tracedecay_complexity`, `tracedecay_dead_code`, `tracedecay_coupling`, `tracedecay_test_risk`
+- Code health: `tracedecay_complexity`, `tracedecay_dead_code`, `tracedecay_unmounted_files`, `tracedecay_coupling`, `tracedecay_test_risk`
 - Git workflow: `tracedecay_diff_context`, `tracedecay_pr_context`, `tracedecay_changelog`, `tracedecay_test_map`
 - Editing: `tracedecay_str_replace`, `tracedecay_multi_str_replace`, `tracedecay_insert_at`, `tracedecay_ast_grep_rewrite`
-- Memory: `tracedecay_fact_store`, `tracedecay_fact_feedback`, `tracedecay_memory_status`
+- Memory: exact `tracedecay_fact_store_add|search|probe|related|reason|contradict|get|update|remove|list` routes, plus `tracedecay_fact_feedback` and `tracedecay_memory_status`
 
 Most read tools are safe to call in parallel. Edit tools are single-file, anchored, and re-index after writing.
 
 ## Index Freshness
 
-TraceDecay does not run a filesystem watcher. MCP calls check for stale indexed files and sync them on demand with a cooldown. When an MCP server starts, it runs a catch-up sync for changes made while no agent was attached.
+The daemon owns freshness and background convergence. Hooks, MCP, LSP, and
+workspace events submit bounded, content-free hints; the daemon resolves exact
+repository/worktree/ref/commit identity, captures a snapshot, and publishes an
+immutable generation. Queries report the generation and typed
+`warming`/`refresh_required`/`partial`/`unavailable` coverage while a newer
+generation is being prepared; they never run a hidden sync or silently use an
+ancestor. An explicit `tracedecay sync` remains an administrative refresh
+request for diagnostics or offline workflows.
 
-Linked git worktrees share the same project enrollment through the repository common directory. Initialize once from any checkout; do not copy `.tracedecay/` into worktrees.
+Linked git worktrees share one registered project authority through the
+repository common directory. Initialize once from any checkout; do not copy a
+TraceDecay store into another worktree. Queries and comparisons select exact
+worktree/ref/commit generations and report typed stale, indexing, partial, or
+unavailable state when that snapshot is not ready. Branches and worktrees do
+not create separate databases or fact stores.
 
-Optional branch databases:
-
-```bash
-tracedecay branch add
-tracedecay branch list
-tracedecay branch remove <name>
-tracedecay branch gc
-```
-
-See [docs/BRANCHING-USER-GUIDE.md](docs/BRANCHING-USER-GUIDE.md) for full branch behavior and recovery.
+See [docs/V2-OPERATING-MODEL.md](docs/V2-OPERATING-MODEL.md) for branch
+selection, provenance, and recovery behavior.
 
 ## Dashboard
 
@@ -135,17 +149,41 @@ tracedecay dashboard --port 8080
 tracedecay dashboard --port 0 --open
 ```
 
-The dashboard includes graph exploration, project memory, LCM session search, token savings, and cost views. See [docs/dashboard.md](docs/dashboard.md) and [docs/graph-explorer.md](docs/graph-explorer.md).
+The dashboard includes graph exploration, project memory, LCM session search, token savings, and cost views. See [docs/dashboard.md](docs/dashboard.md).
 
 ## Privacy
 
-Core indexing, graph queries, MCP tools, memory, and dashboard data are local.
+Core indexing, graph queries, MCP tools, memory, and dashboard data use the
+local daemon-owned authority by default. That default does not mean every
+command is offline: configured remote sources and authorities can exchange only
+authorized, sanitized, classified records under their remote policy.
 
-Optional or external network calls:
+Network-capable effects are separate from core retrieval:
 
-- Worldwide counter: uploads one aggregate token-savings number only when enabled; the Worker also derives country from request metadata for aggregate geography.
-- Version check: fetches release metadata.
-- Pricing refresh: fetches public LiteLLM model pricing for `tracedecay cost`.
+- Worldwide counter: when opted in, sends the pending aggregate token-savings
+  amount and may fetch the public total/country display data.
+- GitHub release checks and updates: contact GitHub release endpoints. An
+  explicitly configured private GitHub review source can use a read-only
+  credential from the operating-system keyring; missing, ambiguous,
+  write-capable, or unverifiable credentials fail closed.
+- Provider usage and pricing: `tracedecay cost` performs a side-effect-free read
+  over immutable native usage observations and the deterministic bundled
+  all-provider pricing table. Unknown or unavailable evidence remains typed.
+- Semantic models: when semantic auto-download is enabled, TraceDecay can
+  download missing revision-pinned artifacts from Hugging Face hosts and verify
+  their catalog-pinned lengths and SHA-256 digests before publication.
+- Configured remote authority: an authenticated, policy-authorized peer can
+  perform remote retrieval, replication, backup, restore, or failover. This
+  path fails closed with typed `unavailable`, `denied`, or `stale-peer` state.
+
+These services receive normal transport metadata, including the connection's
+source address, in addition to any request payload. The counter request is an
+aggregate amount, not repository content, but it is not an anonymity guarantee.
+Use a network policy or firewall if a command must make no outbound connection.
+An opt-out, denial, timeout, or unavailable remote service must remain visible
+as that state; it is not evidence of a zero counter, an up-to-date release, or
+current pricing. See [Security](SECURITY.md#network-access) for the complete
+outbound-access and credential boundary.
 
 Disable the worldwide counter with:
 
@@ -157,25 +195,38 @@ tracedecay disable-upload-counter
 
 ```bash
 tracedecay doctor
-tracedecay status --runtime
-tracedecay sync --doctor
+tracedecay status --json
 ```
+
+`tracedecay doctor` is read-only installation and authority diagnostics. It
+does not repair stores or rewrite host files; authorized maintenance is a
+separate daemon operation with its own preview, receipt, and recovery state.
 
 Common fixes:
 
 - Not initialized: run `tracedecay init` from the project root.
-- Agent does not see tools: run `tracedecay doctor --agent <name>`, then restart the agent.
-- Missing symbols: run `tracedecay sync` and confirm the file is not ignored.
-- Slow first index: use normal incremental `tracedecay sync` after the first run.
+- Agent does not see tools: run `tracedecay doctor`, then restart the agent.
+- Missing symbols: inspect `tracedecay status --json` for the selected
+  generation and typed warming/refresh-required coverage; request an explicit
+  administrative refresh only when the daemon says it is needed, then confirm
+  the file is not ignored.
+- Slow first index: use daemon status/coverage to inspect warming and backlog;
+  routine updates are daemon-owned.
 
 ## Build
+
+Building from a source checkout requires Node.js 22+ and npm in addition to
+Rust: `dashboard/app-dist/` is generated output and is not committed, so
+`build.rs` runs `npm ci` and `npm run build` in `dashboard/` before embedding
+the UI. Release users should install the prebuilt, checksummed GitHub archive;
+workspace Cargo packages are private.
 
 ```bash
 cargo build --release
 cargo build --release --features medium
 cargo build --release --no-default-features
 
-cargo nextest run --workspace --no-fail-fast
+cargo nextest run --workspace --all-features --no-fail-fast
 cargo check --no-default-features
 cargo clippy --workspace --all-targets
 ```
@@ -185,9 +236,8 @@ cargo clippy --workspace --all-targets
 - [User guide](docs/USER-GUIDE.md)
 - [Comparable tools](docs/COMPARABLE-TOOLS.md)
 - [Dashboard](docs/dashboard.md)
-- [Branching](docs/BRANCHING-USER-GUIDE.md)
-- [MCP extensions](docs/MCP-extensions.md)
-- [Architecture/design notes](docs/DESIGN-DOC.md)
+- [V2 operating model](docs/V2-OPERATING-MODEL.md)
+- [V2 roadmap](docs/plans/tracedecay-v2/00-plan-set-index.md)
 
 ## Origin
 

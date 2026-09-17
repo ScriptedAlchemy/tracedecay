@@ -1,87 +1,31 @@
 /// Tree-sitter based Fortran source code extractor.
 ///
 /// Parses Fortran source files and emits nodes and edges for the code graph.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
-use tree_sitter::{Node as TsNode, Parser, Tree};
+use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::{ExtractionState, local_node_id};
 use crate::complexity::{FORTRAN_COMPLEXITY, count_complexity};
 use crate::traversal::find_direct_child_by_kind;
-use tracedecay_domain::code_intelligence::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+use crate::types::{
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+    Visibility, generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from Fortran source files using tree-sitter.
 pub struct FortranExtractor;
 
-/// Internal state used during AST traversal.
-struct ExtractionState {
-    nodes: Vec<Node>,
-    edges: Vec<Edge>,
-    unresolved_refs: Vec<UnresolvedRef>,
-    errors: Vec<String>,
-    /// Stack of (name, `node_id`) for building qualified names and parent edges.
-    node_stack: Vec<(String, String)>,
-    file_path: String,
-    source: Vec<u8>,
-    timestamp: u64,
-}
-
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        Self {
-            nodes: Vec::new(),
-            edges: Vec::new(),
-            unresolved_refs: Vec::new(),
-            errors: Vec::new(),
-            node_stack: Vec::new(),
-            file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
-            timestamp,
-        }
-    }
-
-    /// Returns the current qualified name prefix from the node stack.
-    fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
-    }
-
-    /// Returns the current parent node ID, or None if at file root level.
-    fn parent_node_id(&self) -> Option<&str> {
-        self.node_stack.last().map(|(_, id)| id.as_str())
-    }
-
-    /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
-    }
-}
-
 impl FortranExtractor {
-    /// Extract code graph nodes and edges from a Fortran source file.
-    pub fn extract_fortran(file_path: &str, source: &str) -> ExtractionResult {
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
 
-        let tree = match Self::parse_source(source) {
-            Ok(tree) => tree,
-            Err(msg) => {
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-
-        // Create the File root node.
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -90,7 +34,7 @@ impl FortranExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -104,6 +48,7 @@ impl FortranExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -111,28 +56,19 @@ impl FortranExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        // Walk the AST.
-        let root = tree.root_node();
-        Self::visit_children(&mut state, root);
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            Self::visit_node(&mut state, child);
+        });
 
         state.node_stack.pop();
 
-        Self::build_result(state, start)
+        crate::parsed_extraction::ParsedExtraction::complete(
+            Self::build_result(state, start),
+            scope,
+            metrics,
+        )
     }
 
-    /// Parse source code into a tree-sitter AST.
-    fn parse_source(source: &str) -> Result<Tree, String> {
-        let mut parser = Parser::new();
-        let language = crate::ts_provider::try_language("fortran")?;
-        parser
-            .set_language(&language)
-            .map_err(|e| format!("failed to load Fortran grammar: {e}"))?;
-        parser
-            .parse(source, None)
-            .ok_or_else(|| "tree-sitter parse returned None".to_string())
-    }
-
-    /// Visit all children of a node.
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -146,7 +82,6 @@ impl FortranExtractor {
         }
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "module" => Self::visit_module(state, node),
@@ -171,7 +106,13 @@ impl FortranExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Module, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Module,
+            &name,
+            node,
+        );
 
         let text = state.node_text(node);
         let signature = text
@@ -202,12 +143,12 @@ impl FortranExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -217,7 +158,6 @@ impl FortranExtractor {
             });
         }
 
-        // Visit module body.
         state.node_stack.push((name.clone(), id));
         Self::visit_children(state, node);
         state.node_stack.pop();
@@ -232,7 +172,13 @@ impl FortranExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Function,
+            &name,
+            node,
+        );
 
         let text = state.node_text(node);
         let signature = text
@@ -241,7 +187,7 @@ impl FortranExtractor {
             .map(|l| l.trim().to_string())
             .filter(|l| !l.is_empty());
 
-        let metrics = count_complexity(node, &FORTRAN_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &FORTRAN_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -265,12 +211,12 @@ impl FortranExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -280,10 +226,8 @@ impl FortranExtractor {
             });
         }
 
-        // Visit program body for use statements, call sites, etc.
         state.node_stack.push((name.clone(), id.clone()));
         Self::visit_children(state, node);
-        // Extract call sites from the program body.
         Self::extract_call_sites(state, node, &id);
         state.node_stack.pop();
     }
@@ -297,10 +241,16 @@ impl FortranExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Function,
+            &name,
+            node,
+        );
 
         let signature = Self::extract_first_line_signature(state, node);
-        let metrics = count_complexity(node, &FORTRAN_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &FORTRAN_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -324,12 +274,12 @@ impl FortranExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -339,7 +289,6 @@ impl FortranExtractor {
             });
         }
 
-        // Extract call sites from the subroutine body.
         Self::extract_call_sites(state, node, &id);
     }
 
@@ -352,10 +301,16 @@ impl FortranExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Function,
+            &name,
+            node,
+        );
 
         let signature = Self::extract_first_line_signature(state, node);
-        let metrics = count_complexity(node, &FORTRAN_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &FORTRAN_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -379,12 +334,12 @@ impl FortranExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -394,7 +349,6 @@ impl FortranExtractor {
             });
         }
 
-        // Extract call sites from the function body.
         Self::extract_call_sites(state, node, &id);
     }
 
@@ -407,7 +361,13 @@ impl FortranExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Struct, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Struct,
+            &name,
+            node,
+        );
 
         let text = state.node_text(node);
         let signature = text
@@ -438,12 +398,12 @@ impl FortranExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -465,7 +425,6 @@ impl FortranExtractor {
             });
         }
 
-        // Visit fields inside the derived type.
         state.node_stack.push((name.clone(), id));
         Self::visit_derived_type_fields(state, node);
         state.node_stack.pop();
@@ -490,16 +449,23 @@ impl FortranExtractor {
     /// Extract a field from a `variable_declaration` inside a derived type.
     fn visit_field(state: &mut ExtractionState, node: TsNode<'_>) {
         // The field name is in the `declarator` field, which is an `identifier`.
-        let name = node
-            .child_by_field_name("declarator")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = node.child_by_field_name("declarator").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Field, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Field,
+            &name,
+            node,
+        );
         let text = state.node_text(node);
 
         let graph_node = Node {
@@ -524,12 +490,12 @@ impl FortranExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent (the derived type).
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -549,7 +515,13 @@ impl FortranExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Interface, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Interface,
+            &name,
+            node,
+        );
 
         let text = state.node_text(node);
         let signature = text
@@ -580,12 +552,12 @@ impl FortranExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -607,72 +579,81 @@ impl FortranExtractor {
 
         // Look for init_declarator child with left (name) and right (value).
         let declarator = node.child_by_field_name("declarator");
-        if let Some(decl) = declarator {
-            if decl.kind() == "init_declarator" {
-                let name = decl
-                    .child_by_field_name("left")
-                    .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        if let Some(decl) = declarator
+            && decl.kind() == "init_declarator"
+        {
+            let name = decl.child_by_field_name("left").map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
-                let docstring = Self::extract_docstring(state, node);
-                let start_line = node.start_position().row as u32;
-                let end_line = node.end_position().row as u32;
-                let start_column = node.start_position().column as u32;
-                let end_column = node.end_position().column as u32;
-                let text = state.node_text(node);
-                let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-                let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+            let docstring = Self::extract_docstring(state, node);
+            let start_line = node.start_position().row as u32;
+            let end_line = node.end_position().row as u32;
+            let start_column = node.start_position().column as u32;
+            let end_column = node.end_position().column as u32;
+            let text = state.node_text(node);
+            let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
+            let id = local_node_id(
+                &state.file_path,
+                state.source,
+                &NodeKind::Const,
+                &name,
+                node,
+            );
 
-                let graph_node = Node {
-                    id: id.clone(),
-                    kind: NodeKind::Const,
-                    name,
-                    qualified_name,
-                    file_path: state.file_path.clone(),
-                    start_line,
-                    attrs_start_line: start_line,
-                    end_line,
-                    start_column,
-                    end_column,
-                    signature: Some(text.trim().to_string()),
-                    docstring,
-                    visibility: Visibility::Pub,
-                    is_async: false,
-                    branches: 0,
-                    loops: 0,
-                    returns: 0,
-                    max_nesting: 0,
-                    unsafe_blocks: 0,
-                    unchecked_calls: 0,
-                    assertions: 0,
-                    updated_at: state.timestamp,
-                    parent_id: None,
-                };
-                state.nodes.push(graph_node);
+            let graph_node = Node {
+                id: id.clone(),
+                kind: NodeKind::Const,
+                name,
+                qualified_name,
+                file_path: state.file_path.clone(),
+                start_line,
+                attrs_start_line: start_line,
+                end_line,
+                start_column,
+                end_column,
+                signature: Some(text.trim().to_string()),
+                docstring,
+                visibility: Visibility::Pub,
+                is_async: false,
+                branches: 0,
+                loops: 0,
+                returns: 0,
+                max_nesting: 0,
+                unsafe_blocks: 0,
+                unchecked_calls: 0,
+                assertions: 0,
+                complexity_analysis: ComplexityAnalysisV1::Complete,
+                updated_at: state.timestamp,
+                parent_id: None,
+            };
+            state.nodes.push(graph_node);
 
-                // Contains edge from parent.
-                if let Some(parent_id) = state.parent_node_id() {
-                    state.edges.push(Edge {
-                        source: parent_id.to_string(),
-                        target: id,
-                        kind: EdgeKind::Contains,
-                        line: Some(start_line),
-                    });
-                }
+            if let Some(parent_id) = state.parent_node_id() {
+                state.edges.push(Edge {
+                    source: parent_id.to_string(),
+                    target: id,
+                    kind: EdgeKind::Contains,
+                    line: Some(start_line),
+                });
             }
         }
     }
 
     /// Extract a use statement.
     fn visit_use_statement(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "module_name")
-            .map_or_else(|| "<unknown>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "module_name").map_or_else(
+            || "<unknown>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Use, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -696,12 +677,12 @@ impl FortranExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -712,16 +693,15 @@ impl FortranExtractor {
         }
     }
 
-    // ----------------------------
-    // Name extraction helpers
-    // ----------------------------
-
     /// Find the module name from a module node.
     /// Structure: module -> `module_statement` -> name
     fn find_module_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         find_direct_child_by_kind(node, "module_statement")
             .and_then(|stmt| find_direct_child_by_kind(stmt, "name"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n))
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            )
     }
 
     /// Find the program name from a program node.
@@ -729,7 +709,10 @@ impl FortranExtractor {
     fn find_program_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         find_direct_child_by_kind(node, "program_statement")
             .and_then(|stmt| find_direct_child_by_kind(stmt, "name"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n))
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            )
     }
 
     /// Find the subroutine name from a subroutine node.
@@ -737,7 +720,10 @@ impl FortranExtractor {
     fn find_subroutine_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         find_direct_child_by_kind(node, "subroutine_statement")
             .and_then(|stmt| stmt.child_by_field_name("name"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n))
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            )
     }
 
     /// Find the function name from a function node.
@@ -745,7 +731,10 @@ impl FortranExtractor {
     fn find_function_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         find_direct_child_by_kind(node, "function_statement")
             .and_then(|stmt| stmt.child_by_field_name("name"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n))
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            )
     }
 
     /// Find the derived type name and optional base type.
@@ -757,12 +746,15 @@ impl FortranExtractor {
         let stmt = find_direct_child_by_kind(node, "derived_type_statement");
         let name = stmt
             .and_then(|s| find_direct_child_by_kind(s, "type_name"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         let base_type = stmt
             .and_then(|s| s.child_by_field_name("base"))
             .and_then(|base_spec| find_direct_child_by_kind(base_spec, "identifier"))
-            .map(|n| state.node_text(n));
+            .map(|n| state.node_text(n).to_string());
 
         (name, base_type)
     }
@@ -772,7 +764,10 @@ impl FortranExtractor {
     fn find_interface_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         find_direct_child_by_kind(node, "interface_statement")
             .and_then(|stmt| find_direct_child_by_kind(stmt, "name"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n))
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            )
     }
 
     /// Check if a `variable_declaration` has a `parameter` attribute.
@@ -794,10 +789,6 @@ impl FortranExtractor {
         }
         false
     }
-
-    // ----------------------------
-    // Signature and docstring helpers
-    // ----------------------------
 
     /// Extract the first line of a node as its signature.
     fn extract_first_line_signature(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
@@ -848,32 +839,30 @@ impl FortranExtractor {
                             let callee_name = state.node_text(sub_node);
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: fn_node_id.to_string(),
-                                reference_name: callee_name,
+                                reference_name: callee_name.to_string(),
                                 reference_kind: EdgeKind::Calls,
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
                                 file_path: state.file_path.clone(),
                             });
                         }
-                        // Recurse into arguments for nested calls.
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
                     "call_expression" => {
                         // call_expression: first named child is typically the identifier.
-                        if let Some(ident) = child.named_child(0) {
-                            if ident.kind() == "identifier" {
-                                let callee_name = state.node_text(ident);
-                                state.unresolved_refs.push(UnresolvedRef {
-                                    from_node_id: fn_node_id.to_string(),
-                                    reference_name: callee_name,
-                                    reference_kind: EdgeKind::Calls,
-                                    line: child.start_position().row as u32,
-                                    column: child.start_position().column as u32,
-                                    file_path: state.file_path.clone(),
-                                });
-                            }
+                        if let Some(ident) = child.named_child(0)
+                            && ident.kind() == "identifier"
+                        {
+                            let callee_name = state.node_text(ident);
+                            state.unresolved_refs.push(UnresolvedRef {
+                                from_node_id: fn_node_id.to_string(),
+                                reference_name: callee_name.to_string(),
+                                reference_kind: EdgeKind::Calls,
+                                line: child.start_position().row as u32,
+                                column: child.start_position().column as u32,
+                                file_path: state.file_path.clone(),
+                            });
                         }
-                        // Recurse into arguments for nested calls.
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
                     // Skip nested subroutine/function definitions.
@@ -910,7 +899,16 @@ impl crate::LanguageExtractor for FortranExtractor {
         "Fortran"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_fortran(file_path, source)
+    fn extract_parsed_artifact_prepared(
+        &self,
+        file_path: &str,
+        source: &str,
+        _parsed_source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(Self::extract_tree(
+            file_path, source, tree, scope,
+        ))
     }
 }

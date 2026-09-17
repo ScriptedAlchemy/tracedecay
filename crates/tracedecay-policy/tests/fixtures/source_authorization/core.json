@@ -1,0 +1,782 @@
+[
+  {
+    "name": "project_authorized_live",
+    "source_visible": true,
+    "input": {
+      "definition": {
+        "definition": {
+          "source_id": "source.fixture",
+          "source_kind": "cursor",
+          "revision": 1,
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "binding": {
+        "binding": {
+          "kind": "project",
+          "binding_id": "binding.fixture",
+          "source_id": "source.fixture",
+          "project_id": "project.fixture",
+          "revision": 1,
+          "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "source_grant": {
+        "grant_id": "grant.source.fixture",
+        "issuer": "actor.source",
+        "subject": "actor.requester",
+        "owner": {
+          "kind": "project",
+          "id": "project.fixture"
+        },
+        "resources": ["resource.fixture"],
+        "operations": ["provider_fetch"],
+        "sinks": ["provider_fetch"],
+        "disclosure_ceiling": "sanitized_content",
+        "constraints": [],
+        "budgets": {
+          "requests": 10,
+          "bytes": 10000,
+          "tokens": 1000
+        },
+        "revision": 1,
+        "issued_at": 0,
+        "expires_at": 100,
+        "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "state": "active"
+      },
+      "requester_grant": {
+        "grant_id": "grant.requester.fixture",
+        "issuer": "actor.authority",
+        "subject": "actor.requester",
+        "owner": {
+          "kind": "project",
+          "id": "project.fixture"
+        },
+        "resources": ["resource.fixture"],
+        "operations": ["provider_fetch"],
+        "sinks": ["provider_fetch"],
+        "disclosure_ceiling": "sanitized_content",
+        "constraints": [],
+        "budgets": {
+          "requests": 8,
+          "bytes": 8000,
+          "tokens": 800
+        },
+        "revision": 1,
+        "issued_at": 0,
+        "expires_at": 100,
+        "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "state": "active"
+      },
+      "resolved_owner_scope": {
+        "owner": {
+          "kind": "project",
+          "id": "project.fixture"
+        },
+        "revision": 1,
+        "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "requested_access": {
+        "resource": "resource.fixture",
+        "operation": "provider_fetch",
+        "sink": "provider_fetch",
+        "disclosure": "sanitized_content",
+        "budget": {
+          "requests": 1,
+          "bytes": 1000,
+          "tokens": 100
+        }
+      },
+      "source_policy": {
+        "source_id": "source.fixture",
+        "policy_revision": 1,
+        "policy_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "sensitivity": "non_sensitive",
+        "disclosure_ceiling": "sanitized_content",
+        "eligible_sinks": ["provider_fetch"],
+        "eligible_operations": ["provider_fetch"],
+        "mandatory_privacy": []
+      },
+      "sink_policy": {
+        "sink": "provider_fetch",
+        "policy_revision": 1,
+        "policy_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "disclosure_ceiling": "sanitized_content",
+        "mandatory_privacy": [],
+        "available": true
+      },
+      "content_status": "live",
+      "requested_coverage": "complete",
+      "snapshot_state": "complete",
+      "requester": "actor.requester",
+      "policy_revision": 1,
+      "policy_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "configuration_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "evaluated_at": 10
+    },
+    "expected": {
+      "access": "authorized",
+      "authorization_coverage": "complete",
+      "disposition": "allow",
+      "ordered_reason_codes": [
+        "input_complete",
+        "source_grant_active",
+        "requester_grant_active",
+        "grant_intersection_non_expanding",
+        "access_allowed",
+        "content_live"
+      ],
+      "has_effective_grant": true,
+      "public_shape": "live"
+    }
+  },
+  {
+    "name": "project_owner_mismatch",
+    "source_visible": true,
+    "input": {
+      "definition": {
+        "definition": {
+          "source_id": "source.fixture",
+          "source_kind": "cursor",
+          "revision": 1,
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "binding": {
+        "binding": {
+          "kind": "project",
+          "binding_id": "binding.fixture",
+          "source_id": "source.fixture",
+          "project_id": "project.other",
+          "revision": 1,
+          "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "source_grant": {
+        "grant_id": "grant.source.fixture",
+        "issuer": "actor.source",
+        "subject": "actor.requester",
+        "owner": {
+          "kind": "project",
+          "id": "project.fixture"
+        },
+        "resources": ["resource.fixture"],
+        "operations": ["provider_fetch"],
+        "sinks": ["provider_fetch"],
+        "disclosure_ceiling": "sanitized_content",
+        "constraints": [],
+        "budgets": {
+          "requests": 10,
+          "bytes": 10000,
+          "tokens": 1000
+        },
+        "revision": 1,
+        "issued_at": 0,
+        "expires_at": 100,
+        "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "state": "active"
+      },
+      "requester_grant": {
+        "grant_id": "grant.requester.fixture",
+        "issuer": "actor.authority",
+        "subject": "actor.requester",
+        "owner": {
+          "kind": "project",
+          "id": "project.fixture"
+        },
+        "resources": ["resource.fixture"],
+        "operations": ["provider_fetch"],
+        "sinks": ["provider_fetch"],
+        "disclosure_ceiling": "sanitized_content",
+        "constraints": [],
+        "budgets": {
+          "requests": 8,
+          "bytes": 8000,
+          "tokens": 800
+        },
+        "revision": 1,
+        "issued_at": 0,
+        "expires_at": 100,
+        "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "state": "active"
+      },
+      "resolved_owner_scope": {
+        "owner": {
+          "kind": "project",
+          "id": "project.fixture"
+        },
+        "revision": 1,
+        "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "requested_access": {
+        "resource": "resource.fixture",
+        "operation": "provider_fetch",
+        "sink": "provider_fetch",
+        "disclosure": "sanitized_content",
+        "budget": {
+          "requests": 1,
+          "bytes": 1000,
+          "tokens": 100
+        }
+      },
+      "source_policy": {
+        "source_id": "source.fixture",
+        "policy_revision": 1,
+        "policy_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "sensitivity": "non_sensitive",
+        "disclosure_ceiling": "sanitized_content",
+        "eligible_sinks": ["provider_fetch"],
+        "eligible_operations": ["provider_fetch"],
+        "mandatory_privacy": []
+      },
+      "sink_policy": {
+        "sink": "provider_fetch",
+        "policy_revision": 1,
+        "policy_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "disclosure_ceiling": "sanitized_content",
+        "mandatory_privacy": [],
+        "available": true
+      },
+      "content_status": "live",
+      "requested_coverage": "complete",
+      "snapshot_state": "complete",
+      "requester": "actor.requester",
+      "policy_revision": 1,
+      "policy_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "configuration_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "evaluated_at": 10
+    },
+    "expected": {
+      "access": "unauthorized",
+      "authorization_coverage": "complete",
+      "disposition": "deny",
+      "ordered_reason_codes": [
+        "input_complete",
+        "owner_scope_mismatch"
+      ],
+      "has_effective_grant": false,
+      "public_shape": "not_found_or_not_authorized"
+    }
+  },
+  {
+    "name": "mandatory_local_privacy_blocks_host_egress",
+    "source_visible": true,
+    "input": {
+      "definition": {
+        "definition": {
+          "source_id": "source.fixture",
+          "source_kind": "cursor",
+          "revision": 1,
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "binding": {
+        "binding": {
+          "kind": "project",
+          "binding_id": "binding.fixture",
+          "source_id": "source.fixture",
+          "project_id": "project.fixture",
+          "revision": 1,
+          "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "source_grant": {
+        "grant_id": "grant.source.fixture",
+        "issuer": "actor.source",
+        "subject": "actor.requester",
+        "owner": {
+          "kind": "project",
+          "id": "project.fixture"
+        },
+        "resources": ["resource.fixture"],
+        "operations": ["host_delivery"],
+        "sinks": ["host_delivery"],
+        "disclosure_ceiling": "sanitized_content",
+        "constraints": [],
+        "budgets": {
+          "requests": 10,
+          "bytes": 10000,
+          "tokens": 1000
+        },
+        "revision": 1,
+        "issued_at": 0,
+        "expires_at": 100,
+        "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "state": "active"
+      },
+      "requester_grant": {
+        "grant_id": "grant.requester.fixture",
+        "issuer": "actor.authority",
+        "subject": "actor.requester",
+        "owner": {
+          "kind": "project",
+          "id": "project.fixture"
+        },
+        "resources": ["resource.fixture"],
+        "operations": ["host_delivery"],
+        "sinks": ["host_delivery"],
+        "disclosure_ceiling": "sanitized_content",
+        "constraints": [],
+        "budgets": {
+          "requests": 8,
+          "bytes": 8000,
+          "tokens": 800
+        },
+        "revision": 1,
+        "issued_at": 0,
+        "expires_at": 100,
+        "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "state": "active"
+      },
+      "resolved_owner_scope": {
+        "owner": {
+          "kind": "project",
+          "id": "project.fixture"
+        },
+        "revision": 1,
+        "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "requested_access": {
+        "resource": "resource.fixture",
+        "operation": "host_delivery",
+        "sink": "host_delivery",
+        "disclosure": "sanitized_content",
+        "budget": {
+          "requests": 1,
+          "bytes": 1000,
+          "tokens": 100
+        }
+      },
+      "source_policy": {
+        "source_id": "source.fixture",
+        "policy_revision": 1,
+        "policy_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "sensitivity": "sensitive",
+        "disclosure_ceiling": "sanitized_content",
+        "eligible_sinks": ["host_delivery"],
+        "eligible_operations": ["host_delivery"],
+        "mandatory_privacy": ["local_only"]
+      },
+      "sink_policy": {
+        "sink": "host_delivery",
+        "policy_revision": 1,
+        "policy_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "disclosure_ceiling": "sanitized_content",
+        "mandatory_privacy": [],
+        "available": true
+      },
+      "content_status": "live",
+      "requested_coverage": "complete",
+      "snapshot_state": "complete",
+      "requester": "actor.requester",
+      "policy_revision": 1,
+      "policy_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "configuration_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "evaluated_at": 10
+    },
+    "expected": {
+      "access": "unauthorized",
+      "authorization_coverage": "complete",
+      "disposition": "deny",
+      "ordered_reason_codes": [
+        "input_complete",
+        "source_grant_active",
+        "requester_grant_active",
+        "grant_intersection_non_expanding",
+        "mandatory_local_privacy_blocks_egress"
+      ],
+      "has_effective_grant": false,
+      "public_shape": "not_found_or_not_authorized"
+    }
+  },
+  {
+    "name": "expired_requester_grant",
+    "source_visible": true,
+    "input": {
+      "definition": {
+        "definition": {
+          "source_id": "source.fixture",
+          "source_kind": "cursor",
+          "revision": 1,
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "binding": {
+        "binding": {
+          "kind": "project",
+          "binding_id": "binding.fixture",
+          "source_id": "source.fixture",
+          "project_id": "project.fixture",
+          "revision": 1,
+          "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "source_grant": {
+        "grant_id": "grant.source.fixture",
+        "issuer": "actor.source",
+        "subject": "actor.requester",
+        "owner": {
+          "kind": "project",
+          "id": "project.fixture"
+        },
+        "resources": ["resource.fixture"],
+        "operations": ["provider_fetch"],
+        "sinks": ["provider_fetch"],
+        "disclosure_ceiling": "sanitized_content",
+        "constraints": [],
+        "budgets": {
+          "requests": 10,
+          "bytes": 10000,
+          "tokens": 1000
+        },
+        "revision": 1,
+        "issued_at": 0,
+        "expires_at": 100,
+        "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "state": "active"
+      },
+      "requester_grant": {
+        "grant_id": "grant.requester.fixture",
+        "issuer": "actor.authority",
+        "subject": "actor.requester",
+        "owner": {
+          "kind": "project",
+          "id": "project.fixture"
+        },
+        "resources": ["resource.fixture"],
+        "operations": ["provider_fetch"],
+        "sinks": ["provider_fetch"],
+        "disclosure_ceiling": "sanitized_content",
+        "constraints": [],
+        "budgets": {
+          "requests": 8,
+          "bytes": 8000,
+          "tokens": 800
+        },
+        "revision": 1,
+        "issued_at": 0,
+        "expires_at": 10,
+        "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "state": "active"
+      },
+      "resolved_owner_scope": {
+        "owner": {
+          "kind": "project",
+          "id": "project.fixture"
+        },
+        "revision": 1,
+        "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "requested_access": {
+        "resource": "resource.fixture",
+        "operation": "provider_fetch",
+        "sink": "provider_fetch",
+        "disclosure": "sanitized_content",
+        "budget": {
+          "requests": 1,
+          "bytes": 1000,
+          "tokens": 100
+        }
+      },
+      "source_policy": {
+        "source_id": "source.fixture",
+        "policy_revision": 1,
+        "policy_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "sensitivity": "non_sensitive",
+        "disclosure_ceiling": "sanitized_content",
+        "eligible_sinks": ["provider_fetch"],
+        "eligible_operations": ["provider_fetch"],
+        "mandatory_privacy": []
+      },
+      "sink_policy": {
+        "sink": "provider_fetch",
+        "policy_revision": 1,
+        "policy_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "disclosure_ceiling": "sanitized_content",
+        "mandatory_privacy": [],
+        "available": true
+      },
+      "content_status": "live",
+      "requested_coverage": "complete",
+      "snapshot_state": "complete",
+      "requester": "actor.requester",
+      "policy_revision": 1,
+      "policy_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "configuration_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "evaluated_at": 10
+    },
+    "expected": {
+      "access": "unauthorized",
+      "authorization_coverage": "complete",
+      "disposition": "deny",
+      "ordered_reason_codes": [
+        "input_complete",
+        "source_grant_active",
+        "requester_grant_expired"
+      ],
+      "has_effective_grant": false,
+      "public_shape": "not_found_or_not_authorized"
+    }
+  },
+  {
+    "name": "temporarily_unavailable_is_not_deletion",
+    "source_visible": true,
+    "input": {
+      "definition": {
+        "definition": {
+          "source_id": "source.fixture",
+          "source_kind": "cursor",
+          "revision": 1,
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "binding": {
+        "binding": {
+          "kind": "project",
+          "binding_id": "binding.fixture",
+          "source_id": "source.fixture",
+          "project_id": "project.fixture",
+          "revision": 1,
+          "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "source_grant": {
+        "grant_id": "grant.source.fixture",
+        "issuer": "actor.source",
+        "subject": "actor.requester",
+        "owner": {
+          "kind": "project",
+          "id": "project.fixture"
+        },
+        "resources": ["resource.fixture"],
+        "operations": ["provider_fetch"],
+        "sinks": ["provider_fetch"],
+        "disclosure_ceiling": "sanitized_content",
+        "constraints": [],
+        "budgets": {
+          "requests": 10,
+          "bytes": 10000,
+          "tokens": 1000
+        },
+        "revision": 1,
+        "issued_at": 0,
+        "expires_at": 100,
+        "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "state": "active"
+      },
+      "requester_grant": {
+        "grant_id": "grant.requester.fixture",
+        "issuer": "actor.authority",
+        "subject": "actor.requester",
+        "owner": {
+          "kind": "project",
+          "id": "project.fixture"
+        },
+        "resources": ["resource.fixture"],
+        "operations": ["provider_fetch"],
+        "sinks": ["provider_fetch"],
+        "disclosure_ceiling": "sanitized_content",
+        "constraints": [],
+        "budgets": {
+          "requests": 8,
+          "bytes": 8000,
+          "tokens": 800
+        },
+        "revision": 1,
+        "issued_at": 0,
+        "expires_at": 100,
+        "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "state": "active"
+      },
+      "resolved_owner_scope": {
+        "owner": {
+          "kind": "project",
+          "id": "project.fixture"
+        },
+        "revision": 1,
+        "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "requested_access": {
+        "resource": "resource.fixture",
+        "operation": "provider_fetch",
+        "sink": "provider_fetch",
+        "disclosure": "sanitized_content",
+        "budget": {
+          "requests": 1,
+          "bytes": 1000,
+          "tokens": 100
+        }
+      },
+      "source_policy": {
+        "source_id": "source.fixture",
+        "policy_revision": 1,
+        "policy_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "sensitivity": "non_sensitive",
+        "disclosure_ceiling": "sanitized_content",
+        "eligible_sinks": ["provider_fetch"],
+        "eligible_operations": ["provider_fetch"],
+        "mandatory_privacy": []
+      },
+      "sink_policy": {
+        "sink": "provider_fetch",
+        "policy_revision": 1,
+        "policy_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "disclosure_ceiling": "sanitized_content",
+        "mandatory_privacy": [],
+        "available": true
+      },
+      "content_status": "temporarily_unavailable",
+      "requested_coverage": "complete",
+      "snapshot_state": "complete",
+      "requester": "actor.requester",
+      "policy_revision": 1,
+      "policy_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "configuration_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "evaluated_at": 10
+    },
+    "expected": {
+      "access": "authorized",
+      "authorization_coverage": "complete",
+      "disposition": "indeterminate",
+      "ordered_reason_codes": [
+        "input_complete",
+        "source_grant_active",
+        "requester_grant_active",
+        "grant_intersection_non_expanding",
+        "access_allowed",
+        "content_temporarily_unavailable"
+      ],
+      "has_effective_grant": true,
+      "public_shape": "temporarily_unavailable"
+    }
+  },
+  {
+    "name": "policy_excluded_is_not_unauthorized",
+    "source_visible": true,
+    "input": {
+      "definition": {
+        "definition": {
+          "source_id": "source.fixture",
+          "source_kind": "cursor",
+          "revision": 1,
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "binding": {
+        "binding": {
+          "kind": "project",
+          "binding_id": "binding.fixture",
+          "source_id": "source.fixture",
+          "project_id": "project.fixture",
+          "revision": 1,
+          "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "source_grant": {
+        "grant_id": "grant.source.fixture",
+        "issuer": "actor.source",
+        "subject": "actor.requester",
+        "owner": {
+          "kind": "project",
+          "id": "project.fixture"
+        },
+        "resources": ["resource.fixture"],
+        "operations": ["provider_fetch"],
+        "sinks": ["provider_fetch"],
+        "disclosure_ceiling": "sanitized_content",
+        "constraints": [],
+        "budgets": {
+          "requests": 10,
+          "bytes": 10000,
+          "tokens": 1000
+        },
+        "revision": 1,
+        "issued_at": 0,
+        "expires_at": 100,
+        "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "state": "active"
+      },
+      "requester_grant": {
+        "grant_id": "grant.requester.fixture",
+        "issuer": "actor.authority",
+        "subject": "actor.requester",
+        "owner": {
+          "kind": "project",
+          "id": "project.fixture"
+        },
+        "resources": ["resource.fixture"],
+        "operations": ["provider_fetch"],
+        "sinks": ["provider_fetch"],
+        "disclosure_ceiling": "sanitized_content",
+        "constraints": [],
+        "budgets": {
+          "requests": 8,
+          "bytes": 8000,
+          "tokens": 800
+        },
+        "revision": 1,
+        "issued_at": 0,
+        "expires_at": 100,
+        "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "state": "active"
+      },
+      "resolved_owner_scope": {
+        "owner": {
+          "kind": "project",
+          "id": "project.fixture"
+        },
+        "revision": 1,
+        "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "requested_access": {
+        "resource": "resource.fixture",
+        "operation": "provider_fetch",
+        "sink": "provider_fetch",
+        "disclosure": "sanitized_content",
+        "budget": {
+          "requests": 1,
+          "bytes": 1000,
+          "tokens": 100
+        }
+      },
+      "source_policy": {
+        "source_id": "source.fixture",
+        "policy_revision": 1,
+        "policy_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "sensitivity": "non_sensitive",
+        "disclosure_ceiling": "sanitized_content",
+        "eligible_sinks": ["provider_fetch"],
+        "eligible_operations": ["host_delivery"],
+        "mandatory_privacy": []
+      },
+      "sink_policy": {
+        "sink": "provider_fetch",
+        "policy_revision": 1,
+        "policy_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "disclosure_ceiling": "sanitized_content",
+        "mandatory_privacy": [],
+        "available": true
+      },
+      "content_status": "live",
+      "requested_coverage": "complete",
+      "snapshot_state": "complete",
+      "requester": "actor.requester",
+      "policy_revision": 1,
+      "policy_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "configuration_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "evaluated_at": 10
+    },
+    "expected": {
+      "access": "policy_excluded",
+      "authorization_coverage": "complete",
+      "disposition": "not_applicable",
+      "ordered_reason_codes": [
+        "input_complete",
+        "operation_policy_excluded"
+      ],
+      "has_effective_grant": false,
+      "public_shape": "policy_excluded"
+    }
+  }
+]

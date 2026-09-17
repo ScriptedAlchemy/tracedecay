@@ -16,7 +16,7 @@
     ],
     "acceptable": [
       "tracedecay_sessions_for",
-      "tracedecay_fact_store",
+      "tracedecay_fact_store_search",
       "tracedecay_context"
     ],
     "forbidden_first": [

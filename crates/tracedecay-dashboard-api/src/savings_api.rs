@@ -2,63 +2,68 @@
 //!
 //! Two data stores feed this tab:
 //!
-//! - **Global accounting DB** (`~/.tracedecay/global.db`, the store behind
+//! - **Global accounting DB** (the registered profile store behind
 //!   `tracedecay gain` / `tracedecay cost` / `tracedecay monitor`): the
-//!   `savings_ledger` event log, the legacy per-project `projects.tokens_saved`
-//!   lifetime counters, and the `turns` cost table (Claude Code transcripts,
-//!   cost computed from real usage data at ingest — labeled `actual`).
-//!   Ledger aggregation reuses [`GlobalDb::sum_savings`] /
-//!   [`GlobalDb::savings_history`], the same queries `tracedecay gain` runs.
+//!   `savings_ledger` and legacy lifetime savings counters.
+//!   Ledger aggregation reuses [`RegisteredGlobalDb::sum_savings`] /
+//!   [`RegisteredGlobalDb::savings_history`], the same queries `tracedecay gain` runs.
 //! - **Session store** (the resolved LCM store the dashboard already serves):
-//!   `sessions` +
-//!   `session_messages`, whose `model` and `metadata_json` columns drive
-//!   per-session cost accounting.
+//!   canonical provider-usage observations plus `sessions` +
+//!   `session_messages`, whose content and model fields provide a separate
+//!   non-billing token-count overlay.
 //!
-//! Token counts carry an explicit provenance label everywhere, with three
-//! quality tiers (best available wins per message):
+//! Content token counts carry an explicit provenance label:
 //!
-//! - `cost_basis: "actual"` — the transcript recorded usage data
-//!   (`metadata_json.usage.*`).
-//! - `"tokenized"` — no usage data, but the stored text was counted with a
+//! - `"tokenized"` — stored text counted with a
 //!   real BPE tokenizer (see `token_count`): exact for OpenAI-family
 //!   models, a labeled approximation for vendors without a public
 //!   tokenizer.
 //! - `"estimated"` — the chars/4 heuristic the LCM views use
 //!   (`(LENGTH(text)+3)/4`), the fallback when the `token-counting`
 //!   feature is compiled out.
-//! - `"mixed"` keeps its meaning: usage-backed and non-usage messages in
-//!   one aggregate.
 //!
-//! Dollar costs are computed client-side from the `/pricing` table (see
-//! `savings_pricing`); unknown models keep their token counts but get no
-//! invented price.
+//! Provider billing counters are exposed separately as provider-usage events;
+//! they are never treated as message counts.
+//!
+//! Dollar costs and `/pricing` use one bundled, deterministic all-provider
+//! authority. Unknown models keep their token counts but get no invented
+//! price.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use axum::extract::State;
-use axum::response::Json;
-use serde::Deserialize;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Json, Response};
+use schemars::JsonSchema;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tracedecay_contracts::CostsReadModelV1;
+use tracedecay_domain::{CoverageStateV1, ObservationScopeV1};
+use tracedecay_session_memory::provider_usage::{
+    AggregatedProviderUsageCountersV1, ProviderUsageAggregateV1, ProviderUsageCoverageV1,
+    ProviderUsageDeltaV1, price_provider_usage, provider_usage_aggregate,
+    provider_usage_range_start,
+};
 
+use super::read_model::{DashboardCoverageV1, DashboardEnvelopeV1, scope_from_state};
 use super::token_count::{
     MESSAGE_TOKENS_CTE, MessageTokens, counting_available, encoder_for_model,
 };
-use super::util::{JsonQuery, coerce_limit, i64_field, query_i64, query_rows, str_field};
-use super::{DashboardAccountingStore, DashboardState, savings_pricing, token_count};
+use super::util::{
+    JsonQuery, coerce_limit, i64_field, query_i64, query_i64_result, query_rows, str_field,
+};
+use super::{DashboardState, savings_pricing, token_count};
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::db::engine::{Value as DbValue, params, params_from_iter};
 
-/// Aggregate SELECT list shared by the per-session and per-model rollups.
-/// "Actual" sums only count usage-bearing messages; estimated sums only count
-/// the rest, attributing non-assistant text to input and assistant text to
-/// output (a deliberate lower bound — resent context is not modeled).
+/// Content-size aggregate shared by the per-session and per-model rollups.
+/// Provider billing usage is joined from the canonical observation projection,
+/// never inferred from message rows.
 const TOKEN_AGG_COLUMNS: &str = "
     COUNT(*) AS messages,
-    SUM(CASE WHEN usage_in IS NOT NULL OR usage_out IS NOT NULL THEN 1 ELSE 0 END) AS usage_messages,
-    SUM(CASE WHEN usage_in IS NOT NULL OR usage_out IS NOT NULL THEN COALESCE(usage_in, 0) ELSE 0 END) AS actual_input_tokens,
-    SUM(CASE WHEN usage_in IS NOT NULL OR usage_out IS NOT NULL THEN COALESCE(usage_out, 0) ELSE 0 END) AS actual_output_tokens,
-    SUM(COALESCE(usage_cache_read, 0)) AS cache_read_tokens,
-    SUM(COALESCE(usage_cache_write, 0)) AS cache_write_tokens,
-    SUM(CASE WHEN usage_in IS NULL AND usage_out IS NULL AND role <> 'assistant' THEN est_tokens ELSE 0 END) AS estimated_input_tokens,
-    SUM(CASE WHEN usage_in IS NULL AND usage_out IS NULL AND role = 'assistant' THEN est_tokens ELSE 0 END) AS estimated_output_tokens";
+    SUM(CASE WHEN role <> 'assistant' THEN est_tokens ELSE 0 END) AS estimated_input_tokens,
+    SUM(CASE WHEN role = 'assistant' THEN est_tokens ELSE 0 END) AS estimated_output_tokens";
 
 #[derive(Deserialize)]
 pub struct RangeParams {
@@ -72,19 +77,338 @@ pub struct SessionsParams {
     offset: Option<i64>,
 }
 
-fn range_since(range: Option<&str>) -> (String, i64) {
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsSumV1 {
+    saved_tokens: i64,
+    calls: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsLedgerSummaryV1 {
+    today: SavingsSumV1,
+    last_7d: SavingsSumV1,
+    last_30d: SavingsSumV1,
+    all_time: SavingsSumV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsLifetimeProjectV1 {
+    path: Option<String>,
+    tokens_saved: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsLifetimeCountersV1 {
+    total_tokens_saved: i64,
+    project_total: i64,
+    projects_limit: i64,
+    projects_truncated: bool,
+    projects: Vec<SavingsLifetimeProjectV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsAccountingSummaryV1 {
+    available: bool,
+    db: String,
+    recording: Value,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    ledger: Option<SavingsLedgerSummaryV1>,
+    #[serde(default)]
+    lifetime_counters: Option<SavingsLifetimeCountersV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct TokenActualV1 {
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    cache_read_tokens: Option<i64>,
+    cache_write_tokens: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct TokenPairV1 {
+    input_tokens: i64,
+    output_tokens: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsSessionSummaryV1 {
+    available: bool,
+    db: String,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    messages: Option<i64>,
+    #[serde(default)]
+    provider_usage_events: Option<i64>,
+    #[serde(default)]
+    tokenized_messages: Option<i64>,
+    #[serde(default)]
+    estimated_messages: Option<i64>,
+    #[serde(default)]
+    cost_basis: Option<String>,
+    #[serde(default)]
+    provider_actual: Option<TokenActualV1>,
+    #[serde(default)]
+    tokenized: Option<TokenPairV1>,
+    #[serde(default)]
+    estimated: Option<TokenPairV1>,
+    #[serde(default)]
+    session_count: Option<i64>,
+    #[serde(default)]
+    model_count: Option<i64>,
+    #[serde(default)]
+    unknown_model_messages: Option<i64>,
+    #[serde(default)]
+    token_counting: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct ProviderUsageSummaryV1 {
+    available: bool,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    usage_event_count: Option<i64>,
+    #[serde(default)]
+    total_cost_usd: Option<f64>,
+    #[serde(default)]
+    total_tokens: Option<i64>,
+    #[serde(default)]
+    cost_basis: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsPricingSummaryV1 {
+    source: Value,
+    revision: Value,
+    fetched_at: Value,
+    offline: Value,
+    model_count: Value,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SavingsOverviewPayloadV1 {
+    savings: SavingsAccountingSummaryV1,
+    sessions: SavingsSessionSummaryV1,
+    provider_usage: ProviderUsageSummaryV1,
+    pricing: SavingsPricingSummaryV1,
+    costs: CostsReadModelV1,
+}
+
+fn provider_usage_scope(state: &DashboardState) -> Option<ObservationScopeV1> {
+    state
+        .resolved_scope
+        .as_ref()
+        .map(|scope| ObservationScopeV1::Project {
+            project_id: scope.project_id.clone(),
+        })
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsSessionModelV1 {
+    model: Option<String>,
+    tokenizer: Option<Value>,
+    messages: i64,
+    provider_usage_events: i64,
+    tokenized_messages: i64,
+    estimated_messages: i64,
+    cost_basis: String,
+    provider_actual: Option<TokenActualV1>,
+    tokenized: TokenPairV1,
+    estimated: TokenPairV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsSessionRowV1 {
+    provider: String,
+    session_id: String,
+    title: Option<String>,
+    started_at: Option<i64>,
+    last_message_at: Option<i64>,
+    is_subagent: bool,
+    messages: i64,
+    provider_usage_events: i64,
+    tokenized_messages: i64,
+    estimated_messages: i64,
+    cost_basis: String,
+    models: Vec<SavingsSessionModelV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct SavingsSessionsPayloadV1 {
+    available: bool,
+    db: String,
+    #[serde(default)]
+    scope: Option<String>,
+    range: String,
+    #[serde(default)]
+    since: Option<i64>,
+    total: i64,
+    sessions: Vec<SavingsSessionRowV1>,
+}
+
+/// One model-keyed content aggregate from the session store, joined to the
+/// exact provider usage recorded for that model. `model` is `None` for
+/// messages whose model was never recorded; that row keeps its token counts
+/// and is priced by nothing.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsModelRowV1 {
+    model: Option<String>,
+    sessions: i64,
+    tokenizer: Option<Value>,
+    messages: i64,
+    provider_usage_events: i64,
+    tokenized_messages: i64,
+    estimated_messages: i64,
+    cost_basis: String,
+    provider_actual: Option<TokenActualV1>,
+    tokenized: TokenPairV1,
+    estimated: TokenPairV1,
+}
+
+/// One UTC-day bucket of the per-model content aggregate.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsModelDayRowV1 {
+    day: i64,
+    model: Option<String>,
+    messages: i64,
+    provider_usage_events: i64,
+    tokenized_messages: i64,
+    estimated_messages: i64,
+    cost_basis: String,
+    provider_actual: Option<TokenActualV1>,
+    tokenized: TokenPairV1,
+    estimated: TokenPairV1,
+}
+
+/// Canonical priced usage for one exact provider/model pair. `cost_usd` is
+/// `None` whenever any usage event in the pair could not be priced: the
+/// projector never emits a partial dollar figure for a model.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsProviderModelSpendV1 {
+    provider: String,
+    model: Option<String>,
+    usage_events: i64,
+    cost_usd: Option<f64>,
+    total_tokens: Option<i64>,
+    cost_basis: String,
+    provider_actual: Option<TokenActualV1>,
+}
+
+/// Canonical priced usage for one UTC day across every provider.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsProviderDaySpendV1 {
+    day: i64,
+    usage_events: i64,
+    cost_usd: Option<f64>,
+    total_tokens: Option<i64>,
+    provider_actual: Option<TokenActualV1>,
+}
+
+/// How much of one provider's observed usage the pricing authority could
+/// price. `priced` means every usage event priced; `partial` means some did
+/// and the dollar figure covers only those; `unpriced` means none did.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum SavingsPricingClassV1 {
+    Priced,
+    Partial,
+    Unpriced,
+}
+
+/// Provider-level spend attribution over exact provider usage observations.
+///
+/// `priced_cost_usd` sums only the model groups the canonical projector
+/// priced completely, and the event/model counts beside it say how much of
+/// the provider's usage that figure covers. `total_cost_usd` is the
+/// projector's own complete total and is `None` unless every event priced.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsProviderSpendV1 {
+    provider: String,
+    pricing: SavingsPricingClassV1,
+    usage_events: i64,
+    priced_events: i64,
+    unpriced_events: i64,
+    /// Usage events whose observation carried no model identity. They are
+    /// counted in `unpriced_events` as well: no model means no rate.
+    unknown_model_events: i64,
+    /// Usage events with no native timestamp. They are attributed here but
+    /// cannot be placed on the dated series.
+    undated_events: i64,
+    models: i64,
+    priced_models: i64,
+    unpriced_models: i64,
+    sessions: i64,
+    priced_cost_usd: Option<f64>,
+    total_cost_usd: Option<f64>,
+    total_tokens: Option<i64>,
+    provider_actual: Option<TokenActualV1>,
+}
+
+/// One provider's canonical priced usage on one UTC day.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsProviderDayPointV1 {
+    day: i64,
+    provider: String,
+    usage_events: i64,
+    priced_events: i64,
+    unpriced_events: i64,
+    priced_cost_usd: Option<f64>,
+    total_cost_usd: Option<f64>,
+    total_tokens: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsProviderUsageAttributionV1 {
+    available: bool,
+    #[serde(default)]
+    pricing_revision: Option<String>,
+    #[serde(default)]
+    undated_events: Option<i64>,
+    by_model: Vec<SavingsProviderModelSpendV1>,
+    by_day: Vec<SavingsProviderDaySpendV1>,
+    by_provider: Vec<SavingsProviderSpendV1>,
+    by_provider_day: Vec<SavingsProviderDayPointV1>,
+}
+
+/// GET `/api/plugins/savings/models` response contract.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct SavingsModelsPayloadV1 {
+    available: bool,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+    range: String,
+    #[serde(default)]
+    since: Option<i64>,
+    models: Vec<SavingsModelRowV1>,
+    daily: Vec<SavingsModelDayRowV1>,
+    #[serde(default)]
+    provider_usage_coverage: Option<String>,
+    provider_usage: SavingsProviderUsageAttributionV1,
+}
+
+fn decode_contract<T: DeserializeOwned>(payload: Value, label: &str) -> Result<T, String> {
+    serde_json::from_value(payload)
+        .map_err(|error| format!("{label} did not match its response contract: {error}"))
+}
+
+fn range_since(range: Option<&str>) -> Result<(String, i64), String> {
     let range = range.unwrap_or("all").to_string();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let since = match range.as_str() {
-        "today" => now - (now % 86_400),
-        "30d" | "month" => now.saturating_sub(30 * 86_400),
-        "all" => 0,
-        _ => now.saturating_sub(7 * 86_400),
-    } as i64;
-    (range, since)
+    let since = provider_usage_range_start(&range)?;
+    let since = i64::try_from(since)
+        .map_err(|_| "provider usage range exceeds the timestamp domain".to_owned())?;
+    Ok((range, since))
 }
 
 /// `""` (no model recorded) → JSON null so the UI can render an explicit
@@ -97,25 +421,366 @@ fn model_value(model: &str) -> Value {
     }
 }
 
-/// Provenance label for an aggregate. `tokenized` only applies when every
-/// non-usage message in the aggregate was BPE-counted; partial coverage
-/// stays `estimated` (conservative), and `mixed` keeps its legacy meaning
-/// of usage-backed plus non-usage messages.
-fn basis_label(usage_messages: i64, tokenized_messages: i64, messages: i64) -> &'static str {
-    if messages > 0 && usage_messages >= messages {
-        "actual"
-    } else if usage_messages > 0 {
-        "mixed"
-    } else if messages > 0 && tokenized_messages >= messages {
+/// Provenance label for content sizing only.
+fn basis_label(tokenized_messages: i64, messages: i64) -> &'static str {
+    if messages > 0 && tokenized_messages >= messages {
         "tokenized"
     } else {
         "estimated"
     }
 }
 
-/// Tier sums for the non-usage messages of one aggregate, folded from the
-/// `token_count` overlay. `estimated_*` is strictly the chars/4 remainder —
-/// the three tiers (actual / tokenized / estimated) never overlap.
+fn actual_tokens(aggregate: &ProviderUsageAggregateV1) -> Option<TokenActualV1> {
+    if aggregate.coverage != ProviderUsageCoverageV1::Complete {
+        return None;
+    }
+    Some(TokenActualV1 {
+        input_tokens: aggregate
+            .totals
+            .input_tokens
+            .and_then(|value| i64::try_from(value).ok()),
+        output_tokens: aggregate
+            .totals
+            .output_tokens
+            .and_then(|value| i64::try_from(value).ok()),
+        cache_read_tokens: aggregate
+            .totals
+            .cache_read_tokens
+            .and_then(|value| i64::try_from(value).ok()),
+        cache_write_tokens: aggregate
+            .totals
+            .cache_write_tokens
+            .and_then(|value| i64::try_from(value).ok()),
+    })
+}
+
+fn actual_for_deltas<'a>(
+    deltas: impl Iterator<Item = &'a ProviderUsageDeltaV1>,
+) -> (usize, Option<TokenActualV1>) {
+    let deltas = deltas.collect::<Vec<_>>();
+    if deltas.is_empty() {
+        return (0, None);
+    }
+    let sum = |field: fn(&AggregatedProviderUsageCountersV1) -> Option<u64>| {
+        deltas.iter().try_fold(0_u64, |total, delta| {
+            total.checked_add(field(&delta.counters)?)
+        })
+    };
+    (
+        deltas.len(),
+        Some(TokenActualV1 {
+            input_tokens: sum(|counters| counters.input_tokens)
+                .and_then(|value| i64::try_from(value).ok()),
+            output_tokens: sum(|counters| counters.output_tokens)
+                .and_then(|value| i64::try_from(value).ok()),
+            cache_read_tokens: sum(|counters| counters.cache_read_tokens)
+                .and_then(|value| i64::try_from(value).ok()),
+            cache_write_tokens: sum(|counters| counters.cache_write_tokens)
+                .and_then(|value| i64::try_from(value).ok()),
+        }),
+    )
+}
+
+fn price_deltas<'a>(
+    deltas: impl Iterator<Item = &'a ProviderUsageDeltaV1>,
+    prices: &tracedecay_session_memory::provider_pricing::PriceTable,
+) -> tracedecay_session_memory::provider_usage::ProviderUsageCostSummaryV1 {
+    let deltas = deltas.cloned().collect::<Vec<_>>();
+    let observations_seen = deltas.len() as u64;
+    let aggregate = ProviderUsageAggregateV1 {
+        coverage: if deltas.is_empty() {
+            ProviderUsageCoverageV1::Unavailable
+        } else {
+            ProviderUsageCoverageV1::Complete
+        },
+        observations_seen,
+        totals: AggregatedProviderUsageCountersV1::unknown(),
+        upper_observation_sequence: deltas.last().map(|delta| delta.observation_sequence),
+        deltas,
+        issues: Vec::new(),
+    };
+    price_provider_usage(&aggregate, prices, 0)
+}
+
+fn count_i64(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn count_u64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn cost_basis_label(cost_usd: Option<f64>) -> &'static str {
+    if cost_usd.is_some() {
+        "provider_reported_priced"
+    } else {
+        "provider_reported_unpriced"
+    }
+}
+
+fn total_tokens_of(actual: Option<&TokenActualV1>) -> Option<i64> {
+    actual.and_then(|tokens| tokens.input_tokens?.checked_add(tokens.output_tokens?))
+}
+
+/// The dollar figure the canonical projector priced completely, and the
+/// population it covers. Sums only model groups whose every usage event
+/// priced; a group with one unpriced event contributes nothing, and the
+/// counts beside the sum say so.
+struct PricedSubtotal {
+    priced_cost_usd: Option<f64>,
+    priced_events: u64,
+    priced_models: usize,
+    unpriced_models: usize,
+}
+
+fn priced_subtotal(
+    summary: &tracedecay_session_memory::provider_usage::ProviderUsageCostSummaryV1,
+) -> PricedSubtotal {
+    let mut priced_cost = 0.0_f64;
+    let mut priced_events = 0_u64;
+    let mut priced_models = 0_usize;
+    let mut unpriced_models = 0_usize;
+    for model in &summary.by_model {
+        match model.cost_usd {
+            Some(cost) => {
+                priced_cost += cost;
+                priced_events = priced_events.saturating_add(model.usage_events);
+                priced_models += 1;
+            }
+            None => unpriced_models += 1,
+        }
+    }
+    PricedSubtotal {
+        priced_cost_usd: (priced_events > 0 && priced_cost.is_finite()).then_some(priced_cost),
+        priced_events,
+        priced_models,
+        unpriced_models,
+    }
+}
+
+fn pricing_class(
+    usage_events: u64,
+    unpriced_events: u64,
+    priced_events: u64,
+) -> SavingsPricingClassV1 {
+    if usage_events > 0 && unpriced_events == 0 {
+        SavingsPricingClassV1::Priced
+    } else if priced_events > 0 {
+        SavingsPricingClassV1::Partial
+    } else {
+        SavingsPricingClassV1::Unpriced
+    }
+}
+
+/// Provider-level attribution over one provider's exact usage deltas, priced
+/// by the canonical projection so every dollar here agrees with `/api/costs`.
+fn provider_spend(
+    provider: &str,
+    deltas: &[&ProviderUsageDeltaV1],
+    prices: &tracedecay_session_memory::provider_pricing::PriceTable,
+) -> SavingsProviderSpendV1 {
+    let summary = price_deltas(deltas.iter().copied(), prices);
+    let subtotal = priced_subtotal(&summary);
+    let (_, actual) = actual_for_deltas(deltas.iter().copied());
+    let sessions = deltas
+        .iter()
+        .map(|delta| delta.session_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    SavingsProviderSpendV1 {
+        provider: provider.to_owned(),
+        pricing: pricing_class(
+            summary.usage_events,
+            summary.unpriced_events,
+            subtotal.priced_events,
+        ),
+        usage_events: count_u64(summary.usage_events),
+        priced_events: count_u64(subtotal.priced_events),
+        unpriced_events: count_u64(summary.unpriced_events),
+        unknown_model_events: count_i64(
+            deltas.iter().filter(|delta| delta.model.is_none()).count(),
+        ),
+        undated_events: count_i64(
+            deltas
+                .iter()
+                .filter(|delta| delta.native_timestamp.is_none())
+                .count(),
+        ),
+        models: count_i64(summary.by_model.len()),
+        priced_models: count_i64(subtotal.priced_models),
+        unpriced_models: count_i64(subtotal.unpriced_models),
+        sessions: count_i64(sessions),
+        priced_cost_usd: subtotal.priced_cost_usd,
+        total_cost_usd: summary.total_cost_usd,
+        total_tokens: total_tokens_of(actual.as_ref()),
+        provider_actual: actual,
+    }
+}
+
+fn provider_day_point(
+    day: i64,
+    provider: &str,
+    deltas: &[&ProviderUsageDeltaV1],
+    prices: &tracedecay_session_memory::provider_pricing::PriceTable,
+) -> SavingsProviderDayPointV1 {
+    let summary = price_deltas(deltas.iter().copied(), prices);
+    let subtotal = priced_subtotal(&summary);
+    let (_, actual) = actual_for_deltas(deltas.iter().copied());
+    SavingsProviderDayPointV1 {
+        day,
+        provider: provider.to_owned(),
+        usage_events: count_u64(summary.usage_events),
+        priced_events: count_u64(subtotal.priced_events),
+        unpriced_events: count_u64(summary.unpriced_events),
+        priced_cost_usd: subtotal.priced_cost_usd,
+        total_cost_usd: summary.total_cost_usd,
+        total_tokens: total_tokens_of(actual.as_ref()),
+    }
+}
+
+fn day_bucket(timestamp: i64) -> i64 {
+    (timestamp / 86_400) * 86_400
+}
+
+/// The provider-usage attribution block of `/models`: exact deltas grouped by
+/// provider/model, day, provider, and provider/day, each priced by the same
+/// canonical projection. `since == 0` admits undated deltas to every
+/// non-dated grouping; a positive range excludes them, as the SQL folds do.
+fn provider_usage_attribution(
+    deltas: &[ProviderUsageDeltaV1],
+    since: i64,
+    prices: &tracedecay_session_memory::provider_pricing::PriceTable,
+) -> SavingsProviderUsageAttributionV1 {
+    const DAY_LIMIT: usize = 366;
+    let in_range = deltas
+        .iter()
+        .filter(|delta| {
+            since == 0
+                || delta
+                    .native_timestamp
+                    .is_some_and(|timestamp| timestamp >= since)
+        })
+        .collect::<Vec<_>>();
+
+    let mut by_model: BTreeMap<(String, String), Vec<&ProviderUsageDeltaV1>> = BTreeMap::new();
+    let mut by_day: BTreeMap<i64, Vec<&ProviderUsageDeltaV1>> = BTreeMap::new();
+    let mut by_provider: BTreeMap<String, Vec<&ProviderUsageDeltaV1>> = BTreeMap::new();
+    let mut by_provider_day: BTreeMap<(i64, String), Vec<&ProviderUsageDeltaV1>> = BTreeMap::new();
+    let mut undated_events = 0_usize;
+    for delta in in_range {
+        by_model
+            .entry((
+                delta.provider.clone(),
+                delta.model.clone().unwrap_or_default(),
+            ))
+            .or_default()
+            .push(delta);
+        by_provider
+            .entry(delta.provider.clone())
+            .or_default()
+            .push(delta);
+        match delta.native_timestamp {
+            Some(timestamp) => {
+                let day = day_bucket(timestamp);
+                by_day.entry(day).or_default().push(delta);
+                by_provider_day
+                    .entry((day, delta.provider.clone()))
+                    .or_default()
+                    .push(delta);
+            }
+            None => undated_events += 1,
+        }
+    }
+
+    // The dated series keep the newest 366 days, as the content series does.
+    let day_floor = by_day
+        .keys()
+        .rev()
+        .nth(DAY_LIMIT - 1)
+        .copied()
+        .unwrap_or(i64::MIN);
+
+    SavingsProviderUsageAttributionV1 {
+        available: true,
+        pricing_revision: Some(prices.revision.clone()),
+        undated_events: Some(count_i64(undated_events)),
+        by_model: by_model
+            .into_iter()
+            .map(|((provider, model), deltas)| {
+                let priced = price_deltas(deltas.iter().copied(), prices);
+                let (_, actual) = actual_for_deltas(deltas.into_iter());
+                SavingsProviderModelSpendV1 {
+                    provider,
+                    model: (!model.is_empty()).then_some(model),
+                    usage_events: count_u64(priced.usage_events),
+                    cost_usd: priced.total_cost_usd,
+                    total_tokens: total_tokens_of(actual.as_ref()),
+                    cost_basis: cost_basis_label(priced.total_cost_usd).to_owned(),
+                    provider_actual: actual,
+                }
+            })
+            .collect(),
+        by_day: by_day
+            .into_iter()
+            .filter(|(day, _)| *day >= day_floor)
+            .map(|(day, deltas)| {
+                let priced = price_deltas(deltas.iter().copied(), prices);
+                let (_, actual) = actual_for_deltas(deltas.into_iter());
+                SavingsProviderDaySpendV1 {
+                    day,
+                    usage_events: count_u64(priced.usage_events),
+                    cost_usd: priced.total_cost_usd,
+                    total_tokens: total_tokens_of(actual.as_ref()),
+                    provider_actual: actual,
+                }
+            })
+            .collect(),
+        by_provider: by_provider
+            .iter()
+            .map(|(provider, deltas)| provider_spend(provider, deltas, prices))
+            .collect(),
+        by_provider_day: by_provider_day
+            .iter()
+            .filter(|((day, _), _)| *day >= day_floor)
+            .map(|((day, provider), deltas)| provider_day_point(*day, provider, deltas, prices))
+            .collect(),
+    }
+}
+
+fn unavailable_provider_usage_attribution() -> SavingsProviderUsageAttributionV1 {
+    SavingsProviderUsageAttributionV1 {
+        available: false,
+        pricing_revision: None,
+        undated_events: None,
+        by_model: Vec::new(),
+        by_day: Vec::new(),
+        by_provider: Vec::new(),
+        by_provider_day: Vec::new(),
+    }
+}
+
+fn apply_provider_actual(block: &mut Value, event_count: usize, actual: Option<TokenActualV1>) {
+    let Value::Object(values) = block else {
+        return;
+    };
+    values.insert(
+        "provider_usage_events".to_owned(),
+        i64::try_from(event_count).map_or(Value::Null, Value::from),
+    );
+    values.insert(
+        "provider_actual".to_owned(),
+        actual.map_or(Value::Null, |tokens| {
+            json!({
+                "input_tokens": tokens.input_tokens,
+                "output_tokens": tokens.output_tokens,
+                "cache_read_tokens": tokens.cache_read_tokens,
+                "cache_write_tokens": tokens.cache_write_tokens,
+            })
+        }),
+    );
+}
+
+/// Tier sums for the content messages of one aggregate.
 #[derive(Debug, Clone, Copy, Default)]
 struct TierSums {
     tokenized_messages: i64,
@@ -168,9 +833,8 @@ where
 /// the SQL chars/4 sums serve, which is exactly the legacy two-tier shape.
 fn token_block(row: &Value, tiers: Option<&TierSums>) -> Value {
     let messages = i64_field(row, "messages");
-    let usage_messages = i64_field(row, "usage_messages");
     let fallback = TierSums {
-        estimated_messages: messages - usage_messages,
+        estimated_messages: messages,
         estimated_input: i64_field(row, "estimated_input_tokens"),
         estimated_output: i64_field(row, "estimated_output_tokens"),
         ..TierSums::default()
@@ -178,16 +842,11 @@ fn token_block(row: &Value, tiers: Option<&TierSums>) -> Value {
     let tiers = tiers.copied().unwrap_or(fallback);
     json!({
         "messages": messages,
-        "usage_messages": usage_messages,
+        "provider_usage_events": 0,
         "tokenized_messages": tiers.tokenized_messages,
         "estimated_messages": tiers.estimated_messages,
-        "cost_basis": basis_label(usage_messages, tiers.tokenized_messages, messages),
-        "actual": {
-            "input_tokens": i64_field(row, "actual_input_tokens"),
-            "output_tokens": i64_field(row, "actual_output_tokens"),
-            "cache_read_tokens": i64_field(row, "cache_read_tokens"),
-            "cache_write_tokens": i64_field(row, "cache_write_tokens"),
-        },
+        "cost_basis": basis_label(tiers.tokenized_messages, messages),
+        "provider_actual": Value::Null,
         "tokenized": {
             "input_tokens": tiers.tokenized_input,
             "output_tokens": tiers.tokenized_output,
@@ -214,10 +873,11 @@ fn tokenizer_block(model: &str) -> Value {
 /// the best honest signal the dashboard has: when recording is disabled (or
 /// a long-running MCP server predates ledger recording), the UI can explain
 /// an empty ledger instead of just saying "no events yet".
-fn recording_block(state: &DashboardState) -> Value {
+fn recording_block() -> Value {
+    let mode = tracedecay_global_db::global_accounting_mode();
     json!({
-        "enabled": state.accounting_mode.enabled,
-        "mode": state.accounting_mode.source,
+        "enabled": mode.enabled(),
+        "mode": mode.as_str(),
     })
 }
 
@@ -230,74 +890,267 @@ fn merge(base: Value, extra: Value) -> Value {
 }
 
 /// GET `/api/plugins/savings/overview`
-pub async fn overview(State(state): State<DashboardState>) -> Json<Value> {
-    savings_pricing::ensure_background_refresh();
-
-    let savings = match state.accounting_store.as_deref() {
-        Some(gdb) => savings_overview(gdb, &state).await,
+#[hotpath::measure(label = "dashboard_api.savings.overview", future = true)]
+pub async fn overview(
+    State(state): State<DashboardState>,
+) -> Json<DashboardEnvelopeV1<Option<SavingsOverviewPayloadV1>>> {
+    let provider_scope = provider_usage_scope(&state);
+    let usage_aggregate = match (state.lcm_db.as_deref(), provider_scope.as_ref()) {
+        (Some(db), Some(scope)) => Some(provider_usage_aggregate(db, scope, None, None).await),
+        _ => None,
+    };
+    let savings = match state.savings_db.as_deref() {
+        Some(gdb) => savings_overview(gdb, &state.savings_db_path).await,
         None => json!({
             "available": false,
             "db": state.savings_db_path,
-            "recording": recording_block(&state),
+            "recording": recording_block(),
         }),
     };
-    let sessions = match state.lcm_conn.as_ref() {
-        Some(conn) => sessions_overview(conn, &state).await,
+    let sessions = match state.lcm_db.as_deref() {
+        Some(db) => sessions_overview(db, &state, usage_aggregate.as_ref())
+            .await
+            .unwrap_or_else(|error| {
+                // The session block's contract requires `db`, which the shared
+                // failure block cannot know. Without it a failed session read
+                // would fail to decode and collapse the whole route to a 500 —
+                // turning one unavailable block into a total outage, and hiding
+                // which read actually failed.
+                merge(
+                    json!({ "db": state.lcm_db_path.clone() }),
+                    read_failed_block(error),
+                )
+            }),
         None => json!({ "available": false, "db": state.lcm_db_path }),
     };
-    let turns = match state.accounting_store.as_deref() {
-        Some(gdb) => turns_overview(gdb).await,
+    let provider_usage = match usage_aggregate.as_ref() {
+        Some(aggregate) => provider_usage_overview(aggregate),
         None => json!({ "available": false }),
     };
     let pricing_full = savings_pricing::pricing_payload();
     let pricing = json!({
         "source": pricing_full.get("source"),
+        "revision": pricing_full.get("revision"),
         "fetched_at": pricing_full.get("fetched_at"),
         "offline": pricing_full.get("offline"),
         "model_count": pricing_full.get("model_count"),
     });
-
-    Json(json!({
-        "savings": savings,
-        "sessions": sessions,
-        "turns": turns,
-        "pricing": pricing,
-    }))
+    let costs = match (state.savings_db.as_deref(), usage_aggregate.as_ref()) {
+        (Some(db), Some(aggregate)) => {
+            crate::application::observability::costs_read_model_with_provider_usage(
+                db, None, 0, aggregate,
+            )
+            .await
+        }
+        _ => crate::application::observability::costs_unavailable_read_model(
+            None,
+            0,
+            "accounting_store_unavailable",
+        ),
+    };
+    let payload: Result<SavingsOverviewPayloadV1, String> = (|| {
+        Ok(SavingsOverviewPayloadV1 {
+            savings: decode_contract(savings, "savings summary")?,
+            sessions: decode_contract(sessions, "session savings summary")?,
+            provider_usage: decode_contract(provider_usage, "provider usage summary")?,
+            pricing: decode_contract(pricing, "pricing summary")?,
+            costs,
+        })
+    })();
+    match payload {
+        Ok(payload) => {
+            let available = [
+                payload.savings.available,
+                payload.sessions.available,
+                payload.provider_usage.available,
+            ]
+            .into_iter()
+            .filter(|available| *available)
+            .count() as u64;
+            if available == 0 {
+                Json(DashboardEnvelopeV1::unavailable(
+                    scope_from_state(&state),
+                    Some(payload),
+                    "savings_sources_unavailable",
+                ))
+            } else if available < 3 {
+                Json(DashboardEnvelopeV1::partial(
+                    scope_from_state(&state),
+                    3,
+                    available,
+                    "savings_sources",
+                    vec!["one_or_more_savings_sources_unavailable".to_owned()],
+                    Some(payload),
+                ))
+            } else {
+                Json(DashboardEnvelopeV1::ready(
+                    scope_from_state(&state),
+                    DashboardCoverageV1::complete(3, "savings_sources"),
+                    Some(payload),
+                ))
+            }
+        }
+        Err(error) => Json(DashboardEnvelopeV1::error(
+            scope_from_state(&state),
+            None,
+            error,
+        )),
+    }
 }
 
-async fn savings_overview(gdb: &dyn DashboardAccountingStore, state: &DashboardState) -> Value {
+/// Canonical costs projection over exact provider usage and bundled pricing.
+pub async fn costs(
+    State(state): State<DashboardState>,
+) -> Json<DashboardEnvelopeV1<CostsReadModelV1>> {
+    hotpath::future!(
+        async move {
+            let model = costs_model(&state).await;
+            let metrics = model.usage.iter().chain(&model.estimated_cost);
+            let eligible = metrics.clone().count() as u64;
+            let known = metrics
+                .filter(|metric| metric.coverage.state == CoverageStateV1::Known)
+                .count() as u64;
+            let envelope = if model.current && known == eligible {
+                DashboardEnvelopeV1::ready(
+                    scope_from_state(&state),
+                    DashboardCoverageV1::complete(eligible, "metrics"),
+                    model,
+                )
+            } else {
+                DashboardEnvelopeV1::partial(
+                    scope_from_state(&state),
+                    eligible,
+                    known,
+                    "metrics",
+                    vec!["incomplete_metric_coverage".to_owned()],
+                    model,
+                )
+            };
+            Json(envelope)
+        },
+        label = "dashboard_api.savings.costs"
+    )
+    .await
+}
+
+// `costs_http` / `costs_export` are deleted with their last caller, for the
+// same reason as their Observatory twins above `observatory_model`. They
+// mounted `/api/plugins/savings/costs{,/export}` over the identical
+// `costs_model` that `/api/costs` — the route `CanonicalCosts.tsx` reads —
+// already serves. The savings family's OTHER routes (`overview`, `ledger`,
+// `sessions`, `models`, `pricing`) are not aliases: each is the sole mount of
+// its handler and has live consumers, so they stay.
+
+async fn costs_model(state: &DashboardState) -> CostsReadModelV1 {
+    let provider_scope = provider_usage_scope(state);
+    match (
+        state.savings_db.as_deref(),
+        state.lcm_db.as_deref(),
+        provider_scope.as_ref(),
+    ) {
+        (Some(savings_db), Some(usage_db), Some(scope)) => {
+            let usage = provider_usage_aggregate(usage_db, scope, None, None).await;
+            crate::application::observability::costs_read_model_with_provider_usage(
+                savings_db, None, 0, &usage,
+            )
+            .await
+        }
+        _ => crate::application::observability::costs_unavailable_read_model(
+            None,
+            0,
+            "provider_usage_scope_or_store_unavailable",
+        ),
+    }
+}
+
+async fn savings_overview(gdb: &RegisteredGlobalDb, db_path: &str) -> Value {
+    const PROJECT_LIMIT: i64 = 25;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    let today = gdb.sum_savings(now - (now % 86_400)).await;
-    let week = gdb.sum_savings(now - 7 * 86_400).await;
-    let month = gdb.sum_savings(now - 30 * 86_400).await;
-    let all_time = gdb.sum_savings(0).await;
+    // An unreadable ledger renders as an unavailable block naming the failed
+    // read — the same honest degrade the sibling blocks below already use —
+    // never as a page of zero totals.
+    let windows = async {
+        Ok::<_, String>((
+            gdb.sum_savings(None, now - (now % 86_400)).await?,
+            gdb.sum_savings(None, now - 7 * 86_400).await?,
+            gdb.sum_savings(None, now - 30 * 86_400).await?,
+            gdb.sum_savings(None, 0).await?,
+        ))
+    };
+    let (today, week, month, all_time) = match windows.await {
+        Ok(windows) => windows,
+        Err(error) => {
+            return merge(
+                json!({ "db": db_path, "recording": recording_block() }),
+                read_failed_block(error),
+            );
+        }
+    };
 
     // Legacy lifetime counters (`projects.tokens_saved`) predate the ledger
     // and often carry history the event log does not — surface both.
-    let conn = gdb.dashboard_connection();
-    let lifetime_projects = query_rows(
+    let conn = gdb.read_connection();
+    let lifetime_projects = match query_rows(
         &conn,
         "SELECT path, tokens_saved FROM projects
-         WHERE tokens_saved > 0 ORDER BY tokens_saved DESC LIMIT 25",
-        (),
+         WHERE tokens_saved > 0 ORDER BY tokens_saved DESC LIMIT ?1",
+        params![PROJECT_LIMIT],
     )
     .await
-    .unwrap_or_default();
-    let lifetime_total = query_i64(
+    {
+        Ok(projects) => projects,
+        Err(error) => {
+            return json!({
+                "available": false,
+                "db": db_path,
+                "recording": recording_block(),
+                "error": format!("failed to read lifetime project savings: {error}"),
+            });
+        }
+    };
+    let lifetime_total = match query_i64_result(
         &conn,
         "SELECT COALESCE(SUM(tokens_saved), 0) FROM projects",
         (),
     )
-    .await;
+    .await
+    {
+        Ok(total) => total,
+        Err(error) => {
+            return json!({
+                "available": false,
+                "db": db_path,
+                "recording": recording_block(),
+                "error": format!("failed to read lifetime savings total: {error}"),
+            });
+        }
+    };
+    let project_total = match query_i64_result(
+        &conn,
+        "SELECT COUNT(*) FROM projects WHERE tokens_saved > 0",
+        (),
+    )
+    .await
+    {
+        Ok(total) => total,
+        Err(error) => {
+            return json!({
+                "available": false,
+                "db": db_path,
+                "recording": recording_block(),
+                "error": format!("failed to read lifetime project count: {error}"),
+            });
+        }
+    };
 
-    let sum_json = |total: &super::DashboardSavingsTotal| json!({ "saved_tokens": total.saved_tokens, "calls": total.calls });
+    let sum_json = |total: &tracedecay_global_db::SavingsTotal| json!({ "saved_tokens": total.saved_tokens, "calls": total.calls });
     json!({
         "available": true,
-        "db": state.savings_db_path,
-        "recording": recording_block(state),
+        "db": db_path,
+        "recording": recording_block(),
         "ledger": {
             "today": sum_json(&today),
             "last_7d": sum_json(&week),
@@ -306,6 +1159,9 @@ async fn savings_overview(gdb: &dyn DashboardAccountingStore, state: &DashboardS
         },
         "lifetime_counters": {
             "total_tokens_saved": lifetime_total,
+            "project_total": project_total,
+            "projects_limit": PROJECT_LIMIT,
+            "projects_truncated": project_total > lifetime_projects.len() as i64,
             "projects": lifetime_projects.iter().map(|row| json!({
                 "path": str_field(row, "path"),
                 "tokens_saved": i64_field(row, "tokens_saved"),
@@ -314,7 +1170,20 @@ async fn savings_overview(gdb: &dyn DashboardAccountingStore, state: &DashboardS
     })
 }
 
-async fn sessions_overview(conn: &libsql::Connection, state: &DashboardState) -> Value {
+fn read_failed_block(error: String) -> Value {
+    json!({
+        "available": false,
+        "status": "read_failed",
+        "error": error,
+    })
+}
+
+async fn sessions_overview(
+    db: &RegisteredGlobalDb,
+    state: &DashboardState,
+    provider_usage: Option<&ProviderUsageAggregateV1>,
+) -> Result<Value, String> {
+    let conn = db.read_connection();
     let sql = format!(
         "SELECT {TOKEN_AGG_COLUMNS},
                 COUNT(DISTINCT session_id) AS session_count,
@@ -322,9 +1191,12 @@ async fn sessions_overview(conn: &libsql::Connection, state: &DashboardState) ->
                 SUM(CASE WHEN model = '' THEN 1 ELSE 0 END) AS unknown_model_messages
          FROM ({MESSAGE_TOKENS_CTE})"
     );
-    let rows = query_rows(conn, &sql, ()).await.unwrap_or_default();
-    let agg = rows.first().cloned().unwrap_or_else(|| json!({}));
-    let session_count = query_i64(conn, "SELECT COUNT(*) FROM sessions", ()).await;
+    let rows = query_rows(&conn, &sql, ()).await?;
+    let agg = rows
+        .first()
+        .cloned()
+        .ok_or_else(|| "session overview query returned no row".to_string())?;
+    let session_count = query_i64_result(&conn, "SELECT COUNT(*) FROM sessions", ()).await?;
 
     let overlay = token_count::non_usage_message_tokens(state).await;
     let total_tiers = overlay.as_deref().map(|messages| {
@@ -334,9 +1206,28 @@ async fn sessions_overview(conn: &libsql::Connection, state: &DashboardState) ->
         }
         sums
     });
-
-    merge(
-        token_block(&agg, total_tiers.as_ref()),
+    let mut content = token_block(&agg, total_tiers.as_ref());
+    if let Value::Object(block) = &mut content {
+        let actual = provider_usage.and_then(actual_tokens);
+        let usage_events = provider_usage
+            .as_ref()
+            .filter(|usage| usage.coverage == ProviderUsageCoverageV1::Complete)
+            .and_then(|usage| i64::try_from(usage.deltas.len()).ok());
+        block.insert(
+            "provider_usage_events".to_owned(),
+            usage_events.map_or(Value::Null, Value::from),
+        );
+        block.insert(
+            "provider_actual".to_owned(),
+            actual
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(|error| format!("failed to encode provider usage: {error}"))?
+                .unwrap_or(Value::Null),
+        );
+    }
+    Ok(merge(
+        content,
         json!({
             "available": true,
             "db": state.lcm_db_path,
@@ -346,20 +1237,32 @@ async fn sessions_overview(conn: &libsql::Connection, state: &DashboardState) ->
             "unknown_model_messages": i64_field(&agg, "unknown_model_messages"),
             "token_counting": counting_available(),
         }),
-    )
+    ))
 }
 
-async fn turns_overview(gdb: &dyn DashboardAccountingStore) -> Value {
-    let conn = gdb.dashboard_connection();
-    let turn_count = query_i64(&conn, "SELECT COUNT(*) FROM turns", ()).await;
-    let total_cost = gdb.total_cost_since(0).await.unwrap_or(0.0);
-    let total_tokens = gdb.total_tokens_since(0).await.unwrap_or(0);
+fn provider_usage_overview(aggregate: &ProviderUsageAggregateV1) -> Value {
+    let priced = price_provider_usage(aggregate, savings_pricing::load_table(), 0);
+    let complete = priced.coverage == ProviderUsageCoverageV1::Complete;
+    let total_tokens = priced
+        .total_input_tokens
+        .zip(priced.total_output_tokens)
+        .and_then(|(input, output)| input.checked_add(output));
     json!({
-        "available": true,
-        "turn_count": turn_count,
-        "total_cost_usd": total_cost,
+        "available": priced.coverage != ProviderUsageCoverageV1::Unavailable,
+        "status": match priced.coverage {
+            ProviderUsageCoverageV1::Complete => "complete",
+            ProviderUsageCoverageV1::Partial => "partial",
+            ProviderUsageCoverageV1::Unavailable => "unavailable",
+        },
+        "error": (!complete).then_some("provider_usage_incomplete"),
+        "usage_event_count": i64::try_from(priced.usage_events).ok(),
+        "total_cost_usd": priced.total_cost_usd,
         "total_tokens": total_tokens,
-        "cost_basis": "actual",
+        "cost_basis": if priced.total_cost_usd.is_some() {
+            "provider_reported_priced"
+        } else {
+            "provider_reported_unpriced"
+        },
     })
 }
 
@@ -368,63 +1271,94 @@ pub async fn ledger(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<RangeParams>,
 ) -> Json<Value> {
-    let (range, since) = range_since(params.range.as_deref());
-    let Some(gdb) = state.accounting_store.as_deref() else {
-        return Json(json!({
-            "available": false,
+    hotpath::future!(
+        async move {
+        let (range, since) = match range_since(params.range.as_deref()) {
+            Ok(range) => range,
+            Err(error) => return Json(read_failed_block(error)),
+        };
+        let Some(gdb) = state.savings_db.as_deref() else {
+            return Json(json!({
+                "available": false,
+                "db": state.savings_db_path,
+                "range": range,
+            }));
+        };
+
+        // The ledger route fails closed to its typed read_failed block: an
+        // unreadable ledger is not an empty ledger with zero totals.
+        let (total, history) = match async {
+            Ok::<_, String>((
+                gdb.sum_savings(None, since).await?,
+                gdb.savings_history(None, since).await?,
+            ))
+        }
+        .await
+        {
+            Ok(read) => read,
+            Err(error) => {
+                return Json(merge(
+                    json!({ "db": state.savings_db_path, "range": range, "since": since }),
+                    read_failed_block(error),
+                ));
+            }
+        };
+        let conn = gdb.read_connection();
+        const SAVED_TOKENS_EXPR: &str = "COALESCE(SUM(CASE WHEN before_tokens > after_tokens THEN before_tokens - after_tokens ELSE 0 END), 0)";
+        let by_tool = query_rows(
+            &conn,
+            &format!(
+                "SELECT tool_name,
+                {SAVED_TOKENS_EXPR} AS saved_tokens,
+                COUNT(*) AS calls
+         FROM savings_ledger WHERE ts >= ?1
+         GROUP BY tool_name ORDER BY saved_tokens DESC LIMIT 50"
+            ),
+            params![since],
+        )
+        .await
+        .unwrap_or_default();
+        let by_project = query_rows(
+            &conn,
+            &format!(
+                "SELECT project_path,
+                {SAVED_TOKENS_EXPR} AS saved_tokens,
+                COUNT(*) AS calls
+         FROM savings_ledger WHERE ts >= ?1
+         GROUP BY project_path ORDER BY saved_tokens DESC LIMIT 50"
+            ),
+            params![since],
+        )
+        .await
+        .unwrap_or_default();
+
+        Json(json!({
+            "available": true,
             "db": state.savings_db_path,
             "range": range,
-        }));
-    };
+            "since": since,
+            "total": { "saved_tokens": total.saved_tokens, "calls": total.calls },
+            "by_day": history.iter().map(|day| json!({
+                "day": day.day,
+                "saved_tokens": day.saved_tokens,
+                "calls": day.calls,
+            })).collect::<Vec<_>>(),
+            "by_tool": by_tool.iter().map(|row| json!({
+                "tool": str_field(row, "tool_name"),
+                "saved_tokens": i64_field(row, "saved_tokens"),
+                "calls": i64_field(row, "calls"),
+            })).collect::<Vec<_>>(),
+            "by_project": by_project.iter().map(|row| json!({
+                "project": str_field(row, "project_path"),
+                "saved_tokens": i64_field(row, "saved_tokens"),
+                "calls": i64_field(row, "calls"),
+            })).collect::<Vec<_>>(),
+        }))
 
-    let total = gdb.sum_savings(since).await;
-    let history = gdb.savings_history(since).await;
-    let conn = gdb.dashboard_connection();
-    let by_tool = query_rows(
-        &conn,
-        "SELECT tool_name,
-                COALESCE(SUM(CASE WHEN before_tokens > after_tokens THEN before_tokens - after_tokens ELSE 0 END), 0) AS saved_tokens,
-                COUNT(*) AS calls
-         FROM savings_ledger WHERE ts >= ?1
-         GROUP BY tool_name ORDER BY saved_tokens DESC LIMIT 50",
-        libsql::params![since],
+        },
+        label = "dashboard_api.savings.ledger"
     )
     .await
-    .unwrap_or_default();
-    let by_project = query_rows(
-        &conn,
-        "SELECT project_path,
-                COALESCE(SUM(CASE WHEN before_tokens > after_tokens THEN before_tokens - after_tokens ELSE 0 END), 0) AS saved_tokens,
-                COUNT(*) AS calls
-         FROM savings_ledger WHERE ts >= ?1
-         GROUP BY project_path ORDER BY saved_tokens DESC LIMIT 50",
-        libsql::params![since],
-    )
-    .await
-    .unwrap_or_default();
-
-    Json(json!({
-        "available": true,
-        "db": state.savings_db_path,
-        "range": range,
-        "since": since,
-        "total": { "saved_tokens": total.saved_tokens, "calls": total.calls },
-        "by_day": history.iter().map(|day| json!({
-            "day": day.day,
-            "saved_tokens": day.saved_tokens,
-            "calls": day.calls,
-        })).collect::<Vec<_>>(),
-        "by_tool": by_tool.iter().map(|row| json!({
-            "tool": str_field(row, "tool_name"),
-            "saved_tokens": i64_field(row, "saved_tokens"),
-            "calls": i64_field(row, "calls"),
-        })).collect::<Vec<_>>(),
-        "by_project": by_project.iter().map(|row| json!({
-            "project": str_field(row, "project_path"),
-            "saved_tokens": i64_field(row, "saved_tokens"),
-            "calls": i64_field(row, "calls"),
-        })).collect::<Vec<_>>(),
-    }))
 }
 
 /// GET `/api/plugins/savings/sessions?range=&limit=&offset=`
@@ -435,180 +1369,284 @@ pub async fn ledger(
 pub async fn sessions(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<SessionsParams>,
-) -> Json<Value> {
-    let (range, since) = range_since(params.range.as_deref());
-    let limit = coerce_limit(params.limit, 25, 100);
-    let offset = params.offset.unwrap_or(0).max(0);
-    let Some(conn) = state.lcm_conn.as_ref() else {
-        return Json(json!({
-            "available": false,
-            "db": state.lcm_db_path,
-            "range": range,
-            "sessions": [],
-            "total": 0,
-        }));
-    };
+) -> Response {
+    hotpath::future!(
+        async move {
+        let (range, since) = match range_since(params.range.as_deref()) {
+            Ok(range) => range,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(read_failed_block(error)),
+                )
+                    .into_response();
+            }
+        };
+        let limit = coerce_limit(params.limit, 25, 100);
+        let offset = params.offset.unwrap_or(0).max(0);
+        let Some(db) = state.lcm_db.as_deref() else {
+            return match decode_contract::<SavingsSessionsPayloadV1>(
+                json!({
+                "available": false,
+                "db": state.lcm_db_path,
+                "range": range,
+                "sessions": [],
+                "total": 0,
+                }),
+                "savings sessions",
+            ) {
+                Ok(payload) => Json(payload).into_response(),
+                Err(error) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"status": "contract_invalid", "error": error})),
+                )
+                    .into_response(),
+            };
+        };
+        let conn = db.read_connection();
 
-    let page_sql = "
-        SELECT s.provider, s.session_id, s.title, s.started_at, s.ended_at,
-               s.is_subagent,
-               (SELECT MAX(m.timestamp) FROM session_messages m
-                 WHERE m.provider = s.provider AND m.session_id = s.session_id) AS last_message_at
-        FROM sessions s
-        WHERE ?1 = 0 OR COALESCE(s.started_at,
-              (SELECT MAX(m.timestamp) FROM session_messages m
-                WHERE m.provider = s.provider AND m.session_id = s.session_id), 0) >= ?1
-        ORDER BY (s.started_at IS NULL), s.started_at DESC, s.rowid DESC
-        LIMIT ?2 OFFSET ?3";
-    let page = query_rows(conn, page_sql, libsql::params![since, limit, offset])
-        .await
-        .unwrap_or_default();
-    let total = query_i64(
-        conn,
-        "SELECT COUNT(*) FROM sessions s
-         WHERE ?1 = 0 OR COALESCE(s.started_at,
-               (SELECT MAX(m.timestamp) FROM session_messages m
-                 WHERE m.provider = s.provider AND m.session_id = s.session_id), 0) >= ?1",
-        libsql::params![since],
-    )
-    .await;
-
-    let overlay = token_count::non_usage_message_tokens(&state).await;
-    let session_model_tiers = overlay.as_deref().map(|messages| {
-        fold_overlay(messages, |msg| {
-            Some((
-                msg.provider.clone(),
-                msg.session_id.clone(),
-                msg.model.clone(),
-            ))
-        })
-    });
-
-    // One grouped aggregate over the page's (provider, session_id) pairs —
-    // previously each page row ran its own aggregate query (N+1, up to 100
-    // round-trips re-running the json_extract CTE per page render). The
-    // VALUES list joins as the outer loop so each pair stays an indexed
-    // probe of session_messages (a row-value `IN (VALUES …)` predicate does
-    // not get pushed into the index and full-scans instead). The global
-    // `messages DESC` order keeps each session's model rows descending after
-    // bucketing, matching the old per-session ORDER BY.
-    let mut model_rows_by_session: HashMap<(String, String), Vec<Value>> = HashMap::new();
-    if !page.is_empty() {
-        let tuples = vec!["(?, ?)"; page.len()].join(", ");
-        let agg_sql = format!(
-            "SELECT provider, session_id, model, {TOKEN_AGG_COLUMNS}
-             FROM (VALUES {tuples}) pairs
-             JOIN ({MESSAGE_TOKENS_CTE}) ON provider = pairs.column1
-                                        AND session_id = pairs.column2
-             GROUP BY provider, session_id, model
-             ORDER BY messages DESC"
-        );
-        let mut agg_params: Vec<libsql::Value> = Vec::with_capacity(page.len() * 2);
-        for row in &page {
-            agg_params.push(libsql::Value::Text(str_field(row, "provider").to_string()));
-            agg_params.push(libsql::Value::Text(
-                str_field(row, "session_id").to_string(),
-            ));
-        }
-        let rows = query_rows(conn, &agg_sql, libsql::params_from_iter(agg_params))
+        let page_sql = "
+            SELECT s.provider, s.session_id, s.title, s.started_at, s.ended_at,
+                   s.is_subagent,
+                   (SELECT MAX(m.timestamp) FROM session_messages m
+                     WHERE m.provider = s.provider AND m.session_id = s.session_id) AS last_message_at
+            FROM sessions s
+            WHERE ?1 = 0 OR COALESCE(s.started_at,
+                  (SELECT MAX(m.timestamp) FROM session_messages m
+                    WHERE m.provider = s.provider AND m.session_id = s.session_id), 0) >= ?1
+            ORDER BY (s.started_at IS NULL), s.started_at DESC, s.rowid DESC
+            LIMIT ?2 OFFSET ?3";
+        let page = query_rows(&conn, page_sql, params![since, limit, offset])
             .await
             .unwrap_or_default();
-        for row in rows {
-            let key = (
-                str_field(&row, "provider").to_string(),
-                str_field(&row, "session_id").to_string(),
-            );
-            model_rows_by_session.entry(key).or_default().push(row);
-        }
-    }
+        let total = query_i64(
+            &conn,
+            "SELECT COUNT(*) FROM sessions s
+             WHERE ?1 = 0 OR COALESCE(s.started_at,
+                   (SELECT MAX(m.timestamp) FROM session_messages m
+                     WHERE m.provider = s.provider AND m.session_id = s.session_id), 0) >= ?1",
+            params![since],
+        )
+        .await;
 
-    let mut sessions_json = Vec::with_capacity(page.len());
-    for row in &page {
-        let provider = str_field(row, "provider");
-        let session_id = str_field(row, "session_id");
-        let model_rows = model_rows_by_session
-            .remove(&(provider.to_string(), session_id.to_string()))
-            .unwrap_or_default();
-
-        let mut messages = 0;
-        let mut usage_messages = 0;
-        let mut tokenized_messages = 0;
-        let mut estimated_messages = 0;
-        let models: Vec<Value> = model_rows
-            .iter()
-            .map(|model_row| {
-                let model = str_field(model_row, "model");
-                let tiers = session_model_tiers.as_ref().and_then(|map| {
-                    map.get(&(
-                        provider.to_string(),
-                        session_id.to_string(),
-                        model.to_string(),
-                    ))
-                });
-                let block = token_block(model_row, tiers);
-                messages += i64_field(&block, "messages");
-                usage_messages += i64_field(&block, "usage_messages");
-                tokenized_messages += i64_field(&block, "tokenized_messages");
-                estimated_messages += i64_field(&block, "estimated_messages");
-                merge(
-                    block,
-                    json!({
-                        "model": model_value(model),
-                        "tokenizer": tokenizer_block(model),
-                    }),
-                )
+        let overlay = token_count::non_usage_message_tokens(&state).await;
+        let provider_scope = provider_usage_scope(&state);
+        let provider_usage = match (state.lcm_db.as_deref(), provider_scope.as_ref()) {
+            (Some(usage_db), Some(scope)) => {
+                Some(provider_usage_aggregate(usage_db, scope, None, None).await)
+            }
+            _ => None,
+        };
+        let usage_deltas = provider_usage
+            .as_ref()
+            .filter(|usage| usage.coverage == ProviderUsageCoverageV1::Complete)
+            .map(|usage| usage.deltas.as_slice());
+        let session_model_tiers = overlay.as_deref().map(|messages| {
+            fold_overlay(messages, |msg| {
+                Some((
+                    msg.provider.clone(),
+                    msg.session_id.clone(),
+                    msg.model.clone(),
+                ))
             })
-            .collect();
+        });
 
-        sessions_json.push(json!({
-            "provider": provider,
-            "session_id": session_id,
-            "title": row.get("title").cloned().unwrap_or(Value::Null),
-            "started_at": row.get("started_at").cloned().unwrap_or(Value::Null),
-            "last_message_at": row.get("last_message_at").cloned().unwrap_or(Value::Null),
-            "is_subagent": i64_field(row, "is_subagent") != 0,
-            "messages": messages,
-            "usage_messages": usage_messages,
-            "tokenized_messages": tokenized_messages,
-            "estimated_messages": estimated_messages,
-            "cost_basis": basis_label(usage_messages, tokenized_messages, messages),
-            "models": models,
-        }));
+        // One grouped aggregate over the page's (provider, session_id) pairs —
+        // previously each page row ran its own aggregate query (N+1, up to 100
+        // round-trips re-running the json_extract CTE per page render). The
+        // VALUES list joins as the outer loop so each pair stays an indexed
+        // probe of session_messages (a row-value `IN (VALUES …)` predicate does
+        // not get pushed into the index and full-scans instead). The global
+        // `messages DESC` order keeps each session's model rows descending after
+        // bucketing, matching the old per-session ORDER BY.
+        let mut model_rows_by_session: HashMap<(String, String), Vec<Value>> = HashMap::new();
+        if !page.is_empty() {
+            let tuples = vec!["(?, ?)"; page.len()].join(", ");
+            let agg_sql = format!(
+                "SELECT provider, session_id, model, {TOKEN_AGG_COLUMNS}
+                 FROM (VALUES {tuples}) pairs
+                 JOIN ({MESSAGE_TOKENS_CTE}) ON provider = pairs.column1
+                                            AND session_id = pairs.column2
+                 GROUP BY provider, session_id, model
+                 ORDER BY messages DESC"
+            );
+            let mut agg_params: Vec<DbValue> = Vec::with_capacity(page.len() * 2);
+            for row in &page {
+                agg_params.push(DbValue::Text(str_field(row, "provider").to_string()));
+                agg_params.push(DbValue::Text(str_field(row, "session_id").to_string()));
+            }
+            let rows = query_rows(&conn, &agg_sql, params_from_iter(agg_params))
+                .await
+                .unwrap_or_default();
+            for row in rows {
+                let key = (
+                    str_field(&row, "provider").to_string(),
+                    str_field(&row, "session_id").to_string(),
+                );
+                model_rows_by_session.entry(key).or_default().push(row);
+            }
+        }
+
+        let mut sessions_json = Vec::with_capacity(page.len());
+        for row in &page {
+            let provider = str_field(row, "provider");
+            let session_id = str_field(row, "session_id");
+            let model_rows = model_rows_by_session
+                .remove(&(provider.to_string(), session_id.to_string()))
+                .unwrap_or_default();
+
+            let mut messages = 0;
+            let mut provider_usage_events = 0;
+            let mut tokenized_messages = 0;
+            let mut estimated_messages = 0;
+            let models: Vec<Value> = model_rows
+                .iter()
+                .map(|model_row| {
+                    let model = str_field(model_row, "model");
+                    let tiers = session_model_tiers.as_ref().and_then(|map| {
+                        map.get(&(
+                            provider.to_string(),
+                            session_id.to_string(),
+                            model.to_string(),
+                        ))
+                    });
+                    let mut block = token_block(model_row, tiers);
+                    let (event_count, actual) = usage_deltas.map_or((0, None), |deltas| {
+                        actual_for_deltas(deltas.iter().filter(|delta| {
+                            delta.provider == provider
+                                && delta.session_id == session_id
+                                && delta.model.as_deref().unwrap_or_default() == model
+                                && (since == 0
+                                    || delta
+                                        .native_timestamp
+                                        .is_some_and(|timestamp| timestamp >= since))
+                        }))
+                    });
+                    apply_provider_actual(&mut block, event_count, actual);
+                    messages += i64_field(&block, "messages");
+                    provider_usage_events += i64_field(&block, "provider_usage_events");
+                    tokenized_messages += i64_field(&block, "tokenized_messages");
+                    estimated_messages += i64_field(&block, "estimated_messages");
+                    merge(
+                        block,
+                        json!({
+                            "model": model_value(model),
+                            "tokenizer": tokenizer_block(model),
+                        }),
+                    )
+                })
+                .collect();
+
+            sessions_json.push(json!({
+                "provider": provider,
+                "session_id": session_id,
+                "title": row.get("title").cloned().unwrap_or(Value::Null),
+                "started_at": row.get("started_at").cloned().unwrap_or(Value::Null),
+                "last_message_at": row.get("last_message_at").cloned().unwrap_or(Value::Null),
+                "is_subagent": i64_field(row, "is_subagent") != 0,
+                "messages": messages,
+                "provider_usage_events": provider_usage_events,
+                "tokenized_messages": tokenized_messages,
+                "estimated_messages": estimated_messages,
+                "cost_basis": basis_label(tokenized_messages, messages),
+                "models": models,
+            }));
+        }
+
+        match decode_contract::<SavingsSessionsPayloadV1>(
+            json!({
+                "available": true,
+                "db": state.lcm_db_path,
+                "scope": state.lcm_scope,
+                "range": range,
+                "since": since,
+                "total": total,
+                "sessions": sessions_json,
+            }),
+            "savings sessions",
+        ) {
+            Ok(payload) => Json(payload).into_response(),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"status": "contract_invalid", "error": error})),
+            )
+                .into_response(),
+        }
+
+        },
+        label = "dashboard_api.savings.sessions"
+    )
+    .await
+}
+
+/// The typed `/models` failure body: the request could not be served and no
+/// row of it is invented. `range` echoes what was asked for.
+fn models_read_failed(range: Option<&str>, error: String) -> SavingsModelsPayloadV1 {
+    SavingsModelsPayloadV1 {
+        available: false,
+        status: Some("read_failed".to_owned()),
+        error: Some(error),
+        range: range.unwrap_or("all").to_owned(),
+        since: None,
+        models: Vec::new(),
+        daily: Vec::new(),
+        provider_usage_coverage: None,
+        provider_usage: unavailable_provider_usage_attribution(),
     }
-
-    Json(json!({
-        "available": true,
-        "db": state.lcm_db_path,
-        "scope": state.lcm_scope,
-        "range": range,
-        "since": since,
-        "total": total,
-        "sessions": sessions_json,
-    }))
 }
 
 /// GET `/api/plugins/savings/models?range=`
 ///
-/// Per-model token aggregates from the session store, per-day series for
-/// timestamped messages, plus the `turns` accounting (per-model cost and
-/// per-day cost — `actual`, computed from transcript usage at ingest by
-/// `tracedecay cost`, reusing [`GlobalDb::cost_by_model_since`]).
+/// Per-model token aggregates from the session store plus canonical
+/// provider-usage cost grouped by exact provider/model, day, provider, and
+/// provider/day. Every dollar figure comes from the same pricing projection
+/// `/api/costs` serves; unpriced usage keeps its counts and gets no price.
+#[hotpath::measure(label = "dashboard_api.savings.models", future = true)]
 pub async fn models(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<RangeParams>,
-) -> Json<Value> {
-    let (range, since) = range_since(params.range.as_deref());
+) -> Response {
+    let (range, since) = match range_since(params.range.as_deref()) {
+        Ok(range) => range,
+        // The caller named a window this route does not serve: a request
+        // fault, answered as one, with the typed empty body rather than a
+        // ledger of zeros.
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(models_read_failed(params.range.as_deref(), error)),
+            )
+                .into_response();
+        }
+    };
+    let provider_scope = provider_usage_scope(&state);
+    let provider_usage = match (state.lcm_db.as_deref(), provider_scope.as_ref()) {
+        (Some(usage_db), Some(scope)) => {
+            Some(provider_usage_aggregate(usage_db, scope, None, None).await)
+        }
+        _ => None,
+    };
+    let usage_deltas = provider_usage
+        .as_ref()
+        .filter(|usage| usage.coverage == ProviderUsageCoverageV1::Complete)
+        .map(|usage| usage.deltas.as_slice());
+    let prices = savings_pricing::load_table();
 
     let mut payload = json!({
-        "available": state.lcm_conn.is_some(),
+        "available": state.lcm_db.is_some(),
         "range": range,
         "since": since,
         "models": [],
         "daily": [],
-        "turns": { "available": state.accounting_store.is_some(), "by_model": [], "by_day": [] },
+        "provider_usage_coverage": provider_usage.as_ref().map(|usage| match usage.coverage {
+            ProviderUsageCoverageV1::Complete => "complete",
+            ProviderUsageCoverageV1::Partial => "partial",
+            ProviderUsageCoverageV1::Unavailable => "unavailable",
+        }),
     });
 
-    if let Some(conn) = state.lcm_conn.as_ref() {
+    if let Some(db) = state.lcm_db.as_deref() {
+        let conn = db.read_connection();
         let overlay = token_count::non_usage_message_tokens(&state).await;
         // Folds replicate the SQL range predicates exactly: per-model rows
         // use COALESCE(timestamp, 0), the daily series requires a positive
@@ -632,7 +1670,7 @@ pub async fn models(
              WHERE ?1 = 0 OR COALESCE(timestamp, 0) >= ?1
              GROUP BY model ORDER BY messages DESC LIMIT 100"
         );
-        let model_rows = query_rows(conn, &model_sql, libsql::params![since])
+        let model_rows = query_rows(&conn, &model_sql, params![since])
             .await
             .unwrap_or_default();
         payload["models"] = Value::Array(
@@ -643,8 +1681,19 @@ pub async fn models(
                     let tiers = model_tiers
                         .as_ref()
                         .and_then(|map| map.get(&model.to_string()));
+                    let mut block = token_block(row, tiers);
+                    let (event_count, actual) = usage_deltas.map_or((0, None), |deltas| {
+                        actual_for_deltas(deltas.iter().filter(|delta| {
+                            delta.model.as_deref().unwrap_or_default() == model
+                                && (since == 0
+                                    || delta
+                                        .native_timestamp
+                                        .is_some_and(|timestamp| timestamp >= since))
+                        }))
+                    });
+                    apply_provider_actual(&mut block, event_count, actual);
                     merge(
-                        token_block(row, tiers),
+                        block,
                         json!({
                             "model": model_value(model),
                             "sessions": i64_field(row, "session_count"),
@@ -669,7 +1718,7 @@ pub async fn models(
              FROM daily JOIN latest_days ON latest_days.day = daily.day
              ORDER BY daily.day ASC, daily.messages DESC"
         );
-        let daily_rows = query_rows(conn, &daily_sql, libsql::params![since])
+        let daily_rows = query_rows(&conn, &daily_sql, params![since])
             .await
             .unwrap_or_default();
         payload["daily"] = Value::Array(
@@ -681,93 +1730,249 @@ pub async fn models(
                     let tiers = day_tiers
                         .as_ref()
                         .and_then(|map| map.get(&(day, model.to_string())));
-                    merge(
-                        token_block(row, tiers),
-                        json!({ "day": day, "model": model_value(model) }),
-                    )
+                    let mut block = token_block(row, tiers);
+                    let (event_count, actual) = usage_deltas.map_or((0, None), |deltas| {
+                        actual_for_deltas(deltas.iter().filter(|delta| {
+                            delta.model.as_deref().unwrap_or_default() == model
+                                && delta
+                                    .native_timestamp
+                                    .is_some_and(|timestamp| (timestamp / 86_400) * 86_400 == day)
+                        }))
+                    });
+                    apply_provider_actual(&mut block, event_count, actual);
+                    merge(block, json!({ "day": day, "model": model_value(model) }))
                 })
                 .collect(),
         );
     }
 
-    if let Some(gdb) = state.accounting_store.as_deref() {
-        let by_model = gdb.cost_by_model_since(since.max(0) as u64).await;
-        payload["turns"]["by_model"] = Value::Array(
-            by_model
-                .iter()
-                .map(|(model, cost, tokens)| {
-                    json!({
-                        "model": model,
-                        "cost_usd": cost,
-                        "total_tokens": tokens,
-                        "cost_basis": "actual",
-                    })
-                })
-                .collect(),
-        );
-        let conn = gdb.dashboard_connection();
-        let by_day = query_rows(
-            &conn,
-            "WITH daily AS (
-                SELECT (timestamp / 86400) * 86400 AS day,
-                       SUM(cost_usd) AS cost_usd,
-                       SUM(input_tokens + output_tokens) AS total_tokens
-                FROM turns WHERE timestamp >= ?1
-                GROUP BY day
-             ),
-             latest_days AS (
-                SELECT day FROM daily ORDER BY day DESC LIMIT 366
-             )
-             SELECT daily.*
-             FROM daily JOIN latest_days ON latest_days.day = daily.day
-             ORDER BY daily.day ASC",
-            libsql::params![since],
+    let attribution = match usage_deltas {
+        Some(deltas) => provider_usage_attribution(deltas, since, prices),
+        None => unavailable_provider_usage_attribution(),
+    };
+    let provider_usage = match serde_json::to_value(attribution) {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(models_read_failed(
+                    Some(&range),
+                    format!("failed to encode provider usage attribution: {error}"),
+                )),
+            )
+                .into_response();
+        }
+    };
+    payload["provider_usage"] = provider_usage;
+
+    match decode_contract::<SavingsModelsPayloadV1>(payload, "savings models") {
+        Ok(payload) => Json(payload).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(models_read_failed(Some(&range), error)),
         )
-        .await
-        .unwrap_or_default();
-        payload["turns"]["by_day"] = Value::Array(
-            by_day
-                .iter()
-                .map(|row| {
-                    json!({
-                        "day": i64_field(row, "day"),
-                        "cost_usd": row.get("cost_usd").cloned().unwrap_or(Value::Null),
-                        "total_tokens": i64_field(row, "total_tokens"),
-                    })
-                })
-                .collect(),
-        );
+            .into_response(),
     }
-
-    Json(payload)
 }
 
-/// GET `/api/plugins/savings/pricing` — the merged model price table with
-/// provenance (`live` data is always served from its disk cache, so `source`
-/// is `"cache"` or `"fallback"`).
-#[allow(clippy::unused_async)]
+/// GET `/api/plugins/savings/pricing` — deterministic bundled all-provider
+/// prices with content-addressed provenance.
 pub async fn pricing() -> Json<Value> {
-    savings_pricing::ensure_background_refresh();
     Json(savings_pricing::pricing_payload())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracedecay_session_memory::provider_usage::{
+        AggregatedProviderUsageCountersV1, ProviderUsageAggregateV1, ProviderUsageCoverageV1,
+    };
+
+    fn delta(
+        sequence: u64,
+        provider: &str,
+        model: Option<&str>,
+        session: &str,
+        timestamp: Option<i64>,
+    ) -> ProviderUsageDeltaV1 {
+        ProviderUsageDeltaV1 {
+            observation_id: format!("obs-{sequence}"),
+            receipt_id: format!("receipt-{sequence}"),
+            observation_sequence: sequence,
+            usage_ordinal: 0,
+            scope: ObservationScopeV1::Profile,
+            provider: provider.to_owned(),
+            model: model.map(str::to_owned),
+            session_id: session.to_owned(),
+            turn_id: None,
+            message_id: None,
+            request_id: None,
+            native_kind: "usage".to_owned(),
+            native_field: "usage".to_owned(),
+            native_timestamp: timestamp,
+            derivation:
+                tracedecay_session_memory::provider_usage::ProviderUsageDeltaDerivationV1::NativeDelta,
+            derived_from_sequence: None,
+            counters: AggregatedProviderUsageCountersV1 {
+                input_tokens: Some(1_000),
+                output_tokens: Some(100),
+                cache_read_tokens: Some(0),
+                cache_write_tokens: Some(0),
+                reasoning_tokens: None,
+                total_tokens: Some(1_100),
+            },
+        }
+    }
 
     #[test]
-    fn basis_labels() {
-        assert_eq!(basis_label(0, 0, 0), "estimated");
-        assert_eq!(basis_label(0, 0, 4), "estimated");
-        assert_eq!(basis_label(2, 0, 4), "mixed");
-        assert_eq!(basis_label(4, 0, 4), "actual");
-        // Fully BPE-counted aggregates get the new tier…
-        assert_eq!(basis_label(0, 4, 4), "tokenized");
-        // …partial coverage stays conservative…
-        assert_eq!(basis_label(0, 2, 4), "estimated");
-        // …and any usage data keeps the legacy mixed/actual labels.
-        assert_eq!(basis_label(2, 2, 4), "mixed");
-        assert_eq!(basis_label(4, 4, 4), "actual");
+    fn provider_attribution_keeps_priced_partial_and_unpriced_providers_distinct() {
+        let day = 1_760_000_000_i64 - (1_760_000_000_i64 % 86_400);
+        let deltas = vec![
+            // Fully priced: an exact bundled Anthropic slug on two sessions.
+            delta(1, "claude", Some("claude-opus-4"), "s-1", Some(day + 60)),
+            delta(2, "claude", Some("claude-opus-4"), "s-2", Some(day + 120)),
+            // Partial: one priced OpenAI model and one model nobody prices.
+            delta(3, "codex", Some("gpt-4.1"), "s-3", Some(day + 86_400)),
+            delta(
+                4,
+                "codex",
+                Some("gpt-nonexistent-fixture"),
+                "s-3",
+                Some(day + 86_400),
+            ),
+            // Unpriced: a provider outside every vendor namespace, one event
+            // with no model identity, one with no timestamp.
+            delta(5, "mystery", None, "s-4", Some(day)),
+            delta(6, "mystery", Some("mystery-1"), "s-4", None),
+        ];
+
+        let attribution = provider_usage_attribution(&deltas, 0, savings_pricing::load_table());
+
+        assert!(attribution.available);
+        assert_eq!(attribution.undated_events, Some(1));
+        let by_provider: HashMap<_, _> = attribution
+            .by_provider
+            .iter()
+            .map(|row| (row.provider.as_str(), row))
+            .collect();
+
+        let claude = by_provider["claude"];
+        assert_eq!(claude.pricing, SavingsPricingClassV1::Priced);
+        assert_eq!(claude.usage_events, 2);
+        assert_eq!(claude.priced_events, 2);
+        assert_eq!(claude.unpriced_events, 0);
+        assert_eq!(claude.sessions, 2);
+        assert_eq!(claude.models, 1);
+        assert!(claude.priced_cost_usd.is_some_and(|cost| cost > 0.0));
+        assert_eq!(claude.total_cost_usd, claude.priced_cost_usd);
+        assert_eq!(claude.total_tokens, Some(2_200));
+
+        let codex = by_provider["codex"];
+        assert_eq!(codex.pricing, SavingsPricingClassV1::Partial);
+        assert_eq!(codex.usage_events, 2);
+        assert_eq!(codex.priced_events, 1);
+        assert_eq!(codex.unpriced_events, 1);
+        assert_eq!(codex.priced_models, 1);
+        assert_eq!(codex.unpriced_models, 1);
+        assert_eq!(codex.sessions, 1);
+        assert!(codex.priced_cost_usd.is_some_and(|cost| cost > 0.0));
+        assert_eq!(
+            codex.total_cost_usd, None,
+            "a provider with one unpriced event has no complete total"
+        );
+
+        let mystery = by_provider["mystery"];
+        assert_eq!(mystery.pricing, SavingsPricingClassV1::Unpriced);
+        assert_eq!(mystery.usage_events, 2);
+        assert_eq!(mystery.unpriced_events, 2);
+        assert_eq!(mystery.unknown_model_events, 1);
+        assert_eq!(mystery.undated_events, 1);
+        assert_eq!(mystery.priced_cost_usd, None);
+        assert_eq!(mystery.total_cost_usd, None);
+        assert_eq!(
+            mystery.total_tokens,
+            Some(2_200),
+            "tokens are facts independent of price"
+        );
+
+        // The dated series carries only timestamped events, per provider.
+        assert_eq!(attribution.by_provider_day.len(), 3);
+        let claude_day = attribution
+            .by_provider_day
+            .iter()
+            .find(|point| point.provider == "claude" && point.day == day)
+            .expect("claude day point");
+        assert_eq!(claude_day.usage_events, 2);
+        assert_eq!(claude_day.priced_cost_usd, claude.priced_cost_usd);
+        let codex_day = attribution
+            .by_provider_day
+            .iter()
+            .find(|point| point.provider == "codex")
+            .expect("codex day point");
+        assert_eq!(codex_day.day, day + 86_400);
+        assert_eq!(codex_day.unpriced_events, 1);
+        assert_eq!(codex_day.total_cost_usd, None);
+
+        // The unknown-model row keeps its identity absence explicit.
+        assert!(
+            attribution
+                .by_model
+                .iter()
+                .any(|row| row.provider == "mystery"
+                    && row.model.is_none()
+                    && row.cost_usd.is_none())
+        );
+    }
+
+    #[test]
+    fn provider_attribution_range_excludes_undated_deltas() {
+        let deltas = vec![
+            delta(
+                1,
+                "claude",
+                Some("claude-opus-4"),
+                "s-1",
+                Some(2_000_000_000),
+            ),
+            delta(2, "claude", Some("claude-opus-4"), "s-1", None),
+        ];
+        let attribution =
+            provider_usage_attribution(&deltas, 1_000_000_000, savings_pricing::load_table());
+        assert_eq!(attribution.undated_events, Some(0));
+        assert_eq!(attribution.by_provider.len(), 1);
+        assert_eq!(attribution.by_provider[0].usage_events, 1);
+        assert_eq!(attribution.by_provider[0].undated_events, 0);
+    }
+
+    #[test]
+    fn models_read_failed_body_is_typed_and_empty() {
+        let body = models_read_failed(Some("tomorrow"), "unsupported range".to_owned());
+        assert!(!body.available);
+        assert_eq!(body.status.as_deref(), Some("read_failed"));
+        assert_eq!(body.range, "tomorrow");
+        assert!(body.models.is_empty());
+        assert!(!body.provider_usage.available);
+        let value = serde_json::to_value(&body).expect("encode");
+        decode_contract::<SavingsModelsPayloadV1>(value, "savings models")
+            .expect("failure body satisfies its own contract");
+    }
+
+    #[test]
+    fn partial_provider_usage_never_becomes_an_actual_zero_token_block() {
+        let aggregate = ProviderUsageAggregateV1 {
+            coverage: ProviderUsageCoverageV1::Partial,
+            observations_seen: 1,
+            totals: AggregatedProviderUsageCountersV1 {
+                input_tokens: Some(10),
+                output_tokens: Some(2),
+                ..AggregatedProviderUsageCountersV1::unknown()
+            },
+            deltas: Vec::new(),
+            issues: Vec::new(),
+            upper_observation_sequence: Some(1),
+        };
+
+        assert!(actual_tokens(&aggregate).is_none());
     }
 
     #[test]
@@ -798,18 +2003,13 @@ mod tests {
     fn token_block_falls_back_to_sql_estimates_without_overlay() {
         let row = json!({
             "messages": 3,
-            "usage_messages": 1,
-            "actual_input_tokens": 100,
-            "actual_output_tokens": 50,
-            "cache_read_tokens": 0,
-            "cache_write_tokens": 0,
             "estimated_input_tokens": 40,
             "estimated_output_tokens": 60,
         });
         let block = token_block(&row, None);
-        assert_eq!(block["cost_basis"], "mixed");
+        assert_eq!(block["cost_basis"], "estimated");
         assert_eq!(block["tokenized_messages"], 0);
-        assert_eq!(block["estimated_messages"], 2);
+        assert_eq!(block["estimated_messages"], 3);
         assert_eq!(block["estimated"]["input_tokens"], 40);
         assert_eq!(block["estimated"]["output_tokens"], 60);
         assert_eq!(block["tokenized"]["input_tokens"], 0);
@@ -819,11 +2019,6 @@ mod tests {
     fn token_block_prefers_overlay_tiers() {
         let row = json!({
             "messages": 2,
-            "usage_messages": 0,
-            "actual_input_tokens": 0,
-            "actual_output_tokens": 0,
-            "cache_read_tokens": 0,
-            "cache_write_tokens": 0,
             "estimated_input_tokens": 40,
             "estimated_output_tokens": 60,
         });
@@ -840,11 +2035,5 @@ mod tests {
         assert_eq!(block["tokenized"]["input_tokens"], 33);
         assert_eq!(block["tokenized"]["output_tokens"], 44);
         assert_eq!(block["estimated"]["input_tokens"], 0);
-    }
-
-    #[test]
-    fn unknown_model_serializes_as_null() {
-        assert_eq!(model_value(""), Value::Null);
-        assert_eq!(model_value("gpt-5.5"), Value::String("gpt-5.5".into()));
     }
 }

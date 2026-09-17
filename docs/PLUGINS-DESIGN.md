@@ -13,7 +13,7 @@ work.
 Every language extractor is gated on a Cargo feature (`lang-lua`, `lang-zig`, …) and compiled into the binary at build time via `tracedecay-large-treesitters`. Adding a language today means:
 
 1. Adding a grammar crate dependency to `tracedecay-large-treesitters` and cutting a release.
-2. Writing an extractor in `src/extraction/`, adding `#[cfg(feature = "…")]` gates in `mod.rs`, and updating `Cargo.toml`.
+2. Writing an extractor in `crates/tracedecay-code-extraction/`, adding `#[cfg(feature = "…")]` gates in `lib.rs`, and updating that crate's `Cargo.toml`.
 3. Releasing a new version of `tracedecay` itself.
 
 This is a tight coupling between the extractor author, the grammar maintainer, and the `tracedecay` release cycle. Community contributions have to go through this bottleneck even when the grammar is already a well-maintained crate on crates.io.
@@ -124,7 +124,7 @@ A `tracedecay-plugin-sdk` crate (published separately) provides:
 
 - A `#[tracedecay_plugin]` proc-macro that generates the C ABI glue from a normal `LanguageExtractor` impl.
 - Safe Rust wrappers around the JSON serialisation / deserialisation boundary.
-- A `grammar!` macro that embeds the tree-sitter grammar and calls `ts_provider::language`.
+- A `grammar!` macro that embeds the tree-sitter grammar and calls `ts_provider::try_language`.
 
 Authors implement the same `LanguageExtractor` trait they would for a built-in, then add two lines:
 

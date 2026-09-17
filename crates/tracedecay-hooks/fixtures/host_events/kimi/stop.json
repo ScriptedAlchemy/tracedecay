@@ -1,0 +1,6 @@
+{
+  "hook_event_name": "Stop",
+  "session_id": "<SESSION_ID>",
+  "cwd": "<PROJECT_ROOT>",
+  "stop_hook_active": false
+}

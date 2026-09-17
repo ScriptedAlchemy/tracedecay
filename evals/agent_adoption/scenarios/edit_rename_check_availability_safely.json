@@ -19,25 +19,16 @@
       "tracedecay_callers",
       "tracedecay_body",
       "Read"
-    ],
-    "forbidden_first": [
-      "Grep",
-      "Glob"
-    ],
-    "forbidden_bash": [
-      "grep",
-      "rg ",
-      "rg\t",
-      "find ",
-      "cat ",
-      "sed ",
-      "awk ",
-      "ack "
     ]
   },
   "ground_truth": [
     "reserve_stock"
   ],
   "max_tool_calls": 5,
-  "notes": "rename-this-function-safely; reserve_stock is the one call site rename_preview should surface."
+  "notes": "rename-this-function-safely; reserve_stock is the one call site rename_preview should surface.",
+  "expected_skill": "editing-safely",
+  "allowed_skills": [
+    "editing-safely"
+  ],
+  "max_tracedecay_calls": 5
 }

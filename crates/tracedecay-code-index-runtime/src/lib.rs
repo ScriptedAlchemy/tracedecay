@@ -1,0 +1,77 @@
+//! Code-index scheduler, git watch, and git transactions.
+//!
+//! This crate owns the daemon code-index runtime that used to live under
+//! `tracedecay::daemon`. The composition root constructs the scheduler and
+//! implements [`code_graph_seat::CodeGraphSeatRuntimePortV1`]; this crate must
+//! not depend on `tracedecay`.
+
+#![deny(clippy::all)]
+#![warn(clippy::pedantic)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+#![cfg_attr(not(test), deny(clippy::expect_used))]
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::missing_panics_doc)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::too_many_lines)]
+#![allow(clippy::must_use_candidate)]
+#![allow(clippy::similar_names)]
+#![allow(clippy::needless_pass_by_value)]
+#![allow(clippy::unused_self)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::items_after_statements)]
+#![allow(clippy::match_same_arms)]
+#![allow(clippy::manual_let_else)]
+#![allow(clippy::ref_option)]
+#![allow(clippy::used_underscore_binding)]
+#![allow(clippy::unused_async)]
+#![allow(clippy::unnecessary_wraps)]
+#![allow(clippy::if_not_else)]
+#![allow(clippy::fn_params_excessive_bools)]
+#![allow(clippy::case_sensitive_file_extension_comparisons)]
+#![allow(clippy::single_match_else)]
+#![allow(clippy::large_futures)]
+
+pub mod code_graph_seat;
+pub mod code_index_branch_diff;
+pub mod code_index_executor;
+pub mod code_index_scheduler;
+pub mod code_index_task_support;
+pub(crate) mod config;
+pub mod git_index_transactions;
+pub mod git_transactions;
+#[cfg(unix)]
+pub mod git_watch;
+pub mod mcp_admission;
+pub(crate) mod ports;
+pub mod project_reads;
+
+/// The process-wide worker plan this runtime installs and schedules against;
+/// composition roots read its status from here instead of depending on the
+/// index crate for that one call.
+pub use tracedecay_code_index::parallelism;
+
+/// Historical `crate::code_index` / `crate::query` paths from the root move.
+pub(crate) use tracedecay_code_index as code_index;
+pub(crate) use tracedecay_query as query;
+
+/// Same abort authority re-exported by `tracedecay-daemon-service`.
+pub use tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
+
+pub use code_graph_seat::{
+    CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1, CodeGraphSeatRuntimePortV1,
+};
+pub use code_index_scheduler::CodeIndexSchedulerRegistryV1;
+pub use code_index_scheduler::identity::resolved_scope_for_project;
+pub use ports::{
+    AdmissionParkLeaseV1, ApplicationCatalogSnapshotErrorV1, CONNECTION_ADMISSION,
+    GitWatchMaintenanceWakeV1, GitWatchSyncConfigV1, park_admission,
+};
+
+/// Installs the registered global/session schema into the kernel's fail-closed
+/// port for this crate's test process.
+#[cfg(test)]
+pub(crate) fn register_test_schema_installer() {
+    tracedecay_global_db::register_registered_schema_installer();
+}

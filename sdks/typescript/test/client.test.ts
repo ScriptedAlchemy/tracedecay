@@ -1,0 +1,1627 @@
+import { once } from "node:events";
+import {
+  createServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from "node:http";
+
+import { describe, expect, it, vi } from "vitest";
+
+import { OPERATIONS } from "../src/operations";
+import { factStoreCurateTerminalMatches } from "../src/automation-terminal";
+import {
+  decodeCanonicalSchema,
+  decodeHttpSuccessEnvelope,
+  type HttpSuccessEnvelope,
+  type PageState,
+} from "../src/types";
+
+import {
+  TraceDecayAbortError,
+  TraceDecayDisconnectedError,
+  TraceDecayMalformedResponseError,
+  TraceDecayPartialEffectError,
+  TraceDecayProtocolError,
+  TraceDecayResetRequiredError,
+  createClient,
+  type OperationRequestOptions,
+} from "../src/client";
+
+type RequestHandler = (
+  request: IncomingMessage,
+  response: ServerResponse,
+  body: string,
+) => void | Promise<void>;
+
+const RECEIPT = {
+  started_at: 10,
+  ended_at: 20,
+  effective_deadline: { expires_at: 30 },
+  cancellation: null,
+  budget: {
+    units_consumed: 1,
+    bytes_consumed: 2,
+    elapsed_micros: 3,
+  },
+  termination: "completed",
+  future_receipt_field: "preserved",
+};
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+async function canonicalDigest(value: unknown): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(canonicalJson(value)),
+  );
+  return `sha256:${Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+async function curationEnvelope() {
+  const owner = { kind: "profile" };
+  const ownerDigest = await canonicalDigest(["fact-owner.v1", owner]);
+  const ownerBinding = ownerDigest.slice("sha256:".length);
+  const sourceFactId = `fact.v1.${ownerBinding}.${"a".repeat(64)}`;
+  const targetFactId = `fact.v1.${ownerBinding}.${"b".repeat(64)}`;
+  const receipt = {
+    owner,
+    operation_id: "operation.sdk.curate",
+    input_digest: "c".repeat(64),
+    automation_run_id: "request.sdk.curate",
+    operation_effects: [{
+      kind: "link_facts",
+      source_fact_id: sourceFactId,
+      target_fact_id: targetFactId,
+      relation: {
+        kind: "supports",
+        evidence_fact_ids: [sourceFactId],
+        confidence_millionths: 900_000,
+        provenance: {
+          source_label: "sdk fixture",
+          sanitization_receipt: {
+            receipt: {
+              receipt_id: "receipt.sdk",
+              sanitizer_version: "sanitizer.sdk",
+            },
+            disposition: "redacted",
+            sensitivity: "secret",
+            payload: { digest: `sha256:${"d".repeat(64)}`, byte_len: 1 },
+          },
+        },
+      },
+      disposition: "linked",
+      commit: {
+        disposition: "committed",
+        fact_id: sourceFactId,
+        owner,
+        committed_event_ids: ["event.sdk"],
+        last_event_id: "event.sdk",
+        active_assertion_id: "assertion.sdk",
+      },
+    }],
+    replay_fact_id: sourceFactId,
+    replay_event_id: "event.sdk",
+    changed_fact_ids: [sourceFactId, targetFactId],
+    accepted_operations: 1,
+    facts_added: 0,
+    facts_updated: 0,
+    facts_merged: 0,
+    facts_removed: 0,
+    normalized_tags: 0,
+    facts_linked: 1,
+  };
+  const requestDigest = await canonicalDigest([
+    "tracedecay.automation-run.request-identity.v1",
+    {
+      kind: "memory_curator",
+      options: { fact_review_limit: 24, min_confidence_millionths: 720_000 },
+    },
+  ]);
+  const result = {
+    run_id: "request.sdk.curate",
+    task: "memory_curator",
+    request_digest: requestDigest,
+    terminal: {
+      status: "completed",
+      summary: {
+        reviewed_count: 1,
+        accepted_count: 1,
+        rejected_count: 0,
+        skipped_count: 0,
+      },
+    },
+    committed_receipts: [{
+      kind: "curation",
+      receipt: {
+        receipt,
+        canonical_digest: await canonicalDigest([
+          "tracedecay.automation-run.curation-receipt.v1",
+          receipt,
+        ]),
+      },
+    }],
+  };
+  return {
+    request_id: "request.sdk.curate",
+    outcome: { outcome: "effect", value: { payload: result } },
+  };
+}
+
+async function resealCurationEnvelope(envelope: Awaited<ReturnType<typeof curationEnvelope>>) {
+  const settled = envelope.outcome.value.payload.committed_receipts[0]!.receipt;
+  settled.canonical_digest = await canonicalDigest([
+    "tracedecay.automation-run.curation-receipt.v1",
+    settled.receipt,
+  ]);
+  return envelope;
+}
+
+function successEnvelope(payload: unknown, cursor: unknown = null) {
+  return {
+    kind: "success",
+    value: {
+      binding_id: "binding.http.workflow.list_definitions",
+      contract: {
+        schema_id: "schema.workflow.list_definitions.result",
+        schema_revision: 1,
+      },
+      request_id: "request.http.1",
+      scope: {
+        project_id: "project.sdk",
+        future_scope_field: true,
+      },
+      outcome: {
+        outcome: "evidence",
+        value: {
+          temporal: {},
+          authority: {},
+          evidence_authorities: [],
+          coverage: {},
+          omissions: [],
+          scores: [],
+          contributions: [],
+          page: {
+            sort_contract_id: "sort.sdk-test",
+            sort_revision: 1,
+            total: 1,
+            returned: 1,
+            cursor,
+            expires_at: null,
+          },
+          payload,
+          execution: structuredClone(RECEIPT),
+          future_outcome_field: "preserved",
+        },
+      },
+      future_envelope_field: "preserved",
+    },
+  };
+}
+
+/** A retained fact-store evidence envelope for the named HTTP binding. */
+function factStoreEnvelope(
+  operation: "fact_store_search" | "fact_store_list",
+  payload: unknown,
+  cursor: unknown,
+) {
+  const envelope = successEnvelope(payload, cursor);
+  envelope.value.binding_id = `binding.http.${operation}.v1`;
+  envelope.value.contract.schema_id =
+    `schema.application.retained.${operation.replaceAll("_", "-")}.result`;
+  return envelope;
+}
+
+function evidencePage(envelope: HttpSuccessEnvelope<unknown>): PageState {
+  if (envelope.outcome.outcome !== "evidence") {
+    throw new Error(`expected evidence, received ${envelope.outcome.outcome}`);
+  }
+  return envelope.outcome.value.page;
+}
+
+function problemEnvelope(
+  kind: string,
+  code: string,
+  options: {
+    bindingId?: string;
+    retry?: string;
+    retryable?: boolean;
+    legalActions?: string[];
+    retryAfterMillis?: number | null;
+    committedReceipt?: unknown;
+    cancellationStage?: string | null;
+    unavailableClassification?: string | null;
+    executionFailureClassification?: string | null;
+    diagnostic?: unknown;
+    terminality?: string;
+  } = {},
+) {
+  const retry = options.retry ?? "never";
+  const cancellationStage =
+    options.cancellationStage ??
+    (kind === "cancelled" || kind === "timed_out"
+      ? "before_admission"
+      : null);
+  const unavailableClassification =
+    options.unavailableClassification ??
+    (kind === "unavailable" ? "authority" : null);
+  const executionFailureClassification =
+    options.executionFailureClassification ??
+    (kind === "execution_failed" ? "permanent" : null);
+  const admitted =
+    kind === "partial_effect" ||
+    kind === "reset_required" ||
+    kind === "execution_failed" ||
+    (cancellationStage !== null && cancellationStage !== "before_admission") ||
+    (unavailableClassification !== null && unavailableClassification !== "authority");
+  const diagnostic =
+    options.diagnostic !== undefined
+      ? options.diagnostic
+      : kind === "not_found_or_not_authorized" ||
+          kind === "cancelled" ||
+          kind === "timed_out"
+        ? null
+        : { code, message: code };
+  const value: Record<string, unknown> = {
+    contract: {
+      schema_id: "schema.application.problem",
+      schema_revision: 1,
+    },
+    request_id: `request.${code}`,
+    problem: {
+      revision: 1,
+      kind,
+      code,
+      message: code,
+      diagnostic,
+      committed_receipt: options.committedReceipt ?? null,
+      owning_layer: "application",
+      terminality:
+        options.terminality ??
+        (admitted ? "admitted_terminal" : "pre_admission"),
+      retryable: options.retryable ?? false,
+      retry,
+      retry_scope:
+        retry === "never"
+          ? null
+          : retry === "same_request" || retry === "after_delay"
+            ? "same_request"
+            : retry === "after_revalidate"
+              ? "fresh_request"
+              : "same_operation",
+      retry_after_millis: options.retryAfterMillis ?? null,
+      cancellation_stage: cancellationStage,
+      unavailable_classification: unavailableClassification,
+      execution_failure_classification: executionFailureClassification,
+      request_id: `request.${code}`,
+      trace_id: `trace.${code}`,
+      details: [],
+      legal_actions: options.legalActions ?? [],
+      coverage: null,
+      future_problem_field: "preserved",
+    },
+  };
+  if (options.bindingId !== undefined) {
+    value.binding_id = options.bindingId;
+  }
+  return { kind: "problem", value };
+}
+
+function requestThroughTransport(
+  client: ReturnType<typeof createClient>,
+  options: OperationRequestOptions = {},
+): Promise<HttpSuccessEnvelope<unknown>> {
+  return client.operations.workflow_list_definitions({}, options);
+}
+
+async function readBody(request: IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function listen(handlers: RequestHandler[]): Promise<{
+  server: Server;
+  baseUrl: string;
+  requests: IncomingMessage[];
+}> {
+  const requests: IncomingMessage[] = [];
+  let index = 0;
+  const server = createServer(async (request, response) => {
+    requests.push(request);
+    const handler = handlers[index];
+    index += 1;
+    if (handler === undefined) {
+      response.writeHead(500, { "content-type": "text/plain" });
+      response.end(`unexpected request ${index}: ${request.url}`);
+      return;
+    }
+    try {
+      await handler(request, response, await readBody(request));
+    } catch (error) {
+      response.destroy(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    throw new Error("test server did not bind a TCP address");
+  }
+  return {
+    server,
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    requests,
+  };
+}
+
+async function withServer(
+  handlers: RequestHandler[],
+  run: (baseUrl: string, requests: IncomingMessage[]) => Promise<void>,
+): Promise<void> {
+  const fixture = await listen(handlers);
+  try {
+    await run(fixture.baseUrl, fixture.requests);
+  } finally {
+    fixture.server.closeAllConnections();
+    fixture.server.close();
+    await once(fixture.server, "close");
+  }
+}
+
+function json(
+  response: ServerResponse,
+  status: number,
+  value: unknown,
+): void {
+  response.writeHead(status, { "content-type": "application/json" });
+  response.end(JSON.stringify(value));
+}
+
+describe("canonical JSON Schema decoding", () => {
+  it("enforces integer formats and rejects unsafe numbers", () => {
+    const uint32 = { type: "integer", format: "uint32" } as const;
+    const uint64 = { type: "integer", format: "uint64" } as const;
+    const int64 = { type: "integer", format: "int64" } as const;
+
+    expect(decodeCanonicalSchema(4_294_967_295, uint32)).toBe(4_294_967_295);
+    expect(decodeCanonicalSchema(Number.MAX_SAFE_INTEGER, uint64)).toBe(
+      Number.MAX_SAFE_INTEGER,
+    );
+    expect(decodeCanonicalSchema(Number.MIN_SAFE_INTEGER, int64)).toBe(
+      Number.MIN_SAFE_INTEGER,
+    );
+    expect(() => decodeCanonicalSchema(4_294_967_296, uint32)).toThrow(TypeError);
+    expect(() =>
+      decodeCanonicalSchema(Number.MAX_SAFE_INTEGER + 1, uint64),
+    ).toThrow(TypeError);
+    expect(() => decodeCanonicalSchema(true, uint64)).toThrow(TypeError);
+  });
+
+  it("canonicalizes unique object keys in one serialization per item", () => {
+    const schema = {
+      type: "array",
+      uniqueItems: true,
+      items: { type: "object" },
+    } as const;
+    expect(() =>
+      decodeCanonicalSchema(
+        [
+          { alpha: 1, beta: 2 },
+          { beta: 2, alpha: 1 },
+        ],
+        schema,
+      ),
+    ).toThrow(TypeError);
+
+    let serializations = 0;
+    const originalStringify = JSON.stringify.bind(JSON);
+    const stringify = vi.spyOn(JSON, "stringify").mockImplementation((value: unknown) => {
+      serializations += 1;
+      return originalStringify(value);
+    });
+    try {
+      decodeCanonicalSchema(
+        Array.from({ length: 100 }, (_, index) => ({ index })),
+        schema,
+      );
+    } finally {
+      stringify.mockRestore();
+    }
+    expect(serializations).toBe(100);
+  });
+});
+
+describe("TraceDecayClient generated operation bindings", () => {
+  it("preserves remote base paths and origin policy", async () => {
+    let requestedUrl = "";
+    let requestedOrigin = "";
+    let requestedDeadline = "";
+    const client = createClient({
+      baseUrl: "https://remote.example/api/v1/",
+      projectId: "project.sdk",
+      token: "sdk-secret",
+      origin: "https://consumer.example",
+      fetch: async (input, init) => {
+        requestedUrl = String(input);
+        const headers = new Headers(init?.headers);
+        requestedOrigin = headers.get("origin") ?? "";
+        requestedDeadline =
+          headers.get("x-tracedecay-deadline-micros") ?? "";
+        return new Response(JSON.stringify(successEnvelope({ status: "ok" })), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    await expect(
+      client.operations.workflow_list_definitions(
+        {},
+        { deadlineMicros: 1_800_000_000_000_003 },
+      ),
+    ).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+
+    expect(requestedUrl).toBe(
+      "https://remote.example/api/v1/projects/project.sdk/application/workflow/list-definitions",
+    );
+    expect(requestedOrigin).toBe("https://consumer.example");
+    expect(requestedDeadline).toBe("1800000000000003");
+  });
+
+  it("requires and sends the stable automatic-curation replay handle", async () => {
+    let fetchCalls = 0;
+    let replayHeader = "";
+    const client = createClient({
+      baseUrl: "http://127.0.0.1:43123",
+      projectId: "project.sdk",
+      token: "sdk-secret",
+      fetch: async (_input, init) => {
+        fetchCalls += 1;
+        replayHeader = new Headers(init?.headers).get("x-tracedecay-request-id") ?? "";
+        return new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    await expect(client.operations.application_fact_store_curate({}))
+      .rejects.toBeInstanceOf(TraceDecayProtocolError);
+    expect(fetchCalls).toBe(0);
+    await expect(client.operations.application_fact_store_curate(
+      {},
+      { requestId: "request.sdk.curate" },
+    )).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+    expect(fetchCalls).toBe(1);
+    expect(replayHeader).toBe("request.sdk.curate");
+  });
+
+  it("rejects an automatic-curation problem bound to a foreign replay handle", async () => {
+    const envelope = problemEnvelope("conflict", "retained.request_already_active", {
+      bindingId: "binding.http.fact_store_curate.v1",
+      retry: "same_request",
+      retryable: true,
+      legalActions: ["retry"],
+    });
+    envelope.value.request_id = "request.foreign";
+    (envelope.value.problem as Record<string, unknown>).request_id = "request.foreign";
+    const client = createClient({
+      baseUrl: "http://127.0.0.1:43123",
+      projectId: "project.sdk",
+      token: "sdk-secret",
+      fetch: async () => new Response(JSON.stringify(envelope), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }),
+    });
+
+    await expect(client.operations.application_fact_store_curate(
+      {},
+      { requestId: "request.sdk.curate" },
+    )).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+  });
+
+  it("binds structurally valid automatic-curation terminals to the replay handle", async () => {
+    const digest = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(JSON.stringify([
+        "tracedecay.automation-run.request-identity.v1",
+        {
+          kind: "memory_curator",
+          options: {
+            fact_review_limit: 24,
+            min_confidence_millionths: 720_000,
+          },
+        },
+      ])),
+    );
+    const requestDigest = `sha256:${Array.from(new Uint8Array(digest), (byte) =>
+      byte.toString(16).padStart(2, "0")).join("")}`;
+    const result = {
+      run_id: "request.sdk.curate",
+      task: "memory_curator",
+      request_digest: requestDigest,
+      terminal: {
+        status: "completed",
+        summary: {
+          reviewed_count: 0,
+          accepted_count: 0,
+          rejected_count: 0,
+          skipped_count: 0,
+        },
+      },
+      committed_receipts: [],
+    };
+    const envelope = {
+      request_id: "request.sdk.curate",
+      outcome: { outcome: "effect", value: { payload: result } },
+    };
+
+    await expect(factStoreCurateTerminalMatches({}, envelope)).resolves.toBe(true);
+    await expect(factStoreCurateTerminalMatches({}, {
+      ...envelope,
+      outcome: {
+        outcome: "effect",
+        value: { payload: { ...result, run_id: "request.foreign" } },
+      },
+    })).resolves.toBe(false);
+  });
+
+  it("matches Rust nested curation identity and sanitization rejections", async () => {
+    const valid = await curationEnvelope();
+    await expect(factStoreCurateTerminalMatches({}, valid)).resolves.toBe(true);
+
+    const invalidAssertion = structuredClone(valid);
+    invalidAssertion.outcome.value.payload.committed_receipts[0]!.receipt.receipt
+      .operation_effects[0]!.commit!.active_assertion_id = "";
+    await expect(factStoreCurateTerminalMatches(
+      {},
+      await resealCurationEnvelope(invalidAssertion),
+    )).resolves.toBe(false);
+
+    const invalidOwner = structuredClone(valid);
+    const invalidOwnerReceipt = invalidOwner.outcome.value.payload.committed_receipts[0]!.receipt
+      .receipt as unknown as Record<string, unknown>;
+    invalidOwnerReceipt.owner = {
+      kind: "project",
+      project_id: "",
+    };
+    await expect(factStoreCurateTerminalMatches(
+      {},
+      await resealCurationEnvelope(invalidOwner),
+    )).resolves.toBe(false);
+
+    for (const mutate of [
+      (sanitization: Record<string, unknown>) => {
+        sanitization.disposition = "accepted";
+        sanitization.sensitivity = "secret";
+      },
+      (sanitization: Record<string, unknown>) => {
+        (sanitization.receipt as Record<string, unknown>).receipt_id = "";
+      },
+      (sanitization: Record<string, unknown>) => {
+        (sanitization.payload as Record<string, unknown>).digest = "d".repeat(64);
+      },
+    ]) {
+      const invalid = structuredClone(valid);
+      const sanitization = invalid.outcome.value.payload.committed_receipts[0]!.receipt.receipt
+        .operation_effects[0]!.relation!.provenance.sanitization_receipt;
+      mutate(sanitization);
+      await expect(factStoreCurateTerminalMatches(
+        {},
+        await resealCurationEnvelope(invalid),
+      )).resolves.toBe(false);
+    }
+  });
+
+  it("fails closed on malformed typed Workflow requests before transport", async () => {
+    let fetchCalls = 0;
+    const client = createClient({
+      baseUrl: "http://127.0.0.1:43123",
+      projectId: "project.sdk",
+      token: "sdk-secret",
+      fetch: async () => {
+        fetchCalls += 1;
+        throw new Error("transport must not be reached");
+      },
+    });
+
+    await expect(
+      client.operations.workflow_get_definition(
+        // @ts-expect-error Deliberately malformed at the package boundary.
+        { definition_id: "workflow.sdk", definition_version: "1" },
+      ),
+    ).rejects.toBeInstanceOf(TypeError);
+    expect(fetchCalls).toBe(0);
+    expect("invoke" in client).toBe(false);
+    expect("requestOperation" in client).toBe(false);
+    expect(Reflect.get(client, "requestOperation")).toBeUndefined();
+  });
+
+  it("publishes workflow_register_definition with the canonical descriptor identity", () => {
+    const client = createClient({
+      baseUrl: "http://127.0.0.1:43123",
+      projectId: "project.sdk",
+      token: "sdk-secret",
+    });
+    expect("workflow_register_definition" in client.operations).toBe(true);
+
+    const descriptor = OPERATIONS.find(
+      (operation) => operation.operation === "workflow_register_definition",
+    );
+    expect(descriptor).toBeDefined();
+    expect(descriptor?.operationId).toBe("operation.workflow.register_definition");
+    expect(descriptor?.transport).toEqual({
+      kind: "http",
+      route: "/application/workflow/register-definition",
+      method: "POST",
+    });
+    expect(descriptor?.effect).toBe("administrative");
+    expect(descriptor?.idempotency).toBe("required");
+    expect(descriptor?.bindingId).toBe("binding.http.workflow.register_definition");
+    expect(descriptor?.requestSchema).toEqual({
+      schemaId: "schema.workflow.register_definition.request",
+      revision: 1,
+    });
+    expect(descriptor?.resultSchema).toEqual({
+      schemaId: "schema.workflow.register_definition.result",
+      revision: 1,
+    });
+    expect(descriptor?.deadline).toEqual({
+      maximum_millis: 30_000,
+      behavior: "return_effect_receipt",
+    });
+  });
+
+  it("rejects an operation-illegal terminal before decoding its payload", () => {
+    const descriptor = OPERATIONS.find(
+      (operation) => operation.operation === "application_configuration_set",
+    );
+    expect(descriptor).toBeDefined();
+    const response = successEnvelope({});
+    response.value.binding_id = "binding.http.configuration_set.v1";
+    response.value.contract = {
+      schema_id: "schema.application.configuration.configuration_set.result",
+      schema_revision: 1,
+    };
+    // An effect outcome deliberately replaces the helper's evidence shape;
+    // decodeSuccess treats the envelope as unknown wire input.
+    response.value.outcome = {
+      outcome: "effect",
+      value: {
+        effect_id: "effect.configuration.sdk",
+        effect_class: "configuration_write",
+        idempotency_key: "configuration.idempotency.sdk",
+        authority: {},
+        expected_state: "configuration.revision.sdk",
+        reconciliation: "required",
+        receipt: {},
+        payload: {},
+        execution: {
+          ...structuredClone(RECEIPT),
+          termination: "cancelled",
+        },
+      },
+    } as unknown as typeof response.value.outcome;
+
+    expect(() => descriptor?.decodeSuccess(response.value)).toThrow(
+      /termination cancelled is not legal for this operation/,
+    );
+  });
+
+});
+
+describe("TraceDecayClient transport envelopes", () => {
+  it("classifies admitted terminal problems and requires committed_receipt", async () => {
+    const bindingId = "binding.http.workflow.list_definitions";
+    const reset = problemEnvelope("reset_required", "store_reset_required", {
+      bindingId,
+      legalActions: ["reset"],
+    });
+    const partial = problemEnvelope("partial_effect", "effect_partially_committed", {
+      bindingId,
+      legalActions: ["reconcile"],
+      committedReceipt: {
+        operation: "operation.memory-automation-run",
+        request_id: "request.effect_partially_committed",
+        effect_class: "administrative",
+        idempotency_key: "idempotency.partial",
+        input_digest: "digest.partial",
+        outcome: "partial",
+        committed_state: "state.partial",
+        external_proof: null,
+      },
+    });
+    const missingReceipt = problemEnvelope("reset_required", "missing_receipt_field", {
+      bindingId,
+      legalActions: ["reset"],
+    });
+    delete (missingReceipt.value.problem as Record<string, unknown>).committed_receipt;
+    const wrongStatus = problemEnvelope("reset_required", "wrong_status", {
+      bindingId,
+      legalActions: ["reset"],
+    });
+
+    await withServer(
+      [
+        (_request, response) => json(response, 503, reset),
+        (_request, response) => json(response, 409, partial),
+        (_request, response) => json(response, 503, missingReceipt),
+        (_request, response) => json(response, 409, wrongStatus),
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+          TraceDecayResetRequiredError,
+        );
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+          TraceDecayPartialEffectError,
+        );
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+          TraceDecayMalformedResponseError,
+        );
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+          TraceDecayMalformedResponseError,
+        );
+      },
+    );
+  });
+
+  it("rejects invalid canonical page options before transport", async () => {
+    let fetchCalls = 0;
+    const client = createClient({
+      baseUrl: "http://127.0.0.1:43123",
+      projectId: "project.sdk",
+      token: "sdk-secret",
+      fetch: async () => {
+        fetchCalls += 1;
+        throw new Error("transport must not be reached");
+      },
+    });
+
+    await expect(
+      requestThroughTransport(client, { page: { size: 0 } }),
+    ).rejects.toBeInstanceOf(TraceDecayProtocolError);
+    await expect(
+      requestThroughTransport(client, { page: { size: 1_001 } }),
+    ).rejects.toBeInstanceOf(TraceDecayProtocolError);
+    await expect(
+      requestThroughTransport(client, { page: { cursor: " cursor " } }),
+    ).rejects.toBeInstanceOf(TraceDecayProtocolError);
+    await expect(
+      requestThroughTransport(client, { deadlineMicros: 0 }),
+    ).rejects.toBeInstanceOf(TraceDecayProtocolError);
+    await expect(
+      requestThroughTransport(client, { deadlineMicros: 1.5 }),
+    ).rejects.toBeInstanceOf(TraceDecayProtocolError);
+    expect(fetchCalls).toBe(0);
+  });
+
+  it("fails closed when a success envelope contains an invalid page", async () => {
+    const envelope = successEnvelope({ files: [] });
+    envelope.value.outcome.value.page.returned = 2;
+    envelope.value.outcome.value.page.total = 1;
+
+    await withServer(
+      [
+        (request, response) => {
+          expect(request.method).toBe("POST");
+          expect(request.url).toBe(
+            "/projects/project.sdk/application/workflow/list-definitions",
+          );
+          json(response, 200, envelope);
+        },
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+          TraceDecayMalformedResponseError,
+        );
+      },
+    );
+  });
+
+  it("decodes each canonical page cursor shape and consumes its continuation", async () => {
+    const factId = `fact.v1.${"a".repeat(64)}.${"b".repeat(64)}`;
+    const searchCursor = {
+      score_millionths: 750_000,
+      updated_at: 1_700_000_000_000_000,
+      fact_id: factId,
+    };
+    const searchPayload = {
+      graph_coverage: { kind: "not_applicable" },
+      hits: [],
+      next_after: searchCursor,
+      owner: { kind: "profile" },
+      retrieval_telemetry: { kind: "not_applicable" },
+    };
+    const listPayload = { facts: [], next_after_fact_id: factId, owner: { kind: "profile" } };
+
+    await withServer(
+      [
+        (_request, response) =>
+          json(response, 200, successEnvelope([], { kind: "opaque", cursor: "cursor.page-2" })),
+        (request, response) => {
+          expect(request.url).toBe(
+            "/projects/project.sdk/application/workflow/list-definitions?cursor=cursor.page-2",
+          );
+          json(response, 200, successEnvelope([]));
+        },
+        (_request, response) =>
+          json(
+            response,
+            200,
+            factStoreEnvelope("fact_store_search", searchPayload, {
+              kind: "fact_search",
+              cursor: searchCursor,
+            }),
+          ),
+        (request, response, body) => {
+          expect(request.url).toBe("/projects/project.sdk/application/retained/fact_store_search");
+          expect(JSON.parse(body)).toEqual({ query: "memory", after: searchCursor });
+          json(response, 200, factStoreEnvelope("fact_store_search", searchPayload, null));
+        },
+        (_request, response) =>
+          json(
+            response,
+            200,
+            factStoreEnvelope("fact_store_list", listPayload, {
+              kind: "fact_list_after",
+              fact_id: factId,
+            }),
+          ),
+        (request, response, body) => {
+          expect(request.url).toBe("/projects/project.sdk/application/retained/fact_store_list");
+          expect(JSON.parse(body)).toEqual({ after_fact_id: factId });
+          json(response, 200, factStoreEnvelope("fact_store_list", listPayload, null));
+        },
+      ],
+      async (baseUrl) => {
+        const client = createClient({ baseUrl, projectId: "project.sdk", token: "sdk-secret" });
+
+        const opaque = evidencePage(await client.operations.workflow_list_definitions({})).cursor;
+        expect(opaque).toEqual({ kind: "opaque", cursor: "cursor.page-2" });
+        if (opaque?.kind !== "opaque") throw new Error("expected an opaque cursor");
+        expect(
+          evidencePage(
+            await client.operations.workflow_list_definitions(
+              {},
+              { page: { cursor: opaque.cursor } },
+            ),
+          ).cursor,
+        ).toBeNull();
+
+        const search = evidencePage(
+          await client.operations.application_fact_store_search({ query: "memory" }),
+        ).cursor;
+        expect(search).toEqual({ kind: "fact_search", cursor: searchCursor });
+        if (search?.kind !== "fact_search") throw new Error("expected a fact search cursor");
+        expect(
+          evidencePage(
+            await client.operations.application_fact_store_search({
+              query: "memory",
+              after: search.cursor,
+            }),
+          ).cursor,
+        ).toBeNull();
+
+        const list = evidencePage(await client.operations.application_fact_store_list({})).cursor;
+        expect(list).toEqual({ kind: "fact_list_after", fact_id: factId });
+        if (list?.kind !== "fact_list_after") throw new Error("expected a fact list cursor");
+        expect(
+          evidencePage(
+            await client.operations.application_fact_store_list({ after_fact_id: list.fact_id }),
+          ).cursor,
+        ).toBeNull();
+      },
+    );
+  });
+
+  it("refuses non-canonical page cursors after decoding", async () => {
+    const cursors: unknown[] = [
+      "cursor.page-2",
+      { kind: "opaque", cursor: "a".repeat(4_097) },
+      { kind: "opaque", cursor: " padded " },
+      { kind: "opaque", cursor: "" },
+      { kind: "opaque", cursor: "tab\tseparated" },
+      { kind: "fact_search", cursor: { score_millionths: 1, updated_at: 2 } },
+      { kind: "fact_search", cursor: { score_millionths: 4_294_967_296, updated_at: 2, fact_id: "f" } },
+      { kind: "fact_list_after", fact_id: 7 },
+      { kind: "unknown_tag", cursor: "cursor.page-2" },
+    ];
+    let served: unknown = null;
+    const client = createClient({
+      baseUrl: "http://127.0.0.1:43123",
+      projectId: "project.sdk",
+      token: "sdk-secret",
+      fetch: async () => new Response(JSON.stringify(served), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    });
+
+    served = successEnvelope([], { kind: "opaque", cursor: "a".repeat(4_096) });
+    expect(evidencePage(await requestThroughTransport(client)).cursor).toEqual({
+      kind: "opaque",
+      cursor: "a".repeat(4_096),
+    });
+    for (const cursor of cursors) {
+      served = successEnvelope([], cursor);
+      await expect(requestThroughTransport(client), JSON.stringify(cursor).slice(0, 80))
+        .rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+    }
+  });
+
+  it("fails closed when problem envelope identities disagree", async () => {
+    const envelope = problemEnvelope("unavailable", "service_unavailable");
+    (envelope.value.problem as Record<string, unknown>).request_id =
+      "request.different";
+
+    await withServer(
+      [
+        (_request, response) => {
+          json(response, 503, envelope);
+        },
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+
+        await expect(
+          client.cancelOperation("request.operation"),
+        ).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+      },
+    );
+  });
+
+  it("rejects classified admitted terminals that Rust would reject", async () => {
+    const unavailable = problemEnvelope("unavailable", "backend.unavailable", {
+      unavailableClassification: "backend_unavailable",
+      retry: "after_revalidate",
+      retryable: true,
+      legalActions: ["retry"],
+    });
+    (unavailable.value.problem as Record<string, unknown>).retry = "never";
+    (unavailable.value.problem as Record<string, unknown>).retryable = false;
+    (unavailable.value.problem as Record<string, unknown>).retry_scope = null;
+
+    const executionFailed = problemEnvelope(
+      "execution_failed",
+      "backend.execution_failed",
+      { legalActions: ["contact_administrator"], diagnostic: null },
+    );
+
+    await withServer(
+      [
+        (_request, response) => json(response, 503, unavailable),
+        (_request, response) => json(response, 500, executionFailed),
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+          TraceDecayMalformedResponseError,
+        );
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+          TraceDecayMalformedResponseError,
+        );
+      },
+    );
+  });
+
+  it("rejects a problem envelope from a different executable binding", async () => {
+    const envelope = problemEnvelope("unavailable", "service_unavailable", {
+      bindingId: "binding.http.different.v1",
+    });
+
+    await withServer(
+      [
+        (_request, response) => {
+          json(response, 503, envelope);
+        },
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+          TraceDecayMalformedResponseError,
+        );
+      },
+    );
+  });
+});
+
+describe("TraceDecayClient operation lifecycle", () => {
+  it("accepts the server media type, UTF-8 BOM, and inherited SSE event ID", async () => {
+    await withServer(
+      [
+        (_request, response) => {
+          response.writeHead(200, {
+            "content-type": "text/event-stream; charset=utf-8",
+          });
+          response.end(
+            [
+              "\uFEFFevent: open",
+              'data: {"event":"open","data":{"correlation_id":"request.operation","frontier":{"next_sequence":0,"retained_from_sequence":0,"resume_token":"resume"}}}',
+              "",
+              "id: 0",
+              "",
+              "event: item",
+              'data: {"event":"item","data":{"sequence":0,"item":{"kind":"accepted"}}}',
+              "",
+              "event: completed",
+              "id: 1",
+              `data: ${JSON.stringify({
+                event: "completed",
+                data: {
+                  sequence: 1,
+                  terminal: { termination: "completed", receipt: RECEIPT },
+                },
+              })}`,
+              "",
+              "",
+            ].join("\r\n"),
+          );
+        },
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+        const events = [];
+        for await (const event of client.streamOperation("request.operation")) {
+          events.push(event);
+        }
+
+        expect(events.map((event) => [event.event, event.id])).toEqual([
+          ["open", null],
+          ["item", "0"],
+          ["completed", "1"],
+        ]);
+      },
+    );
+  });
+
+  it("reconnects after a transport interruption following open", async () => {
+    await withServer(
+      [
+        async (_request, response) => {
+          response.writeHead(200, {
+            "content-type": "text/event-stream",
+            connection: "close",
+          });
+          response.write(
+            [
+              "event: open",
+              'data: {"event":"open","data":{"correlation_id":"request.operation","frontier":{"next_sequence":0,"retained_from_sequence":0,"resume_token":"resume.interrupted"}}}',
+              "",
+              "",
+            ].join("\n"),
+          );
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          response.destroy(new Error("simulated body interruption"));
+        },
+        (request, response) => {
+          expect(request.url).toBe(
+            "/projects/project.sdk/application/operations/request.operation/events?next_sequence=0&resume_token=resume.interrupted",
+          );
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          response.end(
+            [
+              "event: open",
+              'data: {"event":"open","data":{"correlation_id":"request.operation","frontier":{"next_sequence":0,"retained_from_sequence":0,"resume_token":"resume.interrupted"}}}',
+              "",
+              "event: completed",
+              "id: 0",
+              `data: ${JSON.stringify({
+                event: "completed",
+                data: {
+                  sequence: 0,
+                  terminal: { termination: "completed", receipt: RECEIPT },
+                },
+              })}`,
+              "",
+              "",
+            ].join("\n"),
+          );
+        },
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+        const events = [];
+        for await (const event of client.streamOperation("request.operation", {
+          maxReconnects: 1,
+        })) {
+          events.push(event.event);
+        }
+        expect(events).toEqual(["open", "open", "completed"]);
+      },
+    );
+  });
+
+  it("rejects an open event for a different operation", async () => {
+    await withServer(
+      [
+        (_request, response) => {
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          response.end(
+            [
+              "event: open",
+              'data: {"event":"open","data":{"correlation_id":"request.other","frontier":{"next_sequence":0,"retained_from_sequence":0,"resume_token":"resume"}}}',
+              "",
+              "",
+            ].join("\n"),
+          );
+        },
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+        const consume = async () => {
+          for await (const _event of client.streamOperation("request.operation")) {
+            // Drain the stream.
+          }
+        };
+        await expect(consume()).rejects.toBeInstanceOf(
+          TraceDecayMalformedResponseError,
+        );
+      },
+    );
+  });
+
+  it("rejects a successful stream response with a non-SSE media type", async () => {
+    await withServer(
+      [
+        (_request, response) => {
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end(
+            [
+              "event: completed",
+              "id: 0",
+              `data: ${JSON.stringify({
+                event: "completed",
+                data: {
+                  sequence: 0,
+                  terminal: { termination: "completed", receipt: RECEIPT },
+                },
+              })}`,
+              "",
+              "",
+            ].join("\n"),
+          );
+        },
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+        const consume = async () => {
+          for await (const _event of client.streamOperation("request.operation")) {
+            // Drain the stream.
+          }
+        };
+
+        await expect(consume()).rejects.toBeInstanceOf(
+          TraceDecayMalformedResponseError,
+        );
+      },
+    );
+  });
+
+  it("preserves SSE order and resumes from the canonical frontier", async () => {
+    await withServer(
+      [
+        (request, response) => {
+          expect(request.method).toBe("GET");
+          expect(request.url).toBe(
+            "/projects/project.sdk/application/operations/request.operation/events",
+          );
+          response.writeHead(200, {
+            "content-type": "text/event-stream",
+            connection: "close",
+          });
+          response.end(
+            [
+              "event: open",
+              'data: {"event":"open","data":{"correlation_id":"request.operation","frontier":{"next_sequence":1,"retained_from_sequence":0,"resume_token":"opaque+/token=="}}}',
+              "",
+              "event: item",
+              "id: 0",
+              'data: {"event":"item","data":{"sequence":0,"item":{"kind":"accepted","future_item_field":true}}}',
+              "",
+              "",
+            ].join("\n"),
+          );
+        },
+        (request, response) => {
+          expect(request.method).toBe("GET");
+          expect(request.url).toBe(
+            "/projects/project.sdk/application/operations/request.operation/events?next_sequence=1&resume_token=opaque%2B%2Ftoken%3D%3D",
+          );
+          response.writeHead(200, {
+            "content-type": "text/event-stream",
+            connection: "close",
+          });
+          response.end(
+            [
+              "event: open",
+              'data: {"event":"open","data":{"correlation_id":"request.operation","frontier":{"next_sequence":1,"retained_from_sequence":0,"resume_token":"opaque+/token=="}}}',
+              "",
+              "event: progress",
+              "id: 1",
+              'data: {"event":"progress","data":{"sequence":1,"completed":1,"total":2}}',
+              "",
+              "event: future_signal",
+              "id: 2",
+              'data: {"event":"future_signal","data":{"sequence":2,"future_field":{"kept":true}},"future_event_field":"preserved"}',
+              "",
+              "event: completed",
+              "id: 3",
+              `data: ${JSON.stringify({
+                event: "completed",
+                data: {
+                  sequence: 3,
+                  terminal: {
+                    termination: "completed",
+                    receipt: RECEIPT,
+                  },
+                },
+              })}`,
+              "",
+              "",
+            ].join("\n"),
+          );
+        },
+      ],
+      async (baseUrl, requests) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+        const events = [];
+        for await (const event of client.streamOperation("request.operation", {
+          maxReconnects: 1,
+        })) {
+          events.push(event);
+        }
+
+        expect(events.map((event) => event.event)).toEqual([
+          "open",
+          "item",
+          "open",
+          "progress",
+          "future_signal",
+          "completed",
+        ]);
+        expect(events.filter((event) => event.id === "0")).toHaveLength(1);
+        expect(events[4]?.data).toMatchObject({
+          event: "future_signal",
+          data: { future_field: { kept: true } },
+          future_event_field: "preserved",
+        });
+        expect(events[5]?.data).toMatchObject({
+          data: {
+            terminal: {
+              receipt: {
+                termination: "completed",
+                future_receipt_field: "preserved",
+              },
+            },
+          },
+        });
+        expect(requests).toHaveLength(2);
+      },
+    );
+  });
+
+  it("parses canonical event-stream framing and publishes resume gaps explicitly", async () => {
+    await withServer(
+      [
+        (_request, response) => {
+          response.writeHead(200, {
+            "content-type": "text/event-stream",
+          });
+          response.end(
+            [
+              ": heartbeat",
+              "event: open",
+              'data: {"event":"open","data":{"correlation_id":"request.operation",',
+              'data: "frontier":{"next_sequence":1,"retained_from_sequence":1,"resume_token":"resume"}}}',
+              "",
+              "event: resume_gap",
+              "id: 1",
+              'data: {"event":"resume_gap","data":{"sequence":1,"gap":{"first_missing_sequence":0,',
+              'data: "last_missing_sequence":0,"frontier":{"next_sequence":2,"retained_from_sequence":1,"resume_token":"resume"}}}}',
+              "",
+              "event: partial",
+              "id: 2",
+              `data: ${JSON.stringify({
+                event: "partial",
+                data: {
+                  sequence: 2,
+                  terminal: {
+                    termination: "partial",
+                    receipt: { ...RECEIPT, termination: "partial" },
+                  },
+                },
+              })}`,
+              "",
+              "",
+            ].join("\r"),
+          );
+        },
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+        const events = [];
+        for await (const event of client.streamOperation("request.operation")) {
+          events.push(event);
+        }
+
+        expect(events.map((event) => event.event)).toEqual([
+          "open",
+          "resume_gap",
+          "partial",
+        ]);
+        expect(events[1]?.data).toMatchObject({
+          data: {
+            gap: {
+              first_missing_sequence: 0,
+              last_missing_sequence: 0,
+            },
+          },
+        });
+      },
+    );
+  });
+
+  it("accepts valid retry fields, ignores invalid values, and fails closed on incomplete events", async () => {
+    await withServer(
+      [
+        (_request, response) => {
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          response.end(
+            [
+              "event: open",
+              "retry: 1",
+              "retry: invalid",
+              'data: {"event":"open","data":{"correlation_id":"request.operation","frontier":{"next_sequence":1,"retained_from_sequence":0,"resume_token":"resume"}}}',
+              "",
+              "event: item",
+              "id: 0",
+              'data: {"event":"item","data":{"sequence":0,"item":{"kind":"accepted"}}}',
+              "",
+              "",
+            ].join("\n"),
+          );
+        },
+        (_request, response) => {
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          response.end(
+            [
+              "event: open",
+              'data: {"event":"open","data":{"correlation_id":"request.operation","frontier":{"next_sequence":1,"retained_from_sequence":0,"resume_token":"resume"}}}',
+              "",
+              "event: completed",
+              "id: 1",
+              `data: ${JSON.stringify({
+                event: "completed",
+                data: {
+                  sequence: 1,
+                  terminal: { termination: "completed", receipt: RECEIPT },
+                },
+              })}`,
+              "",
+              "",
+            ].join("\n"),
+          );
+        },
+        (_request, response) => {
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          response.end(
+            [
+              "event: completed",
+              "id: 0",
+              `data: ${JSON.stringify({
+                event: "completed",
+                data: {
+                  sequence: 0,
+                  terminal: { termination: "completed", receipt: RECEIPT },
+                },
+              })}`,
+            ].join("\n"),
+          );
+        },
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+
+        const events = [];
+        for await (const event of client.streamOperation("request.operation", {
+          maxReconnects: 1,
+        })) {
+          events.push(event);
+        }
+        expect(events.map((event) => event.event)).toEqual([
+          "open",
+          "item",
+          "open",
+          "completed",
+        ]);
+
+        await expect(async () => {
+          for await (const _event of client.streamOperation("request.operation")) {
+            // Drain the stream.
+          }
+        }).rejects.toBeInstanceOf(TraceDecayDisconnectedError);
+      },
+    );
+  });
+
+  it("cancels through the canonical operation route without claiming rollback", async () => {
+    await withServer(
+      [
+        (request, response, body) => {
+          expect(request.method).toBe("POST");
+          expect(request.url).toBe(
+            "/projects/project.sdk/application/operations/request.operation/cancel",
+          );
+          expect(body).toBe("");
+          json(response, 202, { status: "requested", future_field: true });
+        },
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+        await expect(
+          client.cancelOperation("request.operation"),
+        ).resolves.toMatchObject({
+          status: "requested",
+          future_field: true,
+        });
+      },
+    );
+  });
+
+  it("fails closed on a non-canonical cancellation outcome", async () => {
+    await withServer(
+      [
+        (_request, response) => {
+          json(response, 202, { status: "accepted" });
+        },
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+
+        await expect(
+          client.cancelOperation("request.operation"),
+        ).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+      },
+    );
+  });
+
+  it("reports a non-resumable stream close as disconnected", async () => {
+    await withServer(
+      [
+        (_request, response) => {
+          response.writeHead(200, {
+            "content-type": "text/event-stream",
+            connection: "close",
+          });
+          response.end();
+        },
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+        const consume = async () => {
+          for await (const _event of client.streamOperation(
+            "request.operation",
+            { maxReconnects: 0 },
+          )) {
+            // No canonical event is available before disconnect.
+          }
+        };
+
+        await expect(consume()).rejects.toBeInstanceOf(
+          TraceDecayDisconnectedError,
+        );
+      },
+    );
+  });
+
+  it("propagates caller abort without a rollback claim", async () => {
+    await withServer(
+      [
+        (request, response) => {
+          request.once("aborted", () => response.destroy());
+        },
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+        const controller = new AbortController();
+        const pending = (async () => {
+          for await (const _event of client.streamOperation(
+            "request.operation",
+            { signal: controller.signal },
+          )) {
+            // Drain the stream.
+          }
+        })();
+        controller.abort("caller stopped waiting");
+
+        const aborted = await pending.catch((error: unknown) => error);
+        expect(aborted).toBeInstanceOf(TraceDecayAbortError);
+        expect((aborted as Error).message).not.toMatch(/rollback|rolled back/i);
+      },
+    );
+  });
+});
