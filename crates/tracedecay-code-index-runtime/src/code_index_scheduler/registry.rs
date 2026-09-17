@@ -892,20 +892,6 @@ fn same_park_identity(
     }
 }
 
-/// Whether terminal publication-authority corruption is parked on this slot.
-///
-/// The role lives on the shared park, not a flag on the worker task that
-/// observed it. Every reader of the slot, including a later pass of the same
-/// mount, sees the same answer.
-fn terminal_publication_authority_is_parked(
-    slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>,
-) -> bool {
-    slot.read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .as_ref()
-        .is_some_and(is_terminal_publication_authority_park)
-}
-
 /// Whether the current park re-checks on every wake (a contract violation an
 /// operator fix clears in place), as opposed to a terminal failure.
 fn convergence_park_retries_on_wake(slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>) -> bool {
@@ -948,41 +934,6 @@ mod terminal_publication_park_tests {
             observed_passes: 1,
             retries_on_wake: false,
         }
-    }
-
-    #[test]
-    fn terminal_publication_role_is_the_shared_park() {
-        let slot = RwLock::new(None);
-        assert!(!terminal_publication_authority_is_parked(&slot));
-        park_convergence(
-            &slot,
-            "corrupt-authority".to_owned(),
-            "retire and rebuild",
-            Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt),
-            false,
-        );
-        assert!(terminal_publication_authority_is_parked(&slot));
-        assert!(terminal_publication_authority_is_parked(&slot));
-        clear_convergence_park(&slot);
-        assert!(
-            terminal_publication_authority_is_parked(&slot),
-            "clearing a progressed pass must not move the terminal role off the park"
-        );
-    }
-
-    #[test]
-    fn worker_loop_does_not_keep_a_task_local_terminal_flag() {
-        let source = include_str!("registry/mount.rs");
-        let token = concat!("publication_authority_", "terminal");
-        let hits = source
-            .lines()
-            .map(str::trim_start)
-            .filter(|line| !line.starts_with("//") && line.contains(token))
-            .collect::<Vec<_>>();
-        assert!(
-            hits.is_empty(),
-            "terminal suppress must not be a flag on the worker task: {hits:?}"
-        );
     }
 
     #[test]

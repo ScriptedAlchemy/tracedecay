@@ -1229,7 +1229,7 @@ fn feedback_rollback_apply(
     state.switch_receipt = Some(switch_receipt.clone());
     persist_feedback_state(state_path, &lifecycle_root, &state)?;
     let lifecycle = rollback.into_lifecycle();
-    let writer = lifecycle.into_storage();
+    let mut writer = lifecycle.into_storage();
 
     let context = tracedecay_agent_hosts::agents::InstallContext {
         home: home.clone(),
@@ -1585,7 +1585,7 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay_domain::errors::Re
     state.restore_receipt = Some(restore.clone());
     persist_feedback_state(state_path, &lifecycle_root, &state)?;
     let lifecycle = rollback.into_lifecycle();
-    let writer = lifecycle.into_storage();
+    let mut writer = lifecycle.into_storage();
     let context = tracedecay_agent_hosts::agents::InstallContext {
         home,
         tracedecay_bin: tracedecay_agent_hosts::agents::which_tracedecay()
