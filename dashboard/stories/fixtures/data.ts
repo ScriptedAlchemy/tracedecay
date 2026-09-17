@@ -1727,9 +1727,9 @@ function schedulerStatusPayload(): Record<string, unknown> {
     configuration_revision_id: 'configuration.revision.automation.fixture',
     control_path: '/fast/projects/tracedecay/.tracedecay/automation.control.json',
     tasks: [
-      { task: 'memory_curator', due: false, skip_reason: 'cooldown', last_scheduler_run: null },
+      { task: 'memory_curator', due: false, skip_reason: 'scheduler_cooldown_active', last_scheduler_run: null },
       { task: 'session_reflector', due: true, skip_reason: null, last_scheduler_run: null },
-      { task: 'skill_writer', due: false, skip_reason: 'no_new_sessions', last_scheduler_run: null },
+      { task: 'skill_writer', due: false, skip_reason: 'no_new_session_activity', last_scheduler_run: null },
     ],
   };
 }

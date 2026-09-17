@@ -262,7 +262,7 @@ async fn run_memory_curator_for_store_with_publication(
     let _run_lock = match run.gate().await? {
         SchedulerGate::Proceed(lock) => lock,
         SchedulerGate::Skip(reason) => {
-            return skipped_run(&run, reason, None, None)
+            return skipped_run(&run, reason.as_str(), None, None)
                 .await
                 .map_err(Into::into);
         }

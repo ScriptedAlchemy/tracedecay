@@ -11,6 +11,7 @@ use tracedecay_automation_runtime::automation::runner::run_combined_review_with_
 use tracedecay_automation_runtime::automation::scheduler::AutomationTaskLock;
 #[cfg(feature = "test-transport")]
 use tracedecay_automation_runtime::automation::scheduler::{SessionActivity, schedule_decision};
+use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 use tracedecay_domain::SessionId;
 
 struct CountingAutomationSessionRetrieval {
@@ -238,7 +239,7 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
         let now = current_timestamp();
         let decision = schedule_decision(&config, task, &records, SessionActivity::none(), now);
         assert_eq!(
-            decision.skip_reason(),
+            decision.skip_reason().map(AutomationSkipReasonV1::as_str),
             Some("scheduler_interval_not_elapsed"),
             "{task:?} must count the combined run as its last scheduler run"
         );

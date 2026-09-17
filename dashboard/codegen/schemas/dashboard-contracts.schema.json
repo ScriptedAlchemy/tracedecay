@@ -1745,6 +1745,17 @@
         }
       ]
     },
+    "AutomationSchedulerAvailabilityV1": {
+      "description": "Closed availability vocabulary for the scheduler status reading.\n\nWire tokens stay the historical labels. A new state is a compile error in\n[`scheduler_status_label`] until this enum gains a variant.",
+      "enum": [
+        "paused",
+        "automation_disabled",
+        "delegated_host",
+        "backend_disabled",
+        "configured"
+      ],
+      "type": "string"
+    },
     "AutomationSchedulerStatusV1": {
       "additionalProperties": false,
       "description": "The scheduler reading served by `status`, `pause`, and `resume`.\n\nAutomation is autonomous: the status has no pending-review counters. The\nlast run record carries the validation, repair, application, quarantine,\nand deployment receipts that describe what actually happened.",
@@ -1778,8 +1789,7 @@
           "type": "integer"
         },
         "status": {
-          "description": "`paused`, `automation_disabled`, `delegated_host`, `backend_disabled`,\nor `configured`.",
-          "type": "string"
+          "$ref": "#/$defs/AutomationSchedulerAvailabilityV1"
         },
         "tasks": {
           "items": {
@@ -1849,9 +1859,13 @@
         "combined_review_disabled",
         "user_job_disabled",
         "job_commands_disabled",
+        "job_lock_active",
         "delegated_host_mode",
         "backend_disabled",
+        "backend_identity_suppressed",
         "scheduler_lock_active",
+        "scheduler_paused",
+        "scheduler_history_invalid",
         "task_not_schedulable",
         "scheduler_schedule_invalid",
         "scheduler_schedule_manual",
@@ -1891,9 +1905,13 @@
           "description": "The most recent scheduler-triggered ledger record. Its run artifacts\nremain the canonical detailed receipt surface."
         },
         "skip_reason": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AutomationSkipReasonV1"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "task": {

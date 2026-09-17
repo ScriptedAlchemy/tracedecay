@@ -522,6 +522,13 @@ export const AutomationRunTerminalV1Schema = z.discriminatedUnion("status", [z.o
 }).strict()]);
 export type AutomationRunTerminalV1 = z.infer<typeof AutomationRunTerminalV1Schema>;
 
+/** Closed availability vocabulary for the scheduler status reading.
+
+Wire tokens stay the historical labels. A new state is a compile error in
+[`scheduler_status_label`] until this enum gains a variant. */
+export const AutomationSchedulerAvailabilityV1Schema = z.enum(["automation_disabled", "backend_disabled", "configured", "delegated_host", "paused"]);
+export type AutomationSchedulerAvailabilityV1 = z.infer<typeof AutomationSchedulerAvailabilityV1Schema>;
+
 /** The scheduler reading served by `status`, `pause`, and `resume`.
 
 Automation is autonomous: the status has no pending-review counters. The
@@ -535,7 +542,7 @@ export const AutomationSchedulerStatusV1Schema = z.object({
   now: z.number().int().safe(),
   paused: z.boolean(),
   scheduler_tick_secs: z.number().int().safe().min(0),
-  status: z.string(),
+  status: z.lazy(() => AutomationSchedulerAvailabilityV1Schema),
   tasks: z.array(z.lazy(() => AutomationTaskStatusV1Schema)),
 }).strict();
 export type AutomationSchedulerStatusV1 = z.infer<typeof AutomationSchedulerStatusV1Schema>;
@@ -550,13 +557,13 @@ export const AutomationSettingsPayloadV1Schema = z.object({
 });
 export type AutomationSettingsPayloadV1 = z.infer<typeof AutomationSettingsPayloadV1Schema>;
 
-export const AutomationSkipReasonV1Schema = z.enum(["automation_disabled", "backend_disabled", "combined_review_disabled", "delegated_host_mode", "job_commands_disabled", "memory_curator_disabled", "no_new_session_activity", "no_session_evidence", "nothing_to_review", "partial_coverage_no_candidates", "scheduler_cooldown_active", "scheduler_cron_not_due", "scheduler_idle_window_active", "scheduler_interval_not_elapsed", "scheduler_lock_active", "scheduler_non_retryable_failure", "scheduler_schedule_invalid", "scheduler_schedule_manual", "session_cursor_manifest_limit_exceeded", "session_evidence_budget_exhausted", "session_evidence_budget_suppressed", "session_evidence_cancelled", "session_evidence_denied", "session_evidence_filter_unavailable", "session_evidence_locked", "session_evidence_partial", "session_evidence_reset_required", "session_evidence_retrieval_unavailable", "session_evidence_stale", "session_evidence_timed_out", "session_evidence_unavailable", "session_reflector_disabled", "shipped_fact_proposal_history_retired", "similarity_authority_unavailable", "skill_writer_disabled", "task_not_schedulable", "user_job_disabled"]);
+export const AutomationSkipReasonV1Schema = z.enum(["automation_disabled", "backend_disabled", "backend_identity_suppressed", "combined_review_disabled", "delegated_host_mode", "job_commands_disabled", "job_lock_active", "memory_curator_disabled", "no_new_session_activity", "no_session_evidence", "nothing_to_review", "partial_coverage_no_candidates", "scheduler_cooldown_active", "scheduler_cron_not_due", "scheduler_history_invalid", "scheduler_idle_window_active", "scheduler_interval_not_elapsed", "scheduler_lock_active", "scheduler_non_retryable_failure", "scheduler_paused", "scheduler_schedule_invalid", "scheduler_schedule_manual", "session_cursor_manifest_limit_exceeded", "session_evidence_budget_exhausted", "session_evidence_budget_suppressed", "session_evidence_cancelled", "session_evidence_denied", "session_evidence_filter_unavailable", "session_evidence_locked", "session_evidence_partial", "session_evidence_reset_required", "session_evidence_retrieval_unavailable", "session_evidence_stale", "session_evidence_timed_out", "session_evidence_unavailable", "session_reflector_disabled", "shipped_fact_proposal_history_retired", "similarity_authority_unavailable", "skill_writer_disabled", "task_not_schedulable", "user_job_disabled"]);
 export type AutomationSkipReasonV1 = z.infer<typeof AutomationSkipReasonV1Schema>;
 
 export const AutomationTaskStatusV1Schema = z.object({
   due: z.boolean(),
   last_scheduler_run: z.unknown(),
-  skip_reason: z.string().nullable(),
+  skip_reason: z.union([z.lazy(() => AutomationSkipReasonV1Schema), z.null()]),
   task: z.string(),
 });
 export type AutomationTaskStatusV1 = z.infer<typeof AutomationTaskStatusV1Schema>;

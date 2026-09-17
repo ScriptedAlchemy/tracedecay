@@ -18,6 +18,7 @@ use tracedecay_automation_runtime::automation::scheduler::{
     AutomationSchedulerControl, SessionActivity, load_scheduler_control, load_session_activity,
     save_scheduler_control, schedule_decision, scheduler_control_path,
 };
+use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 type ApiResult = std::result::Result<Json<AutomationSchedulerStatusV1>, JsonError>;
@@ -30,9 +31,7 @@ type ApiResult = std::result::Result<Json<AutomationSchedulerStatusV1>, JsonErro
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct AutomationSchedulerStatusV1 {
-    /// `paused`, `automation_disabled`, `delegated_host`, `backend_disabled`,
-    /// or `configured`.
-    pub status: String,
+    pub status: AutomationSchedulerAvailabilityV1,
     pub paused: bool,
     pub enabled: bool,
     pub scheduler_tick_secs: u64,
@@ -43,11 +42,25 @@ pub(super) struct AutomationSchedulerStatusV1 {
     pub tasks: Vec<AutomationTaskStatusV1>,
 }
 
+/// Closed availability vocabulary for the scheduler status reading.
+///
+/// Wire tokens stay the historical labels. A new state is a compile error in
+/// [`scheduler_status_label`] until this enum gains a variant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum AutomationSchedulerAvailabilityV1 {
+    Paused,
+    AutomationDisabled,
+    DelegatedHost,
+    BackendDisabled,
+    Configured,
+}
+
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 pub(super) struct AutomationTaskStatusV1 {
     pub task: String,
     pub due: bool,
-    pub skip_reason: Option<String>,
+    pub skip_reason: Option<AutomationSkipReasonV1>,
     /// The most recent scheduler-triggered ledger record. Its run artifacts
     /// remain the canonical detailed receipt surface.
     pub last_scheduler_run: Option<Value>,
@@ -115,7 +128,7 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
         None => SessionActivity::none(),
     };
     Ok(Json(AutomationSchedulerStatusV1 {
-        status: scheduler_status_label(&effective, control.paused).to_string(),
+        status: scheduler_status_label(&effective, control.paused),
         paused: control.paused,
         enabled: effective.enabled,
         scheduler_tick_secs: effective.scheduler_tick_secs,
@@ -164,7 +177,7 @@ fn task_status(
 ) -> std::result::Result<AutomationTaskStatusV1, JsonError> {
     let decision = if paused {
         tracedecay_automation_runtime::automation::scheduler::AutomationScheduleDecision::skipped(
-            "scheduler_paused",
+            AutomationSkipReasonV1::SchedulerPaused,
         )
     } else {
         schedule_decision(config, task, summary.records(), activity, now)
@@ -172,7 +185,7 @@ fn task_status(
     Ok(AutomationTaskStatusV1 {
         task: task_key(task).to_string(),
         due: decision.is_due(),
-        skip_reason: decision.skip_reason().map(str::to_string),
+        skip_reason: decision.skip_reason(),
         last_scheduler_run: summary
             .latest_scheduler_activity()
             .map(serde_json::to_value)
@@ -181,24 +194,27 @@ fn task_status(
     })
 }
 
-fn scheduler_status_label(config: &AutomationConfig, paused: bool) -> &'static str {
+fn scheduler_status_label(
+    config: &AutomationConfig,
+    paused: bool,
+) -> AutomationSchedulerAvailabilityV1 {
     if paused {
-        return "paused";
+        return AutomationSchedulerAvailabilityV1::Paused;
     }
     if !config.enabled {
-        return "automation_disabled";
+        return AutomationSchedulerAvailabilityV1::AutomationDisabled;
     }
     if config.host_mode
         == tracedecay_automation_runtime::automation::config::AutomationHostMode::DelegatedHost
     {
-        return "delegated_host";
+        return AutomationSchedulerAvailabilityV1::DelegatedHost;
     }
     if config.backend
         == tracedecay_automation_runtime::automation::config::AutomationBackend::Disabled
     {
-        return "backend_disabled";
+        return AutomationSchedulerAvailabilityV1::BackendDisabled;
     }
-    "configured"
+    AutomationSchedulerAvailabilityV1::Configured
 }
 
 #[cfg(test)]
@@ -307,8 +323,8 @@ mod tests {
 
         assert!(!status.due);
         assert_eq!(
-            status.skip_reason.as_deref(),
-            Some("scheduler_non_retryable_failure")
+            status.skip_reason,
+            Some(AutomationSkipReasonV1::SchedulerNonRetryableFailure)
         );
         assert_eq!(status.last_scheduler_run.unwrap()["run_id"], "z-failure");
     }

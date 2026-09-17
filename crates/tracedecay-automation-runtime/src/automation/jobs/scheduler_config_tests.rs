@@ -1,4 +1,5 @@
 use serde_json::json;
+use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 
 use super::{
     AutomationJob, JOBS_SCHEMA_VERSION, JobDelivery, job_schedule_decision,
@@ -80,13 +81,13 @@ fn job_scheduler_ranks_same_second_terminal_records_by_micros_then_run_id() {
 
     assert_eq!(
         job_schedule_decision(&job, &records, 150),
-        Some("scheduler_non_retryable_failure")
+        Some(AutomationSkipReasonV1::SchedulerNonRetryableFailure)
     );
 
     records.reverse();
     assert_eq!(
         job_schedule_decision(&job, &records, 150),
-        Some("scheduler_non_retryable_failure")
+        Some(AutomationSkipReasonV1::SchedulerNonRetryableFailure)
     );
 
     for record in &mut records {
@@ -94,12 +95,12 @@ fn job_scheduler_ranks_same_second_terminal_records_by_micros_then_run_id() {
     }
     assert_eq!(
         job_schedule_decision(&job, &records, 150),
-        Some("scheduler_non_retryable_failure")
+        Some(AutomationSkipReasonV1::SchedulerNonRetryableFailure)
     );
     records.reverse();
     assert_eq!(
         job_schedule_decision(&job, &records, 150),
-        Some("scheduler_non_retryable_failure")
+        Some(AutomationSkipReasonV1::SchedulerNonRetryableFailure)
     );
 }
 
@@ -110,14 +111,14 @@ fn job_scheduler_fails_closed_on_invalid_completion_history() {
     inconsistent.completed_at_micros = Some(101_000_000);
     assert_eq!(
         job_schedule_decision(&job, &[inconsistent], 150),
-        Some("scheduler_history_invalid")
+        Some(AutomationSkipReasonV1::SchedulerHistoryInvalid)
     );
 
     let mut malformed = ledger_record("malformed", AutomationRunStatus::Succeeded, None, 100);
     malformed.completed_at = "not-a-timestamp".to_string();
     assert_eq!(
         job_schedule_decision(&job, &[malformed], 150),
-        Some("scheduler_history_invalid")
+        Some(AutomationSkipReasonV1::SchedulerHistoryInvalid)
     );
 
     let mut overflow = ledger_record("overflow", AutomationRunStatus::Succeeded, None, 100);
@@ -125,13 +126,13 @@ fn job_scheduler_fails_closed_on_invalid_completion_history() {
     overflow.completed_at_micros = None;
     assert_eq!(
         job_schedule_decision(&job, &[overflow], 150),
-        Some("scheduler_history_invalid")
+        Some(AutomationSkipReasonV1::SchedulerHistoryInvalid)
     );
 
     let pre_epoch = ledger_record("pre-epoch", AutomationRunStatus::Succeeded, None, -1);
     assert_eq!(
         job_schedule_decision(&job, &[pre_epoch], 150),
-        Some("scheduler_history_invalid")
+        Some(AutomationSkipReasonV1::SchedulerHistoryInvalid)
     );
 }
 

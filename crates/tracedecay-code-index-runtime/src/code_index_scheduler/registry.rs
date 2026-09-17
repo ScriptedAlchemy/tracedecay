@@ -937,6 +937,23 @@ mod terminal_publication_park_tests {
     }
 
     #[test]
+    fn publication_authority_terminal_is_the_typed_park() {
+        let empty = RwLock::new(None);
+        assert!(!publication_authority_is_terminal(&empty));
+        let slot = RwLock::new(Some(terminal_park("corrupt-authority")));
+        assert!(publication_authority_is_terminal(&slot));
+        let resident = RwLock::new(Some(CodeIndexConvergenceParkedV1 {
+            reason: "resident".to_owned(),
+            blocked_reason: Some(CodeIndexBuildBlockedReasonV1::ResidentMemory),
+            remediation: "free memory".to_owned(),
+            parked_at_micros: 1,
+            observed_passes: 1,
+            retries_on_wake: true,
+        }));
+        assert!(!publication_authority_is_terminal(&resident));
+    }
+
+    #[test]
     fn clear_convergence_park_preserves_terminal_publication_corruption() {
         let slot = RwLock::new(Some(terminal_park("corrupt-authority")));
         clear_convergence_park(&slot);

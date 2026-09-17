@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tracedecay_automation::run_labels::AUTOMATION_DISABLED;
+use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 
 use super::artifacts::{sha256_bytes, sha256_json, write_improvement_artifacts};
 use super::backend::{
@@ -364,10 +364,10 @@ pub fn job_schedule_decision(
     job: &AutomationJob,
     records: &[AutomationRunLedgerRecord],
     now_secs: i64,
-) -> Option<&'static str> {
+) -> Option<AutomationSkipReasonV1> {
     match checked_job_schedule_decision(job, records, now_secs) {
         Ok(decision) => decision,
-        Err(_) => Some("scheduler_history_invalid"),
+        Err(_) => Some(AutomationSkipReasonV1::SchedulerHistoryInvalid),
     }
 }
 
@@ -375,21 +375,23 @@ fn checked_job_schedule_decision(
     job: &AutomationJob,
     records: &[AutomationRunLedgerRecord],
     now_secs: i64,
-) -> Result<Option<&'static str>> {
+) -> Result<Option<AutomationSkipReasonV1>> {
     if !job.enabled {
-        return Ok(Some("user_job_disabled"));
+        return Ok(Some(AutomationSkipReasonV1::UserJobDisabled));
     }
     let Ok(schedule) = parse_schedule(job.schedule.as_deref()) else {
-        return Ok(Some("scheduler_schedule_invalid"));
+        return Ok(Some(AutomationSkipReasonV1::SchedulerScheduleInvalid));
     };
     let (interval_secs, cron) = match schedule {
-        AutomationSchedule::Manual => return Ok(Some("scheduler_schedule_manual")),
+        AutomationSchedule::Manual => {
+            return Ok(Some(AutomationSkipReasonV1::SchedulerScheduleManual));
+        }
         AutomationSchedule::ConfiguredInterval => (job.interval_secs, None),
         AutomationSchedule::Interval { every_secs } => (Some(every_secs), None),
         AutomationSchedule::Cron(cron) => (None, Some(cron)),
     };
     if interval_secs.is_none() && cron.is_none() {
-        return Ok(Some("scheduler_schedule_manual"));
+        return Ok(Some(AutomationSkipReasonV1::SchedulerScheduleManual));
     }
 
     let task_key = job_task_key(&job.id);
@@ -402,30 +404,30 @@ fn checked_job_schedule_decision(
                 record.error.as_deref(),
             );
             if disposition.is_non_retryable() {
-                return Ok(Some("scheduler_non_retryable_failure"));
+                return Ok(Some(AutomationSkipReasonV1::SchedulerNonRetryableFailure));
             }
             let cooldown = job
                 .cooldown_secs
                 .unwrap_or(DEFAULT_JOB_FAILURE_COOLDOWN_SECS);
             if elapsed_secs(completed_at, now_secs) < cooldown {
-                return Ok(Some("scheduler_cooldown_active"));
+                return Ok(Some(AutomationSkipReasonV1::SchedulerCooldownActive));
             }
             return Ok(None);
         }
         if let Some(interval_secs) = interval_secs
             && elapsed_secs(completed_at, now_secs) < interval_secs
         {
-            return Ok(Some("scheduler_interval_not_elapsed"));
+            return Ok(Some(AutomationSkipReasonV1::SchedulerIntervalNotElapsed));
         }
         if let Some(cron) = cron
             && !cron_is_due(&cron, Some(completed_at), now_secs)
         {
-            return Ok(Some("scheduler_cron_not_due"));
+            return Ok(Some(AutomationSkipReasonV1::SchedulerCronNotDue));
         }
     } else if let Some(cron) = cron
         && !cron_is_due(&cron, None, now_secs)
     {
-        return Ok(Some("scheduler_cron_not_due"));
+        return Ok(Some(AutomationSkipReasonV1::SchedulerCronNotDue));
     }
     Ok(None)
 }
@@ -535,9 +537,9 @@ async fn run_user_job_with_backend_publication(
     let Some(task_lock) = try_acquire_job_task_lock(dashboard_root, &job.id, now_secs).await?
     else {
         let reason = if trigger == AutomationTrigger::Scheduler {
-            "scheduler_lock_active"
+            AutomationSkipReasonV1::SchedulerLockActive
         } else {
-            "job_lock_active"
+            AutomationSkipReasonV1::JobLockActive
         };
         if trigger == AutomationTrigger::Scheduler {
             // The diagnostic identity is derived from `run_id`, which the
@@ -588,14 +590,17 @@ async fn run_user_job_with_backend_publication(
         }
     } else if !job.enabled {
         return ctx
-            .skipped("user_job_disabled", None)
+            .skipped(AutomationSkipReasonV1::UserJobDisabled, None)
             .await
             .map_err(Into::into);
     }
 
     if job.pre_run_command.is_some() && !config.allow_job_commands {
         return ctx
-            .skipped("job_commands_disabled", scheduler_summary.as_ref())
+            .skipped(
+                AutomationSkipReasonV1::JobCommandsDisabled,
+                scheduler_summary.as_ref(),
+            )
             .await
             .map_err(Into::into);
     }
@@ -733,15 +738,15 @@ async fn run_user_job_with_backend_publication(
     })
 }
 
-fn config_skip_reason(config: &AutomationConfig) -> Option<&'static str> {
+fn config_skip_reason(config: &AutomationConfig) -> Option<AutomationSkipReasonV1> {
     if !config.enabled {
-        return Some(AUTOMATION_DISABLED);
+        return Some(AutomationSkipReasonV1::AutomationDisabled);
     }
     if config.host_mode == AutomationHostMode::DelegatedHost {
-        return Some("delegated_host_mode");
+        return Some(AutomationSkipReasonV1::DelegatedHostMode);
     }
     if config.backend == AutomationBackend::Disabled {
-        return Some("backend_disabled");
+        return Some(AutomationSkipReasonV1::BackendDisabled);
     }
     None
 }
@@ -830,10 +835,11 @@ impl JobRunContext<'_> {
 
     async fn skipped(
         &self,
-        reason: &'static str,
+        reason: AutomationSkipReasonV1,
         summary: Option<&AutomationRunLedgerTaskSummary>,
     ) -> Result<UserJobAutomationRun> {
-        let candidate = self.base_record(AutomationRunStatus::Skipped, Some(reason.to_string()))?;
+        let token = reason.as_str();
+        let candidate = self.base_record(AutomationRunStatus::Skipped, Some(token.to_string()))?;
         // Mirror the fixed-task ledger dedup: scheduler ticks re-evaluate
         // every job, so a standing skip is persisted only once.
         let repeated = (self.ledger_publication == AutomationRunLedgerPublication::Immediate
@@ -843,7 +849,7 @@ impl JobRunContext<'_> {
                     prior.task_key.as_deref() == Some(&job_task_key(&self.job.id))
                         && prior.trigger == AutomationTrigger::Scheduler
                         && prior.status == AutomationRunStatus::Skipped
-                        && prior.error.as_deref() == Some(reason)
+                        && prior.error.as_deref() == Some(token)
                 })
             })
             .flatten();
@@ -855,7 +861,7 @@ impl JobRunContext<'_> {
         };
         let report = json!({
             "status": "skipped",
-            "reason": reason,
+            "reason": token,
             "task": job_task_key(&self.job.id),
             "job_id": self.job.id,
         });
@@ -875,10 +881,11 @@ impl JobRunContext<'_> {
     /// anchor can silently duplicate this diagnostic.
     async fn scheduler_diagnostic_skipped(
         &self,
-        reason: &'static str,
+        reason: AutomationSkipReasonV1,
         effectful_anchor_run_id: Option<&str>,
     ) -> Result<UserJobAutomationRun> {
-        let candidate = self.base_record(AutomationRunStatus::Skipped, Some(reason.to_owned()))?;
+        let token = reason.as_str();
+        let candidate = self.base_record(AutomationRunStatus::Skipped, Some(token.to_owned()))?;
         let record = append_or_reuse_scheduler_diagnostic(
             self.dashboard_root,
             &candidate,
@@ -889,7 +896,7 @@ impl JobRunContext<'_> {
             run_id: record.run_id.clone(),
             report: json!({
                 "status": "skipped",
-                "reason": reason,
+                "reason": token,
                 "task": job_task_key(&self.job.id),
                 "job_id": self.job.id,
             }),

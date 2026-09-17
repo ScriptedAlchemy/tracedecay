@@ -10,14 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "hotpath")]
 use std::time::Instant;
 
-#[cfg(feature = "hotpath")]
-use tracedecay_automation::evidence_budget::SESSION_EVIDENCE_BUDGET_SUPPRESSED;
-#[cfg(feature = "hotpath")]
-use tracedecay_automation::run_labels::AUTOMATION_DISABLED;
-
-#[cfg(feature = "hotpath")]
-use super::backend_identity::BACKEND_IDENTITY_SUPPRESSED;
 use super::run_ledger::AutomationRunStatus;
+use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 
 #[cfg(feature = "hotpath")]
 static QUEUED: AtomicU64 = AtomicU64::new(0);
@@ -157,47 +151,65 @@ pub(crate) fn observe_run_terminal(_status: AutomationRunStatus) {
     }
 }
 
-/// Maps the open-ended skip-reason strings onto a bounded static counter
-/// family so gauge keys stay compile-time constants with fixed cardinality.
+/// Maps the closed skip vocabulary onto a bounded static counter family.
+/// A new variant fails compilation until it chooses a counter.
 #[cfg(feature = "hotpath")]
-fn count_skip_reason(reason: &str) {
+fn count_skip_reason(reason: AutomationSkipReasonV1) {
     match reason {
-        "scheduler_lock_active" => {
+        AutomationSkipReasonV1::SchedulerLockActive | AutomationSkipReasonV1::JobLockActive => {
             hotpath::gauge!("automation.skips.lock_total").inc(1_u64);
         }
-        "scheduler_cooldown_active" => {
+        AutomationSkipReasonV1::SchedulerCooldownActive => {
             hotpath::gauge!("automation.skips.cooldown_total").inc(1_u64);
         }
-        "scheduler_interval_not_elapsed"
-        | "scheduler_cron_not_due"
-        | "scheduler_idle_window_active"
-        | "scheduler_schedule_manual" => {
+        AutomationSkipReasonV1::SchedulerIntervalNotElapsed
+        | AutomationSkipReasonV1::SchedulerCronNotDue
+        | AutomationSkipReasonV1::SchedulerIdleWindowActive
+        | AutomationSkipReasonV1::SchedulerScheduleManual
+        | AutomationSkipReasonV1::SchedulerPaused => {
             hotpath::gauge!("automation.skips.not_due_total").inc(1_u64);
         }
-        "no_new_session_activity" => {
+        AutomationSkipReasonV1::NoNewSessionActivity => {
             hotpath::gauge!("automation.skips.no_activity_total").inc(1_u64);
         }
-        AUTOMATION_DISABLED
-        | "delegated_host_mode"
-        | "backend_disabled"
-        | "task_not_schedulable"
-        | "task_disabled"
-        | "memory_curator_disabled"
-        | "session_reflector_disabled"
-        | "skill_writer_disabled"
-        | "combined_review_disabled"
-        | "user_job_disabled" => {
+        AutomationSkipReasonV1::AutomationDisabled
+        | AutomationSkipReasonV1::DelegatedHostMode
+        | AutomationSkipReasonV1::BackendDisabled
+        | AutomationSkipReasonV1::TaskNotSchedulable
+        | AutomationSkipReasonV1::MemoryCuratorDisabled
+        | AutomationSkipReasonV1::SessionReflectorDisabled
+        | AutomationSkipReasonV1::SkillWriterDisabled
+        | AutomationSkipReasonV1::CombinedReviewDisabled
+        | AutomationSkipReasonV1::UserJobDisabled
+        | AutomationSkipReasonV1::JobCommandsDisabled => {
             hotpath::gauge!("automation.skips.disabled_total").inc(1_u64);
         }
-        SESSION_EVIDENCE_BUDGET_SUPPRESSED
-        | BACKEND_IDENTITY_SUPPRESSED
-        | "scheduler_non_retryable_failure" => {
+        AutomationSkipReasonV1::SessionEvidenceBudgetSuppressed
+        | AutomationSkipReasonV1::BackendIdentitySuppressed
+        | AutomationSkipReasonV1::SchedulerNonRetryableFailure => {
             hotpath::gauge!("automation.skips.suppressed_total").inc(1_u64);
         }
-        "scheduler_history_invalid" | "scheduler_schedule_invalid" => {
+        AutomationSkipReasonV1::SchedulerHistoryInvalid
+        | AutomationSkipReasonV1::SchedulerScheduleInvalid => {
             hotpath::gauge!("automation.skips.invalid_total").inc(1_u64);
         }
-        _ => {
+        AutomationSkipReasonV1::SimilarityAuthorityUnavailable
+        | AutomationSkipReasonV1::PartialCoverageNoCandidates
+        | AutomationSkipReasonV1::NothingToReview
+        | AutomationSkipReasonV1::SessionEvidenceFilterUnavailable
+        | AutomationSkipReasonV1::SessionEvidenceRetrievalUnavailable
+        | AutomationSkipReasonV1::SessionEvidenceUnavailable
+        | AutomationSkipReasonV1::SessionEvidencePartial
+        | AutomationSkipReasonV1::SessionEvidenceStale
+        | AutomationSkipReasonV1::SessionEvidenceDenied
+        | AutomationSkipReasonV1::SessionEvidenceLocked
+        | AutomationSkipReasonV1::SessionEvidenceResetRequired
+        | AutomationSkipReasonV1::SessionCursorManifestLimitExceeded
+        | AutomationSkipReasonV1::SessionEvidenceBudgetExhausted
+        | AutomationSkipReasonV1::SessionEvidenceTimedOut
+        | AutomationSkipReasonV1::SessionEvidenceCancelled
+        | AutomationSkipReasonV1::NoSessionEvidence
+        | AutomationSkipReasonV1::ShippedFactProposalHistoryRetired => {
             hotpath::gauge!("automation.skips.other_total").inc(1_u64);
         }
     }
@@ -216,16 +228,18 @@ pub(crate) fn observe_due() {
 }
 
 #[inline]
-pub(crate) fn observe_skip_reason(_reason: &str) {
+pub(crate) fn observe_skip_reason(reason: AutomationSkipReasonV1) {
+    #[cfg(not(feature = "hotpath"))]
+    let _ = reason;
     #[cfg(feature = "hotpath")]
     {
-        count_skip_reason(_reason);
-        match _reason {
-            "scheduler_lock_active" => {
+        count_skip_reason(reason);
+        match reason {
+            AutomationSkipReasonV1::SchedulerLockActive | AutomationSkipReasonV1::JobLockActive => {
                 hotpath::val!("automation.schedule_state").set(&STATE_QUEUED);
                 QUEUED.store(1, Ordering::Relaxed);
             }
-            "scheduler_cooldown_active" => {
+            AutomationSkipReasonV1::SchedulerCooldownActive => {
                 hotpath::val!("automation.schedule_state").set(&STATE_COOLDOWN);
                 COOLDOWN.store(1, Ordering::Relaxed);
                 QUEUED.store(0, Ordering::Relaxed);

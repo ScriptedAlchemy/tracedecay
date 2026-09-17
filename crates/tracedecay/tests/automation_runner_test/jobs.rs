@@ -20,6 +20,7 @@ use tracedecay_automation_runtime::automation::jobs::{
 use tracedecay_automation_runtime::automation::scheduler::{
     AutomationSchedule, cron_is_due, parse_schedule,
 };
+use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 
 fn sample_job(id: &str) -> AutomationJob {
     AutomationJob {
@@ -337,7 +338,7 @@ fn job_schedule_decision_enforces_interval_cron_and_enabled() {
     ran_after.task_key = Some(job_task_key(&job.id));
     assert_eq!(
         job_schedule_decision(&job, std::slice::from_ref(&ran_after), now),
-        Some("scheduler_cron_not_due")
+        Some(AutomationSkipReasonV1::SchedulerCronNotDue)
     );
 
     // Prior run before the occurrence: due again.
@@ -353,7 +354,7 @@ fn job_schedule_decision_enforces_interval_cron_and_enabled() {
     recent.completed_at_micros = None;
     assert_eq!(
         job_schedule_decision(&job, std::slice::from_ref(&recent), now),
-        Some("scheduler_interval_not_elapsed")
+        Some(AutomationSkipReasonV1::SchedulerIntervalNotElapsed)
     );
     let mut stale = recent.clone();
     stale.completed_at = (now - 7_200).to_string();
@@ -365,14 +366,14 @@ fn job_schedule_decision_enforces_interval_cron_and_enabled() {
     failed.error = Some("rate limit".to_string());
     assert_eq!(
         job_schedule_decision(&job, std::slice::from_ref(&failed), now),
-        Some("scheduler_cooldown_active")
+        Some(AutomationSkipReasonV1::SchedulerCooldownActive)
     );
 
     // Disabled jobs never run from the scheduler.
     job.enabled = false;
     assert_eq!(
         job_schedule_decision(&job, &[], now),
-        Some("user_job_disabled")
+        Some(AutomationSkipReasonV1::UserJobDisabled)
     );
 
     // Manual schedules are never picked up.
@@ -380,7 +381,7 @@ fn job_schedule_decision_enforces_interval_cron_and_enabled() {
     job.schedule = Some("manual".to_string());
     assert_eq!(
         job_schedule_decision(&job, &[], now),
-        Some("scheduler_schedule_manual")
+        Some(AutomationSkipReasonV1::SchedulerScheduleManual)
     );
 }
 
