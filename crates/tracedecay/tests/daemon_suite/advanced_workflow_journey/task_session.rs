@@ -7,6 +7,9 @@ use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use tracedecay_code_index::production::{
+    CodeIndexPublishedGenerationV1, SealedGenerationSegmentReadV1,
+};
 use tracedecay_code_index_retention::code_index_generations::{
     DurablePublicationPointerV1, scoped_code_index_store_root,
 };
@@ -18,6 +21,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{
     ProjectId, RetrieverKind, TaskId, TemporalModeV1, UtcMicros, WorkAttemptIdentityV1,
+    sha256_hex_suffix,
 };
 use tracedecay_sdk::client::Client;
 use tracedecay_sdk::operations::WorkRetrieveEvidence;
@@ -313,9 +317,46 @@ fn wait_for_code_generation(home: &Path, project: &Path) {
     while read_active_code_generation(home, project).is_none() {
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for the restored code generation"
+            "timed out waiting for the restored code generation: {}",
+            code_generation_wait_diagnostics(home, project)
         );
         std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn code_generation_wait_diagnostics(home: &Path, project: &Path) -> String {
+    let profile = home.join(".tracedecay");
+    let Ok(layout) = tracedecay_runtime_core::storage::resolve_layout(project, &profile) else {
+        return format!(
+            "layout unresolved for project {} under {}",
+            project.display(),
+            profile.display()
+        );
+    };
+    let scope = scoped_code_index_store_root(&layout.data_root.join("code-index-v1"), project);
+    let pointer_path = scope.join("active-code-generation-v1.json");
+    if !pointer_path.is_file() {
+        return format!("missing active pointer at {}", pointer_path.display());
+    }
+    match std::fs::read(&pointer_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<DurablePublicationPointerV1>(&bytes).ok())
+    {
+        Some(pointer) => {
+            let generation_path = scope
+                .join("code-generations-v1")
+                .join(&pointer.generation_file);
+            format!(
+                "pointer={} generation_file_present={} segments_root_present={}",
+                pointer_path.display(),
+                generation_path.is_file(),
+                scope.join("code-generation-segments-v1").is_dir()
+            )
+        }
+        None => format!(
+            "active pointer present but undecodable at {}",
+            pointer_path.display()
+        ),
     }
 }
 
@@ -348,7 +389,7 @@ fn wait_for_task_session_available(client: &Client, scope: &TaskSessionEvidenceS
 fn read_active_code_generation(
     home: &Path,
     project: &Path,
-) -> Option<tracedecay_code_index::production::CodeIndexPublishedGenerationV1> {
+) -> Option<CodeIndexPublishedGenerationV1> {
     let layout =
         tracedecay_runtime_core::storage::resolve_layout(project, &home.join(".tracedecay"))
             .ok()?;
@@ -357,15 +398,43 @@ fn read_active_code_generation(
         &std::fs::read(scope.join("active-code-generation-v1.json")).ok()?,
     )
     .ok()?;
-    tracedecay_code_index::production::CodeIndexPublishedGenerationV1::decode_sealed(
-        &std::fs::read(
-            scope
-                .join("code-generations-v1")
-                .join(pointer.generation_file),
-        )
-        .ok()?,
+    let sealed = std::fs::read(
+        scope
+            .join("code-generations-v1")
+            .join(pointer.generation_file),
     )
-    .ok()
+    .ok()?;
+    // The daemon publishes partitioned manifests; monolithic `decode_sealed`
+    // rejects them, which made this wait time out with the generation on disk.
+    let segments_root = scope.join("code-generation-segments-v1");
+    CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&sealed, |request, buffer| {
+        let (digest, size_bytes, offset, length) = match request {
+            SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
+                (digest, size_bytes, 0, size_bytes)
+            }
+            SealedGenerationSegmentReadV1::Range {
+                digest,
+                size_bytes,
+                offset,
+                length,
+            } => (digest, size_bytes, offset, length),
+        };
+        let digest_hex =
+            sha256_hex_suffix(digest.as_str()).expect("sealed segment digest is sha256");
+        let segment = std::fs::read(segments_root.join(format!("segment-{digest_hex}.json")))
+            .expect("sealed generation segment");
+        assert_eq!(
+            segment.len() as u64,
+            size_bytes,
+            "segment size matches manifest"
+        );
+        let start = usize::try_from(offset).expect("segment offset");
+        let end = start + usize::try_from(length).expect("segment length");
+        buffer.clear();
+        buffer.extend_from_slice(&segment[start..end]);
+        Ok(())
+    })
+    .ok()?
 }
 
 /// The exact Work evidence scope one TaskSession availability sweep reads:
