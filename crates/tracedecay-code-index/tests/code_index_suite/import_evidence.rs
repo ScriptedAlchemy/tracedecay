@@ -389,6 +389,39 @@ fn rust_generic_inherent_impl_matches_a_nominal_typed_receiver() {
 }
 
 #[test]
+fn rust_qualified_inherent_impl_owner_resolves_to_its_type() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.qualified-owner.lib",
+            "crates/widgets/src/lib.rs",
+            "pub mod builder;\nmod methods;\npub use builder::Builder;\n",
+        ),
+        (
+            "file.qualified-owner.builder",
+            "crates/widgets/src/builder.rs",
+            "pub struct Builder;\n",
+        ),
+        (
+            "file.qualified-owner.methods",
+            "crates/widgets/src/methods.rs",
+            "impl crate::builder::Builder {\n    pub fn build(&self) {}\n}\n",
+        ),
+        (
+            "file.qualified-owner.app",
+            "crates/app/src/main.rs",
+            "fn assemble(builder: &widgets::Builder) {\n    builder.build();\n}\nfn main() {}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
+    let build = symbol_occurrence(
+        &generation,
+        "crates/widgets/src/methods.rs::crate::builder::Builder::build",
+    );
+
+    assert_resolved_edge(&generation, &caller, &build, RelationEdgeKindV1::Calls);
+}
+
+#[test]
 fn rust_public_trait_methods_are_callable_across_crates() {
     let generation = published_rust_workspace(&[
         (
@@ -406,6 +439,47 @@ fn rust_public_trait_methods_are_callable_across_crates() {
     let work = symbol_occurrence(&generation, "crates/dep/src/lib.rs::PublicTrait::work");
 
     assert_resolved_edge(&generation, &caller, &work, RelationEdgeKindV1::Calls);
+}
+
+#[test]
+fn rust_trait_impl_methods_do_not_masquerade_as_inherent_methods() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.trait-impl.lib",
+            "crates/widgets/src/lib.rs",
+            "mod first;\nmod second;\npub struct Builder;\npub trait First { fn build(&self); }\npub trait Second { fn build(&self); }\n",
+        ),
+        (
+            "file.trait-impl.first",
+            "crates/widgets/src/first.rs",
+            "impl crate::First for crate::Builder { fn build(&self) {} }\n",
+        ),
+        (
+            "file.trait-impl.second",
+            "crates/widgets/src/second.rs",
+            "impl crate::Second for crate::Builder { fn build(&self) {} }\n",
+        ),
+        (
+            "file.trait-impl.app",
+            "crates/app/src/main.rs",
+            "use widgets::First;\nfn assemble(builder: &widgets::Builder) {\n    builder.build();\n}\nfn main() {}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
+    let first = symbol_occurrence(
+        &generation,
+        "crates/widgets/src/first.rs::crate::Builder::build",
+    );
+    let second = symbol_occurrence(
+        &generation,
+        "crates/widgets/src/second.rs::crate::Builder::build",
+    );
+
+    assert!(generation.edges().iter().all(|edge| {
+        edge.from_occurrence != caller
+            || (edge.to_occurrence != first && edge.to_occurrence != second)
+            || edge.kind != RelationEdgeKindV1::Calls
+    }));
 }
 
 #[test]
@@ -556,6 +630,35 @@ fn rust_typed_parameter_method_call_binds_through_import_and_crate_reexport() {
     );
 
     assert_resolved_edge(&generation, &caller, &target, RelationEdgeKindV1::Calls);
+}
+
+#[test]
+fn rust_restricted_reexport_does_not_escape_its_crate() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.restricted.lib",
+            "crates/widgets/src/lib.rs",
+            "mod hidden;\npub(crate) use hidden::Builder;\n",
+        ),
+        (
+            "file.restricted.hidden",
+            "crates/widgets/src/hidden.rs",
+            "pub struct Builder;\nimpl Builder { pub fn build(&self) {} }\n",
+        ),
+        (
+            "file.restricted.app",
+            "crates/app/src/main.rs",
+            "fn assemble(builder: &widgets::Builder) {\n    builder.build();\n}\nfn main() {}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
+    let build = symbol_occurrence(&generation, "crates/widgets/src/hidden.rs::Builder::build");
+
+    assert!(generation.edges().iter().all(|edge| {
+        edge.from_occurrence != caller
+            || edge.to_occurrence != build
+            || edge.kind != RelationEdgeKindV1::Calls
+    }));
 }
 
 #[test]
