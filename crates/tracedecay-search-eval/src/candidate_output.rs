@@ -5,9 +5,8 @@
 //! lexical, and graph production lanes.
 //!
 //! Outputs deterministic checked-in `train` / `validation` candidate records
-//! plus current/10x resource samples, cancellation, offline, and fallback
-//! digests. Labels are ordinary reviewable fixture data, never a production
-//! authority.
+//! plus current/10x resource samples, cancellation, and fallback digests.
+//! Labels are ordinary reviewable fixture data, never a production authority.
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};

@@ -95,7 +95,6 @@ pub struct DirectProfileEvaluationV1 {
     pub fallback_stable: bool,
     pub fallback_matches_expected: bool,
     pub cancellation_bounded: bool,
-    pub offline: bool,
     pub resource_status: DirectEvaluationStatusV1,
     pub quality: DirectQualityMetricsV1,
     pub status: DirectEvaluationStatusV1,

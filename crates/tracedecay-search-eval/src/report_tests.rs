@@ -206,7 +206,6 @@ fn direct_report_is_evidence_only_and_owns_its_candidate_schema() {
         ));
         // Offline is derived from this run's observed query-fallback match,
         // not a self-asserted availability stamp on the raw output.
-        assert_eq!(profile.offline, profile.fallback_matches_expected);
     }
 
     let value = serde_json::to_value(&report).expect("serialize direct report");
