@@ -426,6 +426,9 @@ async fn test_codex_user_prompt_submit_records_workspace_status_and_missing_sess
 
 #[test]
 fn test_codex_workspace_status_distinguishes_generic_and_project_like_dirs() {
+    // Markers under the process temp root are refused so ephemeral agent
+    // worktrees are not enrolled as projects. Keep the generic case in TMPDIR
+    // (must stay Generic) and place project-like fixtures outside it.
     let generic = tempfile::tempdir().unwrap();
     let generic_event = serde_json::json!({ "cwd": generic.path() }).to_string();
     assert_eq!(
@@ -433,27 +436,33 @@ fn test_codex_workspace_status_distinguishes_generic_and_project_like_dirs() {
         HookWorkspaceStatus::Generic
     );
 
-    let project_like = tempfile::tempdir().unwrap();
-    std::fs::write(
-        project_like.path().join("Cargo.toml"),
-        "[package]\nname = \"x\"\n",
-    )
-    .unwrap();
-    let project_event = serde_json::json!({ "cwd": project_like.path() }).to_string();
+    let outside = std::env::current_dir()
+        .expect("cwd")
+        .join("target/test-hooks-workspace-status");
+    let _ = std::fs::remove_dir_all(&outside);
+    std::fs::create_dir_all(&outside).expect("fixture root outside temp");
+
+    let project_like = outside.join("cargo-marker");
+    std::fs::create_dir_all(&project_like).unwrap();
+    std::fs::write(project_like.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+    let project_event = serde_json::json!({ "cwd": project_like }).to_string();
     assert_eq!(
         codex_workspace_status_from_event(&project_event),
         HookWorkspaceStatus::UnindexedProject
     );
 
-    let git_like = tempfile::tempdir().unwrap();
-    std::fs::create_dir(git_like.path().join(".git")).unwrap();
-    let nested = git_like.path().join("nested");
+    let git_like = outside.join("git-marker");
+    std::fs::create_dir_all(&git_like).unwrap();
+    std::fs::create_dir(git_like.join(".git")).unwrap();
+    let nested = git_like.join("nested");
     std::fs::create_dir(&nested).unwrap();
     let git_event = serde_json::json!({ "cwd": nested }).to_string();
     assert_eq!(
         codex_workspace_status_from_event(&git_event),
         HookWorkspaceStatus::UnindexedProject
     );
+
+    let _ = std::fs::remove_dir_all(&outside);
 }
 
 #[test]
