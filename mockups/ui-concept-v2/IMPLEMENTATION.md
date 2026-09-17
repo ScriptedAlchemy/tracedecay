@@ -85,7 +85,7 @@ the final visual runtime:
 
 | Surface | Current baseline | Final target | Why CSS alone is insufficient |
 |---|---|---|---|
-| Brain | Sigma circles and thin straight graph edges | luminous neural bodies, depth, curved causal paths, stable picking, semantic zoom, and measured activity | the target needs custom geometry/materials, controlled depth, bloom, and stateful path rendering |
+| Brain | registry field: luminous neural bodies over a Three.js orthographic scene (`dashboard/src/viz/scene/`), depth by recency, curved exact checkout paths, analytic picking, semantic-zoom labels and admitted-activity heat; scoped code graph: still Sigma circles and thin edges | the same language for the scoped graph, plus worker clustering for dense registries | the scoped graph still needs the emergent layout migrated onto the shared scene runtime; a worker is not yet warranted at registry scale |
 | Loom | a rectangular host/session lane chart with loaded-page replay | a horizontal temporal execution field with spawn branches, handoffs, rejoin paths, density bundles, replay, and focus-plus-context | the target needs deterministic hierarchical lanes, edge bundling, semantic zoom, and thousands of selectable events |
 | Delivery | a repository recency field and vertical Git/provider projection ledger | global/project PR discovery, umbrella outcomes, horizontal causal journeys, exact review workspaces, and why-to-code navigation | the target joins multiple authorities and alternates between dense scene, exact diff, transcript, and review modes |
 
@@ -309,6 +309,19 @@ The measured structural atlas/treemap remains a retained Brain view option. Its
 stable source-containment geometry and named structural evidence layers are a
 peer to the neural registry field, not a temporary fallback or a substitute for
 project-scoped semantic topology.
+
+Shipped state of the registry field: `dashboard/src/viz/scene/` holds the
+renderer-neutral model (`registrySceneModel.ts`, `neuralBody.ts`,
+`sceneCamera.ts`, `labelPriority.ts`) and the Three.js runtime
+(`registryRuntime.ts`); `dashboard/src/workspaces/brain/RegistryScene.tsx` is
+the DOM host. Three.js was chosen over React Three Fiber for this surface: the
+field is a few dozen bodies with one imperative lifetime (build on box, tear
+down on collapse or context loss), which the existing `GraphCanvas` pattern
+already owns, and a second React reconciler would have added a dependency and
+a jsdom seam without changing a pixel. Label priority runs on the main thread
+because registries are tens of bodies; the worker boundary in the table below
+remains the plan for dense registries. Plate 04's scoped code graph is not yet
+migrated and still renders through the legacy Sigma host.
 
 | Plate | DOM authority | Layout and scene | Overlay and worker | Backend/evidence |
 |---|---|---|---|---|

@@ -80,8 +80,13 @@ reconstructs private reasoning.
   timestamp, exact touched project, and supported propagation relation.
 - `dashboard/src/workspaces/brain/BrainPage.tsx` and
   `dashboard/src/workspaces/brain/ScopedBrain.tsx` are the V2 route and scope
-  composition targets. `dashboard/src/viz/graph/GraphCanvas.propagation.dom.test.tsx`
-  names the existing propagation behavior that the shared high-fidelity scene
-  layer must preserve or replace with equivalent production evidence.
+  composition targets. The registry field (plates 01, 02, 03 and 05) renders
+  through `dashboard/src/workspaces/brain/RegistryScene.tsx` over the shared
+  scene layer in `dashboard/src/viz/scene/` (renderer-neutral model, Three.js
+  runtime); `dashboard/src/workspaces/brain/BrainInteraction.dom.test.tsx` and
+  `RegistryScene.dom.test.tsx` carry the exact-identity and one-hop evidence.
+  The scoped code graph (plate 04) still renders through the legacy
+  `dashboard/src/viz/graph/GraphCanvas.tsx`, whose propagation behavior
+  `GraphCanvas.propagation.dom.test.tsx` names.
 - [`IMPLEMENTATION.md`](../../IMPLEMENTATION.md) owns the hybrid DOM/scene
   architecture and renderer proof-of-capability decision.
