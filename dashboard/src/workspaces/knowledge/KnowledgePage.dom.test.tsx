@@ -11,7 +11,8 @@ import type {
   MemoryOverviewSummaryV1,
 } from '../../contracts/generated.ts';
 import { useScope } from '../../data/scope/store.ts';
-import { FeedbackSplit, KnowledgePage } from './KnowledgePage.tsx';
+import { FeedbackSplit } from './FactInspector.tsx';
+import { KnowledgePage } from './KnowledgePage.tsx';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -236,7 +237,7 @@ describe('KnowledgePage fact detail', () => {
       </QueryClientProvider>,
     );
 
-    await userEvent.click(await screen.findByText('list-truncated fact…'));
+    await userEvent.click(await screen.findByRole('button', { name: /list-truncated fact…/ }));
 
     expect(await screen.findByText('full authoritative fact detail')).toBeTruthy();
     expect(screen.getByText('amari_fhrr')).toBeTruthy();
@@ -272,7 +273,7 @@ describe('KnowledgePage fact detail', () => {
     useScope.getState().selectProject('project-a', 'Project A', 'active');
     renderKnowledge();
 
-    await userEvent.click(await screen.findByText('project A summary'));
+    await userEvent.click(await screen.findByRole('button', { name: /project A summary/ }));
     expect(await screen.findByText('canonical project A detail')).toBeTruthy();
 
     act(() => {

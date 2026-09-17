@@ -234,6 +234,7 @@ export function BayLegend({ children }: { children: ReactNode }) {
 export function DataRow({
   selected,
   onSelect,
+  onInspect,
   children,
   className,
   height,
@@ -242,6 +243,13 @@ export function DataRow({
 }: {
   selected?: boolean;
   onSelect?: () => void;
+  /**
+   * Hover inspects; click selects. A workspace whose inspector previews the
+   * row under the pointer (or under keyboard focus) wires it here, and the row
+   * fires it for both the pointer entering and focus arriving so the keyboard
+   * path reaches exactly what the pointer does.
+   */
+  onInspect?: () => void;
   children: ReactNode;
   className?: string;
   /**
@@ -260,6 +268,8 @@ export function DataRow({
     <button
       type="button"
       onClick={onSelect}
+      onPointerEnter={onInspect}
+      onFocus={onInspect}
       aria-pressed={selected ?? false}
       style={{ height: height != null ? `${height}px` : 'var(--row-height-data)' }}
       className={cn(
