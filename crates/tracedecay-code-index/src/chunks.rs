@@ -211,36 +211,6 @@ unsafe impl ExtractionAdmittedChunkV1 for ExtractionAdmittedCodeSearchChunkV1 {
     }
 }
 
-/// Chunk counts below this stay on the calling thread. One canonical chunk
-/// digest costs single-digit microseconds, so small files are cheaper inline
-/// than split across the pool.
-const PARALLEL_CHUNK_THRESHOLD: usize = 16;
-
-/// Every chunk fan-out runs on a worker that already holds one background-CPU
-/// unit (a `collect_bounded_ordered` leaf), and its stolen halves admit
-/// themselves one unit at a time. Holding the parent's unit across the join
-/// while a full-width request sits at the FIFO head wedges the process, so
-/// the yield is welded to the fan-out here rather than left at each call
-/// site, where a merge resolution once kept the `par_iter` and dropped the
-/// yield. `rayon` is imported nowhere else in `chunks`, so a bare `par_iter`
-/// outside this module does not compile.
-mod fan_out {
-    use rayon::prelude::*;
-
-    /// Map `items` across the pool and return the outputs in input order,
-    /// with the caller's admitted units yielded for the duration of the join.
-    pub(super) fn map_yielding<I, R>(items: I, map: impl Fn(I::Item) -> R + Send + Sync) -> Vec<R>
-    where
-        I: IntoParallelIterator,
-        I::Iter: IndexedParallelIterator,
-        R: Send,
-    {
-        crate::parallelism::with_yielded_background_cpu_permits(|| {
-            items.into_par_iter().map(map).collect()
-        })
-    }
-}
-
 /// Run one chunk unit and turn a panic into that unit's typed failure.
 ///
 /// The file fan-out already does this. A chunk panic that unwinds the join
@@ -260,34 +230,19 @@ fn contain_chunk_unit<T>(
     })
 }
 
-/// Run `operation` over every chunk for its failure only, fanning out across
-/// the pool once the batch is large enough. The lowest-index failure is
-/// returned, matching the sequential sweep's short-circuit outcome, including
-/// when a later unit panics.
-fn try_for_each_chunk_ordered<F, A>(
-    admit: A,
+/// Run `operation` over every chunk in input order. The first typed failure or
+/// panic is returned without scheduling later units.
+fn try_for_each_chunk_ordered<F>(
     chunks: &[Arc<CodeSearchChunkV1>],
     operation: F,
 ) -> Result<(), ChunkingFailureV1>
 where
-    F: Fn(&Arc<CodeSearchChunkV1>) -> Result<(), ChunkingFailureV1> + Send + Sync,
-    A: Fn(&mut dyn FnMut() -> Result<(), ChunkingFailureV1>) -> Result<(), ChunkingFailureV1>
-        + Sync,
+    F: Fn(&Arc<CodeSearchChunkV1>) -> Result<(), ChunkingFailureV1>,
 {
-    if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
-        for (index, chunk) in chunks.iter().enumerate() {
-            contain_chunk_unit(index, || operation(chunk))?;
-        }
-        return Ok(());
+    for (index, chunk) in chunks.iter().enumerate() {
+        contain_chunk_unit(index, || operation(chunk))?;
     }
-    // Outputs come back in input order, so the first failure is the
-    // lowest-index one, panic or not.
-    fan_out::map_yielding(0..chunks.len(), |index| {
-        contain_chunk_unit(index, || admit(&mut || operation(&chunks[index]))).err()
-    })
-    .into_iter()
-    .find_map(|failure| failure)
-    .map_or(Ok(()), Err)
+    Ok(())
 }
 
 impl ExactExtractionAuthorityV1 {
@@ -400,22 +355,11 @@ impl ExactExtractionAuthorityV1 {
         &self,
         chunks: Vec<Arc<CodeSearchChunkV1>>,
     ) -> Result<Vec<ExtractionAdmittedCodeSearchChunkV1>, ChunkingFailureV1> {
-        if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
-            return chunks
-                .into_iter()
-                .enumerate()
-                .map(|(index, chunk)| contain_chunk_unit(index, || self.admit(chunk)))
-                .collect();
-        }
-        fan_out::map_yielding(0..chunks.len(), |index| {
-            contain_chunk_unit(index, || {
-                crate::parallelism::with_background_cpu_permit(|| {
-                    self.admit(Arc::clone(&chunks[index]))
-                })
-            })
-        })
-        .into_iter()
-        .collect()
+        chunks
+            .into_iter()
+            .enumerate()
+            .map(|(index, chunk)| contain_chunk_unit(index, || self.admit(chunk)))
+            .collect()
     }
 
     /// Rebind an exact authority only after every prior parser-backed chunk
@@ -3285,59 +3229,49 @@ mod tests {
         );
     }
 
-    /// A later panic must not drop an earlier typed failure, and a panic that
-    /// is itself the earliest unit must come back named rather than unwinding
-    /// the sweep.
+    /// A typed failure stops later units, and an earlier panic is returned as
+    /// a typed failure rather than unwinding the sweep.
     #[test]
-    fn parallel_sweep_keeps_the_earliest_unit_when_a_later_unit_panics() {
+    fn ordered_sweep_keeps_the_earliest_unit() {
         let chunks = wide_chunks(48);
         let early = 3usize;
         let late = chunks.chunks.len() - 1;
-        assert!(chunks.chunks.len() >= PARALLEL_CHUNK_THRESHOLD);
         assert!(early < late);
 
-        let kept = try_for_each_chunk_ordered(
-            |unit| crate::parallelism::with_background_cpu_permit(unit),
-            &chunks.chunks,
-            |chunk| {
-                let index = chunks
-                    .chunks
-                    .iter()
-                    .position(|candidate| Arc::ptr_eq(candidate, chunk))
-                    .expect("chunk index");
-                if index == late {
-                    panic!("later unit");
-                }
-                if index == early {
-                    return Err(ChunkingFailureV1::GenerationMismatch);
-                }
-                Ok(())
-            },
-        );
+        let kept = try_for_each_chunk_ordered(&chunks.chunks, |chunk| {
+            let index = chunks
+                .chunks
+                .iter()
+                .position(|candidate| Arc::ptr_eq(candidate, chunk))
+                .expect("chunk index");
+            if index == late {
+                panic!("later unit");
+            }
+            if index == early {
+                return Err(ChunkingFailureV1::GenerationMismatch);
+            }
+            Ok(())
+        });
         assert_eq!(
             kept,
             Err(ChunkingFailureV1::GenerationMismatch),
             "the earlier typed failure must survive a later panic"
         );
 
-        let panicked = try_for_each_chunk_ordered(
-            |unit| crate::parallelism::with_background_cpu_permit(unit),
-            &chunks.chunks,
-            |chunk| {
-                let index = chunks
-                    .chunks
-                    .iter()
-                    .position(|candidate| Arc::ptr_eq(candidate, chunk))
-                    .expect("chunk index");
-                if index == early {
-                    panic!("earliest unit");
-                }
-                if index == late {
-                    return Err(ChunkingFailureV1::GenerationMismatch);
-                }
-                Ok(())
-            },
-        )
+        let panicked = try_for_each_chunk_ordered(&chunks.chunks, |chunk| {
+            let index = chunks
+                .chunks
+                .iter()
+                .position(|candidate| Arc::ptr_eq(candidate, chunk))
+                .expect("chunk index");
+            if index == early {
+                panic!("earliest unit");
+            }
+            if index == late {
+                return Err(ChunkingFailureV1::GenerationMismatch);
+            }
+            Ok(())
+        })
         .expect_err("the earliest panic must be a typed failure, not an unwind");
         let rendered = panicked.to_string();
         assert!(
