@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   codeViewBlocker,
   codeViewNeedsFocus,
+  codeViewsOffered,
   readCodeLocation,
   writeCodeLocation,
 } from './codeView.ts';
@@ -55,6 +56,24 @@ describe('Code view locations', () => {
         },
       ).toString(),
     ).toBe('');
+  });
+});
+
+describe('Code view switcher', () => {
+  it('hides a pending view until a deep link asks for it', () => {
+    expect(codeViewsOffered('topology')).toEqual([
+      'topology',
+      'trace',
+      'shared-code',
+      'compare',
+    ]);
+    expect(codeViewsOffered('atlas')).toEqual([
+      'atlas',
+      'topology',
+      'trace',
+      'shared-code',
+      'compare',
+    ]);
   });
 });
 

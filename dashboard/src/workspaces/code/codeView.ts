@@ -40,6 +40,20 @@ export const CODE_VIEW_DEFINITIONS = {
   { label: string; note: string; status: 'mounted' | 'pending' }
 >;
 
+/**
+ * Views the switcher offers.
+ *
+ * A pending view is not a control until someone asks for it. Atlas stays
+ * unavailable on a deep link — that answer is honest — but it does not sit
+ * disabled on every Code visit. Keeping the slot visible would only complete
+ * the enum; the operator cannot use it.
+ */
+export function codeViewsOffered(active: CodeView): readonly CodeView[] {
+  return CODE_VIEWS.filter(
+    (view) => CODE_VIEW_DEFINITIONS[view].status === 'mounted' || view === active,
+  );
+}
+
 export interface CodeLocation {
   readonly view: CodeView;
   readonly focusId: string | null;

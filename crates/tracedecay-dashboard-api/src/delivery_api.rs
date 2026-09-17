@@ -1182,6 +1182,12 @@ fn map_delivery_inbox(
                 .as_str()
                 .to_owned();
             let indexed_generation = pull_request.indexed_generation.as_str().to_owned();
+            let indexed_head_commit_id = pull_request.indexed_head_commit_id.as_str().to_owned();
+            let shared_code = code_navigation_refs(
+                &pull_request.branch_ref,
+                &indexed_head_commit_id,
+                indexed_generation.clone(),
+            );
             DeliveryInboxPullRequestV1 {
                 id: format!(
                     "{project_id}:{}:{pull_request_id}",
@@ -1191,8 +1197,8 @@ fn map_delivery_inbox(
                 repository_id: pull_request.repository_id.as_str().to_owned(),
                 worktree_id: pull_request.worktree_id.as_str().to_owned(),
                 branch_ref: pull_request.branch_ref,
-                indexed_head_commit_id: pull_request.indexed_head_commit_id.as_str().to_owned(),
-                indexed_generation: indexed_generation.clone(),
+                indexed_head_commit_id,
+                indexed_generation,
                 state: map_inbox_pull_request_state(pull_request.state),
                 attention: pull_request
                     .attention
@@ -1201,20 +1207,7 @@ fn map_delivery_inbox(
                         map_attention_item(item, project_id.as_str(), pull_request_id.as_str())
                     })
                     .collect(),
-                shared_code: vec![
-                    DeliverySharedCodeRefV1 {
-                        kind: DeliverySharedCodeRefKindV1::SharedCode,
-                        state: DeliverySharedCodeRefStateV1::RequiresSelection,
-                        href: "/code?view=shared-code".to_owned(),
-                        source_generation: indexed_generation.clone(),
-                    },
-                    DeliverySharedCodeRefV1 {
-                        kind: DeliverySharedCodeRefKindV1::Compare,
-                        state: DeliverySharedCodeRefStateV1::RequiresSelection,
-                        href: "/code?view=compare".to_owned(),
-                        source_generation: indexed_generation,
-                    },
-                ],
+                shared_code,
                 pull_request: map_pull_request(pull_request.pull_request),
             }
         })
@@ -1260,6 +1253,58 @@ fn map_provider_state(state: ProjectDeliveryProviderStateV1) -> DeliveryProvider
         ProjectDeliveryProviderStateV1::NotConfigured => DeliveryProviderStateV1::NotConfigured,
         ProjectDeliveryProviderStateV1::Unavailable => DeliveryProviderStateV1::Unavailable,
     }
+}
+
+/// Next steps, not completed Code readings.
+///
+/// `RequiresSelection` means this row does not name a symbol or a base
+/// revision. Shared Code must link to `/code`, where selection starts — not
+/// `/code?view=shared-code`, which blocks with no symbol. Compare carries the
+/// indexed head so the operator only names the base.
+fn code_navigation_refs(
+    branch_ref: &str,
+    indexed_head_commit_id: &str,
+    indexed_generation: String,
+) -> Vec<DeliverySharedCodeRefV1> {
+    let branch = branch_ref
+        .strip_prefix("refs/heads/")
+        .unwrap_or(branch_ref);
+    let compare_href = format!(
+        "/code?view=compare&head={}&head_revision={}",
+        encode_query_component(branch),
+        encode_query_component(indexed_head_commit_id),
+    );
+    vec![
+        DeliverySharedCodeRefV1 {
+            kind: DeliverySharedCodeRefKindV1::SharedCode,
+            state: DeliverySharedCodeRefStateV1::RequiresSelection,
+            href: "/code".to_owned(),
+            source_generation: indexed_generation.clone(),
+        },
+        DeliverySharedCodeRefV1 {
+            kind: DeliverySharedCodeRefKindV1::Compare,
+            state: DeliverySharedCodeRefStateV1::RequiresSelection,
+            href: compare_href,
+            source_generation: indexed_generation,
+        },
+    ]
+}
+
+/// Match `URLSearchParams` application/x-www-form-urlencoded encoding so a
+/// client that follows this href and the dashboard that builds the same
+/// params agree on slashes in branch names.
+fn encode_query_component(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'*' | b'-' | b'.' | b'_' => {
+                encoded.push(byte as char);
+            }
+            b' ' => encoded.push('+'),
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
 }
 
 fn map_inbox_pull_request_state(
@@ -2277,6 +2322,31 @@ mod tests {
     use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
 
     use super::*;
+
+    #[test]
+    fn code_navigation_refs_start_selection_instead_of_opening_blocked_views() {
+        let refs = code_navigation_refs(
+            "refs/heads/feature/delivery",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "generation.alpha.1".to_owned(),
+        );
+        let shared = refs
+            .iter()
+            .find(|item| item.kind == DeliverySharedCodeRefKindV1::SharedCode)
+            .expect("shared code ref");
+        let compare = refs
+            .iter()
+            .find(|item| item.kind == DeliverySharedCodeRefKindV1::Compare)
+            .expect("compare ref");
+        assert_eq!(shared.state, DeliverySharedCodeRefStateV1::RequiresSelection);
+        assert_eq!(shared.href, "/code");
+        assert!(!shared.href.contains("view=shared-code"));
+        assert_eq!(
+            compare.href,
+            "/code?view=compare&head=feature%2Fdelivery&head_revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_ne!(compare.href, "/code?view=compare");
+    }
 
     fn snapshot(retained_head: &str, expected_head: &str) -> ProjectDeliverySnapshotV1 {
         ProjectDeliverySnapshotV1 {

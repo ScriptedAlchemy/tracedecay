@@ -1,8 +1,8 @@
 import { cn } from '../../ui/cn.ts';
 import {
   CODE_VIEW_DEFINITIONS,
-  CODE_VIEWS,
   codeViewNeedsFocus,
+  codeViewsOffered,
   type CodeView,
 } from './codeView.ts';
 
@@ -34,7 +34,7 @@ export function CodeViewSwitcher({
       data-code-view={active}
     >
       <ol className="flex min-w-0 flex-wrap items-center gap-1">
-        {CODE_VIEWS.map((view) => {
+        {codeViewsOffered(active).map((view) => {
           const definition = CODE_VIEW_DEFINITIONS[view];
           const selected = view === active;
           const disabled =

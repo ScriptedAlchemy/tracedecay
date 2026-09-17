@@ -1,9 +1,10 @@
 import { useMemo } from 'react';
 import { AlertTriangle, GitPullRequest, Network } from 'lucide-react';
 import { useSearchParams } from 'react-router';
+import { scopedWorkspacePath, useScope } from '../../data/scope/store.ts';
 import {
   DeliveryInboxV1Schema,
-  type DeliveryAttentionEvidenceV1,
+  type DeliveryAttentionItemV1,
   type DeliveryAttentionSourceV1,
   type DeliveryAttentionStateV1,
   type DeliveryInboxPullRequestV1,
@@ -18,6 +19,15 @@ import { ReadSection, type ReadState } from '../../ui/ReadSection.tsx';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
 import { Panel, ReadoutBar, WorkspaceHeader } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn.ts';
+import {
+  attentionNeedsOperator,
+  codeNextSteps,
+  evidenceReading,
+  providerStateLabel,
+  pullRequestHasOperatorAttention,
+  rankAttention,
+  settledAttentionReason,
+} from './deliveryReading.ts';
 
 const ATTENTION_SOURCES = [
   'ci_failure',
@@ -95,14 +105,24 @@ function Inbox({ payload }: { payload: DeliveryInboxV1 }) {
   const [params, setParams] = useSearchParams();
   const projectFilter = params.get('project');
   const attentionFilter = asAttentionSource(params.get('attention'));
-  const evidenceFilter = params.get('evidence');
+  const filterSources = useMemo(() => {
+    const present = new Set<DeliveryAttentionSourceV1>();
+    for (const pullRequest of payload.pull_requests) {
+      for (const item of pullRequest.attention) {
+        if (attentionNeedsOperator(item)) present.add(item.source);
+      }
+    }
+    return ATTENTION_SOURCES.filter(
+      (source) => present.has(source) || source === attentionFilter,
+    );
+  }, [attentionFilter, payload.pull_requests]);
   const visible = useMemo(
     () =>
       payload.pull_requests.filter((pullRequest) => {
         if (projectFilter !== null && pullRequest.project_id !== projectFilter) return false;
         if (
           attentionFilter !== null &&
-          !pullRequest.attention.some((item) => item.source === attentionFilter)
+          !pullRequestHasOperatorAttention(pullRequest.attention, attentionFilter)
         ) {
           return false;
         }
@@ -178,7 +198,7 @@ function Inbox({ payload }: { payload: DeliveryInboxV1 }) {
             }
           >
             <option value="">All attention sources</option>
-            {ATTENTION_SOURCES.map((source) => (
+            {filterSources.map((source) => (
               <option key={source} value={source}>
                 {attentionSourceLabel(source)}
               </option>
@@ -198,7 +218,7 @@ function Inbox({ payload }: { payload: DeliveryInboxV1 }) {
             <span className="font-medium">{project.label}</span>
             <StateChip
               kind={providerStateKind(project.provider_state)}
-              detail={project.provider_state.replaceAll('_', ' ')}
+              detail={providerStateLabel(project.provider_state)}
             />
           </div>
         ))}
@@ -206,13 +226,22 @@ function Inbox({ payload }: { payload: DeliveryInboxV1 }) {
       {visible.length === 0 ? (
         <CenteredState
           state={providerNotConfigured ? 'unavailable' : 'complete_zero_findings'}
-          title={providerNotConfigured ? 'Provider not configured' : 'No admitted pull requests'}
-          detail={
-            providerNotConfigured
-              ? 'Registered repositories remain visible, but provider reads are not configured. No unrelated pull request is admitted.'
-              : 'The registry and indexed-head join completed with no admitted pull requests.'
+          title={
+            payload.pull_requests.length > 0
+              ? 'No pull requests match this filter'
+              : providerNotConfigured
+                ? 'Provider not configured'
+                : 'No admitted pull requests'
           }
-          secondary={providerNotConfigured ? 'No admitted pull requests' : undefined}
+          detail={emptyInboxDetail(payload, providerNotConfigured, {
+            project: projectFilter !== null,
+            attention: attentionFilter !== null,
+          })}
+          secondary={
+            providerNotConfigured && payload.pull_requests.length === 0
+              ? 'No admitted pull requests'
+              : undefined
+          }
         />
       ) : (
         <div className="grid min-h-0 flex-1 grid-cols-1 overflow-auto lg:grid-cols-[20rem_minmax(0,1fr)] xl:grid-cols-[20rem_minmax(0,1fr)_20rem]">
@@ -226,15 +255,7 @@ function Inbox({ payload }: { payload: DeliveryInboxV1 }) {
               setParams(next);
             }}
           />
-          {selected === null ? null : (
-            <PullRequestDetail
-              pullRequest={selected}
-              selectedEvidence={evidenceFilter}
-              onEvidence={(evidence) =>
-                updateParams(params, setParams, 'evidence', evidence)
-              }
-            />
-          )}
+          {selected === null ? null : <PullRequestDetail pullRequest={selected} />}
           <MembershipGraph
             edges={payload.membership_edges.filter(
               (edge) => selected !== null && edge.pull_request_id === selected.pull_request.pull_request_id,
@@ -294,15 +315,12 @@ function PullRequestQueue({
   );
 }
 
-function PullRequestDetail({
-  pullRequest,
-  selectedEvidence,
-  onEvidence,
-}: {
-  pullRequest: DeliveryInboxPullRequestV1;
-  selectedEvidence: string | null;
-  onEvidence: (evidence: string) => void;
-}) {
+function PullRequestDetail({ pullRequest }: { pullRequest: DeliveryInboxPullRequestV1 }) {
+  const scope = useScope((state) => state.scope);
+  const steps = codeNextSteps(scopedWorkspacePath(scope, 'code'), pullRequest);
+  const ranked = rankAttention(pullRequest.attention);
+  const leading = ranked.filter(attentionNeedsOperator);
+  const settled = ranked.filter((item) => !attentionNeedsOperator(item));
   return (
     <section aria-label="Pull request detail" className="min-w-0 border-r border-edge-subtle">
       <header className="border-b border-edge-subtle px-4 py-3">
@@ -317,55 +335,96 @@ function PullRequestDetail({
           {pullRequest.indexed_generation}
         </p>
       </header>
-      <div className="grid gap-3 p-3 xl:grid-cols-2">
-        {pullRequest.attention.map((item) => (
-          <Panel key={item.id} legend={attentionSourceLabel(item.source)}>
-            <div className="flex items-center justify-between gap-2">
-              <StateChip kind={attentionStateKind(item.state)} detail={item.coverage} />
-              <span className="text-3xs text-text-muted">{observationTime(item.observed_at_micros)}</span>
-            </div>
-            {item.evidence.length === 0 ? (
-              <p className="mt-2 text-3xs text-text-muted">
-                {item.coverage === 'unsupported'
-                  ? 'This source has no mounted Delivery authority.'
-                  : 'No evidence item is active.'}
-              </p>
-            ) : (
-              <ul className="mt-2 space-y-1">
-                {item.evidence.map((evidence, index) => {
-                  const identity = evidenceIdentity(evidence);
-                  return (
-                    <li key={`${identity}:${index}`}>
-                      <button
-                        type="button"
-                        className={cn(
-                          'w-full break-all border border-edge-subtle px-2 py-1 text-left font-mono text-3xs',
-                          selectedEvidence === identity && 'border-accent bg-surface-2',
-                        )}
-                        onClick={() => onEvidence(identity)}
-                      >
-                        {identity}
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </Panel>
-        ))}
-      </div>
-      <div className="flex flex-wrap gap-2 border-t border-edge-subtle p-3">
-        {pullRequest.shared_code.map((reference) => (
+      {leading.length === 0 ? (
+        <p className="px-4 py-3 text-xs leading-relaxed text-text-secondary">
+          Nothing on this pull request needs attention.
+        </p>
+      ) : (
+        <div className="grid gap-3 p-3 xl:grid-cols-2">
+          {leading.map((item) => (
+            <Panel key={item.id} legend={attentionSourceLabel(item.source)}>
+              <div className="flex items-center justify-between gap-2">
+                <StateChip kind={attentionStateKind(item.state)} detail={item.coverage} />
+                <span className="text-3xs text-text-muted">
+                  {observationTime(item.observed_at_micros)}
+                </span>
+              </div>
+              <EvidenceList item={item} />
+            </Panel>
+          ))}
+        </div>
+      )}
+      {settled.length > 0 ? (
+        <ul aria-label="Other attention sources" className="flex flex-col border-t border-edge-subtle">
+          {settled.map((item) => (
+            <li
+              key={item.id}
+              className="flex min-h-[var(--touch-target-min)] items-center justify-between gap-3 border-b border-edge-subtle px-4 text-3xs"
+            >
+              <span className="text-text-secondary">{attentionSourceLabel(item.source)}</span>
+              <span className="text-right text-text-muted">
+                {settledAttentionReason(item.state, item.coverage)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      <div className="flex flex-col gap-3 border-t border-edge-subtle p-3">
+        {steps.compare === null ? (
+          <p className="text-xs leading-relaxed text-text-muted">
+            Compare needs an indexed head branch and commit. This pull request did not report both,
+            so no compare link is offered.
+          </p>
+        ) : (
+          <div className="flex flex-col gap-1">
+            <a
+              href={steps.compare.href}
+              className="inline-flex min-h-[var(--touch-target-min)] w-fit items-center border border-edge-strong px-3 text-xs hover:bg-surface-2"
+            >
+              {steps.compare.label}
+            </a>
+            <p className="text-3xs leading-relaxed text-text-muted">{steps.compare.detail}</p>
+          </div>
+        )}
+        <div className="flex flex-col gap-1">
           <a
-            key={reference.kind}
-            href={reference.href}
-            className="inline-flex min-h-9 items-center border border-edge-strong px-3 text-xs hover:bg-surface-2"
+            href={steps.selectSymbol.href}
+            className="inline-flex min-h-[var(--touch-target-min)] w-fit items-center border border-edge-strong px-3 text-xs hover:bg-surface-2"
           >
-            {reference.kind === 'shared_code' ? 'Open Shared Code' : 'Open Compare'}
+            {steps.selectSymbol.label}
           </a>
-        ))}
+          <p className="text-3xs leading-relaxed text-text-muted">{steps.selectSymbol.detail}</p>
+        </div>
       </div>
     </section>
+  );
+}
+
+function EvidenceList({ item }: { item: DeliveryAttentionItemV1 }) {
+  if (item.evidence.length === 0) {
+    return (
+      <p className="mt-2 text-3xs leading-relaxed text-text-muted">
+        {item.state === 'denied'
+          ? 'Access was denied. No evidence was disclosed.'
+          : 'No evidence item is active.'}
+      </p>
+    );
+  }
+  return (
+    <ul className="mt-2 space-y-2">
+      {item.evidence.map((evidence, index) => {
+        const reading = evidenceReading(evidence);
+        return (
+          <li key={`${reading.reference}:${index}`} className="flex flex-col gap-0.5">
+            <p className="text-xs leading-relaxed text-text-primary">{reading.headline}</p>
+            <p className="text-3xs leading-relaxed text-text-muted">{reading.detail}</p>
+            <p className="break-all font-mono text-3xs text-text-muted" title={reading.reference}>
+              reference {reading.reference}
+            </p>
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 
@@ -424,6 +483,26 @@ function CenteredState({
       </div>
     </div>
   );
+}
+
+function emptyInboxDetail(
+  payload: DeliveryInboxV1,
+  providerNotConfigured: boolean,
+  filters: { project: boolean; attention: boolean },
+): string {
+  if (payload.pull_requests.length > 0) {
+    if (filters.attention && !filters.project) {
+      return 'Admitted pull requests remain, but none have active or denied attention for this source. Choose all attention sources to see them.';
+    }
+    if (filters.project && !filters.attention) {
+      return 'No admitted pull request belongs to this project. Choose all projects to see the inbox.';
+    }
+    return 'No admitted pull request matches these filters. Clear them to see the inbox.';
+  }
+  if (providerNotConfigured) {
+    return 'Registered repositories remain visible, but provider reads are not configured. No unrelated pull request is admitted.';
+  }
+  return 'The registry and indexed-head join completed with no admitted pull requests.';
 }
 
 function updateParams(
@@ -570,25 +649,6 @@ function membershipBasisDetail(basis: DeliveryMembershipBasisV1): string {
       return `${basis.branch_ref} · ${basis.head_commit_id}`;
     default: {
       const unhandled: never = basis;
-      return unhandled;
-    }
-  }
-}
-
-function evidenceIdentity(evidence: DeliveryAttentionEvidenceV1): string {
-  switch (evidence.kind) {
-    case 'provider_operation':
-      return `${evidence.operation}:${evidence.fetched_at_micros}`;
-    case 'review_comment':
-      return `${evidence.comment_id}:${evidence.path}`;
-    case 'ci_failure':
-      return evidence.failure_anchor;
-    case 'indexed_generation':
-      return evidence.generation;
-    case 'proximity_encounter':
-      return `${evidence.encounter_id}:${evidence.relation}`;
-    default: {
-      const unhandled: never = evidence;
       return unhandled;
     }
   }
