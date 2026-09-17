@@ -621,8 +621,9 @@ describe('exact run lookup', () => {
     expect(fanOut.getAttribute('data-step-status')).toBe('succeeded');
     expect(fanOut.textContent).toContain('2025-05-09 16:14:21');
     expect(fanOut.textContent).toContain('00:00:21');
-    expect(fanOut.textContent).toContain('codex_cli · gpt-5');
-    expect(fanOut.textContent).toContain('completed');
+    expect(fanOut.textContent).toContain('codex_cli');
+    expect(fanOut.textContent).toContain('gpt-5');
+    expect(fanOut.textContent).toContain('effect completed');
     const collect = run.querySelector('[data-workflow-run-step="collect"]')!;
     expect(collect.textContent).toContain('not settled');
     expect(collect.textContent).toContain('no effect receipt');

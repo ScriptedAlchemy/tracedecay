@@ -28,8 +28,6 @@ import {
 const INPUT_CLASS =
   'min-h-[var(--touch-target-min)] w-full rounded-sm border border-edge bg-surface-1 px-2 font-mono text-2xs text-text-primary placeholder:text-text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent';
 
-const REGISTRY_COLUMNS = 'grid-cols-[minmax(0,1fr)_3.25rem_3.25rem_3.25rem_minmax(5.5rem,7rem)]';
-
 export function WorkflowRegistryPanel({
   result,
   pending,
@@ -109,19 +107,13 @@ export function WorkflowRegistryPanel({
           No registered identity contains “{query.trim()}”. {entries.length} remain registered.
         </p>
       ) : (
-        <div className="min-w-0 overflow-x-auto">
+        <div className="min-w-0">
           <div
             aria-hidden
-            className={cn(
-              'grid min-w-[26rem] gap-x-2 border-b border-edge-subtle px-2 pb-1 text-3xs',
-              REGISTRY_COLUMNS,
-            )}
+            className="flex items-baseline justify-between gap-2 border-b border-edge-subtle px-2 pb-1 text-3xs"
           >
-            {['name', 'latest', 'versions', 'steps', 'disposition'].map((column) => (
-              <span key={column} className="td-legend truncate">
-                {column}
-              </span>
-            ))}
+            <span className="td-legend min-w-0 truncate">identity · latest · versions · steps</span>
+            <span className="td-legend shrink-0">disposition</span>
           </div>
           <ul
             ref={listRef}
@@ -131,7 +123,7 @@ export function WorkflowRegistryPanel({
               // Focus moving to another row keeps inspecting; leaving the list ends it.
               if (!listRef.current?.contains(event.relatedTarget)) onInspect(null);
             }}
-            className="flex min-w-[26rem] flex-col"
+            className="flex min-w-0 flex-col"
             data-workflow-definitions={entries.length}
             data-workflow-versions={versionTotal}
             aria-label="Registered workflow definitions"
@@ -184,8 +176,7 @@ function RegistryRow({
         data-workflow-registry-row={entry.definitionId}
         data-inspected={inspected || undefined}
         className={cn(
-          'relative grid min-h-[44px] w-full min-w-0 items-center gap-x-2 px-2 py-1.5 text-left',
-          REGISTRY_COLUMNS,
+          'relative flex min-h-[44px] w-full min-w-0 flex-col gap-0.5 px-2 py-1.5 text-left',
           // Selection is the cyan gutter; inspection raises the face. Neither
           // is colour alone: `aria-pressed` and `data-inspected` carry both.
           selected ? 'bg-surface-2' : inspected ? 'td-raised' : 'hover:bg-surface-3',
@@ -194,19 +185,24 @@ function RegistryRow({
         {selected ? (
           <span aria-hidden className="absolute inset-y-0 left-0 w-[3px] bg-accent" />
         ) : null}
-        <span className="td-value min-w-0 truncate text-2xs text-text-primary">
-          {entry.definitionId}
+        <span className="flex min-w-0 items-center justify-between gap-2">
+          <span
+            className="td-value min-w-0 truncate text-2xs text-text-primary"
+            title={entry.definitionId}
+          >
+            {entry.definitionId}
+          </span>
+          <DispositionCell receipt={receipt} className="shrink-0" />
         </span>
-        <span className="td-value text-3xs text-text-secondary" data-cell="numeric">
-          v{entry.latest.definition_version}
+        <span className="td-value flex min-w-0 flex-wrap gap-x-2 text-3xs text-text-muted">
+          <span data-cell="numeric">v{entry.latest.definition_version}</span>
+          <span data-cell="numeric">
+            {entry.versions.length} {entry.versions.length === 1 ? 'version' : 'versions'}
+          </span>
+          <span data-cell="numeric">
+            {entry.latest.steps.length} {entry.latest.steps.length === 1 ? 'step' : 'steps'}
+          </span>
         </span>
-        <span className="td-value text-3xs text-text-secondary" data-cell="numeric">
-          {entry.versions.length}
-        </span>
-        <span className="td-value text-3xs text-text-secondary" data-cell="numeric">
-          {entry.latest.steps.length}
-        </span>
-        <DispositionCell receipt={receipt} />
       </button>
     </li>
   );
