@@ -1,5 +1,5 @@
 import type { AnalyticsRecentHookV1 } from '../../contracts/generated.ts';
-import type { EvidenceGradeKind } from '../../ui/EvidenceGrade.tsx';
+import type { EvidenceGrade as EvidenceGradeKind } from '../../ui/EvidenceGrade.tsx';
 import type {
   DelegationTopologyModel,
   TopologyBundleMark,
