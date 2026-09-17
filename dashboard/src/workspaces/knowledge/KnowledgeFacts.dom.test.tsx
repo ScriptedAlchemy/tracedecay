@@ -20,6 +20,7 @@ import type {
   MemoryHolographicPayloadV1,
 } from '../../contracts/generated.ts';
 import { useScope } from '../../data/scope/store.ts';
+import { useStatusRegistersStore } from '../../data/shell/statusRegisters.ts';
 import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
 import { KnowledgePage } from './KnowledgePage.tsx';
 
@@ -33,6 +34,9 @@ vi.mock('../../viz/chart/echarts.ts', async (importOriginal) => ({
 afterEach(() => {
   vi.unstubAllGlobals();
   useScope.getState().selectAllProjects();
+  // Registers are withdrawn on unmount; cleanup runs after this hook in the
+  // setup file, so the store is reset here as well to keep cases independent.
+  useStatusRegistersStore.setState({ owners: new Map() });
 });
 
 function fact(over: Partial<MemoryFactRowV1> & { fact_id: string }): MemoryFactRowV1 {
@@ -264,6 +268,21 @@ function rungState(panel: HTMLElement, rung: string): string | null | undefined 
   return panel.querySelector(`[data-ladder-rung="${rung}"]`)?.getAttribute('data-ladder-state');
 }
 
+/** The registers the workspace has posted to the shell strip, keyed by their id tail. */
+function publishedRegisters(): Record<string, { value: string; state: string; detail?: string | undefined }> {
+  const out: Record<string, { value: string; state: string; detail?: string | undefined }> = {};
+  for (const registers of useStatusRegistersStore.getState().owners.values()) {
+    for (const register of registers) {
+      out[register.id.split(':').at(-1) ?? register.id] = {
+        value: register.value,
+        state: register.state,
+        detail: register.detail,
+      };
+    }
+  }
+  return out;
+}
+
 describe('Facts camera: inspect, select, and the address', () => {
   it('previews the bounded row on hover without fetching, and reads the canonical detail on select', async () => {
     const requested = stub();
@@ -444,9 +463,9 @@ describe('Facts camera: typed absences', () => {
     const aperture = screen.getByTestId('knowledge-aperture');
     expect(aperture.querySelector('[data-state="error"]')).not.toBeNull();
     expect(aperture.textContent).toMatch(/no constellation is drawn/);
-    const register = screen.getByTestId('knowledge-register');
-    expect(register.querySelector('[data-register="graph"]')?.getAttribute('data-register-state')).toBe('error');
-    expect(register.querySelector('[data-register="facts"]')?.getAttribute('data-register-state')).toBe('ready');
+    await waitFor(() => expect(publishedRegisters()['graph']?.state).toBe('error'));
+    expect(publishedRegisters()['graph']?.detail).toBe('the graph schema changed');
+    expect(publishedRegisters()['memory']?.state).toBe('ready');
   });
 
   it('prints the daemon coverage under the constellation and the sub-read states on the register', async () => {
@@ -460,10 +479,14 @@ describe('Facts camera: typed absences', () => {
     const svg = screen.getByTestId('fact-constellation-svg');
     expect(svg.getAttribute('aria-label')).toMatch(/2 fact roots/);
     expect(svg.getAttribute('aria-label')).toMatch(/fact ledger beside this field is the exact accessible equivalent/);
-    const register = screen.getByTestId('knowledge-register');
-    expect(register.querySelector('[data-register="graph"]')?.getAttribute('data-register-state')).toBe('partial');
-    expect(register.querySelector('[data-register="status"]')?.getAttribute('data-register-state')).toBe('ready');
-    expect(register.querySelector('[data-register="camera"]')?.textContent).toBe('Facts');
+    await waitFor(() => expect(publishedRegisters()['memory']?.state).toBe('ready'));
+    const registers = publishedRegisters();
+    expect(registers['memory']).toMatchObject({ state: 'ready', detail: '4,128 facts' });
+    expect(registers['graph']).toMatchObject({ state: 'partial', detail: '2 roots · 2 relations' });
+    expect(registers['camera']).toMatchObject({ state: 'identity', value: 'Facts' });
+    expect(Object.keys(registers).sort()).toEqual(['camera', 'graph', 'memory']);
+    // The canonical envelope truth header (coverage, freshness, refresh) is drawn.
+    expect(screen.getByLabelText('Evidence').textContent).toMatch(/coverage/);
   });
 
   it('switches to the Geometry camera from the inspector and keeps the selected fact in the address', async () => {
