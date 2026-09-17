@@ -475,20 +475,48 @@ export const TOPOLOGY_GEOMETRY = {
   minRadius: 5,
   maxRadius: 12,
   sourceRadius: 16,
+  /** Room the last column's labels need to the right of their marks. */
+  labelRoom: 168,
+  /** Widest a column may stretch when the aperture has width to spare. */
+  maxColumnPitch: 320,
 } as const;
 
+export interface TopologyGeometry {
+  readonly columnPitch: number;
+}
+
+/**
+ * The column pitch for an aperture of a given width: the default at minimum,
+ * stretched so the drawn generations span the width when there is room, and
+ * capped so two generations never sit a screen apart. Deterministic in
+ * `(width, columns)`, so a resize is the only thing that moves a mark.
+ */
+export function columnPitchFor(width: number | null, columns: number): TopologyGeometry {
+  const { columnPitch, padX, labelRoom, maxColumnPitch } = TOPOLOGY_GEOMETRY;
+  if (width === null || columns <= 1) return { columnPitch };
+  const usable = width - padX * 2 - labelRoom;
+  const stretched = Math.floor(usable / (columns - 1));
+  return { columnPitch: Math.max(columnPitch, Math.min(maxColumnPitch, stretched)) };
+}
+
 /** Pixel position of a mark in the field. */
-export function markPosition(mark: TopologyMark): { x: number; y: number } {
+export function markPosition(
+  mark: TopologyMark,
+  geometry: TopologyGeometry = TOPOLOGY_GEOMETRY,
+): { x: number; y: number } {
   return {
-    x: TOPOLOGY_GEOMETRY.padX + mark.generation * TOPOLOGY_GEOMETRY.columnPitch,
+    x: TOPOLOGY_GEOMETRY.padX + mark.generation * geometry.columnPitch,
     y: TOPOLOGY_GEOMETRY.padY + mark.row * TOPOLOGY_GEOMETRY.rowPitch,
   };
 }
 
 /** Field extent in pixels for a laid-out model. */
-export function fieldSize(model: DelegationTopologyModel): { width: number; height: number } {
+export function fieldSize(
+  model: DelegationTopologyModel,
+  geometry: TopologyGeometry = TOPOLOGY_GEOMETRY,
+): { width: number; height: number } {
   return {
-    width: TOPOLOGY_GEOMETRY.padX * 2 + Math.max(0, model.columns - 1) * TOPOLOGY_GEOMETRY.columnPitch,
+    width: TOPOLOGY_GEOMETRY.padX * 2 + Math.max(0, model.columns - 1) * geometry.columnPitch,
     height: TOPOLOGY_GEOMETRY.padY * 2 + Math.max(0, model.rows - 1) * TOPOLOGY_GEOMETRY.rowPitch,
   };
 }
