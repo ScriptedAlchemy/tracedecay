@@ -21,8 +21,18 @@ use super::read_model::{
 use super::util::{JsonQuery, coerce_limit};
 use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl};
 
-const DEFAULT_FAMILY_LIMIT: i64 = 100;
-const MAX_FAMILY_LIMIT: i64 = 1_000;
+const DEFAULT_FAMILY_RESULT_LIMIT: i64 = 100;
+const MAX_FAMILY_RESULT_LIMIT: i64 = 1_000;
+const MAX_FAMILY_WORK_LIMIT: i64 = MAX_FAMILY_RESULT_LIMIT + 1;
+
+/// Work a shared-family page spends so serving can prove whether another page
+/// exists. Serving subtracts one unit before paging
+/// (`work_limit.saturating_sub(1)`), so a page of `result_limit` members
+/// states a work budget of `result_limit + 1`. Callers own both budgets; this
+/// is the page policy, not an alias of a single `limit`.
+pub fn shared_family_page_work_limit(result_limit: usize) -> usize {
+    result_limit.saturating_add(1)
+}
 
 #[derive(Clone, Debug)]
 pub struct DashboardCodeReadControlV1 {
@@ -43,7 +53,10 @@ impl From<&DashboardHttpRequestControlV1> for DashboardCodeReadControlV1 {
 pub struct DashboardSharedFamilyRequestV1 {
     pub symbol_occurrence_id: SymbolOccurrenceId,
     pub match_class: SimilarMatchClassV1,
-    pub limit: usize,
+    /// Members returned on this page. Not a `limit` alias.
+    pub result_limit: usize,
+    /// Search work this page may spend. Independent of [`Self::result_limit`].
+    pub work_limit: usize,
     pub cursor: Option<String>,
     pub control: DashboardCodeReadControlV1,
 }
@@ -200,10 +213,12 @@ pub struct RevisionPairUnionLayoutV1 {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SharedFamilyParamsV1 {
     symbol_occurrence_id: SymbolOccurrenceId,
     match_class: SimilarMatchClassV1,
-    limit: Option<i64>,
+    result_limit: Option<i64>,
+    work_limit: Option<i64>,
     cursor: Option<String>,
 }
 
@@ -226,19 +241,17 @@ pub async fn shared_family(
     let Some(authority) = state.code_read_authority.as_ref() else {
         return code_read_unavailable(&state);
     };
-    let limit = match usize::try_from(coerce_limit(
-        params.limit,
-        DEFAULT_FAMILY_LIMIT,
-        MAX_FAMILY_LIMIT,
-    )) {
-        Ok(limit) => limit,
-        Err(_) => return code_read_failed(&state, DashboardCodeReadErrorV1::InvalidRequest),
+    let Some((result_limit, work_limit)) =
+        shared_family_budgets(params.result_limit, params.work_limit)
+    else {
+        return code_read_failed(&state, DashboardCodeReadErrorV1::InvalidRequest);
     };
     let result = authority
         .shared_family(DashboardSharedFamilyRequestV1 {
             symbol_occurrence_id: params.symbol_occurrence_id,
             match_class: params.match_class,
-            limit,
+            result_limit,
+            work_limit,
             cursor: params.cursor,
             control: DashboardCodeReadControlV1::from(&control),
         })
@@ -414,9 +427,66 @@ fn complete_family_coverage(matched: bool, excluded: bool) -> DashboardCoverageV
     }
 }
 
+fn shared_family_budgets(
+    result_limit: Option<i64>,
+    work_limit: Option<i64>,
+) -> Option<(usize, usize)> {
+    let result_limit = usize::try_from(coerce_limit(
+        result_limit,
+        DEFAULT_FAMILY_RESULT_LIMIT,
+        MAX_FAMILY_RESULT_LIMIT,
+    ))
+    .ok()?;
+    let default_work = i64::try_from(shared_family_page_work_limit(result_limit)).ok()?;
+    let work_limit = usize::try_from(coerce_limit(
+        work_limit,
+        default_work,
+        MAX_FAMILY_WORK_LIMIT,
+    ))
+    .ok()?;
+    Some((result_limit, work_limit))
+}
+
 fn graph_version_value(generation: String) -> DashboardVersionV1 {
     DashboardVersionV1 {
         entity_version: None,
         graph_version: Some(generation),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::extract::Query;
+    use axum::http::Uri;
+
+    use super::{SharedFamilyParamsV1, shared_family_budgets, shared_family_page_work_limit};
+
+    #[test]
+    fn shared_family_page_states_both_budgets() {
+        assert_eq!(shared_family_budgets(Some(10), Some(11)), Some((10, 11)));
+        assert_eq!(
+            shared_family_budgets(Some(10), None),
+            Some((10, shared_family_page_work_limit(10)))
+        );
+        assert_eq!(shared_family_budgets(None, None), Some((100, 101)));
+    }
+
+    #[test]
+    fn shared_family_query_rejects_retired_limit_name() {
+        let current: Uri = "/api/plugins/graph/shared-code/family?symbol_occurrence_id=symbol.shared.source&match_class=conservative_exact&result_limit=10&work_limit=11"
+            .parse()
+            .expect("current uri");
+        let Query(params) = Query::<SharedFamilyParamsV1>::try_from_uri(&current)
+            .expect("canonical budgets decode");
+        assert_eq!(params.result_limit, Some(10));
+        assert_eq!(params.work_limit, Some(11));
+
+        let retired: Uri = "/api/plugins/graph/shared-code/family?symbol_occurrence_id=symbol.shared.source&match_class=conservative_exact&limit=10"
+            .parse()
+            .expect("retired uri");
+        assert!(
+            Query::<SharedFamilyParamsV1>::try_from_uri(&retired).is_err(),
+            "limit is not a page-size alias"
+        );
     }
 }

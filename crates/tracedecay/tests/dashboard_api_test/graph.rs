@@ -110,6 +110,9 @@ impl DashboardCodeReadPortV1 for FixtureCodeReadPortV1 {
         request: DashboardSharedFamilyRequestV1,
     ) -> DashboardSharedFamilyReadFuture<'a> {
         Box::pin(async move {
+            if request.result_limit != 10 || request.work_limit != 11 {
+                return Err(DashboardCodeReadErrorV1::InvalidRequest);
+            }
             if request.symbol_occurrence_id.as_str() == "symbol.shared.missing" {
                 return Err(DashboardCodeReadErrorV1::NotFound);
             }
@@ -1032,7 +1035,7 @@ fn code_read_api_returns_verified_families_and_one_revision_union_layout() {
             let (status, family) = get_json(
                 &agent,
                 &format!(
-                    "{}/api/plugins/graph/shared-code/family?symbol_occurrence_id=symbol.shared.source&match_class={match_class}&limit=10",
+                    "{}/api/plugins/graph/shared-code/family?symbol_occurrence_id=symbol.shared.source&match_class={match_class}&result_limit=10&work_limit=11",
                     fixture.base_url
                 ),
             );
@@ -1059,7 +1062,7 @@ fn code_read_api_returns_verified_families_and_one_revision_union_layout() {
         let (status, missing) = get_json(
             &agent,
             &format!(
-                "{}/api/plugins/graph/shared-code/family?symbol_occurrence_id=symbol.shared.missing&match_class=conservative_exact&limit=10",
+                "{}/api/plugins/graph/shared-code/family?symbol_occurrence_id=symbol.shared.missing&match_class=conservative_exact&result_limit=10&work_limit=11",
                 fixture.base_url
             ),
         );

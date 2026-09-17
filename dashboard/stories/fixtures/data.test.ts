@@ -197,19 +197,19 @@ const DYNAMIC: ReadonlyArray<{
   {
     label: 'code_read_api::shared_family conservative, first page',
     pathname: '/api/plugins/graph/shared-code/family',
-    search: '?symbol_occurrence_id=sym-0&match_class=conservative_exact&limit=100',
+    search: '?symbol_occurrence_id=sym-0&match_class=conservative_exact&result_limit=100&work_limit=101',
     schema: DashboardEnvelopeV1Schema(SimilarResultV1Schema),
   },
   {
     label: 'code_read_api::shared_family conservative, cursor page',
     pathname: '/api/plugins/graph/shared-code/family',
-    search: '?symbol_occurrence_id=sym-0&match_class=conservative_exact&limit=100&cursor=cursor.family.page-2',
+    search: '?symbol_occurrence_id=sym-0&match_class=conservative_exact&result_limit=100&work_limit=101&cursor=cursor.family.page-2',
     schema: DashboardEnvelopeV1Schema(SimilarResultV1Schema),
   },
   {
     label: 'code_read_api::shared_family rename-normalized',
     pathname: '/api/plugins/graph/shared-code/family',
-    search: '?symbol_occurrence_id=sym-0&match_class=rename_normalized_exact&limit=100',
+    search: '?symbol_occurrence_id=sym-0&match_class=rename_normalized_exact&result_limit=100&work_limit=101',
     schema: DashboardEnvelopeV1Schema(SimilarResultV1Schema),
   },
 ];

@@ -49,19 +49,31 @@ export const SHARED_CODE_MATCH_CLASSES: ReadonlyArray<{
 
 export const SHARED_CODE_FAMILY_ROUTE = '/api/plugins/graph/shared-code/family';
 
-/** Default page size: the route's own `DEFAULT_FAMILY_LIMIT`. */
+/** Default page size: the route's own `DEFAULT_FAMILY_RESULT_LIMIT`. */
 export const SHARED_CODE_PAGE_LIMIT = 100;
+
+/**
+ * Work a page spends so serving can prove whether another page exists.
+ * Matches `shared_family_page_work_limit`: serving subtracts one unit before
+ * paging, so the client states `result_limit + 1` instead of letting the
+ * server invent a budget from a single `limit`.
+ */
+export function sharedFamilyPageWorkLimit(resultLimit: number): number {
+  return resultLimit + 1;
+}
 
 export function sharedFamilyUrl(
   symbolOccurrenceId: string,
   matchClass: SimilarMatchClassV1,
   cursor: string | null,
-  limit = SHARED_CODE_PAGE_LIMIT,
+  resultLimit = SHARED_CODE_PAGE_LIMIT,
+  workLimit = sharedFamilyPageWorkLimit(resultLimit),
 ): string {
   const params = new URLSearchParams();
   params.set('symbol_occurrence_id', symbolOccurrenceId);
   params.set('match_class', matchClass);
-  params.set('limit', String(limit));
+  params.set('result_limit', String(resultLimit));
+  params.set('work_limit', String(workLimit));
   if (cursor !== null) params.set('cursor', cursor);
   return `${SHARED_CODE_FAMILY_ROUTE}?${params.toString()}`;
 }

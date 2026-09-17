@@ -8,7 +8,8 @@
 use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::de::{DeserializeOwned, Error as DeserializeError};
+use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_domain::{
     CodeGenerationId, CommitId, ComplexityAnalysisV1, ManifestDigest, ProjectId, ProviderId,
     RepositoryId, SourceSpan, SymbolOccurrenceId, WorktreeId,
@@ -156,29 +157,38 @@ pub struct SimilarSurfaceRequestV1 {
     pub repository_id: RepositoryId,
     pub target: SimilarTargetV1,
     pub match_classes: Vec<SimilarMatchClassV1>,
-    /// Preferred result page size. Accepts legacy `limit` as a wire alias.
-    #[serde(alias = "limit")]
+    /// Members returned on this page.
     pub result_limit: u32,
+    /// Search work this request may spend, independent of `result_limit`.
     pub work_limit: u32,
     pub cursor: Option<String>,
 }
 
-/// Pre-family similar request shape (`{symbol, limit}`) retained for decode
-/// so cutover clients get a typed migration error instead of opaque serde noise.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct LegacySimilarSurfaceRequestV1 {
-    pub symbol: String,
-    pub limit: Option<u32>,
-}
-
-/// Runtime decode envelope for `tracedecay_similar`: current family schema or
-/// the retired `{symbol, limit}` spelling.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(untagged)]
+/// Runtime decode for `tracedecay_similar`.
+///
+/// The family schema is the only shape that binds. A top-level `symbol` or
+/// `limit` — the retired `{symbol, limit}` spelling, or a family body that
+/// still uses `limit` as a page-size name — is [`Self::Retired`]. Callers
+/// return a typed migration error. Those keys are not aliases on
+/// [`SimilarSurfaceRequestV1`].
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SimilarSurfaceRequestWireV1 {
     Current(SimilarSurfaceRequestV1),
-    Legacy(LegacySimilarSurfaceRequestV1),
+    Retired,
+}
+
+impl<'de> Deserialize<'de> for SimilarSurfaceRequestWireV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        classify_family_wire(
+            deserializer,
+            SIMILAR_RETIRED_KEYS,
+            Self::Retired,
+            Self::Current,
+        )
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -227,33 +237,75 @@ pub struct RedundancySurfaceRequestV1 {
     pub match_classes: Vec<SimilarMatchClassV1>,
     pub scope: RedundancyScopeV1,
     pub include_generated_paths: bool,
-    /// Preferred family page size. Accepts legacy `max_pairs` / `limit` aliases.
-    #[serde(alias = "max_pairs", alias = "limit")]
+    /// Families returned on this page.
     pub family_limit: u32,
     pub member_limit: u32,
+    /// Search work this request may spend, independent of `family_limit` and
+    /// `member_limit`.
     pub work_limit: u32,
     pub cursor: Option<String>,
 }
 
-/// Pre-family redundancy request shape retained for decode so cutover clients
-/// get a typed migration error instead of opaque serde noise.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct LegacyRedundancySurfaceRequestV1 {
-    pub path: Option<String>,
-    pub min_lines: Option<u32>,
-    pub max_pairs: Option<u32>,
-    pub similarity_threshold: Option<f64>,
-    pub include_naming_only: Option<bool>,
-    pub include_generated_paths: Option<bool>,
-}
-
-/// Runtime decode envelope for `tracedecay_redundancy`.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-#[serde(untagged)]
+/// Runtime decode for `tracedecay_redundancy`.
+///
+/// The family schema is the only shape that binds. A top-level retired key
+/// (`path`, `min_lines`, `max_pairs`, `similarity_threshold`,
+/// `include_naming_only`, or `limit`) — including a family body that still
+/// uses `max_pairs` or `limit` as a page-size name — is [`Self::Retired`].
+/// Nested `scope.path` is not retired. Callers return a typed migration
+/// error. Those keys are not aliases on [`RedundancySurfaceRequestV1`].
+#[derive(Clone, Debug, PartialEq)]
 pub enum RedundancySurfaceRequestWireV1 {
     Current(RedundancySurfaceRequestV1),
-    Legacy(LegacyRedundancySurfaceRequestV1),
+    Retired,
+}
+
+impl<'de> Deserialize<'de> for RedundancySurfaceRequestWireV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        classify_family_wire(
+            deserializer,
+            REDUNDANCY_RETIRED_KEYS,
+            Self::Retired,
+            Self::Current,
+        )
+    }
+}
+
+const SIMILAR_RETIRED_KEYS: &[&str] = &["symbol", "limit"];
+const REDUNDANCY_RETIRED_KEYS: &[&str] = &[
+    "path",
+    "min_lines",
+    "max_pairs",
+    "similarity_threshold",
+    "include_naming_only",
+    "limit",
+];
+
+fn classify_family_wire<'de, D, Current, Wire>(
+    deserializer: D,
+    retired_keys: &[&str],
+    retired: Wire,
+    current: impl FnOnce(Current) -> Wire,
+) -> Result<Wire, D::Error>
+where
+    D: Deserializer<'de>,
+    Current: DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let uses_retired_key = value.as_object().is_some_and(|object| {
+        object
+            .keys()
+            .any(|key| retired_keys.contains(&key.as_str()))
+    });
+    if uses_retired_key {
+        return Ok(retired);
+    }
+    serde_json::from_value(value)
+        .map(current)
+        .map_err(DeserializeError::custom)
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -764,7 +816,8 @@ mod tests {
         ContextModeV1, ContextResultV1, ContextSurfaceRequestV1, PrimitiveFreshnessStateV1,
         PrimitiveIndexingStateV1, PrimitiveLaneCompleteV1, PrimitiveLaneStatusV1,
         PrimitiveRecallV1, PrimitiveSearchCoverageV1, PrimitiveSearchFreshnessV1,
-        RedundancySurfaceRequestWireV1, SimilarSurfaceRequestWireV1,
+        RedundancySurfaceRequestV1, RedundancySurfaceRequestWireV1, SimilarSurfaceRequestV1,
+        SimilarSurfaceRequestWireV1,
     };
     use crate::memory::{FactSearchGraphCoverageV1, FactSearchGraphDegradationV1};
 
@@ -901,11 +954,11 @@ mod tests {
     }
 
     #[test]
-    fn similar_and_redundancy_accept_legacy_request_shapes_on_the_wire() {
+    fn similar_and_redundancy_retire_old_page_size_names_instead_of_aliasing_them() {
         let legacy_similar = json!({"symbol": "foo", "limit": 5});
         let wire: SimilarSurfaceRequestWireV1 =
-            serde_json::from_value(legacy_similar).expect("legacy similar decodes");
-        assert!(matches!(wire, SimilarSurfaceRequestWireV1::Legacy(_)));
+            serde_json::from_value(legacy_similar).expect("retired similar spelling classifies");
+        assert!(matches!(wire, SimilarSurfaceRequestWireV1::Retired));
 
         let legacy_redundancy = json!({
             "path": "src/",
@@ -915,11 +968,11 @@ mod tests {
             "include_naming_only": false,
             "include_generated_paths": true
         });
-        let wire: RedundancySurfaceRequestWireV1 =
-            serde_json::from_value(legacy_redundancy).expect("legacy redundancy decodes");
-        assert!(matches!(wire, RedundancySurfaceRequestWireV1::Legacy(_)));
+        let wire: RedundancySurfaceRequestWireV1 = serde_json::from_value(legacy_redundancy)
+            .expect("retired redundancy spelling classifies");
+        assert!(matches!(wire, RedundancySurfaceRequestWireV1::Retired));
 
-        let current_similar = json!({
+        let aliased_similar = json!({
             "project_id": "project.demo",
             "repository_id": "repo.demo",
             "target": {"kind": "symbol_occurrence", "symbol_occurrence_id": "symbol.v1.demo"},
@@ -928,11 +981,82 @@ mod tests {
             "work_limit": 100,
             "cursor": null
         });
-        let wire: SimilarSurfaceRequestWireV1 = serde_json::from_value(current_similar)
-            .expect("current similar decodes with limit alias");
+        let wire: SimilarSurfaceRequestWireV1 =
+            serde_json::from_value(aliased_similar).expect("limit on a family body classifies");
+        assert!(
+            matches!(wire, SimilarSurfaceRequestWireV1::Retired),
+            "limit must not bind as result_limit"
+        );
+
+        let aliased_redundancy = json!({
+            "project_id": "project.demo",
+            "repository_id": "repo.demo",
+            "match_classes": ["conservative_exact"],
+            "scope": {"kind": "repository"},
+            "include_generated_paths": false,
+            "max_pairs": 4,
+            "member_limit": 8,
+            "work_limit": 20,
+            "cursor": null
+        });
+        let wire: RedundancySurfaceRequestWireV1 = serde_json::from_value(aliased_redundancy)
+            .expect("max_pairs on a family body classifies");
+        assert!(
+            matches!(wire, RedundancySurfaceRequestWireV1::Retired),
+            "max_pairs must not bind as family_limit"
+        );
+
+        let current_similar = json!({
+            "project_id": "project.demo",
+            "repository_id": "repo.demo",
+            "target": {"kind": "symbol_occurrence", "symbol_occurrence_id": "symbol.v1.demo"},
+            "match_classes": ["conservative_exact"],
+            "result_limit": 3,
+            "work_limit": 100,
+            "cursor": null
+        });
+        let wire: SimilarSurfaceRequestWireV1 =
+            serde_json::from_value(current_similar).expect("current similar decodes");
         match wire {
-            SimilarSurfaceRequestWireV1::Current(request) => assert_eq!(request.result_limit, 3),
-            SimilarSurfaceRequestWireV1::Legacy(_) => panic!("expected current family schema"),
+            SimilarSurfaceRequestWireV1::Current(request) => {
+                assert_eq!(request.result_limit, 3);
+                assert_eq!(request.work_limit, 100);
+            }
+            SimilarSurfaceRequestWireV1::Retired => panic!("expected current family schema"),
         }
+
+        let similar_schema = serde_json::to_value(schema_for!(SimilarSurfaceRequestV1))
+            .expect("similar request schema");
+        let redundancy_schema = serde_json::to_value(schema_for!(RedundancySurfaceRequestV1))
+            .expect("redundancy request schema");
+        for description in [
+            similar_schema["properties"]["result_limit"]["description"].as_str(),
+            similar_schema["properties"]["work_limit"]["description"].as_str(),
+            redundancy_schema["properties"]["family_limit"]["description"].as_str(),
+            redundancy_schema["properties"]["work_limit"]["description"].as_str(),
+        ] {
+            let description = description.expect("budget fields document themselves");
+            assert!(
+                !description.to_ascii_lowercase().contains("alias")
+                    && !description.contains("max_pairs")
+                    && !description.contains("`limit`"),
+                "public schema must not advertise retired page-size names: {description}"
+            );
+        }
+
+        let nested_path = json!({
+            "project_id": "project.demo",
+            "repository_id": "repo.demo",
+            "match_classes": ["rename_normalized_exact"],
+            "scope": {"kind": "path", "path": "src/lib.rs"},
+            "include_generated_paths": false,
+            "family_limit": 4,
+            "member_limit": 8,
+            "work_limit": 20,
+            "cursor": null
+        });
+        let wire: RedundancySurfaceRequestWireV1 =
+            serde_json::from_value(nested_path).expect("nested scope.path stays current");
+        assert!(matches!(wire, RedundancySurfaceRequestWireV1::Current(_)));
     }
 }

@@ -39,8 +39,10 @@ import { codeReadState } from './codeRead.ts';
 import type { TraceFocus } from './TraceView.tsx';
 import {
   SHARED_CODE_MATCH_CLASSES,
+  SHARED_CODE_PAGE_LIMIT,
   describeOccurrence,
   readSharedCodeCoverage,
+  sharedFamilyPageWorkLimit,
   sharedFamilyUrl,
   shortDigest,
 } from './sharedCode.ts';
@@ -170,9 +172,20 @@ function FamilyPage({
   onFocusMember: (symbolOccurrenceId: string) => void;
   onTraceMember: (symbolOccurrenceId: string) => void;
 }) {
+  const resultLimit = SHARED_CODE_PAGE_LIMIT;
+  const workLimit = sharedFamilyPageWorkLimit(resultLimit);
   const read = useEnvelope(
-    ['graph', 'shared-code', 'family', focus.id, matchClass, cursor ?? ''],
-    sharedFamilyUrl(focus.id, matchClass, cursor),
+    [
+      'graph',
+      'shared-code',
+      'family',
+      focus.id,
+      matchClass,
+      cursor ?? '',
+      String(resultLimit),
+      String(workLimit),
+    ],
+    sharedFamilyUrl(focus.id, matchClass, cursor, resultLimit, workLimit),
     SimilarResultV1Schema,
     {
       activity: {

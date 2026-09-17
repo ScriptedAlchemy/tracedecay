@@ -4,17 +4,20 @@ import {
   SHARED_CODE_MATCH_CLASSES,
   describeOccurrence,
   readSharedCodeCoverage,
+  sharedFamilyPageWorkLimit,
   sharedFamilyUrl,
   shortDigest,
 } from './sharedCode.ts';
 
 describe('shared-code family reads', () => {
-  it('addresses the route by occurrence, class, limit, and cursor', () => {
+  it('addresses the route by occurrence, class, both budgets, and cursor', () => {
     const url = new URL(sharedFamilyUrl('sym-9', 'rename_normalized_exact', null), 'http://d');
     expect(url.pathname).toBe('/api/plugins/graph/shared-code/family');
     expect(url.searchParams.get('symbol_occurrence_id')).toBe('sym-9');
     expect(url.searchParams.get('match_class')).toBe('rename_normalized_exact');
-    expect(url.searchParams.get('limit')).toBe('100');
+    expect(url.searchParams.get('result_limit')).toBe('100');
+    expect(url.searchParams.get('work_limit')).toBe('101');
+    expect(url.searchParams.has('limit')).toBe(false);
     expect(url.searchParams.has('cursor')).toBe(false);
 
     const paged = new URL(
@@ -22,7 +25,9 @@ describe('shared-code family reads', () => {
       'http://d',
     );
     expect(paged.searchParams.get('cursor')).toBe('cursor.page-2');
-    expect(paged.searchParams.get('limit')).toBe('25');
+    expect(paged.searchParams.get('result_limit')).toBe('25');
+    expect(paged.searchParams.get('work_limit')).toBe(String(sharedFamilyPageWorkLimit(25)));
+    expect(paged.searchParams.has('limit')).toBe(false);
   });
 
   it('draws exactly the two served exact classes, each with its own stitch', () => {

@@ -204,8 +204,10 @@ fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface
 
 /// Similar/redundancy cut over to the family wire schema. Protocol revisions
 /// share one (surface, operation) key; `ProtocolRevisionRange` carries the
-/// accepted revisions. Do not mint a second binding for the same spelling;
-/// `index_bindings` rejects duplicate surface-operation keys.
+/// accepted revisions. Retired field names are classified by the request wire
+/// enums and are not aliases on the family types. Do not mint a second binding
+/// for the same spelling; `index_bindings` rejects duplicate surface-operation
+/// keys.
 fn clone_family_surface_bindings(
     capability_id: &CapabilityId,
     operation: &str,

@@ -1041,11 +1041,11 @@ pub async fn handle_similar(ctx: &McpToolContext<'_>, args: Value) -> Result<Too
     let wire: SimilarSurfaceRequestWireV1 = decode_primitive_request(&args, "tracedecay_similar")?;
     let request = match wire {
         SimilarSurfaceRequestWireV1::Current(request) => request,
-        SimilarSurfaceRequestWireV1::Legacy(_) => {
+        SimilarSurfaceRequestWireV1::Retired => {
             return Err(TraceDecayError::ProjectRoute {
                 reason_code: "similar-request-schema-retired".to_owned(),
                 retryable: false,
-                detail: "tracedecay_similar retired the {symbol, limit} request shape; use the family schema (project_id, repository_id, target, match_classes, result_limit, work_limit). Catalog binding.mcp.similar.v1 covers protocol revisions 1..=2 on one surface-operation key.".to_owned(),
+                detail: "tracedecay_similar binds only the family schema (project_id, repository_id, target, match_classes, result_limit, work_limit). `symbol` and `limit` are retired and are not aliases. Catalog binding.mcp.similar.v1 covers protocol revisions 1..=2 on one surface-operation key.".to_owned(),
             });
         }
     };
@@ -1226,11 +1226,11 @@ pub async fn handle_redundancy(ctx: &McpToolContext<'_>, args: Value) -> Result<
         decode_primitive_request(&args, "tracedecay_redundancy")?;
     let request = match wire {
         RedundancySurfaceRequestWireV1::Current(request) => request,
-        RedundancySurfaceRequestWireV1::Legacy(_) => {
+        RedundancySurfaceRequestWireV1::Retired => {
             return Err(TraceDecayError::ProjectRoute {
                 reason_code: "redundancy-request-schema-retired".to_owned(),
                 retryable: false,
-                detail: "tracedecay_redundancy retired the path/min_lines/max_pairs request shape; use the family schema (project_id, repository_id, match_classes, scope, family_limit, member_limit, work_limit). Catalog binding.mcp.redundancy.v1 covers protocol revisions 1..=2 on one surface-operation key.".to_owned(),
+                detail: "tracedecay_redundancy binds only the family schema (project_id, repository_id, match_classes, scope, family_limit, member_limit, work_limit). Top-level `path`, `min_lines`, `max_pairs`, `similarity_threshold`, `include_naming_only`, and `limit` are retired and are not aliases. Catalog binding.mcp.redundancy.v1 covers protocol revisions 1..=2 on one surface-operation key.".to_owned(),
             });
         }
     };
