@@ -574,7 +574,7 @@ pub(crate) fn plan_chunk_increment_arc_shared(
     Ok(changes)
 }
 
-fn arc_share_chunk_diverged(chunk_id: &CodeSearchChunkId) -> ChunkIncrementErrorV1 {
+pub(crate) fn arc_share_chunk_diverged(chunk_id: &CodeSearchChunkId) -> ChunkIncrementErrorV1 {
     ChunkIncrementErrorV1::NonCanonical(
         crate::noncanonical::NonCanonicalCauseV1::new(
             crate::noncanonical::NonCanonicalReasonCodeV1::DigestMismatch,
