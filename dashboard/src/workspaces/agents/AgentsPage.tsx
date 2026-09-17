@@ -209,11 +209,16 @@ export function AgentsPage() {
       {/* The hero is the topology: who delegated to whom, by generation. The
         * inspector beside it is workspace-owned and shows only what a hover,
         * focus or selection in the field asked for. */}
-      <section aria-label="Delegation topology" className="flex min-h-0 flex-col lg:flex-row">
+      <section aria-label="Delegation topology" className="flex shrink-0 flex-col lg:flex-row">
         <div className="flex min-w-0 flex-1 flex-col gap-2 p-2">
           <Panel
             legend="Delegation topology · read-only"
-            actions={<StateChip kind={hierarchy.kind} detail={hierarchy.detail} />}
+            // Withdrawn below `sm`: the register above already prints this
+            // reading, and in a fixed-height header the detail wraps over the
+            // legend at 320px.
+            actions={
+              <StateChip kind={hierarchy.kind} detail={hierarchy.detail} className="max-sm:hidden" />
+            }
             elevation="well"
             bodyClassName="p-2"
           >
@@ -275,8 +280,23 @@ export function AgentsPage() {
         </div>
         <aside
           aria-label="Inspector"
-          className="w-full shrink-0 border-t border-edge-subtle bg-surface-1 lg:w-[22rem] lg:border-l lg:border-t-0 xl:w-[24rem]"
+          className="flex w-full shrink-0 flex-col border-t border-edge-subtle bg-surface-1 lg:w-[22rem] lg:border-l lg:border-t-0 xl:w-[24rem]"
         >
+          <div className="flex h-8 shrink-0 items-center gap-2.5 border-b border-edge-subtle px-2.5">
+            <span className="td-title">Inspector</span>
+            <span aria-hidden className="td-rule" />
+            <span className="td-legend">
+              {subject.kind === 'session'
+                ? subject.mode === 'inspecting'
+                  ? 'hover · focus'
+                  : subject.mode === 'selected'
+                    ? 'selection'
+                    : 'default'
+                : subject.kind === 'bundle'
+                  ? 'bundle'
+                  : 'idle'}
+            </span>
+          </div>
           <AgentInspector
             subject={subject}
             model={fit?.model ?? EMPTY_MODEL}
@@ -292,7 +312,7 @@ export function AgentsPage() {
       </section>
 
       {/* The exact ledgers the field summarizes, each behind its own read. */}
-      <section aria-label="Delegation ledgers" className="border-t border-edge-subtle">
+      <section aria-label="Delegation ledgers" className="shrink-0 border-t border-edge-subtle">
         <OverviewGrid>
           <OverviewCard title="Agent groups">
             <ReadSection

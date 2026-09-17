@@ -1,8 +1,9 @@
-import { useId, useMemo, type ReactNode } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { cn } from '../../ui/cn';
 import { subagentElapsedSeconds } from './subagentTree.ts';
 import {
   TOPOLOGY_GEOMETRY,
+  columnPitchFor,
   edgePath,
   fieldSize,
   markPosition,
@@ -11,6 +12,7 @@ import {
   type DelegationTopologyModel,
   type FittedTopology,
   type TopologyBundleMark,
+  type TopologyGeometry,
   type TopologyMark,
   type TopologySessionMark,
 } from './delegationTopology.ts';
@@ -50,6 +52,22 @@ export interface TopologyInteraction {
   readonly onToggleExpanded: (id: string) => void;
 }
 
+/** The aperture's own width, so columns can stretch to fill it. `null` until
+ * measured, which under jsdom is forever — the default pitch then holds. */
+function useApertureWidth(ref: React.RefObject<HTMLDivElement | null>): number | null {
+  const [width, setWidth] = useState<number | null>(null);
+  useEffect(() => {
+    const node = ref.current;
+    if (node === null || typeof ResizeObserver === 'undefined') return;
+    const measure = () => setWidth(node.clientWidth);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [ref]);
+  return width;
+}
+
 export function DelegationTopology({
   fit,
   interaction,
@@ -59,7 +77,10 @@ export function DelegationTopology({
 }) {
   const { model } = fit;
   const { inspectedId, selectedId } = interaction;
-  const size = fieldSize(model);
+  const apertureRef = useRef<HTMLDivElement | null>(null);
+  const apertureWidth = useApertureWidth(apertureRef);
+  const geometry = columnPitchFor(apertureWidth, model.columns);
+  const size = fieldSize(model, geometry);
   const hatchId = useId();
   const keep = useMemo(
     () => (inspectedId === null ? null : neighbourhood(model, inspectedId)),
@@ -71,20 +92,21 @@ export function DelegationTopology({
   return (
     <div className="flex min-w-0 flex-col gap-2" data-delegation-topology={model.drawnSessions}>
       <div
+        ref={apertureRef}
         role="group"
         aria-label="Delegation topology field"
         // The field scrolls when a reading outgrows the aperture; a named
         // scroll container needs its own tab stop when no mark is drawn in
         // view, and the marks themselves take over as soon as they are.
         tabIndex={0}
-        className="td-optic td-grain td-scanlines td-graticule relative max-h-[34rem] min-h-[14rem] overflow-auto"
+        className="td-optic td-grain td-scanlines td-graticule relative max-h-[34rem] min-h-[16rem] overflow-auto"
         onMouseLeave={() => interaction.onInspect(null)}
       >
         <div
           className="relative"
           style={{ width: size.width, height: size.height + HEADER_HEIGHT, minWidth: '100%' }}
         >
-          <GenerationHeaders model={model} fit={fit} />
+          <GenerationHeaders model={model} fit={fit} geometry={geometry} />
           <svg
             aria-hidden
             width={size.width}
@@ -104,7 +126,7 @@ export function DelegationTopology({
               </pattern>
             </defs>
             {model.generations.map((generation) => {
-              const x = TOPOLOGY_GEOMETRY.padX + generation.generation * TOPOLOGY_GEOMETRY.columnPitch;
+              const x = TOPOLOGY_GEOMETRY.padX + generation.generation * geometry.columnPitch;
               return (
                 <line
                   key={generation.generation}
@@ -128,8 +150,8 @@ export function DelegationTopology({
                 <path
                   key={edge.id}
                   d={edgePath(
-                    markPosition(from),
-                    markPosition(to),
+                    markPosition(from, geometry),
+                    markPosition(to, geometry),
                     markRadius(from, model.maxDescendants),
                     markRadius(to, model.maxDescendants),
                   )}
@@ -147,7 +169,7 @@ export function DelegationTopology({
             {model.stubs.map((stub) => {
               const to = byId.get(stub.to);
               if (!to) return null;
-              const at = markPosition(to);
+              const at = markPosition(to, geometry);
               const radius = markRadius(to, model.maxDescendants);
               const dim = isDim(stub.to);
               if (stub.kind === 'missing_parent') {
@@ -193,6 +215,7 @@ export function DelegationTopology({
                 key={mark.id}
                 mark={mark}
                 model={model}
+                geometry={geometry}
                 hatchId={hatchId}
                 inspected={mark.id === inspectedId}
                 selected={mark.id === selectedId}
@@ -210,6 +233,7 @@ export function DelegationTopology({
                 <MarkControl
                   mark={mark}
                   model={model}
+                  geometry={geometry}
                   interaction={interaction}
                   dim={isDim(mark.id)}
                 />
@@ -225,7 +249,15 @@ export function DelegationTopology({
 
 /** Column captions across the top of the field: generation, its role, and
  * the reconciled count of what the column holds. */
-function GenerationHeaders({ model, fit }: { model: DelegationTopologyModel; fit: FittedTopology }) {
+function GenerationHeaders({
+  model,
+  fit,
+  geometry,
+}: {
+  model: DelegationTopologyModel;
+  fit: FittedTopology;
+  geometry: TopologyGeometry;
+}) {
   return (
     <ol
       aria-label="Generations"
@@ -233,7 +265,7 @@ function GenerationHeaders({ model, fit }: { model: DelegationTopologyModel; fit
       style={{ height: HEADER_HEIGHT }}
     >
       {model.generations.map((generation) => {
-        const x = TOPOLOGY_GEOMETRY.padX + generation.generation * TOPOLOGY_GEOMETRY.columnPitch;
+        const x = TOPOLOGY_GEOMETRY.padX + generation.generation * geometry.columnPitch;
         const column = model.marks.filter((mark) => mark.generation === generation.generation);
         const tops =
           generation.generation === 0
@@ -294,6 +326,7 @@ function GenerationHeaders({ model, fit }: { model: DelegationTopologyModel; fit
 function MarkGlyph({
   mark,
   model,
+  geometry,
   hatchId,
   inspected,
   selected,
@@ -301,12 +334,13 @@ function MarkGlyph({
 }: {
   mark: TopologyMark;
   model: DelegationTopologyModel;
+  geometry: TopologyGeometry;
   hatchId: string;
   inspected: boolean;
   selected: boolean;
   dim: boolean;
 }) {
-  const at = markPosition(mark);
+  const at = markPosition(mark, geometry);
   const radius = markRadius(mark, model.maxDescendants);
   const source =
     mark.kind === 'session' &&
@@ -409,15 +443,17 @@ function MarkGlyph({
 function MarkControl({
   mark,
   model,
+  geometry,
   interaction,
   dim,
 }: {
   mark: TopologyMark;
   model: DelegationTopologyModel;
+  geometry: TopologyGeometry;
   interaction: TopologyInteraction;
   dim: boolean;
 }) {
-  const at = markPosition(mark);
+  const at = markPosition(mark, geometry);
   const radius = markRadius(mark, model.maxDescendants);
   const selected = mark.id === interaction.selectedId;
   const inspect = () => interaction.onInspect(mark.id);
@@ -491,7 +527,10 @@ function MarkControl({
         data-topology-link={mark.node.link}
       >
         <span aria-hidden className="block shrink-0" style={{ width: HIT, height: HIT }} />
-        <span className="flex min-w-0 max-w-[9.5rem] flex-col" style={{ marginLeft: labelOffset }}>
+        <span
+          className="flex min-w-0 flex-col"
+          style={{ marginLeft: labelOffset, maxWidth: geometry.columnPitch - HIT - 12 }}
+        >
           <span className="td-value truncate text-2xs" title={mark.node.session_id}>
             {mark.label}
           </span>
@@ -533,7 +572,7 @@ function TopologyLegend({ model, fit }: { model: DelegationTopologyModel; fit: F
   const folded = fit.depthLimit !== Number.POSITIVE_INFINITY;
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1.5 px-1 text-3xs text-text-muted">
-      <span className="td-legend text-text-secondary" data-topology-population>
+      <span className="td-legend whitespace-normal text-text-secondary" data-topology-population>
         {model.totalSessions.toLocaleString()} sessions · {model.drawnSessions.toLocaleString()} drawn
         {model.bundledSessions > 0 ? ` · ${model.bundledSessions.toLocaleString()} folded` : ''} ·{' '}
         {model.columns} {model.columns === 1 ? 'generation' : 'generations'}

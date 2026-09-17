@@ -1,9 +1,11 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentsPage } from './AgentsPage.tsx';
 import type {
   AnalyticsDiagnosticsPayloadV1,
+  AnalyticsSubagentNodeV1,
+  AnalyticsSubagentTreePayloadV1,
   AnalyticsUnderusedPayloadV1,
   AnalyticsUsageSummaryV1,
 } from '../../contracts/generated.ts';
@@ -209,6 +211,107 @@ describe('AgentsPage read coverage', () => {
     expect(screen.queryByText(/no handoff on graph version/)).toBeNull();
   });
 
+  it('keeps an unavailable delegation tree distinct from an empty one and from a truncated one', async () => {
+    stubAnalytics({
+      usage: usageSummary({ message_count: 2 }),
+      diagnostics: diagnosticsPayload({ available: false }),
+      underused: underusedPayload(),
+      'subagent-tree': subagentTree({
+        available: false,
+        source: 'session_store_unavailable',
+        error: 'the session store could not be opened',
+      }),
+    });
+    const unavailable = renderAgents();
+    expect(await screen.findByText(/Subagent tree unavailable/)).toBeTruthy();
+    // The daemon's own sentence reaches both the field and the register.
+    expect(screen.getAllByText(/the session store could not be opened/).length).toBeGreaterThanOrEqual(2);
+    expect(document.querySelector('[data-delegation-topology]')).toBeNull();
+    expect(authorityState('hierarchy')).toBe('unavailable');
+    // Nothing is selected and no session is named, so no frontier was asked for.
+    expect(authorityState('tokens')).toBe('unknown');
+    expect(document.querySelector('[data-agent-inspector]')?.getAttribute('data-agent-inspector')).toBe('none');
+    expect(screen.queryByText(/empty store/i)).toBeNull();
+    unavailable.unmount();
+
+    stubAnalytics({
+      usage: usageSummary({ message_count: 2 }),
+      diagnostics: diagnosticsPayload({ available: false }),
+      underused: underusedPayload(),
+      'subagent-tree': subagentTree({ nodes: [], sessions_read: 0, root_count: 0, edge_count: 0 }),
+    });
+    const empty = renderAgents();
+    expect(await screen.findByText(/This is an empty store, not a project whose agents delegated nothing/)).toBeTruthy();
+    expect(document.querySelector('[data-delegation-topology]')).toBeNull();
+    expect(authorityState('hierarchy')).toBe('complete_zero_findings');
+    expect(screen.getByLabelText('Independent authorities').textContent).toMatch(/empty store · no session/);
+    empty.unmount();
+
+    stubAnalytics({
+      usage: usageSummary({ message_count: 2 }),
+      diagnostics: diagnosticsPayload({ available: false }),
+      underused: underusedPayload(),
+      'subagent-tree': subagentTree({ truncated: true }),
+    });
+    renderAgents();
+    await screen.findByText(/scan stopped at its ceiling/);
+    expect(authorityState('hierarchy')).toBe('partial');
+    expect(screen.getByLabelText('Independent authorities').textContent).toMatch(/scan ceiling/);
+  });
+
+  it('bundles fan-out past the limit and opens a bundle on a reader\'s click', async () => {
+    const children = Array.from({ length: 10 }, (_, index) =>
+      treeNode({
+        session_id: `child-${index}`,
+        depth: 1,
+        parent_session_id: 'root',
+        agent: index < 7 ? 'Explorer' : 'Reviewer',
+        link: 'linked',
+        is_subagent: true,
+        parent_tool_use_id: `toolu_${index}`,
+      }),
+    );
+    stubAnalytics({
+      usage: usageSummary({ message_count: 2 }),
+      diagnostics: diagnosticsPayload({ available: false }),
+      underused: underusedPayload(),
+      'subagent-tree': subagentTree({
+        nodes: [treeNode({ session_id: 'root', depth: 0, descendants: 10 }), ...children],
+        sessions_read: 11,
+        root_count: 1,
+        edge_count: 10,
+        max_depth: 1,
+      }),
+    });
+    renderAgents();
+    await screen.findByText('11 sessions · 1 drawn · 10 folded · 2 generations');
+
+    const bundles = document.querySelectorAll<HTMLButtonElement>('[data-topology-control="bundle"]');
+    expect([...bundles].map((node) => node.getAttribute('data-topology-id'))).toEqual([
+      'bundle:codex:root:agent:Explorer',
+      'bundle:codex:root:agent:Reviewer',
+    ]);
+    const explorer = bundles[0]!;
+    expect(explorer.getAttribute('aria-expanded')).toBe('false');
+    expect(explorer.getAttribute('aria-label')).toMatch(/^7 × Explorer: 7 sessions in generation 1\. Open this bundle\./);
+    expect(document.querySelectorAll('[data-topology-edge="bundle"]')).toHaveLength(2);
+
+    // Hovering a bundle inspects its members without opening it.
+    fireEvent.mouseEnter(explorer);
+    const inspector = document.querySelector('[data-agent-inspector]')!;
+    expect(inspector.getAttribute('data-agent-inspector')).toBe('bundle');
+    expect(inspector.textContent).toMatch(/7 sessions grouped by agent label/);
+    expect(explorer.getAttribute('aria-expanded')).toBe('false');
+
+    // Opening is the reader's act, and it unfolds exactly that bundle.
+    fireEvent.click(explorer);
+    await screen.findByText('11 sessions · 8 drawn · 3 folded · 2 generations');
+    expect(document.querySelectorAll('[data-topology-control="bundle"]')).toHaveLength(1);
+    expect(
+      document.querySelectorAll('[data-topology-control="session"][data-topology-id^="codex:child-"]'),
+    ).toHaveLength(7);
+  });
+
   it('keeps an unavailable subagent read distinct from zero delegations', async () => {
     stubAnalytics({
       usage: usageSummary({ message_count: 2 }),
@@ -310,6 +413,65 @@ function hookWindow(
   };
 }
 
+/** One session of the subagent tree as `analytics_api` sends it. */
+function treeNode(
+  overrides: Partial<AnalyticsSubagentNodeV1> & { session_id: string; depth: number },
+): AnalyticsSubagentNodeV1 {
+  return {
+    provider: 'codex',
+    parent_session_id: null,
+    agent: 'Codex',
+    title: null,
+    started_at: 1_760_000_000 + overrides.depth,
+    ended_at: 1_760_000_100,
+    is_subagent: false,
+    parent_tool_use_id: null,
+    descendants: 0,
+    link: 'root',
+    ...overrides,
+  };
+}
+
+/** The subagent tree as `analytics_api` sends it: one root with one child
+ * unless a test overrides the nodes. */
+function subagentTree(
+  overrides: Partial<AnalyticsSubagentTreePayloadV1> = {},
+): AnalyticsSubagentTreePayloadV1 {
+  return {
+    available: true,
+    source: 'sessions',
+    error: null,
+    nodes: [
+      treeNode({ session_id: 'root', depth: 0, descendants: 1 }),
+      treeNode({
+        session_id: 'child',
+        depth: 1,
+        parent_session_id: 'root',
+        link: 'linked',
+        is_subagent: true,
+        parent_tool_use_id: 'toolu_1',
+      }),
+    ],
+    sessions_read: 2,
+    root_count: 1,
+    edge_count: 1,
+    max_depth: 1,
+    missing_parent_count: 0,
+    cycle_count: 0,
+    truncated: false,
+    ...overrides,
+  };
+}
+
+/** The state the authority register reports for one authority. */
+function authorityState(id: string): string | null {
+  return (
+    document
+      .querySelector(`[data-agent-authority="${id}"]`)
+      ?.getAttribute('data-agent-authority-state') ?? null
+  );
+}
+
 /** The underused-family read as `analytics_api` sends it, `db` included. */
 function underusedPayload(
   overrides: Partial<AnalyticsUnderusedPayloadV1> = {},
@@ -364,7 +526,7 @@ function renderAgents() {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
-  render(
+  return render(
     <QueryClientProvider client={client}>
       <AgentsPage />
     </QueryClientProvider>,
