@@ -135,11 +135,12 @@ Do not amend #1562. It is the seat fix. The prove says that fix is in effect: se
 Mac, local, perf is not required. One process. Do not export a timeout override. Command:
 
 ```
-cargo test -p tracedecay --features test-transport --test transport_acceptance_suite \
-  background_refresh_and_reopen_report_only_servable_generations -- --exact
+scripts/require-exact-test.sh cargo test -p tracedecay --features test-transport \
+  --test transport_acceptance_suite -- \
+  graph_rebuild_status_test::background_refresh_and_reopen_report_only_servable_generations -- --exact
 ```
 
-Confirm the output says 1 passed, not 0. `--exact` on a missing name is a vacuous green.
+The helper fails the run when libtest reports 0 tests. A bare `--exact` filter that matches nothing exits 0.
 
 Baseline first, on `b80dd58` as it is, before any row above. On failure, the panic already prints `status` and `search`. Record these fields from that JSON, not a new logger:
 
