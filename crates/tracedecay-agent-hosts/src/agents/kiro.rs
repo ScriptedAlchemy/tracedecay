@@ -359,10 +359,9 @@ impl AgentIntegration for KiroIntegration {
     }
 
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
-        // The managed agent file is the only generated artifact (it bakes the
-        // tracedecay binary path into its hook commands). The shared MCP
-        // config, CLI default-agent setting, and steering rules are config —
-        // they stay untouched. A user-managed agent file is never rewritten.
+        // Refresh only the owned managed-agent artifact that embeds the binary
+        // path. Migration cleanup owns retired global steering/default-agent
+        // state, and user-managed agent files are never rewritten.
         let agent_path = managed_agent_path(&ctx.home);
         if !is_owned_agent_file(&agent_path) {
             return Ok(UpdatePluginOutcome::NotInstalled);
