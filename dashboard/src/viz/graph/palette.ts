@@ -5,6 +5,9 @@ import { cssColorToRgb } from './activation.ts';
  * the data; it is the medium the field is lit against. */
 export interface GraphPalette {
   hot: [number, number, number];
+  /** Measured-activity amber. Distinct from `hot` (cyan focus/signal) so a
+   * surface can keep "hover" and "admitted activity" visibly different. */
+  alert: [number, number, number];
   edge: [number, number, number];
   label: [number, number, number];
   labelFont: string;
@@ -40,6 +43,7 @@ export function palette(element: HTMLElement): GraphPalette {
   const light = (substrate[0] * 299 + substrate[1] * 587 + substrate[2] * 114) / 1000 > 128;
   return {
     hot: token('--raw-graph-accent', '#5de7ff'),
+    alert: token('--raw-graph-alert', '#e0b64a'),
     edge: token('--raw-graph-edge', '#375372'),
     label: token('--raw-graph-text', '#c4d4e8'),
     /* A node label is a code symbol, so it belongs to the same mono face as

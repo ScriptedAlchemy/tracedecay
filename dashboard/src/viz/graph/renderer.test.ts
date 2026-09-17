@@ -60,6 +60,7 @@ vi.mock('./glowProgram.ts', () => ({ GlowProgram: class {} }));
 
 const DARK: GraphPalette = {
   hot: [93, 231, 255],
+  alert: [224, 182, 74],
   edge: [55, 83, 114],
   label: [196, 212, 232],
   labelFont: 'ui-monospace, monospace',
@@ -70,6 +71,7 @@ const DARK: GraphPalette = {
 
 const LIGHT: GraphPalette = {
   hot: [11, 116, 145],
+  alert: [160, 110, 20],
   edge: [148, 166, 188],
   label: [32, 42, 56],
   labelFont: 'ui-monospace, monospace',
