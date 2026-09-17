@@ -944,6 +944,21 @@ async fn query_admission_serves_v14_while_clone_successor_is_pending() {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             Some(latest.text_generation_handle());
+        let serving_generation = worktree
+            .serving_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .expect("the injected text owner has a serving seat")
+            .generation()
+            .manifest()
+            .generation_id
+            .clone();
+        assert_eq!(
+            serving_generation,
+            latest.metadata().manifest().generation_id,
+            "the test must exercise pending backfill on the seated generation"
+        );
     }
 
     let executed = registry
@@ -1022,13 +1037,32 @@ async fn expired_source_proof_reschedules_pending_clone_backfill() {
     drop(admission);
     // No second query or external wake: refreshing the proof must hand the
     // pending clone work to a successor pass by itself.
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while latest.text_projection_needs_work() {
+    let settled = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if registry
+                .latest_text_serving_for_root(fixture.path())
+                .await
+                .is_some_and(|text| !text.text_projection_needs_work())
+            {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
-    .await
-    .expect("the source refresh stranded clone backfill");
+    .await;
+    assert!(
+        settled.is_ok(),
+        "the source refresh stranded clone backfill: pending_wake={:?} reconcile_in_progress={} source_age={:?} receipts={:?}",
+        registry.pending_wake_micros_for_scope(&scope).await,
+        registry.reconcile_in_progress_for_test(fixture.path()).await,
+        source_freshness
+            .state
+            .lock()
+            .unwrap()
+            .last_reconciled_at
+            .elapsed(),
+        registry.event_to_ready_receipts(),
+    );
     registry.shutdown().await;
 }
 

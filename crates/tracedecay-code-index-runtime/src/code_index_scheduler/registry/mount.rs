@@ -602,8 +602,9 @@ impl CodeIndexSchedulerRegistryV1 {
                         });
                     let source_current = worker_source_freshness
                         .ready_without_stat(&worker_project_root, &worker_shutting_down);
-                    clone_backfill_waiting_for_source =
-                        owners_ready && serving_matches_text && !source_current;
+                    // This flag schedules the successor; that successor
+                    // re-checks `serving_matches_text` before doing backfill.
+                    clone_backfill_waiting_for_source = owners_ready && !source_current;
                     let drive_retained = !owners_ready || (serving_matches_text && source_current);
                     if drive_retained {
                         // The retained owner projects on its own task, exactly as
@@ -2260,7 +2261,19 @@ impl CodeIndexSchedulerRegistryV1 {
                             // the seat reads, so it owes no such pass.
                             Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
                         }
-                        PublishedTextProjectionOutcomeV1::Finished => {}
+                        PublishedTextProjectionOutcomeV1::Finished => {
+                            let installed_owner_still_needs_work = worker_text_generation
+                                .read()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .as_ref()
+                                .is_some_and(LatestCodeTextGenerationV1::text_projection_needs_work);
+                            if installed_owner_still_needs_work {
+                                Self::note_worker_continuation(
+                                    &worker_pending_wake,
+                                    &worker_wake,
+                                );
+                            }
+                        }
                         PublishedTextProjectionOutcomeV1::Shutdown => {
                             tracing::info!(
                                 event = "code_index_worker_shutdown_observed",
