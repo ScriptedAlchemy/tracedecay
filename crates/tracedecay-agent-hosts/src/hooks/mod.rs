@@ -366,19 +366,9 @@ fn hook_output_owner_event_id(
 
 macro_rules! read_hook_event {
     () => {{
-        match $crate::hooks::read_stdin_bounded() {
-            Ok($crate::hooks::HookStdinRead::Event(event)) => event,
-            Ok($crate::hooks::HookStdinRead::Oversized) => {
-                eprintln!(
-                    "tracedecay hook: stdin exceeds wire message bound ({})",
-                    ::tracedecay_framing::WIRE_RECORD_TOO_LARGE
-                );
-                return 0;
-            }
-            Err(e) => {
-                eprintln!("tracedecay hook: failed to read stdin: {e}");
-                return 1;
-            }
+        match $crate::hooks::take_hook_event($crate::hooks::read_stdin_bounded()) {
+            Ok(event) => event,
+            Err(code) => return code,
         }
     }};
 }
@@ -1207,6 +1197,56 @@ pub(crate) enum HookStdinRead {
     /// Stdin exceeded [`tracedecay_framing::MAX_WIRE_MESSAGE_BYTES`].
     /// No payload bytes are retained.
     Oversized,
+}
+
+/// Shared stdin admission for every host hook. Policy lives here so a shell
+/// cannot invent a second exit code or continue on an unread event.
+pub(crate) enum HookStdinAdmission {
+    Event(String),
+    Oversized,
+    ReadFailed(std::io::Error),
+}
+
+pub(crate) fn classify_hook_stdin(read: std::io::Result<HookStdinRead>) -> HookStdinAdmission {
+    match read {
+        Ok(HookStdinRead::Event(event)) => HookStdinAdmission::Event(event),
+        Ok(HookStdinRead::Oversized) => HookStdinAdmission::Oversized,
+        Err(error) => HookStdinAdmission::ReadFailed(error),
+    }
+}
+
+/// Exit code for a rejected stdin read. `None` means the event was admitted.
+pub(crate) fn hook_stdin_exit_code(admission: &HookStdinAdmission) -> Option<i32> {
+    match admission {
+        HookStdinAdmission::Event(_) => None,
+        HookStdinAdmission::Oversized => Some(0),
+        HookStdinAdmission::ReadFailed(_) => Some(1),
+    }
+}
+
+fn report_rejected_hook_stdin(admission: &HookStdinAdmission) {
+    match admission {
+        HookStdinAdmission::Oversized => {
+            eprintln!(
+                "tracedecay hook: stdin exceeds wire message bound ({})",
+                tracedecay_framing::WIRE_RECORD_TOO_LARGE
+            );
+        }
+        HookStdinAdmission::ReadFailed(error) => {
+            eprintln!("tracedecay hook: failed to read stdin: {error}");
+        }
+        HookStdinAdmission::Event(_) => {}
+    }
+}
+
+pub(crate) fn take_hook_event(read: std::io::Result<HookStdinRead>) -> Result<String, i32> {
+    match classify_hook_stdin(read) {
+        HookStdinAdmission::Event(event) => Ok(event),
+        admission => {
+            report_rejected_hook_stdin(&admission);
+            Err(hook_stdin_exit_code(&admission).unwrap_or(1))
+        }
+    }
 }
 
 /// Read host-hook stdin with the host wire message byte cap enforced before

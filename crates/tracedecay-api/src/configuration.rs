@@ -115,21 +115,37 @@ pub fn parse_code_index_worker_settings_patch(
         .map_err(|error| patch_shape_error("code index worker settings", &error))
 }
 
-/// Validate the transport-owned user patch invariants. The executable supplies
-/// the duration parser because profile configuration remains its authority.
-pub fn validate_user_settings_patch(
+/// User-settings fields after the HTTP boundary has parsed display strings.
+///
+/// `watcher_debounce_ms` is already a positive millisecond count. Planners
+/// write that unsigned value and do not parse the wire string again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmittedUserSettingsPatch {
+    pub upload_enabled: Option<bool>,
+    pub watcher_debounce_ms: Option<u64>,
+    pub extraction_timeout_secs: Option<u64>,
+}
+
+/// Parse a user settings patch once. The executable supplies the duration
+/// parser because profile configuration remains its authority.
+pub fn admit_user_settings_patch(
     patch: &UserSettingsPatch,
-    duration_is_valid: impl Fn(&str) -> bool,
-) -> Result<(), DashboardConfigurationRouteErrorV1> {
+    parse_debounce_millis: impl Fn(&str) -> Option<u64>,
+) -> Result<AdmittedUserSettingsPatch, DashboardConfigurationRouteErrorV1> {
     let mut errors = Vec::new();
-    if let Some(debounce) = &patch.watcher_debounce
-        && !duration_is_valid(debounce)
-    {
-        errors.push(validation_error(
-            "watcher_debounce",
-            "watcher_debounce must be a duration like \"2s\", \"15s\", or \"1m\"",
-        ));
-    }
+    let watcher_debounce_ms = match patch.watcher_debounce.as_deref() {
+        Some(debounce) => match parse_debounce_millis(debounce) {
+            Some(millis) => Some(millis),
+            None => {
+                errors.push(validation_error(
+                    "watcher_debounce",
+                    "watcher_debounce must be a duration like \"2s\", \"15s\", or \"1m\"",
+                ));
+                None
+            }
+        },
+        None => None,
+    };
     if patch.extraction_timeout_secs == Some(0) {
         errors.push(validation_error(
             "extraction_timeout_secs",
@@ -137,7 +153,11 @@ pub fn validate_user_settings_patch(
         ));
     }
     if errors.is_empty() {
-        Ok(())
+        Ok(AdmittedUserSettingsPatch {
+            upload_enabled: patch.upload_enabled,
+            watcher_debounce_ms,
+            extraction_timeout_secs: patch.extraction_timeout_secs,
+        })
     } else {
         Err(settings_validation_error(errors))
     }
@@ -287,6 +307,32 @@ mod tests {
             validate_code_index_worker_settings_patch(&patch).expect_err("zero must be denied");
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["validation_errors"][0]["field"], "code_index_workers");
+    }
+
+    #[test]
+    fn user_settings_patch_parses_debounce_once() {
+        let patch = parse_user_settings_patch(json!({
+            "expected_revision_id": "configuration.revision.fixture",
+            "idempotency_key": "configuration.idempotency.fixture",
+            "watcher_debounce": "15s",
+            "extraction_timeout_secs": 60
+        }))
+        .unwrap();
+        let admitted =
+            admit_user_settings_patch(&patch, |value| (value == "15s").then_some(15_000)).unwrap();
+        assert_eq!(admitted.watcher_debounce_ms, Some(15_000));
+        assert_eq!(admitted.extraction_timeout_secs, Some(60));
+
+        let invalid = parse_user_settings_patch(json!({
+            "expected_revision_id": "configuration.revision.fixture",
+            "idempotency_key": "configuration.idempotency.fixture",
+            "watcher_debounce": "0s"
+        }))
+        .unwrap();
+        let (status, Json(body)) = admit_user_settings_patch(&invalid, |_| None)
+            .expect_err("zero duration must be denied");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["validation_errors"][0]["field"], "watcher_debounce");
     }
 
     #[test]

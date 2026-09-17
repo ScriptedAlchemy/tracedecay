@@ -239,17 +239,7 @@ async fn claude_post_tool_use_response(
 #[hotpath::measure(future = true, label = "hosts.hooks.claude.stop")]
 pub async fn hook_stop(runtime: &HookRuntimeV1) -> i32 {
     let started = Instant::now();
-    let event = match super::read_stdin_bounded() {
-        Ok(super::HookStdinRead::Event(event)) => event,
-        Ok(super::HookStdinRead::Oversized) => {
-            eprintln!(
-                "tracedecay hook: stdin exceeds wire message bound ({})",
-                tracedecay_framing::WIRE_RECORD_TOO_LARGE
-            );
-            return 1;
-        }
-        Err(_) => String::new(),
-    };
+    let event = read_hook_event!();
     let (root, output) = claude_stop_response_for_event(runtime, &event, started).await;
     if !super::write_hook_output(
         root.as_deref(),

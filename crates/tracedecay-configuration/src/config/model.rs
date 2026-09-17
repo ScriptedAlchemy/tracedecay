@@ -31,24 +31,12 @@ use tracedecay_runtime_core::config::{
     is_generated_dir_segment,
 };
 
-use super::{
-    PinnedRuntimeConfiguration, optional_text_setting, required_bool, required_unsigned,
-    required_usize,
-};
+use super::{PinnedRuntimeConfiguration, required_bool, required_unsigned, required_usize};
 
 /// Name of the legacy configuration migration input stored inside the data
 /// directory. It is not a runtime authority and production code must never
 /// rewrite it.
 pub const CONFIG_FILENAME: &str = "config.json";
-
-/// Atomic daemon retention/compaction policy tree.
-///
-/// The value is canonical JSON for [`RetentionConfig`]. Keeping the session
-/// (LCM), observation-evidence, orphan-store, debris, and compaction windows
-/// under one setting keeps the retention engines threaded as a single
-/// versioned unit the daemon backstop reads, mirroring the semantic key. Absent
-/// or unset resolves to [`RetentionConfig::default`]'s bounded safe policy.
-pub const SYNC_RETENTION_SETTING_KEY: &str = "sync.retention.v1";
 
 /// Returns `true` if any component of `path` is a generated/vendored
 /// directory segment, or `path` itself carries a minified-asset suffix
@@ -576,9 +564,12 @@ impl TraceDecayConfig {
     /// Layers the daemon-only policy over the shared runtime settings of an
     /// already validated pin. The shared settings are copied from the pin, so
     /// they agree with every other consumer by construction; only the
-    /// daemon-only sync, retention, and legacy metadata fields are decoded
-    /// here, from the same snapshot, without defaults, file reads, or
-    /// environment reads.
+    /// daemon-only sync and legacy metadata fields are decoded here, from the
+    /// same snapshot, without defaults, file reads, or environment reads.
+    ///
+    /// Retention is not a registered configuration setting. An unregistered
+    /// text blob is not parsed into policy; the admitted value is
+    /// [`RetentionConfig::default`].
     #[hotpath::measure(label = "daemon.config.parse")]
     pub fn from_runtime(runtime: &PinnedRuntimeConfiguration) -> Result<Self> {
         let shared = runtime.config();
@@ -633,7 +624,7 @@ impl TraceDecayConfig {
                 auto_init: required_bool(snapshot, SYNC_AUTO_INIT_SETTING_KEY)?,
                 auto_track_pr_branches: shared.sync.auto_track_pr_branches,
                 auto_track_pr_poll_secs: shared.sync.auto_track_pr_poll_secs,
-                retention: retention_config_from_snapshot(snapshot)?,
+                retention: admitted_retention_config(snapshot),
             },
             telemetry: TelemetryConfig {
                 timings: shared.telemetry.timings,
@@ -642,15 +633,10 @@ impl TraceDecayConfig {
     }
 }
 
-fn retention_config_from_snapshot(snapshot: &ConfigurationSnapshotV1) -> Result<RetentionConfig> {
-    let retention = match optional_text_setting(snapshot, SYNC_RETENTION_SETTING_KEY)? {
-        None => RetentionConfig::default(),
-        Some(value) => serde_json::from_str(value).map_err(|error| {
-            config_error(format!("resolved retention setting is invalid: {error}"))
-        })?,
-    };
-    retention.validate()?;
-    Ok(retention)
+/// Retention is not in the closed configuration key inventory. A snapshot may
+/// still carry an invented text key; that private JSON is not policy.
+fn admitted_retention_config(_snapshot: &ConfigurationSnapshotV1) -> RetentionConfig {
+    RetentionConfig::default()
 }
 
 fn config_error(message: impl Into<String>) -> TraceDecayError {
@@ -707,6 +693,7 @@ pub fn load_config_from_path(project_root: &Path, config_path: &Path) -> Result<
                 e
             ),
         })?;
+    config.sync.retention.validate()?;
 
     Ok(config)
 }

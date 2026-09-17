@@ -552,8 +552,57 @@ fn default_excludes_still_catch_target_and_worktrees() {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod retention_config_tests {
-    use crate::{RetentionConfig, SyncConfig};
+    use std::collections::BTreeMap;
+
+    use crate::{RetentionConfig, SyncConfig, TraceDecayConfig};
     use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
+    use tracedecay_domain::configuration::{
+        CandidateDispositionV1, ConfigurationCandidateV1, ConfigurationLayerIdV1,
+        ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1, SettingKey,
+    };
+
+    #[test]
+    fn unregistered_retention_text_is_not_policy() {
+        let key = SettingKey::new("sync.retention.v1").unwrap();
+        let mut values = BTreeMap::new();
+        values.insert(
+            key.clone(),
+            ConfigurationValueV1::Text(r#"{"orphan_store_gc_days":7}"#.to_owned()),
+        );
+        let mut provenance = BTreeMap::new();
+        provenance.insert(
+            key,
+            vec![ConfigurationCandidateV1 {
+                layer: ConfigurationLayerIdV1::Default,
+                revision_id: ConfigurationRevisionId::new("configuration.revision.fixture")
+                    .unwrap(),
+                disposition: CandidateDispositionV1::Winning,
+                safe_reason: None,
+            }],
+        );
+        let snapshot = ConfigurationSnapshotV1::new(values, provenance).unwrap();
+        let retention = super::super::admitted_retention_config(&snapshot);
+        assert_eq!(retention, RetentionConfig::default());
+        assert_ne!(retention.orphan_store_gc_days, Some(7));
+    }
+
+    #[test]
+    fn legacy_config_file_rejects_zero_retention_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut config = TraceDecayConfig::default();
+        config.sync.retention.orphan_store_gc_days = Some(0);
+        std::fs::write(
+            &path,
+            serde_json::to_string(&config).expect("serialize legacy config"),
+        )
+        .unwrap();
+        let error = super::super::load_config_from_path(dir.path(), &path).unwrap_err();
+        assert!(
+            error.to_string().contains("orphan_store_gc_days"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn default_retention_runs_only_safe_bounded_maintenance() {

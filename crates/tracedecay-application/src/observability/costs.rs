@@ -1,4 +1,7 @@
-//! Canonical Costs read-model composition and wire serialization.
+//! Canonical Costs read-model composition.
+//!
+//! Transport adapters serialize [`CostsReadModelV1`] themselves. This module
+//! does not name a CLI, MCP, or HTTP wire.
 
 use tracedecay_contracts::{CostsReadModelV1, MetricCoverageV1, MetricSourceV1, now_micros};
 use tracedecay_domain::{CoverageStateV1, ObservationScopeV1};
@@ -14,22 +17,6 @@ use tracedecay_session_memory::provider_usage::{
     AggregatedProviderUsageCountersV1, ProviderUsageAggregateV1, ProviderUsageCoverageV1,
     price_provider_usage, provider_usage_aggregate,
 };
-
-fn canonical_costs_value(model: &CostsReadModelV1) -> Result<serde_json::Value, serde_json::Error> {
-    serde_json::to_value(model)
-}
-
-pub fn costs_cli_value(model: &CostsReadModelV1) -> Result<serde_json::Value, serde_json::Error> {
-    canonical_costs_value(model)
-}
-
-pub fn costs_mcp_value(model: &CostsReadModelV1) -> Result<serde_json::Value, serde_json::Error> {
-    canonical_costs_value(model)
-}
-
-pub fn costs_export_bytes(model: &CostsReadModelV1) -> Result<Vec<u8>, serde_json::Error> {
-    serde_json::to_vec(model)
-}
 
 pub fn costs_unavailable_read_model(
     scope_ref: Option<&str>,

@@ -273,12 +273,21 @@ fn apply_host_bundle_artifact_action_at(
             message: "artifact backup/restore has no dry-run mode".to_string(),
         });
     }
-    // A backup only ever writes a new snapshot; nothing deployed changes, so
-    // it needs no confirmation. A restore overwrites deployed bytes and keeps
-    // requiring `--yes`.
-    if matches!(action, crate::cli::HostBundleAction::ArtifactRestore { .. }) && !options.yes {
+    // The writer refuses either operation without explicit confirmation.
+    // Restore overwrites deployed bytes; backup publishes a receipt. The shell
+    // must not advertise a weaker policy than that contract.
+    if !options.yes {
+        let message = match &action {
+            crate::cli::HostBundleAction::ArtifactBackup { .. } => "artifact backup requires --yes",
+            crate::cli::HostBundleAction::ArtifactRestore { .. } => {
+                "artifact restore requires --yes"
+            }
+            crate::cli::HostBundleAction::Status | crate::cli::HostBundleAction::Recover { .. } => {
+                "status and recovery are not artifact backup/restore operations"
+            }
+        };
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: "artifact restore requires --yes".to_string(),
+            message: message.to_string(),
         });
     }
     let component =
@@ -1802,9 +1811,10 @@ mod tests {
     use super::{
         AgentReinstallOutcome, CatalogHostComponentRegistrationAuthority, ComponentSetApplyContext,
         HostBundleCliOperation, apply_canonical_component_set,
-        apply_default_canonical_component_set, broker_codex_daemon_automation_project,
-        canonical_host_component_set, canonical_host_component_set_with_tracedecay_bin,
-        component_is_not_applicable, component_mutation_still_requires_yes, component_set_request,
+        apply_default_canonical_component_set, apply_host_bundle_artifact_action_at,
+        broker_codex_daemon_automation_project, canonical_host_component_set,
+        canonical_host_component_set_with_tracedecay_bin, component_is_not_applicable,
+        component_mutation_still_requires_yes, component_set_request,
         lifecycle_invocation_confirms_plan,
         reinstall_agent_integrations_with_persisted_dashboard_policies,
     };
@@ -2652,6 +2662,24 @@ mod tests {
                 lifecycle.path(),
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn artifact_backup_requires_the_writer_confirmation() {
+        let error = apply_host_bundle_artifact_action_at(
+            crate::cli::HostBundleAction::ArtifactBackup {
+                agent: "opencode".to_string(),
+            },
+            crate::cli::HostBundleCliOptions::default(),
+            Path::new("/tmp"),
+            Path::new("/tmp"),
+            0,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("artifact backup requires --yes"),
+            "{error}"
         );
     }
 

@@ -1,5 +1,9 @@
-use super::{HookStdinRead, read_stdin_bounded_from};
-use std::io::{self, Read};
+use std::io::{self, ErrorKind, Read};
+
+use super::{
+    HookStdinAdmission, HookStdinRead, classify_hook_stdin, hook_stdin_exit_code,
+    read_stdin_bounded_from,
+};
 use tracedecay_framing::MAX_WIRE_MESSAGE_BYTES;
 
 struct ChunkedHostileReader {
@@ -34,6 +38,19 @@ fn hook_stdin_streams_hostile_input_and_returns_oversized_without_payload() {
     let outcome = read_stdin_bounded_from(&mut hostile).unwrap();
     assert!(matches!(outcome, HookStdinRead::Oversized));
     assert!(hostile.remaining < MAX_WIRE_MESSAGE_BYTES + 512 * 1024);
+}
+
+#[test]
+fn hook_stdin_admission_is_one_policy() {
+    let event = classify_hook_stdin(Ok(HookStdinRead::Event("{\"stop\":true}".to_owned())));
+    assert!(matches!(event, HookStdinAdmission::Event(_)));
+    assert_eq!(hook_stdin_exit_code(&event), None);
+
+    let oversized = classify_hook_stdin(Ok(HookStdinRead::Oversized));
+    assert_eq!(hook_stdin_exit_code(&oversized), Some(0));
+
+    let failed = classify_hook_stdin(Err(io::Error::new(ErrorKind::BrokenPipe, "closed")));
+    assert_eq!(hook_stdin_exit_code(&failed), Some(1));
 }
 
 #[test]
