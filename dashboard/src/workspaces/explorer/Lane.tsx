@@ -69,12 +69,21 @@ export function Lane({
       className="relative flex min-h-[var(--pane-min-height)] min-w-0 flex-col border border-edge-subtle bg-surface-1"
     >
       <Corners tone={read.state === 'ready' ? 'signal' : 'edge'} />
-      <header className="flex min-h-9 shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-edge-subtle px-2.5 py-1.5">
-        <span aria-hidden className={cn('h-3 w-[3px] shrink-0', spec.railClass)} />
-        <h2 className="td-title text-text-primary">{spec.label}</h2>
-        <StateChip kind={kind} detail={laneStateDetail(read)} className="max-w-full" />
-        <span aria-hidden className="td-rule" />
-        <Icon aria-hidden size={14} className={cn('shrink-0', spec.textClass)} />
+      {/* Name over state, so four headers align whatever length a state's
+        * detail runs to. The chip truncates its detail; the body repeats the
+        * full sentence for any lane that has no rows to show instead. */}
+      <header className="flex shrink-0 flex-col gap-1 border-b border-edge-subtle px-2.5 py-1.5">
+        <span className="flex h-5 items-center gap-2">
+          <span aria-hidden className={cn('h-3 w-[3px] shrink-0', spec.railClass)} />
+          <h2 className="td-title text-text-primary">{spec.label}</h2>
+          <span aria-hidden className="td-rule" />
+          <Icon aria-hidden size={14} className={cn('shrink-0', spec.textClass)} />
+        </span>
+        <StateChip
+          kind={kind}
+          detail={laneStateDetail(read)}
+          className="w-fit max-w-full [&>span:last-child]:truncate"
+        />
       </header>
 
       {/* The headline count, or the absence of one. A lane that did not
@@ -133,7 +142,15 @@ export function Lane({
           {answered ? `${rows.length.toLocaleString()} shown` : '—'}
           {answered && read.hasMore === true ? ' · more rows remain past this page' : ''}
         </span>
-        <span>{answered ? 'source order · no cross-lane rank' : searching ? 'not served' : 'no rows'}</span>
+        <span>
+          {answered
+            ? 'source order · no cross-lane rank'
+            : read.state === 'pending'
+              ? 'reading'
+              : searching
+                ? 'not served'
+                : 'no rows'}
+        </span>
       </footer>
     </section>
   );
@@ -343,9 +360,11 @@ function LaneRow({
       className={cn(
         'relative flex w-full flex-col justify-center gap-0.5 border-b border-edge-subtle pl-3.5 pr-2.5 text-left',
         'transition-[opacity,background-color,box-shadow] duration-[var(--dur-state)] ease-[var(--ease-standard)] motion-reduce:transition-none',
-        // Hover raises the face one plane; selection is the gutter, not a wash,
-        // so the two never read as the same thing.
-        'hover:bg-raised hover:shadow-[var(--shadow-raised)] focus-visible:bg-surface-2',
+        // Hover raises the face one plane and draws one restrained halo;
+        // selection is the gutter, not a wash, so the two never read as the
+        // same thing. Keyboard focus keeps the shell's 2px outline.
+        'hover:bg-raised hover:shadow-[var(--shadow-raised)] hover:outline hover:outline-1 hover:-outline-offset-1 hover:outline-accent/40',
+        'focus-visible:bg-surface-2 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent',
         selected && 'bg-surface-2',
       )}
     >
@@ -468,7 +487,16 @@ export function LaneGrid({ children }: { children: ReactNode }) {
       role="group"
       aria-label="Result lanes"
       onKeyDown={onKeyDown}
-      className="td-stagger grid min-h-0 flex-1 auto-rows-fr gap-2 p-2 [grid-template-columns:repeat(auto-fit,minmax(15rem,1fr))]"
+      className={cn(
+        'td-stagger grid gap-2 p-2 [grid-template-columns:repeat(auto-fit,minmax(15rem,1fr))]',
+        // One row at `lg` and above: the grid takes the aperture's height and
+        // each lane scrolls its own rows. Where the lanes wrap — narrow
+        // viewports, 200% zoom — every row is a fixed lane height instead of
+        // a share of a height too small to hold them, so wrapped lanes stack
+        // and the page scrolls rather than the rows overlapping.
+        'lg:min-h-0 lg:flex-1 lg:auto-rows-fr',
+        'max-lg:flex-none max-lg:auto-rows-[28rem]',
+      )}
     >
       {children}
     </div>
