@@ -80,8 +80,17 @@ coverage, initial paused playback, and 0.5–4x presentation speed during migrat
 - Brain project-body/registry-row scoping, repository-hub exclusion, and exact
   activity identity/one-hop propagation:
   `dashboard/src/workspaces/brain/BrainPage.tsx`,
-  `dashboard/src/workspaces/brain/ScopedBrain.tsx`,
-  `dashboard/src/workspaces/brain/ScopedBrain.dom.test.tsx`, and
+  `dashboard/src/workspaces/brain/BrainInteraction.dom.test.tsx`,
+  `dashboard/src/workspaces/brain/ScopedBrain.tsx`, and
+  `dashboard/src/workspaces/brain/ScopedBrain.dom.test.tsx`.
+- Brain registry field (luminous bodies, hover-inspect-only, repository camera
+  emphasis, path conduction, reduced-motion static strike, typed WebGL
+  absence): `dashboard/src/workspaces/brain/RegistryScene.tsx`,
+  `dashboard/src/workspaces/brain/RegistryScene.dom.test.tsx`,
+  `dashboard/src/viz/scene/registrySceneModel.ts`, and
+  `dashboard/src/viz/scene/registryRuntime.ts`. The scoped code graph still
+  renders through `dashboard/src/viz/graph/GraphCanvas.tsx`, whose travelling
+  activation is covered by
   `dashboard/src/viz/graph/GraphCanvas.propagation.dom.test.tsx`.
 - Loom time-window zoom/pan/fit and visible-window culling:
   `dashboard/src/workspaces/loom/WeaveCanvas.tsx` and
