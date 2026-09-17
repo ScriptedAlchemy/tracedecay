@@ -109,6 +109,10 @@ enum SealedStagingReleaseAuthorityV1 {
 /// publication, and that receipt is not serving authority.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SealedReleaseReceiptAuthority {
+    /// Constructed by `test-helpers` / `eval-helpers` callers that have not
+    /// proved a sealed-code-generation replay. Production publication always
+    /// passes [`Self::Permitted`].
+    #[allow(dead_code)]
     Denied,
     Permitted,
 }
