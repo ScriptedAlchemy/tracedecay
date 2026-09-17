@@ -9,6 +9,51 @@ use tracedecay_global_db::RegisteredGlobalDb;
 /// is *finite* — a wedged recorder task can never hang the caller (tests,
 /// shutdown drains) indefinitely as the previous unbounded loop allowed.
 const LEDGER_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_SPAN_IDENTIFIER_BYTES: usize = 256;
+
+fn bounded_span_identifier(value: Option<&str>) -> Option<String> {
+    value
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= MAX_SPAN_IDENTIFIER_BYTES
+                && !value.chars().any(char::is_control)
+        })
+        .map(str::to_string)
+}
+
+fn derive_hook_span_git_context(
+    cwd: &Path,
+    project_root: PathBuf,
+    active_project_root: &Path,
+) -> Option<(String, Option<String>)> {
+    let deadline = tracedecay_runtime_core::cancellation::MonotonicDeadline::at(
+        std::time::Instant::now() + std::time::Duration::from_secs(2),
+    );
+    let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
+    let worktree_raw =
+        match tracedecay_runtime_core::git_discovery::discover_repository_identity_with_control(
+            cwd,
+            deadline,
+            &cancellation,
+        ) {
+            tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Resolved(
+                identity,
+            ) => identity.worktree_root,
+            tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::NotRepository => {
+                project_root
+            }
+            tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Unknown(_) => {
+                return None;
+            }
+        };
+    let worktree_raw =
+        hook_events::authorize_add_branch_at_root(&worktree_raw, active_project_root).ok()?;
+    let worktree = git_correlation::normalize_worktree(&worktree_raw.to_string_lossy());
+    let branch = bounded_span_identifier(
+        tracedecay_runtime_core::branch::current_branch(&worktree_raw).as_deref(),
+    );
+    Some((worktree, branch))
+}
 
 fn configuration_authority_unavailable(detail: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Config {
@@ -431,22 +476,11 @@ impl McpServer {
         event: &hook_events::HookEvent,
         selected: &crate::mcp::project_route::ResolvedProjectRoute,
     ) {
-        const MAX_SPAN_IDENTIFIER_BYTES: usize = 256;
-
         let Some(route) = event.route.as_ref() else {
             return;
         };
 
-        let bounded_identifier = |value: Option<&str>| {
-            value
-                .filter(|value| {
-                    !value.is_empty()
-                        && value.len() <= MAX_SPAN_IDENTIFIER_BYTES
-                        && !value.chars().any(char::is_control)
-                })
-                .map(str::to_string)
-        };
-        let Some(session_id) = bounded_identifier(route.session_id.as_deref())
+        let Some(session_id) = bounded_span_identifier(route.session_id.as_deref())
             .and_then(|value| tracedecay_privacy::protect_sensitive_structural_id(&value).ok())
         else {
             return;
@@ -461,7 +495,7 @@ impl McpServer {
         let Some(db) = self.project_session_db.clone() else {
             return;
         };
-        let thread_id = bounded_identifier(route.thread_id.as_deref())
+        let thread_id = bounded_span_identifier(route.thread_id.as_deref())
             .and_then(|value| tracedecay_privacy::protect_sensitive_structural_id(&value).ok());
         let ts = crate::project::current_timestamp();
         // Session-only pre-debounce: the full key needs branch/worktree, which
@@ -498,33 +532,7 @@ impl McpServer {
             // spawn git, so it runs on the blocking pool, off the
             // notification hot path.
             let derived = tokio::task::spawn_blocking(move || {
-                let deadline = tracedecay_runtime_core::cancellation::MonotonicDeadline::at(
-                    std::time::Instant::now() + std::time::Duration::from_secs(2),
-                );
-                let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
-                let worktree_raw = match tracedecay_runtime_core::git_discovery::discover_repository_identity_with_control(
-                    &cwd,
-                    deadline,
-                    &cancellation,
-                ) {
-                    tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Resolved(
-                        identity,
-                    ) => identity.worktree_root,
-                    tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::NotRepository => {
-                        project_root
-                    }
-                    tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Unknown(_) => {
-                        return None;
-                    }
-                };
-                let worktree_raw =
-                    hook_events::authorize_add_branch_at_root(&worktree_raw, &active_project_root)
-                        .ok()?;
-                let worktree = git_correlation::normalize_worktree(&worktree_raw.to_string_lossy());
-                let branch = bounded_identifier(
-                    tracedecay_runtime_core::branch::current_branch(&worktree_raw).as_deref(),
-                );
-                Some((worktree, branch))
+                derive_hook_span_git_context(&cwd, project_root, &active_project_root)
             })
             .await;
             let Ok(Some((worktree, branch))) = derived else {
