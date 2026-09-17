@@ -1,22 +1,9 @@
-/** Loom track model: pure time-window math, interval packing and axis
- * generation, no DOM. The weave renderer consumes this; tests reason about it
- * directly.
+/** Loom track model: pure time-window math and axis generation, no DOM. The
+ * temporal layout consumes this; tests reason about it directly.
  *
- * Everything here is derived from real spans. Nothing in this module invents a
- * span or a magnitude — the lane packing is a projection of the same session
- * rows the canvas draws.
+ * Nothing in this module invents a span or a magnitude — every window is
+ * derived from the recorded extent it is clamped against.
  */
-
-export interface LoomSpan {
-  id: string;
-  /** Seconds since epoch. */
-  start: number;
-  /** Seconds since epoch; instants render as minimum-width marks. */
-  end: number;
-  label: string;
-  /** Secondary magnitude (e.g. message count) mapped to mark height. */
-  weight: number;
-}
 
 export interface LoomWindow {
   start: number;
@@ -80,36 +67,6 @@ export function isFitted(view: LoomWindow, extent: LoomWindow): boolean {
 
 function xFor(time: number, window: LoomWindow, width: number): number {
   return ((time - window.start) / (window.end - window.start)) * width;
-}
-
-/* -------------------------------------------------------------------------
- * Lane packing
- * ---------------------------------------------------------------------- */
-
-/** Greedy interval packing: each span drops into the first sub-lane whose last
- * mark has already ended (plus a pixel-sized gap, so two marks that would touch
- * on screen are still separated). Overlap becomes structure instead of mud. */
-export function packTrack(spans: LoomSpan[], minGapSeconds = 0): LoomSpan[][] {
-  const ordered = [...spans].sort((a, b) => a.start - b.start || a.end - b.end);
-  const lanes: LoomSpan[][] = [];
-  const lastEnd: number[] = [];
-  for (const span of ordered) {
-    const end = Math.max(span.end, span.start + minGapSeconds);
-    let placed = false;
-    for (let lane = 0; lane < lanes.length; lane += 1) {
-      if ((lastEnd[lane] ?? -Infinity) + minGapSeconds <= span.start) {
-        lanes[lane]!.push(span);
-        lastEnd[lane] = end;
-        placed = true;
-        break;
-      }
-    }
-    if (!placed) {
-      lanes.push([span]);
-      lastEnd.push(end);
-    }
-  }
-  return lanes;
 }
 
 /* -------------------------------------------------------------------------
@@ -192,74 +149,23 @@ function tickLabel(epochSeconds: number, step: number): string {
       second: '2-digit',
     });
   }
-  if (step < 86_400) {
+  if (step < 6 * 3600) {
     return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  }
+  // A window ticking every six hours or more spans days: a bare clock time
+  // would repeat "12:00 AM" across the ruler with nothing to tell them apart.
+  if (step < 86_400) {
+    return date.toLocaleString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
   }
   if (step < 30 * 86_400) {
     return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   }
   return date.toLocaleDateString(undefined, { month: 'short', year: '2-digit' });
-}
-
-export interface DayBand {
-  x0: number;
-  x1: number;
-  /** Local midnight that opens the band. */
-  time: number;
-  label: string;
-  /** Alternating parity, so consecutive days can be tinted apart. */
-  odd: boolean;
-}
-
-/** Calendar bands behind the ticks: hours inside a day, days inside a season,
- * months beyond that. The bands are the weave's warp — the eye reads their
- * rhythm before it reads any single mark. */
-export function dayBands(view: LoomWindow, width: number): DayBand[] {
-  if (width <= 0) return [];
-  const spanSeconds = view.end - view.start;
-  const scale = bandScale(spanSeconds);
-  const bands: DayBand[] = [];
-  const cursor = new Date(view.start * 1000);
-  if (scale === 'hour') cursor.setMinutes(0, 0, 0);
-  else if (scale === 'day') cursor.setHours(0, 0, 0, 0);
-  else cursor.setDate(1), cursor.setHours(0, 0, 0, 0);
-  const hourStride = Math.max(1, Math.round(spanSeconds / 3600 / 8));
-  let guard = 0;
-  while (cursor.getTime() / 1000 < view.end && guard < 400) {
-    guard += 1;
-    const time = cursor.getTime() / 1000;
-    const next = new Date(cursor);
-    if (scale === 'hour') next.setHours(next.getHours() + hourStride);
-    else if (scale === 'day') next.setDate(next.getDate() + 1);
-    else next.setMonth(next.getMonth() + 1);
-    const nextTime = next.getTime() / 1000;
-    if (nextTime > view.start) {
-      bands.push({
-        x0: xFor(Math.max(time, view.start), view, width),
-        x1: xFor(Math.min(nextTime, view.end), view, width),
-        time,
-        label: bandLabel(time, scale),
-        odd: bands.length % 2 === 1,
-      });
-    }
-    cursor.setTime(next.getTime());
-  }
-  return bands;
-}
-
-function bandLabel(epochSeconds: number, scale: 'hour' | 'day' | 'month'): string {
-  const date = new Date(epochSeconds * 1000);
-  if (scale === 'hour') {
-    return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-  }
-  if (scale === 'day') {
-    return date.toLocaleDateString(undefined, {
-      weekday: 'short',
-      month: 'short',
-      day: 'numeric',
-    });
-  }
-  return date.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
 }
 
 /* -------------------------------------------------------------------------
@@ -273,7 +179,7 @@ function bandLabel(epochSeconds: number, scale: 'hour' | 'day' | 'month'): strin
  * formatter be imported into the other's call sites and print a duration off
  * by 1000x with no type error — a wrong number on screen rather than a build
  * failure. Loom's clock is epoch seconds throughout (`formatMoment` multiplies
- * by 1000 to build a `Date`, and `weave.ts` clamps spans against 3600).
+ * by 1000 to build a `Date`, and the journey extent is padded to 3600).
  */
 export function formatDurationSeconds(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return '—';
