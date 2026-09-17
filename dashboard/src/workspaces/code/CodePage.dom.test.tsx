@@ -163,7 +163,7 @@ describe('a graph read that failed', () => {
 });
 
 describe('the URL-stable Code view shell', () => {
-  it('offers mounted views with Topology selected and omits pending Atlas', async () => {
+  it('exposes the five peer lenses with Cortex selected by default', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
@@ -174,34 +174,43 @@ describe('the URL-stable Code view shell', () => {
 
     renderCode();
 
-    expect(await screen.findByRole('heading', { name: 'Topology' })).toBeTruthy();
+    expect(await screen.findByRole('region', { name: 'Graph register' })).toBeTruthy();
     const switcher = screen.getByRole('navigation', { name: 'Code view' });
     expect(within(switcher).getAllByRole('button').map((button) => button.textContent)).toEqual([
-      'Topology',
+      'Cortex',
       'Trace',
       'Shared Code',
       'Compare',
+      'Atlas',
     ]);
-    expect(within(switcher).queryByRole('button', { name: 'Atlas' })).toBeNull();
     expect(
       screen
-        .getByRole('button', { name: 'Topology' })
+        .getByRole('button', { name: 'Cortex' })
         .getAttribute('aria-current'),
     ).toBe('page');
     expect(
       screen
-        .getByRole('region', { name: 'Topology' })
+        .getByRole('region', { name: 'Cortex' })
         .getAttribute('aria-labelledby'),
-    ).toBe('code-view-topology');
-    // Trace and Shared Code read one selected symbol and none is selected.
-    // Compare carries its own revision selection. Atlas is not offered until
-    // a deep link asks for the unmounted projection.
-    for (const name of ['Trace', 'Shared Code']) {
+    ).toBe('code-view-cortex');
+    // Atlas has no projection; Trace and Shared Code read one selected symbol
+    // and none is selected. Compare carries its own revision selection.
+    for (const name of ['Atlas', 'Trace', 'Shared Code']) {
       expect(screen.getByRole<HTMLButtonElement>('button', { name }).disabled).toBe(true);
     }
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Compare' }).disabled).toBe(
       false,
     );
+  });
+
+  it('reads a published Topology link as the Cortex lens', async () => {
+    vi.stubGlobal('fetch', serveFixtures());
+    renderCode('/code?view=topology&symbol=sym-0');
+
+    expect(await screen.findByRole('region', { name: 'Cortex' })).toBeTruthy();
+    expect(
+      screen.getByRole('button', { name: 'Cortex' }).getAttribute('aria-current'),
+    ).toBe('page');
   });
 
   it('restores Atlas as a disabled, truthful unavailable view', async () => {
@@ -219,7 +228,7 @@ describe('the URL-stable Code view shell', () => {
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Atlas' }).disabled).toBe(
       true,
     );
-    expect(screen.queryByRole('heading', { name: 'Topology' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Graph register' })).toBeNull();
   });
 
   it('moves and activates views with native keyboard controls', async () => {
@@ -232,13 +241,13 @@ describe('the URL-stable Code view shell', () => {
     );
     const user = userEvent.setup();
     renderCode('/code?symbol=sym-0');
-    const topology = screen.getByRole('button', { name: 'Topology' });
+    const cortex = screen.getByRole('button', { name: 'Cortex' });
     const trace = screen.getByRole<HTMLButtonElement>('button', { name: 'Trace' });
     await waitFor(() => {
       expect(trace.disabled).toBe(false);
     });
 
-    topology.focus();
+    cortex.focus();
     await user.keyboard('{Tab}{Enter}');
 
     expect(document.activeElement).toBe(trace);

@@ -42,8 +42,9 @@ import {
 } from '../../data/query/codeDiagnostics.ts';
 
 /** The broker's engine words mapped onto the shared chip vocabulary; each is
- * a direct reading, not an inference. */
-const ENGINE_CHIP: Record<EngineStatus['state'], DomainStateKind> = {
+ * a direct reading, not an inference. Exported so the Cortex inspector's
+ * compact engine line and this panel light the same state for the same word. */
+export const ENGINE_CHIP: Record<EngineStatus['state'], DomainStateKind> = {
   unavailable: 'unavailable',
   disabled: 'cancelled',
   inactive: 'unknown',

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  CODE_VIEWS,
   codeViewBlocker,
   codeViewNeedsFocus,
   codeViewsOffered,
@@ -18,17 +19,32 @@ describe('Code view locations', () => {
     }
 
     expect(readCodeLocation(new URLSearchParams('symbol=symbol-42'))).toEqual({
-      view: 'topology',
+      view: 'cortex',
       focusId: 'symbol-42',
     });
   });
 
-  it('defaults unknown views to Topology without losing a valid symbol focus', () => {
+  it('orders the lenses as the reader is shown them, Cortex first', () => {
+    expect(CODE_VIEWS).toEqual(['cortex', 'trace', 'shared-code', 'compare', 'atlas']);
+  });
+
+  it('defaults unknown views to Cortex without losing a valid symbol focus', () => {
     expect(
       readCodeLocation(new URLSearchParams('view=core&symbol=symbol-42')),
     ).toEqual({
-      view: 'topology',
+      view: 'cortex',
       focusId: 'symbol-42',
+    });
+  });
+
+  it('reads a published Topology link as Cortex with the same symbol', () => {
+    expect(readCodeLocation(new URLSearchParams('view=topology&symbol=symbol-42'))).toEqual({
+      view: 'cortex',
+      focusId: 'symbol-42',
+    });
+    expect(readCodeLocation(new URLSearchParams('view=cortex'))).toEqual({
+      view: 'cortex',
+      focusId: null,
     });
   });
 
@@ -51,7 +67,7 @@ describe('Code view locations', () => {
           'view=trace&symbol=symbol-42&structureLens=core&structureFocus=old',
         ),
         {
-          view: 'topology',
+          view: 'cortex',
           focusId: null,
         },
       ).toString(),
@@ -82,7 +98,7 @@ describe('Code view availability', () => {
     expect(codeViewBlocker('trace', 'absent')).toEqual({
       kind: 'unavailable',
       title: 'Trace needs a selected symbol',
-      detail: 'Select a symbol in Topology, then return to Trace.',
+      detail: 'Select a symbol in Cortex, then return to Trace.',
     });
     expect(codeViewBlocker('trace', 'available')).toBeNull();
   });
@@ -106,7 +122,7 @@ describe('Code view availability', () => {
     expect(codeViewBlocker('shared-code', 'absent')).toEqual({
       kind: 'unavailable',
       title: 'Shared Code needs a selected symbol',
-      detail: 'Select a symbol in Topology, then return to Shared Code.',
+      detail: 'Select a symbol in Cortex, then return to Shared Code.',
     });
     expect(codeViewBlocker('shared-code', 'loading')?.kind).toBe('loading');
     expect(codeViewBlocker('shared-code', 'unavailable')?.title).toBe(
@@ -122,6 +138,6 @@ describe('Code view availability', () => {
       expect(codeViewBlocker('compare', focus)).toBeNull();
     }
     expect(codeViewNeedsFocus('compare')).toBe(false);
-    expect(codeViewNeedsFocus('topology')).toBe(false);
+    expect(codeViewNeedsFocus('cortex')).toBe(false);
   });
 });

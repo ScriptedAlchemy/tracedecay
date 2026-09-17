@@ -45,15 +45,24 @@ const IDLE_POLL_MS = 30_000;
 const QUIET_AFTER_SECONDS = 4;
 const STALLED_AFTER_SECONDS = 30;
 
-export function IndexFreshness() {
+/**
+ * The scoped freshness read, polled at the cadence the build's own progress
+ * warrants. One hook so the panel below and the Cortex inspector's compact
+ * reading share a single query cache entry rather than polling twice.
+ */
+export function useIndexFreshness() {
   const scope = useScope((s) => s.scope);
-  const freshness = useQuery({
+  return useQuery({
     queryKey: ['code-index', 'freshness', scopeKey(scope)],
     queryFn: () =>
       fetchEnvelope(scopedUrl(scope, '/api/code-index/freshness'), CodeIndexFreshnessPayloadV1Schema),
     refetchInterval: (query) => freshnessPollIntervalMs(query.state.data),
     refetchIntervalInBackground: false,
   });
+}
+
+export function IndexFreshness() {
+  const freshness = useIndexFreshness();
 
   return (
     <section className="flex flex-col gap-1.5" aria-label="Code index freshness">
