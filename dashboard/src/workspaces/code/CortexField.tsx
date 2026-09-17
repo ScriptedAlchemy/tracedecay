@@ -96,7 +96,7 @@ export function CortexField({
         onSelect={onSelect}
         onInspect={onInspect}
         activation={activation}
-        canvasClassName="min-h-[52vw] md:min-h-[46vh] lg:min-h-0"
+        canvasClassName="min-h-[52vw] md:min-h-[46vh] lg:min-h-[18rem]"
         ariaLabel={fieldDescription(payload, caption?.scale ?? null, kinds, seedLabel)}
         fallbackDescription="the symbol list and inspector beside this field remain available as a text alternative"
         encoding={{

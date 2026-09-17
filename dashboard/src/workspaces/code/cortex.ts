@@ -55,13 +55,14 @@ export function densityReading(totals: GraphTotalsV1): RegisterReading {
   }
   const fraction = totals.edges / (totals.nodes * (totals.nodes - 1));
   const percent = fraction * 100;
-  const value =
-    percent >= 1 ? percent.toFixed(2) : percent >= 0.01 ? percent.toFixed(3) : percent.toExponential(1);
+  // Two significant figures below one percent, so a sparse real index reads
+  // as `0.0069` rather than as a zero or an exponent.
+  const value = percent >= 1 ? percent.toFixed(2) : String(Number(percent.toPrecision(2)));
   return {
     kind: 'measured',
     value,
     unit: '%',
-    note: 'edges over ordered symbol pairs',
+    note: 'edges ÷ ordered pairs',
   };
 }
 
@@ -90,7 +91,7 @@ export function cortexRegister(payload: {
       reading: {
         kind: 'measured',
         value: totals.edges.toLocaleString(),
-        note: 'relations across every kind',
+        note: 'relations, every kind',
       },
     },
     {
@@ -98,7 +99,7 @@ export function cortexRegister(payload: {
       reading: {
         kind: 'measured',
         value: totals.files.toLocaleString(),
-        note: 'source files with symbols',
+        note: 'files with symbols',
       },
     },
     { label: 'modules', reading: moduleReading(payload.nodes_by_kind) },
@@ -108,7 +109,7 @@ export function cortexRegister(payload: {
       reading: {
         kind: 'measured',
         value: 'force-directed',
-        note: 'ForceAtlas2, settled once, never animated',
+        note: 'ForceAtlas2, settled once',
       },
     },
     {
@@ -116,7 +117,7 @@ export function cortexRegister(payload: {
       reading: {
         kind: 'measured',
         value: 'degree',
-        note: 'size is in + out edges over every kind',
+        note: 'size = in + out edges',
       },
     },
   ];

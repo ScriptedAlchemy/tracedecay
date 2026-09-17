@@ -55,8 +55,7 @@ export function SymbolMatches({
   return (
     <ReadSection
       title="Symbols"
-      chrome="panel"
-      className="border-0"
+      chrome="centered"
       state={envelopeReadState(pending, result, {
         loading: 'searching symbols',
         transport: 'symbol search could not be read',
@@ -132,9 +131,8 @@ export function TopConnectedList({
 }) {
   return (
     <ReadSection
-      title="Code"
-      chrome="panel"
-      className="border-0"
+      title="Most connected symbols"
+      chrome="centered"
       state={envelopeReadState(overviewPending, overviewResult, {
         loading: 'reading connected symbols',
         transport: 'connected symbols could not be read',
