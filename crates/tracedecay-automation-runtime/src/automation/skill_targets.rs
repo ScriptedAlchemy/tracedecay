@@ -93,6 +93,7 @@ pub fn export_native_skill_overlay(
     }
 
     let overlay_root = plugin_root.join("skills").join(NATIVE_NAMESPACE_DIR);
+    reconcile_overlay_crash_residue(&overlay_root, super::scheduler::foreign_process_is_dead)?;
     let rendered = render_native_skill_overlay(profile_root, target, plugin_root)?;
     if rendered.files.is_empty() {
         if overlay_root.exists() {
@@ -587,7 +588,117 @@ fn unique_overlay_sibling(overlay_root: &Path, suffix: &str) -> PathBuf {
     ))
 }
 
+#[derive(Clone, Copy)]
+enum OverlaySiblingKind {
+    Previous,
+    Temporary,
+}
+
+fn parse_overlay_sibling(
+    overlay_name: &str,
+    name: &str,
+) -> Option<(OverlaySiblingKind, u32, u128)> {
+    let prefix = format!(".{overlay_name}.");
+    let rest = name.strip_prefix(&prefix)?;
+    let (kind, rest) = if let Some(rest) = rest.strip_prefix("previous-") {
+        (OverlaySiblingKind::Previous, rest)
+    } else if let Some(rest) = rest.strip_prefix("tmp-") {
+        (OverlaySiblingKind::Temporary, rest)
+    } else {
+        return None;
+    };
+    let (pid, nonce) = rest.split_once('-')?;
+    Some((kind, pid.parse().ok()?, nonce.parse().ok()?))
+}
+
+/// Adopt a dead exporter's backup when the live overlay is missing, and
+/// delete that exporter's incomplete stage directories.
+///
+/// A crash between `overlay → previous` and `stage → overlay` leaves the
+/// installed tree only at a uniquely named sibling. The next export must
+/// put that tree back before it swaps again. A live PID is left alone: that
+/// sibling belongs to an export still in progress.
+fn reconcile_overlay_crash_residue(
+    overlay_root: &Path,
+    owner_is_dead: impl Fn(u32) -> bool,
+) -> Result<()> {
+    let Some(parent) = overlay_root.parent() else {
+        return Ok(());
+    };
+    let Some(overlay_name) = overlay_root.file_name().and_then(|name| name.to_str()) else {
+        return Ok(());
+    };
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(config_error(format!(
+                "failed to scan managed skill overlay siblings in '{}': {error}",
+                parent.display()
+            )));
+        }
+    };
+    let mut adopt = None;
+    let mut stale = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            config_error(format!(
+                "failed to read managed skill overlay sibling in '{}': {error}",
+                parent.display()
+            ))
+        })?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some((kind, pid, nonce)) = parse_overlay_sibling(overlay_name, &name) else {
+            continue;
+        };
+        if !owner_is_dead(pid) {
+            continue;
+        }
+        let path = entry.path();
+        match kind {
+            OverlaySiblingKind::Previous if !overlay_root.exists() => {
+                if adopt
+                    .as_ref()
+                    .is_none_or(|(best_nonce, _)| nonce >= *best_nonce)
+                {
+                    if let Some((_, older)) = adopt.replace((nonce, path)) {
+                        stale.push(older);
+                    }
+                } else {
+                    stale.push(path);
+                }
+            }
+            OverlaySiblingKind::Previous | OverlaySiblingKind::Temporary => stale.push(path),
+        }
+    }
+    if let Some((_, backup)) = adopt {
+        fs::rename(&backup, overlay_root).map_err(|error| {
+            config_error(format!(
+                "failed to adopt managed skill overlay backup '{}' onto '{}': {error}",
+                backup.display(),
+                overlay_root.display()
+            ))
+        })?;
+    }
+    for path in stale {
+        match fs::remove_dir_all(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(config_error(format!(
+                    "failed to remove stale managed skill overlay sibling '{}': {error}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn swap_overlay_dirs(overlay_root: &Path, stage_root: &Path) -> Result<()> {
+    reconcile_overlay_crash_residue(overlay_root, super::scheduler::foreign_process_is_dead)?;
     let backup_root = unique_overlay_sibling(overlay_root, "previous");
     if backup_root.exists() {
         fs::remove_dir_all(&backup_root)?;
@@ -642,4 +753,73 @@ fn hermes_host_owned_error() -> TraceDecayError {
     config_error(
         "Hermes owns profile skills, pending approvals, usage telemetry, and curator state; TraceDecay does not export managed skills into Hermes",
     )
+}
+
+#[cfg(test)]
+mod overlay_residue_tests {
+    use super::{NATIVE_NAMESPACE_DIR, reconcile_overlay_crash_residue};
+
+    fn plugin_root() -> tempfile::TempDir {
+        tempfile::tempdir().expect("plugin root")
+    }
+
+    fn overlay_root(plugin: &std::path::Path) -> std::path::PathBuf {
+        plugin.join("skills").join(NATIVE_NAMESPACE_DIR)
+    }
+
+    #[test]
+    fn missing_overlay_adopts_the_newest_dead_pid_backup_and_drops_stale_siblings() {
+        let plugin = plugin_root();
+        let overlay = overlay_root(plugin.path());
+        let skills = overlay.parent().expect("skills dir");
+        std::fs::create_dir_all(skills).expect("skills dir");
+        let older = skills.join(format!(".{NATIVE_NAMESPACE_DIR}.previous-4242-1"));
+        let newer = skills.join(format!(".{NATIVE_NAMESPACE_DIR}.previous-4242-9"));
+        let live = skills.join(format!(
+            ".{NATIVE_NAMESPACE_DIR}.previous-{}-3",
+            std::process::id()
+        ));
+        let stage = skills.join(format!(".{NATIVE_NAMESPACE_DIR}.tmp-4242-2"));
+        std::fs::create_dir_all(older.join("kept")).expect("older backup");
+        std::fs::write(older.join("kept").join("SKILL.md"), "older").expect("older body");
+        std::fs::create_dir_all(&newer).expect("newer backup");
+        std::fs::write(newer.join("SKILL.md"), "newest").expect("newer body");
+        std::fs::create_dir_all(&live).expect("live backup");
+        std::fs::write(live.join("SKILL.md"), "in progress").expect("live body");
+        std::fs::create_dir_all(&stage).expect("dead stage");
+
+        reconcile_overlay_crash_residue(&overlay, |pid| pid == 4242).expect("reconcile");
+
+        assert_eq!(
+            std::fs::read_to_string(overlay.join("SKILL.md")).expect("adopted overlay"),
+            "newest"
+        );
+        assert!(
+            !older.exists(),
+            "an older dead backup is not a second overlay"
+        );
+        assert!(!stage.exists(), "a dead exporter's stage is incomplete");
+        assert!(
+            live.is_dir(),
+            "a live exporter's backup must not be adopted or deleted"
+        );
+    }
+
+    #[test]
+    fn present_overlay_keeps_its_bytes_and_only_clears_dead_residue() {
+        let plugin = plugin_root();
+        let overlay = overlay_root(plugin.path());
+        std::fs::create_dir_all(&overlay).expect("live overlay");
+        std::fs::write(overlay.join("SKILL.md"), "live").expect("live body");
+        let renamed = overlay.with_file_name(format!(".{NATIVE_NAMESPACE_DIR}.previous-4242-4"));
+        std::fs::create_dir_all(&renamed).expect("dead backup");
+
+        reconcile_overlay_crash_residue(&overlay, |pid| pid == 4242).expect("reconcile");
+
+        assert_eq!(
+            std::fs::read_to_string(overlay.join("SKILL.md")).expect("unchanged overlay"),
+            "live"
+        );
+        assert!(!renamed.exists());
+    }
 }

@@ -1089,19 +1089,10 @@ impl DaemonCodeIndexPublicationStoreV1 {
         }
         let mtime = metadata.modified().ok();
         let size = metadata.len();
-        {
-            let memo = self
-                .pointer_memo
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            if let Some(memo) = memo.as_ref()
-                && memo.size == size
-                && memo.mtime.is_some()
-                && memo.mtime == mtime
-            {
-                return Ok(Some(memo.pointer.clone()));
-            }
-        }
+        // Size and mtime are hints, not identity. Text-artifact attach writes
+        // a fixed-width pointer through another path, and a 1-second mtime
+        // filesystem can leave both unchanged while the bytes move. The memo
+        // is reused only when the file digest matches.
         let bytes = std::fs::read(&self.active_path).map_err(Self::unavailable)?;
         let digest = Self::state_digest(&bytes);
         {

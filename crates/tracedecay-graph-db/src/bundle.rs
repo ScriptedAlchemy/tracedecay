@@ -534,6 +534,12 @@ pub fn sweep_aborted_sealed_read_bundle_temporaries(
             continue;
         };
         if name.starts_with(&prefix) && name.ends_with(".tmp") {
+            // The temp name embeds the writer PID. A live writer in another
+            // process (or this one) still owns that file. Only a confirmed-dead
+            // PID, or a name that is not this writer's format, is crash residue.
+            if bundle_tmp_owner_pid(name, &prefix).is_some_and(|pid| !process_is_dead(pid)) {
+                continue;
+            }
             let _ = remove_bundle_file(&entry.path())?;
         }
     }
@@ -610,6 +616,70 @@ impl Write for HashingFileWriter {
     fn flush(&mut self) -> io::Result<()> {
         self.file.flush()
     }
+}
+
+fn bundle_tmp_owner_pid(name: &str, prefix: &str) -> Option<u32> {
+    let rest = name.strip_prefix(prefix)?.strip_suffix(".tmp")?;
+    let (head, seq) = rest.rsplit_once('.')?;
+    seq.parse::<u64>().ok()?;
+    let (_artifact, pid) = head.rsplit_once('.')?;
+    pid.parse().ok()
+}
+
+fn process_is_dead(pid: u32) -> bool {
+    if pid == 0 || pid == std::process::id() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        const UNIX_ESRCH: i32 = 3;
+        let Ok(pid) = i32::try_from(pid) else {
+            return false;
+        };
+        // SAFETY: signal zero probes existence and does not deliver a signal.
+        if unsafe { unix_kill(pid, 0) } == 0 {
+            return false;
+        }
+        return std::io::Error::last_os_error().raw_os_error() == Some(UNIX_ESRCH);
+    }
+    #[cfg(windows)]
+    {
+        return windows_process_is_dead(pid);
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    #[link_name = "kill"]
+    fn unix_kill(pid: i32, signal: i32) -> i32;
+}
+
+#[cfg(windows)]
+fn windows_process_is_dead(pid: u32) -> bool {
+    use std::ffi::c_void;
+
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const ERROR_INVALID_PARAMETER: i32 = 87;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        #[link_name = "OpenProcess"]
+        fn open_process(access: u32, inherit_handle: i32, process_id: u32) -> *mut c_void;
+        #[link_name = "CloseHandle"]
+        fn close_handle(handle: *mut c_void) -> i32;
+    }
+
+    let process = unsafe { open_process(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return std::io::Error::last_os_error().raw_os_error() == Some(ERROR_INVALID_PARAMETER);
+    }
+    let _ = unsafe { close_handle(process) };
+    false
 }
 
 fn bundle_tmp_path(root: &Path, hex: &str, name: &str) -> PathBuf {
@@ -922,12 +992,28 @@ mod tests {
             vec![0u8; 32],
         )
         .unwrap();
+        let mut dead = if cfg!(windows) {
+            std::process::Command::new("cmd")
+                .args(["/C", "exit"])
+                .spawn()
+        } else {
+            std::process::Command::new("true").spawn()
+        }
+        .expect("dead owner");
+        let dead_pid = dead.id();
+        dead.wait().expect("reap dead owner");
         std::fs::write(
-            temp.path()
-                .join(format!(".read-bundle-{hex}.interactive-catalog.9.2.tmp")),
+            temp.path().join(format!(
+                ".read-bundle-{hex}.interactive-catalog.{dead_pid}.2.tmp"
+            )),
             vec![0u8; 32],
         )
         .unwrap();
+        let live_name = format!(
+            ".read-bundle-{hex}.interactive-catalog.{}.3.tmp",
+            std::process::id()
+        );
+        std::fs::write(temp.path().join(&live_name), b"live-writer").unwrap();
         std::fs::write(
             temp.path()
                 .join(format!(".read-bundle-{foreign}.interactive-catalog.1.tmp")),
@@ -945,6 +1031,7 @@ mod tests {
         assert_eq!(
             remaining,
             vec![
+                live_name,
                 format!(".read-bundle-{foreign}.interactive-catalog.1.tmp"),
                 format!("read-bundle-{hex}.interactive-catalog.bin"),
                 format!("read-bundle-{hex}.json"),
