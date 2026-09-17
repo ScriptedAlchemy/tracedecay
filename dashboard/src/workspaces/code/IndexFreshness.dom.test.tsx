@@ -592,6 +592,36 @@ describe('Code index freshness', () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  it('polls an initial indexing mount before a rebuild flag is available', async () => {
+    vi.useFakeTimers();
+    const indexing = envelope('loading', {
+      worktrees: [
+        {
+          ...worktree(),
+          latest_generation_id: null,
+          snapshot_content_identity: null,
+          sealed_at_micros: null,
+          staleness_state: 'indexing',
+          rebuild_in_flight: false,
+          progress: null,
+        },
+      ],
+      note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+    });
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(indexing), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(indexing), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps a non-building loading envelope on the idle cadence', async () => {
     vi.useFakeTimers();
     const parked = envelope('loading', {
