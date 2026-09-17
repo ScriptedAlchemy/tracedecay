@@ -8,19 +8,23 @@ use super::*;
 use tracedecay_daemon_identity::{authority, profile_identity};
 
 pub(super) fn project_server_capacity_error() -> TraceDecayError {
-    TraceDecayError::Config {
-        message: format!(
+    TraceDecayError::project_route(
+        PROJECT_SERVER_CAPACITY_REASON_CODE,
+        true,
+        format!(
             "daemon project server capacity reached (capacity={MAX_CACHED_PROJECT_SERVERS}); retry after active clients finish"
         ),
-    }
+    )
 }
 
 pub(super) fn project_open_task_capacity_error() -> TraceDecayError {
-    TraceDecayError::Config {
-        message: format!(
+    TraceDecayError::project_route(
+        PROJECT_OPEN_TASK_CAPACITY_REASON_CODE,
+        true,
+        format!(
             "daemon project open task capacity reached (capacity={MAX_TRACKED_PROJECT_OPEN_TASKS}); retry shortly"
         ),
-    }
+    )
 }
 
 pub(super) fn project_open_cancellation_error() -> TraceDecayError {

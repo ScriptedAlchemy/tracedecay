@@ -468,7 +468,7 @@ fn is_project_open_retryable_error(error: &TraceDecayError) -> bool {
 
 /// Reconstruct a typed daemon tool refusal from the JSON-RPC error frame.
 ///
-/// Warming, deferred discovery, and response-revoked refusals carry
+/// Warming, deferred discovery, capacity, and response-revoked refusals carry
 /// `data.reason_code`; those must round-trip as [`TraceDecayError::ProjectRoute`]
 /// so journey/client retry keys on the code rather than English detail.
 fn daemon_tool_call_error(error: JsonRpcError) -> TraceDecayError {
@@ -668,8 +668,9 @@ mod tests {
     use serde_json::json;
 
     use super::super::{
-        JsonRpcError, PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE, PROJECT_WARMING_REASON_CODE,
-        tool_call_transport_error_is_retryable,
+        JsonRpcError, PROJECT_SERVER_CAPACITY_REASON_CODE,
+        PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE, PROJECT_WARMING_REASON_CODE,
+        error_is_project_open_retryable, tool_call_transport_error_is_retryable,
     };
     use super::daemon_tool_call_error;
 
@@ -724,5 +725,41 @@ mod tests {
         });
         assert!(error.project_route_context().is_none());
         assert!(!tool_call_transport_error_is_retryable(&error));
+        assert!(
+            !error_is_project_open_retryable(&error),
+            "warming prose without a reason code must not ride project-open retry"
+        );
+    }
+
+    #[test]
+    fn daemon_tool_call_error_round_trips_capacity_without_using_prose() {
+        let capacity = daemon_tool_call_error(JsonRpcError {
+            code: -32603,
+            message: "prose must not decide retry".to_owned(),
+            data: Some(json!({
+                "reason_code": PROJECT_SERVER_CAPACITY_REASON_CODE,
+                "retryable": true,
+                "detail": "daemon project server capacity reached (capacity=8); retry after active clients finish",
+                "kind": PROJECT_SERVER_CAPACITY_REASON_CODE,
+                "capacity": 8,
+            })),
+        });
+        assert!(error_is_project_open_retryable(&capacity));
+        assert!(
+            !tool_call_transport_error_is_retryable(&capacity),
+            "capacity is a project-open retry, not a journey-transport retry"
+        );
+
+        let prose_only = daemon_tool_call_error(JsonRpcError {
+            code: -32603,
+            message: "daemon project server capacity reached (capacity=8); retry after active clients finish"
+                .to_owned(),
+            data: Some(json!({
+                "kind": PROJECT_SERVER_CAPACITY_REASON_CODE,
+                "retryable": true,
+                "capacity": 8,
+            })),
+        });
+        assert!(!error_is_project_open_retryable(&prose_only));
     }
 }

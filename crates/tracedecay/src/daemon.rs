@@ -55,7 +55,8 @@ use tracedecay_runtime_core::cancellation::CancellationToken;
 /// Human-facing detail fragment for a still-warming project/profile owner.
 ///
 /// Protocol control flow must key on [`PROJECT_WARMING_REASON_CODE`] (or the
-/// sibling deferred/revoked codes below), never on this English prose.
+/// sibling deferred, capacity, and revoked codes below), never on this English
+/// prose.
 pub(crate) const PROJECT_WARMING_RETRY_HINT: &str =
     "is warming in the background; retry the same tool shortly";
 /// Typed reason a project/profile/owner open has not finished yet.
@@ -64,6 +65,10 @@ pub const PROJECT_WARMING_REASON_CODE: &str = "project_warming";
 pub const REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE: &str = "repository_discovery_deferred";
 /// Typed reason a retained project server was retired mid-response.
 pub const PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE: &str = "project_server_response_revoked";
+/// Typed reason the in-flight project-open task table is full.
+pub const PROJECT_OPEN_TASK_CAPACITY_REASON_CODE: &str = "project_open_task_capacity_reached";
+/// Typed reason the cached project-server table is full.
+pub const PROJECT_SERVER_CAPACITY_REASON_CODE: &str = "project_server_capacity_reached";
 #[cfg(unix)]
 const TOOL_LIST_CHANGED_METHOD: &str = "notifications/tools/list_changed";
 #[cfg(unix)]
@@ -128,25 +133,6 @@ impl AuthenticatedFirstRequest {
 pub(crate) const PROJECT_OPEN_RETRY_GRACE: Duration = Duration::from_secs(15);
 pub(crate) const PROJECT_OPEN_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Daemon error messages for a saturated project-open queue. Both clear on
-/// their own as in-flight opens finish, so they are retryable for the same
-/// reason [`PROJECT_WARMING_REASON_CODE`] is.
-const PROJECT_OPEN_CAPACITY_MESSAGES: [&str; 2] = [
-    "daemon project open task capacity reached",
-    "daemon project server capacity reached",
-];
-/// Typed `error.data.kind` values for the same two capacity states.
-const PROJECT_OPEN_CAPACITY_ERROR_KINDS: [&str; 2] = [
-    "project_open_task_capacity_reached",
-    "project_server_capacity_reached",
-];
-/// Message fragments emitted when a daemon request misses its read deadline.
-const DAEMON_READ_DEADLINE_MESSAGES: [&str; 3] = [
-    "before deadline",
-    "deadline already elapsed",
-    "did not answer after",
-];
-
 /// True when a daemon error is the typed project/profile/owner warming refusal.
 pub(crate) fn error_is_project_warming(error: &TraceDecayError) -> bool {
     matches!(
@@ -155,47 +141,43 @@ pub(crate) fn error_is_project_warming(error: &TraceDecayError) -> bool {
     )
 }
 
+fn project_open_retryable_reason(reason_code: &str) -> bool {
+    matches!(
+        reason_code,
+        PROJECT_WARMING_REASON_CODE
+            | REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE
+            | PROJECT_OPEN_TASK_CAPACITY_REASON_CODE
+            | PROJECT_SERVER_CAPACITY_REASON_CODE
+    )
+}
+
+fn project_open_capacity_limit(reason_code: &str) -> Option<usize> {
+    match reason_code {
+        PROJECT_OPEN_TASK_CAPACITY_REASON_CODE => Some(MAX_TRACKED_PROJECT_OPEN_TASKS),
+        PROJECT_SERVER_CAPACITY_REASON_CODE => Some(MAX_CACHED_PROJECT_SERVERS),
+        _ => None,
+    }
+}
+
 /// True when a daemon error describes a project open that has not finished
 /// yet: typed warming, deferred repository discovery, or a saturated open
-/// queue (still named in the `Config` message until those producers migrate).
+/// queue. Capacity clears as in-flight opens finish, so it is retryable for
+/// the same reason [`PROJECT_WARMING_REASON_CODE`] is. Classification keys on
+/// the reason code, never on English detail.
 pub(crate) fn error_is_project_open_retryable(error: &TraceDecayError) -> bool {
-    error_is_project_warming(error)
-        || matches!(
-            error.project_route_context(),
-            Some((REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE, true, _))
-        )
-        || matches!(
-            error,
-            TraceDecayError::Config { message }
-                if PROJECT_OPEN_CAPACITY_MESSAGES
-                    .iter()
-                    .any(|capacity| message.contains(*capacity))
-        )
+    error
+        .project_route_context()
+        .is_some_and(|(reason, retryable, _)| retryable && project_open_retryable_reason(reason))
 }
 
 /// Response-side form of [`error_is_project_open_retryable`] for clients that
-/// still hold the JSON-RPC `error` member. Warming/deferred key on
-/// `data.reason_code`; capacity states also carry a typed `data.kind`.
+/// still hold the JSON-RPC `error` member. Every retryable open refusal,
+/// including capacity, carries `data.reason_code`.
 pub(crate) fn json_rpc_error_is_project_open_retryable(error: &serde_json::Value) -> bool {
     error
         .pointer("/data/reason_code")
         .and_then(serde_json::Value::as_str)
-        .is_some_and(|reason| {
-            reason == PROJECT_WARMING_REASON_CODE
-                || reason == REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE
-        })
-        || error
-            .pointer("/data/kind")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|kind| PROJECT_OPEN_CAPACITY_ERROR_KINDS.contains(&kind))
-        || error
-            .get("message")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|message| {
-                PROJECT_OPEN_CAPACITY_MESSAGES
-                    .iter()
-                    .any(|capacity| message.contains(*capacity))
-            })
+        .is_some_and(project_open_retryable_reason)
 }
 
 /// True when a one-shot tool-call transport error should be retried by a
@@ -212,20 +194,15 @@ pub fn tool_call_transport_error_is_retryable(error: &TraceDecayError) -> bool {
     )
 }
 
-/// True when a daemon error message reports a missed read deadline.
-pub fn error_message_is_read_deadline(message: &str) -> bool {
-    DAEMON_READ_DEADLINE_MESSAGES
-        .iter()
-        .any(|deadline| message.contains(deadline))
-}
-
-/// True when a daemon client missed its read deadline, including the typed
-/// `daemon_response_stalled` reason code.
+/// True when a daemon client missed its read deadline.
+///
+/// Keys only on [`tracedecay_daemon_protocol::DAEMON_RESPONSE_STALLED`]. English
+/// detail, including the stalled wait phrase, is not a second classifier.
 pub fn error_is_read_deadline(error: &TraceDecayError) -> bool {
     matches!(
         error.project_route_context(),
         Some((tracedecay_daemon_protocol::DAEMON_RESPONSE_STALLED, _, _))
-    ) || error_message_is_read_deadline(&error.to_string())
+    )
 }
 
 mod bootstrap;
