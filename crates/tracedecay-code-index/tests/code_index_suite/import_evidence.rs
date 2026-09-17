@@ -483,6 +483,73 @@ fn rust_trait_impl_methods_do_not_masquerade_as_inherent_methods() {
 }
 
 #[test]
+fn rust_type_path_call_binds_unique_trait_impl_method() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.ufcs-from.lib",
+            "crates/walk/src/lib.rs",
+            concat!(
+                "mod build;\n",
+                "pub struct WalkDir;\n",
+                "pub struct WalkEventIter;\n",
+                "impl From<WalkDir> for WalkEventIter {\n",
+                "    fn from(it: WalkDir) -> Self { let _ = it; WalkEventIter }\n",
+                "}\n",
+            ),
+        ),
+        (
+            "file.ufcs-from.build",
+            "crates/walk/src/build.rs",
+            concat!(
+                "use crate::{WalkDir, WalkEventIter};\n",
+                "pub fn build(wd: WalkDir) {\n",
+                "    let _ = WalkEventIter::from(wd);\n",
+                "}\n",
+            ),
+        ),
+        (
+            "file.ufcs-from.same",
+            "crates/app/src/main.rs",
+            concat!(
+                "struct Local;\n",
+                "impl From<u8> for Local {\n",
+                "    fn from(value: u8) -> Self { let _ = value; Local }\n",
+                "}\n",
+                "fn main() {\n",
+                "    let _ = Local::from(1u8);\n",
+                "}\n",
+            ),
+        ),
+    ]);
+    let same_file_caller = symbol_occurrence(&generation, "crates/app/src/main.rs::main");
+    let same_crate_caller = symbol_occurrence(&generation, "crates/walk/src/build.rs::build");
+    let local_from = symbol_occurrence(
+        &generation,
+        "crates/app/src/main.rs::<Local as From<u8>>::from",
+    );
+    let walk_from = symbol_occurrence(
+        &generation,
+        "crates/walk/src/lib.rs::<WalkEventIter as From<WalkDir>>::from",
+    );
+
+    assert!(
+        generation.edges().iter().any(|edge| {
+            edge.from_occurrence == same_file_caller
+                && edge.to_occurrence == local_from
+                && edge.kind == RelationEdgeKindV1::Calls
+                && edge.authority == EdgeAuthorityV1::SyntaxExact
+        }),
+        "same-file Local::from must bind the UFCS From impl"
+    );
+    assert_resolved_edge(
+        &generation,
+        &same_crate_caller,
+        &walk_from,
+        RelationEdgeKindV1::Calls,
+    );
+}
+
+#[test]
 fn rust_inherent_method_does_not_bind_to_a_same_named_type_in_another_module() {
     let generation = published_rust_workspace(&[
         (

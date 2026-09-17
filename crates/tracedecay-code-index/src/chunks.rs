@@ -2097,6 +2097,62 @@ pub(crate) fn cross_file_reference_name_is_blocklisted(reference_name: &str) -> 
         || CROSS_FILE_REFERENCE_BLOCKLIST.contains(&owner)
 }
 
+/// Map a Rust UFCS trait-impl method path `<Type as Trait>::method` to the
+/// type-path form `Type::method` that call sites write (`WalkEventIter::from`,
+/// `Builder::default`). Keeps the intentional `<Type as Trait>` definition
+/// name while restoring same-file / seal recall for those calls. `None` when
+/// `path` is not a well-formed UFCS trait-impl method.
+pub(crate) fn rust_type_path_alias_for_trait_impl_method(path: &str) -> Option<String> {
+    if !path.starts_with('<') {
+        return None;
+    }
+    let mut depth = 0_i32;
+    let mut as_split = None;
+    let mut close = None;
+    for (index, character) in path.char_indices() {
+        match character {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(index);
+                    break;
+                }
+            }
+            _ => {
+                if depth == 1
+                    && as_split.is_none()
+                    && path[index..].starts_with(" as ")
+                {
+                    as_split = Some(index);
+                }
+            }
+        }
+    }
+    let as_split = as_split?;
+    let close = close?;
+    let type_name = path.get(1..as_split)?.trim();
+    let trait_name = path.get(as_split + " as ".len()..close)?.trim();
+    let method = path.get(close + 1..)?.strip_prefix("::")?;
+    if type_name.is_empty()
+        || trait_name.is_empty()
+        || method.is_empty()
+        || method.contains(':')
+        || method.contains('<')
+    {
+        return None;
+    }
+    Some(format!("{type_name}::{method}"))
+}
+
+/// Whether `qualified_name`'s file-relative path is a UFCS trait-impl method
+/// (`file.rs::<Type as Trait>::method`).
+pub(crate) fn rust_qualified_name_is_ufcs_trait_impl(qualified_name: &str) -> bool {
+    qualified_name
+        .split_once("::")
+        .is_some_and(|(_, relative)| rust_type_path_alias_for_trait_impl_method(relative).is_some())
+}
+
 /// Resolve same-file symbol references (calls and other extractor reference
 /// kinds) into relation edges, and retain the references this file cannot
 /// bind as typed cross-file candidates. Only an UNAMBIGUOUS kind-compatible
@@ -2153,7 +2209,8 @@ fn resolve_file_references(
     Vec<CodeIndexUnresolvedReferenceV1>,
 ) {
     let mut by_name: BTreeMap<&str, Vec<&SymbolRow>> = BTreeMap::new();
-    let mut by_file_relative_name: BTreeMap<&str, Vec<&SymbolRow>> = BTreeMap::new();
+    let mut by_file_relative_name: BTreeMap<String, Vec<&SymbolRow>> = BTreeMap::new();
+    let mut type_path_aliases: Vec<(String, &SymbolRow)> = Vec::new();
     for symbol in symbols {
         by_name
             .entry(symbol.name.as_str())
@@ -2164,9 +2221,42 @@ fn resolve_file_references(
             .split_once("::")
             .map_or(symbol.qualified_name.as_str(), |(_, name)| name);
         by_file_relative_name
-            .entry(relative_name)
+            .entry(relative_name.to_owned())
             .or_default()
             .push(symbol);
+        // Dual-index `<Type as Trait>::method` under `Type::method` so
+        // type-path calls bind without renaming the definition. Collected
+        // first so an inherent `Type::method` already in the map keeps the
+        // path and trait-impl aliases do not steal it.
+        if let Some(alias) = rust_type_path_alias_for_trait_impl_method(relative_name) {
+            type_path_aliases.push((alias.clone(), symbol));
+            if let Some((type_name, method)) = alias.rsplit_once("::") {
+                if let Some(simple) = type_name.rsplit("::").next() {
+                    if simple != type_name {
+                        type_path_aliases.push((format!("{simple}::{method}"), symbol));
+                    }
+                }
+            }
+        }
+    }
+    for (alias, symbol) in type_path_aliases {
+        let bucket = by_file_relative_name.entry(alias).or_default();
+        if bucket.iter().any(|existing| {
+            let relative = existing
+                .qualified_name
+                .split_once("::")
+                .map_or(existing.qualified_name.as_str(), |(_, name)| name);
+            rust_type_path_alias_for_trait_impl_method(relative).is_none()
+        }) {
+            continue;
+        }
+        if bucket
+            .iter()
+            .any(|existing| existing.node_id == symbol.node_id)
+        {
+            continue;
+        }
+        bucket.push(symbol);
     }
     let mut references_by_site: HashMap<(&str, EdgeKind, u32, u32), Vec<&UnresolvedRef>> =
         HashMap::new();
@@ -4280,6 +4370,136 @@ pub fn real_symbol() {}
             ["target", "target"]
         );
         assert_ne!(calls[0].evidence_span, calls[1].evidence_span);
+    }
+
+    #[test]
+    fn rust_type_path_alias_parses_ufcs_trait_impl_methods() {
+        assert_eq!(
+            rust_type_path_alias_for_trait_impl_method(
+                "<WalkEventIter as From<WalkDir>>::from"
+            )
+            .as_deref(),
+            Some("WalkEventIter::from")
+        );
+        assert_eq!(
+            rust_type_path_alias_for_trait_impl_method(
+                "<crate::Builder as crate::First>::build"
+            )
+            .as_deref(),
+            Some("crate::Builder::build")
+        );
+        assert_eq!(
+            rust_type_path_alias_for_trait_impl_method("WalkEventIter::from"),
+            None
+        );
+        assert!(rust_qualified_name_is_ufcs_trait_impl(
+            "crates/ignore/src/walk.rs::<WalkEventIter as From<WalkDir>>::from"
+        ));
+        assert!(!rust_qualified_name_is_ufcs_trait_impl(
+            "crates/ignore/src/walk.rs::WalkEventIter::from"
+        ));
+    }
+
+    #[test]
+    fn type_path_call_binds_unique_trait_impl_method() {
+        let source = concat!(
+            "struct WalkEventIter;\n",
+            "struct WalkDir;\n",
+            "impl From<WalkDir> for WalkEventIter {\n",
+            "    fn from(it: WalkDir) -> WalkEventIter { WalkEventIter }\n",
+            "}\n",
+            "fn build(wd: WalkDir) {\n",
+            "    let _ = WalkEventIter::from(wd);\n",
+            "}\n",
+        );
+        let file = validated_file("src/walk.rs", source.as_bytes());
+        let batch = batch_for(&file, ParseOutcomeV1::Complete);
+        let artifacts = chunker()
+            .index_file(&file, &batch, &rust_descriptor(), &NeverCancelled)
+            .expect("indexing succeeds");
+        let from_method = artifacts
+            .symbols
+            .iter()
+            .find(|symbol| {
+                symbol.qualified_name
+                    == "src/walk.rs::<WalkEventIter as From<WalkDir>>::from"
+            })
+            .expect("UFCS From::from method");
+        let build = artifacts
+            .symbols
+            .iter()
+            .find(|symbol| symbol.qualified_name == "src/walk.rs::build")
+            .expect("build function");
+        assert!(
+            artifacts.edges.iter().any(|edge| {
+                edge.from_occurrence == build.occurrence
+                    && edge.to_occurrence == from_method.occurrence
+                    && edge.kind == RelationEdgeKindV1::Calls
+                    && edge.authority == EdgeAuthorityV1::SyntaxExact
+            }),
+            "WalkEventIter::from must bind to <WalkEventIter as From<WalkDir>>::from"
+        );
+        assert!(
+            !artifacts.unresolved_references.iter().any(|reference| {
+                reference.reference_name == "WalkEventIter::from"
+            }),
+            "type-path call must resolve same-file rather than remain for sealing"
+        );
+    }
+
+    #[test]
+    fn type_path_alias_does_not_steal_inherent_method() {
+        let source = concat!(
+            "struct Builder;\n",
+            "trait First { fn build(&self); }\n",
+            "impl Builder {\n",
+            "    fn build(&self) {}\n",
+            "}\n",
+            "impl First for Builder {\n",
+            "    fn build(&self) {}\n",
+            "}\n",
+            "fn assemble() {\n",
+            "    Builder::build(&Builder);\n",
+            "}\n",
+        );
+        let file = validated_file("src/lib.rs", source.as_bytes());
+        let batch = batch_for(&file, ParseOutcomeV1::Complete);
+        let artifacts = chunker()
+            .index_file(&file, &batch, &rust_descriptor(), &NeverCancelled)
+            .expect("indexing succeeds");
+        let inherent = artifacts
+            .symbols
+            .iter()
+            .find(|symbol| symbol.qualified_name == "src/lib.rs::Builder::build")
+            .expect("inherent Builder::build");
+        let trait_impl = artifacts
+            .symbols
+            .iter()
+            .find(|symbol| {
+                symbol.qualified_name == "src/lib.rs::<Builder as First>::build"
+            })
+            .expect("trait-impl build");
+        let assemble = artifacts
+            .symbols
+            .iter()
+            .find(|symbol| symbol.qualified_name == "src/lib.rs::assemble")
+            .expect("assemble");
+        assert!(
+            artifacts.edges.iter().any(|edge| {
+                edge.from_occurrence == assemble.occurrence
+                    && edge.to_occurrence == inherent.occurrence
+                    && edge.kind == RelationEdgeKindV1::Calls
+            }),
+            "Builder::build must keep the inherent method when both exist"
+        );
+        assert!(
+            artifacts.edges.iter().all(|edge| {
+                edge.from_occurrence != assemble.occurrence
+                    || edge.to_occurrence != trait_impl.occurrence
+                    || edge.kind != RelationEdgeKindV1::Calls
+            }),
+            "trait-impl alias must not steal the inherent type-path binding"
+        );
     }
 
     #[test]

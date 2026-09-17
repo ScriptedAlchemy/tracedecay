@@ -10,7 +10,8 @@ use tracedecay_domain::{
 
 use crate::chunks::{
     CROSS_FILE_REFERENCE_BLOCKLIST, cross_file_reference_name_is_blocklisted,
-    relation_target_kind_is_compatible,
+    relation_target_kind_is_compatible, rust_qualified_name_is_ufcs_trait_impl,
+    rust_type_path_alias_for_trait_impl_method,
 };
 use crate::incremental::ChunkIncrementErrorV1;
 use crate::lineage::{LineageResolutionErrorV1, LineageSymbolRecordV1};
@@ -650,82 +651,108 @@ where
     {
         return None;
     }
-    let mut compatible = candidates.iter().filter(|(candidate_index, symbol)| {
-        let target = RustSymbolTargetV1 {
-            index: *candidate_index,
-            symbol,
-        };
-        files[*candidate_index].as_ref().extraction.language == file.extraction.language
-            && relation_target_kind_is_compatible(reference.kind, &symbol.kind)
-            && match import {
-                None => {
-                    let direct = match crate_qualified {
-                        None => {
-                            (has_rust_glob
+    let compatible = candidates
+        .iter()
+        .filter(|(candidate_index, symbol)| {
+            let target = RustSymbolTargetV1 {
+                index: *candidate_index,
+                symbol,
+            };
+            files[*candidate_index].as_ref().extraction.language == file.extraction.language
+                && relation_target_kind_is_compatible(reference.kind, &symbol.kind)
+                && match import {
+                    None => {
+                        let direct = match crate_qualified {
+                            None => {
+                                (has_rust_glob
+                                    && hotpath::measure_block!(
+                                        "code_index.seal.glob_expansion",
+                                        rust_parent_glob_import_matches(
+                                            files,
+                                            &mut rust,
+                                            index,
+                                            &reference.reference_name,
+                                            reference.kind,
+                                            target,
+                                        )
+                                    ))
+                                    // Rust `::` paths bind only through the
+                                    // hop-by-hop walk below; a bare file-stem
+                                    // match would bind `fs::read` to any crate's
+                                    // `fs.rs`.
+                                    || (!is_rust
+                                        && file_qualified_name_matches(
+                                            &reference.reference_name,
+                                            &files[*candidate_index]
+                                                .as_ref()
+                                                .authority
+                                                .logical_path,
+                                            &symbol.qualified_name,
+                                        ))
+                            }
+                            Some(crate_path) => rust_crate_qualified_name_matches(
+                                crate_path,
+                                source_path,
+                                &files[*candidate_index].as_ref().authority.logical_path,
+                                &symbol.qualified_name,
+                            ),
+                        };
+                        direct
+                            || (qualified
+                                && is_rust
                                 && hotpath::measure_block!(
-                                    "code_index.seal.glob_expansion",
-                                    rust_parent_glob_import_matches(
+                                    "code_index.seal.qualified_path_walk",
+                                    rust_qualified_path_matches(
                                         files,
                                         &mut rust,
                                         index,
                                         &reference.reference_name,
-                                        reference.kind,
                                         target,
                                     )
                                 ))
-                                // Rust `::` paths bind only through the
-                                // hop-by-hop walk below; a bare file-stem
-                                // match would bind `fs::read` to any crate's
-                                // `fs.rs`.
-                                || (!is_rust
-                                    && file_qualified_name_matches(
-                                        &reference.reference_name,
-                                        &files[*candidate_index].as_ref().authority.logical_path,
-                                        &symbol.qualified_name,
-                                    ))
-                        }
-                        Some(crate_path) => rust_crate_qualified_name_matches(
-                            crate_path,
-                            source_path,
+                    }
+                    Some(binding) => match binding.module_kind {
+                        ImportModuleKindV1::ProjectRelative => project_import_matches(
+                            binding,
+                            &binding.logical_path,
                             &files[*candidate_index].as_ref().authority.logical_path,
                             &symbol.qualified_name,
                         ),
-                    };
-                    direct
-                        || (qualified
-                            && is_rust
-                            && hotpath::measure_block!(
-                                "code_index.seal.qualified_path_walk",
-                                rust_qualified_path_matches(
-                                    files,
-                                    &mut rust,
-                                    index,
-                                    &reference.reference_name,
-                                    target,
+                        ImportModuleKindV1::BareModule
+                            if file.extraction.language.as_str() == "rust" =>
+                        {
+                            hotpath::measure_block!(
+                                "code_index.seal.reexport_walk",
+                                rust_bare_import_matches(
+                                    files, &mut rust, index, binding, target, ""
                                 )
-                            ))
+                            )
+                        }
+                        ImportModuleKindV1::BareModule => false,
+                    },
                 }
-                Some(binding) => match binding.module_kind {
-                    ImportModuleKindV1::ProjectRelative => project_import_matches(
-                        binding,
-                        &binding.logical_path,
-                        &files[*candidate_index].as_ref().authority.logical_path,
-                        &symbol.qualified_name,
-                    ),
-                    ImportModuleKindV1::BareModule
-                        if file.extraction.language.as_str() == "rust" =>
-                    {
-                        hotpath::measure_block!(
-                            "code_index.seal.reexport_walk",
-                            rust_bare_import_matches(files, &mut rust, index, binding, target, "")
-                        )
-                    }
-                    ImportModuleKindV1::BareModule => false,
-                },
+        })
+        .collect::<Vec<_>>();
+    // A type-path call may match both an inherent `Type::method` and one or
+    // more `<Type as Trait>::method` aliases; Rust prefers the inherent, so
+    // keep a unique non-UFCS hit when aliases also matched.
+    let compatible = match compatible.as_slice() {
+        [] => return None,
+        [_] => compatible,
+        many => {
+            let inherent = many
+                .iter()
+                .copied()
+                .filter(|(_, symbol)| !rust_qualified_name_is_ufcs_trait_impl(&symbol.qualified_name))
+                .collect::<Vec<_>>();
+            match inherent.as_slice() {
+                [_] => inherent,
+                _ => return None,
             }
-    });
-    let (first_index, target) = compatible.next()?;
-    if *first_index == index || compatible.next().is_some() {
+        }
+    };
+    let (first_index, target) = compatible.into_iter().next()?;
+    if *first_index == index {
         return None;
     }
     Some((*first_index, target.occurrence.clone()))
@@ -1536,10 +1563,12 @@ fn file_qualified_name_matches(
         == Some(symbol_path)
 }
 
-/// An inherent `Type::method` whose owning type is defined in `scope_index`
-/// (as `scope_qualified_type`, the type's crate-relative path) may live in
-/// any other file of the same crate. Validate the type at scope, match the
-/// method by its file-relative `Type::method` path, and require the `impl`
+/// A `Type::method` whose owning type is defined in `scope_index` (as
+/// `scope_qualified_type`, the type's crate-relative path) may live in any
+/// other file of the same crate — either an inherent `impl Type` or a unique
+/// `impl Trait for Type` whose UFCS name still answers the type-path call.
+/// Validate the type at scope, match the method by its file-relative
+/// `Type::method` path (including the UFCS alias), and require the `impl`
 /// file to bind `Type` to that same definition: it is the defining file, or
 /// it defines no `Type` of its own and imports the type, by name or through
 /// a glob of a module that exports it. A same-named type in another module
@@ -1575,7 +1604,7 @@ where
         return false;
     };
     let impl_file = files[target.index].as_ref();
-    if !rust_method_belongs_to_inherent_impl(impl_file, target.symbol) {
+    if !rust_method_belongs_to_type_impl(impl_file, target.symbol) {
         return false;
     }
     let Some(impl_owner) = rust_inherent_method_owner(
@@ -1650,7 +1679,7 @@ where
     })
 }
 
-fn rust_method_belongs_to_inherent_impl(
+fn rust_method_belongs_to_type_impl(
     file: &FileGenerationArtifactsV1,
     method: &LineageSymbolRecordV1,
 ) -> bool {
@@ -1666,20 +1695,15 @@ fn rust_method_belongs_to_inherent_impl(
                 .iter()
                 .find(|symbol| symbol.occurrence == edge.from_occurrence)
         })
-        .any(|owner| {
-            owner.kind == "impl"
-                && owner
-                    .signature
-                    .as_deref()
-                    .is_some_and(|signature| !signature.contains(" for "))
-        })
+        .any(|owner| owner.kind == "impl")
 }
 
-/// File-relative inherent method identity: a top-level `impl Type` block's
-/// `Type::method`, same crate as `source_path`, in whichever module file
-/// holds the `impl`. Methods of an `impl` nested in an inline module are not
-/// matched: their `Type` is bound by that module's own imports, which file
-/// import rows do not attest.
+/// File-relative method identity for an `impl Type` or `impl Trait for Type`
+/// block's `Type::method` (UFCS definitions keep a type-path alias). Same
+/// crate as `source_path`, in whichever module file holds the `impl`.
+/// Methods of an `impl` nested in an inline module are not matched: their
+/// `Type` is bound by that module's own imports, which file import rows do
+/// not attest.
 fn rust_inherent_method_owner<'a>(
     type_name: &str,
     member: &str,
@@ -1714,11 +1738,32 @@ fn rust_inherent_method_owner<'a>(
     if target_member != member {
         return None;
     }
-    let owner = nominal_rust_impl_owner(target_owner)?;
+    let owner = rust_ufcs_impl_type_name(target_owner)
+        .or_else(|| nominal_rust_impl_owner(target_owner))?;
     (owner.rsplit("::").next() == Some(type_name)).then_some(owner)
 }
 
+fn rust_ufcs_impl_type_name(owner: &str) -> Option<&str> {
+    let body = owner.strip_prefix('<')?.strip_suffix('>')?;
+    let mut depth = 0_i32;
+    for (index, character) in body.char_indices() {
+        match character {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            _ if depth == 0 && body[index..].starts_with(" as ") => {
+                let type_name = body[..index].trim();
+                return (!type_name.is_empty()).then_some(type_name);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn nominal_rust_impl_owner(owner: &str) -> Option<&str> {
+    if rust_ufcs_impl_type_name(owner).is_some() {
+        return None;
+    }
     match owner.find('<') {
         Some(generic_start) if owner.ends_with('>') => Some(&owner[..generic_start]),
         Some(_) => None,
@@ -1771,11 +1816,32 @@ fn rust_crate_qualified_name_matches(
     let Some(module) = rust_file_module(relative_file) else {
         return false;
     };
-    if module.is_empty() {
-        reference_path == symbol_path
-    } else {
-        reference_path == format!("{}::{symbol_path}", module.replace('/', "::"))
+    let path_matches = |path: &str| {
+        if module.is_empty() {
+            reference_path == path
+        } else {
+            reference_path == path
+                || reference_path == format!("{}::{path}", module.replace('/', "::"))
+        }
+    };
+    if path_matches(symbol_path) {
+        return true;
     }
+    // `<Type as Trait>::method` also answers a type-path call `Type::method`
+    // (and the type's final path segment when the UFCS type is crate-qualified).
+    let Some(alias) = rust_type_path_alias_for_trait_impl_method(symbol_path) else {
+        return false;
+    };
+    if path_matches(&alias) {
+        return true;
+    }
+    let Some((type_name, method)) = alias.rsplit_once("::") else {
+        return false;
+    };
+    let Some(simple) = type_name.rsplit("::").next() else {
+        return false;
+    };
+    simple != type_name && path_matches(&format!("{simple}::{method}"))
 }
 
 fn rust_file_module(relative_file: &str) -> Option<&str> {
