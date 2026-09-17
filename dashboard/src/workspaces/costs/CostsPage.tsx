@@ -127,22 +127,7 @@ export function CostsPage() {
       />
 
       <div className="grid gap-2 p-2 md:grid-cols-2 xl:grid-cols-12">
-        <Panel
-          legend="Actual provider spend"
-          className="md:col-span-2 xl:col-span-9"
-          actions={
-            <span className="td-value text-2xs text-text-primary" data-cell="numeric" data-priced-total>
-              {ledger === null ? '—' : formatUsd(ledger.pricedTotalUsd)}
-              <span className="td-unit ml-1.5">
-                {ledger === null
-                  ? ''
-                  : ledger.complete
-                    ? 'priced total · complete'
-                    : `priced total · ${formatShare(ledger.coverage)} coverage`}
-              </span>
-            </span>
-          }
-        >
+        <Panel legend="Actual provider spend" className="md:col-span-2 xl:col-span-7">
           <AttributionBody attribution={attribution}>
             {(ready) => (
               <ProviderSpendField
@@ -156,6 +141,15 @@ export function CostsPage() {
               />
             )}
           </AttributionBody>
+        </Panel>
+
+        <Panel legend="Usage" className="xl:col-span-2">
+          <UsageReadouts
+            ledger={ledger}
+            attribution={attribution}
+            overview={overviewRead}
+            range={query.range}
+          />
         </Panel>
 
         <Panel legend="Provider pricing authority" className="xl:col-span-3">
@@ -176,18 +170,9 @@ export function CostsPage() {
           </OverviewBody>
         </Panel>
 
-        <Panel legend="Usage · facts independent of price" className="xl:col-span-3">
-          <UsageReadouts
-            ledger={ledger}
-            attribution={attribution}
-            overview={overviewRead}
-            range={query.range}
-          />
-        </Panel>
-
         <Panel
           legend="Provider spend detail · canonical pricing"
-          className="md:col-span-2 xl:col-span-6"
+          className="md:col-span-2 xl:col-span-9"
           elevation="well"
           bodyClassName="p-0"
         >
@@ -207,7 +192,7 @@ export function CostsPage() {
           </AttributionBody>
         </Panel>
 
-        <Panel legend="Inspector" className="xl:col-span-3">
+        <Panel legend="Inspector" className="md:col-span-2 xl:col-span-3">
           <AttributionBody attribution={attribution}>
             {(ready) => (
               <CostsInspector
@@ -371,9 +356,17 @@ function usageState(payload: SavingsOverviewPayloadV1): RegisterState {
       ? { label: 'usage', kind: 'error', detail: usage.error ?? 'read failed' }
       : { label: 'usage', kind: 'unavailable', detail: usage.status ?? 'not served' };
   }
-  return usage.status === 'complete'
-    ? { label: 'usage', kind: 'ready', detail: 'complete aggregate' }
-    : { label: 'usage', kind: 'partial', detail: usage.status ?? 'partial aggregate' };
+  switch (usage.status) {
+    case 'complete':
+      return { label: 'usage', kind: 'ready', detail: 'complete aggregate' };
+    case 'partial':
+      return { label: 'usage', kind: 'partial', detail: 'partial aggregate' };
+    case null:
+      // Served without its coverage word: neither claimed complete nor partial.
+      return { label: 'usage', kind: 'unknown', detail: 'aggregate coverage not reported' };
+    default:
+      return { label: 'usage', kind: 'unknown', detail: usage.status };
+  }
 }
 
 function QueryRegister({
@@ -393,7 +386,7 @@ function QueryRegister({
 }) {
   return (
     <div
-      className="flex min-h-[52px] flex-wrap items-center gap-x-4 gap-y-2 border-b border-edge-subtle bg-surface-1 px-3 py-1"
+      className="flex min-h-[52px] shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-edge-subtle bg-surface-1 px-3 py-1"
       data-costs-register
     >
       <RangeControl range={range} onRange={onRange} />
@@ -477,7 +470,7 @@ function RangeControl({
       role="tablist"
       aria-label="Spend range"
       aria-orientation="horizontal"
-      className="flex items-center gap-1 border border-edge-subtle bg-surface-1 p-1"
+      className="flex flex-wrap items-center gap-1 border border-edge-subtle bg-surface-1 p-1"
       data-costs-range={range}
     >
       {COSTS_RANGES.map((candidate, position) => {
@@ -495,7 +488,7 @@ function RangeControl({
             onClick={() => onRange(candidate)}
             onKeyDown={(event) => onKeyDown(event, position)}
             className={cn(
-              'flex min-h-[44px] items-center gap-2 border px-3 text-2xs',
+              'flex min-h-[44px] items-center gap-2 whitespace-nowrap border px-3 text-2xs',
               'focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
               selected
                 ? 'border-edge-strong bg-surface-3 text-text-primary'
@@ -534,6 +527,9 @@ function UsageReadouts({
   const windows = savings?.available ? savings.ledger : null;
   return (
     <div className="flex flex-col gap-4">
+      <p className="text-3xs leading-relaxed text-text-muted">
+        facts independent of price: counts and tokens the providers reported for this range
+      </p>
       {ledger === null ? (
         <div role="status">
           <StateChip
@@ -543,30 +539,30 @@ function UsageReadouts({
         </div>
       ) : (
         <>
-          <Readout
-            label="usage events"
-            size="xl"
-            value={ledger.usageEvents.toLocaleString()}
-            note={`${ledger.pricedEvents.toLocaleString()} priced · ${ledger.unpricedEvents.toLocaleString()} unpriced · ${ledger.undatedEvents.toLocaleString()} undated`}
-          />
-          <Readout
-            label="tokens consumed"
-            size="xl"
-            {...splitCount(tokens?.tokens, 1_000)}
-            note={
-              tokens === null || tokens.reported === 0
+          <div className="flex flex-col gap-1.5">
+            <Readout label="usage events" size="xl" value={ledger.usageEvents.toLocaleString()} />
+            <ul className="flex flex-col gap-0.5 text-3xs text-text-muted" data-usage-breakdown>
+              <li>{ledger.pricedEvents.toLocaleString()} priced</li>
+              <li>{ledger.unpricedEvents.toLocaleString()} unpriced</li>
+              <li>{ledger.undatedEvents.toLocaleString()} undated</li>
+            </ul>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Readout label="tokens consumed" size="xl" {...splitCount(tokens?.tokens, 1_000)} />
+            <p className="text-3xs leading-relaxed text-text-muted">
+              {tokens === null || tokens.reported === 0
                 ? 'no provider reported a token total'
                 : tokens.unreported > 0
                   ? `input + output over ${tokens.reported.toLocaleString()} of ${ledger.rows.length.toLocaleString()} providers`
-                  : 'input + output, provider-reported'
-            }
-          />
+                  : 'input + output, provider-reported'}
+            </p>
+          </div>
         </>
       )}
 
       <div className="flex flex-col gap-2 border-t border-edge-subtle pt-3">
-        <div className="flex items-center gap-2">
-          <span className="td-legend">saved-token windows</span>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="td-legend">saved tokens</span>
           <span aria-hidden className="td-rule" />
           <span className="td-legend text-text-muted">count only</span>
         </div>

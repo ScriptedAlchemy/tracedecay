@@ -45,7 +45,7 @@ export function ProviderSpendField({
   const option = useMemo<EChartsOption | null>(() => {
     if (!series) return null;
     return {
-      grid: { left: 8, right: 12, top: 18, bottom: 6, containLabel: true },
+      grid: { left: 8, right: 28, top: 18, bottom: 6, containLabel: true },
       xAxis: {
         type: 'category',
         data: series.days.map(formatUtcDay),
@@ -96,34 +96,54 @@ export function ProviderSpendField({
       : 'No dated priced spend to draw';
 
   return (
-    <div className="flex min-w-0 flex-col gap-3 lg:flex-row">
-      <div className="flex min-w-0 flex-1 flex-col gap-2">
-        <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-          <span className="td-legend">priced spend · USD per UTC day</span>
-          <span className="text-3xs text-text-muted">{rangeNote}</span>
-        </div>
-        {option ? (
-          <Chart option={option} height={240} ariaLabel={describe} />
-        ) : (
-          <div
-            className="td-optic td-graticule flex min-h-[240px] items-center justify-center px-4 text-center text-2xs leading-relaxed text-text-secondary"
-            role="img"
-            aria-label={describe}
-          >
-            {ledger.usageEvents === 0
-              ? 'no usage observations in this range — an empty series, not a zero bill'
-              : 'usage was observed but none of it carries a timestamp, so there is no dated series to draw'}
+    // Container-queried, not viewport-queried: the legend sits beside the
+    // field only when this panel is wide enough to give the chart room, which
+    // depends on the grid column it landed in, not on the window. The query
+    // lives on a wrapper because an element cannot query its own size.
+    <div className="@container min-w-0">
+      <div className="flex min-w-0 flex-col gap-3 @3xl:flex-row">
+        <div className="flex min-w-0 flex-1 flex-col gap-2">
+          <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+            <span className="td-legend">priced spend · USD per UTC day</span>
+            <span
+              className="td-value flex flex-wrap items-baseline gap-x-1.5 text-sm text-text-primary"
+              data-cell="numeric"
+              data-priced-total
+            >
+              {formatUsd(ledger.pricedTotalUsd)}
+              <span className="td-unit">
+                {ledger.usageEvents === 0
+                  ? 'no usage in range'
+                  : ledger.complete
+                    ? 'priced total · complete'
+                    : `priced total · ${formatShare(ledger.coverage)} coverage`}
+              </span>
+            </span>
           </div>
-        )}
-        <SeriesDisclosure ledger={ledger} series={series} />
+          <span className="text-3xs text-text-muted">{rangeNote}</span>
+          {option ? (
+            <Chart option={option} height={280} ariaLabel={describe} />
+          ) : (
+            <div
+              className="td-optic td-graticule flex min-h-[280px] items-center justify-center px-4 text-center text-2xs leading-relaxed text-text-secondary"
+              role="img"
+              aria-label={describe}
+            >
+              {ledger.usageEvents === 0
+                ? 'no usage observations in this range — an empty series, not a zero bill'
+                : 'usage was observed but none of it carries a timestamp, so there is no dated series to draw'}
+            </div>
+          )}
+          <SeriesDisclosure ledger={ledger} series={series} />
+        </div>
+        <ProviderLegend
+          ledger={ledger}
+          inspected={inspected}
+          selected={selected}
+          onInspect={onInspect}
+          onSelect={onSelect}
+        />
       </div>
-      <ProviderLegend
-        ledger={ledger}
-        inspected={inspected}
-        selected={selected}
-        onInspect={onInspect}
-        onSelect={onSelect}
-      />
     </div>
   );
 }
@@ -286,7 +306,7 @@ export function ProviderLegend({
     <div
       role="group"
       aria-label="Provider legend and scope"
-      className="relative flex w-full shrink-0 flex-col border border-edge-subtle bg-surface-1 lg:w-64"
+      className="relative flex w-full shrink-0 flex-col border border-edge-subtle bg-surface-1 @3xl:w-64"
       onMouseLeave={() => onInspect(null)}
     >
       <Corners />

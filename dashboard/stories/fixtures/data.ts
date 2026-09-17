@@ -1543,7 +1543,9 @@ function savingsPayload(): Record<string, unknown> {
     },
     provider_usage: {
       available: true,
-      status: null,
+      // `savings_api::provider_usage_overview` always names the aggregate's
+      // coverage; a priced complete total is only served with `complete`.
+      status: 'complete',
       error: null,
       usage_event_count: 57_704,
       total_cost_usd: 8148.9744974,
