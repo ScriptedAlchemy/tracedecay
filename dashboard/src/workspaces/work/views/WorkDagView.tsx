@@ -1,20 +1,15 @@
 import { useMemo } from 'react';
 import { StateChip } from '../../../ui/StateChip.tsx';
-import { Meter, Panel } from '../../../ui/instrument.tsx';
-import { cn } from '../../../ui/cn.ts';
+import { Panel } from '../../../ui/instrument.tsx';
 import { coverageReading } from '../workModel.ts';
 import type { WorkGraphReading } from '../workGraphModel.ts';
 import type { WorkProductView } from '../workProductView.ts';
-import {
-  type WorkDagComponent,
-  type WorkDagReading,
-  workDagReading,
-} from '../workViewsModel.ts';
-import { TaskChip } from './TaskChip.tsx';
-import { ChannelLedger, EmptyReading, ViewCaption } from './WorkViewChannel.tsx';
+import { type WorkDagReading, workDagReading } from '../workViewsModel.ts';
+import { WorkDagBoard } from './WorkDagBoard.tsx';
+import { ChannelLedger, EmptyReading } from './WorkViewChannel.tsx';
 
 /**
- * DAG / critical path — the transit-map strata over the declared task graph.
+ * DAG / critical path — the task dependency board over the declared graph.
  *
  * Strata are the longest path over the Tarjan condensation, the same discipline
  * the Code workspace layers imports with: a task sits one stratum below the
@@ -23,22 +18,14 @@ import { ChannelLedger, EmptyReading, ViewCaption } from './WorkViewChannel.tsx'
  * hue and the caption must state it is an observation; a declared cycle is a
  * real reading of the plan, not a rendering fault.
  *
- * The widest channel is the deepest chain of components, and it is UNWEIGHTED.
- * The product critical path is weighted by effort, and the effort lives in the
- * work-product graph rather than in `WorkProjection`, so the two chains are
- * drawn side by side and neither is rescaled by the other: this one is the
- * longest path over the edges THIS PAGE returned, and the authority's is the
- * effort-weighted path over the whole graph. Where they disagree, the
- * disagreement is the reading. When the graph read has not answered, the
- * weighted chain is an absence carrying that read's own state.
- *
- * Accessibility. The strata are an ordered list of ordered lists of buttons,
- * so the visualization IS the accessible structure: it takes Tab in reading
- * order, announces each task's depth and cycle membership, and needs no
- * parallel text twin. The channel rails beside each stratum are decoration of
- * a number printed next to them and stay out of the accessibility tree.
+ * The board (`WorkDagBoard`) lays those strata out deterministically and draws
+ * the three declared relation kinds between the cards. The readings below it
+ * are the parts of the graph a drawing cannot carry: the authority's
+ * effort-weighted critical path over the WHOLE graph version, which need not
+ * agree with the unweighted deepest chain the strata show; the gating edge set
+ * the graph declares; the edges that climb inside a cycle; and the
+ * dependencies whose far end this page did not return.
  */
-
 export function WorkDagView({
   snapshot,
   graph,
@@ -55,42 +42,27 @@ export function WorkDagView({
     [snapshot.projections, graph],
   );
   const coverage = coverageReading(snapshot.coverage);
-  const onLongestChain = useMemo(
-    () => new Set(reading.longestChain.map((component) => component.index)),
-    [reading],
-  );
 
   return (
     <div className="flex min-w-0 flex-col gap-3" data-work-view="dag">
       <Panel
-        legend="Declared dependency strata"
-        actions={<StateChip kind={coverage.state} detail={coverage.detail} />}
+        legend="Task dependency graph"
+        actions={
+          <>
+            <StateChip kind={coverage.state} detail={coverage.detail} />
+            <span className="td-value text-3xs text-text-muted" data-cell="numeric">
+              graph v{snapshot.graph_version} · seq {snapshot.event_sequence}
+            </span>
+          </>
+        }
         elevation="well"
       >
-        <div className="flex min-w-0 flex-col gap-3">
-          <ViewCaption
-            population={`${snapshot.projections.length} tasks · ${reading.strata.length} strata · ${reading.edges.length} declared edges`}
-            note={
-              reading.longestChain.length > 0
-                ? `deepest chain ${reading.longestChain.length} deep, unweighted`
-                : undefined
-            }
-          />
-
-          {snapshot.projections.length === 0 ? (
-            <EmptyReading>
-              The snapshot returned no tasks, so there is no graph to layer. This is the
-              daemon reporting an empty board, not a projection that failed to draw.
-            </EmptyReading>
-          ) : (
-            <Strata
-              reading={reading}
-              onLongestChain={onLongestChain}
-              selected={selected}
-              onSelect={onSelect}
-            />
-          )}
-        </div>
+        <WorkDagBoard
+          snapshot={snapshot}
+          reading={reading}
+          selected={selected}
+          onSelect={onSelect}
+        />
       </Panel>
 
       <CriticalPath reading={reading} />
@@ -224,162 +196,6 @@ function GatingEdges({ reading }: { reading: WorkDagReading }) {
         </ul>
       )}
     </Panel>
-  );
-}
-
-function Strata({
-  reading,
-  onLongestChain,
-  selected,
-  onSelect,
-}: {
-  reading: WorkDagReading;
-  onLongestChain: ReadonlySet<number>;
-  selected: string | null;
-  onSelect: (taskId: string) => void;
-}) {
-  const widest = Math.max(1, reading.widestStratum);
-  return (
-    <ol className="flex min-w-0 flex-col gap-1.5" data-work-strata={reading.strata.length}>
-      {reading.strata.map((stratum) => (
-        <li
-          key={stratum.depth}
-          className="flex min-w-0 items-start gap-2.5"
-          data-work-stratum={stratum.depth}
-        >
-          {/* The depth gutter: a printed number and, under it, the same
-            * quantity as a length so the profile of the graph reads without
-            * digits. The rail repeats the count beside it and stays hidden. */}
-          <span className="flex w-10 shrink-0 flex-col gap-1 pt-1">
-            <span
-              className="td-value text-right text-2xs text-text-secondary"
-              data-cell="numeric"
-            >
-              {stratum.depth}
-            </span>
-            <Meter fraction={stratum.components.length / widest} height="row" align="right" />
-          </span>
-          <ul className="flex min-w-0 flex-1 flex-wrap gap-1.5">
-            {stratum.components.map((component) => (
-              <li key={component.index} className="min-w-0">
-                <ComponentMark
-                  component={component}
-                  reading={reading}
-                  widest={onLongestChain.has(component.index)}
-                  selected={selected}
-                  onSelect={onSelect}
-                />
-              </li>
-            ))}
-          </ul>
-        </li>
-      ))}
-    </ol>
-  );
-}
-
-/**
- * One condensation component.
- *
- * A single task is one button. A cycle is a bracketed group of buttons wearing
- * the climb hue, labelled with its size, because the members share a stratum
- * and no order among them exists to draw.
- */
-function ComponentMark({
-  component,
-  reading,
-  widest,
-  selected,
-  onSelect,
-}: {
-  component: WorkDagComponent;
-  reading: WorkDagReading;
-  widest: boolean;
-  selected: string | null;
-  onSelect: (taskId: string) => void;
-}) {
-  const cyclic = component.taskIds.length > 1;
-  if (!cyclic) {
-    const taskId = component.taskIds[0];
-    if (taskId === undefined) return null;
-    return (
-      <TaskMark
-        taskId={taskId}
-        reading={reading}
-        widest={widest}
-        selected={selected === taskId}
-        onSelect={onSelect}
-      />
-    );
-  }
-  return (
-    <div
-      className="flex min-w-0 flex-wrap items-center gap-1 border border-state-conflicting/60 bg-surface-2 p-1"
-      data-work-cycle={component.taskIds.length}
-    >
-      <span className="td-legend shrink-0 px-1 text-state-conflicting">
-        cycle · {component.taskIds.length}
-      </span>
-      {component.taskIds.map((taskId) => (
-        <TaskMark
-          key={taskId}
-          taskId={taskId}
-          reading={reading}
-          widest={widest}
-          selected={selected === taskId}
-          onSelect={onSelect}
-        />
-      ))}
-    </div>
-  );
-}
-
-function TaskMark({
-  taskId,
-  reading,
-  widest,
-  selected,
-  onSelect,
-}: {
-  taskId: string;
-  reading: WorkDagReading;
-  widest: boolean;
-  selected: boolean;
-  onSelect: (taskId: string) => void;
-}) {
-  const node = reading.nodes.get(taskId);
-  if (node === undefined) return null;
-  const cycleNote = node.cyclic ? ', in a dependency cycle' : '';
-  const chainNote = widest ? ', on the deepest chain' : '';
-  return (
-    <TaskChip
-      taskId={taskId}
-      selected={selected}
-      onSelect={onSelect}
-      variant="filled"
-      className={cn('max-w-[16rem]', widest && !selected && 'border-edge-strong')}
-      data-work-depth={node.depth}
-      data-work-widest={widest ? 'true' : undefined}
-    >
-      <span className="flex min-w-0 items-center gap-1.5">
-        {/* The widest channel is a heavier mark, not only a hue: the deepest
-          * chain has to survive a monochrome rendering. */}
-        <span
-          aria-hidden
-          className={cn(
-            'shrink-0',
-            widest ? 'h-2.5 w-1 bg-accent' : 'size-1.5 bg-edge-strong',
-            node.cyclic && 'bg-state-conflicting',
-          )}
-        />
-        <span className="min-w-0 truncate text-2xs text-text-primary">{node.title}</span>
-      </span>
-      <span className="truncate text-3xs text-text-muted">
-        depth {node.depth} · {node.dependencies.length} in · {node.dependents.length} out
-        {cycleNote}
-        {chainNote}
-      </span>
-    </TaskChip>
   );
 }
 

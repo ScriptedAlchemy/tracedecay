@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { WorkGraphReadV1Schema } from '../../contracts/index.ts';
 import { workGraphRead } from '../../test/workGraphFixture.ts';
+import { workTaskView } from '../../test/workTaskViewFixture.ts';
 import { absentChannel, channelGap, type WorkChannelGap } from './workChannel.ts';
 import { workGraphReading } from './workGraphModel.ts';
 import {
@@ -25,19 +26,7 @@ import type { WorkTaskView } from './workProductView.ts';
  */
 
 function projection(overrides: Partial<WorkTaskView> = {}): WorkTaskView {
-  return {
-    accepted_proposal: null,
-    acceptance_evidence_required: false,
-    dependencies: [],
-    execution_admitted: false,
-    history_len: 1,
-    relation_replan: null,
-    task_accepted: false,
-    task_id: 'task',
-    title: 'Task',
-    version: 1,
-    ...overrides,
-  };
+  return workTaskView(overrides);
 }
 
 function runtimeGraph(
