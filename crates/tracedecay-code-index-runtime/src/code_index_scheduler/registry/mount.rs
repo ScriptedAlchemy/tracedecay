@@ -2026,6 +2026,25 @@ impl CodeIndexSchedulerRegistryV1 {
                         && worker_source_freshness
                             .ready_without_stat(&worker_project_root, &worker_shutting_down)
                     {
+                        // A seat whose publishing pass could not prove its
+                        // source (`code_index_post_projection_source_unverified`)
+                        // installs without a currency witness. The swap arm
+                        // re-proves such a seat as `Offered`, but a retained
+                        // native graph that already serves skips the graph
+                        // prepare and with it the swap, so no later pass ever
+                        // reached that arm: every ready probe kept requesting a
+                        // reconcile and the route stayed `stale / verifying`
+                        // indefinitely. This unchanged pass verified exactly
+                        // the snapshot the seat was sealed from, so bind that
+                        // proof here.
+                        if let CodeIndexReconcileOutcomeV1::Noop(evidence) = outcome {
+                            Self::bind_unproven_seat_to_verified_source(
+                                &worker_serving_generation,
+                                &worker_serving_source_witness,
+                                &worker_source_freshness,
+                                &evidence.snapshot_content_identity,
+                            );
+                        }
                         worker_serving_generation_changed.send_replace(());
                         // The retained slice was checked before reconciliation
                         // renewed this proof. Preserve its wake now that source

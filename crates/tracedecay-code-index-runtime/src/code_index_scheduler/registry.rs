@@ -2561,6 +2561,54 @@ impl CodeIndexSchedulerRegistryV1 {
         seats.send_modify(|seats| *seats = seats.wrapping_add(1));
     }
 
+    /// Bind the seated generation to the source proof an unchanged pass just
+    /// renewed, when that seat has no currency witness (or a foreign one) and
+    /// was sealed from exactly the snapshot the pass verified.
+    ///
+    /// The fence stays the single source-currency authority:
+    /// [`super::SourceFreshnessFenceV1::source_currency_witness_for`] answers
+    /// only when its sealed-digest proof describes this snapshot, so a seat
+    /// the checkout has moved past is never armed here.
+    pub(super) fn bind_unproven_seat_to_verified_source(
+        serving_generation: &RwLock<Option<LatestCompleteCodeIndexV1>>,
+        serving_source_witness: &RwLock<Option<super::ServingSourceWitnessV1>>,
+        source_freshness: &super::SourceFreshnessFenceV1,
+        verified_snapshot_content_identity: &tracedecay_domain::ContentDigest,
+    ) -> bool {
+        let serving = serving_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(seated) = serving.as_ref() else {
+            return false;
+        };
+        let generation_id = &seated.generation().manifest().generation_id;
+        if seated.generation().snapshot().content_identity != *verified_snapshot_content_identity {
+            return false;
+        }
+        let mut witness = serving_source_witness
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if witness
+            .as_ref()
+            .is_some_and(|witness| witness.generation_id == *generation_id)
+        {
+            return false;
+        }
+        let Some(proof) = source_freshness
+            .source_currency_witness_for(generation_id, verified_snapshot_content_identity)
+        else {
+            return false;
+        };
+        *witness = Some(proof);
+        tracing::info!(
+            event = "code_index_serving_seat_source_proof_bound",
+            generation_id = generation_id.as_str(),
+            "an unchanged pass verified the seated generation's snapshot; the seat now \
+             carries its source-currency witness"
+        );
+        true
+    }
+
     /// Record that a worktree root became mounted. Call after the mounted map
     /// insert commits so subscribe-after-mount waiters observe the root.
     fn record_root_mounted(roots: &tokio::sync::watch::Sender<u64>) {

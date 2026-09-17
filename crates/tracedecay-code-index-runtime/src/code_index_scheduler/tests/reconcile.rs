@@ -2446,6 +2446,111 @@ async fn busy_scheduler_still_refuses_a_seated_generation_without_a_currency_wit
     registry.shutdown().await;
 }
 
+/// A seat that installed without a currency witness (its publishing pass saw
+/// `code_index_post_projection_source_unverified`) can only be re-proven by a
+/// pass. When the retained native graph already serves, the swap arm that
+/// used to do that never runs, so the unchanged-pass path must bind the
+/// renewed proof to the seat itself — and only for the exact snapshot the
+/// pass verified.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unchanged_pass_binds_its_source_proof_to_an_unproven_seat() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+
+    let ready = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ready) = registry
+                .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+                .await
+            {
+                break ready;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the mounted generation becomes ready-decoded");
+    let generation_id = ready.generation().manifest().generation_id.clone();
+    let seated_snapshot = ready.generation().snapshot().content_identity.clone();
+
+    let serving_generation = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .expect("mounted worktree")
+                .serving_generation,
+        )
+    };
+    let witness = registry
+        .serving_source_witness_for_root(fixture.path())
+        .await
+        .expect("mounted worktree witness");
+    let fence = registry
+        .source_freshness_for_root(fixture.path())
+        .await
+        .expect("mounted worktree fence");
+
+    // Stage the unproven seat the post-projection race leaves behind.
+    *witness
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+
+    let foreign_snapshot = tracedecay_domain::ContentDigest::new(format!("sha256:{:064x}", 0_u8))
+        .expect("digest literal");
+    assert!(
+        !CodeIndexSchedulerRegistryV1::bind_unproven_seat_to_verified_source(
+            &serving_generation,
+            &witness,
+            &fence,
+            &foreign_snapshot,
+        ),
+        "a proof over a different snapshot must never arm the seat"
+    );
+    assert!(
+        witness
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none(),
+        "the seat stays unproven after a foreign-snapshot proof"
+    );
+
+    assert!(
+        CodeIndexSchedulerRegistryV1::bind_unproven_seat_to_verified_source(
+            &serving_generation,
+            &witness,
+            &fence,
+            &seated_snapshot,
+        ),
+        "the proof over the seated snapshot arms the seat"
+    );
+    assert_eq!(
+        witness
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|witness| witness.generation_id.clone()),
+        Some(generation_id.clone()),
+        "the witness names the seated generation"
+    );
+    assert!(
+        !CodeIndexSchedulerRegistryV1::bind_unproven_seat_to_verified_source(
+            &serving_generation,
+            &witness,
+            &fence,
+            &seated_snapshot,
+        ),
+        "an already-proven seat is left alone"
+    );
+    assert!(
+        registry.has_current_ready_decoded_for_root_scope(fixture.path(), &scope),
+        "the readiness census admits the re-proven seat without another pass"
+    );
+
+    registry.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_currency_witness_refuses_a_stale_generation() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
