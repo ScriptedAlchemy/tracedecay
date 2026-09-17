@@ -194,7 +194,7 @@ describe('DeliveryPage', () => {
     expect(screen.getByTestId('location').textContent).toContain('pr=project.alpha%3Agithub%3A42');
   });
 
-  it('restores project, pull request, attention source, and evidence from the URL', async () => {
+  it('keeps active attention readable and unreadable sources secondary', async () => {
     renderDelivery(
       INBOX,
       'ready',
