@@ -1054,7 +1054,9 @@ async fn expired_source_proof_reschedules_pending_clone_backfill() {
         settled.is_ok(),
         "the source refresh stranded clone backfill: pending_wake={:?} reconcile_in_progress={} source_age={:?} receipts={:?}",
         registry.pending_wake_micros_for_scope(&scope).await,
-        registry.reconcile_in_progress_for_test(fixture.path()).await,
+        registry
+            .reconcile_in_progress_for_test(fixture.path())
+            .await,
         source_freshness
             .state
             .lock()
