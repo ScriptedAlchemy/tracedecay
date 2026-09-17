@@ -2961,6 +2961,18 @@
       ],
       "type": "object"
     },
+    "CodeIndexFreshnessCoverageV1": {
+      "description": "Coverage of one freshness read. Distinct from [`CodeIndexStalenessStateV1`]:\na generation can be fresh and still omit hook-hint counts, or unverified\nwhile the ladder would otherwise say ready.\n\n`Unobserved` is only the constructed default. A projected read never emits\nit, so an absent observation cannot be mistaken for `complete`.",
+      "enum": [
+        "unobserved",
+        "complete",
+        "partial_refresh_in_progress",
+        "partial_source_verification",
+        "partial_unverified_restore",
+        "partial_hook_hint_overflow"
+      ],
+      "type": "string"
+    },
     "CodeIndexFreshnessPayloadV1": {
       "properties": {
         "note": {
@@ -3012,6 +3024,18 @@
         "serving"
       ],
       "type": "object"
+    },
+    "CodeIndexStalenessStateV1": {
+      "description": "Closed staleness ladder for one mounted worktree.\n\nThe scheduler publishes one of these tokens. MCP, the dashboard, and the\nCLI must match the variant — not a hand-copied string — so a new ladder\nstate cannot appear at one caller and be missed at the others.",
+      "enum": [
+        "fresh",
+        "stale",
+        "indexing",
+        "refreshing",
+        "verifying",
+        "parked"
+      ],
+      "type": "string"
     },
     "CodeIndexWorkerLimitingReasonV1": {
       "enum": [
@@ -3155,8 +3179,8 @@
           "description": "Whether that generation's verified graph projection can serve reads."
         },
         "coverage": {
-          "description": "Whether this read covers the complete mounted scheduler state.",
-          "type": "string"
+          "$ref": "#/$defs/CodeIndexFreshnessCoverageV1",
+          "description": "Whether this read covers the complete mounted scheduler state."
         },
         "generation_recovery": {
           "anyOf": [
@@ -3257,11 +3281,15 @@
           ]
         },
         "staleness_state": {
-          "description": "Staleness-ladder state from the last scheduler execution. `fresh` means\nthe scheduler most recently observed a fresh source; the status read\ndoes not probe the worktree to revalidate that observation.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeIndexStalenessStateV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Staleness-ladder state from the last scheduler execution. `fresh` means\nthe scheduler most recently observed a fresh source; the status read\ndoes not probe the worktree to revalidate that observation."
         },
         "worktree_id": {
           "description": "Stable worktree identity resolved by the scheduler.",
