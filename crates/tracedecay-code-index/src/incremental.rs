@@ -161,9 +161,9 @@ impl GenerationChunkManifestV1 {
         // corpus-sized aggregate, so it fans out over the indexing pool
         // instead of running as one serial loop; the first failure in file
         // order is still the one reported. Each file holds one background
-        // CPU unit for its whole validation so the nested per-chunk admission
-        // inside `validate` reuses it inline instead of taking the process
-        // budget lock once per chunk.
+        // CPU unit for its whole validation. The ordered chunk sweep stays
+        // on that caller, so it does not take the process budget lock once
+        // per chunk or join the FIFO as its own waiters.
         let validated = crate::parallelism::install(|| {
             files
                 .par_iter()

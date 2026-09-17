@@ -206,61 +206,23 @@ unsafe impl ExtractionAdmittedChunkV1 for ExtractionAdmittedCodeSearchChunkV1 {
     }
 }
 
-/// Chunk counts below this stay on the calling thread. One canonical chunk
-/// digest costs single-digit microseconds, so small files are cheaper inline
-/// than split across the pool — and leaving them sequential keeps the pool free
-/// for the coarser per-file fan-out above this layer.
-const PARALLEL_CHUNK_THRESHOLD: usize = 16;
-
-/// The only route from this module to the rayon pool.
+/// Run `operation` over every chunk on the calling thread.
 ///
-/// Every chunk fan-out runs on a worker that already holds one background-CPU
-/// unit (a `collect_bounded_ordered` leaf), and its stolen halves admit
-/// themselves one unit at a time. Holding the parent's unit across the join
-/// while a full-width request sits at the FIFO head wedges the process, so
-/// the yield is welded to the fan-out here rather than left at each call
-/// site, where a merge resolution once kept the `par_iter` and dropped the
-/// yield. `rayon` is imported nowhere else in `chunks`, so a bare `par_iter`
-/// outside this module does not compile.
-mod fan_out {
-    use rayon::prelude::*;
-
-    /// Map `items` across the pool and return the outputs in input order,
-    /// with the caller's admitted units yielded for the duration of the join.
-    pub(super) fn map_yielding<I, R>(items: I, map: impl Fn(I::Item) -> R + Send + Sync) -> Vec<R>
-    where
-        I: IntoParallelIterator,
-        I::Iter: IndexedParallelIterator,
-        R: Send,
-    {
-        crate::parallelism::with_yielded_background_cpu_permits(|| {
-            items.into_par_iter().map(map).collect()
-        })
-    }
-}
-
-/// Run `operation` over every chunk for its failure only, fanning out across
-/// the pool once the batch is large enough. The lowest-index failure is
-/// returned, matching the sequential sweep's short-circuit outcome.
-fn try_for_each_chunk_ordered<F, A>(
-    admit: A,
+/// Chunk rows are not a pool actor. The file-level indexing worker already
+/// holds the background-CPU role for this file. Stolen leaves that re-admit
+/// through the FIFO are what wedged behind a full-width head waiter: each
+/// fix returned the parent's unit around the join, and the parent still held
+/// that role on every large batch. The ordered sweep stays on the caller, so
+/// no chunk is admitted on its own and the lowest-index failure is the first
+/// one.
+fn try_for_each_chunk_ordered<F>(
     chunks: &[Arc<CodeSearchChunkV1>],
     operation: F,
 ) -> Result<(), ChunkingFailureV1>
 where
-    F: Fn(&Arc<CodeSearchChunkV1>) -> Result<(), ChunkingFailureV1> + Send + Sync,
-    A: Fn(&mut dyn FnMut() -> Result<(), ChunkingFailureV1>) -> Result<(), ChunkingFailureV1>
-        + Sync,
+    F: Fn(&Arc<CodeSearchChunkV1>) -> Result<(), ChunkingFailureV1>,
 {
-    if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
-        return chunks.iter().try_for_each(&operation);
-    }
-    // Outputs come back in input order, so the first failure is the
-    // lowest-index one.
-    fan_out::map_yielding(chunks, |chunk| admit(&mut || operation(chunk)).err())
-        .into_iter()
-        .find_map(|failure| failure)
-        .map_or(Ok(()), Err)
+    chunks.iter().try_for_each(operation)
 }
 
 impl ExactExtractionAuthorityV1 {
@@ -350,11 +312,7 @@ impl ExactExtractionAuthorityV1 {
             .unwrap_or(chunks.len());
         // The sequential sweep stopped at the first repeated identity, so only
         // the chunks ahead of it were ever digest-checked.
-        try_for_each_chunk_ordered(
-            |unit| crate::parallelism::with_background_cpu_permit(unit),
-            &chunks[..repeated_at],
-            |chunk| self.validate_chunk(chunk),
-        )?;
+        try_for_each_chunk_ordered(&chunks[..repeated_at], |chunk| self.validate_chunk(chunk))?;
         if repeated_at < chunks.len() {
             return Err(ChunkingFailureV1::NonCanonicalIdentity(
                 crate::noncanonical::NonCanonicalCauseV1::new(
@@ -377,14 +335,7 @@ impl ExactExtractionAuthorityV1 {
         &self,
         chunks: Vec<Arc<CodeSearchChunkV1>>,
     ) -> Result<Vec<ExtractionAdmittedCodeSearchChunkV1>, ChunkingFailureV1> {
-        if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
-            return chunks.into_iter().map(|chunk| self.admit(chunk)).collect();
-        }
-        fan_out::map_yielding(chunks, |chunk| {
-            crate::parallelism::with_background_cpu_permit(|| self.admit(chunk))
-        })
-        .into_iter()
-        .collect()
+        chunks.into_iter().map(|chunk| self.admit(chunk)).collect()
     }
 
     /// Rebind an exact authority only after every prior parser-backed chunk
@@ -455,22 +406,18 @@ impl CodeFileChunksV1 {
                 ),
             ));
         }
-        try_for_each_chunk_ordered(
-            |unit| crate::parallelism::with_background_cpu_permit(unit),
-            &self.chunks,
-            |chunk| {
-                if chunk.anchor.generation_id != self.document.generation_id
-                    || chunk.anchor.file_occurrence_id != self.document.file_occurrence_id
-                {
-                    return Err(ChunkingFailureV1::GenerationMismatch);
-                }
-                chunk.validate().map_err(|error| {
-                    ChunkingFailureV1::NonCanonicalIdentity(
-                        crate::noncanonical::noncanonical_from_domain(error),
-                    )
-                })
-            },
-        )
+        try_for_each_chunk_ordered(&self.chunks, |chunk| {
+            if chunk.anchor.generation_id != self.document.generation_id
+                || chunk.anchor.file_occurrence_id != self.document.file_occurrence_id
+            {
+                return Err(ChunkingFailureV1::GenerationMismatch);
+            }
+            chunk.validate().map_err(|error| {
+                ChunkingFailureV1::NonCanonicalIdentity(
+                    crate::noncanonical::noncanonical_from_domain(error),
+                )
+            })
+        })
     }
 
     /// Rebind carried-forward chunks to their next generation without
@@ -2667,8 +2614,7 @@ fn attribute_whitespace_only_windows(source: &str, pending: &mut Vec<PendingChun
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::mpsc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
 
     use super::*;
@@ -2828,21 +2774,20 @@ mod tests {
         }
     }
 
-    /// The production shape of the wedge: a pool worker admitted for one
-    /// background-CPU unit (a `collect_bounded_ordered` leaf) fans chunk work
-    /// out across the pool while a full-width request (the lexical sorter's
-    /// admission) is already queued at the FIFO head. Stolen leaves must not
-    /// wait behind that head on a unit their own parent holds.
+    /// The caller that already holds one background-CPU unit keeps it for the
+    /// ordered chunk sweep. A full-width waiter queued at the FIFO head must
+    /// stay queued: handing it the caller's unit is the return path that left
+    /// the same parent holding the role on every batch.
     #[test]
-    fn nested_chunk_fan_out_does_not_wedge_behind_a_full_width_head_waiter() {
+    fn ordered_chunk_sweep_does_not_return_the_callers_cpu_unit() {
         // The installed authority is global. Run this scenario alone so its
         // queue counters cannot be advanced by another test's admissions.
-        if std::env::var_os("TRACEDECAY_NESTED_ADMISSION_CHILD").is_none() {
+        if std::env::var_os("TRACEDECAY_CHUNK_SWEEP_ROLE_CHILD").is_none() {
             let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
                 .arg("--exact")
                 .arg(std::thread::current().name().expect("named libtest thread"))
                 .arg("--nocapture")
-                .env("TRACEDECAY_NESTED_ADMISSION_CHILD", "1")
+                .env("TRACEDECAY_CHUNK_SWEEP_ROLE_CHILD", "1")
                 .output()
                 .expect("run isolated admission test");
             assert!(
@@ -2864,60 +2809,52 @@ mod tests {
         if width < 2 {
             return;
         }
-        let chunks = std::iter::repeat_n(
-            Arc::clone(&file_chunks().chunks[0]),
-            PARALLEL_CHUNK_THRESHOLD * width,
-        )
-        .collect::<Vec<_>>();
-
+        // Above the old batch threshold so a reverted join still admits leaves.
+        let chunks =
+            std::iter::repeat_n(Arc::clone(&file_chunks().chunks[0]), 64).collect::<Vec<_>>();
         let holder_admitted = Arc::new(AtomicBool::new(false));
         let head_queued = Arc::new(AtomicBool::new(false));
-        let leaves_entered = Arc::new(AtomicUsize::new(0));
-        let (finished, finishes) = mpsc::channel::<&'static str>();
+        let head_finished = Arc::new(AtomicBool::new(false));
 
         let holder = {
             let authority = Arc::clone(&authority);
             let holder_admitted = Arc::clone(&holder_admitted);
             let head_queued = Arc::clone(&head_queued);
-            let leaves_entered = Arc::clone(&leaves_entered);
-            let finished = finished.clone();
+            let head_finished = Arc::clone(&head_finished);
             std::thread::spawn(move || {
-                let outcome = crate::parallelism::install(|| {
-                    crate::parallelism::with_background_cpu_permit(|| {
-                        holder_admitted.store(true, Ordering::SeqCst);
-                        wait_until("full-width head request queued", || {
-                            head_queued.load(Ordering::SeqCst)
-                        });
-                        try_for_each_chunk_ordered(
-                            |unit| crate::parallelism::with_background_cpu_permit(unit),
-                            &chunks,
-                            |_| {
-                                if leaves_entered.fetch_add(1, Ordering::SeqCst) == 0 {
-                                    // Keep the first leaf busy until a sibling
-                                    // either ran (admission progressed) or is
-                                    // queued behind the head (the wedge).
-                                    wait_until("a sibling leaf ran or queued", || {
-                                        leaves_entered.load(Ordering::SeqCst) >= 2
-                                            || authority.waiting_work_units() > width
-                                    });
-                                }
-                                Ok(())
-                            },
-                        )
-                    })
+                crate::parallelism::with_background_cpu_permit(|| {
+                    holder_admitted.store(true, Ordering::SeqCst);
+                    wait_until("full-width head request queued", || {
+                        head_queued.load(Ordering::SeqCst)
+                    });
+                    assert_eq!(authority.active_units(), 1);
+                    assert_eq!(authority.waiting_work_units(), width);
+                    try_for_each_chunk_ordered(&chunks, |_| Ok(())).expect("ordered chunk sweep");
+                    assert!(
+                        !head_finished.load(Ordering::SeqCst),
+                        "the chunk sweep returned the caller's unit to the FIFO head"
+                    );
+                    assert_eq!(
+                        authority.active_units(),
+                        1,
+                        "the caller must still hold its unit after the sweep"
+                    );
+                    assert_eq!(
+                        authority.waiting_work_units(),
+                        width,
+                        "chunk leaves joined the FIFO as their own waiters"
+                    );
                 });
-                assert!(matches!(outcome, Ok(Ok(()))), "fan-out failed: {outcome:?}");
-                finished.send("holder").expect("test thread is waiting");
             })
         };
         wait_until("holder admitted", || holder_admitted.load(Ordering::SeqCst));
-        assert_eq!(authority.active_units(), 1);
 
         let head = {
-            let finished = finished.clone();
+            let head_finished = Arc::clone(&head_finished);
             std::thread::spawn(move || {
-                crate::parallelism::with_background_cpu_permits(width, || {});
-                finished.send("head").expect("test thread is waiting");
+                crate::parallelism::with_background_cpu_permits(width, || {
+                    head_finished.store(true, Ordering::SeqCst);
+                });
             })
         };
         wait_until("head request waiting for the full width", || {
@@ -2925,76 +2862,52 @@ mod tests {
         });
         head_queued.store(true, Ordering::SeqCst);
 
-        for _ in 0..2 {
+        let started = Instant::now();
+        while !holder.is_finished() {
             assert!(
-                finishes.recv_timeout(ADMISSION_STEP_DEADLINE).is_ok(),
-                "nested chunk fan-out wedged behind the full-width head waiter for \
-                 {ADMISSION_STEP_DEADLINE:?}: active_units={} waiting_work_units={} \
-                 leaves_entered={}",
+                started.elapsed() < ADMISSION_STEP_DEADLINE,
+                "ordered chunk sweep wedged for {ADMISSION_STEP_DEADLINE:?}: \
+                 active_units={} waiting_work_units={}",
                 authority.active_units(),
-                authority.waiting_work_units(),
-                leaves_entered.load(Ordering::SeqCst),
+                authority.waiting_work_units()
             );
+            std::thread::sleep(Duration::from_millis(1));
         }
         holder.join().expect("holder thread");
         head.join().expect("head thread");
+        assert!(head_finished.load(Ordering::SeqCst));
         assert_eq!(authority.active_units(), 0);
         assert_eq!(authority.waiting_work_units(), 0);
     }
 
-    /// Structural pin for the nested-admission fix: the yield lives inside
-    /// `fan_out`, so it survives only while `fan_out` stays the sole pool
-    /// entry point in this file. A merge resolution that reintroduces a bare
-    /// `par_iter` elsewhere fails here even before it fails to compile.
+    /// Chunk rows are not a pool actor. A merge that puts a join back in this
+    /// file assigns the CPU role to stolen leaves again.
     #[test]
-    fn every_pool_fan_out_in_chunks_goes_through_the_yielding_helper() {
+    fn chunk_sweeps_are_not_a_pool_actor() {
         let source = include_str!("chunks.rs");
-        let module_start = source
-            .find("\nmod fan_out {\n")
-            .expect("chunks.rs declares `mod fan_out`");
-        let module_end = module_start
-            + source[module_start..]
-                .find("\n}\n")
-                .expect("`mod fan_out` closes at column zero");
-        let module = &source[module_start..=module_end];
-        assert!(
-            module.contains("with_yielded_background_cpu_permits("),
-            "`fan_out` must yield the caller's admitted units around the join"
-        );
-
-        // Built with `concat!` so this test's own source is not an occurrence.
         let pool_tokens = [
             concat!("ray", "on"),
-            concat!("par_", "iter("),
+            concat!("par_", "iter"),
             concat!("par_", "chunks"),
             concat!("par_", "bridge"),
+            concat!("with_yielded_background_cpu_", "permits"),
         ];
-        let code_lines = |text: &str| {
-            text.lines()
-                .map(str::trim_start)
-                .filter(|line| !line.starts_with("//"))
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        };
-        let outside = code_lines(&source[..module_start])
-            .into_iter()
-            .chain(code_lines(&source[module_end + 1..]))
+        let code_lines = source
+            .lines()
+            .map(str::trim_start)
+            .filter(|line| !line.starts_with("//"))
+            .map(str::to_owned)
             .collect::<Vec<_>>();
-        let inside = code_lines(module);
         for token in pool_tokens {
-            let stray = outside
+            let hits = code_lines
                 .iter()
                 .filter(|line| line.contains(token))
                 .collect::<Vec<_>>();
             assert!(
-                stray.is_empty(),
-                "`{token}` reaches the pool outside `fan_out`, bypassing the yield: {stray:?}"
+                hits.is_empty(),
+                "`{token}` assigns chunk work a pool role: {hits:?}"
             );
         }
-        assert!(
-            inside.iter().any(|line| line.contains(pool_tokens[0])),
-            "`fan_out` is expected to be where the pool crate is imported"
-        );
     }
 
     const RUST_SOURCE: &str = "//! Module documentation.\n\nuse std::collections::HashMap;\n\n/// Doc comment.\npub fn alpha(x: u32) -> u32 {\n    x + 1\n}\n\npub struct Holder {\n    map: HashMap<u32, u32>,\n}\n\nimpl Holder {\n    pub fn get(&self, key: u32) -> Option<u32> {\n        self.map.get(&key).copied()\n    }\n}\n\n// A trailing free-floating comment.\n";
@@ -3111,8 +3024,8 @@ mod tests {
             .expect("chunking succeeds")
     }
 
-    /// A chunk set large enough to cross `PARALLEL_CHUNK_THRESHOLD`, built from
-    /// real extraction rather than hand-assembled chunks.
+    /// A generation-sized chunk set, built from real extraction rather than
+    /// hand-assembled chunks.
     fn wide_chunk_source(symbols: usize) -> String {
         let mut source =
             String::from("//! Module documentation.\n\nuse std::collections::HashMap;\n\n");
@@ -3127,8 +3040,8 @@ mod tests {
     fn wide_chunks(symbols: usize) -> CodeFileChunksV1 {
         let chunks = chunk_source(&wide_chunk_source(symbols));
         assert!(
-            chunks.chunks.len() > PARALLEL_CHUNK_THRESHOLD,
-            "fixture must cross the parallel threshold, got {} chunks",
+            chunks.chunks.len() > 16,
+            "fixture must be a non-trivial generation, got {} chunks",
             chunks.chunks.len()
         );
         chunks
@@ -3239,11 +3152,11 @@ mod tests {
 
         authority
             .validate_all(&chunks.chunks)
-            .expect("parallel validation accepts its own chunks");
+            .expect("ordered validation accepts its own chunks");
 
         let admitted = authority
             .admit_all(chunks.chunks.clone())
-            .expect("parallel admission");
+            .expect("ordered admission");
         let readmitted = admitted
             .into_iter()
             .map(ExtractionAdmittedCodeSearchChunkV1::into_chunk)
@@ -3256,10 +3169,10 @@ mod tests {
         assert_eq!(readmitted, expected, "admission must preserve order");
     }
 
-    /// The fanned-out sweeps still report the lowest-index failure, so callers
-    /// observe the same error the sequential short-circuit produced.
+    /// The ordered sweep reports the lowest-index failure, the same error a
+    /// short-circuit over the chunks produces.
     #[test]
-    fn parallel_validation_reports_the_lowest_index_failure() {
+    fn ordered_validation_reports_the_lowest_index_failure() {
         let baseline = wide_chunks(48);
         let early = 3usize;
         let late = baseline.chunks.len() - 2;

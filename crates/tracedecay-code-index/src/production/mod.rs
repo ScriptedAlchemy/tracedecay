@@ -454,9 +454,9 @@ where
 {
     let queue = crate::hotpath_observe::PendingWorkQueue::new(items.len());
     crate::hotpath_observe::record_files(items.len());
-    // Always enter the indexing pool, even when the width is 1: the pool is
-    // what keeps the nested chunk-level fan-out inside the reservation
-    // instead of spilling onto rayon's global (all-cores) pool.
+    // Always enter the indexing pool, even when the width is 1. File-level
+    // leaves are the pool actors. Chunk sweeps stay on the calling leaf so
+    // they do not become a second admission class.
     crate::parallelism::install(|| {
         let run = |(index, item): (usize, &T)| -> Result<R, E> {
             crate::parallelism::with_background_cpu_permit(|| {

@@ -205,11 +205,13 @@ impl ProcessBackgroundCpuV1 {
         operation()
     }
 
-    /// Temporarily yield the caller's active units while a nested executor
-    /// fans out independently admitted leaf work. This prevents a parent
-    /// Rayon worker from holding capacity while it waits for child workers,
-    /// including a full-width weighted child. Capacity is reacquired before
-    /// the parent resumes, including during unwind.
+    /// Yield the caller's active units for a pool-boundary join.
+    ///
+    /// Production callers use this only at the indexing-pool boundary, where
+    /// the caller is not a leaf waiting on stolen children. Nested leaves
+    /// must not return their unit here: that hands it to whoever is at the
+    /// FIFO head and reassigns the same parent the role on resume. Capacity
+    /// is reacquired before the caller resumes, including during unwind.
     pub fn with_yielded_permits<R>(self: &Arc<Self>, operation: impl FnOnce() -> R) -> R {
         let units = BACKGROUND_CPU_UNITS.with(Cell::get);
         if units == 0 {
