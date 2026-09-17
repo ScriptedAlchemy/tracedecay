@@ -1171,6 +1171,52 @@ async fn require_fresh_without_a_refresh_worker_is_refused_as_worker_missing() {
     }
 }
 
+/// A core mount has no refresh worker. Zero LCM rows are absence, not a
+/// historical catch-up, so describe must not answer `RefreshWorkerMissing`.
+#[tokio::test]
+async fn describe_without_a_refresh_worker_does_not_pretend_history_is_converging() {
+    let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "session-describe-refresh-worker-missing",
+    )
+    .await;
+    let root = registered_profile_retrieval_root(&harness.registered);
+    let scope = root
+        .identity()
+        .session_request_scope()
+        .expect("profile session scope");
+    let service =
+        DaemonSessionRetrievalService::new_without_refresh_worker(harness.registered.clone(), root)
+            .expect("registered retrieval service");
+    let context = admitted_lookup_context(scope);
+    let cancellation = tracedecay_contracts::CancellationSignal::active("cancellation.session-lookup")
+        .expect("cancellation");
+    let command = LcmDescribeServiceCommand::new(
+        "codex",
+        SessionId::new("session.describe.worker-missing").expect("session identity"),
+        tracedecay_lcm::contracts::LcmDescribeTarget::Session,
+        tracedecay_domain::RetrievalGrainV1::Occurrence,
+        SessionRetrievalStoreScope::Profile,
+    );
+    let outcome = SessionApplicationRetrievalPortV1::describe_lcm_admitted(
+        &service,
+        &context,
+        &cancellation,
+        command,
+    )
+    .await;
+    match outcome {
+        LcmDescribeServiceOutcome::Unavailable(unavailable) => assert_ne!(
+            unavailable.reason,
+            SessionRetrievalUnavailableReason::RefreshWorkerMissing,
+            "a missing worker must not rewrite absence as catch-up: {unavailable:?}"
+        ),
+        LcmDescribeServiceOutcome::Complete { .. }
+        | LcmDescribeServiceOutcome::Partial { .. }
+        | LcmDescribeServiceOutcome::Deleted => {}
+        other => panic!("describe without a worker returned {other:?}"),
+    }
+}
+
 struct CurrentRefreshServing;
 
 impl tracedecay_sessions::serving::SessionProjectionServingStatusPort for CurrentRefreshServing {
