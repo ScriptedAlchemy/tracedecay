@@ -418,7 +418,8 @@ impl HeldActiveDecodeV1 {
     }
 }
 
-/// Last validated publication pointer, reused when the on-disk file is unchanged.
+/// Last validated publication pointer. Reuse requires the file bytes' digest;
+/// mtime and size alone miss a same-quantum rewrite of equal length.
 struct PublicationPointerMemoV1 {
     mtime: Option<SystemTime>,
     size: u64,
@@ -1086,19 +1087,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
         }
         let mtime = metadata.modified().ok();
         let size = metadata.len();
-        {
-            let memo = self
-                .pointer_memo
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            if let Some(memo) = memo.as_ref()
-                && memo.size == size
-                && memo.mtime.is_some()
-                && memo.mtime == mtime
-            {
-                return Ok(Some(memo.pointer.clone()));
-            }
-        }
         let bytes = std::fs::read(&self.active_path).map_err(Self::unavailable)?;
         let digest = Self::state_digest(&bytes);
         {

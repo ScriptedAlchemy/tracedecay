@@ -136,22 +136,22 @@ fn remote_query_request_enforces_shard_inventory_bounds_and_identity() {
     let range = ApplicationContractError::InvalidRange {
         field: "remote query expected shard inventory",
     };
-    let inconsistent = ApplicationContractError::Inconsistent {
-        field: "remote query expected shard inventory",
-    };
     assert_eq!(request(Vec::new()).validate(), Err(range.clone()));
     let accepted = request(vec![shard(1)]);
     assert_eq!(accepted.validate(), Ok(()));
     assert_eq!(accepted.expected_shards[0].shard_id, "shard.remote-query.1");
-    assert_eq!(request(vec![shard(1), shard(2)]).validate(), Err(range));
+    assert_eq!(
+        request(vec![shard(1), shard(2)]).validate(),
+        Err(range.clone())
+    );
     assert_eq!(
         request(vec![shard(1), shard(1)]).validate(),
-        Err(inconsistent.clone())
+        Err(range.clone())
     );
 
     let mut mixed = shard(2);
     mixed.brain_id = "brain.other".to_owned();
-    assert_eq!(request(vec![shard(1), mixed]).validate(), Err(inconsistent));
+    assert_eq!(request(vec![shard(1), mixed]).validate(), Err(range));
 }
 
 #[test]

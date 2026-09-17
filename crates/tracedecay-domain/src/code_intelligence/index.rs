@@ -644,6 +644,10 @@ mod tests {
 
         let mut reordered = generation_manifest();
         reordered.grammar_revisions.reverse();
+        assert_eq!(reordered.validate(), Err(DomainError::DigestMismatch));
+        reordered.invalidation_digest = reordered
+            .expected_legacy_invalidation_digest()
+            .expect("restamp after revision reorder");
         assert_eq!(
             reordered.validate(),
             Err(DomainError::NonCanonical {
@@ -653,6 +657,10 @@ mod tests {
 
         let mut mismatched = generation_manifest();
         mismatched.extractor_revisions.pop();
+        assert_eq!(mismatched.validate(), Err(DomainError::DigestMismatch));
+        mismatched.invalidation_digest = mismatched
+            .expected_legacy_invalidation_digest()
+            .expect("restamp after dropping an extractor revision");
         assert_eq!(
             mismatched.validate(),
             Err(DomainError::SnapshotMismatch {
