@@ -61,7 +61,7 @@ use tracedecay_query::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneRequest, lexical_query_parts,
 };
 use tracedecay_query::retrieval::ports::{
-    CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalExecutionControl,
+    CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalExecutionControl, RetrievalPortError,
 };
 use tracedecay_query::retrieval::{
     AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeGraphRecordV1,
@@ -2597,6 +2597,73 @@ fn application_budget_usage(usage: RetrievalBudgetUsage) -> OperationBudgetUsage
 type PortFuture<'a, T> =
     Pin<Box<dyn Future<Output = RetrievalPortOutcome<CodeQueryPage<T>>> + Send + 'a>>;
 
+fn execute_prepared_exact_query(
+    prepared: &PreparedTextCallableQueryV1,
+    context: &RetrievalPortContext<'_>,
+    request: &ExactOccurrenceRequest,
+    query_binding_digest: ManifestDigest,
+) -> RetrievalPortOutcome<CodeQueryPage<ExactOccurrenceRecord>> {
+    let latest = &prepared.latest;
+    let served_generation = latest.metadata().manifest().generation_id.clone();
+    let finished_at = query_finished_at();
+    let base = prepared.query.request();
+    let Ok(query_view) = tracedecay_domain::EphemeralSanitizedQueryViewV1::sanitize(
+        request.literal.clone(),
+        callable_query_sanitizer_revision(),
+        callable_query_normalization_revision(),
+    ) else {
+        return unavailable(finished_at);
+    };
+    let authority = CentralExactAdmissionAuthorityV1::new(
+        ExactAdmissionRuleRevision::new(tracedecay_query::retrieval::QUERY_EXACT_RULE_REVISION_V1)
+            .unwrap_or_else(|_| panic!("static exact rule revision")),
+    );
+    let exact_control = CallableRetrievalExecutionControl::for_request(context.request);
+    let lane_request = ExactLaneRequest {
+        literals: authority.parse_literals(&query_view, base),
+        generation: served_generation.clone(),
+        budget: base.budget,
+        base: base.clone(),
+        query_view: &query_view,
+        control: exact_control.as_ref(),
+    };
+    let Ok(owners) = latest.production_query_owners_with_budget(&base.budget) else {
+        return unavailable(finished_at);
+    };
+    let records = TextArtifactNativeRecordReadPortV1 {
+        generation: served_generation.clone(),
+        owners: std::sync::Arc::clone(&owners),
+    };
+    let Ok(native_context) =
+        AdmittedGenerationContextV1::admit(served_generation.clone(), &records)
+    else {
+        return unavailable_for_generation(finished_at, served_generation);
+    };
+    let outcome = match owners.retrieve_exact(&lane_request) {
+        Ok(outcome) => {
+            let Ok(outcome) =
+                native_context.exact(outcome, &request.literal, request.kind, |path| {
+                    path_is_in_code_query_scope(path, &request.scope)
+                })
+            else {
+                return unavailable(finished_at);
+            };
+            outcome
+        }
+        Err(RetrievalPortError::Cancelled) => NativeLaneOutcomeV1::Cancelled,
+        Err(_) => return unavailable(finished_at),
+    };
+    finish_native_lane_query(
+        prepared,
+        context,
+        "code_exact_occurrence",
+        query_binding_digest,
+        &request.meta.page,
+        outcome,
+        application_exact_record,
+    )
+}
+
 impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
     fn exact_occurrence<'a>(
         &'a self,
@@ -2618,66 +2685,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     &request.meta.order,
                 )
             );
-            let latest = &prepared.latest;
-            let served_generation = latest.metadata().manifest().generation_id.clone();
-            let finished_at = query_finished_at();
-            let base = prepared.query.request();
-            let Ok(query_view) = tracedecay_domain::EphemeralSanitizedQueryViewV1::sanitize(
-                request.literal.clone(),
-                callable_query_sanitizer_revision(),
-                callable_query_normalization_revision(),
-            ) else {
-                return unavailable(finished_at);
-            };
-            let authority = CentralExactAdmissionAuthorityV1::new(
-                ExactAdmissionRuleRevision::new(
-                    tracedecay_query::retrieval::QUERY_EXACT_RULE_REVISION_V1,
-                )
-                .unwrap_or_else(|_| panic!("static exact rule revision")),
-            );
-            let exact_control = CallableRetrievalExecutionControl::for_request(context.request);
-            let lane_request = ExactLaneRequest {
-                literals: authority.parse_literals(&query_view, base),
-                generation: served_generation.clone(),
-                budget: base.budget,
-                base: base.clone(),
-                query_view: &query_view,
-                control: exact_control.as_ref(),
-            };
-            let Ok(owners) = latest.production_query_owners_with_budget(&base.budget) else {
-                return unavailable(finished_at);
-            };
-            let records = TextArtifactNativeRecordReadPortV1 {
-                generation: served_generation.clone(),
-                owners: std::sync::Arc::clone(&owners),
-            };
-            let Ok(native_context) =
-                AdmittedGenerationContextV1::admit(served_generation.clone(), &records)
-            else {
-                return unavailable_for_generation(finished_at, served_generation);
-            };
-            let outcome = owners.retrieve_exact(&lane_request);
-            match outcome {
-                Ok(outcome) => {
-                    let Ok(outcome) =
-                        native_context.exact(outcome, &request.literal, request.kind, |path| {
-                            path_is_in_code_query_scope(path, &request.scope)
-                        })
-                    else {
-                        return unavailable(finished_at);
-                    };
-                    finish_native_lane_query(
-                        &prepared,
-                        &context,
-                        "code_exact_occurrence",
-                        query_binding_digest,
-                        &request.meta.page,
-                        outcome,
-                        application_exact_record,
-                    )
-                }
-                Err(_) => unavailable(finished_at),
-            }
+            execute_prepared_exact_query(&prepared, &context, request, query_binding_digest)
         })
     }
 
@@ -2766,26 +2774,27 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             else {
                 return unavailable_for_generation(finished_at, served_generation);
             };
-            let outcome = owners.retrieve_lexical(&lane_request);
-            match outcome {
+            let outcome = match owners.retrieve_lexical(&lane_request) {
                 Ok(outcome) => {
                     let Ok(outcome) = native_context.lexical(outcome, |path| {
                         path_is_in_code_query_scope(path, &request.scope)
                     }) else {
                         return unavailable(finished_at);
                     };
-                    finish_native_lane_query(
-                        &prepared,
-                        &context,
-                        "code_phrase_search",
-                        query_binding_digest,
-                        &request.meta.page,
-                        outcome,
-                        application_lexical_record,
-                    )
+                    outcome
                 }
-                Err(_) => unavailable(finished_at),
-            }
+                Err(RetrievalPortError::Cancelled) => NativeLaneOutcomeV1::Cancelled,
+                Err(_) => return unavailable(finished_at),
+            };
+            finish_native_lane_query(
+                &prepared,
+                &context,
+                "code_phrase_search",
+                query_binding_digest,
+                &request.meta.page,
+                outcome,
+                application_lexical_record,
+            )
         })
     }
 
@@ -3902,6 +3911,94 @@ fn navigation_symbol_query<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::code_index_scheduler::tests::{
+        GitFixture, application_context, mounted_core_query_worktree, query_meta,
+        wait_for_queryable_text_generation,
+    };
+    use tracedecay_contracts::{
+        CallableCodeOperationKind, CancellationContext, CodeQueryScope, callable_code_operation,
+    };
+
+    #[tokio::test]
+    async fn callable_exact_read_preserves_cancellation_after_generation_admission() {
+        let fixture = GitFixture::new(&[("src/lib.rs", "pub fn cancellation_target() {}\n")]);
+        let store = tempfile::tempdir().expect("isolated store");
+        let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+        let latest = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+        let generation = latest.metadata().manifest().generation_id.clone();
+        let operation = callable_code_operation(CallableCodeOperationKind::ExactOccurrence)
+            .expect("exact operation");
+        let context = application_context(&operation, scope.repository_id, scope.worktree_id);
+        let request = ExactOccurrenceRequest::new(
+            "cancellation_target",
+            None,
+            CodeQueryScope::new(generation.clone(), None).expect("exact generation scope"),
+            query_meta(),
+        )
+        .expect("exact request");
+        let port_context = RetrievalPortContext {
+            request: &context,
+            operation: &operation,
+        };
+        let binding = canonical_sha256(&(
+            "code_exact_occurrence",
+            &request.literal,
+            &request.kind,
+            &request.scope,
+            &request.meta.projection,
+            &request.meta.order,
+        ))
+        .expect("request binding");
+        let prepared = registry
+            .prepare_text_callable_query(
+                &port_context,
+                &generation,
+                &request.meta.page,
+                request.meta.temporal,
+                "code_exact_occurrence",
+                binding.clone(),
+            )
+            .await
+            .expect("real mounted artifact admission");
+        let active = registry.exact_occurrence(port_context, &request).await;
+        assert!(
+            matches!(active, RetrievalPortOutcome::Completed(_)),
+            "{active:?}"
+        );
+
+        let cancelled = context.with_cancellation(
+            CancellationContext::cancelled("cancel.callable-exact", query_finished_at())
+                .expect("cancelled request context"),
+        );
+        let outcome = execute_prepared_exact_query(
+            &prepared,
+            &RetrievalPortContext {
+                request: &cancelled,
+                operation: &operation,
+            },
+            &request,
+            binding,
+        );
+        let RetrievalPortOutcome::Cancelled(evidence) = outcome else {
+            panic!("a cancelled exact read must retain its typed outcome: {outcome:?}");
+        };
+        assert_eq!(evidence.temporal.source_generation, Some(generation));
+        assert!(evidence.payload.is_none());
+        assert!(
+            evidence
+                .omissions
+                .iter()
+                .any(|omission| omission.reason == OmissionReason::Cancelled)
+        );
+        assert_eq!(
+            evidence
+                .cancellation
+                .expect("cancellation observation")
+                .stage,
+            CancellationStage::DuringRead
+        );
+        registry.shutdown().await;
+    }
 
     #[test]
     fn generation_resolution_wait_reserves_outer_settlement_margin() {

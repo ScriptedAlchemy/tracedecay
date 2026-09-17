@@ -885,6 +885,7 @@ impl CodeLexicalProjectionAdapterV1 {
             };
             pairs.push((candidate, evidence));
         }
+        retrieval_checkpoint(request.control)?;
         pairs.sort_by(|left, right| {
             left.0
                 .source_occurrence_id
@@ -893,6 +894,9 @@ impl CodeLexicalProjectionAdapterV1 {
         let mut candidates = Vec::with_capacity(pairs.len());
         let mut evidence_by_occurrence = BTreeMap::new();
         for (ordinal, (mut candidate, evidence)) in pairs.into_iter().enumerate() {
+            if ordinal.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
+                retrieval_checkpoint(request.control)?;
+            }
             candidate.ordinal_rank = ordinal as u32;
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);
@@ -1304,6 +1308,7 @@ where
             };
             pairs.push((candidate, evidence));
         }
+        retrieval_checkpoint(request.control)?;
         pairs.sort_by(|left, right| {
             left.0
                 .source_occurrence_id
@@ -1312,6 +1317,9 @@ where
         let mut candidates = Vec::with_capacity(pairs.len());
         let mut evidence_by_occurrence = BTreeMap::new();
         for (ordinal, (mut candidate, evidence)) in pairs.into_iter().enumerate() {
+            if ordinal.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
+                retrieval_checkpoint(request.control)?;
+            }
             candidate.ordinal_rank = ordinal as u32;
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);
