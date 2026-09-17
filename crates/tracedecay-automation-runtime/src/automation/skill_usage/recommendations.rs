@@ -269,6 +269,7 @@ mod tests {
     use super::super::super::outcomes::SKILL_ACTIVATION_WINDOW_SECS;
     use super::super::SkillUsageRecord;
     use super::*;
+    use std::collections::BTreeSet;
 
     /// An activated, active, automation-authored skill with recent views but
     /// no uses since activation: kept by the plain activity heuristics, so any
@@ -295,6 +296,7 @@ mod tests {
             activated_at: Some(now - SKILL_ACTIVATION_WINDOW_SECS - 1),
             view_count_at_activation: Some(0),
             use_count_at_activation: Some(0),
+            imported_analytics_events: BTreeSet::new(),
         }
     }
 

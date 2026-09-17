@@ -5,12 +5,13 @@ use serde::{Deserialize, Serialize};
 
 use super::config_error;
 use super::managed_skills::{ManagedSkill, ManagedSkillSource, ManagedSkillState};
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::Result;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 mod analytics;
 mod overlap;
 mod recommendations;
+mod store;
 
 pub use crate::ports::session_store::AnalyticsEventRecord;
 pub use analytics::analytics_import_key_for_request;
@@ -72,6 +73,11 @@ pub struct SkillUsageRecord {
     pub view_count_at_activation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub use_count_at_activation: Option<u64>,
+    /// Import keys that already counted toward this skill. They are not a
+    /// store-wide set: each key names this skill, so another skill must not
+    /// share the write.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub imported_analytics_events: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,6 +145,7 @@ impl SkillUsageRecord {
             activated_at: None,
             view_count_at_activation: None,
             use_count_at_activation: None,
+            imported_analytics_events: BTreeSet::new(),
         }
     }
 
@@ -188,58 +195,39 @@ pub fn skill_usage_ledger_path(profile_root: &Path) -> PathBuf {
         .join(SKILL_USAGE_LEDGER_FILENAME)
 }
 
+pub fn skill_usage_record_path(profile_root: &Path, skill_id: &str) -> PathBuf {
+    store::skill_usage_record_path(profile_root, skill_id)
+}
+
 #[hotpath::measure(label = "automation.skill_usage.load", future = true)]
 pub async fn load_skill_usage_ledger(profile_root: &Path) -> Result<SkillUsageLedger> {
-    let path = skill_usage_ledger_path(profile_root);
-    let bytes = match tokio::fs::read(&path).await {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(SkillUsageLedger::default());
-        }
-        Err(e) => {
-            return Err(config_error(format!(
-                "failed to read skill usage ledger '{}': {e}",
-                path.display()
-            )));
-        }
-    };
-    serde_json::from_slice(&bytes).map_err(|e| {
-        config_error(format!(
-            "failed to parse skill usage ledger '{}': {e}",
-            path.display()
-        ))
-    })
+    store::load_ledger(profile_root).await
 }
 
 #[hotpath::measure(label = "automation.skill_usage.save", future = true)]
 pub async fn save_skill_usage_ledger(profile_root: &Path, ledger: &SkillUsageLedger) -> Result<()> {
-    let path = skill_usage_ledger_path(profile_root);
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| {
-            config_error(format!(
-                "failed to create skill usage ledger directory '{}': {e}",
-                parent.display()
-            ))
-        })?;
+    // Split the snapshot. Do not rewrite an aggregate file, and do not delete
+    // a skill file that this snapshot does not mention.
+    for record in ledger.records.values() {
+        let owned = record.clone();
+        let skill_id = owned.skill_id.clone();
+        let first_seen_at = owned.first_seen_at;
+        store::update_record(profile_root, &skill_id, first_seen_at, move |slot| {
+            *slot = owned;
+        })
+        .await?;
     }
-    let bytes = serde_json::to_vec_pretty(ledger).map_err(TraceDecayError::from)?;
-    tokio::fs::write(&path, bytes).await.map_err(|e| {
-        config_error(format!(
-            "failed to write skill usage ledger '{}': {e}",
-            path.display()
-        ))
-    })
+    Ok(())
 }
 
 pub async fn sync_skill_usage_metadata(profile_root: &Path, skill: &ManagedSkill) -> Result<()> {
-    let mut ledger = load_skill_usage_ledger(profile_root).await?;
+    let skill = skill.clone();
     let skill_id = skill.metadata.id.clone();
-    let record = ledger
-        .records
-        .entry(skill_id.clone())
-        .or_insert_with(|| SkillUsageRecord::new(skill_id, 0));
-    record.merge_skill_metadata(skill);
-    save_skill_usage_ledger(profile_root, &ledger).await
+    store::update_record(profile_root, &skill_id, 0, move |record| {
+        record.merge_skill_metadata(&skill);
+    })
+    .await
+    .map(|_| ())
 }
 
 pub async fn record_skill_usage_event(
@@ -248,18 +236,14 @@ pub async fn record_skill_usage_event(
     skill: Option<&ManagedSkill>,
 ) -> Result<SkillUsageRecord> {
     let skill_id = ledger_skill_id(&event.skill_name)?;
-    let mut ledger = load_skill_usage_ledger(profile_root).await?;
-    let record = ledger
-        .records
-        .entry(skill_id.clone())
-        .or_insert_with(|| SkillUsageRecord::new(skill_id, event.timestamp));
-    if let Some(skill) = skill {
-        record.merge_skill_metadata(skill);
-    }
-    record.record(&event);
-    let updated = record.clone();
-    save_skill_usage_ledger(profile_root, &ledger).await?;
-    Ok(updated)
+    let skill = skill.cloned();
+    store::update_record(profile_root, &skill_id, event.timestamp, move |record| {
+        if let Some(skill) = skill.as_ref() {
+            record.merge_skill_metadata(skill);
+        }
+        record.record(&event);
+    })
+    .await
 }
 
 pub async fn record_skill_usage(
@@ -273,13 +257,16 @@ pub async fn record_skill_usage(
 ) -> Result<SkillUsageRecord> {
     let skill_id = skill.metadata.id.clone();
     let timestamp = current_timestamp();
-    let mut ledger = load_skill_usage_ledger(profile_root).await?;
-    let updated = {
-        let record = ledger
-            .records
-            .entry(skill_id.clone())
-            .or_insert_with(|| SkillUsageRecord::new(skill_id, timestamp));
-        record.merge_skill_metadata(skill);
+    let skill = skill.clone();
+    let import_key = metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("imported_analytics_event_key"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_string);
+    store::update_record(profile_root, &skill_id, timestamp, move |record| {
+        record.merge_skill_metadata(&skill);
         record.record(&SkillUsageEvent {
             skill_name: skill.metadata.id.clone(),
             action,
@@ -291,21 +278,11 @@ pub async fn record_skill_usage(
                 insert_sorted_unique(&mut record.targets, target);
             }
         }
-        record.clone()
-    };
-    if let Some(import_key) = metadata
-        .as_ref()
-        .and_then(|metadata| metadata.get("imported_analytics_event_key"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|key| !key.is_empty())
-    {
-        ledger
-            .imported_analytics_events
-            .insert(import_key.to_string());
-    }
-    save_skill_usage_ledger(profile_root, &ledger).await?;
-    Ok(updated)
+        if let Some(import_key) = import_key {
+            record.imported_analytics_events.insert(import_key);
+        }
+    })
+    .await
 }
 
 pub async fn load_skill_usage_records(
@@ -409,4 +386,64 @@ fn insert_sorted_unique(values: &mut Vec<String>, value: String) {
 
 fn max_optional(existing: Option<i64>, timestamp: i64) -> i64 {
     existing.map_or(timestamp, |current| current.max(timestamp))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SkillUsageAction, SkillUsageEvent, record_skill_usage_event};
+
+    #[tokio::test]
+    async fn recording_one_skill_does_not_rewrite_another_skills_file() {
+        let root = tempfile::tempdir().unwrap();
+        record_skill_usage_event(
+            root.path(),
+            SkillUsageEvent {
+                skill_name: "skill-a".to_string(),
+                action: SkillUsageAction::Use,
+                timestamp: 10,
+                target: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        record_skill_usage_event(
+            root.path(),
+            SkillUsageEvent {
+                skill_name: "skill-b".to_string(),
+                action: SkillUsageAction::View,
+                timestamp: 11,
+                target: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let before = super::load_skill_usage_ledger(root.path()).await.unwrap();
+        assert_eq!(before.records["skill-b"].view_count, 1);
+
+        record_skill_usage_event(
+            root.path(),
+            SkillUsageEvent {
+                skill_name: "skill-a".to_string(),
+                action: SkillUsageAction::Use,
+                timestamp: 12,
+                target: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let after = super::load_skill_usage_ledger(root.path()).await.unwrap();
+        assert_eq!(after.records["skill-a"].use_count, 2);
+        assert_eq!(
+            after.records["skill-b"].view_count, 1,
+            "skill B's last-view must survive skill A's write"
+        );
+        assert!(
+            !super::skill_usage_ledger_path(root.path()).exists(),
+            "independent skills must not share skill_usage.json"
+        );
+    }
 }

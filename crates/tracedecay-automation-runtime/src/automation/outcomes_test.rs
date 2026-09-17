@@ -1,6 +1,7 @@
 use super::super::skill_usage::SkillUsageRecord;
 use super::*;
 use crate::automation::AutomationRunControl;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 static OUTCOME_PERSISTENCE_DB_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -33,6 +34,7 @@ fn summary(skill_id: &str) -> SkillUsageRecord {
         activated_at: None,
         view_count_at_activation: None,
         use_count_at_activation: None,
+        imported_analytics_events: BTreeSet::new(),
     }
 }
 

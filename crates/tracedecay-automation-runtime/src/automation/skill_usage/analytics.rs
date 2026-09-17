@@ -7,16 +7,13 @@ use crate::ports::session_store::{
 use tracedecay_automation::analytics::{UsageKind, infer_usage_events};
 use tracedecay_domain::errors::Result;
 
-use super::{
-    SkillUsageAction, SkillUsageEvent, SkillUsageRecord, config_error, ledger_skill_id,
-    load_skill_usage_ledger, save_skill_usage_ledger,
-};
+use super::store;
+use super::{SkillUsageAction, SkillUsageEvent, SkillUsageRecord, config_error, ledger_skill_id};
 
 pub async fn ingest_analytics_events(
     profile_root: &Path,
     events: &[AnalyticsEventRecord],
 ) -> Result<Vec<SkillUsageRecord>> {
-    let mut ledger = load_skill_usage_ledger(profile_root).await?;
     let mut touched = Vec::new();
     let mut seen = BTreeSet::new();
     for event in events {
@@ -33,24 +30,29 @@ pub async fn ingest_analytics_events(
             if !seen.insert(dedupe.clone()) {
                 continue;
             }
-            if !ledger.imported_analytics_events.insert(dedupe) {
+            let skill_name = usage.name.clone();
+            let provider = event.provider.clone();
+            let timestamp = event.timestamp;
+            let Some(record) = store::record_imported_event(
+                profile_root,
+                &skill_id,
+                timestamp,
+                dedupe,
+                move |record| {
+                    record.record(&SkillUsageEvent {
+                        skill_name,
+                        action,
+                        timestamp,
+                        target: Some(provider),
+                    });
+                },
+            )
+            .await?
+            else {
                 continue;
-            }
-            let record = ledger
-                .records
-                .entry(skill_id.clone())
-                .or_insert_with(|| SkillUsageRecord::new(skill_id, event.timestamp));
-            record.record(&SkillUsageEvent {
-                skill_name: usage.name,
-                action,
-                timestamp: event.timestamp,
-                target: Some(event.provider.clone()),
-            });
-            touched.push(record.clone());
+            };
+            touched.push(record);
         }
-    }
-    if !touched.is_empty() {
-        save_skill_usage_ledger(profile_root, &ledger).await?;
     }
     Ok(touched)
 }
