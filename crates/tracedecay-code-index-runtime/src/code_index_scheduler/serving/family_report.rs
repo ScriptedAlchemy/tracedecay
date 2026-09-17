@@ -72,6 +72,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
         let mut work_exhausted = false;
         let mut report_continuation = request.cursor.clone();
         for candidate in page.families {
+            interrupt_family_batch(control)?;
             if work_spent.saturating_add(3) > request.work_limit {
                 work_exhausted = true;
                 break;
@@ -267,6 +268,18 @@ fn report_path_matches(path: &str, scope: Option<&str>, include_generated_paths:
         && (include_generated_paths || !is_generated_path(path))
 }
 
+fn interrupt_family_batch(
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(), RetrievalPortError> {
+    if control.is_cancelled() {
+        Err(RetrievalPortError::Cancelled)
+    } else if control.is_deadline_exceeded() {
+        Err(RetrievalPortError::BudgetExceeded)
+    } else {
+        Ok(())
+    }
+}
+
 fn is_generated_path(path: &str) -> bool {
     Path::new(path).components().any(|component| {
         matches!(
@@ -333,7 +346,28 @@ fn redundancy_coverage(
 
 #[cfg(test)]
 mod tests {
-    use super::is_generated_path;
+    use super::{RetrievalPortError, interrupt_family_batch, is_generated_path};
+    use tracedecay_code_index::production::CodeIndexExecutionControlV1;
+
+    struct CancelledControl;
+
+    impl CodeIndexExecutionControlV1 for CancelledControl {
+        fn is_cancelled(&self) -> bool {
+            true
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn a_cancelled_family_batch_stops_before_the_next_family() {
+        assert_eq!(
+            interrupt_family_batch(&CancelledControl).unwrap_err(),
+            RetrievalPortError::Cancelled
+        );
+    }
 
     #[test]
     fn generated_member_labels_follow_the_canonical_path_policy() {
