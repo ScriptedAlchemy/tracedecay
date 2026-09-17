@@ -287,8 +287,9 @@ function RegistryFieldView({
   const sceneModel = useMemo(() => buildRegistryScene(field), [field]);
   // Repository zoom is camera emphasis over stable coordinates: the members
   // and their hub stay where the field measured them and everything else
-  // recedes to context. Keyed on the group's identity so a live pulse's
-  // re-render never hands the scene a fresh set.
+  // recedes to context. Keyed on the group's identity and the field (which
+  // changes only when the registry does) so a live pulse's re-render never
+  // hands the scene a fresh set, while a checkout added mid-view still joins.
   const repositoryKey = repository?.git_common_dir ?? null;
   const repositoryRef = useRef(repository);
   repositoryRef.current = repository;
@@ -297,7 +298,7 @@ function RegistryFieldView({
     const ids = new Set(repositoryRef.current?.projects.map((project) => project.project_id));
     ids.add(`repo:${repositoryKey}`);
     return ids as ReadonlySet<string>;
-  }, [repositoryKey]);
+  }, [field, repositoryKey]);
 
   // Propagation reads the drawn relation list, so activation can only ever
   // travel where the viewer can see a path to travel along. On this field most

@@ -75,6 +75,11 @@ export function RegistryScene({
   const [contextLostFor, setContextLostFor] = useState<RegistrySceneModel | null>(null);
   const [generation, setGeneration] = useState(0);
   const [view, setView] = useState<SceneView | null>(null);
+  /** What the scene is actually isolating right now: the pointer's body while
+   * it hovers, else the retained keyboard/inspector focus. Labels dim from
+   * this, never from the retained inspection alone, so leaving the field
+   * un-dims the names exactly when it un-dims the bodies. */
+  const [sceneFocus, setSceneFocus] = useState<string | null>(null);
   const { reduced } = useReducedMotion();
   const reducedRef = useRef(reduced);
   reducedRef.current = reduced;
@@ -134,9 +139,14 @@ export function RegistryScene({
     runtime.resize(box);
     if (emphasisRef.current) runtime.emphasize(emphasisRef.current);
     if (inspectedRef.current) runtime.focus(inspectedRef.current);
+    // Disposal releases the GL context on purpose, which fires the same
+    // `webglcontextlost` a GPU eviction would; the latch tells them apart.
+    let cancelled = false;
     contextWatchRef.current?.();
     contextWatchRef.current = watchWebGlContext([runtime.canvas], {
       onLost: () => {
+        if (cancelled) return;
+        cancelled = true;
         runtime.dispose();
         if (runtimeRef.current === runtime) runtimeRef.current = null;
         setContextLostFor(model);
@@ -147,6 +157,7 @@ export function RegistryScene({
       },
     });
     return () => {
+      cancelled = true;
       runtime.dispose();
       if (runtimeRef.current === runtime) runtimeRef.current = null;
     };
@@ -160,6 +171,7 @@ export function RegistryScene({
 
   useEffect(() => {
     runtimeRef.current?.focus(inspectedId);
+    setSceneFocus(inspectedId);
   }, [inspectedId]);
 
   useEffect(() => {
@@ -193,7 +205,7 @@ export function RegistryScene({
     return () => container.removeEventListener('wheel', onWheel);
   }, [hasBox]);
 
-  const drag = useRef<{ x: number; y: number; moved: boolean } | null>(null);
+  const drag = useRef<{ x: number; y: number; moved: boolean; button: number } | null>(null);
   const hoveredRef = useRef<string | null>(null);
 
   const pickAt = (event: { clientX: number; clientY: number }): SceneBody | null => {
@@ -214,11 +226,11 @@ export function RegistryScene({
       .sort((a, b) => b.mass - a.mass)
       .slice(0, 6)
       .map((body) => body.id);
-    // Hover isolates the drawn neighbourhood: the inspected body and anything
-    // a path joins it to keep full ink; the rest recedes with the scene.
-    const neighborhood = inspectedId === null
+    // Hover isolates the drawn neighbourhood: the focused body and anything a
+    // path joins it to keep full ink; the rest recedes with the scene.
+    const neighborhood = sceneFocus === null
       ? null
-      : new Set([inspectedId, ...(model.pathsByBody.get(inspectedId) ?? []).flatMap((path) => [path.from, path.to])]);
+      : new Set([sceneFocus, ...(model.pathsByBody.get(sceneFocus) ?? []).flatMap((path) => [path.from, path.to])]);
     // A narrow aperture has no room for secondary lines at all.
     const roomy = viewport.width >= 480;
     const candidates: Array<LabelCandidate & { body: SceneBody; lines: readonly string[]; dimmed: boolean }> = model.bodies.map((body) => {
@@ -248,7 +260,7 @@ export function RegistryScene({
         placements,
         width,
         height,
-        forced: body.id === inspectedId || emphasis?.has(body.id) === true,
+        forced: body.id === inspectedId || body.id === sceneFocus || emphasis?.has(body.id) === true,
         body,
         lines,
         dimmed: (neighborhood !== null && !neighborhood.has(body.id)) || (emphasis !== null && !emphasis.has(body.id)),
@@ -258,13 +270,13 @@ export function RegistryScene({
     // everything else has receded to context and keeps its name in the rail.
     const named = emphasis === null
       ? candidates
-      : candidates.filter((candidate) => emphasis.has(candidate.id) || candidate.id === inspectedId);
+      : candidates.filter((candidate) => emphasis.has(candidate.id) || candidate.id === inspectedId || candidate.id === sceneFocus);
     const chosen = selectLabels(named, viewport, labelBudget(zoom, model.bodies.length, viewport));
     return named.flatMap((candidate) => {
       const placed = chosen.get(candidate.id);
       return placed ? [{ ...candidate, px: placed.px, py: placed.py, side: placed.placement }] : [];
     });
-  }, [view, model, detail, inspectedId, emphasis]);
+  }, [view, model, detail, inspectedId, sceneFocus, emphasis]);
 
   if (model.bodies.length === 0) {
     return <p className="p-6 text-center text-sm text-text-muted">no registered project to draw</p>;
@@ -289,89 +301,94 @@ export function RegistryScene({
   const zoom = view ? zoomLevel(view.camera, view.fit) : 1;
   return (
     <figure className="relative flex h-full min-h-0 flex-col gap-1.5">
-      <div
-        ref={attachContainer}
-        role="img"
-        aria-label={ariaLabel}
-        className={cn(
-          'relative min-h-0 flex-1 cursor-crosshair overflow-hidden rounded-[var(--radius-card)] border border-edge-subtle/60 md:max-h-[62vw] lg:max-h-none',
-          'td-graph-field td-grain td-scanlines shadow-[var(--shadow-field)]',
-          canvasClassName,
-        )}
-        onPointerDown={(event) => {
-          if (event.button !== 0) return;
-          drag.current = { x: event.clientX, y: event.clientY, moved: false };
-          event.currentTarget.setPointerCapture(event.pointerId);
-        }}
-        onPointerMove={(event) => {
-          const runtime = runtimeRef.current;
-          if (!runtime) return;
-          if (drag.current && event.buttons === 1) {
-            const dx = event.clientX - drag.current.x;
-            const dy = event.clientY - drag.current.y;
-            if (Math.abs(dx) + Math.abs(dy) > 2) drag.current.moved = true;
-            if (drag.current.moved) {
-              runtime.panBy(dx, dy);
-              drag.current.x = event.clientX;
-              drag.current.y = event.clientY;
+      {/* The drawn field is one image to assistive tech; its controls and
+        * minimap are siblings, not children, so they stay in the tree. */}
+      <div className={cn('relative min-h-0 flex-1 md:max-h-[62vw] lg:max-h-none', canvasClassName)}>
+        <div
+          ref={attachContainer}
+          role="img"
+          aria-label={ariaLabel}
+          className={cn(
+            'absolute inset-0 cursor-crosshair overflow-hidden rounded-[var(--radius-card)] border border-edge-subtle/60',
+            'td-graph-field td-grain td-scanlines shadow-[var(--shadow-field)]',
+          )}
+          onPointerDown={(event) => {
+            drag.current = { x: event.clientX, y: event.clientY, moved: false, button: event.button };
+            event.currentTarget.setPointerCapture(event.pointerId);
+          }}
+          onPointerMove={(event) => {
+            const runtime = runtimeRef.current;
+            if (!runtime) return;
+            if (drag.current && drag.current.button === 0 && event.buttons === 1) {
+              const dx = event.clientX - drag.current.x;
+              const dy = event.clientY - drag.current.y;
+              if (Math.abs(dx) + Math.abs(dy) > 2) drag.current.moved = true;
+              if (drag.current.moved) {
+                runtime.panBy(dx, dy);
+                drag.current.x = event.clientX;
+                drag.current.y = event.clientY;
+              }
+              return;
             }
-            return;
-          }
-          const hit = pickAt(event);
-          const id = hit?.id ?? null;
-          if (id === hoveredRef.current) return;
-          hoveredRef.current = id;
-          runtime.focus(id);
-          onInspectRef.current(id);
-        }}
-        onPointerUp={(event) => {
-          const wasDrag = drag.current?.moved === true;
-          drag.current = null;
-          event.currentTarget.releasePointerCapture(event.pointerId);
-          if (wasDrag) return;
-          const hit = pickAt(event);
-          // Selection scopes only through a project body; a repository hub is
-          // an identity that does not narrow scope.
-          if (hit && hit.kind === 'project') onSelectRef.current(hit.id);
-        }}
-        onPointerCancel={() => {
-          drag.current = null;
-        }}
-        onPointerLeave={() => {
-          drag.current = null;
-          if (hoveredRef.current === null) return;
-          hoveredRef.current = null;
-          runtimeRef.current?.focus(null);
-          onInspectRef.current(null);
-        }}
-      >
-        {view ? <AxisOverlay model={model} view={view} /> : null}
-        {view ? (
-          <div aria-hidden className="pointer-events-none absolute inset-0 z-10 select-none">
-            {labels.map((label) => (
-              <div
-                key={label.id}
-                className={cn(
-                  'absolute flex flex-col leading-[12px] transition-opacity duration-150',
-                  label.body.kind === 'repository' ? 'text-text-secondary' : 'text-text-primary',
-                  label.dimmed && 'opacity-40',
-                  label.side === 1 && 'items-end text-right',
-                  label.side >= 2 && 'items-center text-center',
-                )}
-                style={{ left: label.px, top: label.py, width: label.width }}
-              >
-                <span className={cn('td-value whitespace-nowrap text-[11px]', label.id === inspectedId && 'text-accent')}>
-                  {label.body.kind === 'repository' ? `repo:${label.body.label}` : label.body.label}
-                </span>
-                {label.lines.map((line) => (
-                  <span key={line} className="td-value whitespace-nowrap text-[10px] text-text-muted">
-                    {line}
+            const hit = pickAt(event);
+            const id = hit?.id ?? null;
+            if (id === hoveredRef.current) return;
+            hoveredRef.current = id;
+            runtime.focus(id);
+            setSceneFocus(id);
+            onInspectRef.current(id);
+          }}
+          onPointerUp={(event) => {
+            const press = drag.current;
+            drag.current = null;
+            event.currentTarget.releasePointerCapture(event.pointerId);
+            // Only a primary-button press that did not pan is a click.
+            if (!press || press.button !== 0 || press.moved) return;
+            const hit = pickAt(event);
+            // Selection scopes only through a project body; a repository hub is
+            // an identity that does not narrow scope.
+            if (hit && hit.kind === 'project') onSelectRef.current(hit.id);
+          }}
+          onPointerCancel={() => {
+            drag.current = null;
+          }}
+          onPointerLeave={() => {
+            drag.current = null;
+            if (hoveredRef.current === null) return;
+            hoveredRef.current = null;
+            runtimeRef.current?.focus(null);
+            setSceneFocus(null);
+            onInspectRef.current(null);
+          }}
+        >
+          {view ? <AxisOverlay model={model} view={view} /> : null}
+          {view ? (
+            <div aria-hidden className="pointer-events-none absolute inset-0 z-10 select-none">
+              {labels.map((label) => (
+                <div
+                  key={label.id}
+                  className={cn(
+                    'absolute flex flex-col leading-[12px] transition-opacity duration-150',
+                    label.body.kind === 'repository' ? 'text-text-secondary' : 'text-text-primary',
+                    label.dimmed && 'opacity-40',
+                    label.side === 1 && 'items-end text-right',
+                    label.side >= 2 && 'items-center text-center',
+                  )}
+                  style={{ left: label.px, top: label.py, width: label.width }}
+                >
+                  <span className={cn('td-value whitespace-nowrap text-[11px]', (label.id === sceneFocus || label.id === inspectedId) && 'text-accent')}>
+                    {label.body.kind === 'repository' ? `repo:${label.body.label}` : label.body.label}
                   </span>
-                ))}
-              </div>
-            ))}
-          </div>
-        ) : null}
+                  {label.lines.map((line) => (
+                    <span key={line} className="td-value whitespace-nowrap text-[10px] text-text-muted">
+                      {line}
+                    </span>
+                  ))}
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
         <div
           role="group"
           aria-label="Registry field camera controls"
@@ -507,9 +524,9 @@ function Minimap({
   const height = 84;
   const mini: Viewport = { width, height };
   const fit = fitBounds(spreadExtent(model.extent, view.spread), mini, 4);
-  const window = visibleBounds(view.camera, view.viewport);
-  const a = project(fit, mini, window.x[0], window.y[1]);
-  const b = project(fit, mini, window.x[1], window.y[0]);
+  const shown = visibleBounds(view.camera, view.viewport);
+  const a = project(fit, mini, shown.x[0], shown.y[1]);
+  const b = project(fit, mini, shown.x[1], shown.y[0]);
   return (
     <svg
       role="img"
