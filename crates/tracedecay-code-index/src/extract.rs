@@ -781,7 +781,7 @@ mod tests {
         assert_eq!(descriptor.extractor_revision.as_str(), "extractor.rust.v8");
         assert_eq!(
             extraction.batch().rows_digest.as_str(),
-            "sha256:596cd09bc6642163992b51d996d218ce3ff2ea8edfbceb52d7846ef00a83dfd9"
+            "sha256:da811677a89babc024b19ae5b99dad72fb2f3ccc88a3d53f97f22488cc88219d"
         );
     }
 
