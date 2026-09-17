@@ -29,8 +29,8 @@ use tracedecay_contracts::feedback::{
     FeedbackExpandResultV1, FeedbackFindingReadV1, FeedbackGetRequestV1, FeedbackGetResultV1,
     FeedbackListRequestV1, FeedbackListResultV1, FeedbackObservationPort, FeedbackPortFuture,
     FeedbackPublicationReadPort, FeedbackPublicationRecordState, FeedbackPublicationV1,
-    FeedbackReadPortContext, FeedbackReadPortFuture, FeedbackReadService, FeedbackRouteAdmission,
-    FeedbackRouteAuthorizationPort, feedback_surface_operation,
+    FeedbackReadPort, FeedbackReadPortContext, FeedbackReadPortFuture, FeedbackReadService,
+    FeedbackRouteAdmission, FeedbackRouteAuthorizationPort, feedback_surface_operation,
 };
 use tracedecay_contracts::{
     ApplicationContractError, ApplicationOperation, ApplicationProblem, AuthorityReceipt,
@@ -53,9 +53,9 @@ use super::observations::{
     FeedbackObservationSinkOutcome,
 };
 use super::owner::{
-    AuthorizedFeedbackReadRequestV1, CanonicalFeedbackReadOwnerV1, DaemonFeedbackReadOwnerV1,
-    DurableFeedbackReadStoreV1, FeedbackReadOperationV1, FeedbackReadRequestAuthority,
-    FeedbackReadRequestAuthorityFuture, FeedbackReadRequestResolutionV1, FeedbackReadRequestV1,
+    AuthorizedFeedbackReadRequestV1, DaemonFeedbackReadOwnerV1, FeedbackReadOperationV1,
+    FeedbackReadRequestAuthority, FeedbackReadRequestAuthorityFuture,
+    FeedbackReadRequestResolutionV1, FeedbackReadRequestV1,
 };
 use crate::diagnostics_store::DiagnosticsStore;
 use crate::source_authorization::ProjectSourceAccessSnapshot;
@@ -85,7 +85,7 @@ const OBSERVATION_SHUTDOWN_WORKER_FAILED: u8 = 2;
 
 pub type ConcreteFeedbackOwner = DaemonFeedbackReadOwnerV1<
     ProjectFeedbackRequestAuthority,
-    CanonicalFeedbackReadOwnerV1<ProjectFeedbackStore>,
+    ProjectFeedbackStore,
     ProjectFeedbackRouteAuthorization,
 >;
 
@@ -504,7 +504,7 @@ impl FeedbackRuntime {
         let observation_adapter = Arc::new(FeedbackObservationAdapter::new(durable_observations));
         publications.source_observations = Some(observation_adapter.clone());
         let service = FeedbackReadService::new(
-            CanonicalFeedbackReadOwnerV1::new(publications.clone()),
+            publications.clone(),
             route_authorization,
             tracedecay_contracts::feedback::feedback_read_operations()?,
         );
@@ -936,7 +936,12 @@ impl FeedbackPublicationReadPort for FeedbackRuntime {
     }
 }
 
-impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
+/// Publication ledger and anchor owner for the four feedback reads.
+///
+/// `list` owns stable finding-id ordering and authenticated cursor validation.
+/// `expand` accepts only the exact `RetrievalAnchorId` resolved by the
+/// server-owned request authority, then hydrates through this store.
+impl FeedbackReadPort for ProjectFeedbackStore {
     fn diagnostics<'a>(
         &'a self,
         context: &'a FeedbackReadPortContext<'a>,

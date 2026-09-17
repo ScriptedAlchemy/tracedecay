@@ -15,13 +15,14 @@ use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
 use tracedecay_lsp::analyzer::{LanguageSemanticRoute, PolyglotSemanticProvider};
 use tracedecay_lsp::{
     AdmittedRoot, LspAnalyzerCancellationAuthority, LspRequestId, LspRuntimeFailure,
-    LspRuntimeFuture, SemanticProviderPort, UnavailableSemanticProvider, UpstreamCapabilities,
+    LspRuntimeFuture, SemanticProviderAdapter, SemanticProviderPort, UnavailableSemanticProvider,
+    UpstreamCapabilities,
 };
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::{DaemonSemanticProviderAdapter, UpstreamCapabilityInitializationAuthority};
-use crate::lsp_support::analyzer_runtime_config_error;
+use super::UpstreamCapabilityInitializationAuthority;
+use crate::lsp_support::{analyzer_runtime_config_error, runtime_spawner};
 
 #[derive(Clone)]
 pub struct ProductionSemanticAuthorities {
@@ -91,7 +92,7 @@ pub async fn production_semantic_authorities(
     let mut initializers = Vec::with_capacity(upstream_routes.len());
     for (_, adapter, upstream) in upstream_routes {
         initializers.push(Arc::clone(&upstream));
-        let authority = DaemonSemanticProviderAdapter::shared_protocol(runtime.clone(), upstream);
+        let authority = SemanticProviderAdapter::shared(runtime_spawner(runtime.clone()), upstream);
         cancellation.push(authority.clone());
         routes.push(LanguageSemanticRoute::new(adapter.extensions, authority));
     }

@@ -13,11 +13,13 @@
 //! foreign markers are a typed conflict, never collateral cleanup.
 
 use std::{
-    cell::Cell,
     fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
 };
+
+#[cfg(any(test, feature = "test-helpers"))]
+use std::cell::Cell;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -37,39 +39,44 @@ mod tests;
 pub use error::ProfileBackupError;
 pub use identity::ProfileBackupProjectIdentity;
 
+#[cfg(any(test, feature = "test-helpers"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RehearsalPublicationFault {
-    None,
     BeforeRename,
     AfterRenameBeforeParentSync,
     AfterParentSyncBeforeMarkerRemoval,
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 thread_local! {
-    static REHEARSAL_PUBLICATION_FAULT: Cell<RehearsalPublicationFault> =
-        const { Cell::new(RehearsalPublicationFault::None) };
+    static REHEARSAL_PUBLICATION_FAULT: Cell<Option<RehearsalPublicationFault>> =
+        const { Cell::new(None) };
 }
 
 /// Test-only fault injection for rehearsal publication boundaries.
+#[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn set_rehearsal_publication_fault_for_test(fault: &str) {
     let fault = match fault {
-        "before_rename" => RehearsalPublicationFault::BeforeRename,
-        "after_rename_before_parent_sync" => RehearsalPublicationFault::AfterRenameBeforeParentSync,
-        "after_parent_sync_before_marker_removal" => {
-            RehearsalPublicationFault::AfterParentSyncBeforeMarkerRemoval
+        "before_rename" => Some(RehearsalPublicationFault::BeforeRename),
+        "after_rename_before_parent_sync" => {
+            Some(RehearsalPublicationFault::AfterRenameBeforeParentSync)
         }
-        _ => RehearsalPublicationFault::None,
+        "after_parent_sync_before_marker_removal" => {
+            Some(RehearsalPublicationFault::AfterParentSyncBeforeMarkerRemoval)
+        }
+        _ => None,
     };
     REHEARSAL_PUBLICATION_FAULT.with(|cell| cell.set(fault));
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 fn inject_rehearsal_publication_fault(
     phase: RehearsalPublicationFault,
 ) -> Result<(), ProfileBackupError> {
     let injected = REHEARSAL_PUBLICATION_FAULT.with(|cell| {
-        if cell.get() == phase {
-            cell.set(RehearsalPublicationFault::None);
+        if cell.get() == Some(phase) {
+            cell.set(None);
             true
         } else {
             false
@@ -266,6 +273,7 @@ pub fn rehearse_complete_profile_backup(
         // never leaves an unowned staging directory or an unmarked published
         // root that recovery cannot finish.
         sync_directory(&staging)?;
+        #[cfg(any(test, feature = "test-helpers"))]
         inject_rehearsal_publication_fault(RehearsalPublicationFault::BeforeRename)?;
         fs::rename(&staging, &restore_root).map_err(|error| {
             ProfileBackupError::unavailable(format!(
@@ -274,6 +282,7 @@ pub fn rehearse_complete_profile_backup(
                 restore_root.display()
             ))
         })?;
+        #[cfg(any(test, feature = "test-helpers"))]
         inject_rehearsal_publication_fault(RehearsalPublicationFault::AfterRenameBeforeParentSync)?;
         finish_published_rehearsal(&restore_root, &marker)
     })();
@@ -432,6 +441,7 @@ fn finish_published_rehearsal(
         .parent()
         .ok_or_else(|| ProfileBackupError::invalid("restore destination has no parent"))?;
     sync_directory(parent)?;
+    #[cfg(any(test, feature = "test-helpers"))]
     inject_rehearsal_publication_fault(
         RehearsalPublicationFault::AfterParentSyncBeforeMarkerRemoval,
     )?;

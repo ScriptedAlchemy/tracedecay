@@ -12,9 +12,8 @@ use serde::{Deserialize, Serialize};
 use tracedecay_contracts::feedback::{
     FeedbackDiagnosticsReadRequestV1, FeedbackDiagnosticsReadResultV1, FeedbackExpandRequestV1,
     FeedbackExpandResultV1, FeedbackGetRequestV1, FeedbackGetResultV1, FeedbackHandleRequestV1,
-    FeedbackListRequestV1, FeedbackListResultV1, FeedbackReadPort, FeedbackReadPortContext,
-    FeedbackReadPortFuture, FeedbackReadService, FeedbackRouteAuthorizationPort,
-    feedback_read_operations,
+    FeedbackListRequestV1, FeedbackListResultV1, FeedbackReadPort, FeedbackReadService,
+    FeedbackRouteAuthorizationPort,
 };
 use tracedecay_contracts::{
     ApplicationContractError, ApplicationEnvelope, ApplicationOutcome, ApplicationResult,
@@ -87,87 +86,6 @@ pub trait FeedbackReadRequestAuthority: Send + Sync {
         request_handle: &'a str,
         observed_at: UtcMicros,
     ) -> FeedbackReadRequestAuthorityFuture<'a>;
-}
-
-/// Physical durable-read boundary implemented by the daemon's canonical
-/// publication ledger and anchor owner.
-///
-/// `list` owns stable finding-id ordering and authenticated cursor validation.
-/// `expand` accepts only the exact `RetrievalAnchorId` resolved by the
-/// server-owned request authority, then hydrates through the canonical anchor
-/// owner.
-pub trait DurableFeedbackReadStoreV1: Send + Sync {
-    fn diagnostics<'a>(
-        &'a self,
-        context: &'a FeedbackReadPortContext<'a>,
-        request: &'a FeedbackDiagnosticsReadRequestV1,
-    ) -> FeedbackReadPortFuture<'a, FeedbackDiagnosticsReadResultV1>;
-
-    fn get<'a>(
-        &'a self,
-        context: &'a FeedbackReadPortContext<'a>,
-        request: &'a FeedbackGetRequestV1,
-    ) -> FeedbackReadPortFuture<'a, FeedbackGetResultV1>;
-
-    fn expand<'a>(
-        &'a self,
-        context: &'a FeedbackReadPortContext<'a>,
-        request: &'a FeedbackExpandRequestV1,
-    ) -> FeedbackReadPortFuture<'a, FeedbackExpandResultV1>;
-
-    fn list<'a>(
-        &'a self,
-        context: &'a FeedbackReadPortContext<'a>,
-        request: &'a FeedbackListRequestV1,
-    ) -> FeedbackReadPortFuture<'a, FeedbackListResultV1>;
-}
-
-/// Concrete application-port owner over the durable feedback store.
-pub struct CanonicalFeedbackReadOwnerV1<S> {
-    store: S,
-}
-
-impl<S> CanonicalFeedbackReadOwnerV1<S> {
-    pub fn new(store: S) -> Self {
-        Self { store }
-    }
-}
-
-impl<S> FeedbackReadPort for CanonicalFeedbackReadOwnerV1<S>
-where
-    S: DurableFeedbackReadStoreV1,
-{
-    fn diagnostics<'a>(
-        &'a self,
-        context: &'a FeedbackReadPortContext<'a>,
-        request: &'a FeedbackDiagnosticsReadRequestV1,
-    ) -> FeedbackReadPortFuture<'a, FeedbackDiagnosticsReadResultV1> {
-        self.store.diagnostics(context, request)
-    }
-
-    fn get<'a>(
-        &'a self,
-        context: &'a FeedbackReadPortContext<'a>,
-        request: &'a FeedbackGetRequestV1,
-    ) -> FeedbackReadPortFuture<'a, FeedbackGetResultV1> {
-        self.store.get(context, request)
-    }
-
-    fn expand<'a>(
-        &'a self,
-        context: &'a FeedbackReadPortContext<'a>,
-        request: &'a FeedbackExpandRequestV1,
-    ) -> FeedbackReadPortFuture<'a, FeedbackExpandResultV1> {
-        self.store.expand(context, request)
-    }
-
-    fn list<'a>(
-        &'a self,
-        context: &'a FeedbackReadPortContext<'a>,
-        request: &'a FeedbackListRequestV1,
-    ) -> FeedbackReadPortFuture<'a, FeedbackListResultV1> {
-        self.store.list(context, request)
-    }
 }
 
 /// Typed result retained until the central invocation layer serializes the
@@ -411,29 +329,6 @@ where
                     .map_err(FeedbackReadOwnerErrorV1::Contract)?,
             )),
         }
-    }
-}
-
-impl<R, S, A> DaemonFeedbackReadOwnerV1<R, CanonicalFeedbackReadOwnerV1<S>, A>
-where
-    R: FeedbackReadRequestAuthority,
-    S: DurableFeedbackReadStoreV1,
-    A: FeedbackRouteAuthorizationPort,
-{
-    /// Mounts the canonical durable store with the exact callable catalog
-    /// operations. This is the concise constructor used by central daemon
-    /// integration.
-    pub fn from_store(
-        requests: R,
-        store: S,
-        authorization: A,
-    ) -> Result<Self, ApplicationContractError> {
-        let service = FeedbackReadService::new(
-            CanonicalFeedbackReadOwnerV1::new(store),
-            authorization,
-            feedback_read_operations()?,
-        );
-        Ok(Self::new(requests, service))
     }
 }
 

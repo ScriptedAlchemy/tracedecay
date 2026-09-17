@@ -30,9 +30,8 @@ use tracedecay_lsp::{
 use crate::feedback::concrete::{FeedbackRuntime, ProjectFeedbackStore};
 use crate::feedback::owner::FeedbackReadOperationV1;
 pub use crate::lsp_support::{
-    BrokerDiagnosticSnapshotAuthority, DaemonLspSessionFactory, DaemonSemanticProviderAdapter,
-    LspDiagnosticDocumentPort, LspSemanticRequestAuthority, LspWorkspaceDocumentIndexPort,
-    UpstreamCapabilityInitializationAuthority,
+    BrokerDiagnosticSnapshotAuthority, DaemonLspSessionFactory, LspDiagnosticDocumentPort,
+    LspWorkspaceDocumentIndexPort, UpstreamCapabilityInitializationAuthority,
 };
 const LSP_CONTEXT_EXPANSION_HANDLE_SCHEMA_VERSION: u16 = 1;
 const LSP_TEST_RUN_EXPANSION_HANDLE_SCHEMA_VERSION: u16 = 1;

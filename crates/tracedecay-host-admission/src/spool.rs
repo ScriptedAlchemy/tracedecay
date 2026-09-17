@@ -223,10 +223,6 @@ impl HostAdmissionSpool {
             .map(|index| &self.pending[index])
     }
 
-    pub(crate) fn ensure_replay_allowed(&self) -> Result<(), SpoolError> {
-        self.ensure_mutations_allowed()
-    }
-
     pub(crate) fn pending_count(&self) -> usize {
         self.pending.len()
     }
@@ -571,7 +567,7 @@ impl HostAdmissionSpool {
         Ok(())
     }
 
-    fn ensure_mutations_allowed(&self) -> Result<(), SpoolError> {
+    pub(crate) fn ensure_mutations_allowed(&self) -> Result<(), SpoolError> {
         // Corrupted active files are forensic evidence: never compact, append,
         // ack, or quarantine-move while the on-disk suffix is still intact.
         if let SpoolIntegrity::Corrupted { at_offset } = self.meta.integrity {

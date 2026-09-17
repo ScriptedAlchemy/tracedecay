@@ -24,11 +24,11 @@ use super::StoreOwnerKey;
 #[cfg(unix)]
 use super::scheduler::AutomationSchedulerHandle;
 use super::{DaemonHandshake, DatabaseOwnerRegistry, write_json_rpc_response};
+use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationServiceRegistry;
 #[cfg(unix)]
 use tracedecay_automation_runtime::automation::maintenance_termination::MaintenanceTaskTermination;
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use tracedecay_daemon_identity::{authority, profile_identity};
-use tracedecay_daemon_service::DaemonNativeIntegrationRuntimeRegistrar;
 use tracedecay_daemon_service::{
     ProfileHostAdmissionBootstrapOperation, ProfileHostAdmissionBootstrapStatus,
     ProfileHostAdmissionReplayRegistry,
@@ -475,7 +475,7 @@ pub(super) struct StoreAdministration {
     manual_branch_publications: Arc<ManualBranchPublicationTasks>,
     session_temporal_refresh_schedulers: Arc<SessionTemporalRefreshSchedulerRegistry>,
     git_index_transaction_services: Arc<DaemonGitIndexTransactionServiceRegistry>,
-    native_integration_services: Arc<DaemonNativeIntegrationRuntimeRegistrar>,
+    native_integration_services: Arc<DaemonNativeIntegrationServiceRegistry>,
     remote_recovery_project_lifecycles:
         remote_recovery_lifecycle::SharedRemoteRecoveryProjectLifecyclesV1,
     #[cfg(unix)]
@@ -596,9 +596,7 @@ impl Default for StoreAdministration {
                     crate::runtime_ports::compose_application_catalog_snapshot,
                 ),
             ),
-            native_integration_services: Arc::new(
-                DaemonNativeIntegrationRuntimeRegistrar::default(),
-            ),
+            native_integration_services: Arc::new(DaemonNativeIntegrationServiceRegistry::default()),
             remote_recovery_project_lifecycles: Arc::default(),
             #[cfg(unix)]
             retirement_reapers: Arc::new(MaintenanceReaperRegistry::default()),
@@ -1325,7 +1323,7 @@ impl StoreAdministration {
 
     pub(super) fn native_integration_services(
         &self,
-    ) -> &Arc<DaemonNativeIntegrationRuntimeRegistrar> {
+    ) -> &Arc<DaemonNativeIntegrationServiceRegistry> {
         &self.native_integration_services
     }
 

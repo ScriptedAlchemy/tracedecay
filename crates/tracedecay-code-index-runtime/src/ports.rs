@@ -83,13 +83,19 @@ tokio::task_local! {
     pub static CONNECTION_ADMISSION: Arc<dyn AdmissionParkLeaseV1>;
 }
 
-/// Same grace the daemon admission park uses: 50ms before surrendering a slot.
+/// How long a park may keep its admission permit before surrendering it.
+///
+/// A request that finishes inside this grace never touches the semaphore.
+/// Only a request that is genuinely parked — waiting on a project open, on the
+/// writer gate, or on a single-flight generation decode — gives its slot back.
 pub const ADMISSION_PARK_GRACE: Duration = Duration::from_millis(50);
 
-/// Park a future the way daemon connection admission does.
+/// Park a future without holding a connection admission slot across a long wait.
 ///
-/// Outside a connection scope (tests, background reconcile) this is a
-/// transparent passthrough — matching the pre-extract helper.
+/// Reads [`CONNECTION_ADMISSION`]. Outside a connection scope (tests, background
+/// reconcile, reserved-control clients) this is a transparent passthrough.
+/// Daemon callers install that task-local beside their concrete lease; this
+/// function is the only park algorithm.
 #[hotpath::measure(label = "daemon.engine.admission.park", future = true)]
 pub async fn park_admission<F>(future: F) -> F::Output
 where

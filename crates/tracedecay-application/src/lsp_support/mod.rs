@@ -18,9 +18,9 @@ pub fn analyzer_runtime_config_error(error: AnalyzerRuntimeError) -> TraceDecayE
 }
 
 pub use factory::{DaemonLspSessionFactory, UpstreamCapabilityInitializationAuthority};
+pub(crate) use runtime_adapters::runtime_spawner;
 pub use runtime_adapters::{
-    BrokerDiagnosticSnapshotAuthority, DaemonSemanticProviderAdapter, LspDiagnosticDocumentPort,
-    LspSemanticRequestAuthority, LspWorkspaceDocumentIndexPort,
+    BrokerDiagnosticSnapshotAuthority, LspDiagnosticDocumentPort, LspWorkspaceDocumentIndexPort,
 };
 pub(crate) use runtime_adapters::{
     managed_diagnostic_authority_digest, validate_managed_diagnostic_scope,

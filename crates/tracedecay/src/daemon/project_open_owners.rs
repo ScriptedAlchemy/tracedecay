@@ -19,7 +19,8 @@ use tracedecay_domain::{ProjectId, UtcMicros, canonical_sha256};
 use super::DaemonInvocationState;
 use crate::mcp::McpServer;
 use tracedecay_agent_hosts::native_integration::{
-    DaemonNativeIntegrationAnalysisV1, NativeIntegrationTargetV1,
+    DaemonNativeIntegrationAnalysisV1, DaemonNativeIntegrationServiceRegistry,
+    NativeIntegrationTargetV1,
 };
 use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_application::primitives::admitted_root_uri_for_project;
@@ -27,9 +28,8 @@ use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use tracedecay_daemon_service::{
     DaemonCallableCodeAuthorizationSource, DaemonContextScoutRuntimeRegistrationError,
-    DaemonFeedbackRuntimeRegistrationError, DaemonNativeIntegrationRuntimeRegistrar,
-    DaemonWorkProposalRoutingAuthorityV1, daemon_owned_project_source_access_at,
-    project_open_source_access_authority,
+    DaemonFeedbackRuntimeRegistrationError, DaemonWorkProposalRoutingAuthorityV1,
+    daemon_owned_project_source_access_at, project_open_source_access_authority,
     project_owner_registration::{
         ProjectSourceEditAuthorizationV1, ProjectSourceEditOwnerV1, SourceEditMutationGate,
         production_lsp_registration, project_open_lsp_scope_grant,
@@ -166,7 +166,7 @@ pub(crate) async fn install_project_open_source_edit_owners_for_test(
 pub(super) async fn register_project_open_production_owners(
     invocation: &DaemonInvocationState,
     git_transactions: &DaemonGitIndexTransactionServiceRegistry,
-    native_integration: &DaemonNativeIntegrationRuntimeRegistrar,
+    native_integration: &DaemonNativeIntegrationServiceRegistry,
     project_root: &Path,
     project_id: &str,
     server: &McpServer,
