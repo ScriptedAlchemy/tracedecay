@@ -6,8 +6,10 @@ import type {
 } from '../../contracts/index.ts';
 import { scopeKey, scopedUrl, scopeWritable, useScope } from '../../data/scope/store.ts';
 import { callWork, type WorkResult } from '../work/workApi.ts';
+import type { WorkflowLifecycleAction } from './workflowLedger.ts';
 import {
   WORKFLOW_ACTIVATE_DEFINITION_ROUTE,
+  WORKFLOW_DEFINITION_HISTORY_ROUTE,
   WORKFLOW_GET_RUN_ROUTE,
   WORKFLOW_LIST_DEFINITIONS_ROUTE,
   WORKFLOW_REJECT_DEFINITION_ROUTE,
@@ -38,6 +40,23 @@ export function useWorkflowDefinitions() {
   });
 }
 
+/** The version track of one definition identity; disabled until one is
+ * selected. */
+export function useWorkflowDefinitionHistory(definitionId: string | null) {
+  const scope = useScope((state) => state.scope);
+  const key = scopeKey(scope);
+  return useQuery<WorkResult<WorkflowDefinition[]>>({
+    queryKey: workflowQueryKey(key, 'definition-history', definitionId ?? ''),
+    enabled: definitionId !== null,
+    queryFn: () =>
+      callWork(
+        WORKFLOW_DEFINITION_HISTORY_ROUTE,
+        { definition_id: definitionId ?? '' },
+        scopedUrl(scope, WORKFLOW_DEFINITION_HISTORY_ROUTE.path),
+      ),
+  });
+}
+
 /** One run's projection, read on demand; disabled until a run id is named. */
 export function useWorkflowRun(runId: string | null) {
   const scope = useScope((state) => state.scope);
@@ -53,8 +72,6 @@ export function useWorkflowRun(runId: string | null) {
       ),
   });
 }
-
-export type WorkflowLifecycleAction = 'activate' | 'retire' | 'reject';
 
 export interface WorkflowLifecycleCommand {
   readonly action: WorkflowLifecycleAction;
@@ -86,9 +103,9 @@ function notWritable(reason: string): WorkResult<WorkflowDefinitionDisposition> 
 }
 
 /** One compare-and-swap lifecycle transition; resolves to the daemon's own
- * `WorkResult` and re-reads the definitions list afterwards. A scope the
- * gateway serves read-only is refused here without dispatching, exactly as
- * Work commands are. */
+ * `WorkResult` and re-reads the definitions list and the version track
+ * afterwards. A scope the gateway serves read-only is refused here without
+ * dispatching, exactly as Work commands are. */
 export function useWorkflowLifecycle() {
   const scope = useScope((state) => state.scope);
   const key = scopeKey(scope);
@@ -110,8 +127,11 @@ export function useWorkflowLifecycle() {
         scopedUrl(scope, route.path),
       );
     },
-    onSettled: () => {
+    onSettled: (_result, _error, command) => {
       void client.invalidateQueries({ queryKey: workflowQueryKey(key, 'list-definitions') });
+      void client.invalidateQueries({
+        queryKey: workflowQueryKey(key, 'definition-history', command.definitionId),
+      });
     },
   });
 }

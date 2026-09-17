@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   WorkflowDefinitionActivateRequestSchema,
   WorkflowDefinitionDispositionSchema,
+  WorkflowDefinitionHistoryRequestSchema,
   WorkflowDefinitionListRequestSchema,
   WorkflowDefinitionRejectRequestSchema,
   WorkflowDefinitionRetireRequestSchema,
@@ -24,6 +25,16 @@ export const WORKFLOW_LIST_DEFINITIONS_ROUTE = {
   operation: 'operation.workflow.list_definitions',
   path: '/api/application/workflow/list-definitions',
   request: WorkflowDefinitionListRequestSchema,
+  response: z.array(WorkflowDefinitionSchema),
+} as const satisfies WorkRoute<unknown, unknown>;
+
+/** Every immutable version of one definition, ascending — the version track
+ * behind the selected identity, read from its own route so the track carries
+ * its own typed state rather than borrowing the registry's. */
+export const WORKFLOW_DEFINITION_HISTORY_ROUTE = {
+  operation: 'operation.workflow.definition_history',
+  path: '/api/application/workflow/definition-history',
+  request: WorkflowDefinitionHistoryRequestSchema,
   response: z.array(WorkflowDefinitionSchema),
 } as const satisfies WorkRoute<unknown, unknown>;
 
