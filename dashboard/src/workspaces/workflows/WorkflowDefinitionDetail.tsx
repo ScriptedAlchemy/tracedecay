@@ -64,7 +64,7 @@ export function SelectedDefinitionPanel({
         <DispositionCell receipt={receipt} />
       </div>
 
-      <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-3xs sm:grid-cols-4">
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-3xs 2xl:grid-cols-4">
         <Term label="project">
           {entry.projectAgreement === 'agree' ? (
             definition.project_id
@@ -80,7 +80,7 @@ export function SelectedDefinitionPanel({
         <Term label="distinct operations">{String(shape.distinctOperations)}</Term>
       </dl>
 
-      <div className="grid gap-3 border-y border-edge-subtle py-2 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 border-y border-edge-subtle py-2 2xl:grid-cols-4">
         <Readout label="entry steps" value={shape.entrySteps} size="sm" />
         <Readout label="terminal steps" value={shape.terminalSteps} size="sm" />
         <Readout
