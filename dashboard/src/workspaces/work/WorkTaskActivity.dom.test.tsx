@@ -114,7 +114,7 @@ describe('the Work task-activity window, by scope', () => {
     pulse('hook_activity', 'project.beta'),
   ];
 
-  it('counts only the selected project's frames, and never another project's', () => {
+  it('counts only the selected project’s frames, and never another project’s', () => {
     expect(
       taskActivityWindow(MIXED, {
         kind: 'project',

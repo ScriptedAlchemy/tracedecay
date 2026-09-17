@@ -138,7 +138,7 @@ describe('a scoped read whose scope changed', () => {
     await waitFor(() => expect(first.signal?.aborted).toBe(true));
   });
 
-  it('never paints the abandoned project's late answer into the new scope', async () => {
+  it('never paints the abandoned project’s late answer into the new scope', async () => {
     useScope.getState().selectProject('proj_a', 'Project A', 'active');
     const { findByText } = renderProbe();
     await waitFor(() => expect(attempts).toHaveLength(1));

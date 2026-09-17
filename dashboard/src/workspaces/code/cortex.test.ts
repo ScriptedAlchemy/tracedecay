@@ -49,7 +49,7 @@ function node(over: Partial<GraphNodeV1> & { id: string }): GraphNodeV1 {
 }
 
 describe('the register strip', () => {
-  it('reads modules as the index's module kind, and names the absence otherwise', () => {
+  it('reads modules as the index’s module kind, and names the absence otherwise', () => {
     expect(
       moduleReading([
         { kind: 'function', count: 40 },
@@ -81,7 +81,7 @@ describe('the register strip', () => {
     });
   });
 
-  it('lays out seven cells in the plate's order and names the renderer's real rule', () => {
+  it('lays out seven cells in the plate’s order and names the renderer’s real rule', () => {
     const cells = cortexRegister({
       totals: { nodes: 12_873, edges: 41_206, files: 642 },
       nodes_by_kind: [{ kind: 'module', count: 393 }],
@@ -200,7 +200,7 @@ describe('strata for a file', () => {
     });
   });
 
-  it('falls back to the directory's depths, then names the absence', () => {
+  it('falls back to the directory’s depths, then names the absence', () => {
     expect(strataForPath(measurement, 'src/storage/other.rs')).toEqual({
       kind: 'directory_only',
       directory: 'src/storage',
@@ -235,7 +235,7 @@ describe('diagnostics in a file', () => {
     ],
   } as unknown as DiagnosticsSnapshot;
 
-  it('matches the broker's absolute or relative path to the index path', () => {
+  it('matches the broker’s absolute or relative path to the index path', () => {
     const file = diagnosticsForFile(snapshot, 'src/a.rs');
     expect(file?.rows.length).toBe(2);
     expect(file?.errors).toBe(1);

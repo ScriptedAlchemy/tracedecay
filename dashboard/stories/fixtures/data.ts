@@ -378,7 +378,7 @@ const FACT_CONTENTS = [
   'The Orbit Control demo exercises three genuine Module Federation consumption forms without eager shares.',
   'Web and native public-path contracts differ; Web builds set output.assetPrefix to auto.',
   'The iOS GitHub Actions job uses pinned actions/cache v5 restore/save for one atomic exact-key cache.',
-  'Concurrent agents share the repo target/; waiting on cargo's directory lock is expected.',
+  'Concurrent agents share the repo target/; waiting on cargo’s directory lock is expected.',
   'Never add --locked to local or agent Cargo commands; CI and packaging own lockfile reproducibility.',
   'Route literal/regex text to tracedecay_grep, symbol names to tracedecay_search, and concepts to tracedecay_context.',
   'Prefer file-edit tools over inline python heredocs for on-disk changes.',
@@ -388,7 +388,7 @@ const FACT_CONTENTS = [
   'Compaction defaults to gpt-5.6-terra with extra-high reasoning for LCM summarization.',
   'Empty and Unavailable temporal roots are distinct; do not collapse them in the registry mapping.',
   'Binary slot staleness manifests as stale hook logs; check the resolved graph DB path first.',
-  'Pathspec-scoped commits (git commit -- <paths>) avoid sweeping others' staged work in shared trees.',
+  'Pathspec-scoped commits (git commit -- <paths>) avoid sweeping others’ staged work in shared trees.',
   'Hook-driven incremental indexing triggers on agent hooks; gix reconciles lazily without always-on watchers.',
 ] as const;
 
@@ -1084,7 +1084,7 @@ function neighborsPayload(nodeId: string, limit: number): Record<string, unknown
 }
 
 /** GET /api/plugins/graph/subgraph[?node_id=]. Unseeded returns the full hub
- * overview (mode "default"); a node_id returns that node's neighborhood
+ * overview (mode "default"); a node_id returns that node’s neighborhood
  * (mode "seeded"), matching graph_service.rs subgraph_payload. */
 // `coerce_limit(params.limit_nodes, 80, 250)` / `(params.limit_edges, 120,
 // 500)` in graph_api.rs: the defaults are 80 and 120, not 40. The Code

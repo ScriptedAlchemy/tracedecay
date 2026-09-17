@@ -179,7 +179,7 @@ describe('versionTrack', () => {
 });
 
 describe('recordReceipt', () => {
-  it('keys the daemon's answer by the exact version it answered for', () => {
+  it('keys the daemon’s answer by the exact version it answered for', () => {
     const ledger = recordReceipt(new Map(), {
       action: 'activate',
       expectedRevision: 1,

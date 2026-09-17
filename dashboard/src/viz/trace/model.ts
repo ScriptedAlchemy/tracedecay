@@ -553,7 +553,7 @@ export function sensoryChannels(model: TraceModel): readonly SensoryChannel[] {
       state: anyDegree ? 'measured' : 'not-on-this-wire',
       staticEquivalent: 'sill width',
       note: anyDegree
-        ? 'degree sets each body's mass, so hover latency, bloom depth and settle time all scale with it'
+        ? 'degree sets each body’s mass, so hover latency, bloom depth and settle time all scale with it'
         : 'no row on this payload carried a degree, so every body is at the mass floor and weight reads nothing',
     },
     {
@@ -572,8 +572,8 @@ export function sensoryChannels(model: TraceModel): readonly SensoryChannel[] {
       state: complexityField ? 'measured' : 'not-on-this-wire',
       staticEquivalent: 'contour tightness',
       note: complexityField
-        ? `driven by the payload's ${complexityField} field`
-        : 'this route's rows carry no complexity field, so the channel is inert, the symbols are not being claimed to be simple',
+        ? `driven by the payload’s ${complexityField} field`
+        : 'this route’s rows carry no complexity field, so the channel is inert, the symbols are not being claimed to be simple',
     },
     {
       feel: 'warmth',
@@ -581,8 +581,8 @@ export function sensoryChannels(model: TraceModel): readonly SensoryChannel[] {
       state: churnField ? 'measured' : 'not-on-this-wire',
       staticEquivalent: 'heat tint held at its current value',
       note: churnField
-        ? `driven by the payload's ${churnField} field`
-        : 'this route's rows carry no churn or last-modified field, so nothing is tinted, untinted here means unmeasured, not cold',
+        ? `driven by the payload’s ${churnField} field`
+        : 'this route’s rows carry no churn or last-modified field, so nothing is tinted, untinted here means unmeasured, not cold',
     },
     {
       feel: 'pulse',
@@ -590,7 +590,7 @@ export function sensoryChannels(model: TraceModel): readonly SensoryChannel[] {
       state: activityField ? 'measured' : 'coarser-scope',
       staticEquivalent: 'pinned-lit',
       note: activityField
-        ? `driven by the payload's ${activityField} field`
+        ? `driven by the payload’s ${activityField} field`
         : 'the live activity stream is project-scoped and carries no path, so no strike can be attributed to a symbol on this field',
     },
   ];

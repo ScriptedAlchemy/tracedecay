@@ -187,7 +187,7 @@ describe('the concurrency ladder', () => {
     });
   });
 
-  it('states the graph read's own reason when it has not answered', () => {
+  it('states the graph read’s own reason when it has not answered', () => {
     const card = cardOf(
       workTopologyAccounting(listed([]), {
         state: 'refused',
@@ -361,7 +361,7 @@ describe('the rerun census', () => {
     expect(figure(rows.get('runtime_recovery_required')!).value).toBe(0);
   });
 
-  it('carries the daemon's refusal rather than a census of zero', () => {
+  it('carries the daemon’s refusal rather than a census of zero', () => {
     const card = cardOf(
       workTopologyAccounting(
         { outcome: 'refused', state: 'unavailable', detail: 'the Work runtime is unavailable' },
@@ -377,7 +377,7 @@ describe('the rerun census', () => {
     }
   });
 
-  it('keeps a capped page's eligible denominator partial instead of deriving a full set', () => {
+  it('keeps a capped page’s eligible denominator partial instead of deriving a full set', () => {
     const capped: WorkResult<WorkAttemptListV1> = {
       outcome: 'value',
       value: WorkAttemptListV1Schema.parse(
@@ -533,7 +533,7 @@ describe('observed integration outcomes', () => {
     ],
   });
 
-  it('decodes the projector's kind × outcome cells verbatim', () => {
+  it('decodes the projector’s kind × outcome cells verbatim', () => {
     const card = cardOf(
       workTopologyAccounting(listed([]), graphOf(), undefined, MERGE_CELLS),
       'integration_outcomes',
@@ -612,7 +612,7 @@ describe('observed integration outcomes', () => {
     expect(figure(card.provenance.support).value).toBe(7);
   });
 
-  it('carries the projector's typed absence for an empty horizon rather than zero cells', () => {
+  it('carries the projector’s typed absence for an empty horizon rather than zero cells', () => {
     const empty = metricsOf({
       measurements: [
         topologyMeasurement({
@@ -635,7 +635,7 @@ describe('observed integration outcomes', () => {
     expect(stated.detail).toContain('no eligible evidence');
   });
 
-  it('carries the metrics read's refusal rather than an empty ledger', () => {
+  it('carries the metrics read’s refusal rather than an empty ledger', () => {
     const card = cardOf(
       workTopologyAccounting(listed([]), graphOf(), undefined, {
         outcome: 'refused',
@@ -654,7 +654,7 @@ describe('observed integration outcomes', () => {
 });
 
 describe('GitHub stack capability', () => {
-  it('reads the projection's own capability state and fallback observations', () => {
+  it('reads the projection’s own capability state and fallback observations', () => {
     const card = cardOf(
       workTopologyAccounting(listed([]), graphOf(), undefined, metricsOf({
         githubStackCapability: {
@@ -675,7 +675,7 @@ describe('GitHub stack capability', () => {
     expect(card.reading.value).toContain('other-forge fallback unobserved');
   });
 
-  it('states the projector's typed reason when no trustworthy observation exists', () => {
+  it('states the projector’s typed reason when no trustworthy observation exists', () => {
     const card = cardOf(
       workTopologyAccounting(listed([]), graphOf(), undefined, metricsOf()),
       'github_stack_capability',
