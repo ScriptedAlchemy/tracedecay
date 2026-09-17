@@ -549,11 +549,11 @@ impl std::error::Error for CodeIndexParallelismErrorV1 {}
 
 /// 0 means "use the configured host width".
 static FORCED_WORKERS: AtomicUsize = AtomicUsize::new(0);
-#[cfg(test)]
 thread_local! {
     /// Test-only: force [`install`] on this thread to return
     /// [`CodeIndexParallelismErrorV1::PoolBuild`]. Thread-scoped so a fault
     /// test cannot leak into sibling tests running in the same process.
+    /// Visible to integration tests; production callers leave it false.
     static FORCE_INSTALL_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -590,8 +590,8 @@ pub fn clear_forced_indexing_workers_for_test() {
 
 /// Force [`install`] to fail so callers can assert operational pool errors stay
 /// typed as parallelism failures instead of identity corruption.
-#[cfg(test)]
-pub(crate) fn force_install_failure_for_test(force: bool) {
+#[doc(hidden)]
+pub fn force_install_failure_for_test(force: bool) {
     FORCE_INSTALL_FAILURE.with(|flag| flag.set(force));
 }
 
@@ -642,7 +642,6 @@ where
     R: Send,
 {
     hotpath::gauge!("code_index_worker_count").set(indexing_workers());
-    #[cfg(test)]
     if FORCE_INSTALL_FAILURE.with(std::cell::Cell::get) {
         return Err(CodeIndexParallelismErrorV1::PoolBuild {
             message: "forced code-index worker pool failure for test".to_owned(),

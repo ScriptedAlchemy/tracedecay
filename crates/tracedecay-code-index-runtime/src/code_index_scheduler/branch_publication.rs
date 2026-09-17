@@ -448,9 +448,17 @@ impl BranchPublicationContextV1 {
             .notify_hook_overflow(canonical_worktree_root)
             .await
         {
-            // NotApplicable means this overflow wake has no repository identity.
-            // The complete-generation request above already admitted, so keep waiting.
-            CodeIndexDemandAdmissionV1::Queued | CodeIndexDemandAdmissionV1::NotApplicable => {}
+            CodeIndexDemandAdmissionV1::Queued => {}
+            CodeIndexDemandAdmissionV1::NotApplicable => {
+                return Err(TraceDecayError::project_route(
+                    CODE_INDEX_IDENTITY_MISMATCH,
+                    false,
+                    format!(
+                        "branch generation publication does not apply to '{}': the route has no repository identity",
+                        canonical_worktree_root.display()
+                    ),
+                ));
+            }
             CodeIndexDemandAdmissionV1::Terminal(parked) => {
                 return Err(TraceDecayError::project_route(
                     CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT,
