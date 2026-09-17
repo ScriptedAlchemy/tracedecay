@@ -1,11 +1,13 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, useLocation } from 'react-router';
 import type { DeliveryInboxV1 } from '../../contracts/generated.ts';
+import { useScope } from '../../data/scope/store.ts';
 import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
 import { DeliveryPage } from './DeliveryPage.tsx';
+import { compareHeadSearch } from './deliveryReading.ts';
 
 const INBOX = {
   registry_state: 'ready',
@@ -74,13 +76,13 @@ const INBOX = {
         {
           kind: 'shared_code',
           state: 'requires_selection',
-          href: '/code?view=shared-code',
+          href: '/code',
           source_generation: 'generation.alpha.1',
         },
         {
           kind: 'compare',
           state: 'requires_selection',
-          href: '/code?view=compare',
+          href: `/code?${compareHeadSearch('feature/delivery', 'a'.repeat(40)).toString()}`,
           source_generation: 'generation.alpha.1',
         },
       ],
@@ -171,6 +173,11 @@ function renderDelivery(payload: DeliveryInboxV1, domainState = 'ready', route =
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  useScope.getState().selectAllProjects();
+});
+
+beforeEach(() => {
+  useScope.getState().selectAllProjects();
 });
 
 describe('DeliveryPage', () => {
@@ -196,17 +203,32 @@ describe('DeliveryPage', () => {
 
     const detail = await screen.findByRole('region', { name: 'Pull request detail' });
     expect(within(detail).getByText('CI failure')).toBeTruthy();
-    expect(within(detail).getByText('anchor.ci.42')).toBeTruthy();
+    expect(within(detail).getByText('A check failed on this indexed head.')).toBeTruthy();
+    expect(within(detail).getByText('reference anchor.ci.42')).toBeTruthy();
     expect(within(detail).getByText('Overlapping edit')).toBeTruthy();
+    expect(within(detail).getByText('Not available for this pull request.')).toBeTruthy();
+    expect(within(detail).queryByText(/mounted Delivery authority/)).toBeNull();
   });
 
-  it('links to the existing verified Code views', async () => {
+  it('offers the next Code step instead of a blocked view', async () => {
     renderDelivery(INBOX);
 
-    const shared = await screen.findByRole('link', { name: 'Open Shared Code' });
-    const compare = screen.getByRole('link', { name: 'Open Compare' });
-    expect(shared.getAttribute('href')).toBe('/code?view=shared-code');
-    expect(compare.getAttribute('href')).toBe('/code?view=compare');
+    const symbol = await screen.findByRole('link', { name: 'Select a symbol in Code' });
+    const compare = screen.getByRole('link', { name: 'Compare this head' });
+    expect(symbol.getAttribute('href')).toBe('/code');
+    expect(symbol.getAttribute('href')).not.toContain('view=shared-code');
+    expect(compare.getAttribute('href')).toBe(
+      `/code?${compareHeadSearch('feature/delivery', 'a'.repeat(40)).toString()}`,
+    );
+    expect(screen.queryByRole('link', { name: 'Open Shared Code' })).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Open Compare' })).toBeNull();
+  });
+
+  it('does not keep a pull request when the attention filter has no operator work', async () => {
+    renderDelivery(INBOX, 'ready', '/delivery?attention=overlapping_edit');
+
+    expect(await screen.findByText('No pull requests match this filter')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Admit delivery inbox/ })).toBeNull();
   });
 
   it('renders provider-not-configured as a typed zero, not a transport failure', async () => {
@@ -244,7 +266,9 @@ describe('DeliveryPage', () => {
     renderDelivery(INBOX_WITH_PROXIMITY_ATTENTION);
 
     const detail = await screen.findByRole('region', { name: 'Pull request detail' });
-    expect(await within(detail).findByText('sha256:overlap:overlapping_edit')).toBeTruthy();
+    expect(await within(detail).findByText('Overlapping edit recorded.')).toBeTruthy();
+    expect(within(detail).getByText('reference sha256:overlap')).toBeTruthy();
+    expect(within(detail).queryByText('sha256:overlap:overlapping_edit')).toBeNull();
     expect(within(detail).queryByText('This source has no mounted Delivery authority.')).toBeNull();
   });
 });

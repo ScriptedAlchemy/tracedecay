@@ -163,7 +163,7 @@ describe('a graph read that failed', () => {
 });
 
 describe('the URL-stable Code view shell', () => {
-  it('exposes the five peer views with Topology selected by default', async () => {
+  it('offers mounted views with Topology selected and omits pending Atlas', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
@@ -177,12 +177,12 @@ describe('the URL-stable Code view shell', () => {
     expect(await screen.findByRole('heading', { name: 'Topology' })).toBeTruthy();
     const switcher = screen.getByRole('navigation', { name: 'Code view' });
     expect(within(switcher).getAllByRole('button').map((button) => button.textContent)).toEqual([
-      'Atlas',
       'Topology',
       'Trace',
       'Shared Code',
       'Compare',
     ]);
+    expect(within(switcher).queryByRole('button', { name: 'Atlas' })).toBeNull();
     expect(
       screen
         .getByRole('button', { name: 'Topology' })
@@ -193,9 +193,10 @@ describe('the URL-stable Code view shell', () => {
         .getByRole('region', { name: 'Topology' })
         .getAttribute('aria-labelledby'),
     ).toBe('code-view-topology');
-    // Atlas has no projection; Trace and Shared Code read one selected symbol
-    // and none is selected. Compare carries its own revision selection.
-    for (const name of ['Atlas', 'Trace', 'Shared Code']) {
+    // Trace and Shared Code read one selected symbol and none is selected.
+    // Compare carries its own revision selection. Atlas is not offered until
+    // a deep link asks for the unmounted projection.
+    for (const name of ['Trace', 'Shared Code']) {
       expect(screen.getByRole<HTMLButtonElement>('button', { name }).disabled).toBe(true);
     }
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Compare' }).disabled).toBe(
