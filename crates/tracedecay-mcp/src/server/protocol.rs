@@ -87,7 +87,7 @@ pub fn resources_list_result() -> Value {
             {
                 "uri": "tracedecay://schema",
                 "name": "SQLite Schema",
-                "description": "Documentation for the .tracedecay/tracedecay.db schema: tables, columns, indexes, and common query recipes. Use when MCP tools don't cover your query and you need to drop down to raw SQL.",
+                "description": "Installed project-store DDL for this binary, generated from the fresh-store shape create_schema admits. Code topology is not in these tables.",
                 "mimeType": "text/markdown"
             }
         ]

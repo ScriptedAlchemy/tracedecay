@@ -15,7 +15,9 @@ use tracedecay_rusqlite_runtime::runtime_ledger;
 mod final_shape;
 mod released_shape;
 
-pub use final_shape::{expected_final_schema_fingerprint, fingerprint_schema_objects};
+pub use final_shape::{
+    expected_final_schema_fingerprint, fingerprint_schema_objects, schema_resource_markdown,
+};
 
 const ROOT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS metadata (
         key TEXT PRIMARY KEY,
