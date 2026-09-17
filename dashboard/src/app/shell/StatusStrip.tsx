@@ -137,11 +137,11 @@ function WorkspaceRegisters() {
   return (
     <>
       {registers.map((register, index) => (
-        <Cell key={register.id} icon={Link2} label={`${index + 5} · ${register.label}`}>
+        <Cell key={register.id} icon={register.icon ?? Link2} label={`${index + 5} · ${register.label}`}>
           <span
             aria-hidden
             className={cn(
-              'size-2 shrink-0',
+              'size-1.5 shrink-0',
               register.state === 'identity'
                 ? 'bg-accent'
                 : (STATE_LAMP[register.state] ?? 'bg-state-unsupported-schema'),

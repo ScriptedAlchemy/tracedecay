@@ -62,13 +62,12 @@ describe('workspace status registers', () => {
     expect(graph?.getAttribute('data-register')).toBe('test:graph');
     expect(graph?.getAttribute('data-state')).toBe('ready');
     expect(within(strip).getByText('12,873 symbols')).toBeTruthy();
-    // Numbered on from Link 01 and Feed 02: the workspace cells are the
+    // Numbered on from the shell's own four: the workspace cells are the
     // strip's fifth and sixth registers, not a second status word.
-    expect(within(strip).getByText('05')).toBeTruthy();
-    expect(within(strip).getByText('06')).toBeTruthy();
+    expect(within(strip).getByText('5 · Graph')).toBeTruthy();
+    expect(within(strip).getByText('6 · Selection')).toBeTruthy();
     // An identifier keeps its case; the strip never uppercases a selection.
     expect(within(strip).getByText('subgraph_payload')).toBeTruthy();
-    expect(within(strip).getByText('Selection')).toBeTruthy();
   });
 
   it('withdraws every register when its workspace unmounts', () => {
@@ -78,11 +77,11 @@ describe('workspace status registers', () => {
         <StatusStrip />
       </>,
     );
-    expect(screen.getByText('Graph')).toBeTruthy();
+    expect(screen.getByText('5 · Graph')).toBeTruthy();
 
     view.rerender(<StatusStrip />);
 
-    expect(screen.queryByText('Graph')).toBeNull();
+    expect(screen.queryByText('5 · Graph')).toBeNull();
     expect(document.querySelector('[data-register]')).toBeNull();
   });
 

@@ -45,7 +45,7 @@ describe('the graph register', () => {
       path: '',
       top_connected: [],
     } satisfies GraphOverviewPayloadV1;
-    expect(graphRegister(false, { outcome: 'envelope', envelope: envelope(overview, 'ready') })).toEqual({
+    expect(graphRegister(false, { outcome: 'envelope', envelope: envelope(overview, 'ready') })).toMatchObject({
       id: 'code:graph',
       label: 'Graph',
       value: 'ready',
@@ -85,7 +85,7 @@ describe('the index register', () => {
         outcome: 'envelope',
         envelope: envelope({ worktrees: [worktree], note: 'n' }, 'ready'),
       }),
-    ).toEqual({
+    ).toMatchObject({
       id: 'code:index',
       label: 'Index',
       value: 'fresh',
@@ -119,12 +119,15 @@ describe('the selection register', () => {
     expect(selectionRegister(null)).toMatchObject({ value: 'none', state: 'unknown' });
     expect(
       selectionRegister({ id: 'sym-1', name: 'subgraph_payload', kind: 'function' }),
-    ).toEqual({
+    ).toMatchObject({
       id: 'code:selection',
       label: 'Selection',
       value: 'subgraph_payload',
       state: 'identity',
       detail: 'function',
     });
+    // Each register carries its own glyph so the strip never falls back to a
+    // link icon for a graph, an index, or a selection.
+    expect(selectionRegister(null).icon).toBeTypeOf('object');
   });
 });

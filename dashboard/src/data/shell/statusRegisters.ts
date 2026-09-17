@@ -14,6 +14,7 @@
  * label carries the meaning, so colour is never the only channel.
  */
 import { useEffect, useMemo } from 'react';
+import type { LucideIcon } from 'lucide-react';
 import { create } from 'zustand';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
 
@@ -22,6 +23,9 @@ export interface StatusRegister {
   readonly id: string;
   /** The register's engraved name, e.g. `Graph`. */
   readonly label: string;
+  /** The 14px monoline glyph that identifies the subsystem beside its name.
+   * Identity only; the swatch and the word carry the state. */
+  readonly icon?: LucideIcon | undefined;
   /** The reading printed after the swatch, in the workspace's own words. */
   readonly value: string;
   /** Taxonomy state behind the reading, or `identity` for a register that
@@ -80,9 +84,15 @@ function flatten(owners: ReadonlyMap<string, readonly StatusRegister[]>): readon
 export function usePublishStatusRegisters(owner: string, registers: readonly StatusRegister[]) {
   const publish = useStatusRegistersStore((state) => state.publish);
   const withdraw = useStatusRegistersStore((state) => state.withdraw);
-  const signature = JSON.stringify(registers);
+  // The icon is a component reference and is not part of the reading; the
+  // signature covers everything that is, so equal readings do not republish.
+  const signature = JSON.stringify(
+    registers.map(({ id, label, value, state, detail }) => ({ id, label, value, state, detail })),
+  );
+  // `registers` is a fresh array every render; the signature is its identity,
+  // so it is deliberately the dependency rather than the array.
   useEffect(() => {
-    publish(owner, JSON.parse(signature) as StatusRegister[]);
+    publish(owner, registers);
   }, [owner, publish, signature]);
   useEffect(() => () => withdraw(owner), [owner, withdraw]);
 }
