@@ -137,55 +137,39 @@ export function BrainPage() {
                 {summary.truncated ? ' · truncated' : ''}
               </span>
             </div>
-            {/* Readouts state the measurements. The rail is the registry. */}
+            {/* The registry is the page. Readouts and the inspector sit in a
+             * rail beside it so no row is hidden behind chrome. */}
             <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-              {/* Below `lg` this is a vertical stack, and the column has to be
-                * allowed its natural height. Pinned to a share of the viewport
-                * it both squeezed the field and overflowed, and what would not
-                * fit painted straight through the registry rail beneath it.
-                * The shell's `main` is the scroll container, so giving the
-                * stack its real height simply makes the page scroll. From `lg`
-                * the two panes split the viewport and each owns its overflow
-                * again. */}
-              <div className="relative flex shrink-0 flex-col p-3 lg:min-h-0 lg:flex-1">
-                {viewedRepository ? <nav aria-label="Brain camera breadcrumb" className="mb-2 flex flex-wrap items-center gap-2 text-xs">
+              <RegistryPane>
+                <div className="flex flex-wrap items-end gap-3">
+                  <label className="text-2xs">Search project registry
+                    <input type="search" value={registryFilter} onChange={(event) => setRegistryFilter(event.target.value)} className="mt-1 w-full border border-edge-subtle bg-surface-0 p-2 text-xs sm:w-72" />
+                  </label>
+                  {query ? <p className="text-2xs text-text-muted">{matchingGroups.reduce((count, group) => count + group.projects.length, 0)} matching projects</p> : null}
+                  {/* The counts that are the same on every row, said once. */}
+                  {holdings?.uniformLine ? (
+                    <p className="text-3xs leading-relaxed text-text-muted">{holdings.uniformLine}</p>
+                  ) : null}
+                </div>
+                {viewedRepository ? <nav aria-label="Brain camera breadcrumb" className="flex flex-wrap items-center gap-2 text-xs">
                   <button type="button" className="td-hit underline" onClick={() => setRepositoryView(null)}>Registry overview</button>
                   <span aria-hidden> / </span><span>{viewedRepository.label} repository · {viewedRepository.projects.length} registered {viewedRepository.projects.length === 1 ? 'project' : 'projects'}</span>
                 </nav> : null}
-                <RegistryFieldView groups={groups} repository={viewedRepository} onInspect={setInspectedId} />
-              </div>
-              <RegistryRail>
-                {/* Keep row coordinates stable between pointer-down and click:
-                  * inspection must not insert content above its own trigger. */}
-                <div className="h-96 shrink-0 overflow-auto">
-                  {inspectedProject && inspectedGroup ? <ProjectInspector project={inspectedProject} group={inspectedGroup} onClose={() => setInspectedId(null)} onRepository={() => setRepositoryView(inspectedGroup.git_common_dir)} /> : <div className="flex h-full flex-col justify-center gap-3 border border-edge-subtle p-4 text-xs text-text-muted">
-                    <h2 className="font-semibold text-text-primary">Project inspection</h2>
-                    <p>Hover or focus a project to inspect its exact registry evidence.</p>
-                    <p>Click or Enter selects project scope. Escape dismisses inspection.</p>
-                  </div>}
+                <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                  {(viewedRepository ? [viewedRepository] : matchingGroups).map((group, index) => (
+                    <RepoGroupCard
+                      key={`${group.git_common_dir ?? group.label}#${index}`}
+                      group={group}
+                      holdings={holdings}
+                      onInspect={setInspectedId}
+                    />
+                  ))}
                 </div>
-                <label className="text-2xs">Search project registry
-                  <input type="search" value={registryFilter} onChange={(event) => setRegistryFilter(event.target.value)} className="mt-1 w-full border border-edge-subtle bg-surface-0 p-2 text-xs" />
-                </label>
-                {query ? <p className="text-2xs text-text-muted">{matchingGroups.reduce((count, group) => count + group.projects.length, 0)} matching projects</p> : null}
-                {/* The counts that are the same on every row, said once. Every
-                  * project in a real registry holds exactly one store and three
-                  * to five artifacts, so "1 ST · 4 ART" printed forty-four times
-                  * was one fact with forty-three echoes. */}
-                {holdings?.uniformLine ? (
-                  <p className="text-3xs leading-relaxed text-text-muted">
-                    {holdings.uniformLine}
-                  </p>
-                ) : null}
-                {matchingGroups.map((group, index) => (
-                  <RepoGroupCard
-                    key={`${group.git_common_dir ?? group.label}#${index}`}
-                    group={group}
-                    holdings={holdings}
-                    onInspect={setInspectedId}
-                  />
-                ))}
-              </RegistryRail>
+              </RegistryPane>
+              <aside aria-label="Registry readouts" className="flex w-full shrink-0 flex-col gap-3 border-t border-edge-subtle p-3 lg:w-96 lg:min-h-0 lg:overflow-auto lg:border-l lg:border-t-0">
+                <RegistryFieldView groups={groups} repository={viewedRepository} onInspect={setInspectedId} />
+                {inspectedProject && inspectedGroup ? <ProjectInspector project={inspectedProject} group={inspectedGroup} onClose={() => setInspectedId(null)} onRepository={() => setRepositoryView(inspectedGroup.git_common_dir)} /> : <p className="text-2xs text-text-muted">Hover or focus a project to inspect its registry evidence. Click or Enter selects project scope. Escape dismisses inspection.</p>}
+              </aside>
             </div>
           </div>
         );
@@ -194,22 +178,21 @@ export function BrainPage() {
   );
 }
 
-/** The registry side rail is a scroll container from `lg` and an ordinary
- * block below it, so its tab stop is measured from the rendered box (see
- * `useScrollTabStop`) instead of hard-coded, a literal `tabIndex={0}` gave
- * every keyboard user on a narrow screen a dead stop in front of the cards. */
-function RegistryRail({ children }: { children: ReactNode }) {
-  const railRef = useRef<HTMLElement>(null);
-  const railTabStop = useScrollTabStop(railRef);
+/** The registry pane is a scroll container from `lg` and an ordinary block
+ * below it, so its tab stop is measured from the rendered box (see
+ * `useScrollTabStop`) instead of hard-coded. */
+function RegistryPane({ children }: { children: ReactNode }) {
+  const paneRef = useRef<HTMLElement>(null);
+  const tabStop = useScrollTabStop(paneRef);
   return (
-    <aside
-      ref={railRef}
+    <section
+      ref={paneRef}
       aria-label="Project registry"
-      tabIndex={railTabStop}
-      className="flex w-full shrink-0 flex-col gap-2 border-t border-edge-subtle p-3 lg:w-80 lg:min-h-0 lg:overflow-auto lg:border-l lg:border-t-0"
+      tabIndex={tabStop}
+      className="flex min-h-0 flex-1 flex-col gap-3 p-3 lg:overflow-auto"
     >
       {children}
-    </aside>
+    </section>
   );
 }
 
@@ -253,7 +236,7 @@ function RegistryFieldView({
 
   return (
     <>
-      <div className="mb-2 flex shrink-0 flex-wrap items-start gap-2">
+      <div className="flex flex-col items-start gap-2">
         <InstrumentReadout
           items={[
             { label: 'repos', value: groups.length },
