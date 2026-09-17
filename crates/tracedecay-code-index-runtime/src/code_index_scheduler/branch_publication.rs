@@ -449,6 +449,16 @@ impl BranchPublicationContextV1 {
             .await
         {
             CodeIndexDemandAdmissionV1::Queued => {}
+            CodeIndexDemandAdmissionV1::NotApplicable => {
+                return Err(TraceDecayError::project_route(
+                    CODE_INDEX_IDENTITY_MISMATCH,
+                    false,
+                    format!(
+                        "branch generation publication does not apply to '{}': the route has no repository identity",
+                        canonical_worktree_root.display()
+                    ),
+                ));
+            }
             CodeIndexDemandAdmissionV1::Terminal(parked) => {
                 return Err(TraceDecayError::project_route(
                     CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT,
