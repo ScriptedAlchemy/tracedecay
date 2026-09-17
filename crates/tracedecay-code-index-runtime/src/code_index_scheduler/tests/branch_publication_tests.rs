@@ -8,8 +8,9 @@ use tracedecay_contracts::code_index_freshness::{
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 use super::super::branch_publication::{
-    BranchPublicationContextV1, branch_generation_work_is_active,
+    BranchPublicationContextV1, branch_generation_work_is_active, branch_refresh_admission_error,
 };
+use super::super::demand_admission::{CodeIndexDemandAdmissionV1, CodeIndexDemandUnavailableV1};
 use super::{ALPHA_LIB_V1, CodeIndexSchedulerRegistryV1, GitFixture, test_project_id};
 
 async fn mounted_registry(fixture: &GitFixture, store: &TempDir) -> CodeIndexSchedulerRegistryV1 {
@@ -42,6 +43,34 @@ fn branch_publication_requires_authoritative_project_identity() {
             false,
             "branch graph publication requires an authoritative project identity",
         ))
+    );
+}
+
+#[test]
+fn not_applicable_branch_refresh_is_observed_immediately() {
+    let root = std::path::Path::new("/tmp/not-a-repository");
+    let error = branch_refresh_admission_error(&CodeIndexDemandAdmissionV1::NotApplicable, root)
+        .expect("not-applicable must not wait for a generation");
+    assert_eq!(
+        error.project_route_context(),
+        Some((
+            "code_index_not_applicable",
+            false,
+            "code indexing does not apply for branch worktree '/tmp/not-a-repository'; no repository identity was admitted and no generation was queued",
+        ))
+    );
+    assert!(
+        branch_refresh_admission_error(&CodeIndexDemandAdmissionV1::Queued, root).is_none(),
+        "a queued demand is the only admission that may wait"
+    );
+    let unavailable = branch_refresh_admission_error(
+        &CodeIndexDemandAdmissionV1::Unavailable(CodeIndexDemandUnavailableV1::SchedulerUnmounted),
+        root,
+    )
+    .expect("unavailability stays a typed refusal");
+    assert_eq!(
+        unavailable.project_route_context().map(|context| context.0),
+        Some("code_index_scheduler_unavailable")
     );
 }
 

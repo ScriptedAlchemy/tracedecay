@@ -1543,7 +1543,10 @@ async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay_domain::err
                 "cli.daemon.status",
                 print!(
                     "{}",
-                    tracedecay_daemon_control::service_status(&socket_path)
+                    tracedecay_daemon_control::service_status(
+                        &socket_path,
+                        crate::product_runtime::PRODUCT_BUILD_VERSION,
+                    )
                 )
             );
         }

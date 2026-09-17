@@ -109,7 +109,7 @@ pub async fn run_doctor(
     eprintln!("\n\x1b[1mtracedecay doctor v{build_version}\x1b[0m\n");
 
     check_binary(&mut dc, build_version);
-    check_daemon_service(&mut dc);
+    check_daemon_service(&mut dc, build_version);
 
     eprintln!("\n\x1b[1mCurrent project\x1b[0m");
     let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -601,21 +601,31 @@ fn print_database_recovery_guidance(dc: &DoctorCounters, db_path: &Path) {
     }
 }
 
-/// Diagnose the managed user-service unit without contacting the daemon.
+/// Diagnose the managed user-service unit, then prove a running unit by
+/// initialize — not by `systemctl is-active` or a connectable socket.
 ///
 /// A stopped or disabled unit is visible without treating it as permission to
 /// activate the service; it may be an intentional operator hold.
-fn check_daemon_service(dc: &mut DoctorCounters) {
+fn check_daemon_service(dc: &mut DoctorCounters, build_version: &str) {
     eprintln!("\n\x1b[1mDaemon service\x1b[0m");
-    match tracedecay_daemon_control::installed_service_state() {
-        Ok(state) => {
-            let message = state.lifecycle_operator_advice();
-            match daemon_service_doctor_verdict(state) {
-                DaemonServiceDoctorVerdict::Pass => dc.pass(&message),
-                DaemonServiceDoctorVerdict::Warn => dc.warn(&message),
-            }
+    let state = match tracedecay_daemon_control::installed_service_state() {
+        Ok(state) => state,
+        Err(error) => {
+            dc.warn(&format!("Daemon service state could not be read: {error}"));
+            return;
         }
-        Err(error) => dc.warn(&format!("Daemon service state could not be read: {error}")),
+    };
+    let proof = match tracedecay_daemon_control::installed_service_process_proof(build_version) {
+        Ok(proof) => proof,
+        Err(error) => {
+            dc.warn(&format!("Daemon process proof could not be read: {error}"));
+            return;
+        }
+    };
+    let message = daemon_service_doctor_message(state, &proof);
+    match daemon_service_doctor_verdict(state, &proof) {
+        DaemonServiceDoctorVerdict::Pass => dc.pass(&message),
+        DaemonServiceDoctorVerdict::Warn => dc.warn(&message),
     }
 }
 
@@ -627,16 +637,45 @@ enum DaemonServiceDoctorVerdict {
 
 fn daemon_service_doctor_verdict(
     state: tracedecay_daemon_control::DaemonServiceState,
+    proof: &tracedecay_daemon_control::DaemonProcessProofV1,
 ) -> DaemonServiceDoctorVerdict {
     match state {
-        tracedecay_daemon_control::DaemonServiceState::RunningEnabled => {
+        tracedecay_daemon_control::DaemonServiceState::RunningEnabled
+            if proof.version_matches() =>
+        {
             DaemonServiceDoctorVerdict::Pass
         }
         tracedecay_daemon_control::DaemonServiceState::Missing
+        | tracedecay_daemon_control::DaemonServiceState::RunningEnabled
         | tracedecay_daemon_control::DaemonServiceState::RunningDisabled
         | tracedecay_daemon_control::DaemonServiceState::StoppedEnabled
         | tracedecay_daemon_control::DaemonServiceState::StoppedDisabled
         | tracedecay_daemon_control::DaemonServiceState::Masked => DaemonServiceDoctorVerdict::Warn,
+    }
+}
+
+fn daemon_service_doctor_message(
+    state: tracedecay_daemon_control::DaemonServiceState,
+    proof: &tracedecay_daemon_control::DaemonProcessProofV1,
+) -> String {
+    if !matches!(
+        state,
+        tracedecay_daemon_control::DaemonServiceState::RunningEnabled
+            | tracedecay_daemon_control::DaemonServiceState::RunningDisabled
+    ) {
+        return state.lifecycle_operator_advice();
+    }
+    match proof {
+        tracedecay_daemon_control::DaemonProcessProofV1::Ready => state.lifecycle_operator_advice(),
+        tracedecay_daemon_control::DaemonProcessProofV1::VersionMismatch { observed, expected } => {
+            format!(
+                "TraceDecay daemon unit is active, but initialize reported version {} not {expected}. Unit state is not proof this binary is serving.",
+                observed.as_deref().unwrap_or("missing")
+            )
+        }
+        tracedecay_daemon_control::DaemonProcessProofV1::Unproven { detail } => format!(
+            "TraceDecay daemon unit is active, but the process did not answer initialize ({detail}). Unit state is not proof the daemon is serving."
+        ),
     }
 }
 

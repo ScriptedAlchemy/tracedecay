@@ -26,7 +26,7 @@ mod tests;
 #[allow(clippy::expect_used)]
 mod update_restore_tests;
 
-pub use probe::daemon_reachable;
+pub use probe::{DaemonProcessProofV1, daemon_reachable};
 pub use unit_file::installed_service_socket_path;
 
 use probe::{
@@ -1281,6 +1281,28 @@ pub fn installed_service_state() -> Result<DaemonServiceState> {
     ServiceRunner::current()?.service_state(&socket_path)
 }
 
+/// Observe whether the managed unit's process completed initialize.
+///
+/// `Running` from systemd or a connectable socket is not this proof. A missing
+/// or stopped unit is [`DaemonProcessProofV1::Unproven`] without a probe.
+pub fn installed_service_process_proof(expected_version: &str) -> Result<DaemonProcessProofV1> {
+    let service_path = service_unit_path()?;
+    if !service_unit_exists(&service_path)? {
+        return Ok(DaemonProcessProofV1::Unproven {
+            detail: "no managed TraceDecay daemon service is installed".to_owned(),
+        });
+    }
+    let unit = read_service_unit(&service_path)?;
+    let socket_path = socket_path_from_unit_text(&unit).unwrap_or(default_socket_path()?);
+    let state = ServiceRunner::current()?.service_state(&socket_path)?;
+    if !state.is_running() {
+        return Ok(DaemonProcessProofV1::Unproven {
+            detail: "managed daemon unit is not running".to_owned(),
+        });
+    }
+    Ok(probe::probe_daemon_process(&socket_path, expected_version))
+}
+
 #[hotpath::measure(label = "daemon.service.start")]
 pub fn start_service(expected_version: &str) -> Result<()> {
     let service_path = service_unit_path()?;
@@ -1490,7 +1512,7 @@ fn uninstall_service_under_lease(stop: bool, expected_version: &str) -> Result<P
 }
 
 #[hotpath::measure(label = "daemon.service.status")]
-pub fn service_status(socket_path: &Path) -> String {
+pub fn service_status(socket_path: &Path, expected_version: &str) -> String {
     let transport_path = if cfg!(unix) {
         socket_path.to_path_buf()
     } else {
@@ -1499,7 +1521,7 @@ pub fn service_status(socket_path: &Path) -> String {
             .flatten()
             .unwrap_or_else(|| socket_path.to_path_buf())
     };
-    let socket_state = daemon_socket_state(&transport_path);
+    let (socket_state, process) = probe::observe_daemon_process(&transport_path, expected_version);
     let service = service_unit_path().map_or_else(
         |e| format!("unavailable: {e}"),
         |path| path.display().to_string(),
@@ -1524,6 +1546,6 @@ pub fn service_status(socket_path: &Path) -> String {
     let transport_kind = if cfg!(unix) { "socket" } else { "endpoint" };
     let transport = daemon_transport_display(&transport_path);
     format!(
-        "service: {service}\nstate: {state}\n{transport_kind}: {transport} ({socket_state})\n{detail}logs: {logs}\n",
+        "service: {service}\nstate: {state}\n{transport_kind}: {transport} ({socket_state})\nprotocol: {process:?}\n{detail}logs: {logs}\n",
     )
 }

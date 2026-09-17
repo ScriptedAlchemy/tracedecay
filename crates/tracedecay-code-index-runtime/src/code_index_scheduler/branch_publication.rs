@@ -25,6 +25,7 @@ use super::{
     ServingGenerationInstallationOutcomeV1, ServingGenerationRollbackOutcomeV1,
 };
 
+const CODE_INDEX_NOT_APPLICABLE: &str = "code_index_not_applicable";
 const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
 const CODE_INDEX_ACTIVATION_UNAVAILABLE: &str = "code_index_activation_unavailable";
 const CODE_INDEX_IDENTITY_MISMATCH: &str = "code_index_scheduler_identity_mismatch";
@@ -32,6 +33,42 @@ const GIT_SNAPSHOT_UNAVAILABLE: &str = "git_snapshot_unavailable";
 const BRANCH_TRACKING_FAILED: &str = "branch_tracking_failed";
 const BRANCH_GENERATION_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 const BRANCH_GENERATION_HARD_TIMEOUT: Duration = Duration::from_mins(30);
+
+/// Immediate refusal for a branch refresh that was not queued.
+///
+/// `None` means the caller may wait for a generation. `NotApplicable` must
+/// not fall through into that wait: nothing was queued, so an idle timeout
+/// would look like a slow scheduler instead of an observed non-admission.
+pub(super) fn branch_refresh_admission_error(
+    admission: &CodeIndexDemandAdmissionV1,
+    canonical_worktree_root: &Path,
+) -> Option<TraceDecayError> {
+    match admission {
+        CodeIndexDemandAdmissionV1::Queued => None,
+        CodeIndexDemandAdmissionV1::NotApplicable => Some(TraceDecayError::project_route(
+            CODE_INDEX_NOT_APPLICABLE,
+            false,
+            format!(
+                "code indexing does not apply for branch worktree '{}'; no repository identity was admitted and no generation was queued",
+                canonical_worktree_root.display()
+            ),
+        )),
+        CodeIndexDemandAdmissionV1::Terminal(parked) => Some(TraceDecayError::project_route(
+            CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT,
+            false,
+            format!("{}; {}", parked.reason, parked.remediation),
+        )),
+        CodeIndexDemandAdmissionV1::RefusedByPolicy
+        | CodeIndexDemandAdmissionV1::Unavailable(_) => Some(TraceDecayError::project_route(
+            CODE_INDEX_SCHEDULER_UNAVAILABLE,
+            true,
+            format!(
+                "code-index scheduler rejected refresh for branch worktree '{}'",
+                canonical_worktree_root.display()
+            ),
+        )),
+    }
+}
 
 fn branch_publication_cancelled_error(branch: &str) -> TraceDecayError {
     TraceDecayError::project_route(
@@ -444,29 +481,11 @@ impl BranchPublicationContextV1 {
                 ),
             ));
         }
-        match schedulers
+        let admission = schedulers
             .notify_hook_overflow(canonical_worktree_root)
-            .await
-        {
-            CodeIndexDemandAdmissionV1::Queued => {}
-            CodeIndexDemandAdmissionV1::Terminal(parked) => {
-                return Err(TraceDecayError::project_route(
-                    CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT,
-                    false,
-                    format!("{}; {}", parked.reason, parked.remediation),
-                ));
-            }
-            CodeIndexDemandAdmissionV1::RefusedByPolicy
-            | CodeIndexDemandAdmissionV1::Unavailable(_) => {
-                return Err(TraceDecayError::project_route(
-                    CODE_INDEX_SCHEDULER_UNAVAILABLE,
-                    true,
-                    format!(
-                        "code-index scheduler rejected refresh for branch worktree '{}'",
-                        canonical_worktree_root.display()
-                    ),
-                ));
-            }
+            .await;
+        if let Some(error) = branch_refresh_admission_error(&admission, canonical_worktree_root) {
+            return Err(error);
         }
         let hard_deadline = Instant::now() + BRANCH_GENERATION_HARD_TIMEOUT;
         let mut idle_deadline = Instant::now() + BRANCH_GENERATION_IDLE_TIMEOUT;

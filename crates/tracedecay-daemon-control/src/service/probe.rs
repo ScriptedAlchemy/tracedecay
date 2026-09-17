@@ -4,6 +4,7 @@ use std::net::TcpStream as StdTcpStream;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::Path;
+use std::time::Duration;
 
 #[cfg(not(unix))]
 use tracedecay_daemon_identity::authority;
@@ -11,7 +12,6 @@ use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_identity::client_connection;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-#[cfg(unix)]
 use super::default_socket_path;
 
 trait ProbeStream: Read + IoWrite {
@@ -41,19 +41,116 @@ impl ProbeStream for StdTcpStream {
     }
 }
 
-/// Whether a daemon is accepting connections at the default socket path.
+/// How long a routing check waits for initialize before treating the listener
+/// as unproven. A connect that never answers must not count as a live daemon.
+const DAEMON_REACHABILITY_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// What an initialize probe actually observed.
 ///
-/// Installers use this to warn when a daemon-scheduled feature is enabled but
-/// no daemon service is running to execute it.
-#[cfg(unix)]
-pub fn daemon_reachable() -> bool {
-    default_socket_path().is_ok_and(|path| StdUnixStream::connect(path).is_ok())
+/// Socket acceptance and service-manager "active" are not this type. Only a
+/// completed initialize exchange produces [`Ready`] or [`VersionMismatch`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonProcessProofV1 {
+    /// initialize returned `serverInfo.name = tracedecay` at `expected_version`.
+    Ready,
+    /// A `TraceDecay` process answered initialize at a different version.
+    VersionMismatch {
+        observed: Option<String>,
+        expected: String,
+    },
+    /// Nothing completed an initialize exchange that named this daemon.
+    Unproven { detail: String },
 }
 
-#[cfg(not(unix))]
+impl DaemonProcessProofV1 {
+    /// A `TraceDecay` process answered, regardless of version.
+    #[must_use]
+    pub fn names_tracedecay(&self) -> bool {
+        matches!(self, Self::Ready | Self::VersionMismatch { .. })
+    }
+
+    /// The answering process is this binary's version.
+    #[must_use]
+    pub fn version_matches(&self) -> bool {
+        matches!(self, Self::Ready)
+    }
+}
+
+/// Whether the default socket's process completed initialize as `TraceDecay`.
+///
+/// A listening socket is not enough: installers and `tracedecay init` use this
+/// to decide that a daemon can admit work. Version mismatch still counts —
+/// an older process is running and still owns the profile.
 pub fn daemon_reachable() -> bool {
-    super::default_socket_path()
-        .is_ok_and(|path| matches!(daemon_socket_state(&path), DaemonSocketState::Connectable))
+    default_socket_path().is_ok_and(|path| {
+        probe_daemon_process_with_timeout(
+            &path,
+            env!("CARGO_PKG_VERSION"),
+            DAEMON_REACHABILITY_PROBE_TIMEOUT,
+        )
+        .names_tracedecay()
+    })
+}
+
+/// Probe `socket_path` once and return both the socket observation and the
+/// initialize proof. Callers must not connect again to classify liveness.
+pub(super) fn observe_daemon_process(
+    socket_path: &Path,
+    expected_version: &str,
+) -> (DaemonSocketState, DaemonProcessProofV1) {
+    observe_daemon_process_with_timeout(socket_path, expected_version, Duration::from_secs(1))
+}
+
+pub(super) fn observe_daemon_process_with_timeout(
+    socket_path: &Path,
+    expected_version: &str,
+    timeout: Duration,
+) -> (DaemonSocketState, DaemonProcessProofV1) {
+    let (socket, protocol) = daemon_readiness_probe(socket_path, expected_version, timeout);
+    (socket, proof_from_protocol(protocol))
+}
+
+/// Probe `socket_path` with the operator timeout used by daemon status.
+pub(super) fn probe_daemon_process(
+    socket_path: &Path,
+    expected_version: &str,
+) -> DaemonProcessProofV1 {
+    observe_daemon_process(socket_path, expected_version).1
+}
+
+pub(super) fn probe_daemon_process_with_timeout(
+    socket_path: &Path,
+    expected_version: &str,
+    timeout: Duration,
+) -> DaemonProcessProofV1 {
+    observe_daemon_process_with_timeout(socket_path, expected_version, timeout).1
+}
+
+fn proof_from_protocol(protocol: DaemonProtocolState) -> DaemonProcessProofV1 {
+    match protocol {
+        DaemonProtocolState::Ready => DaemonProcessProofV1::Ready,
+        DaemonProtocolState::IdentityMismatch {
+            name,
+            version,
+            expected_version,
+        } if name.as_deref() == Some("tracedecay") => DaemonProcessProofV1::VersionMismatch {
+            observed: version,
+            expected: expected_version,
+        },
+        DaemonProtocolState::IdentityMismatch {
+            name,
+            version,
+            expected_version,
+        } => DaemonProcessProofV1::Unproven {
+            detail: format!(
+                "initialize named {name:?}/{version:?}, expected tracedecay/{expected_version}"
+            ),
+        },
+        DaemonProtocolState::NotRequired => DaemonProcessProofV1::Unproven {
+            detail: "protocol probe was not required".to_owned(),
+        },
+        DaemonProtocolState::Unresponsive(detail) => DaemonProcessProofV1::Unproven { detail },
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

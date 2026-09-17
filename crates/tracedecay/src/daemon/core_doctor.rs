@@ -303,17 +303,26 @@ async fn doctor_runtime_value_inner(
     let canonical_graph_path = graph_path
         .canonicalize()
         .unwrap_or_else(|_| graph_path.clone());
-    // A daemon-retained project route that passed post-open health validation
-    // and has not been revoked is live evidence on its own: the fast runtime
-    // snapshot projects that retained liveness instead of re-probing SQLite
-    // (`quick_check`, page counts, schema pragma) on every doctor read.
-    let route_live = {
+    // A retained admission bool is not a store observation. If the file the
+    // route was opened against is gone, say so — do not project "live".
+    let route_retained = {
         let servers = store_administration.project_servers().lock().await;
         servers.servers.iter().any(|(key, entry)| {
             key.project_root == canonical_project_path
                 && entry.server.project_route_live() == Some(true)
         })
     };
+    if route_retained && !graph_path.is_file() {
+        return doctor_runtime_unavailable(
+            build_version,
+            Some(project_path),
+            "project_store_missing",
+        );
+    }
+    // Skip the SQLite integrity probes on a retained route, but do not call
+    // that skip liveness. Status stays `retained` until quick_check and the
+    // schema pragma are actually read.
+    let route_live = route_retained;
     let (quick_check_ok, quick_check_error) = if route_live {
         (None, None)
     } else {
@@ -344,8 +353,8 @@ async fn doctor_runtime_value_inner(
     let page_size = page_counts.map(|(page_size, _, _)| page_size);
     let expected_schema_version = tracedecay_runtime_core::db::migrations::SCHEMA_VERSION;
     let schema_version = if route_live {
-        // Retained liveness proves that this route was admitted, but the fast
-        // Doctor snapshot deliberately does not re-read the schema pragma.
+        // Retained admission is not a schema observation. Leave the pragma
+        // unread rather than inventing the compiled version.
         None
     } else {
         match Box::pin(
@@ -386,8 +395,12 @@ async fn doctor_runtime_value_inner(
             "schema_drift": schema_drift,
         },
         "doctor_runtime": {
-            "status": if route_live { "live" } else { "complete" },
-            "reason": null,
+            "status": if route_live { "retained" } else { "complete" },
+            "reason": if route_live {
+                serde_json::Value::String("storage_integrity_not_reobserved".to_owned())
+            } else {
+                serde_json::Value::Null
+            },
             "read_only": true,
         },
     });
@@ -1064,8 +1077,13 @@ mod doctor_runtime_route_tests {
 
         assert_eq!(
             value.pointer("/doctor_runtime/status"),
-            Some(&serde_json::json!("live")),
-            "fast runtime health must project retained liveness without probing SQLite"
+            Some(&serde_json::json!("retained")),
+            "a skipped integrity probe must not be reported as live"
+        );
+        assert_eq!(
+            value.pointer("/doctor_runtime/reason"),
+            Some(&serde_json::json!("storage_integrity_not_reobserved")),
+            "retained admission must name the observation it skipped"
         );
         assert_eq!(
             value.pointer("/database/quick_check_ok"),
