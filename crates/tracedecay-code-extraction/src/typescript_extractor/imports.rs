@@ -220,6 +220,7 @@ fn push_evidence(
         imported_name: names.0,
         local_name: names.1,
         is_public: false,
+        is_restricted_public: false,
         is_glob: false,
         namespace,
         module_kind,
