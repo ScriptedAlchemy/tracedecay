@@ -135,8 +135,8 @@
     }
   ],
   "expected_query_fallback_digests": {
-    "train": "sha256:9712f2369d36e63d61db3500e011365c9baf6d919d6fb1ebb8cc16056893e873",
-    "validation": "sha256:af62a12c41cd6da521088cc1a9cbd5c771812872f1ade5aefe4adb25569b8083"
+    "train": "sha256:69c146e6907e73fe9396fef8ab117ef402e48e69b633a5333f9c3aa981f953a5",
+    "validation": "sha256:d1814281a5bbe67dccd394308fd23853b55b179b75c8f8b18eb40bc02c038a2e"
   },
   "profile_matrix": [
     {
