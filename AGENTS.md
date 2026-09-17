@@ -19,6 +19,13 @@ for affected behavior and broaden only for unresolved risk. Documentation-only
 edits do not require application builds. Pause for a missing decision or an
 unauthorized external action after completing independent, authorized work.
 
+## Working checkout authority
+
+- Always work in the primary checkout at `/fast/projects/tracedecay`.
+- Always work on `codex/tracedecay-total-redesign-plan-reopened`, the head branch
+  of PR #707. Merge outside work into this branch before continuing.
+- Do not create or use linked worktrees or work from another branch.
+
 ## Layout
 
 - The repository root is a **virtual workspace** — it has no package of its
@@ -62,11 +69,10 @@ unauthorized external action after completing independent, authorized work.
   prebuilt `dashboard/app-dist`, set `TRACEDECAY_SKIP_DASHBOARD_BUILD=1` and the
   digest from `scripts/check-dashboard-bundle.py` in
   `TRACEDECAY_DASHBOARD_BUNDLE_SHA256`; missing or stale digests fail closed.
-- Create linked worktrees with `scripts/agent-worktree.sh`, which locks the
-  lane and prints its build environment. Clean up through `scripts/worktree-gc.sh`
-  or by unlocking and removing only your exact path. Never remove another lane,
-  select cleanup targets by name prefix, or treat a clean integration-tip lane
-  as abandoned.
+- Existing linked worktrees may be cleaned up only through
+  `scripts/worktree-gc.sh`, or by unlocking and removing the exact owned path.
+  Never remove another lane, select cleanup targets by name prefix, or treat a
+  clean integration-tip lane as abandoned.
 - Never re-run tests that are known-red under another active lane; cite the
   owner instead.
 
