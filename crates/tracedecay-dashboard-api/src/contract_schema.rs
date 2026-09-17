@@ -67,7 +67,9 @@ use super::memory_api::{
 use super::projects::{ProjectContextPayloadV1, ProjectsPayloadV1};
 use super::read_model::{DASHBOARD_SCHEMA_REVISION_V1, DashboardEnvelopeV1};
 use super::remote_status_api::RemoteOperationalStatusPayloadV1;
-use super::savings_api::{SavingsOverviewPayloadV1, SavingsSessionsPayloadV1};
+use super::savings_api::{
+    SavingsModelsPayloadV1, SavingsOverviewPayloadV1, SavingsSessionsPayloadV1,
+};
 use super::settings_api::{
     CodeIndexWorkerSettingsPatch, ProjectSettingsPatch, SettingsPayloadV1, UserSettingsPatch,
 };
@@ -116,6 +118,7 @@ struct DashboardContractCatalogV1 {
     analytics_diagnostics: DashboardEnvelopeV1<Option<AnalyticsDiagnosticsPayloadV1>>,
     savings_overview: DashboardEnvelopeV1<Option<SavingsOverviewPayloadV1>>,
     savings_sessions: SavingsSessionsPayloadV1,
+    savings_models: SavingsModelsPayloadV1,
     lcm_session: DashboardEnvelopeV1<Option<LcmSessionPayloadV1>>,
     lcm_timeline: DashboardEnvelopeV1<Option<LcmTimelinePayloadV1>>,
     lcm_overview: DashboardEnvelopeV1<Option<LcmOverviewPayloadV1>>,
@@ -579,6 +582,9 @@ mod tests {
             "AnalyticsOverviewPayloadV1",
             "SavingsOverviewPayloadV1",
             "SavingsSessionsPayloadV1",
+            "SavingsModelsPayloadV1",
+            "SavingsProviderSpendV1",
+            "SavingsProviderDayPointV1",
             "LcmSessionPayloadV1",
             "LcmTimelinePayloadV1",
             "LcmMessageV1",

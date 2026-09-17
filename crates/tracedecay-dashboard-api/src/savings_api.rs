@@ -256,6 +256,148 @@ pub(super) struct SavingsSessionsPayloadV1 {
     sessions: Vec<SavingsSessionRowV1>,
 }
 
+/// One model-keyed content aggregate from the session store, joined to the
+/// exact provider usage recorded for that model. `model` is `None` for
+/// messages whose model was never recorded; that row keeps its token counts
+/// and is priced by nothing.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsModelRowV1 {
+    model: Option<String>,
+    sessions: i64,
+    tokenizer: Option<Value>,
+    messages: i64,
+    provider_usage_events: i64,
+    tokenized_messages: i64,
+    estimated_messages: i64,
+    cost_basis: String,
+    provider_actual: Option<TokenActualV1>,
+    tokenized: TokenPairV1,
+    estimated: TokenPairV1,
+}
+
+/// One UTC-day bucket of the per-model content aggregate.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsModelDayRowV1 {
+    day: i64,
+    model: Option<String>,
+    messages: i64,
+    provider_usage_events: i64,
+    tokenized_messages: i64,
+    estimated_messages: i64,
+    cost_basis: String,
+    provider_actual: Option<TokenActualV1>,
+    tokenized: TokenPairV1,
+    estimated: TokenPairV1,
+}
+
+/// Canonical priced usage for one exact provider/model pair. `cost_usd` is
+/// `None` whenever any usage event in the pair could not be priced: the
+/// projector never emits a partial dollar figure for a model.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsProviderModelSpendV1 {
+    provider: String,
+    model: Option<String>,
+    usage_events: i64,
+    cost_usd: Option<f64>,
+    total_tokens: Option<i64>,
+    cost_basis: String,
+    provider_actual: Option<TokenActualV1>,
+}
+
+/// Canonical priced usage for one UTC day across every provider.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsProviderDaySpendV1 {
+    day: i64,
+    usage_events: i64,
+    cost_usd: Option<f64>,
+    total_tokens: Option<i64>,
+    provider_actual: Option<TokenActualV1>,
+}
+
+/// How much of one provider's observed usage the pricing authority could
+/// price. `priced` means every usage event priced; `partial` means some did
+/// and the dollar figure covers only those; `unpriced` means none did.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum SavingsPricingClassV1 {
+    Priced,
+    Partial,
+    Unpriced,
+}
+
+/// Provider-level spend attribution over exact provider usage observations.
+///
+/// `priced_cost_usd` sums only the model groups the canonical projector
+/// priced completely, and the event/model counts beside it say how much of
+/// the provider's usage that figure covers. `total_cost_usd` is the
+/// projector's own complete total and is `None` unless every event priced.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsProviderSpendV1 {
+    provider: String,
+    pricing: SavingsPricingClassV1,
+    usage_events: i64,
+    priced_events: i64,
+    unpriced_events: i64,
+    /// Usage events whose observation carried no model identity. They are
+    /// counted in `unpriced_events` as well: no model means no rate.
+    unknown_model_events: i64,
+    /// Usage events with no native timestamp. They are attributed here but
+    /// cannot be placed on the dated series.
+    undated_events: i64,
+    models: i64,
+    priced_models: i64,
+    unpriced_models: i64,
+    sessions: i64,
+    priced_cost_usd: Option<f64>,
+    total_cost_usd: Option<f64>,
+    total_tokens: Option<i64>,
+    provider_actual: Option<TokenActualV1>,
+}
+
+/// One provider's canonical priced usage on one UTC day.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsProviderDayPointV1 {
+    day: i64,
+    provider: String,
+    usage_events: i64,
+    priced_events: i64,
+    unpriced_events: i64,
+    priced_cost_usd: Option<f64>,
+    total_cost_usd: Option<f64>,
+    total_tokens: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsProviderUsageAttributionV1 {
+    available: bool,
+    #[serde(default)]
+    pricing_revision: Option<String>,
+    #[serde(default)]
+    undated_events: Option<i64>,
+    by_model: Vec<SavingsProviderModelSpendV1>,
+    by_day: Vec<SavingsProviderDaySpendV1>,
+    by_provider: Vec<SavingsProviderSpendV1>,
+    by_provider_day: Vec<SavingsProviderDayPointV1>,
+}
+
+/// GET `/api/plugins/savings/models` response contract.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct SavingsModelsPayloadV1 {
+    available: bool,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+    range: String,
+    #[serde(default)]
+    since: Option<i64>,
+    models: Vec<SavingsModelRowV1>,
+    daily: Vec<SavingsModelDayRowV1>,
+    #[serde(default)]
+    provider_usage_coverage: Option<String>,
+    provider_usage: SavingsProviderUsageAttributionV1,
+}
+
 fn decode_contract<T: DeserializeOwned>(payload: Value, label: &str) -> Result<T, String> {
     serde_json::from_value(payload)
         .map_err(|error| format!("{label} did not match its response contract: {error}"))
@@ -358,6 +500,263 @@ fn price_deltas<'a>(
         issues: Vec::new(),
     };
     price_provider_usage(&aggregate, prices, 0)
+}
+
+fn count_i64(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn count_u64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn cost_basis_label(cost_usd: Option<f64>) -> &'static str {
+    if cost_usd.is_some() {
+        "provider_reported_priced"
+    } else {
+        "provider_reported_unpriced"
+    }
+}
+
+fn total_tokens_of(actual: Option<&TokenActualV1>) -> Option<i64> {
+    actual.and_then(|tokens| tokens.input_tokens?.checked_add(tokens.output_tokens?))
+}
+
+/// The dollar figure the canonical projector priced completely, and the
+/// population it covers. Sums only model groups whose every usage event
+/// priced; a group with one unpriced event contributes nothing, and the
+/// counts beside the sum say so.
+struct PricedSubtotal {
+    priced_cost_usd: Option<f64>,
+    priced_events: u64,
+    priced_models: usize,
+    unpriced_models: usize,
+}
+
+fn priced_subtotal(
+    summary: &tracedecay_session_memory::provider_usage::ProviderUsageCostSummaryV1,
+) -> PricedSubtotal {
+    let mut priced_cost = 0.0_f64;
+    let mut priced_events = 0_u64;
+    let mut priced_models = 0_usize;
+    let mut unpriced_models = 0_usize;
+    for model in &summary.by_model {
+        match model.cost_usd {
+            Some(cost) => {
+                priced_cost += cost;
+                priced_events = priced_events.saturating_add(model.usage_events);
+                priced_models += 1;
+            }
+            None => unpriced_models += 1,
+        }
+    }
+    PricedSubtotal {
+        priced_cost_usd: (priced_events > 0 && priced_cost.is_finite()).then_some(priced_cost),
+        priced_events,
+        priced_models,
+        unpriced_models,
+    }
+}
+
+fn pricing_class(
+    usage_events: u64,
+    unpriced_events: u64,
+    priced_events: u64,
+) -> SavingsPricingClassV1 {
+    if usage_events > 0 && unpriced_events == 0 {
+        SavingsPricingClassV1::Priced
+    } else if priced_events > 0 {
+        SavingsPricingClassV1::Partial
+    } else {
+        SavingsPricingClassV1::Unpriced
+    }
+}
+
+/// Provider-level attribution over one provider's exact usage deltas, priced
+/// by the canonical projection so every dollar here agrees with `/api/costs`.
+fn provider_spend(
+    provider: &str,
+    deltas: &[&ProviderUsageDeltaV1],
+    prices: &tracedecay_session_memory::provider_pricing::PriceTable,
+) -> SavingsProviderSpendV1 {
+    let summary = price_deltas(deltas.iter().copied(), prices);
+    let subtotal = priced_subtotal(&summary);
+    let (_, actual) = actual_for_deltas(deltas.iter().copied());
+    let sessions = deltas
+        .iter()
+        .map(|delta| delta.session_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    SavingsProviderSpendV1 {
+        provider: provider.to_owned(),
+        pricing: pricing_class(
+            summary.usage_events,
+            summary.unpriced_events,
+            subtotal.priced_events,
+        ),
+        usage_events: count_u64(summary.usage_events),
+        priced_events: count_u64(subtotal.priced_events),
+        unpriced_events: count_u64(summary.unpriced_events),
+        unknown_model_events: count_i64(
+            deltas.iter().filter(|delta| delta.model.is_none()).count(),
+        ),
+        undated_events: count_i64(
+            deltas
+                .iter()
+                .filter(|delta| delta.native_timestamp.is_none())
+                .count(),
+        ),
+        models: count_i64(summary.by_model.len()),
+        priced_models: count_i64(subtotal.priced_models),
+        unpriced_models: count_i64(subtotal.unpriced_models),
+        sessions: count_i64(sessions),
+        priced_cost_usd: subtotal.priced_cost_usd,
+        total_cost_usd: summary.total_cost_usd,
+        total_tokens: total_tokens_of(actual.as_ref()),
+        provider_actual: actual,
+    }
+}
+
+fn provider_day_point(
+    day: i64,
+    provider: &str,
+    deltas: &[&ProviderUsageDeltaV1],
+    prices: &tracedecay_session_memory::provider_pricing::PriceTable,
+) -> SavingsProviderDayPointV1 {
+    let summary = price_deltas(deltas.iter().copied(), prices);
+    let subtotal = priced_subtotal(&summary);
+    let (_, actual) = actual_for_deltas(deltas.iter().copied());
+    SavingsProviderDayPointV1 {
+        day,
+        provider: provider.to_owned(),
+        usage_events: count_u64(summary.usage_events),
+        priced_events: count_u64(subtotal.priced_events),
+        unpriced_events: count_u64(summary.unpriced_events),
+        priced_cost_usd: subtotal.priced_cost_usd,
+        total_cost_usd: summary.total_cost_usd,
+        total_tokens: total_tokens_of(actual.as_ref()),
+    }
+}
+
+fn day_bucket(timestamp: i64) -> i64 {
+    (timestamp / 86_400) * 86_400
+}
+
+/// The provider-usage attribution block of `/models`: exact deltas grouped by
+/// provider/model, day, provider, and provider/day, each priced by the same
+/// canonical projection. `since == 0` admits undated deltas to every
+/// non-dated grouping; a positive range excludes them, as the SQL folds do.
+fn provider_usage_attribution(
+    deltas: &[ProviderUsageDeltaV1],
+    since: i64,
+    prices: &tracedecay_session_memory::provider_pricing::PriceTable,
+) -> SavingsProviderUsageAttributionV1 {
+    const DAY_LIMIT: usize = 366;
+    let in_range = deltas
+        .iter()
+        .filter(|delta| {
+            since == 0
+                || delta
+                    .native_timestamp
+                    .is_some_and(|timestamp| timestamp >= since)
+        })
+        .collect::<Vec<_>>();
+
+    let mut by_model: BTreeMap<(String, String), Vec<&ProviderUsageDeltaV1>> = BTreeMap::new();
+    let mut by_day: BTreeMap<i64, Vec<&ProviderUsageDeltaV1>> = BTreeMap::new();
+    let mut by_provider: BTreeMap<String, Vec<&ProviderUsageDeltaV1>> = BTreeMap::new();
+    let mut by_provider_day: BTreeMap<(i64, String), Vec<&ProviderUsageDeltaV1>> = BTreeMap::new();
+    let mut undated_events = 0_usize;
+    for delta in in_range {
+        by_model
+            .entry((
+                delta.provider.clone(),
+                delta.model.clone().unwrap_or_default(),
+            ))
+            .or_default()
+            .push(delta);
+        by_provider
+            .entry(delta.provider.clone())
+            .or_default()
+            .push(delta);
+        match delta.native_timestamp {
+            Some(timestamp) => {
+                let day = day_bucket(timestamp);
+                by_day.entry(day).or_default().push(delta);
+                by_provider_day
+                    .entry((day, delta.provider.clone()))
+                    .or_default()
+                    .push(delta);
+            }
+            None => undated_events += 1,
+        }
+    }
+
+    // The dated series keep the newest 366 days, as the content series does.
+    let day_floor = by_day
+        .keys()
+        .rev()
+        .nth(DAY_LIMIT - 1)
+        .copied()
+        .unwrap_or(i64::MIN);
+
+    SavingsProviderUsageAttributionV1 {
+        available: true,
+        pricing_revision: Some(prices.revision.clone()),
+        undated_events: Some(count_i64(undated_events)),
+        by_model: by_model
+            .into_iter()
+            .map(|((provider, model), deltas)| {
+                let priced = price_deltas(deltas.iter().copied(), prices);
+                let (_, actual) = actual_for_deltas(deltas.into_iter());
+                SavingsProviderModelSpendV1 {
+                    provider,
+                    model: (!model.is_empty()).then_some(model),
+                    usage_events: count_u64(priced.usage_events),
+                    cost_usd: priced.total_cost_usd,
+                    total_tokens: total_tokens_of(actual.as_ref()),
+                    cost_basis: cost_basis_label(priced.total_cost_usd).to_owned(),
+                    provider_actual: actual,
+                }
+            })
+            .collect(),
+        by_day: by_day
+            .into_iter()
+            .filter(|(day, _)| *day >= day_floor)
+            .map(|(day, deltas)| {
+                let priced = price_deltas(deltas.iter().copied(), prices);
+                let (_, actual) = actual_for_deltas(deltas.into_iter());
+                SavingsProviderDaySpendV1 {
+                    day,
+                    usage_events: count_u64(priced.usage_events),
+                    cost_usd: priced.total_cost_usd,
+                    total_tokens: total_tokens_of(actual.as_ref()),
+                    provider_actual: actual,
+                }
+            })
+            .collect(),
+        by_provider: by_provider
+            .iter()
+            .map(|(provider, deltas)| provider_spend(provider, deltas, prices))
+            .collect(),
+        by_provider_day: by_provider_day
+            .iter()
+            .filter(|((day, _), _)| *day >= day_floor)
+            .map(|((day, provider), deltas)| provider_day_point(*day, provider, deltas, prices))
+            .collect(),
+    }
+}
+
+fn unavailable_provider_usage_attribution() -> SavingsProviderUsageAttributionV1 {
+    SavingsProviderUsageAttributionV1 {
+        available: false,
+        pricing_revision: None,
+        undated_events: None,
+        by_model: Vec::new(),
+        by_day: Vec::new(),
+        by_provider: Vec::new(),
+        by_provider_day: Vec::new(),
+    }
 }
 
 fn apply_provider_actual(block: &mut Value, event_count: usize, actual: Option<TokenActualV1>) {
@@ -1180,18 +1579,45 @@ pub async fn sessions(
     .await
 }
 
+/// The typed `/models` failure body: the request could not be served and no
+/// row of it is invented. `range` echoes what was asked for.
+fn models_read_failed(range: Option<&str>, error: String) -> SavingsModelsPayloadV1 {
+    SavingsModelsPayloadV1 {
+        available: false,
+        status: Some("read_failed".to_owned()),
+        error: Some(error),
+        range: range.unwrap_or("all").to_owned(),
+        since: None,
+        models: Vec::new(),
+        daily: Vec::new(),
+        provider_usage_coverage: None,
+        provider_usage: unavailable_provider_usage_attribution(),
+    }
+}
+
 /// GET `/api/plugins/savings/models?range=`
 ///
 /// Per-model token aggregates from the session store plus canonical
-/// provider-usage cost grouped by exact provider/model and day.
+/// provider-usage cost grouped by exact provider/model, day, provider, and
+/// provider/day. Every dollar figure comes from the same pricing projection
+/// `/api/costs` serves; unpriced usage keeps its counts and gets no price.
 #[hotpath::measure(label = "dashboard_api.savings.models", future = true)]
 pub async fn models(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<RangeParams>,
-) -> Json<Value> {
+) -> Response {
     let (range, since) = match range_since(params.range.as_deref()) {
         Ok(range) => range,
-        Err(error) => return Json(read_failed_block(error)),
+        // The caller named a window this route does not serve: a request
+        // fault, answered as one, with the typed empty body rather than a
+        // ledger of zeros.
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(models_read_failed(params.range.as_deref(), error)),
+            )
+                .into_response();
+        }
     };
     let provider_scope = provider_usage_scope(&state);
     let provider_usage = match (state.lcm_db.as_deref(), provider_scope.as_ref()) {
@@ -1217,7 +1643,6 @@ pub async fn models(
             ProviderUsageCoverageV1::Partial => "partial",
             ProviderUsageCoverageV1::Unavailable => "unavailable",
         }),
-        "provider_usage": { "available": usage_deltas.is_some(), "by_model": [], "by_day": [] },
     });
 
     if let Some(db) = state.lcm_db.as_deref() {
@@ -1321,79 +1746,33 @@ pub async fn models(
         );
     }
 
-    if let Some(deltas) = usage_deltas {
-        let mut by_model: BTreeMap<(String, String), Vec<&ProviderUsageDeltaV1>> = BTreeMap::new();
-        let mut by_day: BTreeMap<i64, Vec<&ProviderUsageDeltaV1>> = BTreeMap::new();
-        for delta in deltas.iter().filter(|delta| {
-            since == 0
-                || delta
-                    .native_timestamp
-                    .is_some_and(|timestamp| timestamp >= since)
-        }) {
-            by_model
-                .entry((
-                    delta.provider.clone(),
-                    delta.model.clone().unwrap_or_default(),
-                ))
-                .or_default()
-                .push(delta);
-            if let Some(timestamp) = delta.native_timestamp {
-                by_day
-                    .entry((timestamp / 86_400) * 86_400)
-                    .or_default()
-                    .push(delta);
-            }
+    let attribution = match usage_deltas {
+        Some(deltas) => provider_usage_attribution(deltas, since, prices),
+        None => unavailable_provider_usage_attribution(),
+    };
+    let provider_usage = match serde_json::to_value(attribution) {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(models_read_failed(
+                    Some(&range),
+                    format!("failed to encode provider usage attribution: {error}"),
+                )),
+            )
+                .into_response();
         }
-        payload["provider_usage"]["by_model"] = Value::Array(
-            by_model
-                .into_iter()
-                .map(|((provider, model), deltas)| {
-                    let priced = price_deltas(deltas.iter().copied(), prices);
-                    let (_, actual) = actual_for_deltas(deltas.into_iter());
-                    let total_tokens = actual
-                        .as_ref()
-                        .and_then(|tokens| tokens.input_tokens?.checked_add(tokens.output_tokens?));
-                    json!({
-                        "provider": provider,
-                        "model": model_value(&model),
-                        "cost_usd": priced.total_cost_usd,
-                        "total_tokens": total_tokens,
-                        "cost_basis": if priced.total_cost_usd.is_some() {
-                            "provider_reported_priced"
-                        } else {
-                            "provider_reported_unpriced"
-                        },
-                        "provider_actual": actual,
-                    })
-                })
-                .collect(),
-        );
-        payload["provider_usage"]["by_day"] = Value::Array(
-            by_day
-                .into_iter()
-                .rev()
-                .take(366)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .map(|(day, deltas)| {
-                    let priced = price_deltas(deltas.iter().copied(), prices);
-                    let (_, actual) = actual_for_deltas(deltas.into_iter());
-                    let total_tokens = actual
-                        .as_ref()
-                        .and_then(|tokens| tokens.input_tokens?.checked_add(tokens.output_tokens?));
-                    json!({
-                        "day": day,
-                        "cost_usd": priced.total_cost_usd,
-                        "total_tokens": total_tokens,
-                        "provider_actual": actual,
-                    })
-                })
-                .collect(),
-        );
-    }
+    };
+    payload["provider_usage"] = provider_usage;
 
-    Json(payload)
+    match decode_contract::<SavingsModelsPayloadV1>(payload, "savings models") {
+        Ok(payload) => Json(payload).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(models_read_failed(Some(&range), error)),
+        )
+            .into_response(),
+    }
 }
 
 /// GET `/api/plugins/savings/pricing` — deterministic bundled all-provider
@@ -1408,6 +1787,175 @@ mod tests {
     use tracedecay_session_memory::provider_usage::{
         AggregatedProviderUsageCountersV1, ProviderUsageAggregateV1, ProviderUsageCoverageV1,
     };
+
+    fn delta(
+        sequence: u64,
+        provider: &str,
+        model: Option<&str>,
+        session: &str,
+        timestamp: Option<i64>,
+    ) -> ProviderUsageDeltaV1 {
+        ProviderUsageDeltaV1 {
+            observation_id: format!("obs-{sequence}"),
+            receipt_id: format!("receipt-{sequence}"),
+            observation_sequence: sequence,
+            usage_ordinal: 0,
+            scope: ObservationScopeV1::Profile,
+            provider: provider.to_owned(),
+            model: model.map(str::to_owned),
+            session_id: session.to_owned(),
+            turn_id: None,
+            message_id: None,
+            request_id: None,
+            native_kind: "usage".to_owned(),
+            native_field: "usage".to_owned(),
+            native_timestamp: timestamp,
+            derivation:
+                tracedecay_session_memory::provider_usage::ProviderUsageDeltaDerivationV1::NativeDelta,
+            derived_from_sequence: None,
+            counters: AggregatedProviderUsageCountersV1 {
+                input_tokens: Some(1_000),
+                output_tokens: Some(100),
+                cache_read_tokens: Some(0),
+                cache_write_tokens: Some(0),
+                reasoning_tokens: None,
+                total_tokens: Some(1_100),
+            },
+        }
+    }
+
+    #[test]
+    fn provider_attribution_keeps_priced_partial_and_unpriced_providers_distinct() {
+        let day = 1_760_000_000_i64 - (1_760_000_000_i64 % 86_400);
+        let deltas = vec![
+            // Fully priced: an exact bundled Anthropic slug on two sessions.
+            delta(1, "claude", Some("claude-opus-4"), "s-1", Some(day + 60)),
+            delta(2, "claude", Some("claude-opus-4"), "s-2", Some(day + 120)),
+            // Partial: one priced OpenAI model and one model nobody prices.
+            delta(3, "codex", Some("gpt-4.1"), "s-3", Some(day + 86_400)),
+            delta(
+                4,
+                "codex",
+                Some("gpt-nonexistent-fixture"),
+                "s-3",
+                Some(day + 86_400),
+            ),
+            // Unpriced: a provider outside every vendor namespace, one event
+            // with no model identity, one with no timestamp.
+            delta(5, "mystery", None, "s-4", Some(day)),
+            delta(6, "mystery", Some("mystery-1"), "s-4", None),
+        ];
+
+        let attribution = provider_usage_attribution(&deltas, 0, savings_pricing::load_table());
+
+        assert!(attribution.available);
+        assert_eq!(attribution.undated_events, Some(1));
+        let by_provider: HashMap<_, _> = attribution
+            .by_provider
+            .iter()
+            .map(|row| (row.provider.as_str(), row))
+            .collect();
+
+        let claude = by_provider["claude"];
+        assert_eq!(claude.pricing, SavingsPricingClassV1::Priced);
+        assert_eq!(claude.usage_events, 2);
+        assert_eq!(claude.priced_events, 2);
+        assert_eq!(claude.unpriced_events, 0);
+        assert_eq!(claude.sessions, 2);
+        assert_eq!(claude.models, 1);
+        assert!(claude.priced_cost_usd.is_some_and(|cost| cost > 0.0));
+        assert_eq!(claude.total_cost_usd, claude.priced_cost_usd);
+        assert_eq!(claude.total_tokens, Some(2_200));
+
+        let codex = by_provider["codex"];
+        assert_eq!(codex.pricing, SavingsPricingClassV1::Partial);
+        assert_eq!(codex.usage_events, 2);
+        assert_eq!(codex.priced_events, 1);
+        assert_eq!(codex.unpriced_events, 1);
+        assert_eq!(codex.priced_models, 1);
+        assert_eq!(codex.unpriced_models, 1);
+        assert_eq!(codex.sessions, 1);
+        assert!(codex.priced_cost_usd.is_some_and(|cost| cost > 0.0));
+        assert_eq!(
+            codex.total_cost_usd, None,
+            "a provider with one unpriced event has no complete total"
+        );
+
+        let mystery = by_provider["mystery"];
+        assert_eq!(mystery.pricing, SavingsPricingClassV1::Unpriced);
+        assert_eq!(mystery.usage_events, 2);
+        assert_eq!(mystery.unpriced_events, 2);
+        assert_eq!(mystery.unknown_model_events, 1);
+        assert_eq!(mystery.undated_events, 1);
+        assert_eq!(mystery.priced_cost_usd, None);
+        assert_eq!(mystery.total_cost_usd, None);
+        assert_eq!(
+            mystery.total_tokens,
+            Some(2_200),
+            "tokens are facts independent of price"
+        );
+
+        // The dated series carries only timestamped events, per provider.
+        assert_eq!(attribution.by_provider_day.len(), 3);
+        let claude_day = attribution
+            .by_provider_day
+            .iter()
+            .find(|point| point.provider == "claude" && point.day == day)
+            .expect("claude day point");
+        assert_eq!(claude_day.usage_events, 2);
+        assert_eq!(claude_day.priced_cost_usd, claude.priced_cost_usd);
+        let codex_day = attribution
+            .by_provider_day
+            .iter()
+            .find(|point| point.provider == "codex")
+            .expect("codex day point");
+        assert_eq!(codex_day.day, day + 86_400);
+        assert_eq!(codex_day.unpriced_events, 1);
+        assert_eq!(codex_day.total_cost_usd, None);
+
+        // The unknown-model row keeps its identity absence explicit.
+        assert!(
+            attribution
+                .by_model
+                .iter()
+                .any(|row| row.provider == "mystery"
+                    && row.model.is_none()
+                    && row.cost_usd.is_none())
+        );
+    }
+
+    #[test]
+    fn provider_attribution_range_excludes_undated_deltas() {
+        let deltas = vec![
+            delta(
+                1,
+                "claude",
+                Some("claude-opus-4"),
+                "s-1",
+                Some(2_000_000_000),
+            ),
+            delta(2, "claude", Some("claude-opus-4"), "s-1", None),
+        ];
+        let attribution =
+            provider_usage_attribution(&deltas, 1_000_000_000, savings_pricing::load_table());
+        assert_eq!(attribution.undated_events, Some(0));
+        assert_eq!(attribution.by_provider.len(), 1);
+        assert_eq!(attribution.by_provider[0].usage_events, 1);
+        assert_eq!(attribution.by_provider[0].undated_events, 0);
+    }
+
+    #[test]
+    fn models_read_failed_body_is_typed_and_empty() {
+        let body = models_read_failed(Some("tomorrow"), "unsupported range".to_owned());
+        assert!(!body.available);
+        assert_eq!(body.status.as_deref(), Some("read_failed"));
+        assert_eq!(body.range, "tomorrow");
+        assert!(body.models.is_empty());
+        assert!(!body.provider_usage.available);
+        let value = serde_json::to_value(&body).expect("encode");
+        decode_contract::<SavingsModelsPayloadV1>(value, "savings models")
+            .expect("failure body satisfies its own contract");
+    }
 
     #[test]
     fn partial_provider_usage_never_becomes_an_actual_zero_token_block() {

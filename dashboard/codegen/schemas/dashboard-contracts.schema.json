@@ -19585,6 +19585,201 @@
       ],
       "type": "object"
     },
+    "SavingsModelDayRowV1": {
+      "description": "One UTC-day bucket of the per-model content aggregate.",
+      "properties": {
+        "cost_basis": {
+          "type": "string"
+        },
+        "day": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "estimated": {
+          "$ref": "#/$defs/TokenPairV1"
+        },
+        "estimated_messages": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "messages": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_actual": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenActualV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provider_usage_events": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "tokenized": {
+          "$ref": "#/$defs/TokenPairV1"
+        },
+        "tokenized_messages": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "day",
+        "model",
+        "messages",
+        "provider_usage_events",
+        "tokenized_messages",
+        "estimated_messages",
+        "cost_basis",
+        "provider_actual",
+        "tokenized",
+        "estimated"
+      ],
+      "type": "object"
+    },
+    "SavingsModelRowV1": {
+      "description": "One model-keyed content aggregate from the session store, joined to the\nexact provider usage recorded for that model. `model` is `None` for\nmessages whose model was never recorded; that row keeps its token counts\nand is priced by nothing.",
+      "properties": {
+        "cost_basis": {
+          "type": "string"
+        },
+        "estimated": {
+          "$ref": "#/$defs/TokenPairV1"
+        },
+        "estimated_messages": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "messages": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_actual": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenActualV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provider_usage_events": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "sessions": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "tokenized": {
+          "$ref": "#/$defs/TokenPairV1"
+        },
+        "tokenized_messages": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "tokenizer": true
+      },
+      "required": [
+        "model",
+        "sessions",
+        "tokenizer",
+        "messages",
+        "provider_usage_events",
+        "tokenized_messages",
+        "estimated_messages",
+        "cost_basis",
+        "provider_actual",
+        "tokenized",
+        "estimated"
+      ],
+      "type": "object"
+    },
+    "SavingsModelsPayloadV1": {
+      "description": "GET `/api/plugins/savings/models` response contract.",
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "daily": {
+          "items": {
+            "$ref": "#/$defs/SavingsModelDayRowV1"
+          },
+          "type": "array"
+        },
+        "error": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/SavingsModelRowV1"
+          },
+          "type": "array"
+        },
+        "provider_usage": {
+          "$ref": "#/$defs/SavingsProviderUsageAttributionV1"
+        },
+        "provider_usage_coverage": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "range": {
+          "type": "string"
+        },
+        "since": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "available",
+        "status",
+        "error",
+        "range",
+        "since",
+        "models",
+        "daily",
+        "provider_usage_coverage",
+        "provider_usage"
+      ],
+      "type": "object"
+    },
     "SavingsOverviewPayloadV1": {
       "properties": {
         "costs": {
@@ -19612,6 +19807,15 @@
       ],
       "type": "object"
     },
+    "SavingsPricingClassV1": {
+      "description": "How much of one provider's observed usage the pricing authority could\nprice. `priced` means every usage event priced; `partial` means some did\nand the dollar figure covers only those; `unpriced` means none did.",
+      "enum": [
+        "priced",
+        "partial",
+        "unpriced"
+      ],
+      "type": "string"
+    },
     "SavingsPricingSummaryV1": {
       "properties": {
         "fetched_at": true,
@@ -19626,6 +19830,316 @@
         "fetched_at",
         "offline",
         "model_count"
+      ],
+      "type": "object"
+    },
+    "SavingsProviderDayPointV1": {
+      "description": "One provider's canonical priced usage on one UTC day.",
+      "properties": {
+        "day": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "priced_cost_usd": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "priced_events": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "total_cost_usd": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "total_tokens": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "unpriced_events": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "usage_events": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "day",
+        "provider",
+        "usage_events",
+        "priced_events",
+        "unpriced_events",
+        "priced_cost_usd",
+        "total_cost_usd",
+        "total_tokens"
+      ],
+      "type": "object"
+    },
+    "SavingsProviderDaySpendV1": {
+      "description": "Canonical priced usage for one UTC day across every provider.",
+      "properties": {
+        "cost_usd": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "day": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "provider_actual": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenActualV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "total_tokens": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "usage_events": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "day",
+        "usage_events",
+        "cost_usd",
+        "total_tokens",
+        "provider_actual"
+      ],
+      "type": "object"
+    },
+    "SavingsProviderModelSpendV1": {
+      "description": "Canonical priced usage for one exact provider/model pair. `cost_usd` is\n`None` whenever any usage event in the pair could not be priced: the\nprojector never emits a partial dollar figure for a model.",
+      "properties": {
+        "cost_basis": {
+          "type": "string"
+        },
+        "cost_usd": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "type": "string"
+        },
+        "provider_actual": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenActualV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "total_tokens": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "usage_events": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "provider",
+        "model",
+        "usage_events",
+        "cost_usd",
+        "total_tokens",
+        "cost_basis",
+        "provider_actual"
+      ],
+      "type": "object"
+    },
+    "SavingsProviderSpendV1": {
+      "description": "Provider-level spend attribution over exact provider usage observations.\n\n`priced_cost_usd` sums only the model groups the canonical projector\npriced completely, and the event/model counts beside it say how much of\nthe provider's usage that figure covers. `total_cost_usd` is the\nprojector's own complete total and is `None` unless every event priced.",
+      "properties": {
+        "models": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "priced_cost_usd": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "priced_events": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "priced_models": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "pricing": {
+          "$ref": "#/$defs/SavingsPricingClassV1"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "provider_actual": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenActualV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sessions": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "total_cost_usd": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "total_tokens": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "undated_events": {
+          "description": "Usage events with no native timestamp. They are attributed here but\ncannot be placed on the dated series.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "unknown_model_events": {
+          "description": "Usage events whose observation carried no model identity. They are\ncounted in `unpriced_events` as well: no model means no rate.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "unpriced_events": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "unpriced_models": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "usage_events": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "provider",
+        "pricing",
+        "usage_events",
+        "priced_events",
+        "unpriced_events",
+        "unknown_model_events",
+        "undated_events",
+        "models",
+        "priced_models",
+        "unpriced_models",
+        "sessions",
+        "priced_cost_usd",
+        "total_cost_usd",
+        "total_tokens",
+        "provider_actual"
+      ],
+      "type": "object"
+    },
+    "SavingsProviderUsageAttributionV1": {
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "by_day": {
+          "items": {
+            "$ref": "#/$defs/SavingsProviderDaySpendV1"
+          },
+          "type": "array"
+        },
+        "by_model": {
+          "items": {
+            "$ref": "#/$defs/SavingsProviderModelSpendV1"
+          },
+          "type": "array"
+        },
+        "by_provider": {
+          "items": {
+            "$ref": "#/$defs/SavingsProviderSpendV1"
+          },
+          "type": "array"
+        },
+        "by_provider_day": {
+          "items": {
+            "$ref": "#/$defs/SavingsProviderDayPointV1"
+          },
+          "type": "array"
+        },
+        "pricing_revision": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "undated_events": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "available",
+        "pricing_revision",
+        "undated_events",
+        "by_model",
+        "by_day",
+        "by_provider",
+        "by_provider_day"
       ],
       "type": "object"
     },
@@ -32002,6 +32516,9 @@
     "revision_pair_union_layout": {
       "$ref": "#/$defs/DashboardEnvelopeV113"
     },
+    "savings_models": {
+      "$ref": "#/$defs/SavingsModelsPayloadV1"
+    },
     "savings_overview": {
       "$ref": "#/$defs/DashboardEnvelopeV124"
     },
@@ -32256,6 +32773,7 @@
     "analytics_diagnostics",
     "savings_overview",
     "savings_sessions",
+    "savings_models",
     "lcm_session",
     "lcm_timeline",
     "lcm_overview",
