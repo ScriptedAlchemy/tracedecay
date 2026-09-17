@@ -12,11 +12,13 @@ import { ReadModelState, ReadSection, envelopeReadState } from '../../ui/ReadSec
 import { Corners, Meter, Readout } from '../../ui/instrument.tsx';
 import { SearchField } from '../../ui/search/SearchField.tsx';
 import { StateChip } from '../../ui/StateChip.tsx';
+import { EnvelopeTruth } from '../../ui/EnvelopeTruth.tsx';
 import { Chart } from '../../viz/chart/Chart.tsx';
 import { formatCount, splitCount } from '../../ui/format.ts';
 import { cn } from '../../ui/cn';
 import { envelopePayload, useEnvelope } from '../../data/query/useEnvelope.ts';
 import { scopeKey, useScope } from '../../data/scope/store.ts';
+import { usePublishStatusRegisters } from '../../data/shell/statusRegisters.ts';
 import {
   type MemoryCategoryCountV1,
   MemoryFactDetailPayloadV1Schema,
@@ -34,11 +36,7 @@ import { FactLedger, FactSortControl, MemoryCoverageNotices } from './FactLedger
 import { composeConstellation } from './constellation.ts';
 import { useFactsAddress } from './factsAddress.ts';
 import { sortFacts } from './ledger.ts';
-import {
-  KnowledgeRegister,
-  envelopeReading,
-  subReadReading,
-} from './KnowledgeRegister.tsx';
+import { cameraRegister, graphRegister, memoryRegister } from './knowledgeRegisters.ts';
 import {
   KNOWLEDGE_PANEL_ID,
   KnowledgeViewSwitcher,
@@ -75,6 +73,9 @@ const BASE = '/api/plugins/holographic';
  */
 export function KnowledgePage() {
   const [view, selectView] = useKnowledgeView();
+  // The camera position rides the shell's status strip beside the transport
+  // facts, so a linked position can be read off the screen from any camera.
+  usePublishStatusRegisters('knowledge', [cameraRegister(view)]);
   return (
     // Below `lg` the Facts camera is a vertical stack and the column has to be
     // allowed its natural height: pinned to the viewport it squeezed the
@@ -223,19 +224,24 @@ function KnowledgeFacts({ onOpenGeometry }: { onOpenGeometry: () => void }) {
     unknown: 'memory overview has not answered',
   });
 
+  // The two authorities the plate names on the strip, posted in their own
+  // words: the memory overview envelope and its graph sub-read. The facts and
+  // status sub-reads print their states on the ledger and the store summary,
+  // where the width for a reason exists; the strip has room for a word.
+  usePublishStatusRegisters('knowledge:facts', [
+    memoryRegister(overview.isPending, overview.data),
+    graphRegister(overview.isPending, overview.data),
+  ]);
+
   return (
     <div className="flex flex-col lg:h-full lg:min-h-0" data-testid="knowledge-facts">
-      <KnowledgeRegister
-        memory={envelopeReading(overview.isPending, overview.data)}
-        facts={holographic ? subReadReading(reads?.facts) : envelopeReading(overview.isPending, overview.data)}
-        entities={holographic ? subReadReading(reads?.entities) : envelopeReading(overview.isPending, overview.data)}
-        graph={holographic ? subReadReading(reads?.graph) : envelopeReading(overview.isPending, overview.data)}
-        status={envelopeReading(status.isPending, status.data)}
-        camera="facts"
-        envelope={overviewEnvelope}
-        refreshing={overview.isFetching}
-        onRefresh={() => void overview.refetch()}
-      />
+      {overviewEnvelope ? (
+        <EnvelopeTruth
+          envelope={overviewEnvelope}
+          refreshing={overview.isFetching}
+          onRefresh={() => void overview.refetch()}
+        />
+      ) : null}
       <div className="flex flex-col lg:min-h-0 lg:flex-1 lg:flex-row">
         <section
           aria-label="Facts camera"
