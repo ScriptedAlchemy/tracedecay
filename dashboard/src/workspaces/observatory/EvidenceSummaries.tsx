@@ -31,6 +31,7 @@ import { doctorEvidencePresentation, doctorFamilyLabel } from './doctorModel.ts'
 import { BlockedBody, EvidenceChip } from './EvidencePanel.tsx';
 import {
   diagnosticsWindowWord,
+  evidenceStateLabel,
   evidenceStateOf,
   type EvidenceRead,
   type EvidenceSummary,
@@ -109,6 +110,17 @@ function Kicker({ children, tone }: { children: ReactNode; tone?: string }) {
 // Plan 26 dimension bands (adoption, retrieval, budgets)
 // ---------------------------------------------------------------------------
 
+/** What a body says about rows it did not draw: the exact count, never a
+ * silent cut. */
+function MoreNote({ hidden, unit }: { hidden: number; unit: string }) {
+  if (hidden <= 0) return null;
+  return (
+    <p className="td-legend mt-1" data-evidence-more={hidden}>
+      {hidden} more {unit} in exact evidence
+    </p>
+  );
+}
+
 function dimensionRows(
   dimensions: readonly PlanDimension[],
   anchors: ReadAnchors,
@@ -155,14 +167,13 @@ export function AdoptionBody({
 }) {
   const model = envelopePayload(observatory.result);
   if (!model) return <BlockedBody summary={summary} />;
-  const bands = adoptionCoverageBands(model);
+  const dimensions = adoptionCoverageBands(model).flatMap((band) => band.dimensions);
   const anchors = coverageAnchors(model);
   const window = diagnosticsWindowWord(diagnostics);
   return (
     <>
-      <Rows label="Adoption dimensions">
-        {dimensionRows(bands.flatMap((band) => band.dimensions), anchors, 6)}
-      </Rows>
+      <Rows label="Adoption dimensions">{dimensionRows(dimensions, anchors, 6)}</Rows>
+      <MoreNote hidden={dimensions.length - 6} unit="dimensions" />
       <p className="mt-2 flex flex-wrap items-center gap-1.5 text-3xs text-text-muted">
         <span className="td-legend">record counts</span>
         <EvidenceChip state={window.state} detail={window.detail} />
@@ -182,14 +193,13 @@ export function RetrievalBody({
 }) {
   const model = envelopePayload(observatory.result);
   if (!model) return <BlockedBody summary={summary} />;
-  const bands = retrievalQualityBands(model);
+  const dimensions = retrievalQualityBands(model).flatMap((band) => band.dimensions);
   const anchors = retrievalAnchors(model);
   const window = diagnosticsWindowWord(diagnostics);
   return (
     <>
-      <Rows label="Retrieval dimensions">
-        {dimensionRows(bands.flatMap((band) => band.dimensions), anchors, 6)}
-      </Rows>
+      <Rows label="Retrieval dimensions">{dimensionRows(dimensions, anchors, 6)}</Rows>
+      <MoreNote hidden={dimensions.length - 6} unit="dimensions" />
       <p className="mt-2 flex flex-wrap items-center gap-1.5 text-3xs text-text-muted">
         <span className="td-legend">record counts</span>
         <EvidenceChip state={window.state} detail={window.detail} />
@@ -211,7 +221,8 @@ export function BudgetsBody({
   const model = envelopePayload(observatory.result);
   if (!model) return <BlockedBody summary={summary} />;
   const anchors = budgetAnchors(model);
-  const dimensions = performanceBudgetBands(model).flatMap((band) => band.dimensions).slice(0, 7);
+  const allDimensions = performanceBudgetBands(model).flatMap((band) => band.dimensions);
+  const dimensions = allDimensions.slice(0, 7);
   return (
     <>
       <table className="w-full border-collapse text-2xs" aria-label="Budget ledger">
@@ -251,6 +262,7 @@ export function BudgetsBody({
           })}
         </tbody>
       </table>
+      <MoreNote hidden={allDimensions.length - 7} unit="budget dimensions" />
       <p className="mt-2 text-3xs text-text-muted">
         comparison · {model.comparison.disposition.replaceAll('_', ' ')} · no budget threshold or
         7-day baseline is published, so no delta is drawn
@@ -290,9 +302,7 @@ export function DoctorBody({
                 ? entries.length === 0
                   ? 'consulted · no findings'
                   : `${entries.length} finding${entries.length === 1 ? '' : 's'}`
-                : payload.report_coverage == null
-                  ? 'coverage not published'
-                  : 'not consulted';
+                : 'consultation not published';
           return (
             <div
               key={family}
@@ -353,7 +363,7 @@ function FindingRows({
   onSelect: (index: number) => void;
 }) {
   return (
-    <ul className="relative z-[1] mt-2 flex flex-col gap-0.5" aria-label={label}>
+    <ul className="relative z-[2] mt-2 flex flex-col gap-0.5" aria-label={label}>
       {entries.slice(0, FINDING_ROW_LIMIT).map((entry) => {
         const presentation = doctorEvidencePresentation(entry.state);
         const isSelected = selected === entry.index;
@@ -421,14 +431,14 @@ export function PipelineBody({
     );
   }
   return (
-    <div className="flex flex-col gap-2" role="list" aria-label="Code-index worktrees">
-      {payload.worktrees.slice(0, 4).map((worktree) => (
-        <WorktreeRail key={worktree.worktree_root} worktree={worktree} />
-      ))}
-      {payload.worktrees.length > 4 ? (
-        <p className="td-legend">{payload.worktrees.length - 4} more worktrees in exact evidence</p>
-      ) : null}
-    </div>
+    <>
+      <div className="flex flex-col gap-2" role="list" aria-label="Code-index worktrees">
+        {payload.worktrees.slice(0, 4).map((worktree) => (
+          <WorktreeRail key={worktree.worktree_root} worktree={worktree} />
+        ))}
+      </div>
+      <MoreNote hidden={payload.worktrees.length - 4} unit="worktrees" />
+    </>
   );
 }
 
@@ -539,7 +549,9 @@ export function HooksBody({
   const maxEmitted = Math.max(0, ...categories.map((category) => category.emitted));
   return (
     <>
-      <Kicker tone="text-accent">hook hints · emitted</Kicker>
+      <Kicker tone="text-accent">
+        hook hints · emitted{payload?.available && payload.by_category.length > 4 ? ` · top 4 of ${payload.by_category.length}` : ''}
+      </Kicker>
       {!payload ? (
         <BlockedBody summary={summary} />
       ) : !payload.available ? (
@@ -547,20 +559,34 @@ export function HooksBody({
           unavailable · {payload.error ?? 'the hint analytics source is unavailable'}
         </p>
       ) : categories.length === 0 ? (
-        <p className="text-2xs text-text-muted">measured · no hook hints recorded in the window</p>
+        <p className="text-2xs text-text-muted">
+          {evidenceStateLabel(summary.state)} · no hook hints recorded in the window
+        </p>
       ) : (
-        <Rows label="Hook hint categories">
-          {categories.map((category) => (
-            <Row
-              key={category.category}
-              label={category.category}
-              value={category.emitted.toLocaleString()}
-              fraction={maxEmitted > 0 ? category.emitted / maxEmitted : null}
-              title={`followed ${category.followed} · ignored ${category.ignored} · suppressed ${category.suppressed}`}
-              attrs={{ 'data-hint-category': category.category }}
-            />
-          ))}
-        </Rows>
+        <>
+          <Rows label="Hook hint categories">
+            {categories.map((category) => (
+              <Row
+                key={category.category}
+                label={
+                  <span className="flex min-w-0 items-baseline gap-1.5">
+                    <span className="truncate">{category.category}</span>
+                    <span className="td-legend shrink-0 max-sm:hidden">
+                      f {category.followed.toLocaleString()} · i {category.ignored.toLocaleString()}{' '}
+                      · s {category.suppressed.toLocaleString()}
+                    </span>
+                  </span>
+                }
+                value={category.emitted.toLocaleString()}
+                fraction={maxEmitted > 0 ? category.emitted / maxEmitted : null}
+                attrs={{ 'data-hint-category': category.category }}
+              />
+            ))}
+          </Rows>
+          <p className="td-legend mt-1">
+            f followed · i ignored · s suppressed · independent tallies, not a funnel
+          </p>
+        </>
       )}
       <Kicker tone="text-alert">rejected arguments</Kicker>
       {!rejected ? (
@@ -630,6 +656,7 @@ export function TopologyBody({
       {groups.size === 0 ? (
         <p className="text-2xs text-text-muted">the projection returned no measurement cells</p>
       ) : null}
+      <MoreNote hidden={groups.size - 6} unit="metric families" />
       <p className="mt-2 text-3xs text-text-muted">
         {model.coverage.state} family coverage · {model.coverage.observed.toLocaleString()} observed ·{' '}
         {model.coverage.censored.toLocaleString()} censored · no node topology is published, so
@@ -722,6 +749,7 @@ export function TelemetryBody({
   const sized = payload.stores.filter((store) => store.total_bytes != null);
   const largest = Math.max(0, ...sized.map((store) => store.total_bytes ?? 0));
   return (
+    <>
     <Rows label="Store sizes">
       {payload.stores.slice(0, 7).map((store) => {
         const measured = store.read.kind === 'observed' || store.read.kind === 'observed_bytes';
@@ -745,10 +773,9 @@ export function TelemetryBody({
           />
         );
       })}
-      {payload.stores.length > 7 ? (
-        <p className="td-legend">{payload.stores.length - 7} more stores in exact evidence</p>
-      ) : null}
     </Rows>
+    <MoreNote hidden={payload.stores.length - 7} unit="stores" />
+    </>
   );
 }
 

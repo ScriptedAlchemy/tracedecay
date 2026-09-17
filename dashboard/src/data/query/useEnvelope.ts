@@ -10,7 +10,14 @@ export function useEnvelope<T>(
   key: readonly unknown[],
   url: string,
   schema: WireSchema<T>,
-  options?: { enabled?: boolean; staleTime?: number; activity?: QueryActivityDescriptor },
+  options?: {
+    enabled?: boolean;
+    staleTime?: number;
+    activity?: QueryActivityDescriptor;
+    /** Poll period in ms. Off by default: most envelopes move only when the
+     * reader asks again. */
+    refetchInterval?: number;
+  },
 ) {
   const scope = useScope((s) => s.scope);
   const target = scopedUrl(scope, url);
@@ -21,7 +28,7 @@ export function useEnvelope<T>(
       options?.activity === undefined
         ? undefined
         : { dashboard: { activity: options.activity } },
-    refetchInterval: false,
+    refetchInterval: options?.refetchInterval ?? false,
     staleTime: options?.staleTime ?? 60_000,
     enabled: options?.enabled ?? true,
   });

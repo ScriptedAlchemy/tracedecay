@@ -17,9 +17,9 @@ import { FindingsReadModel } from './StorageFindings.tsx';
 import { TelemetryReadModel } from './StorageTelemetry.tsx';
 import type { EvidenceSourceId } from './evidence.ts';
 import { SOURCE_IDENTITY } from './evidence.ts';
+import { EXACT_EVIDENCE_ID } from './exactEvidenceId.ts';
 import type { ObservatoryReads } from './useObservatoryReads.ts';
 
-export const EXACT_EVIDENCE_ID = 'observatory-exact-evidence';
 
 /**
  * The exact fallback for the selected authority: its full read model, with

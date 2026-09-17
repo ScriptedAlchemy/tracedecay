@@ -19,15 +19,17 @@ export const OBSERVATORY_READ_MODEL_URL = '/api/observatory';
 
 export const OBSERVATORY_READ_MODEL_KEY = ['observatory', 'read-model'] as const;
 
-/** The route the Observatory read model is polled at. Findings are a sweep,
- * not a stream, so thirty seconds is the shared cadence. */
-export const OBSERVATORY_READ_MODEL_STALE_MS = 30_000;
+/** The period the Observatory read model is polled at — the same thirty
+ * seconds the telemetry, findings, and Doctor reads use, so the overview's
+ * one time context does not drift between authorities. Observations are a
+ * sweep, not a stream; nothing invalidates them but this poll. */
+export const OBSERVATORY_READ_MODEL_REFETCH_MS = 30_000;
 
 export function useObservatoryReadModel() {
   return useEnvelope(
     OBSERVATORY_READ_MODEL_KEY,
     OBSERVATORY_READ_MODEL_URL,
     ObservatoryReadModelV1Schema,
-    { staleTime: OBSERVATORY_READ_MODEL_STALE_MS },
+    { staleTime: OBSERVATORY_READ_MODEL_REFETCH_MS, refetchInterval: OBSERVATORY_READ_MODEL_REFETCH_MS },
   );
 }

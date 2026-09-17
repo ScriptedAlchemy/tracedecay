@@ -8,6 +8,7 @@ import { Corners, Meter } from '../../ui/instrument.tsx';
 import { formatMicrosUtc } from '../../ui/format.ts';
 import { doctorEvidencePresentation, doctorFamilyLabel } from './doctorModel.ts';
 import { EVIDENCE_INSPECTOR_ID, EvidenceChip } from './EvidencePanel.tsx';
+import { EXACT_EVIDENCE_ID } from './exactEvidenceId.ts';
 import {
   coveragePercent,
   coverageSentence,
@@ -109,7 +110,7 @@ export function EvidenceInspector({
           className={cn('td-legend', mode === 'preview' ? 'text-accent' : undefined)}
           data-inspector-mode-word
         >
-          {mode === 'preview' ? 'preview · hover' : mode === 'selected' ? 'selected' : 'no selection'}
+          {mode === 'preview' ? 'preview' : mode === 'selected' ? 'selected' : 'no selection'}
         </span>
       </header>
       <div
@@ -121,6 +122,7 @@ export function EvidenceInspector({
         {summary ? (
           <InspectorBody
             summary={summary}
+            mode={mode}
             finding={finding}
             scope={scope}
             refreshing={refreshing}
@@ -153,6 +155,7 @@ function NoSelection() {
 
 function InspectorBody({
   summary,
+  mode,
   finding,
   scope,
   refreshing,
@@ -160,6 +163,7 @@ function InspectorBody({
   onClearFinding,
 }: {
   summary: EvidenceSummary;
+  mode: InspectorMode;
   finding: { index: number; entry: DoctorReportEntryV1 } | null;
   scope: DashboardScope;
   refreshing: boolean;
@@ -175,6 +179,17 @@ function InspectorBody({
           {summary.title}
         </h2>
         <EvidenceChip state={summary.state} detail={summary.stateDetail} size="title" className="w-fit" />
+        {mode === 'selected' ? (
+          <a
+            href={`#${EXACT_EVIDENCE_ID}`}
+            className="td-legend w-fit border-b border-accent/60 text-text-secondary hover:border-accent hover:text-text-primary"
+            data-inspector-exact-link
+          >
+            exact evidence below ↓
+          </a>
+        ) : (
+          <p className="td-legend">preview · click or press Enter to select and open exact evidence</p>
+        )}
       </div>
 
       {finding ? <FindingDetail finding={finding} onClear={onClearFinding} /> : null}

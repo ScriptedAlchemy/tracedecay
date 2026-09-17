@@ -262,13 +262,52 @@ describe('summaries', () => {
     };
     const summary = findingsSummary(read(envelope(payload)));
     expect(summary.state).toBe('empty');
+    // One producer short narrows the envelope's `complete` to `partial`; the
+    // count is the panel's, the completeness axis stays the daemon's.
     expect(summary.coverage).toEqual({
-      completeness: 'complete',
+      completeness: 'partial',
       examined: 1,
       denominator: 2,
       unit: 'producers real',
     });
     expect(coveragePercent(summary.coverage)).toBe(50);
+  });
+
+  it('never upgrades a partial envelope to complete, however many producers are real', () => {
+    const payload: StorageFindingsPayloadV1 = {
+      entries: [],
+      family_filter: 'storage',
+      kind_statuses: [
+        { kind: 'over_budget_store', state: 'real', reason: 'measured', observed_entries: 0 },
+      ],
+      known_families: ['storage'],
+      note: 'no entries',
+      report_coverage: null,
+      schema_convergences: [],
+    };
+    const summary = findingsSummary(
+      read(
+        envelope(payload, {
+          domain_state: 'partial',
+          coverage: {
+            completeness: 'partial',
+            eligible: 2,
+            examined: 1,
+            matched: 1,
+            excluded: 0,
+            omitted: 1,
+            unknown: 0,
+            denominator: 2,
+            unit: 'producers',
+            omission_reasons: ['one producer timed out'],
+          },
+        }),
+      ),
+    );
+    expect(summary.state).toBe('partial');
+    expect(summary.coverage?.completeness).toBe('partial');
+    expect(summary.coverage?.examined).toBe(1);
+    expect(summary.coverage?.denominator).toBe(1);
   });
 
   it('grades the topology projection by its own family coverage and refusal', () => {

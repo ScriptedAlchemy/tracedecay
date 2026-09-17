@@ -507,52 +507,60 @@ export function doctorSummary(read: EvidenceRead<DoctorFindingsPayloadV1>): Evid
   });
 }
 
+/**
+ * A panel-specific coverage count under the envelope's own completeness word.
+ * The count is the panel's — how many of its required dimensions the read
+ * carried — but the completeness axis stays the daemon's: a full set of
+ * figures never upgrades a `partial` envelope to `complete`, and a short set
+ * can only narrow it.
+ */
+function dimensionCoverage(
+  envelope: DashboardEnvelopeV1<unknown>,
+  totals: { measured: number; required: number },
+  unit: string,
+): EvidenceCoverage {
+  return {
+    completeness:
+      totals.measured < totals.required && envelope.coverage.completeness === 'complete'
+        ? 'partial'
+        : envelope.coverage.completeness,
+    examined: totals.measured,
+    denominator: totals.required,
+    unit,
+  };
+}
+
 export function adoptionSummary(read: EvidenceRead<ObservatoryReadModelV1>): EvidenceSummary {
-  return envelopeSummary(SOURCE_IDENTITY.adoption, read, (model) => {
+  return envelopeSummary(SOURCE_IDENTITY.adoption, read, (model, envelope) => {
     const totals = coverageTotals(adoptionCoverageBands(model));
     return {
       observedAtMicros: model.observed_at_micros,
       watermark: model.watermark,
-      coverage: {
-        completeness: totals.measured === totals.required ? 'complete' : 'partial',
-        examined: totals.measured,
-        denominator: totals.required,
-        unit: 'adoption dimensions',
-      },
+      coverage: dimensionCoverage(envelope, totals, 'adoption dimensions'),
       affected: `${totals.measured} of ${totals.required} dimensions carry a figure · ${totals.unprojected} unpublished`,
     };
   });
 }
 
 export function retrievalSummary(read: EvidenceRead<ObservatoryReadModelV1>): EvidenceSummary {
-  return envelopeSummary(SOURCE_IDENTITY.retrieval, read, (model) => {
+  return envelopeSummary(SOURCE_IDENTITY.retrieval, read, (model, envelope) => {
     const totals = retrievalCoverage(retrievalQualityBands(model));
     return {
       observedAtMicros: model.observed_at_micros,
       watermark: model.watermark,
-      coverage: {
-        completeness: totals.measured === totals.required ? 'complete' : 'partial',
-        examined: totals.measured,
-        denominator: totals.required,
-        unit: 'retrieval dimensions',
-      },
+      coverage: dimensionCoverage(envelope, totals, 'retrieval dimensions'),
       affected: `${totals.measured} of ${totals.required} dimensions carry a figure`,
     };
   });
 }
 
 export function budgetsSummary(read: EvidenceRead<ObservatoryReadModelV1>): EvidenceSummary {
-  return envelopeSummary(SOURCE_IDENTITY.budgets, read, (model) => {
+  return envelopeSummary(SOURCE_IDENTITY.budgets, read, (model, envelope) => {
     const totals = budgetCoverage(performanceBudgetBands(model));
     return {
       observedAtMicros: model.observed_at_micros,
       watermark: model.watermark,
-      coverage: {
-        completeness: totals.measured === totals.required ? 'complete' : 'partial',
-        examined: totals.measured,
-        denominator: totals.required,
-        unit: 'budget dimensions',
-      },
+      coverage: dimensionCoverage(envelope, totals, 'budget dimensions'),
       affected: `${totals.measured} of ${totals.required} budget dimensions carry a figure · comparison ${model.comparison.disposition.replaceAll('_', ' ')}`,
     };
   });
@@ -581,11 +589,15 @@ export function pipelineSummary(read: EvidenceRead<CodeIndexFreshnessPayloadV1>)
     const stale = worktrees.filter((worktree) => worktree.staleness_state === 'stale').length;
     const blocked = worktrees.filter((worktree) => worktree.progress?.blocked_reason != null).length;
     const grade = evidenceStateOf(envelope.domain_state);
+    // Only a served, complete read may say the scope is empty; a build in
+    // flight narrows a served grade to `building`; refusals stay refusals.
     const state: EvidenceState =
       grade === 'denied' || grade === 'failed' || grade === 'restricted' || grade === 'unavailable'
         ? grade
         : worktrees.length === 0
-          ? 'empty'
+          ? grade === 'measured'
+            ? 'empty'
+            : grade
           : building > 0
             ? 'building'
             : grade;
@@ -657,15 +669,11 @@ export function findingsSummary(read: EvidenceRead<StorageFindingsPayloadV1>): E
     const grade = evidenceStateOf(envelope.domain_state);
     return {
       state: grade === 'measured' && payload.entries.length === 0 ? 'empty' : grade,
-      coverage: {
-        completeness:
-          payload.kind_statuses.length > 0 && real === payload.kind_statuses.length
-            ? 'complete'
-            : envelope.coverage.completeness,
-        examined: real,
-        denominator: payload.kind_statuses.length,
-        unit: 'producers real',
-      },
+      coverage: dimensionCoverage(
+        envelope,
+        { measured: real, required: payload.kind_statuses.length },
+        'producers real',
+      ),
       affected: `${payload.entries.length.toLocaleString()} findings · ${problems} problem · ${real} of ${payload.kind_statuses.length} producers real`,
       note: payload.note,
     };
@@ -714,7 +722,14 @@ export function topologySummary(read: {
     state: topologyGrade(model.coverage.state),
     stateDetail: `${model.coverage.state} family coverage${model.current ? '' : ' · not current'}`,
     coverage: {
-      completeness: measured === model.measurements.length ? 'complete' : 'partial',
+      // The projection's own coverage state is the completeness axis; the
+      // cell count only narrows it.
+      completeness:
+        model.coverage.state === 'unknown'
+          ? 'unknown'
+          : model.coverage.state !== 'known' || measured < model.measurements.length
+            ? 'partial'
+            : 'complete',
       examined: measured,
       denominator: model.measurements.length,
       unit: 'measurement cells',

@@ -103,9 +103,10 @@ export function panelRovingKeyDown(event: KeyboardEvent<HTMLElement>): void {
  * One independently sourced panel of the overview.
  *
  * The whole face selects: the title button stretches an invisible hit area
- * over the panel, so clicking anywhere on it opens the inspector, while the
- * body stays plain read-out. Interactive rows a body wants of its own
- * (finding rows) sit above that overlay with `relative z-[1]`.
+ * over the panel (`after:z-[1]`, above the body and the header chip), so
+ * clicking anywhere on it opens the inspector, while the body stays plain
+ * read-out. Interactive rows a body wants of its own (finding rows) sit above
+ * that overlay with `relative z-[2]`.
  *
  * Hover and focus preview the panel in the inspector; only click or Enter
  * selects it. Hover changes nothing but the inspector.
@@ -158,7 +159,7 @@ export function EvidencePanel({
           data-evidence-panel-button={summary.id}
           aria-pressed={selected}
           aria-controls={EVIDENCE_INSPECTOR_ID}
-          className="td-title min-w-0 truncate text-left text-text-primary after:absolute after:inset-0 after:content-[''] focus-visible:outline-none"
+          className="td-title min-w-0 truncate text-left text-text-primary after:absolute after:inset-0 after:z-[1] after:content-[''] focus-visible:outline-none"
           onClick={() => onSelect(summary.id)}
           onFocus={() => onPreview(summary.id)}
           onBlur={onPreviewEnd}
@@ -168,7 +169,7 @@ export function EvidencePanel({
         <span aria-hidden className="td-rule" />
         <EvidenceChip state={summary.state} />
       </header>
-      <div className="relative min-w-0 flex-1 p-2.5">{children}</div>
+      <div className="min-w-0 flex-1 p-2.5">{children}</div>
       <footer className="flex shrink-0 items-center justify-between gap-2 border-t border-edge-subtle px-2.5 py-1">
         <span className="td-legend truncate" data-evidence-as-of>
           {asOfLegend(summary)}

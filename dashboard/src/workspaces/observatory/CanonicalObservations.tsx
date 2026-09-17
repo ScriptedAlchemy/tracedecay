@@ -27,7 +27,7 @@ import { Field } from '../../ui/instrument.tsx';
 import { formatMicrosUtc } from '../../ui/format.ts';
 import {
   OBSERVATORY_READ_MODEL_KEY,
-  OBSERVATORY_READ_MODEL_STALE_MS,
+  OBSERVATORY_READ_MODEL_REFETCH_MS,
   OBSERVATORY_READ_MODEL_URL,
 } from './observatoryReadModel.ts';
 
@@ -42,7 +42,7 @@ export function CanonicalObservations() {
       queryKey={OBSERVATORY_READ_MODEL_KEY}
       url={OBSERVATORY_READ_MODEL_URL}
       schema={ObservatoryReadModelV1Schema}
-      refetchInterval={OBSERVATORY_READ_MODEL_STALE_MS}
+      refetchInterval={OBSERVATORY_READ_MODEL_REFETCH_MS}
       loadingDetail="requesting canonical observations"
       className="border-b border-edge-subtle"
       metrics={(model) => model.metrics}

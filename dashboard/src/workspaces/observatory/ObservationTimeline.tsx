@@ -5,6 +5,7 @@ import { Corners } from '../../ui/instrument.tsx';
 import { formatMicrosUtc } from '../../ui/format.ts';
 import { EVIDENCE_INSPECTOR_ID, EvidenceChip } from './EvidencePanel.tsx';
 import {
+  EVIDENCE_STATES,
   evidenceStateLabel,
   evidenceTone,
   relativeTickLabel,
@@ -16,7 +17,10 @@ import {
   type TimelineCluster,
 } from './evidence.ts';
 
-const LEGEND: readonly EvidenceState[] = ['measured', 'partial', 'stale', 'building', 'unavailable'];
+/** The grades the legend always names, in the plate's order; grades that are
+ * present on the rail but not in this list are appended so the legend is
+ * exact for what is drawn. */
+const LEGEND_FLOOR: readonly EvidenceState[] = ['measured', 'partial', 'stale', 'building', 'unavailable'];
 
 const TICK_FRACTIONS = [0, 0.25, 0.5, 0.75, 1] as const;
 
@@ -117,6 +121,13 @@ export function ObservationTimeline({
   const railLeft = (position: number) =>
     `calc(${RAIL_INSET_PX}px + (100% - ${RAIL_INSET_PX * 2}px) * ${position})`;
 
+  const legend: EvidenceState[] = [
+    ...LEGEND_FLOOR,
+    ...EVIDENCE_STATES.filter(
+      (state) => !LEGEND_FLOOR.includes(state) && summaries.some((summary) => summary.state === state),
+    ),
+  ];
+
   const activateCluster = (cluster: TimelineCluster) => {
     const only = cluster.marks[0];
     if (cluster.marks.length === 1 && only) {
@@ -161,7 +172,7 @@ export function ObservationTimeline({
         </span>
         <span aria-hidden className="td-rule max-sm:hidden" />
         <ul className="flex flex-wrap items-center gap-x-3 gap-y-1" aria-label="Timeline legend">
-          {LEGEND.map((state) => (
+          {legend.map((state) => (
             <li key={state} className="td-legend flex items-center gap-1.5">
               <span aria-hidden className={cn('size-1.5 shrink-0', evidenceTone(state).lamp)} />
               {evidenceStateLabel(state)}
@@ -202,7 +213,7 @@ export function ObservationTimeline({
                 </span>
               );
             })}
-            <ul className="contents" aria-label="Observation marks">
+            <ul className="absolute inset-0 m-0 list-none p-0" aria-label="Observation marks">
               {model.clusters.map((cluster) => {
                 const single = cluster.marks.length === 1 ? cluster.marks[0] : null;
                 const holdsSelected = cluster.marks.some((mark) => mark.id === selected);
@@ -212,20 +223,23 @@ export function ObservationTimeline({
                   ? `${single.title} · ${evidenceStateLabel(single.state)} · observed ${formatMicrosUtc(single.observedAtMicros)}`
                   : `${cluster.marks.length} reads between ${formatMicrosUtc(cluster.oldestMicros)} and ${formatMicrosUtc(cluster.newestMicros)} · open to choose one`;
                 return (
-                  <li key={cluster.key} className="contents">
+                  <li
+                    key={cluster.key}
+                    className="absolute"
+                    style={{ left: railLeft(cluster.position), top: '50%' }}
+                  >
                     <button
                       type="button"
                       data-timeline-cluster={cluster.key}
                       data-timeline-mark={single?.id}
                       data-timeline-cluster-size={cluster.marks.length}
                       data-evidence-state={single?.state}
-                      aria-pressed={single ? holdsSelected : openCluster === cluster.key}
+                      aria-pressed={single ? holdsSelected : undefined}
                       aria-expanded={single ? undefined : openCluster === cluster.key}
                       aria-controls={single ? EVIDENCE_INSPECTOR_ID : `timeline-cluster-${cluster.key}`}
                       aria-label={label}
                       title={label}
-                      className="td-hit absolute -translate-x-1/2 -translate-y-1/2 focus-visible:outline-none"
-                      style={{ left: railLeft(cluster.position), top: '50%' }}
+                      className="td-hit -translate-x-1/2 -translate-y-1/2 focus-visible:outline-none"
                       onClick={() => activateCluster(cluster)}
                       onPointerEnter={single ? () => onPreview(single.id) : undefined}
                       onPointerLeave={single ? onPreviewEnd : undefined}
