@@ -421,6 +421,9 @@ function FieldAxis({ field }: { field: RegistryField }) {
         * paragraph below, and a legend that truncates to "INDEXED M…" states
         * nothing. */}
       <Legend>recency across · mass up</Legend>
+      <p className="td-value text-2xs text-text-secondary" data-cell="numeric">
+        {field.columns.map((column) => `${column.label} ${column.count}`).join(' · ')}
+      </p>
       <p className="text-2xs leading-relaxed text-text-muted">
         Recency glow spans now to {formatHorizon(field.vitalityHorizonDays)}, the
         age nine in ten projects here are younger than.{' '}

@@ -65,10 +65,12 @@ export function hashId(value: string): number {
   return hash >>> 0;
 }
 
+/** Normal deviate clipped at three sigma, so a body's envelope is bounded by
+ * design rather than by luck: no particle wanders off into another column. */
 function gaussian(random: () => number): number {
   const u = Math.max(1e-9, random());
   const v = random();
-  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  return Math.max(-3, Math.min(3, Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v)));
 }
 
 /** Particle budget per body: heavier crowns hold more dust, bounded so a large

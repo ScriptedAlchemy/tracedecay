@@ -523,6 +523,10 @@ export function createRegistryRuntime(options: RegistryRuntimeOptions): Registry
   let alive = true;
   let raf = 0;
   let lastFrame = 0;
+  /** Under reduced motion heat still has to cool. Nothing travels; the static
+   * frame is simply recomposed once a second while anything is warm, the same
+   * coarse clock the signal panel uses to keep a printed age true. */
+  let coolingTimer: ReturnType<typeof setTimeout> | null = null;
 
   const neighborhoodOf = (id: string): Set<string> => {
     const set = new Set<string>([id]);
@@ -666,8 +670,12 @@ export function createRegistryRuntime(options: RegistryRuntimeOptions): Registry
       cancelAnimationFrame(raf);
       raf = 0;
     }
+    if (coolingTimer !== null) {
+      clearTimeout(coolingTimer);
+      coolingTimer = null;
+    }
     lastFrame = 0;
-    field.tick(performance.now());
+    const warm = field.tick(performance.now());
     focus.t = focus.target;
     if (focus.target === 0) {
       focus.shown = null;
@@ -679,6 +687,7 @@ export function createRegistryRuntime(options: RegistryRuntimeOptions): Registry
       publish();
     }
     compose(performance.now());
+    if (warm && alive && isReduced()) coolingTimer = setTimeout(settle, 1000);
   };
 
   const wake = (): void => {
@@ -834,6 +843,8 @@ export function createRegistryRuntime(options: RegistryRuntimeOptions): Registry
       unsubscribe();
       if (raf) cancelAnimationFrame(raf);
       raf = 0;
+      if (coolingTimer !== null) clearTimeout(coolingTimer);
+      coolingTimer = null;
       for (const geometry of [dustGeometry, glowGeometry, lineGeometry, pathGeometry, pulseGeometry, haloGeometry]) {
         geometry.dispose();
       }
