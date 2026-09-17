@@ -115,7 +115,8 @@ export const STORY_SURFACES: readonly StorySurface[] = [
     id: 'settings',
     path: '/settings',
     label: 'Settings',
-    description: 'Effective layered configuration and validated changes.',
+    description:
+      'Effective configuration review: served provenance, typed write capability, compare-and-swap changes.',
     wired: true,
   },
   {
