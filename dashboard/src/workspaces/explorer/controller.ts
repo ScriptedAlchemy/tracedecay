@@ -28,6 +28,7 @@ import {
   scopedUrl,
   useScope,
   type DashboardScope,
+  type ScopeWritability,
 } from '../../data/scope/store.ts';
 import { queryTerms } from '../../ui/search/terms.ts';
 import { absenceVerdict, type AbsenceVerdict } from './absence.ts';
@@ -170,6 +171,9 @@ export interface ExplorerController {
   readonly submitted: string;
   readonly searching: boolean;
   readonly terms: readonly string[];
+  /** Whether the current scope accepts a query run, from the scope authority.
+   * Anything but `writable` means no run was, or will be, dispatched. */
+  readonly writability: ScopeWritability;
   /** One read model per lane, in `LANES` order — four, including semantic. */
   readonly lanes: readonly ExplorerLaneReadModel[];
   /** The lanes the current lane filter admits. */
@@ -428,6 +432,7 @@ export function useExplorerController(): ExplorerController {
     submitted,
     searching,
     terms,
+    writability,
     lanes,
     visibleLanes,
     laneRows,

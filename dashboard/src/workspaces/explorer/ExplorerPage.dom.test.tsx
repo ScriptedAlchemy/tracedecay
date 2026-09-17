@@ -440,6 +440,10 @@ describe('ExplorerPage scope truth', () => {
       within(lane('Code')).getAllByText(/Other project is not the active project/).length,
     ).toBeGreaterThan(0);
     expect(within(lane('Code')).getByText('Read-only scope')).toBeTruthy();
+    // The run register carries the same refusal rather than a pending admission.
+    const register = document.querySelector('[data-run-register]');
+    expect(register?.getAttribute('data-run-state')).toBe('locked');
+    expect(within(register as HTMLElement).getByText(/no run created/)).toBeTruthy();
     expect(
       fetchImpl.mock.calls.some(([input]) => String(input).includes('/api/explorer/queries')),
     ).toBe(false);

@@ -1,13 +1,37 @@
 /** Explorer's query register chrome: the coordinator run's own state, drawn
  * beside the query it answers, with the one explicit cancel control. Every
  * value is the run's; the lanes below render each source's condition. */
-import { StateChip } from '../../ui/StateChip';
+import { StateChip, type DomainStateKind } from '../../ui/StateChip';
 import { cn } from '../../ui/cn';
 import { Meter } from '../../ui/instrument.tsx';
 import type { ExplorerQueryRunV1 } from '../../contracts/generated.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
+import type { ScopeWritability } from '../../data/scope/store.ts';
 import type { RunProgress } from './controller.ts';
 import { runStateKind } from './laneModel.ts';
+
+/** What the register says while no run exists: the scope's refusal when the
+ * scope authority declined to dispatch one, otherwise the plan being admitted
+ * or the transport failure that answered instead. */
+function noRunReading(
+  writability: ScopeWritability,
+  result: EnvelopeResult<ExplorerQueryRunV1> | undefined,
+): { kind: DomainStateKind; detail: string } {
+  switch (writability.state) {
+    case 'read_only':
+      return { kind: 'locked', detail: 'no run created: the scope is read-only' };
+    case 'unknown':
+      return { kind: 'unknown', detail: 'no run created until the scope is checked' };
+    case 'writable':
+      return result?.outcome === 'transport'
+        ? { kind: result.state, detail: result.detail ?? 'coordinator response unavailable' }
+        : { kind: 'loading', detail: 'admitting the source plan' };
+    default: {
+      const exhaustive: never = writability;
+      return exhaustive;
+    }
+  }
+}
 
 /**
  * The run readout. Progress is counted in sources concluded, because that is
@@ -21,6 +45,7 @@ import { runStateKind } from './laneModel.ts';
 export function RunRegister({
   result,
   run,
+  writability,
   progress,
   cancelling,
   onCancel,
@@ -28,23 +53,20 @@ export function RunRegister({
 }: {
   result: EnvelopeResult<ExplorerQueryRunV1> | undefined;
   run: ExplorerQueryRunV1 | undefined;
+  writability: ScopeWritability;
   progress: RunProgress | null;
   cancelling: boolean;
   onCancel: (() => void) | undefined;
   className?: string;
 }) {
   if (!run) {
-    // One reading of the result, not two: a transport failure is rendered
-    // from its state and detail; anything else is the plan being admitted.
-    const blocked =
-      result?.outcome === 'transport'
-        ? { kind: result.state, detail: result.detail ?? 'coordinator response unavailable' }
-        : { kind: 'loading' as const, detail: 'admitting the source plan' };
+    const blocked = noRunReading(writability, result);
     return (
       <div
         className={cn('flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1', className)}
         aria-live="polite"
         data-run-register
+        data-run-state={blocked.kind}
       >
         <span className="td-legend">Run</span>
         <StateChip kind={blocked.kind} detail={blocked.detail} />
