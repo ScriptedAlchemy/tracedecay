@@ -64,11 +64,31 @@ pub fn skill_view_md(value: &Value) -> String {
     if !body.is_empty() {
         md.blank().heading(3, "Body").line(body);
     }
-    if let Some(files) = skill.get("support_files").and_then(Value::as_array) {
+    let summaries = value
+        .get("support_file_summaries")
+        .and_then(Value::as_array);
+    let files = skill.get("support_files").and_then(Value::as_array);
+    if summaries.is_some_and(|items| !items.is_empty())
+        || files.is_some_and(|items| !items.is_empty())
+    {
         md.blank().heading(3, "Support Files");
-        if files.is_empty() {
-            md.empty_note("No support files.");
-        } else {
+        if let Some(summaries) = summaries.filter(|items| !items.is_empty()) {
+            let bodies_included = value
+                .get("support_files_included")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            for summary in summaries {
+                let path = value_str(summary, "/path");
+                let bytes = summary.get("byte_len").and_then(Value::as_u64).unwrap_or(0);
+                if bodies_included {
+                    md.bullet(&format!("**{path}** - {bytes} bytes"));
+                } else {
+                    md.bullet(&format!(
+                        "**{path}** - {bytes} bytes (pass include_support_files=true only for a required body)"
+                    ));
+                }
+            }
+        } else if let Some(files) = files {
             for file in files {
                 let path = value_str(file, "/path");
                 let bytes = file

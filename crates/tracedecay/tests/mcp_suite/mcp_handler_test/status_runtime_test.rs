@@ -50,9 +50,43 @@ async fn test_status() {
         "status should include server stats"
     );
     assert!(
-        text.contains("branch_diagnostics"),
-        "status should include branch diagnostics"
+        !text.contains("branch_diagnostics"),
+        "status should omit the full branch diagnostic list unless requested: {text}"
     );
+    assert!(
+        !text.contains("storage_health"),
+        "status should omit storage health unless requested"
+    );
+    assert!(
+        !text.contains("session_ingest"),
+        "status should omit session ingest unless requested"
+    );
+}
+
+#[tokio::test]
+async fn status_includes_verbose_sections_only_when_requested() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_status",
+        json!({
+            "include_branch_diagnostics": true,
+            "include_storage_health": true,
+            "include_session_ingest": true,
+            "include_staleness": true,
+        }),
+        Some(json!({"uptime": 100})),
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    assert!(
+        text.contains("branch_diagnostics"),
+        "explicit opt-in should include branch diagnostics"
+    );
+    assert!(text.contains("storage_health"));
+    assert!(text.contains("git_staleness"));
 }
 
 #[tokio::test]
@@ -112,7 +146,7 @@ async fn status_reports_daemon_owned_partial_history_catch_up() {
     let result = tracedecay::mcp::tools::handle_tool_call_with_registry_options(
         &cg,
         "tracedecay_status",
-        json!({"format": "json"}),
+        json!({"format": "json", "include_session_ingest": true}),
         None,
         None,
         tracedecay::mcp::tools::ToolCallRegistryOptions::with_session_authorities(
@@ -206,7 +240,7 @@ async fn status_without_retained_session_authority_fails_closed() {
     let result = handle_tool_call(
         &cg,
         "tracedecay_status",
-        json!({ "format": "json" }),
+        json!({ "format": "json", "include_session_ingest": true }),
         None,
         None,
     )

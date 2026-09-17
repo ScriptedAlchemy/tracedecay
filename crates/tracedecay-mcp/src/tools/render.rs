@@ -21,6 +21,29 @@ pub use tracedecay_runtime_core::text::format_relative_time;
 
 const MARKDOWN_TRUNCATION_RESERVED_CHARS: usize = 2_048;
 
+/// Agent-facing recovery text for a truncated response.
+///
+/// The stored body is larger than one response frame by definition. The
+/// instruction must not tell the caller to page through and join that body
+/// back into the conversation.
+fn truncated_response_recovery_instruction(
+    preview_chars: usize,
+    original_chars: usize,
+    expires_at: i64,
+    handle: &str,
+) -> String {
+    format!(
+        "This response was truncated: `preview` contains only the first {preview_chars} of \
+         {original_chars} characters. The original response is stored locally and expires at \
+         {expires_at} (TTL {RESPONSE_HANDLE_TTL_SECS} seconds). Use the preview. Do not page \
+         through and join the stored body back into the conversation. If one omitted detail \
+         is required, call `{RESPONSE_RETRIEVE_TOOL}` once with required argument `handle` \
+         set to `{handle}` and an offset/max_chars window for that span only. If the original \
+         call used `project_selector.project_id`, pass the same selector. Only call it if the \
+         missing details are needed."
+    )
+}
+
 fn parse_format(args: &Value) -> RequestedOutputFormat {
     requested_output_format(args)
 }
@@ -105,13 +128,11 @@ pub fn truncated_json_envelope_with_handle(project_root: Option<&Path>, formatte
                 );
                 object.insert(
                     "retrieve_instruction".to_string(),
-                    serde_json::json!(format!(
-                        "This response was truncated: `preview` contains only the first {} of {} characters. The full original response is stored locally in this project and expires at {} (TTL {} seconds). To recover it, call `{RESPONSE_RETRIEVE_TOOL}` with required argument `handle` set to `{}`. The stored body is by definition larger than one response frame, so each call returns one page: repeat the call with `offset` set to the `next_offset` the previous page reported until `has_more` is false, then join the pages in order. If the original call used `project_selector.project_id`, pass the same selector so the handle is read from that project cache. Only call it if the missing details are needed.",
+                    serde_json::json!(truncated_response_recovery_instruction(
                         preview.chars().count(),
                         original_chars,
                         record.expires_at,
-                        RESPONSE_HANDLE_TTL_SECS,
-                        record.handle
+                        &record.handle,
                     )),
                 );
             } else if let Some(status) = &handle.unavailable {
@@ -403,7 +424,7 @@ fn render_markdown_truncation(
     if let Some(record) = &handle.record {
         let _ = writeln!(
             rendered,
-            "Full response stored locally. Retrieve it with `{RESPONSE_RETRIEVE_TOOL}` using handle `{}` before {}.",
+            "Preview is the context to use. Do not join stored pages back into the conversation. If one omitted detail is required, call `{RESPONSE_RETRIEVE_TOOL}` once using handle `{}` before {}.",
             record.handle, record.expires_at
         );
     } else if let Some(status) = &handle.unavailable {

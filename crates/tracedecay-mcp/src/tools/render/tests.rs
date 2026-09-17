@@ -65,6 +65,13 @@ fn truncated_json_envelope_includes_handle() {
 
     assert_eq!(parsed["truncated"], true);
     assert_eq!(parsed["retrieve_tool"], "tracedecay_retrieve");
+    let instruction = parsed["retrieve_instruction"].as_str().unwrap();
+    assert!(instruction.contains("Use the preview"));
+    assert!(instruction.contains("Only call it if the missing details are needed"));
+    assert!(
+        !instruction.contains("join the pages"),
+        "truncation must not instruct a full reassembly: {instruction}"
+    );
     assert!(parsed.get("retrieve_handle").is_none());
     let handle = parsed["handle"].as_str().unwrap();
     assert!(handle.starts_with("rh_"));
@@ -98,7 +105,9 @@ fn truncated_markdown_includes_readable_handle_guidance() {
 
     assert!(result.starts_with("# Truncated Response"));
     assert!(result.contains("## Preview"));
-    assert!(result.contains("Full response stored locally"));
+    assert!(result.contains("Preview is the context to use"));
+    assert!(result.contains("Do not join stored pages"));
+    assert!(!result.contains("until has_more is false"));
     assert!(result.contains("tracedecay_retrieve"));
     assert!(
         serde_json::from_str::<serde_json::Value>(&result).is_err(),
