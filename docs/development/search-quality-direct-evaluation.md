@@ -21,6 +21,19 @@ whose lower bound had to exceed zero. The rule travelled with the evidence as
 tuning material digest so the threshold could not be re-tuned to fit the result
 it produced.
 
+The same subtraction applies to the policy slice that survived that deletion.
+`decision_policy` could express only `required_cancellation =
+bounded_typed_cancelled` plus an unread `required_fallback_byte_stability`
+flag. Candidate generation already proves cancellation fail-closed
+(`prove_cancellation`) and already records fallback byte equality as
+`fallback_stable` / `fallback_matches_expected`. The slice, the single-variant
+`RequiredCancellationV1` stamp, and the report aliases `cancellation_bounded`
+and `offline` (the latter was `fallback_matches_expected` copied) added no
+observation. Schema 1 refuses `decision_policy` the same way it refuses a
+methodology. The leftover `QUALIFICATION-METHODOLOGY.md` described that
+deleted gate as if it were still the live rule; it is gone rather than kept
+as a stub.
+
 `refactor(retrieval): retire dense FastEmbed path for lexical/graph`
 (`8e7952f91a`) deleted `native_qualification.rs` along with the whole semantic
 runtime. That was not an oversight: the gate existed to decide whether a
@@ -69,9 +82,10 @@ a qualification record.
 ## Re-introducing a gate
 
 Restoring an activation gate is a schema change, not a comment change. Workload
-schema 1 carries no `methodology_version`, no practical-effect bound, and no
-`policy_freeze`, and `deny_unknown_fields` refuses those keys outright, so a
-workload cannot smuggle a methodology back in. A future gate needs, at minimum:
+schema 1 carries no `methodology_version`, no practical-effect bound, no
+`policy_freeze`, and no `decision_policy`, and `deny_unknown_fields` refuses
+those keys outright, so a workload cannot smuggle a methodology back in. A
+future gate needs, at minimum:
 
 1. a second profile in the packaged matrix to serve as the candidate,
 2. a versioned methodology declaration (`methodology_version`) travelling with

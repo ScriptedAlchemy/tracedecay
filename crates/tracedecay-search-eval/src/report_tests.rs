@@ -204,9 +204,12 @@ fn direct_report_is_evidence_only_and_owns_its_candidate_schema() {
                 | crate::DirectEvaluationStatusV1::Fail
                 | crate::DirectEvaluationStatusV1::Pending
         ));
-        // Offline is derived from this run's observed query-fallback match,
-        // not a self-asserted availability stamp on the raw output.
-        assert_eq!(profile.offline, profile.fallback_matches_expected);
+        // Offline and cancellation were aliases of observations already on
+        // the profile (fallback match, and a fail-closed generate proof).
+        // They are not separate report fields.
+        let profile_value = serde_json::to_value(profile).expect("profile serializes");
+        assert!(profile_value.get("offline").is_none());
+        assert!(profile_value.get("cancellation_bounded").is_none());
     }
 
     let value = serde_json::to_value(&report).expect("serialize direct report");

@@ -21,8 +21,9 @@
 //!
 //! Re-introducing a qualification gate is a schema change, not a comment
 //! change: workload schema 1 carries no `methodology_version`, no practical-
-//! effect bound, and no `policy_freeze`, so it cannot express a held-out
-//! methodology. See `docs/development/search-quality-direct-evaluation.md`.
+//! effect bound, no `policy_freeze`, and no `decision_policy`, so it cannot
+//! express a held-out methodology or a single-variant policy slice. See
+//! `docs/development/search-quality-direct-evaluation.md`.
 
 pub mod candidate_output;
 pub mod evaluate;
@@ -32,10 +33,10 @@ pub mod report;
 pub use candidate_output::{
     CandidateOutputError, CandidateWorkloadV1, CorpusDocumentV1, EvaluationConcurrencyContractV1,
     EvaluationExecutionContractV1, GenerateCandidateOutputsResultV1, NeedProvenanceKindV1,
-    NeedProvenanceV1, ProductionCandidateOutputV1, RequiredCancellationV1,
-    ResourceMeasurementPendingReasonV1, ResourceMeasurementStatusV1, WorkloadQueryV1,
-    compute_corpus_digest, compute_profile_material_digest, compute_workload_digest,
-    load_candidate_workload, validate_workload_for_tuning,
+    NeedProvenanceV1, ProductionCandidateOutputV1, ResourceMeasurementPendingReasonV1,
+    ResourceMeasurementStatusV1, WorkloadQueryV1, compute_corpus_digest,
+    compute_profile_material_digest, compute_workload_digest, load_candidate_workload,
+    validate_workload_for_tuning,
 };
 pub use evaluate::{
     DirectEvaluationStatusV1, QUERY_BASELINE_PROFILE, SearchEvalError, evaluate_generated_outputs,
