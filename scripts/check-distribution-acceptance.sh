@@ -567,17 +567,28 @@ for package in sorted(metadata["packages"], key=lambda value: value["name"]):
     path = packages / f'{package["name"]}-{package["version"]}'
     print(f'{json.dumps(package["name"])} = {{ path = {json.dumps(str(path))} }}')
 # Packaged crates resolve outside the workspace, so the workspace manifest's
-# git patches (e.g. the pinned tree-sitter-rust fork) must be re-applied here
-# for the extracted trees to see the same patched dependencies.
+# patches must be re-applied here for the extracted trees to see the same
+# patched dependencies: git patches (e.g. the pinned tree-sitter-rust fork)
+# verbatim, and path patches (e.g. the vendored hotpath-macros) against the
+# staged workspace root, which carries the same `vendor` tree.
+staged_root = pathlib.Path(sys.argv[3]).parent
 for name, spec in workspace_manifest.get("patch", {}).get("crates-io", {}).items():
-    if not isinstance(spec, dict) or "git" not in spec:
+    if not isinstance(spec, dict):
         continue
-    entry = f'{json.dumps(name)} = {{ git = {json.dumps(spec["git"])}'
-    for key in ("rev", "branch", "tag"):
-        if key in spec:
-            entry += f", {key} = {json.dumps(spec[key])}"
-    entry += " }"
-    print(entry)
+    if "git" in spec:
+        entry = f'{json.dumps(name)} = {{ git = {json.dumps(spec["git"])}'
+        for key in ("rev", "branch", "tag"):
+            if key in spec:
+                entry += f", {key} = {json.dumps(spec[key])}"
+        entry += " }"
+        print(entry)
+    elif "path" in spec:
+        patched = staged_root / spec["path"]
+        if not (patched / "Cargo.toml").is_file():
+            raise SystemExit(
+                f"distribution acceptance: workspace path patch {name} is not staged at {patched}"
+            )
+        print(f'{json.dumps(name)} = {{ path = {json.dumps(str(patched))} }}')
 PY
 
 verify_feature_wiring \
