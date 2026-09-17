@@ -333,16 +333,18 @@ fn problem_envelope(payload: &Value, context: &str) -> Value {
 /// starts its deadline clock itself: arrival is strictly after that clock
 /// started, so holding a full budget plus a margin beyond arrival always
 /// outlives it.
-fn park_at_commit_barrier<T, F>(barrier_dir: &Path, request: F) -> T
+fn park_at_commit_barrier<T, F>(barrier_dir: &Path, content: &str, request: F) -> T
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
     // The barrier is one-shot per directory: clear a previous park's markers
     // so the same daemon process can serve more than one parked request.
-    for marker in ["armed", "claimed", "arrived", "release"] {
+    for marker in ["armed", "claimed", "arrived", "release", "expect_content"] {
         let _ = std::fs::remove_file(barrier_dir.join(marker));
     }
+    std::fs::write(barrier_dir.join("expect_content"), content.as_bytes())
+        .expect("pin the fact commit barrier to the parked content");
     std::fs::write(barrier_dir.join("armed"), b"armed\n").expect("arm the fact commit barrier");
 
     let started = Instant::now();
@@ -425,7 +427,7 @@ fn partial_effect_survives_http_mcp_and_rust_sdk_across_restart() {
         token: mount.token.clone(),
     };
     let http_identity = identity.clone();
-    let (http_status, http_body) = park_at_commit_barrier(&barrier_path, move || {
+    let (http_status, http_body) = park_at_commit_barrier(&barrier_path, HTTP_MARKER, move || {
         post_application(
             &http_mount_for_request,
             &http_identity,
@@ -447,7 +449,7 @@ fn partial_effect_survives_http_mcp_and_rust_sdk_across_restart() {
     // the `_meta` object on `tools/call`.
     let mcp_home = home_path.clone();
     let mcp_project = project_path.clone();
-    let mcp_response = park_at_commit_barrier(&barrier_path, move || {
+    let mcp_response = park_at_commit_barrier(&barrier_path, MCP_MARKER, move || {
         mcp_tool_call(
             &mcp_home,
             &mcp_project,
@@ -469,7 +471,7 @@ fn partial_effect_survives_http_mcp_and_rust_sdk_across_restart() {
         token: mount.token.clone(),
     };
     let sdk_identity = identity.clone();
-    let sdk_error = park_at_commit_barrier(&barrier_path, move || {
+    let sdk_error = park_at_commit_barrier(&barrier_path, SDK_MARKER, move || {
         let client = sdk_client(&sdk_mount, &sdk_identity);
         let request =
             serde_json::from_value(fact_add_body(SDK_MARKER)).expect("canonical fact-add request");
@@ -546,7 +548,7 @@ fn partial_effect_survives_http_mcp_and_rust_sdk_across_restart() {
         token: mount.token.clone(),
     };
     let restart_identity = identity.clone();
-    let (_, restart_body) = park_at_commit_barrier(&barrier_path, move || {
+    let (_, restart_body) = park_at_commit_barrier(&barrier_path, POST_RESTART_MARKER, move || {
         post_application(
             &restart_mount,
             &restart_identity,

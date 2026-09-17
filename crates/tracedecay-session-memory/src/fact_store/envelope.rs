@@ -213,13 +213,39 @@ impl DatabaseFactStore<'_> {
         + Send
         + 'static,
     ) -> FactStoreResult<T> {
+        self.project_memory_write_with_barrier_content(
+            write_control,
+            None,
+            graph_source_changed,
+            work,
+        )
+        .await
+    }
+
+    /// Like [`Self::project_memory_write`], but names the fact content the
+    /// test-transport commit barrier may match against `expect_content`.
+    #[hotpath::skip]
+    pub(super) async fn project_memory_write_with_barrier_content<T: Send + 'static>(
+        &self,
+        write_control: &FactWriteControl,
+        barrier_content: Option<String>,
+        graph_source_changed: impl FnOnce(&T) -> bool + Send + 'static,
+        work: impl for<'tx> FnOnce(
+            &'tx Transaction<'_>,
+        )
+            -> Pin<Box<dyn Future<Output = FactStoreResult<T>> + Send + 'tx>>
+        + Send
+        + 'static,
+    ) -> FactStoreResult<T> {
         let db = (*self.db).clone();
         let write_control = write_control.clone();
         // Dropping the caller's future detaches this owned task. The control
         // can still deny the write before its commit-start transition; after
         // that transition the bounded transaction commit runs to completion.
         tokio::spawn(async move {
-            let result = execute_project_memory_write(db.clone(), write_control, work).await;
+            let result =
+                execute_project_memory_write(db.clone(), write_control, barrier_content, work)
+                    .await;
             if result.as_ref().is_ok_and(graph_source_changed) {
                 super::graph::publish_project_memory_graph_after_write(db).await;
             }
@@ -233,6 +259,7 @@ impl DatabaseFactStore<'_> {
 async fn execute_project_memory_write<T: Send + 'static>(
     db: Database,
     write_control: FactWriteControl,
+    barrier_content: Option<String>,
     work: impl for<'tx> FnOnce(
         &'tx Transaction<'_>,
     ) -> Pin<Box<dyn Future<Output = FactStoreResult<T>> + Send + 'tx>>
@@ -274,7 +301,10 @@ async fn execute_project_memory_write<T: Send + 'static>(
             // yet. Acceptance harnesses park exactly here to make a budget that
             // expires after the commit point reproducible.
             #[cfg(feature = "test-transport")]
-            crate::fact_store::commit_barrier::wait_after_durable_fact_commit().await;
+            crate::fact_store::commit_barrier::wait_after_durable_fact_commit(
+                barrier_content.as_deref(),
+            )
+            .await;
             Ok(value)
         }
         Err(error) => match transaction.rollback().await {

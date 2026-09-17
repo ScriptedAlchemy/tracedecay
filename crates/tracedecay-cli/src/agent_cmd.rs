@@ -1175,9 +1175,22 @@ fn host_bundle_error_for_agent(
             == tracedecay_agent_hosts::agents::host_bundle::HostBundleError::UnsupportedCapability
     {
         return tracedecay_domain::errors::TraceDecayError::Config {
-            message: "Codex plugin activation could not be completed through `codex plugin add`. \
-                      Confirm the `codex` CLI is on PATH and retry; hook trust still requires \
-                      `/hooks` inside Codex after a successful add."
+            message: "Codex activates plugins through its native cache. Run `codex plugin add \
+                      tracedecay@personal` after TraceDecay stages the source package. Confirm \
+                      the `codex` CLI is on PATH and retry; hook trust still requires `/hooks` \
+                      inside Codex after a successful add."
+                .to_string(),
+        };
+    }
+    if matches!(
+        &error,
+        tracedecay_agent_hosts::agents::host_bundle::HostBundleError::HostCliUnavailable { .. }
+    ) && agent_id == "codex"
+    {
+        return tracedecay_domain::errors::TraceDecayError::Config {
+            message: "Codex activates plugins through its native cache. Run `codex plugin add \
+                      tracedecay@personal` after TraceDecay stages the source package. Install \
+                      the `codex` CLI or add it to PATH, then retry."
                 .to_string(),
         };
     }

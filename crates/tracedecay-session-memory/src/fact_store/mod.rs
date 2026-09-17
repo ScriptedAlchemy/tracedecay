@@ -503,8 +503,10 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         request: ProjectMemoryFactAddCommandV1,
         write_control: &FactWriteControl,
     ) -> FactStoreResult<ProjectMemoryFactAddOutcomeV1> {
-        self.project_memory_write(
+        let barrier_content = Some(request.content().to_owned());
+        self.project_memory_write_with_barrier_content(
             write_control,
+            barrier_content,
             |outcome: &ProjectMemoryFactAddOutcomeV1| {
                 outcome.commit_receipt().is_some() && !outcome.commit_replayed()
             },

@@ -34,12 +34,15 @@ const RELEASE_POLL: Duration = Duration::from_millis(10);
 /// Parks after a durable fact commit when the harness armed the barrier.
 ///
 /// A no-op unless [`BARRIER_DIR_ENV`] names a directory holding an `armed`
-/// file. Renaming `armed` to `claimed` is the claim: a concurrent fact commit
-/// cannot also consume this one-shot barrier, so exactly the mutation the test
-/// is watching is the one that parks. Arrival is published as `arrived`; the
-/// park ends when `release` appears, or when the bounded wait expires so a
-/// failed test cannot strand a live daemon.
-pub(super) async fn wait_after_durable_fact_commit() {
+/// file. When that directory also holds `expect_content`, only a commit whose
+/// `committed_content` matches that file byte-for-byte (trimmed) may claim the
+/// barrier — so a foreign project-open or curator write cannot steal the park
+/// from the mutation the journey is watching. Renaming `armed` to `claimed` is
+/// the claim: a concurrent matching fact commit cannot also consume this
+/// one-shot barrier. Arrival is published as `arrived`; the park ends when
+/// `release` appears, or when the bounded wait expires so a failed test cannot
+/// strand a live daemon.
+pub(super) async fn wait_after_durable_fact_commit(committed_content: Option<&str>) {
     let Some(root) = std::env::var_os(BARRIER_DIR_ENV) else {
         return;
     };
@@ -47,6 +50,21 @@ pub(super) async fn wait_after_durable_fact_commit() {
     let armed = root.join("armed");
     if !matches!(armed.try_exists(), Ok(true)) {
         return;
+    }
+    let expect = root.join("expect_content");
+    if matches!(expect.try_exists(), Ok(true)) {
+        let expected = match std::fs::read_to_string(&expect) {
+            Ok(value) => value,
+            Err(_) => return,
+        };
+        let expected = expected.trim();
+        if expected.is_empty() {
+            return;
+        }
+        match committed_content {
+            Some(actual) if actual.trim() == expected => {}
+            _ => return,
+        }
     }
     if std::fs::rename(&armed, root.join("claimed")).is_err() {
         return;
