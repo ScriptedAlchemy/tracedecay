@@ -76,7 +76,7 @@ export function BranchNavigator({
             value={query}
             onChange={(event) => setQuery(event.currentTarget.value)}
             placeholder="session, agent, host"
-            className="min-h-8 min-w-0 flex-1 border border-edge-subtle bg-surface-1 px-1.5 text-2xs text-text-primary"
+            className="min-h-[var(--touch-target-min)] min-w-0 flex-1 border border-edge-subtle bg-surface-1 px-1.5 text-2xs text-text-primary"
           />
         </label>
         <span className="text-3xs text-text-muted">

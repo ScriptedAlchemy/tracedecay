@@ -495,7 +495,7 @@ function TemporalBody({
 
         <aside className={cn('flex w-full shrink-0 flex-col gap-3', 'order-first')}>
           <details>
-            <summary className="min-h-6 cursor-pointer text-3xs leading-6 text-text-muted">
+            <summary className="flex min-h-[var(--touch-target-min)] cursor-pointer items-center text-3xs text-text-muted">
               Source coverage · {envelope.freshness.state} ·{' '}
               {data.source_statuses.map((source) => `${source.label}: ${source.state}`).join(' · ')}
             </summary>
