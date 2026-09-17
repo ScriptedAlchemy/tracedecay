@@ -167,12 +167,14 @@ export function CommandPalette({
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 bg-black/55" />
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/55" />
         {/* An overlay, not channel 15 (NAVIGATION.md): the same framed
-          * night-glass panel as the shell, set over it. */}
+          * night-glass panel as the shell, set over it. Stacked above every
+          * workspace layer explicitly — a sticky header with its own z-index
+          * painted over the palette rows otherwise. */}
         <Dialog.Content
           className={cn(
-            'fixed left-1/2 top-24 w-[min(560px,90vw)] -translate-x-1/2',
+            'fixed left-1/2 top-24 z-50 w-[min(560px,90vw)] -translate-x-1/2',
             'overflow-hidden rounded-[var(--radius-panel)] border border-edge-frame bg-surface-1 shadow-2xl',
           )}
           onKeyDown={onKeyDown}

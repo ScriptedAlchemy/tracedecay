@@ -163,7 +163,7 @@ function RailLink({
             {channelNumber(path)}
           </span>
           <Icon aria-hidden size={14} strokeWidth={1.5} className="shrink-0" />
-          <span className="truncate text-sm">{label}</span>
+          <span className="truncate text-sm max-md:hidden">{label}</span>
           {health ? <DoctorDot health={health} /> : null}
         </>
       )}
@@ -263,8 +263,7 @@ export function NavRail() {
   return (
     <nav
       aria-label="Workspaces"
-      className="group/rail relative flex w-[var(--shell-rail)] shrink-0 flex-col border-r border-edge-frame bg-surface-1 max-md:w-[var(--shell-rail-compact)]"
-      data-collapsed="false"
+      className="relative flex w-[var(--shell-rail)] shrink-0 flex-col border-r border-edge-frame bg-surface-1 max-md:w-[var(--shell-rail-compact)]"
     >
       <BrandBlock />
       <div className="min-h-0 flex-1 overflow-auto">

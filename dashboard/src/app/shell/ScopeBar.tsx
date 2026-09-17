@@ -117,15 +117,18 @@ export function ScopeBar({
           </span>
         )}
         {channel ? (
+          // Withdrawn below `sm`: the workspace header inside the aperture
+          // carries the same number and title, and at 320px the register has
+          // no width to repeat it without overrunning its own controls.
           <span
-            className="flex min-w-0 shrink-0 items-center gap-2 border-r border-edge-subtle px-3"
+            className="flex min-w-0 shrink-0 items-center gap-2 border-r border-edge-subtle px-3 max-sm:hidden"
             aria-label="Active channel"
             data-active-channel={channel.path}
           >
             <span className="td-value text-2xs text-accent" data-cell="numeric">
               {channelNumber(channel.path)}
             </span>
-            <span className="td-title text-text-primary">{channel.label}</span>
+            <span className="td-title truncate text-text-primary">{channel.label}</span>
           </span>
         ) : null}
         <span aria-hidden className="flex-1 border-r border-edge-subtle" />

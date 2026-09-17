@@ -77,8 +77,12 @@ export function StatusStrip({ queryActivity }: { queryActivity?: ReactNode } = {
         ? { value: 'connecting', tone: 'bg-state-loading', ink: 'text-text-primary', live: true }
         : { value: 'down', tone: 'bg-state-offline', ink: 'text-text-muted', live: false };
   return (
+    // Wraps rather than clips: below the width that holds every cell on one
+    // row, the trailing cells drop to a second 32px row instead of being cut
+    // off by the shell's overflow, which is how the Registry cell went missing
+    // at 768 and everything past Feed at 320.
     <footer
-      className="flex min-h-[var(--shell-status)] shrink-0 items-stretch border-t border-edge-frame bg-surface-1"
+      className="flex min-h-[var(--shell-status)] shrink-0 flex-wrap items-stretch border-t border-edge-frame bg-surface-1"
       aria-label="Status"
     >
       <Cell icon={Link2} label="Link">
@@ -359,7 +363,7 @@ function Cell({
   children: ReactNode;
 }) {
   return (
-    <div className="flex min-w-0 shrink-0 items-center gap-2 border-r border-edge-subtle px-3">
+    <div className="flex min-h-[var(--shell-status)] min-w-0 shrink-0 items-center gap-2 border-r border-edge-subtle px-3">
       <Icon aria-hidden size={14} strokeWidth={1.5} className="shrink-0 text-text-muted" />
       <span className="td-legend">{label}</span>
       <span className="flex min-w-0 items-center gap-1.5">{children}</span>

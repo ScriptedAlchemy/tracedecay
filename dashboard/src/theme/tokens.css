@@ -493,10 +493,16 @@
   content: '';
   position: absolute;
   left: 6px;
-  right: 2px;
+  /* The tail runs on past the last point and fades out well short of the
+   * rail's edge — a trace, not a divider. */
+  right: 30%;
   top: 50%;
   height: 1px;
-  background: color-mix(in oklab, var(--raw-accent) 55%, transparent);
+  background: linear-gradient(
+    to right,
+    color-mix(in oklab, var(--raw-accent) 55%, transparent),
+    transparent
+  );
 }
 .td-trace-tail > i {
   display: block;
