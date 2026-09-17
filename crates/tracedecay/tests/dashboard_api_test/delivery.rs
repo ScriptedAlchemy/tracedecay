@@ -339,8 +339,10 @@ fn delivery_http_admission_freshness_reader() -> CodeIndexFreshnessReader {
                 source_reference: Some("refs/heads/feature".to_owned()),
                 source_revision: Some(DELIVERY_HTTP_ADMISSION_INDEXED_HEAD.to_owned()),
                 latest_generation_id: Some("generation.delivery-http-admission.1".to_owned()),
-                coverage: "complete".to_owned(),
-                staleness_state: Some("fresh".to_owned()),
+                coverage: tracedecay_contracts::code_index_freshness::CodeIndexFreshnessCoverageV1::Complete,
+                staleness_state: Some(
+                    tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh,
+                ),
                 sealed_at_micros: Some(30),
                 ..CodeIndexWorktreeFreshnessV1::default()
             }))

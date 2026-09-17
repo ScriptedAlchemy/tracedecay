@@ -378,12 +378,23 @@ impl CodeIndexSchedulerRegistryV1 {
                         graph_activation_enabled,
                         &code_graph_serving,
                     );
-                    let verifying = ready && refresh_in_flight && !source_change_pending;
-                    let refreshing = refresh_in_flight && !verifying;
-                    let rebuild_in_flight = refreshing;
-                    let stale = hook_hint_count != Some(0);
+                    let observation = tracedecay_contracts::code_index_freshness::CodeIndexFreshnessLadderV1::project(
+                        tracedecay_contracts::code_index_freshness::CodeIndexFreshnessLadderInputsV1 {
+                            ready,
+                            refresh_in_flight,
+                            source_change_pending,
+                            parked: parked.as_ref(),
+                            // The scheduler lock is held by the pass this read
+                            // could not join, so verification is unknown here.
+                            source_verified: None,
+                            hook_hint_count,
+                        },
+                    );
                     let clone_index = text.as_ref().map_or_else(Default::default, |text| {
-                        text.clone_index_status(stale || refreshing, clone_update)
+                        text.clone_index_status(
+                            hook_hint_count != Some(0) || observation.rebuild_in_flight,
+                            clone_update,
+                        )
                     });
                     let last_reconcile_micros = match last_reconciled_at_micros
                         .load(Ordering::Acquire)
@@ -396,38 +407,10 @@ impl CodeIndexSchedulerRegistryV1 {
                         code_graph_serving,
                         clone_index: Some(clone_index),
                         last_reconcile_micros,
-                        rebuild_in_flight,
-                        staleness_state: Some(
-                            if parked.is_some() && !ready {
-                                "parked"
-                            } else if verifying {
-                                "verifying"
-                            } else if refreshing {
-                                if ready {
-                                    "refreshing"
-                                } else {
-                                    "indexing"
-                                }
-                            } else if stale && ready {
-                                "stale"
-                            } else if ready {
-                                "fresh"
-                            } else {
-                                "indexing"
-                            }
-                            .to_owned(),
-                        ),
+                        rebuild_in_flight: observation.rebuild_in_flight,
+                        staleness_state: Some(observation.staleness_state),
                         hook_hint_count,
-                        coverage: if refreshing {
-                            "partial_refresh_in_progress"
-                        } else if verifying {
-                            "partial_source_verification"
-                        } else if hook_hint_count.is_some() {
-                            "complete"
-                        } else {
-                            "partial_hook_hint_overflow"
-                        }
-                        .to_owned(),
+                        coverage: observation.coverage,
                         progress,
                         parked,
                         generation_recovery,
@@ -469,33 +452,19 @@ impl CodeIndexSchedulerRegistryV1 {
                 graph_activation_enabled,
                 &code_graph_serving,
             );
-            let verifying = ready && refresh_in_flight && !source_change_pending;
-            let refreshing = refresh_in_flight && !verifying;
-            let rebuild_in_flight = refreshing;
+            let observation = tracedecay_contracts::code_index_freshness::CodeIndexFreshnessLadderV1::project(
+                tracedecay_contracts::code_index_freshness::CodeIndexFreshnessLadderInputsV1 {
+                    ready,
+                    refresh_in_flight,
+                    source_change_pending,
+                    parked: parked.as_ref(),
+                    source_verified: Some(verified),
+                    hook_hint_count,
+                },
+            );
             let clone_index = text.as_ref().map_or_else(Default::default, |text| {
-                text.clone_index_status(stale || refreshing, clone_update)
+                text.clone_index_status(stale || observation.rebuild_in_flight, clone_update)
             });
-            let staleness_state = if parked.is_some() && !ready {
-                "parked"
-            } else if verifying {
-                "verifying"
-            } else if refreshing {
-                if ready {
-                    "refreshing"
-                } else {
-                    "indexing"
-                }
-            } else if stale || hook_hint_count != Some(0) {
-                if ready {
-                    "stale"
-                } else {
-                    "indexing"
-                }
-            } else if ready {
-                "fresh"
-            } else {
-                "indexing"
-            };
             let identity = if text.is_some() {
                 dashboard_text_freshness_identity(text.as_ref())
             } else {
@@ -506,21 +475,10 @@ impl CodeIndexSchedulerRegistryV1 {
                 code_graph_serving,
                 clone_index: Some(clone_index),
                 last_reconcile_micros: scheduler.last_reconciled_at_micros(),
-                rebuild_in_flight,
-                staleness_state: Some(staleness_state.to_owned()),
+                rebuild_in_flight: observation.rebuild_in_flight,
+                staleness_state: Some(observation.staleness_state),
                 hook_hint_count,
-                coverage: if refreshing {
-                    "partial_refresh_in_progress"
-                } else if verifying {
-                    "partial_source_verification"
-                } else if !verified {
-                    "partial_unverified_restore"
-                } else if hook_hint_count.is_some() {
-                    "complete"
-                } else {
-                    "partial_hook_hint_overflow"
-                }
-                .to_owned(),
+                coverage: observation.coverage,
                 progress,
                 parked,
                 generation_recovery,

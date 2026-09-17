@@ -537,7 +537,7 @@ describe('Code index freshness', () => {
           ...worktree(),
           latest_generation_id: readyProgress.generation_id,
           staleness_state: 'stale',
-          coverage: 'partial',
+          coverage: 'partial_unverified_restore',
           rebuild_in_flight: false,
           progress: readyProgress,
         },
@@ -789,7 +789,9 @@ describe('Code index freshness', () => {
 
   it('reports a stale generation as stale against the reference it was sealed on', async () => {
     renderFreshness('partial', {
-      worktrees: [{ ...worktree(), staleness_state: 'stale', coverage: 'partial' }],
+      worktrees: [
+        { ...worktree(), staleness_state: 'stale', coverage: 'partial_unverified_restore' },
+      ],
       note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
     });
 
@@ -797,7 +799,7 @@ describe('Code index freshness', () => {
     const mount = document.querySelector('[data-worktree-staleness="stale"]');
     expect(mount).toBeTruthy();
     expect(mount?.textContent).toContain('refs/heads/codex/tracedecay-total-redesign-plan');
-    expect(mount?.textContent).toContain('partial');
+    expect(mount?.textContent).toContain('partial_unverified_restore');
   });
 
   it('reports an unreachable daemon as offline', async () => {

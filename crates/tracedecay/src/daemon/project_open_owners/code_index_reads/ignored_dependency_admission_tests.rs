@@ -394,8 +394,9 @@ async fn latest(
                 .dashboard_freshness(project_root)
                 .await
                 .and_then(|freshness| freshness.staleness_state)
-                .as_deref()
-                == Some("fresh")
+                == Some(
+                    tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh,
+                )
                 && let Some(latest) = registry.latest_complete_fresh(project_root).await
             {
                 return latest;

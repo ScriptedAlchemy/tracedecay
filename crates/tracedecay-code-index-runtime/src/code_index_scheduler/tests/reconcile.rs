@@ -649,7 +649,10 @@ async fn registry_feeds_publications_and_bounded_freshness_reads() {
         Some(initial.generation_id.as_str())
     );
     assert!(freshness.last_reconcile_micros.is_some());
-    assert_eq!(freshness.staleness_state.as_deref(), Some("fresh"));
+    assert_eq!(
+        freshness.staleness_state,
+        Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh)
+    );
     assert_eq!(freshness.hook_hint_count, Some(0));
 
     fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
@@ -3656,11 +3659,14 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
     assert_eq!(projected_progress.generation_id, expected.generation_id);
     assert!(projected_progress.progress_epoch >= expected.progress_epoch);
     assert_eq!(
-        projected.staleness_state.as_deref(),
-        Some("fresh"),
+        projected.staleness_state,
+        Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh),
         "an unrelated scheduler-mutex holder is not a source refresh"
     );
-    assert_eq!(projected.coverage, "complete");
+    assert_eq!(
+        projected.coverage,
+        tracedecay_contracts::code_index_freshness::CodeIndexFreshnessCoverageV1::Complete
+    );
     assert_eq!(projected.hook_hint_count, Some(0));
     let _ = release_tx.send(());
     scheduler_holder
@@ -3935,8 +3941,14 @@ async fn elapsed_freshness_window_alone_does_not_make_dashboard_state_stale() {
         .dashboard_freshness(fixture.path())
         .await
         .expect("dashboard freshness");
-    assert_eq!(projected.staleness_state.as_deref(), Some("fresh"));
-    assert_eq!(projected.coverage, "complete");
+    assert_eq!(
+        projected.staleness_state,
+        Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh)
+    );
+    assert_eq!(
+        projected.coverage,
+        tracedecay_contracts::code_index_freshness::CodeIndexFreshnessCoverageV1::Complete
+    );
     registry.shutdown().await;
 }
 
@@ -4025,8 +4037,11 @@ async fn a_fresh_seat_declines_query_admission_during_source_verification() {
         .dashboard_freshness(fixture.path())
         .await
         .expect("dashboard freshness");
-    assert_eq!(projected.staleness_state.as_deref(), Some("verifying"));
-    assert_eq!(projected.coverage, "partial_source_verification");
+    assert_eq!(
+        projected.staleness_state,
+        Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Verifying)
+    );
+    assert_eq!(projected.coverage, tracedecay_contracts::code_index_freshness::CodeIndexFreshnessCoverageV1::PartialSourceVerification);
     assert!(!projected.rebuild_in_flight);
 
     drop(pass);
@@ -9714,7 +9729,7 @@ async fn blocked_observability_store_does_not_hold_reconcile_readiness() {
             .dashboard_freshness(fixture.path())
             .await
             .expect("dashboard freshness");
-        if freshness.staleness_state.as_deref() == Some("fresh") && freshness.coverage == "complete"
+        if freshness.staleness_state == Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh) && freshness.coverage == tracedecay_contracts::code_index_freshness::CodeIndexFreshnessCoverageV1::Complete
         {
             break;
         }

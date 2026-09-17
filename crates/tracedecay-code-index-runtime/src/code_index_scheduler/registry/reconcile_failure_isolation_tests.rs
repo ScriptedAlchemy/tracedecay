@@ -861,6 +861,45 @@ async fn retire_and_remount_clears_terminal_publication_park_for_new_admission()
     fixture.registry.shutdown().await;
 }
 
+/// A park written by an actor other than this worker must still suppress
+/// the loop. The old worker-local bool stayed false here, so later wakes
+/// reconciled against a terminal publication authority.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn planted_terminal_publication_park_suppresses_later_wakes() {
+    let fixture = Fixture::mount("project.reconcile-planted-publication-park").await;
+    let fault = fixture
+        .install_fault(ReconcileFaultKindV1::Permanent, usize::MAX)
+        .await;
+    fixture
+        .plant_terminal_publication_park("planted by an actor other than the worker")
+        .await;
+
+    fixture.wake_with_pending_arrival().await;
+    fixture.drive_external_wakes().await;
+    fixture.settle_for(TERMINATION_QUIET_WINDOW).await;
+
+    assert_eq!(
+        fault.attempts(),
+        0,
+        "a shared terminal park must stop the worker without a task-local latch"
+    );
+    assert_eq!(
+        fixture.pending_wake_micros().await,
+        0,
+        "the suppressed wake must drain the pending arrival"
+    );
+    let freshness = fixture
+        .registry
+        .dashboard_freshness(&fixture.project)
+        .await
+        .expect("mounted freshness");
+    assert!(
+        !freshness.rebuild_in_flight,
+        "a terminal park is not a rebuild: {freshness:?}"
+    );
+    fixture.registry.shutdown().await;
+}
+
 fn run_git_in(root: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)

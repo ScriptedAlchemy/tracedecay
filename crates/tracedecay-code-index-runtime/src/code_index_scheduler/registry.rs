@@ -820,7 +820,7 @@ fn is_terminal_publication_authority_park(parked: &CodeIndexConvergenceParkedV1)
 /// this read. A worker-local bool only the observing pass can set would keep
 /// reconciling a park planted by another path, drifting from the authority
 /// hooks already refuse.
-fn publication_authority_terminal(slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>) -> bool {
+fn publication_authority_is_terminal(slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>) -> bool {
     slot.read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_ref()

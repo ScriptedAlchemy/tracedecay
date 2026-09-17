@@ -1166,9 +1166,13 @@ fn indexed_delivery_head(
         branch_ref: freshness.source_reference?,
         head_commit_id: CommitId::new(freshness.source_revision?).ok()?,
         generation: CodeGenerationId::new(freshness.latest_generation_id?).ok()?,
-        coverage: if freshness.coverage != "complete" {
+        coverage: if freshness.coverage
+            != tracedecay_contracts::code_index_freshness::CodeIndexFreshnessCoverageV1::Complete
+        {
             ProjectDeliveryInboxCoverageV1::Partial
-        } else if freshness.staleness_state.as_deref() == Some("fresh") {
+        } else if freshness.staleness_state
+            == Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh)
+        {
             ProjectDeliveryInboxCoverageV1::Complete
         } else {
             ProjectDeliveryInboxCoverageV1::Stale

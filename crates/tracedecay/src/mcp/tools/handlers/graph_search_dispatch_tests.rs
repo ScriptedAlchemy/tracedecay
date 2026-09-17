@@ -269,15 +269,19 @@ fn freshness_reader(
     rebuild_in_flight: bool,
 ) -> CodeIndexFreshnessReader {
     let latest_generation_id = latest_generation_id.map(str::to_owned);
-    let staleness_state = staleness_state.to_owned();
+    let staleness_state =
+        tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::from_wire(
+            staleness_state,
+        );
     std::sync::Arc::new(move |worktree_root: std::path::PathBuf| {
         let freshness = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
             worktree_root: worktree_root.display().to_string(),
             latest_generation_id: latest_generation_id.clone(),
-            staleness_state: Some(staleness_state.clone()),
+            staleness_state,
             rebuild_in_flight,
             hook_hint_count: Some(0),
-            coverage: "complete".to_owned(),
+            coverage:
+                tracedecay_contracts::code_index_freshness::CodeIndexFreshnessCoverageV1::Complete,
             ..Default::default()
         };
         Box::pin(async move { Ok(Some(freshness)) })

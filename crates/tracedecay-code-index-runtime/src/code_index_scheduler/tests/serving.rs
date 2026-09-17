@@ -6315,7 +6315,10 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
                 .reconcile_in_progress_for_test(fixture.path())
                 .await
             && let Some(freshness) = registry.dashboard_freshness(fixture.path()).await
-            && freshness.staleness_state.as_deref() == Some("fresh")
+            && freshness.staleness_state
+                == Some(
+                    tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh,
+                )
         {
             // A completed owner pass can have another queued wake. Capture the
             // settled public snapshot instead of racing a later status read.
@@ -6423,8 +6426,14 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         Some(&PublicRetrieverStatus::Unavailable)
     );
 
-    assert_eq!(dashboard.staleness_state.as_deref(), Some("fresh"));
-    assert_eq!(dashboard.coverage, "complete");
+    assert_eq!(
+        dashboard.staleness_state,
+        Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh)
+    );
+    assert_eq!(
+        dashboard.coverage,
+        tracedecay_contracts::code_index_freshness::CodeIndexFreshnessCoverageV1::Complete
+    );
     assert_eq!(
         dashboard
             .progress

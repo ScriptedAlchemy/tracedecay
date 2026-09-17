@@ -297,6 +297,181 @@ impl Default for CodeCloneIndexStatusV1 {
     }
 }
 
+/// Closed staleness ladder for one mounted worktree.
+///
+/// The scheduler publishes one of these tokens. MCP, the dashboard, and the
+/// CLI must match the variant — not a hand-copied string — so a new ladder
+/// state cannot appear at one caller and be missed at the others.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeIndexStalenessStateV1 {
+    Fresh,
+    Stale,
+    Indexing,
+    Refreshing,
+    Verifying,
+    Parked,
+}
+
+impl CodeIndexStalenessStateV1 {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Stale => "stale",
+            Self::Indexing => "indexing",
+            Self::Refreshing => "refreshing",
+            Self::Verifying => "verifying",
+            Self::Parked => "parked",
+        }
+    }
+
+    #[must_use]
+    pub fn from_wire(token: &str) -> Option<Self> {
+        match token {
+            "fresh" => Some(Self::Fresh),
+            "stale" => Some(Self::Stale),
+            "indexing" => Some(Self::Indexing),
+            "refreshing" => Some(Self::Refreshing),
+            "verifying" => Some(Self::Verifying),
+            "parked" => Some(Self::Parked),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for CodeIndexStalenessStateV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Coverage of one freshness read. Distinct from [`CodeIndexStalenessStateV1`]:
+/// a generation can be fresh and still omit hook-hint counts, or unverified
+/// while the ladder would otherwise say ready.
+///
+/// `Unobserved` is only the constructed default. A projected read never emits
+/// it, so an absent observation cannot be mistaken for `complete`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeIndexFreshnessCoverageV1 {
+    Unobserved,
+    Complete,
+    PartialRefreshInProgress,
+    PartialSourceVerification,
+    PartialUnverifiedRestore,
+    PartialHookHintOverflow,
+}
+
+impl Default for CodeIndexFreshnessCoverageV1 {
+    fn default() -> Self {
+        Self::Unobserved
+    }
+}
+
+impl CodeIndexFreshnessCoverageV1 {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unobserved => "unobserved",
+            Self::Complete => "complete",
+            Self::PartialRefreshInProgress => "partial_refresh_in_progress",
+            Self::PartialSourceVerification => "partial_source_verification",
+            Self::PartialUnverifiedRestore => "partial_unverified_restore",
+            Self::PartialHookHintOverflow => "partial_hook_hint_overflow",
+        }
+    }
+
+    #[must_use]
+    pub fn from_wire(token: &str) -> Option<Self> {
+        match token {
+            "unobserved" => Some(Self::Unobserved),
+            "complete" => Some(Self::Complete),
+            "partial_refresh_in_progress" => Some(Self::PartialRefreshInProgress),
+            "partial_source_verification" => Some(Self::PartialSourceVerification),
+            "partial_unverified_restore" => Some(Self::PartialUnverifiedRestore),
+            "partial_hook_hint_overflow" => Some(Self::PartialHookHintOverflow),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for CodeIndexFreshnessCoverageV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Inputs to the single freshness ladder.
+///
+/// `source_verified` is `None` when the scheduler lock was not held, so that
+/// read must not claim an unverified restore. A park with `retries_on_wake`
+/// false is terminal for this observation: a racing wake must not make the
+/// worktree look like a rebuild.
+#[derive(Clone, Copy, Debug)]
+pub struct CodeIndexFreshnessLadderInputsV1<'a> {
+    pub ready: bool,
+    pub refresh_in_flight: bool,
+    pub source_change_pending: bool,
+    pub parked: Option<&'a CodeIndexConvergenceParkedV1>,
+    pub source_verified: Option<bool>,
+    pub hook_hint_count: Option<u64>,
+}
+
+/// The ladder plus the two fields that must stay consistent with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CodeIndexFreshnessLadderV1 {
+    pub staleness_state: CodeIndexStalenessStateV1,
+    pub rebuild_in_flight: bool,
+    pub coverage: CodeIndexFreshnessCoverageV1,
+}
+
+impl CodeIndexFreshnessLadderV1 {
+    #[must_use]
+    pub fn project(inputs: CodeIndexFreshnessLadderInputsV1<'_>) -> Self {
+        let terminal_park = inputs.parked.is_some_and(|parked| !parked.retries_on_wake);
+        let refresh_in_flight = inputs.refresh_in_flight && !terminal_park;
+        let verifying = inputs.ready && refresh_in_flight && !inputs.source_change_pending;
+        let refreshing = refresh_in_flight && !verifying;
+        let hints_outstanding = inputs.hook_hint_count != Some(0);
+        let source_unverified = inputs.source_verified == Some(false);
+        let admitted_stale = source_unverified || hints_outstanding;
+        let staleness_state = if inputs.parked.is_some() && !inputs.ready {
+            CodeIndexStalenessStateV1::Parked
+        } else if verifying {
+            CodeIndexStalenessStateV1::Verifying
+        } else if refreshing {
+            if inputs.ready {
+                CodeIndexStalenessStateV1::Refreshing
+            } else {
+                CodeIndexStalenessStateV1::Indexing
+            }
+        } else if admitted_stale && inputs.ready {
+            CodeIndexStalenessStateV1::Stale
+        } else if admitted_stale || !inputs.ready {
+            CodeIndexStalenessStateV1::Indexing
+        } else {
+            CodeIndexStalenessStateV1::Fresh
+        };
+        let coverage = if refreshing {
+            CodeIndexFreshnessCoverageV1::PartialRefreshInProgress
+        } else if verifying {
+            CodeIndexFreshnessCoverageV1::PartialSourceVerification
+        } else if source_unverified {
+            CodeIndexFreshnessCoverageV1::PartialUnverifiedRestore
+        } else if inputs.hook_hint_count.is_some() {
+            CodeIndexFreshnessCoverageV1::Complete
+        } else {
+            CodeIndexFreshnessCoverageV1::PartialHookHintOverflow
+        };
+        Self {
+            staleness_state,
+            rebuild_in_flight: refreshing,
+            coverage,
+        }
+    }
+}
+
 /// Freshness/generation state for one mounted worktree.
 ///
 /// `Deserialize` is part of the wire contract: the CLI status command decodes
@@ -333,7 +508,7 @@ pub struct CodeIndexWorktreeFreshnessV1 {
     /// Staleness-ladder state from the last scheduler execution. `fresh` means
     /// the scheduler most recently observed a fresh source; the status read
     /// does not probe the worktree to revalidate that observation.
-    pub staleness_state: Option<String>,
+    pub staleness_state: Option<CodeIndexStalenessStateV1>,
     /// Whether the exact scheduler route owns a reconcile pass or has a
     /// pending wake. A stale seated generation with this false is stalled,
     /// not in a routine rebuild window.
@@ -342,7 +517,7 @@ pub struct CodeIndexWorktreeFreshnessV1 {
     /// Pending hook-hint count, when cheaply available.
     pub hook_hint_count: Option<u64>,
     /// Whether this read covers the complete mounted scheduler state.
-    pub coverage: String,
+    pub coverage: CodeIndexFreshnessCoverageV1,
     /// Latest committed progress for the active generation, if one is mounted.
     pub progress: Option<CodeIndexBuildProgressV1>,
     /// Deterministic contract violation currently parking background
@@ -493,6 +668,185 @@ mod tests {
                 "incompatibilities": ["policy_revision"],
                 "serving": "refused"
             })
+        );
+    }
+
+    fn ladder(inputs: CodeIndexFreshnessLadderInputsV1<'_>) -> CodeIndexFreshnessLadderV1 {
+        CodeIndexFreshnessLadderV1::project(inputs)
+    }
+
+    fn settled() -> CodeIndexFreshnessLadderInputsV1<'static> {
+        CodeIndexFreshnessLadderInputsV1 {
+            ready: true,
+            refresh_in_flight: false,
+            source_change_pending: false,
+            parked: None,
+            source_verified: Some(true),
+            hook_hint_count: Some(0),
+        }
+    }
+
+    #[test]
+    fn freshness_ladder_tokens_round_trip_the_wire_spelling() {
+        for state in [
+            CodeIndexStalenessStateV1::Fresh,
+            CodeIndexStalenessStateV1::Stale,
+            CodeIndexStalenessStateV1::Indexing,
+            CodeIndexStalenessStateV1::Refreshing,
+            CodeIndexStalenessStateV1::Verifying,
+            CodeIndexStalenessStateV1::Parked,
+        ] {
+            assert_eq!(
+                CodeIndexStalenessStateV1::from_wire(state.as_str()),
+                Some(state)
+            );
+            assert_eq!(
+                serde_json::to_value(state).expect("staleness serializes"),
+                serde_json::json!(state.as_str())
+            );
+        }
+        for coverage in [
+            CodeIndexFreshnessCoverageV1::Complete,
+            CodeIndexFreshnessCoverageV1::PartialRefreshInProgress,
+            CodeIndexFreshnessCoverageV1::PartialSourceVerification,
+            CodeIndexFreshnessCoverageV1::PartialUnverifiedRestore,
+            CodeIndexFreshnessCoverageV1::PartialHookHintOverflow,
+        ] {
+            assert_eq!(
+                CodeIndexFreshnessCoverageV1::from_wire(coverage.as_str()),
+                Some(coverage)
+            );
+        }
+        assert_eq!(
+            CodeIndexFreshnessCoverageV1::default(),
+            CodeIndexFreshnessCoverageV1::Unobserved
+        );
+    }
+
+    #[test]
+    fn settled_ready_generation_is_fresh_and_complete() {
+        let observed = ladder(settled());
+        assert_eq!(observed.staleness_state, CodeIndexStalenessStateV1::Fresh);
+        assert!(!observed.rebuild_in_flight);
+        assert_eq!(observed.coverage, CodeIndexFreshnessCoverageV1::Complete);
+    }
+
+    #[test]
+    fn verifying_is_not_a_rebuild() {
+        let observed = ladder(CodeIndexFreshnessLadderInputsV1 {
+            ready: true,
+            refresh_in_flight: true,
+            source_change_pending: false,
+            ..settled()
+        });
+        assert_eq!(
+            observed.staleness_state,
+            CodeIndexStalenessStateV1::Verifying
+        );
+        assert!(!observed.rebuild_in_flight);
+        assert_eq!(
+            observed.coverage,
+            CodeIndexFreshnessCoverageV1::PartialSourceVerification
+        );
+    }
+
+    #[test]
+    fn source_change_while_ready_is_a_refresh() {
+        let observed = ladder(CodeIndexFreshnessLadderInputsV1 {
+            ready: true,
+            refresh_in_flight: true,
+            source_change_pending: true,
+            ..settled()
+        });
+        assert_eq!(
+            observed.staleness_state,
+            CodeIndexStalenessStateV1::Refreshing
+        );
+        assert!(observed.rebuild_in_flight);
+        assert_eq!(
+            observed.coverage,
+            CodeIndexFreshnessCoverageV1::PartialRefreshInProgress
+        );
+    }
+
+    #[test]
+    fn locked_read_reports_unverified_restore_separately_from_a_busy_read() {
+        let locked = ladder(CodeIndexFreshnessLadderInputsV1 {
+            source_verified: Some(false),
+            ..settled()
+        });
+        assert_eq!(locked.staleness_state, CodeIndexStalenessStateV1::Stale);
+        assert_eq!(
+            locked.coverage,
+            CodeIndexFreshnessCoverageV1::PartialUnverifiedRestore
+        );
+        let busy = ladder(CodeIndexFreshnessLadderInputsV1 {
+            source_verified: None,
+            ..settled()
+        });
+        assert_eq!(busy.staleness_state, CodeIndexStalenessStateV1::Fresh);
+        assert_eq!(busy.coverage, CodeIndexFreshnessCoverageV1::Complete);
+    }
+
+    #[test]
+    fn unknown_hint_count_is_stale_when_ready_and_overflow_coverage() {
+        let observed = ladder(CodeIndexFreshnessLadderInputsV1 {
+            hook_hint_count: None,
+            ..settled()
+        });
+        assert_eq!(observed.staleness_state, CodeIndexStalenessStateV1::Stale);
+        assert_eq!(
+            observed.coverage,
+            CodeIndexFreshnessCoverageV1::PartialHookHintOverflow
+        );
+    }
+
+    #[test]
+    fn terminal_park_is_not_a_racing_rebuild() {
+        let parked = CodeIndexConvergenceParkedV1 {
+            reason: "corrupt".to_owned(),
+            blocked_reason: Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt),
+            remediation: "reset".to_owned(),
+            parked_at_micros: 1,
+            observed_passes: 1,
+            retries_on_wake: false,
+        };
+        let observed = ladder(CodeIndexFreshnessLadderInputsV1 {
+            ready: false,
+            refresh_in_flight: true,
+            parked: Some(&parked),
+            source_verified: Some(true),
+            hook_hint_count: Some(0),
+            source_change_pending: false,
+        });
+        assert_eq!(observed.staleness_state, CodeIndexStalenessStateV1::Parked);
+        assert!(!observed.rebuild_in_flight);
+        assert_eq!(observed.coverage, CodeIndexFreshnessCoverageV1::Complete);
+    }
+
+    #[test]
+    fn retryable_park_keeps_a_racing_rebuild_visible() {
+        let parked = CodeIndexConvergenceParkedV1 {
+            reason: "mode".to_owned(),
+            blocked_reason: None,
+            remediation: "chmod".to_owned(),
+            parked_at_micros: 1,
+            observed_passes: 1,
+            retries_on_wake: true,
+        };
+        let observed = ladder(CodeIndexFreshnessLadderInputsV1 {
+            ready: false,
+            refresh_in_flight: true,
+            parked: Some(&parked),
+            source_verified: Some(true),
+            hook_hint_count: Some(0),
+            source_change_pending: false,
+        });
+        assert_eq!(observed.staleness_state, CodeIndexStalenessStateV1::Parked);
+        assert!(observed.rebuild_in_flight);
+        assert_eq!(
+            observed.coverage,
+            CodeIndexFreshnessCoverageV1::PartialRefreshInProgress
         );
     }
 }

@@ -35,7 +35,7 @@ use super::{
     PendingWakeV1, PublishedTextProjectionOutcomeV1, ServingSwapOutcomeV1,
     TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1, clear_convergence_park,
     convergence_park_retries_on_wake, is_repeated_conflict_verdict, park_convergence,
-    publication_authority_terminal, retained_noop_requires_follow_up_wake,
+    publication_authority_is_terminal, retained_noop_requires_follow_up_wake,
 };
 
 impl CodeIndexSchedulerRegistryV1 {
@@ -427,10 +427,11 @@ impl CodeIndexSchedulerRegistryV1 {
                     .await;
                     return;
                 }
-                // The shared park is the terminal authority admission already
-                // refuses. Reading it here, instead of a bool only this pass
-                // can set, suppresses a planted or cross-path corruption too.
-                if publication_authority_terminal(&worker_convergence_park) {
+                // The shared park slot is the authority admission already
+                // consults. A task-local bool would ignore a park planted by
+                // another actor and would reset if this loop state were lost
+                // while the slot remained.
+                if publication_authority_is_terminal(&worker_convergence_park) {
                     let _ = Self::take_pending_arrival(
                         &worker_pending_wake,
                         CodeIndexCadenceTriggerV1::Mount,
@@ -2171,7 +2172,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         ),
                         Ok((Ok(_), _, _)) => {}
                     }
-                    if !publication_authority_terminal(&worker_convergence_park) {
+                    if !publication_authority_is_terminal(&worker_convergence_park) {
                         // Restore arrival so the next pass measures this wake's full queue wait.
                         Self::restore_pending_arrival(&worker_pending_wake, arrival, trigger);
                     }

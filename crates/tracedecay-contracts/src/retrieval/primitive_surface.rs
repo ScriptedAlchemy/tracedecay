@@ -14,6 +14,7 @@ use tracedecay_domain::{
     RepositoryId, SourceSpan, SymbolOccurrenceId, WorktreeId,
 };
 
+use crate::code_index_freshness::CodeIndexStalenessStateV1;
 use crate::memory::{FactSearchGraphCoverageV1, FactSearchHitV1};
 
 pub const MAX_REDUNDANCY_FAMILIES_V1: u32 = 100;
@@ -88,7 +89,7 @@ pub struct PrimitiveIndexingStateV1 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_generation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub staleness_state: Option<String>,
+    pub staleness_state: Option<CodeIndexStalenessStateV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rebuild_in_flight: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -725,6 +726,7 @@ mod tests {
         PrimitiveRecallV1, PrimitiveSearchCoverageV1, PrimitiveSearchFreshnessV1,
         RedundancySurfaceRequestV1, SimilarSurfaceRequestV1,
     };
+    use crate::code_index_freshness::CodeIndexStalenessStateV1;
     use crate::memory::{FactSearchGraphCoverageV1, FactSearchGraphDegradationV1};
 
     fn context_result() -> ContextResultV1 {
@@ -832,7 +834,7 @@ mod tests {
                 summary: "state=refreshing".to_owned(),
                 served_generation: Some("generation.old".to_owned()),
                 latest_generation: Some("generation.new".to_owned()),
-                staleness_state: Some("refreshing".to_owned()),
+                staleness_state: Some(CodeIndexStalenessStateV1::Refreshing),
                 rebuild_in_flight: Some(true),
                 stale_lanes: vec!["lexical".to_owned()],
                 reason: None,

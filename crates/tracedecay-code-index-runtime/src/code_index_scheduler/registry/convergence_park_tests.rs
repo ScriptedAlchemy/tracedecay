@@ -166,13 +166,18 @@ async fn a_legacy_permissive_text_artifacts_root_self_heals_and_serves() {
     .await;
 
     let observed = fixture
-        .wait_for_freshness(|freshness| freshness.staleness_state.as_deref() == Some("fresh"))
+        .wait_for_freshness(|freshness| {
+            freshness.staleness_state
+                == Some(
+                    tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh,
+                )
+        })
         .await
         .expect("freshness projection for the mounted worktree");
 
     assert_eq!(
-        observed.staleness_state.as_deref(),
-        Some("fresh"),
+        observed.staleness_state,
+        Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh),
         "the healed store must converge to serving instead of warming forever: {observed:?}"
     );
     assert!(
@@ -221,8 +226,8 @@ async fn an_unhealable_text_artifacts_root_parks_typed_and_recovers_when_fixed()
         )
     });
     assert_eq!(
-        parked.staleness_state.as_deref(),
-        Some("parked"),
+        parked.staleness_state,
+        Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Parked),
         "status must report parked, not indexing/warming: {parked:?}"
     );
     assert!(
@@ -249,7 +254,7 @@ async fn an_unhealable_text_artifacts_root_parks_typed_and_recovers_when_fixed()
 
     let recovered = fixture
         .wait_for_freshness(|freshness| {
-            freshness.parked.is_none() && freshness.staleness_state.as_deref() == Some("fresh")
+            freshness.parked.is_none() && freshness.staleness_state == Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh)
         })
         .await
         .expect("freshness projection for the mounted worktree");
@@ -259,8 +264,8 @@ async fn an_unhealable_text_artifacts_root_parks_typed_and_recovers_when_fixed()
         "the park must clear once the violation is removed: {recovered:?}"
     );
     assert_eq!(
-        recovered.staleness_state.as_deref(),
-        Some("fresh"),
+        recovered.staleness_state,
+        Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh),
         "convergence must resume on the ordinary wake cadence after the fix: {recovered:?}"
     );
     let mode = fs::metadata(&fixture.artifacts_root)
@@ -301,8 +306,8 @@ async fn fresh_graph_activation_waits_while_the_published_text_owner_is_parked()
         .await
         .expect("freshness projection for the mounted worktree");
     assert_eq!(
-        parked.staleness_state.as_deref(),
-        Some("parked"),
+        parked.staleness_state,
+        Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Parked),
         "the text owner must park on the unhealable root: {parked:?}"
     );
 
@@ -318,8 +323,8 @@ async fn fresh_graph_activation_waits_while_the_published_text_owner_is_parked()
         .await
         .expect("freshness projection for the mounted worktree");
     assert_eq!(
-        observed.staleness_state.as_deref(),
-        Some("parked"),
+        observed.staleness_state,
+        Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Parked),
         "waiting graph activation must not unpark an owner that has not finished: {observed:?}"
     );
     assert!(
