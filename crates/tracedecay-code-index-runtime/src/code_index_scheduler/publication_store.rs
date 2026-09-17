@@ -1086,19 +1086,9 @@ impl DaemonCodeIndexPublicationStoreV1 {
         }
         let mtime = metadata.modified().ok();
         let size = metadata.len();
-        {
-            let memo = self
-                .pointer_memo
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            if let Some(memo) = memo.as_ref()
-                && memo.size == size
-                && memo.mtime.is_some()
-                && memo.mtime == mtime
-            {
-                return Ok(Some(memo.pointer.clone()));
-            }
-        }
+        // Size and mtime are not a content identity. A same-length pointer
+        // rewrite in one timestamp tick (generation file, state digest) must
+        // not satisfy the compare-and-swap of a different incumbent.
         let bytes = std::fs::read(&self.active_path).map_err(Self::unavailable)?;
         let digest = Self::state_digest(&bytes);
         {
