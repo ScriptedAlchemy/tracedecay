@@ -190,11 +190,29 @@ describe('DeliveryPage · inbox', () => {
 
     expect(await screen.findByText('Provider not configured')).toBeTruthy();
     expect(screen.getByText('No admitted pull requests')).toBeTruthy();
-    expect(screen.getByText(/requires github_read_authority/)).toBeTruthy();
+    expect(screen.getByText(/No provider read authority is configured/)).toBeTruthy();
     expect(screen.getByRole('link', { name: /Open Settings · Provider authority/ }).getAttribute('href')).toBe(
       '/settings',
     );
     expect(screen.queryByText(/transport/i)).toBeNull();
+  });
+
+  it('renders every-project-omitted as partial, not as a complete zero inbox', async () => {
+    renderDelivery(
+      {
+        registry_state: 'ready',
+        projects: [],
+        pull_requests: [],
+        membership_edges: [],
+        omitted_projects: 1,
+        excluded_pull_requests: 0,
+      },
+      { domainState: 'partial' },
+    );
+
+    expect(await screen.findByText('Every registered project was omitted')).toBeTruthy();
+    expect(screen.getByText(/carry no indexed head yet/)).toBeTruthy();
+    expect(screen.queryByText('No admitted pull requests')).toBeNull();
   });
 
   it('renders an unavailable registry distinctly from a complete zero inbox', async () => {

@@ -11,7 +11,12 @@ import { cn } from '../../ui/cn.ts';
 import type { DeliveryContext } from './deliveryContext.ts';
 import { GradeMark, ProviderStateChip } from './deliveryChrome.tsx';
 import type { DeliveryLocation } from './deliveryLocation.ts';
-import { membershipGrade, membershipSourceClass, providerServes } from './evidence.ts';
+import {
+  membershipGrade,
+  membershipSourceClass,
+  providerServes,
+  providerStateSentence,
+} from './evidence.ts';
 import { activeAttention, edgesFor, projectFor } from './inboxFilter.ts';
 import {
   attentionSourceLabel,
@@ -480,27 +485,33 @@ function InboxTable({
  * complete-zero join. Neither is a blank list. */
 function EmptyInbox({ context }: { context: DeliveryContext }) {
   const { inbox } = context;
+  if (inbox.projects.length === 0 && inbox.omitted_projects > 0) {
+    return (
+      <CenteredState
+        title="Every registered project was omitted"
+        kind="partial"
+        detail={`${inbox.omitted_projects} registered project${inbox.omitted_projects === 1 ? '' : 's'} carry no indexed head yet (index warming or store unmounted), so no pull request could be joined. This is not an empty inbox.`}
+      />
+    );
+  }
   const notServing = inbox.projects.filter((project) => !providerServes(project.provider_state));
   if (notServing.length > 0 && notServing.length === inbox.projects.length) {
-    const notConfigured = notServing.every(
-      (project) => project.provider_state === 'not_configured' || project.provider_state === 'not_published',
+    const states = [...new Set(notServing.map((project) => project.provider_state))];
+    const notConfigured = states.every(
+      (state) => state === 'not_configured' || state === 'not_published',
     );
     return (
       <div className="flex min-h-0 flex-1 flex-col">
         <CenteredState
           title={notConfigured ? 'Provider not configured' : 'Provider reads unavailable'}
           kind="unavailable"
-          detail={
-            notConfigured
-              ? 'not_published · requires github_read_authority. Registered repositories remain visible, but provider reads are not configured. No unrelated pull request is admitted.'
-              : 'No registered project can serve pull requests right now; each state is printed above.'
-          }
+          detail={`${states.map(providerStateSentence).join(' ')} Registered repositories remain visible; no unrelated pull request is admitted.`}
         />
         <p className="px-3 pb-3 text-center text-xs text-text-secondary">No admitted pull requests</p>
         <p className="px-3 pb-4 text-center text-3xs text-text-muted">
           <a href="/settings" className="text-accent hover:underline">Open Settings · Provider authority</a>
           {' · '}
-          scope a project above to continue with local evidence
+          scope a project above to read the daemon's reason and continue with local evidence
         </p>
       </div>
     );
