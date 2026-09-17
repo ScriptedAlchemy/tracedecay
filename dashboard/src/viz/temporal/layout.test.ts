@@ -441,6 +441,55 @@ describe('layoutTemporalScene', () => {
     });
   });
 
+  it('draws nothing past a dated cursor: threads clip, later lanes stay unrevealed', () => {
+    const proj = treeProjection();
+    const model = layoutTemporalScene(
+      proj,
+      optionsFor(proj, { reveal: { time: T0 + 650, laneId: 'A', sequence: 1 } }),
+    );
+    const cursorX = timeToX(model.viewport, T0 + 650);
+    // C starts at T0+700: its row keeps its place but nothing of it is drawn.
+    const c = sceneLane(model, 'C');
+    expect(c.revealed).toBe(false);
+    expect(model.paths.some((p) => p.kind === 'lane' && p.fromId === 'C')).toBe(false);
+    // A, B and D are revealed but their threads end at the cursor, not at their recorded ends.
+    for (const id of ['A', 'B', 'D']) {
+      const scene = sceneLane(model, id);
+      expect(scene.revealed).toBe(true);
+      expect(scene.x1).toBeCloseTo(cursorX, 6);
+      const path = model.paths.find((p) => p.kind === 'lane' && p.fromId === id);
+      expect(path?.controls[2]).toBeCloseTo(cursorX, 6);
+    }
+    // A span that starts before the cursor is clipped to it; one after is not emitted.
+    const later: JourneyProjection = {
+      ...proj,
+      intervals: [
+        ...proj.intervals,
+        { id: 'span:A:late', laneId: 'A', kind: 'git_span', start: T0 + 900, end: T0 + 1500, label: 'late', grade: 'exact', tone: null, ref: null },
+        { id: 'span:A:across', laneId: 'A', kind: 'git_span', start: T0 + 400, end: T0 + 1500, label: 'across', grade: 'exact', tone: null, ref: null },
+      ],
+    };
+    const clipped = layoutTemporalScene(
+      later,
+      optionsFor(later, { reveal: { time: T0 + 650, laneId: 'A', sequence: 1 } }),
+    );
+    expect(clipped.intervals.some((i) => i.id === 'span:A:late')).toBe(false);
+    expect(clipped.intervals.find((i) => i.id === 'span:A:across')?.x1).toBeCloseTo(cursorX, 6);
+    // A bundle whose body reaches past the cursor is clipped too.
+    const bundled = layoutTemporalScene(
+      proj,
+      optionsFor(proj, {
+        branches: { collapsed: new Set(['A']), expanded: new Set() },
+        reveal: { time: T0 + 650, laneId: 'D', sequence: 0 },
+      }),
+    );
+    expect(bundled.clusters[0]?.x1).toBeCloseTo(cursorX, 6);
+    // Without a dated cursor every lane is revealed and nothing is clipped.
+    const open = layoutTemporalScene(proj, optionsFor(proj));
+    expect(open.lanes.every((l) => l.revealed)).toBe(true);
+    expect(sceneLane(open, 'A').x1).toBeCloseTo(timeToX(open.viewport, T0 + 3000), 6);
+  });
+
   it('does not let an undated cursor cut other lanes', () => {
     const proj = treeProjection();
     const model = layoutTemporalScene(
