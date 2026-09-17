@@ -92,6 +92,10 @@ export type ExplorerLaneReadModel =
       /** Whether the source said rows remain past this page; `null` when the
        * read carries no pagination at all (the browse overviews). */
       readonly hasMore: boolean | null;
+      /** The source's own freshness word (`fresh`, `unknown`, …) and the
+       * watermark it answered from, verbatim. Never inferred. */
+      readonly freshness: string;
+      readonly watermark: string | null;
     }
   /** The source answered with real rows but its own read reported omitted
    * records: what is shown is genuine and less than what exists. */
@@ -102,6 +106,8 @@ export type ExplorerLaneReadModel =
       readonly reportedTotal: number | null;
       readonly unreadableRows: number;
       readonly hasMore: boolean | null;
+      readonly freshness: string;
+      readonly watermark: string | null;
       readonly errorCode: string | null;
       readonly detail: string | null;
     }
@@ -302,6 +308,8 @@ export function laneFromSourceProgress(
           reportedTotal: null,
           unreadableRows: 0,
           hasMore: null,
+          freshness: source.freshness,
+          watermark: source.watermark,
         };
       }
       const hits = hitsForLane(lane, narrowPageRows(page), terms);
@@ -312,6 +320,8 @@ export function laneFromSourceProgress(
         reportedTotal: page.total,
         unreadableRows: page.rows.length - hits.length,
         hasMore: page.next_offset !== null,
+        freshness: source.freshness,
+        watermark: source.watermark,
       };
     }
     case 'partial': {
@@ -324,6 +334,8 @@ export function laneFromSourceProgress(
         reportedTotal: page?.total ?? null,
         unreadableRows: page === null ? 0 : page.rows.length - hits.length,
         hasMore: page === null ? null : page.next_offset !== null,
+        freshness: source.freshness,
+        watermark: source.watermark,
         errorCode: source.error_code,
         detail: source.message,
       };
@@ -450,6 +462,9 @@ export function browseLane<T>(
   }
   const rows = rowsOf(result.envelope.payload);
   const hits = hitsForLane(lane, rows, terms);
+  // The overview carries no per-source freshness; the envelope's own
+  // freshness reading is the daemon's statement about this read.
+  const freshness = result.envelope.freshness;
   return {
     state: 'ready',
     lane,
@@ -457,6 +472,8 @@ export function browseLane<T>(
     reportedTotal: null,
     unreadableRows: rows.length - hits.length,
     hasMore: null,
+    freshness: freshness.state,
+    watermark: freshness.watermark,
   };
 }
 

@@ -33,6 +33,8 @@ describe('laneGrade', () => {
       reportedTotal: 0,
       unreadableRows: 0,
       hasMore: false,
+      freshness: 'fresh',
+      watermark: null,
     };
     const stale: ExplorerLaneReadModel = { state: 'stale', lane: 'code', errorCode: null, detail: null };
     const pending: ExplorerLaneReadModel = { state: 'pending', lane: 'code', phase: 'reading' };

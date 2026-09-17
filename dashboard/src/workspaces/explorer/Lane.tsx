@@ -8,6 +8,7 @@
  * worked. Nothing in a lane is computed from another lane.
  */
 import { type KeyboardEvent, type ReactNode } from 'react';
+import { EvidencePattern } from '../../ui/EvidencePattern.tsx';
 import { StateChip } from '../../ui/StateChip';
 import { VirtualList } from '../../ui/VirtualList.tsx';
 import { Highlight } from '../../ui/search/Highlight.tsx';
@@ -17,6 +18,7 @@ import { compactRelativeAge } from '../../ui/time.ts';
 import { laneGrade } from './evidence.ts';
 import { LANE_BY_ID, LANE_ICON } from './laneChrome.ts';
 import {
+  laneEvidence,
   laneHits,
   laneStateDetail,
   laneStateKind,
@@ -97,16 +99,24 @@ export function Lane({
           </span>
         </div>
         <span className="flex items-center justify-between gap-2 text-3xs text-text-muted">
-          <span className="truncate">
-            {answered
-              ? read.state === 'partial'
-                ? 'loaded from an incomplete read; records were omitted'
-                : total != null
-                  ? `loaded of ${total.toLocaleString()} matching reported`
-                  : searching
-                    ? 'loaded; no source total reported'
-                    : 'shown from the overview endpoint'
-              : 'no count reported'}
+          <span className="flex min-w-0 items-center gap-1.5">
+            {/* How well the count is known, on the shared pattern axis: solid
+              * when the source reported a real denominator, hatched when rows
+              * arrived without one. Distinct from the record grade beside it. */}
+            {answered ? (
+              <EvidencePattern quality={laneEvidence(read)} className="shrink-0 text-3xs" />
+            ) : null}
+            <span className="truncate">
+              {answered
+                ? read.state === 'partial'
+                  ? 'loaded from an incomplete read; records were omitted'
+                  : total != null
+                    ? `loaded of ${total.toLocaleString()} matching reported`
+                    : searching
+                      ? 'loaded; no source total reported'
+                      : 'shown from the overview endpoint'
+                : 'no count reported'}
+            </span>
           </span>
           {grade !== null ? (
             <span
@@ -141,6 +151,14 @@ export function Lane({
         <span className="td-value text-3xs text-text-muted">
           {answered ? `${rows.length.toLocaleString()} shown` : '—'}
           {answered && read.hasMore === true ? ' · more rows remain past this page' : ''}
+          {/* The source's own freshness word and watermark, so a served page
+            * says how current it is rather than looking current by default. */}
+          {answered ? (
+            <span data-lane-freshness={read.freshness}>
+              {` · ${read.freshness}`}
+              {read.watermark !== null ? ` @ ${read.watermark}` : ''}
+            </span>
+          ) : null}
         </span>
         <span>
           {answered
