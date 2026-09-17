@@ -1078,8 +1078,6 @@ pub(crate) fn symbol_record(
         qualified_name: metadata.qualified_name,
         kind: metadata.kind,
         file,
-        start_line_zero_based: metadata.start_line,
-        end_line_zero_based: end_line,
         line: metadata.start_line.saturating_add(1),
         end_line: end_line.saturating_add(1),
         is_async: metadata.is_async,

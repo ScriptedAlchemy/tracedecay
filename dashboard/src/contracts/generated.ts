@@ -5230,7 +5230,6 @@ export const StoreTelemetryEntryV1Schema = z.object({
   growth: z.lazy(() => StoreGrowthDimensionV1Schema),
   path: z.string(),
   read: z.lazy(() => StorageTelemetryReadV1Schema),
-  role: z.string(),
   roles: z.array(z.string()),
   store: z.string(),
   table_growth: z.lazy(() => TableGrowthDimensionV1Schema),

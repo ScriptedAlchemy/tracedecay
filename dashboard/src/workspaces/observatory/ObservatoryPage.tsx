@@ -726,7 +726,7 @@ function StoreCard({
         <div className="flex flex-wrap items-center gap-2">
           <StateChip kind={readKindToState(entry.read.kind)} />
           <span className="text-2xs text-text-muted" data-store-roles={entry.roles.join(',')}>
-            {storeRolesLabel(entry.roles, entry.role)}
+            {storeRolesLabel(entry.roles)}
           </span>
         </div>
         {sized ? (

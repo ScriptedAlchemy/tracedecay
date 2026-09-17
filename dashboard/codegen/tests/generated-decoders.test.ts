@@ -17,6 +17,7 @@ import {
   MemoryStatusV1Schema,
   MemoryTrustBucketV1Schema,
   StorageTelemetryPayloadV1Schema,
+  StoreTelemetryEntryV1Schema,
   WIRE_SCHEMA_REVISION,
 } from "../../src/contracts/index.ts";
 
@@ -246,7 +247,6 @@ describe("wire storage payload decoders", () => {
       stores: [
         {
           store: "s",
-          role: "graph",
           roles: ["graph", "memory"],
           path: "/p",
           read: {
@@ -287,6 +287,7 @@ describe("wire storage payload decoders", () => {
     });
     expect(parsed.stores[0]!.read.kind).toBe("observed");
     expect(parsed.stores[0]!.roles).toEqual(["graph", "memory"]);
+    expect(StoreTelemetryEntryV1Schema.shape).not.toHaveProperty("role");
     // A dashboard read cannot establish its own growth baseline.
     const growth = parsed.stores[0]!.growth;
     expect(growth.state).toBe("unknown");
@@ -295,7 +296,6 @@ describe("wire storage payload decoders", () => {
   it("rejects the retired unsupported budget and absent growth variants", () => {
     const entry = {
       store: "s",
-      role: "graph",
       roles: ["graph"],
       path: "/p",
       read: { kind: "unknown", store: "s" },

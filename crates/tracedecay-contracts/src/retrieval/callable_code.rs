@@ -718,8 +718,6 @@ mod tests {
                 "qualified_name": "crate::worker::work",
                 "kind": "function",
                 "file": "src/worker.rs",
-                "start_line_zero_based": 4,
-                "end_line_zero_based": 8,
                 "line": 5,
                 "end_line": 9,
                 "signature": null,
@@ -729,6 +727,26 @@ mod tests {
             }"#,
             )
             .is_err()
+        );
+        assert!(
+            serde_json::from_str::<SymbolPrimitiveRecord>(
+                r#"{
+                "node_id": "node.fixture",
+                "name": "work",
+                "qualified_name": "crate::worker::work",
+                "kind": "function",
+                "file": "src/worker.rs",
+                "start_line_zero_based": 4,
+                "end_line_zero_based": 8,
+                "line": 5,
+                "end_line": 9,
+                "signature": null,
+                "is_async": false,
+                "score": null
+            }"#,
+            )
+            .is_err(),
+            "zero-based line fields are not part of the symbol record contract"
         );
     }
 }

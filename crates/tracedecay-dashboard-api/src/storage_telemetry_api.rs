@@ -67,10 +67,6 @@ pub struct StoreTelemetryEntryV1 {
     /// Stable store key (the store's file name), or the raw file name when it is
     /// not a valid [`StoreKeyV1`].
     pub store: String,
-    /// The dashboard's primary role label for the store (`graph` / `memory` /
-    /// `lcm` / `savings`). Retained for compatibility; see `roles` for the
-    /// complete set.
-    pub role: String,
     /// Every dashboard role served by this one store file. More than one role
     /// here means the roles share a database, not that a store was duplicated.
     pub roles: Vec<String>,
@@ -176,14 +172,6 @@ impl SampledStoreV1 {
             StorageTelemetryReadV1::Observed { sample } => Some(sample),
             _ => None,
         }
-    }
-
-    /// The dashboard's primary role label for this store.
-    fn primary_role(&self) -> String {
-        self.roles
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "store".to_string())
     }
 }
 
@@ -565,7 +553,6 @@ fn telemetry_entry(
     });
     let budget = budget_dimension(&sampled.store, sample, retention);
     let growth = growth_dimension(total_bytes, free_bytes);
-    let role = sampled.primary_role();
     let table_growth = table_growth_dimension(TableGrowthTelemetryReadV1::Unsupported {
         store: StoreKeyV1::new(sanitize_store_key(&sampled.store))
             .unwrap_or_else(|_| fallback_store_key()),
@@ -573,7 +560,6 @@ fn telemetry_entry(
 
     StoreTelemetryEntryV1 {
         store: sampled.store,
-        role,
         roles: sampled.roles,
         path: sampled.path,
         read: sampled.read,

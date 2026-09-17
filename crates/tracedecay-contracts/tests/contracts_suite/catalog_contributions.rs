@@ -185,7 +185,7 @@ fn verified_graph_mcp_reads_have_application_primitive_admission_identity() {
 }
 
 #[test]
-fn similar_and_redundancy_cover_protocol_revisions_on_one_surface_operation() {
+fn similar_and_redundancy_use_the_current_protocol_revision_only() {
     use tracedecay_tool_catalog::BindingStatus;
 
     let contribution = primitive_read_contribution().unwrap();
@@ -208,19 +208,19 @@ fn similar_and_redundancy_cover_protocol_revisions_on_one_surface_operation() {
         assert_eq!(binding.alias_of(), None);
         assert!(
             binding.protocol_revisions().contains(1),
-            "{operation} must accept protocol revision 1"
+            "{operation} must accept the current protocol revision"
         );
         assert!(
-            binding.protocol_revisions().contains(2),
-            "{operation} must accept protocol revision 2"
+            !binding.protocol_revisions().contains(2),
+            "{operation} must not keep a retired protocol revision"
         );
         assert_eq!(binding.protocol_revisions().minimum(), 1);
-        assert_eq!(binding.protocol_revisions().maximum(), 2);
+        assert_eq!(binding.protocol_revisions().maximum(), 1);
     }
 }
 
 #[test]
-fn application_catalog_snapshot_admits_similar_redundancy_protocol_range() {
+fn application_catalog_snapshot_admits_one_similar_redundancy_binding() {
     tracedecay_contracts::catalog_composition::build_application_catalog_snapshot()
         .expect("catalog construction must succeed with one binding per surface-operation");
 }

@@ -4544,8 +4544,6 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
             assert_eq!(callee.edge_kind, "calls");
             assert_eq!(callee.symbol.name, "callee");
             assert_eq!(callee.symbol.file, "src/lib.rs");
-            assert_eq!(callee.symbol.start_line_zero_based, 13);
-            assert_eq!(callee.symbol.end_line_zero_based, 13);
             assert_eq!(callee.symbol.line, 14);
             assert_eq!(callee.symbol.end_line, 14);
         }

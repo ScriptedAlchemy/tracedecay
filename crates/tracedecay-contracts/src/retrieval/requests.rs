@@ -303,11 +303,9 @@ pub struct QualifiedNamePrimitiveResult {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CallChainPrimitiveRequest {
-    #[serde(alias = "from_id")]
     pub from_node_id: String,
-    #[serde(alias = "to_id")]
     pub to_node_id: String,
-    #[serde(default = "default_call_chain_depth", alias = "max_depth")]
+    #[serde(default = "default_call_chain_depth")]
     pub maximum_depth: u32,
 }
 
@@ -488,4 +486,38 @@ pub enum PrimitiveRequest {
 pub struct PrimitiveInvocation {
     pub operation: ApplicationOperation,
     pub request: PrimitiveRequest,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CallChainPrimitiveRequest;
+
+    #[test]
+    fn call_chain_rejects_retired_field_names() {
+        let current = serde_json::from_value::<CallChainPrimitiveRequest>(serde_json::json!({
+            "from_node_id": "node.from",
+            "to_node_id": "node.to",
+            "maximum_depth": 3
+        }))
+        .expect("current call-chain schema decodes");
+        assert_eq!(current.maximum_depth, 3);
+
+        for retired in [
+            serde_json::json!({
+                "from_id": "node.from",
+                "to_id": "node.to",
+                "max_depth": 3
+            }),
+            serde_json::json!({
+                "from_node_id": "node.from",
+                "to_node_id": "node.to",
+                "max_depth": 3
+            }),
+        ] {
+            assert!(
+                serde_json::from_value::<CallChainPrimitiveRequest>(retired).is_err(),
+                "retired call-chain field names are not aliases"
+            );
+        }
+    }
 }

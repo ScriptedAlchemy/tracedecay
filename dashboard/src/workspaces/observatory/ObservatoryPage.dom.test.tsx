@@ -769,7 +769,6 @@ function telemetryPayload() {
     stores: [
       {
         store: 'graph.db',
-        role: 'graph',
         roles: ['graph', 'memory'],
         path: '/project/.tracedecay/graph.db',
         read: {
@@ -798,7 +797,6 @@ function telemetryPayload() {
       },
       {
         store: 'lcm.db',
-        role: 'lcm',
         roles: ['lcm'],
         path: '/profile/lcm.db',
         read: {
@@ -832,7 +830,6 @@ function telemetryPayload() {
       },
       {
         store: 'savings.db',
-        role: 'savings',
         roles: ['savings'],
         path: '/profile/savings.db',
         read: {
@@ -860,7 +857,6 @@ function telemetryPayload() {
       },
       {
         store: 'sessions.db',
-        role: 'sessions',
         roles: ['sessions'],
         path: '/profile/sessions.db',
         read: {
@@ -887,7 +883,6 @@ function telemetryPayload() {
       },
       {
         store: 'incident.db',
-        role: 'incident',
         roles: ['incident'],
         path: '/profile/incident.db',
         read: { kind: 'unknown', store: 'incident.db' },
@@ -936,7 +931,6 @@ function telemetryPayload() {
 function byteOnlyStore() {
   return {
     store: 'savings.db',
-    role: 'savings',
     roles: ['savings'],
     path: '/profile/savings.db',
     read: {

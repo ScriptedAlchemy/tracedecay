@@ -242,9 +242,9 @@ export function tableGrowthOmissionPresentation(
 
 /** Every role this one store file serves. More than one means the roles share a
  * database — not that a store was reported twice. */
-export function storeRolesLabel(roles: string[], role: string): string {
-  const ordered = roles.length > 0 ? roles : [role];
-  return ordered.length > 1 ? `${ordered.join(' · ')} (shared store file)` : ordered.join(' · ');
+export function storeRolesLabel(roles: string[]): string {
+  if (roles.length === 0) return 'role unrecorded';
+  return roles.length > 1 ? `${roles.join(' · ')} (shared store file)` : roles.join(' · ');
 }
 
 /** The shared byte magnitudes, joined for a sentence rather than split for a
