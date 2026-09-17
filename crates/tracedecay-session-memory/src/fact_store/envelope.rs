@@ -259,7 +259,7 @@ impl DatabaseFactStore<'_> {
 async fn execute_project_memory_write<T: Send + 'static>(
     db: Database,
     write_control: FactWriteControl,
-    barrier_content: Option<String>,
+    _barrier_content: Option<String>,
     work: impl for<'tx> FnOnce(
         &'tx Transaction<'_>,
     ) -> Pin<Box<dyn Future<Output = FactStoreResult<T>> + Send + 'tx>>
@@ -302,7 +302,7 @@ async fn execute_project_memory_write<T: Send + 'static>(
             // expires after the commit point reproducible.
             #[cfg(feature = "test-transport")]
             crate::fact_store::commit_barrier::wait_after_durable_fact_commit(
-                barrier_content.as_deref(),
+                _barrier_content.as_deref(),
             )
             .await;
             Ok(value)
