@@ -519,7 +519,7 @@ async fn open_runtime_configuration_from_store(
         })?;
     let current = store.current().await.map_err(map_configuration_error)?;
     let mut current = match store
-        .converge_registered_additive_defaults(&current.revision_id, now_micros())
+        .converge_registered_registry_shape(&current.revision_id, now_micros())
         .await
     {
         Ok(state) => state,

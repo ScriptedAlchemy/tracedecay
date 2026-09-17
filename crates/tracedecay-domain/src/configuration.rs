@@ -39,6 +39,12 @@ pub const PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY: &str = "work.expertise_con
 pub const CONTEXT_SCOUT_SETTINGS_SETTING_KEY: &str = "context_scout.settings.v1";
 pub const AUTOMATION_SETTINGS_SETTING_KEY: &str = "automation.settings.v1";
 
+/// Core setting keys that shipped in published betas and were then retired.
+/// A persisted snapshot carrying one converges by dropping it; its value has
+/// no registered owner anymore. `semantic.runtime.v1` shipped through
+/// v0.1.0-beta.37 and left with the dense retrieval runtime.
+pub const RETIRED_CORE_SETTING_KEYS_V1: &[&str] = &["semantic.runtime.v1"];
+
 /// Canonical user-profile settings.
 pub const USER_UPLOAD_ENABLED_SETTING_KEY: &str = "user.upload_enabled.v1";
 pub const USER_CODE_INDEX_WORKERS_SETTING_KEY: &str = "user.code_index_workers.v1";

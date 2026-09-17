@@ -91,7 +91,7 @@ async fn linked_worktree_default_converges_into_existing_snapshot() {
     let store = GlobalDbConfigurationControlStore::new_registered(db);
 
     let converged = store
-        .converge_registered_additive_defaults(&root.revision_id, UtcMicros(2))
+        .converge_registered_registry_shape(&root.revision_id, UtcMicros(2))
         .await
         .unwrap();
 
@@ -101,6 +101,81 @@ async fn linked_worktree_default_converges_into_existing_snapshot() {
         Some(&ConfigurationValueV1::Boolean(false))
     );
     assert!(converged.snapshot.provenance.contains_key(&key));
+    validate_snapshot_registry_completeness(&converged.snapshot).unwrap();
+}
+
+/// A v0.1.0-beta.37 profile still carries `semantic.runtime.v1`. Opening it
+/// on the current registry must drop that retired key instead of stalling the
+/// project behind a reset verdict.
+#[tokio::test]
+async fn retired_semantic_runtime_key_converges_out_of_a_beta37_snapshot() {
+    let (_directory, runtime, root) = Box::pin(global_setup()).await;
+    let retired = SettingKey::new("semantic.runtime.v1").unwrap();
+    let mut effective_values = root.snapshot.effective_values.clone();
+    let mut provenance = root.snapshot.provenance.clone();
+    effective_values.insert(retired.clone(), ConfigurationValueV1::Boolean(true));
+    provenance.insert(
+        retired.clone(),
+        root.snapshot.provenance.values().next().unwrap().clone(),
+    );
+    let historical_snapshot = ConfigurationSnapshotV1::new(effective_values, provenance).unwrap();
+    let db = runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute_batch(
+            "DROP TRIGGER configuration_revisions_immutable_update;
+             DROP TRIGGER configuration_entries_immutable_delete;",
+        )
+        .await
+        .unwrap();
+    let entry = serde_json::json!({
+        "schema_version": 1,
+        "value": ConfigurationValueV1::Boolean(true),
+        "provenance": root.snapshot.provenance.values().next().unwrap(),
+    })
+    .to_string();
+    transaction
+        .execute(
+            "INSERT INTO configuration_entries (
+                revision_id, key, layer_kind, layer_id, schema_revision, typed_value
+             ) VALUES (?1, ?2, 'default', NULL, 1, ?3)",
+            tracedecay_runtime_core::db::engine::params![
+                root.revision_id.as_str(),
+                retired.as_str(),
+                entry
+            ],
+        )
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "UPDATE configuration_revisions
+             SET snapshot_id = ?2,
+                 effective_behavior_digest = ?3,
+                 resolution_provenance_digest = ?4
+             WHERE revision_id = ?1",
+            tracedecay_runtime_core::db::engine::params![
+                root.revision_id.as_str(),
+                historical_snapshot.snapshot_id.as_str(),
+                historical_snapshot.effective_behavior_digest.as_str(),
+                historical_snapshot.resolution_provenance_digest.as_str()
+            ],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    let store = GlobalDbConfigurationControlStore::new_registered(db);
+
+    let converged = store
+        .converge_registered_registry_shape(&root.revision_id, UtcMicros(2))
+        .await
+        .unwrap();
+
+    assert_ne!(converged.revision_id, root.revision_id);
+    assert!(!converged.snapshot.effective_values.contains_key(&retired));
+    assert!(!converged.snapshot.provenance.contains_key(&retired));
     validate_snapshot_registry_completeness(&converged.snapshot).unwrap();
 }
 

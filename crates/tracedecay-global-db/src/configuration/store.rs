@@ -20,10 +20,10 @@ use tracedecay_domain::configuration::{
     ConfigurationLayerIdV1, ConfigurationReceiptId, ConfigurationRevisionId,
     ConfigurationSnapshotV1, ConfigurationValueV1, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
     ProtectedChange, ProtectedChangePlan, ProtectedChangeSnapshotError,
-    RedactedConfigurationChangeV1, RollbackModeV1, RuleEffect, SOURCE_BINDINGS_SETTING_KEY,
-    SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, ScopeControlOperationV1, ScopeSourceBinding,
-    SettingKey, SourceKindV1, USER_CODE_INDEX_WORKERS_SETTING_KEY, UserProfileId,
-    WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    RETIRED_CORE_SETTING_KEYS_V1, RedactedConfigurationChangeV1, RollbackModeV1, RuleEffect,
+    SOURCE_BINDINGS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, ScopeControlOperationV1,
+    ScopeSourceBinding, SettingKey, SourceKindV1, USER_CODE_INDEX_WORKERS_SETTING_KEY,
+    UserProfileId, WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::{AccessPolicyDigest, ActorId, ManifestDigest, UtcMicros, canonical_sha256};
 #[cfg(test)]
@@ -330,15 +330,16 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
         }
     }
 
-    /// Publish registry-added defaults into a snapshot created before those
-    /// settings existed.
+    /// Converge a snapshot written by an earlier published registry onto the
+    /// current one: registry-added settings receive their typed defaults and
+    /// retired settings are dropped.
     ///
     /// This is exact schema convergence, not a runtime fallback: only the
-    /// closed set of known additive keys is accepted. Registered typed defaults
-    /// and default provenance are written into an immutable child revision,
-    /// and the expected parent is checked under the store's write transaction.
+    /// closed sets of known additive keys and known retired keys are accepted.
+    /// The result is an immutable child revision, and the expected parent is
+    /// checked under the store's write transaction.
     #[hotpath::measure(future = true, label = "global_db.configuration.persist.converge")]
-    pub async fn converge_registered_additive_defaults(
+    pub async fn converge_registered_registry_shape(
         &self,
         expected_revision_id: &ConfigurationRevisionId,
         occurred_at: UtcMicros,
@@ -365,13 +366,12 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
             .map(SettingKey::new)
             .collect::<Result<std::collections::BTreeSet<_>, _>>()
             .map_err(ConfigurationError::validation)?;
-            if additive_keys
+            let retired_keys = RETIRED_CORE_SETTING_KEYS_V1
                 .iter()
-                .all(|key| current.snapshot.effective_values.contains_key(key))
-            {
-                validate_snapshot_registry_completeness(&current.snapshot).map_err(map_store_error)?;
-                return Ok(current);
-            }
+                .copied()
+                .map(SettingKey::new)
+                .collect::<Result<std::collections::BTreeSet<_>, _>>()
+                .map_err(ConfigurationError::validation)?;
             let expected_keys = registry
                 .definitions()
                 .map(|definition| definition.key.clone())
@@ -386,12 +386,23 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 .difference(&actual_keys)
                 .cloned()
                 .collect::<Vec<_>>();
-            if missing_keys.is_empty()
-                || missing_keys.iter().any(|key| !additive_keys.contains(key))
-                || !actual_keys.is_subset(&expected_keys)
+            let removals = actual_keys
+                .intersection(&retired_keys)
+                .cloned()
+                .collect::<Vec<_>>();
+            if missing_keys.is_empty() && removals.is_empty() {
+                validate_snapshot_registry_completeness(&current.snapshot).map_err(map_store_error)?;
+                return Ok(current);
+            }
+            let surviving_keys = actual_keys
+                .difference(&retired_keys)
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            if missing_keys.iter().any(|key| !additive_keys.contains(key))
+                || !surviving_keys.is_subset(&expected_keys)
             {
                 return Err(ConfigurationError::ResetRequired {
-                    reason: "configuration snapshot registry drift is not a registered additive-default upgrade"
+                    reason: "configuration snapshot registry drift is not a registered additive-default or retired-key upgrade"
                         .to_owned(),
                 });
             }
@@ -405,9 +416,10 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(ConfigurationError::validation)?;
             let operation_digest = canonical_sha256(&(
-                "tracedecay.configuration.additive-default-convergence.v1",
+                "tracedecay.configuration.registry-shape-convergence.v1",
                 expected_revision_id,
                 &additions,
+                &removals,
             ))
             .map_err(ConfigurationError::validation)?;
             let next_revision_id: ConfigurationRevisionId = derived_identifier(
@@ -418,10 +430,14 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                     &operation_digest,
                 ))
                 .map_err(ConfigurationError::validation)?,
-                "configuration additive default revision id",
+                "configuration registry shape revision id",
             )?;
             let mut effective_values = current.snapshot.effective_values.clone();
             let mut provenance = current.snapshot.provenance.clone();
+            for key in &removals {
+                effective_values.remove(key);
+                provenance.remove(key);
+            }
             for (key, default_value) in additions {
                 effective_values.insert(key.clone(), default_value);
                 provenance.insert(
@@ -437,10 +453,10 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 parent_revision_id: Some(expected_revision_id.clone()),
                 snapshot,
                 actor_id: ActorId::new(
-                    "actor.tracedecay-daemon.additive-default-convergence".to_owned(),
+                    "actor.tracedecay-daemon.registry-shape-convergence".to_owned(),
                 )
                 .map_err(ConfigurationError::validation)?,
-                operation_kind: "additive_default_convergence".to_owned(),
+                operation_kind: "registry_shape_convergence".to_owned(),
                 created_at: occurred_at,
             };
             insert_revision(&transaction, &revision)
