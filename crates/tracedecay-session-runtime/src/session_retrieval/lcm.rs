@@ -170,8 +170,8 @@ impl DaemonSessionRetrievalService {
     /// backlog and blocker, is the answer instead. Once the worker is current
     /// the temporal outcome stands: nothing is going to project the session.
     ///
-    /// A missing refresh worker is not convergence. Core and direct mounts
-    /// never attach one, and zero rows there are absence, not a pending
+    /// A missing refresh worker is not convergence: core/direct mounts never
+    /// attach one, and zero rows there are evidence of absence, not a pending
     /// catch-up. Only historical-convergence staleness remaps absence.
     fn historically_converging_unavailable(&self) -> Option<SessionRetrievalUnavailable> {
         let unavailable = self.refresh_not_current()?;
@@ -322,8 +322,11 @@ impl DaemonSessionRetrievalService {
                 };
                 (Some(result), retrieval)
             }
-            // Zero temporal rows for the session is absence unless history is
-            // still converging. A missing worker is not that catch-up.
+            // Zero temporal rows for the session is only evidence of absence
+            // once history is not still converging. A missing worker (core /
+            // direct mounts) is not convergence — treat CompleteZero as
+            // absence there. While historical catch-up is in flight, surface
+            // that state instead of a complete description at generation zero.
             SessionRetrievalOutcome::CompleteZero { .. }
                 if direct.is_none() && self.historically_converging_unavailable().is_some() =>
             {

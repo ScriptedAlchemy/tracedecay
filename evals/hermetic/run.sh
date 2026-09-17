@@ -32,8 +32,8 @@ WORKTREE_ROOT="$(cd -- "${SCRIPT_DIR}/../.." >/dev/null 2>&1 && pwd -P)"
 TMP_ROOT="${TMPDIR:-/tmp}"
 TMP_ROOT="${TMP_ROOT%/}"
 
-# Default project to index/eval against: the main tracedecay checkout.
-DEFAULT_PROJECT="/fast/projects/tracedecay"
+# Default to the checkout that owns this harness, independent of the caller's cwd.
+DEFAULT_PROJECT="${WORKTREE_ROOT}"
 
 log()  { printf '[hermetic] %s\n' "$*" >&2; }
 die()  { printf '[hermetic] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -565,7 +565,7 @@ Subcommands:
 Common options:
   --env-dir <path>      Reuse an existing env dir (else a fresh one is created).
   --agent <name>        Agent driver: claude or codex (default: claude).
-  --project <path>      Project to index / default cwd (default: main tracedecay checkout).
+  --project <path>      Project to index / default cwd (default: this harness's checkout).
   --corpus <path.jsonl> Corpus file for `run`.
   --model <name>        Model override (default: sonnet for claude; gpt-5.6-sol for codex).
   --reps <N>            Re-run the corpus N times (default: 1; `run` only).

@@ -685,8 +685,8 @@ mod tests {
 
     #[test]
     fn install_runs_the_caller_on_an_admitted_rayon_worker() {
-        let on_worker = install(|| rayon::current_thread_index().is_some())
-            .expect("code-index worker pool");
+        let on_worker =
+            install(|| rayon::current_thread_index().is_some()).expect("code-index worker pool");
         assert!(
             on_worker,
             "direct-seal encode only parallelizes when the caller is already a rayon worker"

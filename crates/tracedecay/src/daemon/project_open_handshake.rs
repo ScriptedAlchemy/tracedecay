@@ -233,19 +233,23 @@ pub(super) fn project_open_error_response(
             reason_code,
             retryable,
             detail,
-        } if reason_code == PROJECT_WARMING_REASON_CODE
-            || reason_code == REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE =>
-        {
+        } if project_open_retryable_reason(reason_code) => {
+            let mut data = json!({
+                "reason_code": reason_code,
+                "retryable": retryable,
+                "detail": detail,
+                "kind": reason_code,
+            });
+            if let Some(capacity) = project_open_capacity_limit(reason_code)
+                && let Some(object) = data.as_object_mut()
+            {
+                object.insert("capacity".to_owned(), json!(capacity));
+            }
             JsonRpcResponse::error_with_data(
                 id,
                 ErrorCode::InternalError,
                 detail.clone(),
-                Some(json!({
-                    "reason_code": reason_code,
-                    "retryable": retryable,
-                    "detail": detail,
-                    "kind": reason_code,
-                })),
+                Some(data),
             )
         }
         TraceDecayError::Config { message }
@@ -259,34 +263,6 @@ pub(super) fn project_open_error_response(
                     "kind": "project_route_open_backoff",
                     "retryable": true,
                     "retry_after_ms": PROJECT_OPEN_FAILURE_RETRY_BACKOFF.as_millis() as u64,
-                })),
-            )
-        }
-        TraceDecayError::Config { message }
-            if message.starts_with("daemon project open task capacity reached") =>
-        {
-            JsonRpcResponse::error_with_data(
-                id,
-                ErrorCode::InternalError,
-                message.clone(),
-                Some(json!({
-                    "kind": "project_open_task_capacity_reached",
-                    "retryable": true,
-                    "capacity": MAX_TRACKED_PROJECT_OPEN_TASKS,
-                })),
-            )
-        }
-        TraceDecayError::Config { message }
-            if message.starts_with("daemon project server capacity reached") =>
-        {
-            JsonRpcResponse::error_with_data(
-                id,
-                ErrorCode::InternalError,
-                message.clone(),
-                Some(json!({
-                    "kind": "project_server_capacity_reached",
-                    "retryable": true,
-                    "capacity": MAX_CACHED_PROJECT_SERVERS,
                 })),
             )
         }

@@ -18,6 +18,16 @@ evals/hermetic/run.sh run   --agent claude --env-dir "$ENV" --corpus my-corpus.j
 evals/hermetic/run.sh teardown --env-dir "$ENV"
 ```
 
+Without `--project`, the harness indexes the checkout containing `run.sh`, not
+the caller's working directory or a machine-specific primary checkout. Pass
+`--project` explicitly to evaluate another repository.
+
+Offline harness path-selection checks (no build, agent, or daemon required):
+
+```bash
+python3 -m unittest discover -s evals/hermetic -p 'test_run.py' -v
+```
+
 ## Why a naive PATH override is not enough
 
 An eval session launched via `claude -p` resolves tracedecay **three** ways:

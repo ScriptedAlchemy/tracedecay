@@ -391,15 +391,28 @@ fn project_server_capacity_response_is_typed_json_rpc_data() {
         serde_json::Value::Null,
         &super::super::project_server_capacity_error(),
     );
-    let data = response
-        .error
-        .expect("error response")
-        .data
-        .expect("typed data");
+    let error = response.error.expect("error response");
+    let refusal = serde_json::to_value(&error).expect("serialize capacity refusal");
+    assert!(
+        super::super::json_rpc_error_is_project_open_retryable(&refusal),
+        "branch add and the proxy must retry this refusal: {refusal}"
+    );
+    let data = error.data.expect("typed data");
 
+    assert_eq!(data["reason_code"], "project_server_capacity_reached");
     assert_eq!(data["kind"], "project_server_capacity_reached");
     assert_eq!(data["retryable"], true);
     assert_eq!(data["capacity"], super::super::MAX_CACHED_PROJECT_SERVERS);
+    assert!(super::super::error_is_project_open_retryable(
+        &super::super::project_server_capacity_error()
+    ));
+    let prose = tracedecay_domain::errors::TraceDecayError::Config {
+        message: "daemon project server capacity reached".to_owned(),
+    };
+    assert!(
+        !super::super::error_is_project_open_retryable(&prose),
+        "capacity English prose must not decide project-open retry"
+    );
 }
 
 #[tokio::test]

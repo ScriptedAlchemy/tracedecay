@@ -12,6 +12,7 @@ use super::{CodeLexicalArtifactReaderV1, MAX_CLONE_EXACT_PAGE_MEMBERS_V1};
 use crate::retrieval::lexical::projection::artifact::{
     CodeLexicalArtifactErrorV1, checkpoint, sqlite_error,
 };
+use crate::retrieval::ports::RETRIEVAL_CANDIDATE_BATCH_SIZE;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 struct CloneFamilyCursorV1 {
@@ -199,7 +200,12 @@ impl CodeLexicalArtifactReaderV1 {
             .map_err(sqlite_error)?;
         let mut families = Vec::with_capacity(fetch);
         while let Some(row) = rows.next().map_err(sqlite_error)? {
-            checkpoint(control)?;
+            if families
+                .len()
+                .is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE)
+            {
+                checkpoint(control)?;
+            }
             let class = match row.get::<_, i64>(0).map_err(sqlite_error)? {
                 1 => CloneNormalizationClassV1::Conservative,
                 2 => CloneNormalizationClassV1::Rename,
@@ -246,6 +252,7 @@ impl CodeLexicalArtifactReaderV1 {
                 continuation,
             });
         }
+        checkpoint(control)?;
         let next_cursor = (families.len() > limit)
             .then(|| {
                 families

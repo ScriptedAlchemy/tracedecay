@@ -464,7 +464,7 @@ fn generation_backed_projection(
 fn real_lexical_source_fixture_with_files(file_count: usize) -> RealLexicalSourceFixture {
     assert!(file_count >= 1, "fixture needs at least one file");
     let identity_source = b"import type { Widget } from \"widget-kit\";\nexport function render(value: Widget) { return value; }\n";
-    let sources = (0..file_count)
+    let mut sources = (0..file_count)
         .map(|ordinal| {
             if ordinal == 0 {
                 (
@@ -473,8 +473,7 @@ fn real_lexical_source_fixture_with_files(file_count: usize) -> RealLexicalSourc
                     identity_source.to_vec(),
                 )
             } else {
-                // Zero-padded ordinals keep lexicographic file order equal to
-                // generation order, which snapshot intake requires.
+                // Keep the original small-fixture identities stable.
                 (
                     format!("file.artifact.{ordinal:02}"),
                     format!("src/artifact_{ordinal:02}.ts"),
@@ -485,7 +484,8 @@ fn real_lexical_source_fixture_with_files(file_count: usize) -> RealLexicalSourc
                 )
             }
         })
-        .collect();
+        .collect::<Vec<_>>();
+    sources.sort_by(|left, right| left.1.cmp(&right.1));
     real_lexical_source_fixture_from_sources(sources)
 }
 
@@ -5759,6 +5759,7 @@ fn artifact_exact_reader_prefers_admitted_matches_over_denied_best() {
     let base = base_request(exact_query, 1);
     let exact_query_view = query_view(exact_query);
     let exact_request = ExactLaneRequest {
+        control: &ACTIVE_CONTROL,
         literals: authority.parse_literals(&exact_query_view, &base),
         base,
         query_view: &exact_query_view,
@@ -5786,6 +5787,146 @@ fn artifact_exact_reader_prefers_admitted_matches_over_denied_best() {
             .any(|literal| literal.original_bytes == b"render_02"),
         "the returned document carries the admitted literal"
     );
+}
+
+#[test]
+fn exact_candidate_scan_stops_before_the_next_batch_after_cancellation() {
+    struct CancelDuringScan {
+        checks: AtomicUsize,
+    }
+    impl RetrievalExecutionControl for CancelDuringScan {
+        fn is_cancelled(&self) -> bool {
+            self.checks.fetch_add(1, Ordering::SeqCst) >= 2
+        }
+        fn elapsed_micros(&self) -> u64 {
+            0
+        }
+    }
+
+    let fixture = real_lexical_source_fixture_with_files(256);
+    let metadata = fixture.metadata.clone();
+    let generation = metadata.generation.clone();
+    let build_control = ArtifactControl { cancelled: false };
+    let (pages, _) = drain_verified_pages(&fixture, 128);
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let path = directory.path().join("cancel-exact.sqlite");
+    let mut builder =
+        CodeLexicalArtifactBuilderV1::create(&path, metadata).expect("create real artifact");
+    for page in &pages {
+        builder
+            .append_page(page, &build_control)
+            .expect("append page");
+    }
+    let mut source = fixture.open_source(128);
+    let verified = builder
+        .rebuild_and_finalize(&mut source, &build_control)
+        .expect("finalize artifact");
+    let reader = CodeLexicalArtifactReaderV1::open_with_control(
+        &path,
+        &verified,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &build_control,
+    )
+    .expect("open artifact");
+    let authority = CentralExactAdmissionAuthorityV1::new(id("exact-rules.v1"));
+    let query = r#""return value""#;
+    let base = base_request(query, 8);
+    let view = query_view(query);
+    let control = CancelDuringScan {
+        checks: AtomicUsize::new(0),
+    };
+    let mut request = ExactLaneRequest {
+        literals: authority.parse_literals(&view, &base),
+        base,
+        query_view: &view,
+        generation,
+        budget: budget(8),
+        control: &control,
+    };
+    let exact = reader.exact_adapter(authority);
+    assert_eq!(
+        exact.read_exact_postings(&request),
+        Err(RetrievalPortError::Cancelled),
+        "the exact artifact scan must consult the carried request control between candidate batches",
+    );
+    request.control = &ACTIVE_CONTROL;
+    let first = complete(exact.read_exact_postings(&request).expect("active read"));
+    assert!(
+        first.coverage.eligible > 128,
+        "fixture must span candidate batches"
+    );
+    assert_eq!(first.candidates.len(), 8);
+    assert_eq!(
+        first,
+        complete(exact.read_exact_postings(&request).expect("repeat read"))
+    );
+}
+
+#[test]
+fn in_memory_rebuilds_observe_cancellation_at_phase_and_batch_boundaries() {
+    let fixture = real_lexical_source_fixture_with_files(256);
+    let (pages, _) = drain_verified_pages(&fixture, 128);
+    let projection = CodeLexicalProjectionAdapterV1::new_admitted(
+        fixture.metadata.clone(),
+        pages
+            .iter()
+            .flat_map(|page| page.chunks().iter().cloned())
+            .collect::<Vec<_>>(),
+        page_symbol_displays(&pages),
+    )
+    .expect("real admitted in-memory projection");
+
+    // Empty rebuilds must still consult the phase boundary. For the wide
+    // fixture, cancellation occurs after enough observations to enter a later
+    // rebuild batch; entry and final checks alone cannot trigger it.
+    for (term, cancel_at, has_matches) in [("absentzzxyz", 2, false), ("widget", 10, true)] {
+        let control = CancelAtObservation::new(cancel_at);
+        let mut request = lexical_request(term, &[term], &[], &[], 0, 1024);
+        request.generation = fixture.metadata.generation.clone();
+        let baseline = complete(
+            projection
+                .read_lexical_postings(&request)
+                .expect("active lexical read"),
+        );
+        assert_eq!(baseline.candidates.len() > 128, has_matches);
+        request.control = &control;
+        assert_eq!(
+            projection.read_lexical_postings(&request),
+            Err(RetrievalPortError::Cancelled)
+        );
+        assert_eq!(control.observations(), cancel_at);
+    }
+
+    let authority = CentralExactAdmissionAuthorityV1::new(id("exact-rules.v1"));
+    let exact = projection.exact_adapter(authority.clone());
+    for (query, cancel_at, has_matches) in [
+        (r#""absentzzxyz""#, 3, false),
+        (r#""return value""#, 9, true),
+    ] {
+        let control = CancelAtObservation::new(cancel_at);
+        let view = query_view(query);
+        let base = base_request(query, 1024);
+        let mut request = ExactLaneRequest {
+            literals: authority.parse_literals(&view, &base),
+            base,
+            query_view: &view,
+            generation: fixture.metadata.generation.clone(),
+            budget: budget(1024),
+            control: &ACTIVE_CONTROL,
+        };
+        let baseline = complete(
+            exact
+                .read_exact_postings(&request)
+                .expect("active exact read"),
+        );
+        assert_eq!(baseline.candidates.len() > 128, has_matches);
+        request.control = &control;
+        assert_eq!(
+            exact.read_exact_postings(&request),
+            Err(RetrievalPortError::Cancelled)
+        );
+        assert_eq!(control.observations(), cancel_at);
+    }
 }
 
 #[test]
@@ -5955,6 +6096,7 @@ fn disk_artifact_reader_selects_bounded_top_k_with_lane_tie_order_and_coverage()
     let base = base_request(exact_query, 7);
     let exact_query_view = query_view(exact_query);
     let exact_request = ExactLaneRequest {
+        control: &ACTIVE_CONTROL,
         literals: authority.parse_literals(&exact_query_view, &base),
         base,
         query_view: &exact_query_view,
@@ -6214,6 +6356,7 @@ fn exact_projection_emits_only_authority_minted_proofs() {
     let base = base_request(query, 16);
     let query_view = query_view(query);
     let request = ExactLaneRequest {
+        control: &ACTIVE_CONTROL,
         literals: authority.parse_literals(&query_view, &base),
         base,
         query_view: &query_view,

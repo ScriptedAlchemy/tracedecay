@@ -11,8 +11,19 @@ use tracedecay_domain::{
 };
 use tracedecay_query::retrieval::exact::{ExactLaneEvidence, ExactLaneRequest, ExactLiteralV1};
 use tracedecay_query::retrieval::ports::{
-    CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalPortError,
+    CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalExecutionControl, RetrievalPortError,
 };
+
+struct ActiveControl;
+
+impl RetrievalExecutionControl for ActiveControl {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+    fn elapsed_micros(&self) -> u64 {
+        0
+    }
+}
 
 fn id<T>(value: &str) -> T
 where
@@ -85,6 +96,7 @@ fn request_and_proof() -> (ExactLaneRequest<'static>, ExactAdmissionProof) {
     ));
     (
         ExactLaneRequest {
+            control: &ActiveControl,
             base,
             query_view,
             generation: CodeGenerationId::new("generation.contract").unwrap(),
