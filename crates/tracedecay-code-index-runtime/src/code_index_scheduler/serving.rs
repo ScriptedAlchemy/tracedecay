@@ -23,10 +23,10 @@ use tracedecay_code_extraction::{
     RENAME_CLONE_NORMALIZATION_REVISION_V1,
 };
 use tracedecay_code_index_retention::code_index_generations::{
-    DurableCodeTextArtifactDescriptorV1, DurablePublicationPointerV1,
-    DurableSealedCodeGenerationIdentityV1, acquire_code_generation_store_lock,
-    attach_verified_text_artifact_under_lock, code_text_artifact_path, code_text_artifacts_root,
-    replace_verified_text_artifact_under_lock, withdraw_verified_text_artifact_under_lock,
+    CodeGenerationStoreLockV1, DurableCodeTextArtifactDescriptorV1, DurablePublicationPointerV1,
+    DurableSealedCodeGenerationIdentityV1, attach_verified_text_artifact_under_lock,
+    code_text_artifact_path, code_text_artifacts_root, replace_verified_text_artifact_under_lock,
+    try_acquire_code_generation_store_lock, withdraw_verified_text_artifact_under_lock,
 };
 use tracedecay_contracts::{
     code_index_freshness::{
@@ -1108,6 +1108,16 @@ impl DaemonCodeTextArtifactStoreV1 {
         Ok(reservation)
     }
 
+    fn acquire_store_write_lock(&self) -> Result<CodeGenerationStoreLockV1, RetrievalPortError> {
+        try_acquire_code_generation_store_lock(&self.store_root)
+            .map_err(text_artifact_unavailable)?
+            .ok_or_else(|| {
+                RetrievalPortError::AuthorityUnavailable(
+                    "code-generation store has an active owner".to_owned(),
+                )
+            })
+    }
+
     /// The durably attached artifact descriptor for one retained generation,
     /// or `None` when the generation has no published text artifact yet.
     pub(super) fn published_descriptor(
@@ -1136,9 +1146,10 @@ impl DaemonCodeTextArtifactStoreV1 {
         &self,
         descriptor: &DurableCodeTextArtifactDescriptorV1,
         quarantine_corrupt_file: bool,
+        control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<(), RetrievalPortError> {
-        let lock = acquire_code_generation_store_lock(&self.store_root)
-            .map_err(text_artifact_unavailable)?;
+        checkpoint_text_artifact_control(control)?;
+        let lock = self.acquire_store_write_lock()?;
         let pointer = self
             .publication
             .read_publication_pointer()
@@ -1211,8 +1222,7 @@ impl DaemonCodeTextArtifactStoreV1 {
                 "text-artifact staging path is outside its canonical root".to_owned(),
             ));
         }
-        let _lock = acquire_code_generation_store_lock(&self.store_root)
-            .map_err(text_artifact_unavailable)?;
+        let _lock = self.acquire_store_write_lock()?;
         checkpoint_text_artifact_control(control)?;
         let metadata = staging_path
             .symlink_metadata()
@@ -1357,8 +1367,8 @@ impl DaemonCodeTextArtifactStoreV1 {
             // Hold it from the first staging observation until pointer attachment
             // is durable so retention cannot unlink a newly visible artifact from
             // a plan made before the descriptor was attached.
-            let lock = acquire_code_generation_store_lock(&self.store_root)
-                .map_err(text_artifact_unavailable)?;
+            checkpoint_text_artifact_control(control)?;
+            let lock = self.acquire_store_write_lock()?;
             let (artifact_sha256, artifact_size_bytes) = hotpath::measure_block!(
                 "query.artifact.store.state_digest",
                 sha256_private_file_and_size(staging_path, control)
@@ -2645,17 +2655,17 @@ impl LatestCodeTextGenerationV1 {
             }
             Err(CodeLexicalArtifactErrorV1::Missing(_)) => {
                 drop(reader_reservation);
-                store.withdraw_unavailable_descriptor(&descriptor, false)?;
+                store.withdraw_unavailable_descriptor(&descriptor, false, control)?;
                 Ok(None)
             }
             Err(CodeLexicalArtifactErrorV1::Corrupt(_)) => {
                 drop(reader_reservation);
-                store.withdraw_unavailable_descriptor(&descriptor, true)?;
+                store.withdraw_unavailable_descriptor(&descriptor, true, control)?;
                 Ok(None)
             }
             Err(CodeLexicalArtifactErrorV1::Incompatible(_)) => {
                 drop(reader_reservation);
-                store.withdraw_unavailable_descriptor(&descriptor, false)?;
+                store.withdraw_unavailable_descriptor(&descriptor, false, control)?;
                 Ok(None)
             }
             Err(error) => Err(map_text_artifact_error(error)),

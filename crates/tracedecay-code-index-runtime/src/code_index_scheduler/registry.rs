@@ -990,11 +990,11 @@ mod terminal_publication_park_tests {
     #[test]
     fn publication_authority_terminal_reads_the_shared_park() {
         let slot = RwLock::new(None);
-        assert!(!publication_authority_terminal(&slot));
+        assert!(!publication_authority_is_terminal(&slot));
         *slot
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(terminal_park("planted"));
-        assert!(publication_authority_terminal(&slot));
+        assert!(publication_authority_is_terminal(&slot));
         *slot
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
@@ -1007,7 +1007,7 @@ mod terminal_publication_park_tests {
                 retries_on_wake: true,
             });
         assert!(
-            !publication_authority_terminal(&slot),
+            !publication_authority_is_terminal(&slot),
             "only PublicationAuthorityCorrupt is the terminal park"
         );
     }

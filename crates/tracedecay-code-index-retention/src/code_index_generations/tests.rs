@@ -998,6 +998,48 @@ fn text_artifact_retention_collects_staging_database_sidecars_with_their_owner()
 }
 
 #[test]
+fn applied_retention_refuses_a_busy_generation_store_and_retries() {
+    let (store, _) = fixture_store(2);
+    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new())
+        .expect("plan generation retention");
+    let lock = acquire_code_generation_store_lock(store.path()).expect("hold generation store");
+    let root = store.path().to_path_buf();
+    let (sent, received) = std::sync::mpsc::sync_channel(1);
+    let blocked = std::thread::spawn(move || {
+        sent.send(execute_code_generation_retention(
+            &root,
+            plan,
+            CodeGenerationRetentionModeV1::Apply,
+            UtcMicros(14),
+            None,
+        ))
+        .expect("return retention outcome");
+    });
+
+    let error = received
+        .recv_timeout(std::time::Duration::from_millis(500))
+        .expect("busy generation store must settle without waiting")
+        .expect_err("busy generation store must defer retention");
+    assert!(matches!(
+        error,
+        CodeGenerationRetentionErrorV1::GenerationStoreBusy
+    ));
+    drop(lock);
+    blocked.join().expect("retention attempt exits");
+
+    let retry = plan_code_generation_retention(store.path(), &BTreeSet::new())
+        .expect("replan after contention");
+    execute_code_generation_retention(
+        store.path(),
+        retry,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(15),
+        None,
+    )
+    .expect("retention retries after the store owner releases");
+}
+
+#[test]
 fn cancellable_artifact_apply_stops_rehash_before_quarantine_and_retries() {
     let (store, generations) = fixture_store(1);
     let active = generations.last().expect("active generation");

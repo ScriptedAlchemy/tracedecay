@@ -428,6 +428,8 @@ pub enum CodeGenerationRetentionErrorV1 {
     Cancelled,
     #[error("code-generation retention deferred: graph replay pool is busy")]
     GraphReplayPoolBusy,
+    #[error("code-generation retention deferred: generation store is busy")]
+    GenerationStoreBusy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1422,7 +1424,8 @@ pub fn execute_code_generation_retention_cancellable(
     }
 
     let vector_readable_sources = plan.vector_readable_sources.clone();
-    let _store_lock = acquire_code_generation_store_lock(store_root)?;
+    let _store_lock = try_acquire_code_generation_store_lock(store_root)?
+        .ok_or(CodeGenerationRetentionErrorV1::GenerationStoreBusy)?;
     if observe_cancel(is_cancelled) {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
@@ -1626,7 +1629,8 @@ fn recover_code_generation_retention_cancellable(
     if observe_cancel(is_cancelled) {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
-    let _store_lock = acquire_code_generation_store_lock(store_root)?;
+    let _store_lock = try_acquire_code_generation_store_lock(store_root)?
+        .ok_or(CodeGenerationRetentionErrorV1::GenerationStoreBusy)?;
     if observe_cancel(is_cancelled) {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }

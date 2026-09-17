@@ -25,7 +25,7 @@ use super::SCOPE_RETENTION_QUARANTINE_DIRECTORY;
 use super::journal::{
     BoundedJournalSpec, clear_journal, journal_path, load_journal, persist_journal,
 };
-use super::locking::{acquire_code_generation_store_lock, acquire_scope_retention_lock};
+use super::locking::{acquire_scope_retention_lock, try_acquire_code_generation_store_lock};
 use super::receipt_store;
 use super::receipt_store::{ReceiptStoreSpec, receipt_digest_file_component};
 use super::scope_quarantine::{ScopeDirectoryIdentityV1, ScopeQuarantineAuthority};
@@ -676,7 +676,10 @@ pub fn execute_scope_root_retention(
                 scope.scope_hash
             )));
         }
-        scope_locks.push(acquire_code_generation_store_lock(&scope_root)?);
+        scope_locks.push(
+            try_acquire_code_generation_store_lock(&scope_root)?
+                .ok_or(CodeGenerationRetentionErrorV1::GenerationStoreBusy)?,
+        );
         if scope_root.join(TRANSACTION_FILE).exists() {
             return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
                 "stranded scope '{}' has a pending generation-retention journal",

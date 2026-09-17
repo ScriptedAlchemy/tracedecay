@@ -3,13 +3,16 @@ use std::{
     fmt::Write as _,
     num::NonZeroU64,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, mpsc},
+    thread,
     time::{Duration, Instant},
 };
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tracedecay_code_index_retention::code_index_generations::code_text_artifacts_root;
+use tracedecay_code_index_retention::code_index_generations::{
+    acquire_code_generation_store_lock, code_text_artifacts_root,
+};
 use tracedecay_contracts::{
     CallableCodeOperationKind, CallableCodeQueryPort, CodeQueryScope, CodeRelationRequest,
     CodeSymbolSearchRequest, ExactOccurrenceRequest, OmissionReason, OpaqueCursor, PageRequest,
@@ -31,6 +34,7 @@ use tracedecay_domain::{
     TemporalModeV1, UtcMicros, VectorWatermark, encode_lowercase_hex, sha256_hex_suffix,
 };
 use tracedecay_query::retrieval::{
+    RetrievalPortError,
     exact::{CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneRequest},
     lexical::{
         CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
@@ -761,9 +765,9 @@ fn text_artifact_publication_serializes_pointer_attachment_with_retention() {
             .expect("report retention completion");
     });
 
-    // Unfixed publication owns no store lock here, so retention completes and
-    // unlinks the destination. Fixed publication holds the canonical lock and
-    // keeps retention blocked until its pointer attachment is durable.
+    // Publication holds the canonical lock through pointer attachment.
+    // Retention must settle as typed busy instead of blocking or unlinking the
+    // destination from its stale plan.
     let early_retention = retention_done_rx.recv_timeout(Duration::from_secs(2));
     control.resume();
     let descriptor = publisher
@@ -1532,6 +1536,66 @@ fn text_artifact_publish_rejects_a_permissive_artifacts_root() {
         "publication must fail closed instead of accepting a permissive artifact namespace"
     );
     assert!(staging.is_file(), "refusal must preserve staging evidence");
+}
+
+#[test]
+fn text_artifact_publish_refuses_a_busy_generation_store_and_retries() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retry_publish() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    let artifact_store = latest.text_artifact_store.clone();
+    let generation_id = latest.generation().manifest().generation_id.clone();
+    let sealed_identity = artifact_store
+        .sealed_identity(&generation_id)
+        .expect("sealed generation identity");
+    let artifacts_root = store.path().join("code-text-artifacts-v1");
+    tracedecay_private_fs::create_private_directory(&artifacts_root)
+        .expect("create private artifacts root");
+    let staging = artifacts_root.join("busy-publish.staging");
+    let mut staging_file =
+        tracedecay_private_fs::create_private_file(&staging).expect("create staging artifact");
+    std::io::Write::write_all(&mut staging_file, b"busy publication")
+        .expect("write staging artifact");
+    drop(staging_file);
+
+    let lock = acquire_code_generation_store_lock(store.path()).expect("hold generation store");
+    let publish_store = artifact_store.clone();
+    let publish_generation = generation_id.clone();
+    let publish_identity = sealed_identity.clone();
+    let publish_staging = staging.clone();
+    let (sent, received) = mpsc::sync_channel(1);
+    let blocked = thread::spawn(move || {
+        sent.send(publish_store.publish(
+            &publish_staging,
+            &publish_generation,
+            &publish_identity,
+            &UninterruptibleCodeIndexControlV1,
+        ))
+        .expect("return publication outcome");
+    });
+    assert!(matches!(
+        received
+            .recv_timeout(Duration::from_millis(500))
+            .expect("busy publication must settle without waiting"),
+        Err(RetrievalPortError::AuthorityUnavailable(_))
+    ));
+    drop(lock);
+    blocked.join().expect("publication attempt exits");
+
+    artifact_store
+        .publish(
+            &staging,
+            &generation_id,
+            &sealed_identity,
+            &UninterruptibleCodeIndexControlV1,
+        )
+        .expect("publication retries after the store owner releases");
 }
 
 #[cfg(unix)]

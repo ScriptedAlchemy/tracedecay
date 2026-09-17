@@ -32,6 +32,13 @@ pub enum CodeGenerationRetentionOutcomeV1 {
     Failed,
 }
 
+fn defer_generation_store_busy(
+    observations: &crate::telemetry::StoreTelemetrySamplingRegistry,
+) -> CodeGenerationRetentionOutcomeV1 {
+    log_code_generation_retention_degraded(observations, "generation_store_busy");
+    CodeGenerationRetentionOutcomeV1::Failed
+}
+
 /// Collect superseded code-index generations for one mounted project.
 ///
 /// Sealed generations are ordinary files, so no database retention or
@@ -162,6 +169,9 @@ pub async fn run_code_generation_retention(
         )) => {
             return defer_graph_replay_pool_busy(observations, lease.project_root());
         }
+        Ok(Err(
+            tracedecay_code_index_retention::code_index_generations::CodeGenerationRetentionErrorV1::GenerationStoreBusy,
+        )) => return defer_generation_store_busy(observations),
         Ok(Err(error)) => {
             // The bare label proved undiagnosable on a live profile: without
             // the typed error, a pointer CAS loss under rebuild churn is
@@ -337,6 +347,9 @@ pub async fn run_code_generation_retention(
         }
         Ok(Err(CodeGenerationRetentionErrorV1::GraphReplayPoolBusy)) => {
             defer_graph_replay_pool_busy(observations, lease.project_root())
+        }
+        Ok(Err(CodeGenerationRetentionErrorV1::GenerationStoreBusy)) => {
+            defer_generation_store_busy(observations)
         }
         Ok(Err(error)) => {
             // Same diagnosability contract as the plan failure above: the
