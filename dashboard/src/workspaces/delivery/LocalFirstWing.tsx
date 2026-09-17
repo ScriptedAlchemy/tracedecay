@@ -16,7 +16,13 @@ import {
   shortSha,
 } from './deliveryChrome.tsx';
 import { providerStateSentence } from './evidence.ts';
-import { laneServes, laneStateKind, projectionLaneState, type LaneState } from './journey.ts';
+import {
+  laneServes,
+  laneStateKind,
+  projectionLaneState,
+  projectionValue,
+  type LaneState,
+} from './journey.ts';
 import { laneStateDetail, overviewReadState, ProjectionLedger } from './ProjectionLedger.tsx';
 
 /**
@@ -26,10 +32,8 @@ import { laneStateDetail, overviewReadState, ProjectionLedger } from './Projecti
  * absence with the daemon's own reason. A horizontal band above the inbox, not
  * a page; the only control is the Settings link.
  *
- * The band is drawn from the first render so the provider state is never
- * hidden, but it becomes a named landmark only once the overview read has
- * settled: assistive tech is not pointed at a region whose evidence has not
- * arrived, and the band is marked busy in the meantime.
+ * The band is a named landmark from first paint; while the overview read is
+ * in flight it is marked busy and prints the loading chip in place of evidence.
  */
 export function LocalFirstWing({
   project,
@@ -42,7 +46,7 @@ export function LocalFirstWing({
   const reading = state.kind === 'blocked' && state.state === 'loading';
   return (
     <section
-      aria-label={reading ? undefined : `Local-first · ${project.label}`}
+      aria-label={`Local-first · ${project.label}`}
       aria-busy={reading ? true : undefined}
       className="border-b border-edge-subtle bg-surface-1"
     >
@@ -73,11 +77,6 @@ export function LocalFirstWing({
       )}
     </section>
   );
-}
-
-/** The eight projections share one state ladder; only `value` differs. */
-function projectionValue<T>(projection: { readonly state: string; readonly value?: T | null }): T | null {
-  return projection.value ?? null;
 }
 
 function LaneChip({ state, className }: { state: LaneState; className?: string }) {

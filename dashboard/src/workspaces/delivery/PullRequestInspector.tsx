@@ -9,7 +9,7 @@ import type {
 import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
 import { Panel } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn.ts';
-import type { DeliveryContext } from './DeliveryPage.tsx';
+import type { DeliveryContext } from './deliveryContext.ts';
 import {
   ControlLink,
   GradeMark,

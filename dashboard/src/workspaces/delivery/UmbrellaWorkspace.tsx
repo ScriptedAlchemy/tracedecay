@@ -2,7 +2,7 @@ import { CenteredState } from '../../ui/ReadSection.tsx';
 import { StateChip } from '../../ui/StateChip.tsx';
 import { Panel, ReadoutBar } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn.ts';
-import type { DeliveryContext } from './DeliveryPage.tsx';
+import type { DeliveryContext } from './deliveryContext.ts';
 import { GradeMark, ProviderStateChip, ReadOnlyProviderBadge } from './deliveryChrome.tsx';
 import { DELIVERY_LAYOUTS } from './deliveryLocation.ts';
 import { gradeLabel, type EvidenceGrade } from './evidence.ts';

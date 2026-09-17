@@ -353,7 +353,7 @@ function EpisodeNode({
       tabIndex={0}
       aria-label={`${laneLabel(episode.lane)} · ${episode.label} · ${gradeLabel(episode.grade)}`}
       aria-pressed={selected}
-      className="cursor-pointer outline-none"
+      className="cursor-pointer outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
       onClick={() => onSelect(episode)}
       onKeyDown={activate}
     >
