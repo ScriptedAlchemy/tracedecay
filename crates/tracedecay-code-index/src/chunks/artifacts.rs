@@ -144,8 +144,8 @@ impl CodeIndexImportEvidenceV1 {
 /// One parser-observed reference the file's own symbol table could not bind.
 /// Retained as typed evidence so generation sealing can resolve it against
 /// the whole generation's symbol set, where a cross-file target may live.
-/// Names are already narrowed at retention: ubiquitous method names and
-/// receiver-dotted paths never reach this lane.
+/// Unqualified ubiquitous names are excluded. Rust receiver-dotted calls
+/// remain as limitation evidence even when their receiver type cannot bind.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(deny_unknown_fields)]
 pub struct CodeIndexUnresolvedReferenceV1 {

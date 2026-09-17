@@ -4493,6 +4493,33 @@ pub fn real_symbol() {}
     }
 
     #[test]
+    fn dotted_chain_references_keep_distinct_method_token_spans() {
+        let source = "fn nested(builder: &WalkBuilder) { builder.repeat().repeat(); }\n";
+        let file = validated_file("src/lib.rs", source.as_bytes());
+        let batch = batch_for(&file, ParseOutcomeV1::Complete);
+        let artifacts = chunker()
+            .index_file(&file, &batch, &rust_descriptor(), &NeverCancelled)
+            .expect("real Rust extraction");
+        let receiver_sites = artifacts
+            .unresolved_references
+            .iter()
+            .filter(|reference| reference.reference_name.contains('.'))
+            .map(|reference| reference.evidence_span)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            receiver_sites.len(),
+            2,
+            "inner and outer calls are distinct sites"
+        );
+        for span in receiver_sites {
+            assert_eq!(
+                &source[span.start_byte as usize..span.end_byte as usize],
+                "repeat"
+            );
+        }
+    }
+
+    #[test]
     fn trait_bound_method_call_binds_the_trait_callee() {
         let source = concat!(
             "pub trait Processor {\n",

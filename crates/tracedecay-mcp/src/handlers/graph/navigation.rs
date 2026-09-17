@@ -8,6 +8,7 @@ use tracedecay_contracts::retrieval::{
     CalleeV1, CalleesSurfaceRequestV1, ImpactNodeV1, ImpactResultV1, ImpactSurfaceRequestV1,
     NodeDetailsV1, NodeExpansionCostV1, NodeSurfaceRequestV1,
 };
+use tracedecay_contracts::{CoverageCompleteness, EvidenceDomain, Omission, OmissionReason};
 use tracedecay_domain::RelationEdgeKindV1;
 use tracedecay_domain::code_intelligence::{EdgeKind, NodeKind};
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -42,7 +43,7 @@ pub async fn handle_callers(graph: &VerifiedGraphQuery, args: Value) -> Result<T
         "mcp.graph.callers.graph",
         traverse_verified_neighbors(
             graph,
-            occurrence,
+            occurrence.clone(),
             &[RelationEdgeKindV1::Calls],
             true,
             max_depth as usize,
@@ -58,7 +59,31 @@ pub async fn handle_callers(graph: &VerifiedGraphQuery, args: Value) -> Result<T
         .map(verified_neighbor_value)
         .collect::<Result<Vec<_>>>()?;
 
-    let value = hotpath::measure_block!("mcp.graph.callers.serialize", json!(items));
+    let mut traversed = vec![occurrence];
+    traversed.extend(
+        results
+            .iter()
+            .filter(|result| result.depth < max_depth as usize)
+            .map(|result| result.symbol.occurrence.clone()),
+    );
+    let unsupported = graph.has_unresolved_callers(&traversed)?;
+    let omissions = if unsupported {
+        vec![Omission {
+            domain: EvidenceDomain::Graph,
+            count: 1,
+            reason: OmissionReason::Unsupported,
+        }]
+    } else {
+        Vec::new()
+    };
+    let value = hotpath::measure_block!(
+        "mcp.graph.callers.serialize",
+        json!({
+            "callers": items,
+            "coverage": { "completeness": if unsupported { CoverageCompleteness::Partial } else { CoverageCompleteness::Complete } },
+            "omissions": omissions,
+        })
+    );
     Ok(generic_tool_result(
         Some(graph.project_root()?),
         &args,
@@ -367,12 +392,46 @@ pub async fn handle_callers_for(graph: &VerifiedGraphQuery, args: Value) -> Resu
         .map(|id| (id, by_target.remove(id).unwrap_or_default()))
         .collect();
 
+    let mut unsupported = false;
+    if kinds.is_empty() || kinds.contains(&RelationEdgeKindV1::Calls) {
+        // Bulk lookup preserves an empty row for unmatched IDs, but absence of
+        // admitted target metadata cannot establish complete caller coverage.
+        for occurrence in &occurrences {
+            if graph
+                .symbol_summary(occurrence)?
+                .and_then(|symbol| symbol.metadata)
+                .is_none()
+            {
+                unsupported = true;
+                break;
+            }
+        }
+        unsupported = unsupported || graph.has_unresolved_callers(&occurrences)?;
+    }
+    let mut omissions = Vec::new();
+    if unsupported {
+        omissions.push(Omission {
+            domain: EvidenceDomain::Graph,
+            count: 1,
+            reason: OmissionReason::Unsupported,
+        });
+    }
+    if truncated {
+        omissions.push(Omission {
+            domain: EvidenceDomain::Graph,
+            count: 1,
+            reason: OmissionReason::Budget,
+        });
+    }
+
     let output = hotpath::measure_block!(
         "mcp.graph.callers_for.serialize",
         json!({
             "callers": result_map,
             "truncated": truncated,
             "max_per_item": max_per_item,
+            "coverage": { "completeness": if unsupported || truncated { CoverageCompleteness::Partial } else { CoverageCompleteness::Complete } },
+            "omissions": omissions,
         })
     );
     Ok(generic_tool_result(

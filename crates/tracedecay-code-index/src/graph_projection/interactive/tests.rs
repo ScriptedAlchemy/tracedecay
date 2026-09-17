@@ -16,6 +16,7 @@ use tracedecay_graph_db::{
     NeverCancelled, VerifiedGraphSnapshot,
 };
 
+use crate::chunks::CodeIndexUnresolvedReferenceV1;
 use crate::graph_projection::builder::ProductionCodeGraphInputs;
 use crate::graph_projection::schema::SYMBOL_LABEL;
 use crate::graph_projection::{
@@ -222,6 +223,12 @@ fn fixture_symbols() -> GenerationSymbolIndexV1 {
 }
 
 fn production_manifest() -> GraphGenerationManifest {
+    production_manifest_with_unresolved_calls(&[])
+}
+
+fn production_manifest_with_unresolved_calls(
+    unresolved_calls: &[CodeIndexUnresolvedReferenceV1],
+) -> GraphGenerationManifest {
     let projection =
         code_graph_projection_identity(GraphNamespace::new("code-graph").expect("namespace"))
             .expect("projection identity");
@@ -236,6 +243,7 @@ fn production_manifest() -> GraphGenerationManifest {
             files: &files,
             symbols: &symbols,
             imports: &[],
+            unresolved_calls,
         }),
         &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
             .expect("projector revision"),
@@ -274,6 +282,7 @@ fn large_production_manifest(symbol_count: usize) -> GraphGenerationManifest {
             files: &files,
             symbols: &symbols,
             imports: &[],
+            unresolved_calls: &[],
         }),
         &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
             .expect("projector revision"),
