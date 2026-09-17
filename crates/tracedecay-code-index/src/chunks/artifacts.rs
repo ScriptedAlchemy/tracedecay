@@ -31,6 +31,8 @@ pub struct CodeIndexImportEvidenceV1 {
     #[serde(default)]
     pub is_public: bool,
     #[serde(default)]
+    pub is_restricted_public: bool,
+    #[serde(default)]
     pub is_glob: bool,
     pub namespace: ImportNamespaceV1,
     pub module_kind: ImportModuleKindV1,
@@ -51,6 +53,7 @@ impl CodeIndexImportEvidenceV1 {
             imported_name: row.imported_name.clone(),
             local_name: row.local_name.clone(),
             is_public: row.is_public,
+            is_restricted_public: row.is_restricted_public,
             is_glob: row.is_glob,
             namespace: row.namespace,
             module_kind: row.module_kind,
@@ -67,6 +70,7 @@ impl CodeIndexImportEvidenceV1 {
             imported_name: self.imported_name.clone(),
             local_name: self.local_name.clone(),
             is_public: self.is_public,
+            is_restricted_public: self.is_restricted_public,
             is_glob: self.is_glob,
             namespace: self.namespace,
             module_kind: self.module_kind,

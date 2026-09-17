@@ -84,6 +84,7 @@ impl CodeIndexDemandAdmissionV1 {
     /// Reduce the verdicts of one batch to the strongest refusal it carries: a
     /// terminal park outranks a policy refusal, which outranks unavailability,
     /// which outranks acceptance.
+    #[must_use = "the reduced admission verdict is the only answer the batch produced"]
     pub fn strongest_refusal(self, other: Self) -> Self {
         match (self, other) {
             (Self::Terminal(parked), _) | (_, Self::Terminal(parked)) => Self::Terminal(parked),

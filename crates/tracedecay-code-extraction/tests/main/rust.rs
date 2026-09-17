@@ -345,6 +345,42 @@ use std::io::{self, Read};
 }
 
 #[test]
+fn test_rust_restricted_reexports_are_not_public_import_evidence() {
+    let source = r#"
+mod read;
+pub use read::Open;
+pub(crate) use read::CrateOnly;
+pub(super) use read::ParentOnly;
+pub(self) use read::SelfOnly;
+pub(in crate::read) use read::InOnly;
+use read::Private;
+"#;
+    let artifact = RustExtractor.extract_artifact("reexports.rs", source);
+    assert!(
+        artifact.result.errors.is_empty(),
+        "errors: {:?}",
+        artifact.result.errors
+    );
+    let visibility = |name: &str| {
+        let import = artifact
+            .imports
+            .iter()
+            .find(|import| import.local_name.as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("{name} missing from {:?}", artifact.imports));
+        (import.is_public, import.is_restricted_public)
+    };
+    assert_eq!(visibility("Open"), (true, false));
+    for restricted in ["CrateOnly", "ParentOnly", "SelfOnly", "InOnly"] {
+        assert_eq!(
+            visibility(restricted),
+            (false, true),
+            "{restricted} is restricted public evidence, not an unrestricted re-export"
+        );
+    }
+    assert_eq!(visibility("Private"), (false, false));
+}
+
+#[test]
 fn test_rust_const_and_static() {
     let source = r#"
 pub const MAX_SIZE: usize = 1024;
@@ -681,6 +717,40 @@ fn assemble() {
     assert!(
         names.contains(&"p.run".to_owned()) && names.contains(&"Factory::new".to_owned()),
         "receiver-dotted and associated-function forms remain: {names:?}"
+    );
+}
+
+#[test]
+fn test_rust_method_initializers_do_not_fabricate_receiver_types() {
+    let source = r#"
+struct Literal;
+struct Questioned;
+impl Literal {
+    fn len(&self) {}
+}
+impl Questioned {
+    fn len(&self) {}
+}
+fn assemble() -> Questioned {
+    let unwrapped = Literal {}.unwrap();
+    unwrapped.len();
+    let expected = Literal {}.expect("msg");
+    expected.len();
+    let questioned = Questioned {}?;
+    questioned.len();
+    Questioned {}
+}
+"#;
+    let result = RustExtractor.extract("initializers.rs", source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let names = call_names(&result, "assemble");
+    assert!(
+        !names.iter().any(|name| name == "Literal::len"),
+        "unwrap/expect must not fabricate Literal::len: {names:?}"
+    );
+    assert!(
+        names.contains(&"Questioned::len".to_owned()),
+        "a struct literal behind `?` still states its type: {names:?}"
     );
 }
 
