@@ -181,7 +181,6 @@ describe('the URL-stable Code view shell', () => {
       'Trace',
       'Shared Code',
       'Compare',
-      'Atlas',
     ]);
     expect(
       screen
@@ -193,9 +192,8 @@ describe('the URL-stable Code view shell', () => {
         .getByRole('region', { name: 'Cortex' })
         .getAttribute('aria-labelledby'),
     ).toBe('code-view-cortex');
-    // Atlas has no projection; Trace and Shared Code read one selected symbol
-    // and none is selected. Compare carries its own revision selection.
-    for (const name of ['Atlas', 'Trace', 'Shared Code']) {
+    // Trace and Shared Code read one selected symbol and none is selected.
+    for (const name of ['Trace', 'Shared Code']) {
       expect(screen.getByRole<HTMLButtonElement>('button', { name }).disabled).toBe(true);
     }
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Compare' }).disabled).toBe(

@@ -125,7 +125,7 @@ export const STATE_LAMP: Record<DomainStateKind, string> = {
  * beside a swatch without the chip's full chrome. One table, so a register
  * and the chips beneath it cannot disagree about a hue. */
 export function stateLampClass(kind: DomainStateKind): string {
-  return LAMP[kind] ?? 'bg-state-unsupported-schema';
+  return STATE_LAMP[kind] ?? 'bg-state-unsupported-schema';
 }
 
 export function StateChip({

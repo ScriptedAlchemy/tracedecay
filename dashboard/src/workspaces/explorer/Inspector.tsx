@@ -251,7 +251,7 @@ function CodePivot({ hit }: { hit: Hit }) {
   const base = scopedWorkspacePath(scope, 'code');
   const [pathname, search = ''] = base.split('?');
   const params = writeCodeLocation(new URLSearchParams(search), {
-    view: 'topology',
+    view: 'cortex',
     focusId: id,
   });
   return (

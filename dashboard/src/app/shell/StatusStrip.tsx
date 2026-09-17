@@ -137,7 +137,7 @@ function WorkspaceRegisters() {
   return (
     <>
       {registers.map((register, index) => (
-        <Cell key={register.id} code={String(index + 5).padStart(2, '0')} label={register.label}>
+        <Cell key={register.id} icon={Link2} label={`${index + 5} · ${register.label}`}>
           <span
             aria-hidden
             className={cn(

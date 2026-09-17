@@ -250,12 +250,10 @@ export function schedulerReading(status: AutomationSchedulerStatusV1): Scheduler
         word: 'delegated host',
         sentence: 'this daemon delegates automation to another host and runs none itself',
       };
-    default:
-      return {
-        tone: UNKNOWN,
-        word: status.status,
-        sentence: 'the scheduler reported a status word this build does not recognise',
-      };
+    default: {
+      const unhandled: never = status.status;
+      return unhandled;
+    }
   }
 }
 

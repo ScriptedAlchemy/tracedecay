@@ -77,18 +77,18 @@ describe('Code view locations', () => {
 
 describe('Code view switcher', () => {
   it('hides a pending view until a deep link asks for it', () => {
-    expect(codeViewsOffered('topology')).toEqual([
-      'topology',
+    expect(codeViewsOffered('cortex')).toEqual([
+      'cortex',
       'trace',
       'shared-code',
       'compare',
     ]);
     expect(codeViewsOffered('atlas')).toEqual([
-      'atlas',
-      'topology',
+      'cortex',
       'trace',
       'shared-code',
       'compare',
+      'atlas',
     ]);
   });
 });

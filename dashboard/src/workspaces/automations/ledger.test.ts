@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
+import type {
+  AutomationSchedulerStatusV1,
+  AutomationTaskStatusV1,
+} from '../../contracts/generated.ts';
 import type { RunRow } from '../../data/query/automation.ts';
 import {
   dueSummary,
@@ -119,7 +123,9 @@ describe('typed tones', () => {
 });
 
 describe('schedulerReading', () => {
-  const status = (word: string) => ({
+  const status = (
+    word: AutomationSchedulerStatusV1['status'],
+  ): AutomationSchedulerStatusV1 => ({
     status: word,
     paused: word === 'paused',
     enabled: word !== 'automation_disabled',
@@ -137,14 +143,11 @@ describe('schedulerReading', () => {
     expect(reading.sentence).toMatch(/no liveness heartbeat/);
   });
 
-  it('keeps paused, disabled and delegated distinct and names an unknown word', () => {
+  it('keeps paused, disabled and delegated states distinct', () => {
     expect(schedulerReading(status('paused')).tone.kind).toBe('partial');
     expect(schedulerReading(status('automation_disabled')).tone.kind).toBe('cancelled');
     expect(schedulerReading(status('backend_disabled')).word).toBe('backend disabled');
     expect(schedulerReading(status('delegated_host')).word).toBe('delegated host');
-    const unknown = schedulerReading(status('hibernating'));
-    expect(unknown.word).toBe('hibernating');
-    expect(unknown.tone.kind).toBe('unknown');
   });
 });
 
@@ -166,7 +169,7 @@ describe('scheduler task readings', () => {
   });
 
   it('reports the newest readable scheduler completion across tasks', () => {
-    const tasks = [
+    const tasks: AutomationTaskStatusV1[] = [
       { task: 'memory_curator', due: false, skip_reason: null, last_scheduler_run: null },
       {
         task: 'session_reflector',
@@ -177,7 +180,7 @@ describe('scheduler task readings', () => {
       {
         task: 'skill_writer',
         due: false,
-        skip_reason: 'cooldown',
+        skip_reason: 'scheduler_cooldown_active',
         last_scheduler_run: { run_id: 'new', status: 'failed', started_at: '30', completed_at: '40' },
       },
     ];

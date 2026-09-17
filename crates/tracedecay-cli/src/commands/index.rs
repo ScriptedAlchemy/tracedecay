@@ -497,9 +497,10 @@ mod init_bootstrap_tests {
     #[test]
     fn reset_remedy_commands_survive_paths_with_spaces_and_apostrophes() {
         let error = annotate_reset_required_init_error(
-            tracedecay_domain::errors::TraceDecayError::ResetRequired {
-                project_id: "project-fixture".to_owned(),
-            },
+            tracedecay_domain::errors::TraceDecayError::reset_required(
+                "project-fixture",
+                "incompatible persisted shape",
+            ),
             Path::new("/repo/it's an example"),
         );
 

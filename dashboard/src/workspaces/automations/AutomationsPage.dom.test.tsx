@@ -31,7 +31,14 @@ describe("AutomationsPage scheduler bay", () => {
   it("says when no scheduler-triggered run exists rather than implying liveness", async () => {
     stubAutomation({
       status: scheduler({
-        tasks: [{ task: "memory_curator", due: false, skip_reason: "cooldown", last_scheduler_run: null }],
+        tasks: [
+          {
+            task: "memory_curator",
+            due: false,
+            skip_reason: "scheduler_cooldown_active",
+            last_scheduler_run: null,
+          },
+        ],
       }),
     });
     renderAutomations();
@@ -402,7 +409,10 @@ function scheduler(overrides: { paused?: boolean; status?: string; tasks?: unkno
         task: "memory_curator",
         due: false,
         skip_reason: "scheduler_cooldown_active",
-        last_scheduler_run: run("run-mc-1", { task: "memory_curator", status: "succeeded" }),
+        last_scheduler_run: run("run-mc-1", {
+          task: "memory_curator",
+          status: "succeeded",
+        }),
       },
       { task: "session_reflector", due: true, skip_reason: null, last_scheduler_run: null },
       { task: "skill_writer", due: false, skip_reason: "no_new_session_activity", last_scheduler_run: null },
