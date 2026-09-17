@@ -190,6 +190,24 @@ export function WorkCommands({
         <dd>{projection.version}</dd>
       </dl>
 
+      {/* The authority's own reading of what is legal on this card, printed
+        * beside the controls rather than used to hide them: the daemon still
+        * adjudicates every prepared command, and a typed refusal is the
+        * answer a reader is owed when the two disagree. */}
+      <div className="flex min-w-0 flex-col gap-0.5 border-b border-edge px-2 py-1.5" data-work-legal-actions={projection.legal_actions.length}>
+        <p className="text-3xs text-text-muted">
+          Prepared by the daemon against graph v{projection.version}. A refusal, conflict, or
+          stale result is shown as returned; nothing here is optimistic.
+        </p>
+        <p className="td-value text-3xs text-text-muted">
+          {projection.lane.kind === 'uncarded'
+            ? 'kanban card absent · no legal-action list for this task'
+            : projection.legal_actions.length === 0
+              ? 'kanban card lists no legal action'
+              : `kanban card lists legal: ${projection.legal_actions.join(', ')}`}
+        </p>
+      </div>
+
       <CommandButton
         label="Accept task"
         disabled={

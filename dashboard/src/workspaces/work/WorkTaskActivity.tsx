@@ -1,4 +1,6 @@
 import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
+import { Panel } from '../../ui/instrument.tsx';
+import { formatMicrosUtc } from '../../ui/format.ts';
 import { useEventStreamState, useLiveActivity } from '../../data/sse/useEvents.tsx';
 import type { LiveActivityPulse, SseConnectionState } from '../../data/sse/connect.ts';
 import { useScope, type DashboardScope } from '../../data/scope/store.ts';
@@ -163,5 +165,140 @@ export function WorkTaskActivity({ kind }: { kind: DomainStateKind }) {
         {taskActivityLink(link)}
       </span>
     </>
+  );
+}
+
+/** One task pulse the ledger can claim for the reported scope. */
+export interface TaskActivityRow {
+  readonly eventId: string;
+  /** Server observation time in microseconds, as the envelope carried it. */
+  readonly observedAtMicros: number | null;
+  readonly projectId: string | null;
+  /** The daemon's bounded detail word, or `null` when the frame named none. */
+  readonly detail: string | null;
+  /** Under a selected project, a frame that named no project is listed but
+   * marked: it is not this project's to claim, and it is not dropped. */
+  readonly attribution: 'scoped' | 'unattributed';
+}
+
+/**
+ * The task pulses the buffer holds for one scope, newest first.
+ *
+ * The same counting rule as `taskActivityWindow`, kept as rows so the ledger
+ * and the chip cannot disagree about which frames this scope may show. The
+ * observation time is parsed here because the envelope carries it as a
+ * string; an unparsable stamp is `null`, never a guessed instant.
+ */
+export function taskActivityRows(
+  pulses: readonly LiveActivityPulse[],
+  scope: DashboardScope,
+): readonly TaskActivityRow[] {
+  const rows: TaskActivityRow[] = [];
+  for (const pulse of pulses) {
+    if (pulse.family !== TASK_FAMILY) continue;
+    let attribution: TaskActivityRow['attribution'];
+    if (scope.kind !== 'project') attribution = 'scoped';
+    else if (pulse.projectId === scope.projectId) attribution = 'scoped';
+    else if (pulse.projectId === null) attribution = 'unattributed';
+    else continue;
+    const micros = Number(pulse.observationTime);
+    rows.push({
+      eventId: pulse.eventId,
+      observedAtMicros: Number.isSafeInteger(micros) ? micros : null,
+      projectId: pulse.projectId,
+      detail: pulse.detail ?? null,
+      attribution,
+    });
+  }
+  return rows.reverse();
+}
+
+/**
+ * The live task activity ledger.
+ *
+ * Every row is one admitted `task_activity` frame the connection still holds,
+ * printed with exactly what the frame carried: its observation instant, the
+ * project it named, and the daemon's bounded detail word when the mutation
+ * emitted one. The frame does not carry a task identity or title — the
+ * daemon coalesces task mutations per project — so those columns are not
+ * drawn, and the caption says why. Mounted reads refetch the canonical graph
+ * on every frame; this ledger is a window on the stream, not the graph.
+ */
+export function WorkActivityLedger({ limit = 12 }: { limit?: number }) {
+  const { state: link } = useEventStreamState();
+  const { pulses } = useLiveActivity();
+  const scope = useScope((s) => s.scope);
+  const allRows = taskActivityRows(pulses, scope);
+  const rows = allRows.slice(0, limit);
+  const window = taskActivityWindow(pulses, scope);
+
+  return (
+    <Panel
+      legend="Live task activity"
+      actions={<WorkTaskActivity kind={link === 'live' ? 'ready' : link === 'connecting' ? 'loading' : 'offline'} />}
+      bodyClassName="p-0"
+      elevation="well"
+    >
+      <div role="region" aria-label="Live task activity ledger" tabIndex={0} className="min-w-0 overflow-x-auto" data-work-activity-ledger={rows.length}>
+        <table className="w-full min-w-0 border-collapse text-2xs">
+          <caption className="sr-only">
+            Admitted task-activity frames still held by the live connection, newest first, with
+            the observation instant, project, and detail word each frame carried. The stream
+            coalesces task mutations per project and carries no task identity or title, so
+            neither is a column; canonical Work reads refetch on every frame.
+          </caption>
+          <thead>
+            <tr className="border-b border-edge text-text-muted">
+              <th scope="col" className="px-2 py-1 text-left font-medium">Observed (UTC)</th>
+              <th scope="col" className="px-2 py-1 text-left font-medium">Project</th>
+              <th scope="col" className="px-2 py-1 text-left font-medium">Event</th>
+              <th scope="col" className="px-2 py-1 text-left font-medium max-md:hidden">Frame</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 ? (
+              <tr>
+                <td colSpan={4} className="px-2 py-2 text-text-muted" data-work-activity-empty={link}>
+                  {link === 'live'
+                    ? 'No task frame in the live window. The buffer holds 64 frames across every family, so this is what is retained, not a count of committed mutations.'
+                    : link === 'connecting'
+                      ? 'The stream is connecting; no frame has arrived yet.'
+                      : 'The stream is unreachable; nothing could arrive. Canonical reads on this page are captured, not live.'}
+                </td>
+              </tr>
+            ) : (
+              rows.map((row) => (
+                <tr key={row.eventId} className="border-b border-edge-subtle last:border-b-0" data-work-activity-row={row.attribution}>
+                  <td className="td-value whitespace-nowrap px-2 py-1 text-text-secondary">
+                    {row.observedAtMicros === null ? 'unparsed stamp' : formatMicrosUtc(row.observedAtMicros)}
+                  </td>
+                  <td className="td-value px-2 py-1 text-text-secondary">
+                    {row.projectId ?? 'unattributed'}
+                    {row.attribution === 'unattributed' ? (
+                      <span className="td-legend ml-2 text-state-partial">not this scope's</span>
+                    ) : null}
+                  </td>
+                  <td className="px-2 py-1 text-text-secondary">
+                    {row.detail === null ? (
+                      <span className="text-text-muted">task mutation committed · kind not carried by the frame</span>
+                    ) : (
+                      <span className="td-value">{row.detail}</span>
+                    )}
+                  </td>
+                  <td className="td-value px-2 py-1 text-3xs text-text-muted max-md:hidden">{row.eventId}</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+      {window.unattributed > 0 || rows.length < allRows.length ? (
+        <p className="border-t border-edge-subtle px-2 py-1 text-3xs text-text-muted">
+          {allRows.length} task frames in the live window
+          {rows.length < allRows.length ? ` · newest ${rows.length} shown` : ''}
+          {window.unattributed > 0 ? ` · ${window.unattributed} unattributed` : ''}
+        </p>
+      ) : null}
+    </Panel>
   );
 }
