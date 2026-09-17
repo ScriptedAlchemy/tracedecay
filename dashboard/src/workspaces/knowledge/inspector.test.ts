@@ -131,6 +131,18 @@ describe('detailLadder', () => {
     expect(rung(missing, 'canonical_detail').detail).toMatch(/holds no fact under this identity/);
   });
 
+  it('reads a null-payload complete_zero_findings transport as a missing identity, not a green complete', () => {
+    const missing: LadderInput = {
+      ...base,
+      mode: 'selected',
+      detail: { pending: false, result: { outcome: 'transport', state: 'complete_zero_findings' } },
+    };
+    expect(rung(missing, 'canonical_detail')).toMatchObject({
+      state: 'unavailable',
+      detail: 'the store holds no fact under this identity in the current scope',
+    });
+  });
+
   it('carries a detail transport failure in the daemon state vocabulary', () => {
     const offline: LadderInput = {
       ...base,

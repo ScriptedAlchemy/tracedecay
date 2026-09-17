@@ -83,6 +83,11 @@ export interface LadderInput {
   readonly graphRead: MemoryReadStatusV1 | undefined;
 }
 
+/** What the ladder and the content block both say about an identity the
+ * store does not hold in the current scope. */
+export const MISSING_IDENTITY =
+  'the store holds no fact under this identity in the current scope';
+
 /** The canonical detail rung. Distinguishes a detail still loading, a detail
  * served, a fact the store does not hold, a daemon-side error carried inside
  * the envelope, and a transport failure. */
@@ -104,6 +109,18 @@ function canonicalDetailRung(input: LadderInput): LadderRung {
     return { id: 'canonical_detail', label, state: 'unknown', detail: 'detail read has not answered' };
   }
   if (result.outcome === 'transport') {
+    // The route answers `complete_zero_findings` with a null payload for an
+    // identity the store does not hold, and the envelope ladder surfaces a
+    // null payload as a transport outcome carrying that state. A green
+    // "complete" chip for a fact that is not there would be the wrong word.
+    if (result.state === 'complete_zero_findings') {
+      return {
+        id: 'canonical_detail',
+        label,
+        state: 'unavailable',
+        detail: MISSING_IDENTITY,
+      };
+    }
     return {
       id: 'canonical_detail',
       label,
@@ -113,9 +130,6 @@ function canonicalDetailRung(input: LadderInput): LadderRung {
   }
   const payload = result.envelope.payload;
   if (payload == null || payload.fact == null) {
-    // The route answers `complete_zero_findings` with a null payload for an
-    // identity the store does not hold; any other empty envelope carries the
-    // daemon's own state and is reported in its words.
     return {
       id: 'canonical_detail',
       label,
@@ -123,10 +137,7 @@ function canonicalDetailRung(input: LadderInput): LadderRung {
         result.envelope.domain_state === 'complete_zero_findings'
           ? 'unavailable'
           : result.envelope.domain_state,
-      detail:
-        payload?.error && payload.error !== ''
-          ? payload.error
-          : 'the store holds no fact under this identity in the current scope',
+      detail: payload?.error && payload.error !== '' ? payload.error : MISSING_IDENTITY,
     };
   }
   if (payload.error !== '') {
