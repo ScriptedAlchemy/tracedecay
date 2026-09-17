@@ -717,7 +717,7 @@ where
                     {
                         hotpath::measure_block!(
                             "code_index.seal.reexport_walk",
-                            rust_bare_import_matches(files, &mut rust, binding, target, "")
+                            rust_bare_import_matches(files, &mut rust, index, binding, target, "")
                         )
                     }
                     ImportModuleKindV1::BareModule => false,
@@ -753,7 +753,7 @@ fn unique_import<'a>(
     matches.next().is_none().then_some(binding)
 }
 
-type RustReexportCacheV1 = HashMap<(usize, usize, String, usize, String), bool>;
+type RustReexportCacheV1 = HashMap<(usize, usize, bool, String, usize, String), bool>;
 
 struct RustResolutionContextV1<'a> {
     files: &'a RustFileIndexV1,
@@ -901,7 +901,7 @@ where
                 &target.symbol.qualified_name,
             ),
             ImportModuleKindV1::BareModule => {
-                rust_bare_import_matches(files, rust, binding, target, "")
+                rust_bare_import_matches(files, rust, source_index, binding, target, "")
             }
         })
 }
@@ -909,6 +909,7 @@ where
 fn rust_bare_import_matches<T>(
     files: &[T],
     rust: &mut RustResolutionContextV1<'_>,
+    access_index: usize,
     binding: &CodeIndexImportEvidenceV1,
     target: RustSymbolTargetV1<'_>,
     member: &str,
@@ -945,6 +946,8 @@ where
         rust,
         root_index,
         scope_index,
+        access_index,
+        true,
         imported_name,
         target,
         member,
@@ -992,8 +995,8 @@ where
     let Some((origin, path)) = rust_expand_path_head(rust, file, &segments) else {
         return false;
     };
-    let (origin_index, root_path) = match origin {
-        RustPathOriginV1::InCrate => (index, source_path),
+    let (origin_index, root_path, require_unrestricted) = match origin {
+        RustPathOriginV1::InCrate => (index, source_path, false),
         RustPathOriginV1::Crate { root_index } => {
             if target.symbol.visibility != "public" {
                 return false;
@@ -1001,6 +1004,7 @@ where
             (
                 root_index,
                 files[root_index].as_ref().authority.logical_path.as_str(),
+                true,
             )
         }
     };
@@ -1027,6 +1031,8 @@ where
             rust,
             origin_index,
             scope_index,
+            index,
+            require_unrestricted,
             &path[k],
             target,
             &member,
@@ -1175,6 +1181,8 @@ fn rust_export_resolves_to_target<T>(
     rust: &mut RustResolutionContextV1<'_>,
     origin_index: usize,
     scope_index: usize,
+    access_index: usize,
+    require_unrestricted: bool,
     exported_name: &str,
     target: RustSymbolTargetV1<'_>,
     member: &str,
@@ -1186,6 +1194,7 @@ where
     let cache_key = (
         origin_index,
         scope_index,
+        require_unrestricted,
         format!("{exported_name}{member}"),
         target.index,
         target.symbol.qualified_name.clone(),
@@ -1242,17 +1251,20 @@ where
             .imports
             .iter()
             .filter(|binding| {
-                binding.is_public && binding.local_name.as_deref() == Some(exported_name)
+                (binding.is_public || (!require_unrestricted && binding.is_restricted_public))
+                    && binding.local_name.as_deref() == Some(exported_name)
             });
         match (bindings.next(), bindings.next()) {
             (Some(binding), None) => match binding.module_kind {
                 ImportModuleKindV1::BareModule => {
-                    rust_bare_import_matches(files, rust, binding, target, member)
+                    rust_bare_import_matches(files, rust, access_index, binding, target, member)
                 }
                 ImportModuleKindV1::ProjectRelative => rust_project_import_resolves_to_target(
                     files,
                     rust,
                     origin_index,
+                    access_index,
+                    require_unrestricted,
                     scope_path,
                     binding,
                     target,
@@ -1276,6 +1288,8 @@ fn rust_project_import_resolves_to_target<T>(
     files: &[T],
     rust: &mut RustResolutionContextV1<'_>,
     origin_index: usize,
+    access_index: usize,
+    require_unrestricted: bool,
     scope_path: &str,
     binding: &CodeIndexImportEvidenceV1,
     target: RustSymbolTargetV1<'_>,
@@ -1311,6 +1325,8 @@ where
         rust,
         origin_index,
         next_scope,
+        access_index,
+        require_unrestricted,
         imported_name,
         target,
         member,
@@ -1502,6 +1518,9 @@ where
         return false;
     };
     let impl_file = files[target.index].as_ref();
+    if !rust_method_belongs_to_inherent_impl(impl_file, target.symbol) {
+        return false;
+    }
     let Some(impl_owner) = rust_inherent_method_owner(
         exported_name,
         member,
@@ -1526,13 +1545,7 @@ where
         symbol: scope_type,
     };
     if impl_owner.contains("::") {
-        return rust_qualified_path_matches(
-            files,
-            rust,
-            target.index,
-            impl_owner,
-            type_target,
-        );
+        return rust_qualified_path_matches(files, rust, target.index, impl_owner, type_target);
     }
     if target.index == scope_index {
         return true;
@@ -1544,6 +1557,8 @@ where
                 files,
                 rust,
                 origin_index,
+                target.index,
+                false,
                 impl_path,
                 binding,
                 type_target,
@@ -1569,6 +1584,8 @@ where
                     rust,
                     origin_index,
                     glob_scope,
+                    target.index,
+                    false,
                     exported_name,
                     type_target,
                     "",
@@ -1576,6 +1593,31 @@ where
                 )
             })
     })
+}
+
+fn rust_method_belongs_to_inherent_impl(
+    file: &FileGenerationArtifactsV1,
+    method: &LineageSymbolRecordV1,
+) -> bool {
+    file.artifacts
+        .edges
+        .iter()
+        .filter(|edge| {
+            edge.kind == RelationEdgeKindV1::Contains && edge.to_occurrence == method.occurrence
+        })
+        .filter_map(|edge| {
+            file.artifacts
+                .symbols
+                .iter()
+                .find(|symbol| symbol.occurrence == edge.from_occurrence)
+        })
+        .any(|owner| {
+            owner.kind == "impl"
+                && owner
+                    .signature
+                    .as_deref()
+                    .is_some_and(|signature| !signature.contains(" for "))
+        })
 }
 
 /// File-relative inherent method identity: a top-level `impl Type` block's

@@ -83,6 +83,7 @@ fn expected_import() -> CodeIndexImportEvidenceV1 {
         imported_name: Some("Foo".to_owned()),
         local_name: Some("LocalFoo".to_owned()),
         is_public: false,
+        is_restricted_public: false,
         is_glob: false,
         namespace: ImportNamespaceV1::Type,
         module_kind: ImportModuleKindV1::BareModule,

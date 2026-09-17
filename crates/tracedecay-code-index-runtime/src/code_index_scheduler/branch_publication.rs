@@ -477,6 +477,16 @@ impl BranchPublicationContextV1 {
                     ),
                 ));
             }
+            CodeIndexDemandAdmissionV1::NotApplicable => {
+                return Err(TraceDecayError::project_route(
+                    CODE_INDEX_IDENTITY_MISMATCH,
+                    false,
+                    format!(
+                        "code indexing does not apply to branch worktree '{}': the route has no repository identity",
+                        canonical_worktree_root.display()
+                    ),
+                ));
+            }
         }
         let hard_deadline = Instant::now() + BRANCH_GENERATION_HARD_TIMEOUT;
         let mut idle_deadline = Instant::now() + BRANCH_GENERATION_IDLE_TIMEOUT;

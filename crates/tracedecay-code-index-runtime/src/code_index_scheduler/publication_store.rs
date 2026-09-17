@@ -868,7 +868,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .active_path
             .parent()
             .ok_or_else(|| Self::unavailable("active code-generation pointer has no store root"))?;
-        acquire_code_generation_store_lock(store_root).map_err(Self::unavailable)
+        acquire_code_generation_store_read_lock(store_root).map_err(Self::unavailable)
     }
 
     fn remove_abandoned_evidence_packs(
