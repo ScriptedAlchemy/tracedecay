@@ -3011,6 +3011,198 @@ function deliveryOverviewPayload(): Record<string, unknown> {
 }
 
 /* ==========================================================================
+ * GET /api/delivery/inbox (delivery_api.rs::inbox) — the registry-admitted,
+ * indexed-head-joined pull request inbox across projects. Three registered
+ * projects in three provider states, five admitted PRs, and membership edges
+ * that include the correlating bases the daemon MAY serve (shared Work
+ * objective, session–Git relation, shared agent), so the umbrella field and
+ * the cross-project rail render in the audit. Production inboxes today serve
+ * only the branch reference; the dashboard renders that as "correlation
+ * unavailable" rather than an empty graph.
+ * ========================================================================== */
+
+const INBOX_HEADS = {
+  tracedecay: '7f3a1c9e'.padEnd(40, '4'),
+  rspack: 'b81d2e07'.padEnd(40, '9'),
+  'module-federation': 'c4e9a022'.padEnd(40, '1'),
+} as const;
+
+function inboxProject(
+  projectId: keyof typeof INBOX_HEADS,
+  branch: string,
+  providerState: string,
+): Record<string, unknown> {
+  return {
+    project_id: projectId,
+    label: projectId,
+    project_root: `/fast/projects/${projectId}`,
+    git_common_dir: `/fast/projects/${projectId}/.git`,
+    repository_id: `repository.${projectId}`,
+    worktree_id: `worktree.${projectId}`,
+    branch_ref: `refs/heads/${branch}`,
+    indexed_head_commit_id: INBOX_HEADS[projectId],
+    indexed_generation: `generation.${projectId}.2026-09-16.001`,
+    provider_state: providerState,
+  };
+}
+
+function inboxPullRequest(
+  projectId: keyof typeof INBOX_HEADS,
+  branch: string,
+  number: string,
+  title: string,
+  options: {
+    state?: string;
+    draft?: boolean;
+    prState?: string;
+    attention?: ReadonlyArray<Record<string, unknown>>;
+    sizes?: readonly [number, number, number];
+    fetchedAgoHours?: number;
+  } = {},
+): Record<string, unknown> {
+  const head = INBOX_HEADS[projectId];
+  const [additions, deletions, files] = options.sizes ?? [512, 87, 12];
+  const fetched = nowMicros - (options.fetchedAgoHours ?? 2) * 3_600_000_000;
+  return {
+    id: `${projectId}:github:${number}`,
+    project_id: projectId,
+    repository_id: `repository.${projectId}`,
+    worktree_id: `worktree.${projectId}`,
+    branch_ref: `refs/heads/${branch}`,
+    indexed_head_commit_id: head,
+    indexed_generation: `generation.${projectId}.2026-09-16.001`,
+    state: options.state ?? 'current',
+    pull_request: {
+      id: `github:${number}`,
+      label: `Pull request #${number} — ${title}`,
+      provider: 'github',
+      pull_request_id: number,
+      identity: {
+        title,
+        state: options.prState ?? 'open',
+        draft: options.draft ?? false,
+        additions,
+        deletions,
+        changed_files: files,
+      },
+      operations: ['pull_request', 'reviews', 'review_comments', 'review_threads'].map(
+        (operation) => ({
+          operation,
+          last_complete: {
+            coverage: 'complete',
+            fetched_at_micros: fetched,
+            merge_base_commit_id: '3e6167b2'.padEnd(40, '0'),
+            outcome: options.state === 'stale' ? 'stale' : 'complete',
+            provider_base_commit_id: 'dfc669d9'.padEnd(40, '0'),
+            provider_head_commit_id: head,
+          },
+          latest_attempt: null,
+        }),
+      ),
+    },
+    attention: (options.attention ?? []).map((item, index) => ({
+      id: `${projectId}:${number}:${String(item['source'])}:${index}`,
+      project_id: projectId,
+      pull_request_id: number,
+      state: 'active',
+      coverage: 'complete',
+      observed_at_micros: fetched,
+      ...item,
+    })),
+    shared_code: [
+      {
+        kind: 'shared_code',
+        state: 'requires_selection',
+        href: '/code?view=shared-code',
+        source_generation: `generation.${projectId}.2026-09-16.001`,
+      },
+      {
+        kind: 'compare',
+        state: 'requires_selection',
+        href: '/code?view=compare',
+        source_generation: `generation.${projectId}.2026-09-16.001`,
+      },
+    ],
+  };
+}
+
+function inboxEdge(
+  projectId: keyof typeof INBOX_HEADS,
+  number: string,
+  basis: Record<string, unknown>,
+  index: number,
+): Record<string, unknown> {
+  return {
+    id: `${projectId}:${number}:${String(basis['kind'])}:${index}`,
+    project_id: projectId,
+    pull_request_id: number,
+    basis,
+  };
+}
+
+function deliveryInboxPayload(): Record<string, unknown> {
+  const branchRef = (projectId: keyof typeof INBOX_HEADS, branch: string) => ({
+    kind: 'branch_pull_request_reference',
+    branch_ref: `refs/heads/${branch}`,
+    head_commit_id: INBOX_HEADS[projectId],
+  });
+  return {
+    registry_state: 'ready',
+    projects: [
+      inboxProject('module-federation', 'feat/runtime-plugin-hooks', 'not_published'),
+      inboxProject('rspack', 'perf/persistent-cache-v2', 'stale'),
+      inboxProject('tracedecay', 'codex/tracedecay-total-redesign-plan', 'ready'),
+    ],
+    pull_requests: [
+      inboxPullRequest('rspack', 'perf/persistent-cache-v2', '10337', 'perf: persistent caching v2', {
+        state: 'stale',
+        sizes: [4_812, 1_206, 58],
+        fetchedAgoHours: 9,
+        attention: [
+          { source: 'stale_provider_state', evidence: [{ kind: 'provider_operation', operation: 'pull_request', fetched_at_micros: nowMicros - 9 * 3_600_000_000 }] },
+        ],
+      }),
+      inboxPullRequest('rspack', 'perf/persistent-cache-v2', '10315', 'feat: emit perf graph leak diagnostics', {
+        state: 'stale',
+        sizes: [143, 32, 6],
+        fetchedAgoHours: 9,
+      }),
+      inboxPullRequest('tracedecay', 'codex/tracedecay-total-redesign-plan', '707', 'feat: restore TraceDecay V2 review head', {
+        sizes: [78_341, 21_904, 1_840],
+        attention: [
+          { source: 'unresolved_review', evidence: [{ kind: 'review_comment', comment_id: 'r1234567890', path: 'dashboard/src/workspaces/delivery/DeliveryPage.tsx' }] },
+          { source: 'ci_failure', evidence: [{ kind: 'ci_failure', failure_anchor: 'ci:integration-tests:cargo-test' }] },
+        ],
+      }),
+      inboxPullRequest('tracedecay', 'codex/tracedecay-total-redesign-plan', '694', 'fix: tag jitter on retries', {
+        draft: true,
+        sizes: [76, 12, 3],
+      }),
+      inboxPullRequest('tracedecay', 'codex/tracedecay-total-redesign-plan', '681', 'docs: delivery lookbook authority', {
+        prState: 'merged',
+        sizes: [1_204, 0, 14],
+        fetchedAgoHours: 30,
+      }),
+    ],
+    membership_edges: [
+      inboxEdge('rspack', '10337', branchRef('rspack', 'perf/persistent-cache-v2'), 0),
+      inboxEdge('rspack', '10337', { kind: 'shared_work_objective', work_item_id: 'work.v2-code-intelligence-release' }, 1),
+      inboxEdge('rspack', '10337', { kind: 'shared_agent', agent_id: 'agent.claude-code' }, 2),
+      inboxEdge('rspack', '10315', branchRef('rspack', 'perf/persistent-cache-v2'), 0),
+      inboxEdge('rspack', '10315', { kind: 'shared_agent', agent_id: 'agent.claude-code' }, 1),
+      inboxEdge('tracedecay', '707', branchRef('tracedecay', 'codex/tracedecay-total-redesign-plan'), 0),
+      inboxEdge('tracedecay', '707', { kind: 'shared_work_objective', work_item_id: 'work.v2-code-intelligence-release' }, 1),
+      inboxEdge('tracedecay', '707', { kind: 'session_git_relation', session_id: loomSessionId(0), commit_id: INBOX_HEADS.tracedecay }, 2),
+      inboxEdge('tracedecay', '694', branchRef('tracedecay', 'codex/tracedecay-total-redesign-plan'), 0),
+      inboxEdge('tracedecay', '694', { kind: 'shared_agent', agent_id: 'agent.claude-code' }, 1),
+      inboxEdge('tracedecay', '681', branchRef('tracedecay', 'codex/tracedecay-total-redesign-plan'), 0),
+    ],
+    omitted_projects: 1,
+    excluded_pull_requests: 23,
+  };
+}
+
+/* ==========================================================================
  * GET /api/plugins/graph/strata (graph_structure_api.rs::strata) — the CORTEX
  * relief's one reading: file depth strata plus per-directory boundary totals,
  * wrapped in the measurement-grade `StructureReadV1` union. Modeled as a real
@@ -3282,6 +3474,9 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   // Delivery's pipeline overview: local git stages measured, forge-authority
   // stages explicitly not_published.
   '/api/delivery/overview': envelope(deliveryOverviewPayload()),
+  // Delivery's registry-admitted inbox: one omitted project keeps the
+  // envelope honest about partial coverage.
+  '/api/delivery/inbox': envelope(deliveryInboxPayload(), 'partial'),
   // Savings. `sessions` is the Loom weave's thread source, not a costs route.
   '/api/plugins/savings/overview': envelope(savingsPayload()),
   '/api/plugins/savings/sessions': loomSessionsPayload(),
