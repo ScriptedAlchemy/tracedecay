@@ -39,8 +39,8 @@ use super::{
     extract::{ExtractionCancellation, TreeSitterExtractor, rebind_extraction_batch},
     generations::{FileExtractionActionV1, GenerationPlanner, GenerationPlanningErrorV1},
     incremental::{
-        ChunkIncrementErrorV1, GenerationChunkManifestV1, plan_chunk_increment,
-        plan_chunk_increment_arc_shared,
+        ChunkIncrementErrorV1, GenerationChunkManifestV1, arc_share_chunk_diverged,
+        plan_chunk_increment, plan_chunk_increment_arc_shared,
     },
     intake::{
         CodeIndexIntake, ReceiptBoundCodeFileAuthorityV1, ReceiptBoundCodeFileV1,
@@ -1620,24 +1620,58 @@ impl CodeIndexPublishedGenerationV1 {
     }
 }
 
-/// Prove reused complement against the current corpus before publication.
+/// Walk the complement in chunk-id order and stop at the first row that the
+/// count envelope claimed as reused but that is not the parent row.
+fn prove_reused_complement_units(
+    changes: &tracedecay_domain::ChangedCodeChunkSetV1,
+    prior: &[Arc<tracedecay_domain::CodeSearchChunkV1>],
+    current: &[Arc<tracedecay_domain::CodeSearchChunkV1>],
+) -> Result<(), CodeIndexProductionErrorV1> {
+    let changed = changes
+        .added_or_changed
+        .iter()
+        .map(|change| &change.chunk_id)
+        .collect::<HashSet<_>>();
+    let mut previous = prior.iter().peekable();
+    for chunk in current {
+        while previous.next_if(|prior| prior.id < chunk.id).is_some() {}
+        if changed.contains(&chunk.id) {
+            continue;
+        }
+        let Some(prior_chunk) = previous.next_if(|prior| prior.id == chunk.id) else {
+            return Err(CodeIndexProductionErrorV1::Increment(
+                arc_share_chunk_diverged(&chunk.id),
+            ));
+        };
+        if Arc::ptr_eq(prior_chunk, chunk) || prior_chunk.content_digest == chunk.content_digest {
+            continue;
+        }
+        return Err(CodeIndexProductionErrorV1::Increment(
+            arc_share_chunk_diverged(&chunk.id),
+        ));
+    }
+    Ok(())
+}
+
+/// Prove each reused complement chunk against its parent row before trusting
+/// the count envelope.
 ///
 /// `changes.validate()` seals the public manifest digest but not the reused
-/// partition against the corpus. On the Arc-share path the plan sealed
-/// `reused_digest` from Arc-identical file pages; publish authenticates with
-/// O(changed) membership checks plus a non-empty shared-file set when reuse
-/// is claimed. A full O(generation) rehash is reserved for the mixed path
-/// where reuse exists without shared file pages (should not happen on the
-/// Arc-share planner).
+/// partition against the corpus. The first complement row that is neither
+/// pointer-equal nor digest-equal to the parent is the failure, in chunk-id
+/// order, and it is named before `reused_count` is accepted. The walk is
+/// pointer identity on the Arc-share path; a digest compare runs only when
+/// the allocation differs. A full pair-list rehash stays on the mixed path.
 fn validate_arc_shared_reused_complement(
     changes: &tracedecay_domain::ChangedCodeChunkSetV1,
-    _prior: &[Arc<tracedecay_domain::CodeSearchChunkV1>],
+    prior: &[Arc<tracedecay_domain::CodeSearchChunkV1>],
     current: &[Arc<tracedecay_domain::CodeSearchChunkV1>],
     shared_occurrences: &HashSet<FileOccurrenceId>,
 ) -> Result<(), CodeIndexProductionErrorV1> {
     changes
         .validate()
         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+    prove_reused_complement_units(changes, prior, current)?;
     let expected_reused = current.len().saturating_sub(changes.added_or_changed.len()) as u64;
     if changes.reused_count != expected_reused {
         return Err(CodeIndexProductionErrorV1::Contract(
