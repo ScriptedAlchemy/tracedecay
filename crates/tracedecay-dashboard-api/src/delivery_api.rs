@@ -1292,9 +1292,7 @@ fn code_navigation_refs(
     indexed_head_commit_id: &str,
     indexed_generation: String,
 ) -> Vec<DeliverySharedCodeRefV1> {
-    let branch = branch_ref
-        .strip_prefix("refs/heads/")
-        .unwrap_or(branch_ref);
+    let branch = branch_ref.strip_prefix("refs/heads/").unwrap_or(branch_ref);
     let compare_href = format!(
         "/code?view=compare&head={}&head_revision={}",
         encode_query_component(branch),
@@ -2364,7 +2362,10 @@ mod tests {
             .iter()
             .find(|item| item.kind == DeliverySharedCodeRefKindV1::Compare)
             .expect("compare ref");
-        assert_eq!(shared.state, DeliverySharedCodeRefStateV1::RequiresSelection);
+        assert_eq!(
+            shared.state,
+            DeliverySharedCodeRefStateV1::RequiresSelection
+        );
         assert_eq!(shared.href, "/code");
         assert!(!shared.href.contains("view=shared-code"));
         assert_eq!(

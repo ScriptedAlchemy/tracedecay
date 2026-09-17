@@ -13,8 +13,8 @@ use tempfile::TempDir;
 use tracedecay_code_index_retention::code_index_generations::{
     CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1, DurableGenerationIndexEntryV1,
     DurablePublicationPointerV1, MAX_CODE_GENERATION_RETENTION_BATCH_V1,
-    acquire_code_generation_store_lock,
-    durable_generation_index_digest, execute_code_generation_retention_cancellable,
+    acquire_code_generation_store_lock, durable_generation_index_digest,
+    execute_code_generation_retention_cancellable,
     prepare_next_code_generation_retention_cancellable, run_code_generation_retention,
     try_acquire_code_generation_store_read_lock,
 };
