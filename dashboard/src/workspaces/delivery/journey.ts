@@ -575,6 +575,46 @@ const BREAK_WIDTH = 28;
 /** Gaps longer than this share of the dated span are compressed to a break. */
 const BREAK_SHARE = 0.35;
 const MAX_TICKS = 8;
+/** Ruler labels closer than this overprint; the later tick yields. */
+const MIN_TICK_GAP = 44;
+/** Same-lane points within this many pixels are stacked, not overprinted. */
+const COINCIDENT_GAP = 8;
+const STACK_STEP = 9;
+
+/**
+ * Episodes recorded at (nearly) the same instant on one lane would hide each
+ * other. They fan out vertically around the lane line in a fixed order, so the
+ * count of visible marks stays honest and the layout stays deterministic.
+ */
+function stackCoincident(points: readonly JourneyPoint[]): JourneyPoint[] {
+  const byLane = new Map<JourneyLaneId, JourneyPoint[]>();
+  for (const point of points) {
+    const list = byLane.get(point.episode.lane) ?? [];
+    list.push(point);
+    byLane.set(point.episode.lane, list);
+  }
+  const stacked = new Map<string, number>();
+  for (const list of byLane.values()) {
+    const ordered = [...list].sort(
+      (left, right) => left.x - right.x || left.episode.id.localeCompare(right.episode.id),
+    );
+    let run: JourneyPoint[] = [];
+    const flush = () => {
+      run.forEach((point, index) => {
+        const magnitude = Math.ceil(index / 2) * STACK_STEP;
+        stacked.set(point.episode.id, index % 2 === 0 ? magnitude : -magnitude);
+      });
+      run = [];
+    };
+    for (const point of ordered) {
+      const previous = run[run.length - 1];
+      if (previous !== undefined && point.x - previous.x >= COINCIDENT_GAP) flush();
+      run.push(point);
+    }
+    flush();
+  }
+  return points.map((point) => ({ ...point, y: point.y + (stacked.get(point.episode.id) ?? 0) }));
+}
 
 /**
  * Maps recorded time onto X. Empty time longer than `BREAK_SHARE` of the span
@@ -657,22 +697,32 @@ export function layoutJourney(
   }));
   const rowY = new Map(rows.map((row) => [row.lane.id, row.y]));
   const undatedPerLane = new Map<JourneyLaneId, number>();
-  const points: JourneyPoint[] = model.episodes.map((episode) => {
-    const y = rowY.get(episode.lane) ?? 0;
-    if (episode.at === null) {
-      const slot = undatedPerLane.get(episode.lane) ?? 0;
-      undatedPerLane.set(episode.lane, slot + 1);
-      const step = gutterWidth / 4;
-      return { episode, x: Math.min(gutterWidth - 10, 12 + slot * step), y };
-    }
-    return { episode, x: scale.map(episode.at), y };
-  });
+  const points: JourneyPoint[] = stackCoincident(
+    model.episodes.map((episode) => {
+      const y = rowY.get(episode.lane) ?? 0;
+      if (episode.at === null) {
+        const slot = undatedPerLane.get(episode.lane) ?? 0;
+        undatedPerLane.set(episode.lane, slot + 1);
+        const step = gutterWidth / 4;
+        return { episode, x: Math.min(gutterWidth - 10, 12 + slot * step), y };
+      }
+      return { episode, x: scale.map(episode.at), y };
+    }),
+  );
   const spanMicros = model.span === null ? 0 : model.span.end - model.span.start;
   const anchors = scale.anchors;
   const stride = Math.max(1, Math.ceil(anchors.length / MAX_TICKS));
-  const ticks: JourneyTick[] = anchors
-    .filter((_, index) => index % stride === 0 || index === anchors.length - 1)
-    .map((at) => ({ x: scale.map(at), at, label: tickLabel(at, spanMicros) }));
+  const ticks: JourneyTick[] = [];
+  anchors.forEach((at, index) => {
+    if (index % stride !== 0 && index !== anchors.length - 1) return;
+    const x = scale.map(at);
+    const previous = ticks[ticks.length - 1];
+    if (previous !== undefined && x - previous.x < MIN_TICK_GAP) {
+      if (index === anchors.length - 1) ticks.pop();
+      else return;
+    }
+    ticks.push({ x, at, label: tickLabel(at, spanMicros) });
+  });
   return {
     width,
     height: rows.length * JOURNEY_LANE_HEIGHT,

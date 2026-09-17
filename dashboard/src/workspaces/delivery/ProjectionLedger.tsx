@@ -74,15 +74,21 @@ export function ProjectionLedger({
     <Panel legend="Delivery pipeline · 8 projections" className={className} bodyClassName="p-0">
       <ol className="divide-y divide-edge-subtle">
         {rows.map((row, index) => (
-          <li key={row.key} className="flex items-center gap-3 px-3 py-2">
-            <span className="td-value w-5 shrink-0 text-3xs text-text-muted" data-cell="numeric">
+          <li key={row.key} className="flex items-start gap-3 px-3 py-2">
+            <span className="td-value w-5 shrink-0 pt-0.5 text-3xs text-text-muted" data-cell="numeric">
               {String(index + 1).padStart(2, '0')}
             </span>
             <span className="min-w-0 flex-1">
-              <span className="block truncate text-xs text-text-primary">{row.label}</span>
-              <span className="block truncate text-3xs text-text-muted">source · {row.source}</span>
+              <span className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+                <span className="text-xs text-text-primary">{row.label}</span>
+                <span className="text-3xs text-text-muted">source · {row.source}</span>
+              </span>
+              <StateChip
+                kind={laneStateKind(row.state)}
+                detail={laneStateDetail(row.state)}
+                className="mt-1"
+              />
             </span>
-            <StateChip kind={laneStateKind(row.state)} detail={laneStateDetail(row.state)} />
           </li>
         ))}
       </ol>

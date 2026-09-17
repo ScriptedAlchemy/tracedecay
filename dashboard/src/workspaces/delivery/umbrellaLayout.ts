@@ -58,15 +58,25 @@ export interface FieldLayout {
 
 export const FIELD_WIDTH = 800;
 export const FIELD_HEIGHT = 480;
+const FIELD_MIN_WIDTH = 320;
+const FIELD_MIN_HEIGHT = 240;
+
+export interface FieldViewport {
+  readonly width: number;
+  readonly height: number;
+}
+
+export const DEFAULT_FIELD_VIEWPORT: FieldViewport = { width: FIELD_WIDTH, height: FIELD_HEIGHT };
 
 export function layoutField(
   inbox: DeliveryInboxV1,
   rows: readonly DeliveryInboxPullRequestV1[],
   projection: UmbrellaProjection,
   focusUmbrellaId: string | null,
+  viewport: FieldViewport = DEFAULT_FIELD_VIEWPORT,
 ): FieldLayout {
-  const width = FIELD_WIDTH;
-  const height = FIELD_HEIGHT;
+  const width = Math.max(FIELD_MIN_WIDTH, Math.floor(viewport.width));
+  const height = Math.max(FIELD_MIN_HEIGHT, Math.floor(viewport.height));
   const cx = width / 2;
   const cy = height / 2;
 
@@ -81,16 +91,21 @@ export function layoutField(
 
   const projectIds = [...new Set(visibleRows.map((row) => row.project_id))].sort();
   const labels = new Map(inbox.projects.map((project) => [project.project_id, project.label]));
-  const ringRadius =
-    projectIds.length <= 1 ? 0 : Math.min(width, height) * (focus === null ? 0.33 : 0.36);
+  // Hubs sit on an ellipse that follows the aperture's aspect, filled from the
+  // left so two projects read as a horizontal pair rather than a column. The
+  // orbit budget below keeps PR nodes inside the frame.
+  const orbitBudget = 34 + 24 + 30;
+  const ringX = projectIds.length <= 1 ? 0 : Math.max(0, width / 2 - orbitBudget - 40);
+  const ringY =
+    projectIds.length <= 1 ? 0 : Math.max(0, height / 2 - orbitBudget - 28) * (focus === null ? 0.9 : 1);
   const hubs: FieldHub[] = projectIds.map((projectId, index) => {
-    const angle = -Math.PI / 2 + (index / Math.max(1, projectIds.length)) * Math.PI * 2;
+    const angle = Math.PI + (index / Math.max(1, projectIds.length)) * Math.PI * 2;
     const count = visibleRows.filter((row) => row.project_id === projectId).length;
     return {
       projectId,
       label: labels.get(projectId) ?? projectId,
-      x: cx + Math.cos(angle) * ringRadius,
-      y: cy + Math.sin(angle) * ringRadius,
+      x: cx + Math.cos(angle) * ringX,
+      y: cy + Math.sin(angle) * ringY,
       radius: 14 + Math.min(10, count * 2),
       rows: count,
     };

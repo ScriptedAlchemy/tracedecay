@@ -29,7 +29,7 @@ describe('JourneyWorkspace', () => {
     expect(within(readings).getByText('undated').nextElementSibling?.textContent).toContain('2');
     expect(within(readings).getByText('lanes served').nextElementSibling?.textContent).toContain('6');
     expect(within(readings).getByText('8 total')).toBeTruthy();
-    expect(within(readings).getByText(/2026-05-09 15:00 → 2026-05-09 21:00/)).toBeTruthy();
+    expect(within(readings).getByText(/05-09 15:00 → 05-09 21:00/)).toBeTruthy();
 
     expect(screen.getByRole('button', { name: 'Start review' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Back to inbox' })).toBeTruthy();
