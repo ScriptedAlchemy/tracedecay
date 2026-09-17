@@ -86,8 +86,6 @@ export function settledAttentionReason(
       return state === 'clear' ? 'Clear on a partial reading.' : 'Partial reading.';
     case 'complete':
       return state === 'clear' ? 'Clear.' : 'Recorded.';
-    case 'denied':
-      return 'Access was denied.';
     default: {
       const unhandled: never = coverage;
       return unhandled;
