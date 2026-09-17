@@ -154,8 +154,15 @@ function WorkspaceRegisters() {
             className="flex min-w-0 items-center gap-1.5"
           >
             <span className="td-value max-w-56 truncate text-2xs">{register.value}</span>
+            {/* The qualifier yields first: with the shell's own four cells and
+              * three workspace registers, a 1440px strip has room for every
+              * state word or every detail, not both. The word carries the
+              * state; the detail returns from `2xl` and stays on the title. */}
             {register.detail ? (
-              <span className="td-value min-w-0 max-w-64 truncate text-3xs text-text-muted">
+              <span
+                className="td-value min-w-0 max-w-64 truncate text-3xs text-text-muted max-2xl:hidden"
+                title={register.detail}
+              >
                 {register.detail}
               </span>
             ) : null}
