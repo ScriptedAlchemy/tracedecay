@@ -119,8 +119,10 @@ async fn clone_family_tools_refuse_absent_executors_without_awaiting_graph_query
                 "result_limit": 10,
                 "work_limit": 20,
             }),
-            "verified-code-similarity-unavailable",
-            "the maintained clone similarity lane is unavailable",
+            // Shared `reason.as_str()` wire (`CapabilityUnavailable`); retired
+            // opaque tokens `verified-code-*-unavailable` must stay gone.
+            "code_index_unavailable",
+            "the maintained clone similarity lane is unavailable: code_index_unavailable",
         ),
         (
             "tracedecay_redundancy",
@@ -134,8 +136,8 @@ async fn clone_family_tools_refuse_absent_executors_without_awaiting_graph_query
                 "member_limit": 10,
                 "work_limit": 20,
             }),
-            "verified-code-redundancy-unavailable",
-            "the maintained clone family lane is unavailable",
+            "code_index_unavailable",
+            "the maintained clone family lane is unavailable: code_index_unavailable",
         ),
     ];
 

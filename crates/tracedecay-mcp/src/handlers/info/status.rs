@@ -361,58 +361,59 @@ pub async fn handle_status(
     }
 
     // Session-transcript ingest health (recall trust): last ingest time and
-    // any un-ingested transcript backlog from the project sessions.db.
+    // any un-ingested transcript backlog from the admitted project session
+    // authority. Match tracedecay_runtime: consult the lease directly rather
+    // than gating on the layout path existing on disk (fixtures and some
+    // retained mounts hold an open authority before the path is observed).
     if include_session_ingest {
-        let session_db_path = ctx.store_layout().sessions_db_path.clone();
-        if session_db_path.exists() {
-            match ctx.authorized_project_session_db() {
-                None => {
-                    // Attached means admitted; absent is the typed
-                    // unavailable/denied state. Fail closed instead of
-                    // opening a second connection here.
-                    output["session_ingest"] = json!({
-                        "status": "unavailable",
-                        "reason": "session_store_denied",
-                        "message": "this request is not authorized to read the admitted project session store",
-                    });
-                }
-                Some((lease, _)) => {
-                    let db = lease.as_ref();
-                    match hotpath::future!(
-                        db.cursor_session_ingest_health(),
-                        label = "mcp.info.status.session_ingest"
-                    )
-                    .await
-                    {
-                        Ok(ingest) => {
-                            output["session_ingest"] = serde_json::to_value(&ingest)
-                                .unwrap_or_else(|error| {
-                                    json!({
-                                        "status": "unavailable",
-                                        "reason": "session_ingest_serialization_failed",
-                                        "message": error.to_string(),
-                                    })
-                                });
-                            // `session_ingest` stays cursor-scoped so it keeps matching the
-                            // doctor-owned signal. Historical catch-up is measured across
-                            // providers and remains explicitly partial while the retained
-                            // daemon authority drains its bounded backlog.
-                            if let Some(catch_up) = hotpath::future!(
-                                historical_session_catch_up(db),
-                                label = "mcp.info.status.session_history"
-                            )
-                            .await
-                            {
-                                output["session_history_catch_up"] = catch_up;
-                            }
+        match ctx.authorized_project_session_db() {
+            None => {
+                // Attached means admitted; absent is the typed
+                // unavailable/denied state. Fail closed instead of
+                // opening a second connection here.
+                output["session_ingest"] = json!({
+                    "status": "unavailable",
+                    "reason": "session_store_denied",
+                    "message": "this request is not authorized to read the admitted project session store",
+                });
+            }
+            Some((lease, _)) => {
+                let db = lease.as_ref();
+                match hotpath::future!(
+                    db.cursor_session_ingest_health(),
+                    label = "mcp.info.status.session_ingest"
+                )
+                .await
+                {
+                    Ok(ingest) => {
+                        output["session_ingest"] = serde_json::to_value(&ingest).unwrap_or_else(
+                            |error| {
+                                json!({
+                                    "status": "unavailable",
+                                    "reason": "session_ingest_serialization_failed",
+                                    "message": error.to_string(),
+                                })
+                            },
+                        );
+                        // `session_ingest` stays cursor-scoped so it keeps matching the
+                        // doctor-owned signal. Historical catch-up is measured across
+                        // providers and remains explicitly partial while the retained
+                        // daemon authority drains its bounded backlog.
+                        if let Some(catch_up) = hotpath::future!(
+                            historical_session_catch_up(db),
+                            label = "mcp.info.status.session_history"
+                        )
+                        .await
+                        {
+                            output["session_history_catch_up"] = catch_up;
                         }
-                        Err(error) => {
-                            output["session_ingest"] = json!({
-                                "status": "unavailable",
-                                "reason": "session_ingest_query_failed",
-                                "message": error,
-                            });
-                        }
+                    }
+                    Err(error) => {
+                        output["session_ingest"] = json!({
+                            "status": "unavailable",
+                            "reason": "session_ingest_query_failed",
+                            "message": error,
+                        });
                     }
                 }
             }
