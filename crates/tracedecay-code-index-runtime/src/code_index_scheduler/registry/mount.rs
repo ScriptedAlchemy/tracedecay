@@ -35,7 +35,7 @@ use super::{
     PendingWakeV1, PublishedTextProjectionOutcomeV1, ServingSwapOutcomeV1,
     TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1, clear_convergence_park,
     convergence_park_retries_on_wake, is_repeated_conflict_verdict, park_convergence,
-    retained_noop_requires_follow_up_wake,
+    retained_noop_requires_follow_up_wake, terminal_publication_authority_is_parked,
 };
 
 impl CodeIndexSchedulerRegistryV1 {
@@ -385,7 +385,6 @@ impl CodeIndexSchedulerRegistryV1 {
             // artifact build. Releasing that capacity emits no wake, so this
             // worker must schedule its own.
             let mut capacity_retry = ReconcileCapacityRetryV1::new();
-            let mut publication_authority_terminal = false;
             // The last arrival this worker restored for a nothing-seated
             // warming outcome. A quiet remount's seat pass restores its
             // arrival exactly once so the next pass can restore and warm the
@@ -428,7 +427,9 @@ impl CodeIndexSchedulerRegistryV1 {
                     .await;
                     return;
                 }
-                if publication_authority_terminal {
+                // Terminal suppress is the shared park, not a flag on this
+                // task. A later pass of the same mount reads the same slot.
+                if terminal_publication_authority_is_parked(&worker_convergence_park) {
                     let _ = Self::take_pending_arrival(
                         &worker_pending_wake,
                         CodeIndexCadenceTriggerV1::Mount,
@@ -2097,7 +2098,6 @@ impl CodeIndexSchedulerRegistryV1 {
                                 // Mid-wait branch publication rechecks the park on
                                 // serving-generation notifications.
                                 worker_serving_generation_changed.send_replace(());
-                                publication_authority_terminal = true;
                             } else if transient_capacity {
                                 // Shared process capacity was held by another
                                 // holder when this pass asked for it. Releasing
@@ -2169,7 +2169,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         ),
                         Ok((Ok(_), _, _)) => {}
                     }
-                    if !publication_authority_terminal {
+                    if !terminal_publication_authority_is_parked(&worker_convergence_park) {
                         // Restore arrival so the next pass measures this wake's full queue wait.
                         Self::restore_pending_arrival(&worker_pending_wake, arrival, trigger);
                     }
@@ -2266,12 +2266,11 @@ impl CodeIndexSchedulerRegistryV1 {
                                 .read()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .as_ref()
-                                .is_some_and(LatestCodeTextGenerationV1::text_projection_needs_work);
-                            if installed_owner_still_needs_work {
-                                Self::note_worker_continuation(
-                                    &worker_pending_wake,
-                                    &worker_wake,
+                                .is_some_and(
+                                    LatestCodeTextGenerationV1::text_projection_needs_work,
                                 );
+                            if installed_owner_still_needs_work {
+                                Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
                             }
                         }
                         PublishedTextProjectionOutcomeV1::Shutdown => {
