@@ -34,7 +34,7 @@ use super::{
     HostBundleJournalEntryV1, HostBundleLifecycleOpV1, HostBundleManifestV1,
     HostBundleReceiptArtifactV1, HostBundleRollbackBoundaryV1, HostBundleVerificationAdapterV1,
     HostComponentSetJournalComponentV1, HostComponentSetJournalStateV1, HostComponentSetJournalV1,
-    HostComponentSetReceiptV1, HostComponentV1, HostKindV1,
+    HostComponentSetReceiptV1, HostComponentV1, HostKindV1, stock_host_kinds,
 };
 
 /// Public component-set lifecycle façade over the capability-rooted writer.
@@ -56,9 +56,19 @@ impl<'a> HostComponentSetTransactionV1<'a> {
         &mut self,
         registration: &mut R,
     ) -> Result<(), HostBundleError> {
+        let Some(journal) = self.writer.load_component_set_journal()? else {
+            for host in stock_host_kinds() {
+                if self.writer.load_journal_for(host)?.is_some() {
+                    self.writer.recover_interrupted_operation(host)?;
+                }
+            }
+            return Ok(());
+        };
+        let host = journal.host;
+        self.writer.ensure_host_lock(host)?;
         self.writer
-            .recover_component_set_operation(None, registration)?;
-        self.writer.recover_interrupted_operation()
+            .recover_component_set_operation(Some(host), registration)?;
+        self.writer.recover_interrupted_operation(host)
     }
 
     /// Recover only `host`'s pending component-set journal. Other hosts'
@@ -69,9 +79,10 @@ impl<'a> HostComponentSetTransactionV1<'a> {
         host: HostKindV1,
         registration: &mut R,
     ) -> Result<(), HostBundleError> {
+        self.writer.ensure_host_lock(host)?;
         self.writer
             .recover_component_set_operation(Some(host), registration)?;
-        self.writer.recover_interrupted_operation()
+        self.writer.recover_interrupted_operation(host)
     }
 
     pub fn preview<V: HostBundleVerificationAdapterV1, R: HostComponentSetRegistrationV1>(
@@ -84,7 +95,7 @@ impl<'a> HostComponentSetTransactionV1<'a> {
         // Only this host's own pending journal blocks the preview. A wedged
         // transaction for an unrelated host mutates a disjoint path space and
         // is not a reason to refuse work here.
-        if self.writer.load_journal()?.is_some()
+        if self.writer.load_journal_for(component_set.host)?.is_some()
             || self
                 .writer
                 .load_component_set_journal_for(component_set.host)?
@@ -238,7 +249,8 @@ impl HostBundleWriterV1 {
         registration: &mut R,
     ) -> Result<HostComponentSetReceiptV1, HostBundleError> {
         validate_component_set_request(component_set, request)?;
-        if self.load_journal()?.is_some() {
+        self.ensure_host_lock(component_set.host)?;
+        if self.load_journal_for(component_set.host)?.is_some() {
             return Err(host_bundle_recovery_required!());
         }
         // Never clobber this host's own outstanding journal: it is the only

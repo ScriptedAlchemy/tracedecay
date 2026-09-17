@@ -104,7 +104,8 @@ where
         contents: &[HostBundleArtifactContentV1],
     ) -> Result<HostBundleInstallReceiptV1, HostBundleError> {
         self.verifier.verify_manifest(manifest)?;
-        self.storage.recover_lifecycle()?;
+        // execute_lifecycle recovers this manifest's host. Recovering every
+        // host here would roll back an unrelated host's journal.
         self.storage
             .execute_lifecycle(manifest, request, contents, &self.verifier)
     }
