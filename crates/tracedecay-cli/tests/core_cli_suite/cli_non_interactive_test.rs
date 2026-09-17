@@ -109,15 +109,6 @@ fn tracedecay_command(home: &std::path::Path, project: &std::path::Path) -> Comm
     tracedecay_command_without_daemon(home, project)
 }
 
-fn tracedecay_command_with_stdin_without_daemon(
-    home: &std::path::Path,
-    project: &std::path::Path,
-) -> Command {
-    let mut command = tracedecay_command_without_daemon(home, project);
-    command.stdin(Stdio::piped());
-    command
-}
-
 fn cli_timeout() -> Duration {
     Duration::from_secs(90)
 }
@@ -1409,8 +1400,8 @@ fn bare_invocation_skips_create_prompt_when_stdin_not_a_terminal() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("Non-interactive: skipping index creation"),
-        "stderr should explain the non-interactive default\nstderr:\n{stderr}"
+        stderr.contains("Skipping index creation") && stderr.contains("tracedecay init"),
+        "stderr should explain how to initialize without waiting on stdin\nstderr:\n{stderr}"
     );
 }
 
@@ -1930,15 +1921,9 @@ async fn wipe_all_does_not_repair_host_bundles_before_removing_profile_store() {
     drop(runtime);
     arm_implicit_cursor_reinstall(home.path());
 
-    let mut command = tracedecay_command_with_stdin_without_daemon(home.path(), project.path());
-    command.args(["wipe", "--all"]);
-    let mut child = command.spawn().unwrap();
-    {
-        use std::io::Write;
-        let stdin = child.stdin.as_mut().unwrap();
-        stdin.write_all(b"go!\n").unwrap();
-    }
-    let output = child.wait_with_output().unwrap();
+    let mut command = tracedecay_command_without_daemon(home.path(), project.path());
+    command.args(["wipe", "--all", "--yes"]);
+    let output = run_with_timeout(command, cli_timeout());
 
     assert!(
         output.status.success(),
@@ -2068,15 +2053,9 @@ async fn wipe_all_removes_registry_backed_profile_shard_without_enrollment_marke
     runtime.checkpoint_profile_database_for_test().await;
     drop(runtime);
 
-    let mut command = tracedecay_command_with_stdin_without_daemon(home.path(), project.path());
-    command.args(["wipe", "--all"]);
-    let mut child = command.spawn().unwrap();
-    {
-        use std::io::Write;
-        let stdin = child.stdin.as_mut().unwrap();
-        stdin.write_all(b"go!\n").unwrap();
-    }
-    let output = child.wait_with_output().unwrap();
+    let mut command = tracedecay_command_without_daemon(home.path(), project.path());
+    command.args(["wipe", "--all", "--yes"]);
+    let output = run_with_timeout(command, cli_timeout());
 
     assert!(
         output.status.success(),

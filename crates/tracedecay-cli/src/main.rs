@@ -1588,6 +1588,7 @@ async fn dispatch_agent_command(
             local,
             no_dashboard,
             automation,
+            git_hook,
         } => {
             if host_bundle.component.is_some() {
                 if local || automation || no_dashboard {
@@ -1602,6 +1603,9 @@ async fn dispatch_agent_command(
                     host_bundle,
                 )
                 .await?;
+                if git_hook {
+                    agent_cmd::install_requested_git_hook()?;
+                }
             } else {
                 agent_cmd::handle_install_command(
                     agent,
@@ -1609,6 +1613,7 @@ async fn dispatch_agent_command(
                     no_dashboard,
                     automation.then_some(agent_cmd::CodexAutomationInstall),
                     host_bundle.adopt,
+                    git_hook,
                 )
                 .await?;
             }

@@ -618,7 +618,7 @@ pub(super) fn corrupt_component_result(
             receipt_path.display()
         ),
         (Some(host), Some(component)) => format!(
-            "remove the corrupt receipt {}, then run `tracedecay install --agent {} --component {} --yes`",
+            "remove the corrupt receipt {}, then run `tracedecay install --agent {} --component {}`",
             receipt_path.display(),
             host.descriptor().cli_id(),
             component_slug(component)
@@ -662,7 +662,7 @@ pub(super) fn repair_action(
             "resolve the foreign or modified files for {host}/{component}, then run `tracedecay reinstall --component {component} --yes`"
         ),
         HostBundleComponentDoctorStateV1::Drifted => format!(
-            "run `tracedecay reinstall --component {component} --yes` (backs up and re-owns)"
+            "run `tracedecay reinstall --component {component}` (backs up and refreshes tracedecay-owned files)"
         ),
         HostBundleComponentDoctorStateV1::OrphanedRegistration => format!(
             "{host} still registers {component} with no owning receipt; run `tracedecay uninstall --agent {host} --component {component} --yes` to finish removing it, or `tracedecay reinstall --component {component} --yes` to re-own it"
@@ -676,7 +676,7 @@ pub(super) fn repair_action(
         HostBundleComponentDoctorStateV1::Repairable
         | HostBundleComponentDoctorStateV1::Missing
         | HostBundleComponentDoctorStateV1::Corrupt => {
-            format!("run `tracedecay reinstall --component {component} --yes`")
+            format!("run `tracedecay reinstall --component {component}`")
         }
     }
 }

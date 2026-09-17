@@ -160,18 +160,21 @@ Writes the MCP server registration, permissions, hooks, and prompt rules for \
 an agent host (Cursor, Codex, Claude Code, Hermes, Kiro, and others). \
 With --component, selects one compiled first-party Core or MCP companion \
 and uses the receipt-based host lifecycle instead of the compatibility installer. \
-Auto-detects installed agents when --agent is omitted. Safe to re-run; use it \
-after installing a new agent or moving the tracedecay binary.";
+Configures every detected agent when --agent is omitted, without prompting. \
+Safe to re-run; use it after installing a new agent or moving the tracedecay binary. \
+Pass --git-hook to install the global post-commit sync hook; that flag is explicit \
+because setting core.hooksPath can redirect every repository away from .git/hooks.";
 
 pub(crate) const INSTALL_AFTER_HELP: &str = "\
 Examples:
   tracedecay install                             Configure every detected agent
   tracedecay install --agent cursor              One agent only
+  tracedecay install --git-hook                  Also install the post-commit hook
   tracedecay install --agent cursor --component core --dry-run
-  tracedecay install --agent cursor --component core --yes
-  tracedecay install --agent opencode --component agent --yes
-  tracedecay install --agent kimi --component context-mcp --yes
-  tracedecay install --agent opencode --component context-mcp --yes
+  tracedecay install --agent cursor --component core
+  tracedecay install --agent opencode --component agent
+  tracedecay install --agent kimi --component context-mcp
+  tracedecay install --agent opencode --component context-mcp
   tracedecay install --agent codex --automation  Also enable the automation loop
   tracedecay install --agent hermes --profile dev
   tracedecay install --local                     Project-local config in cwd
@@ -189,7 +192,7 @@ pub(crate) const REINSTALL_AFTER_HELP: &str = "\
 Examples:
   tracedecay reinstall                           Refresh all installed agents
   tracedecay reinstall --component core --dry-run
-  tracedecay reinstall --component core --yes     Repair signed Core components
+  tracedecay reinstall --component core          Repair signed Core components
 
 Related: tracedecay install (add an agent), tracedecay update-plugin
 (refresh generated plugin assets without touching config files).";
@@ -198,7 +201,7 @@ pub(crate) const UPDATE_PLUGIN_AFTER_HELP: &str = "\
 Examples:
   tracedecay update-plugin                       Refresh generated plugin assets
   tracedecay update-plugin --component context-mcp --dry-run
-  tracedecay update-plugin --component context-mcp --yes
+  tracedecay update-plugin --component context-mcp
 
 Related: tracedecay reinstall (also rewrites agent config files),
 tracedecay update (binary + plugins + daemon + health pass).";

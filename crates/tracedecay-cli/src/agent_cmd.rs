@@ -61,9 +61,17 @@ pub(crate) async fn handle_host_bundle_component_command(
     operation: HostBundleCliOperation,
     options: crate::cli::HostBundleCliOptions,
 ) -> tracedecay_domain::errors::Result<()> {
-    if options.component.is_some() && !options.dry_run && !options.yes {
+    if component_mutation_still_requires_yes(
+        operation,
+        options.component.is_some(),
+        options.dry_run,
+        options.yes,
+    ) {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: "host component mutation requires --yes; use --dry-run first".to_string(),
+            message: "host component uninstall requires --yes; use --dry-run to preview. \
+                      install, update, and repair proceed from the named command \
+                      and only stop for competing extension claims or --adopt"
+                .to_string(),
         });
     }
     let home = tracedecay_agent_hosts::agents::home_dir().ok_or_else(|| {
@@ -388,6 +396,27 @@ pub(crate) async fn handle_host_bundle_artifact_command(
     Ok(())
 }
 
+/// Uninstall removes host registration. That stays behind `--yes`.
+/// Install, update, and repair are the command the operator already ran.
+pub(crate) fn component_mutation_still_requires_yes(
+    operation: HostBundleCliOperation,
+    component_selected: bool,
+    dry_run: bool,
+    yes: bool,
+) -> bool {
+    component_selected && !dry_run && !yes && operation == HostBundleCliOperation::Uninstall
+}
+
+/// The named verb authorizes a reversible plan. `--yes` is still required to
+/// accept competing third-party claims, and uninstall still requires it.
+pub(crate) fn lifecycle_invocation_confirms_plan(
+    operation: HostBundleCliOperation,
+    component_selected: bool,
+    yes: bool,
+) -> bool {
+    yes || !component_selected || operation != HostBundleCliOperation::Uninstall
+}
+
 fn lifecycle_operation(
     operation: HostBundleCliOperation,
 ) -> tracedecay_agent_hosts::agents::host_bundle::HostBundleLifecycleOpV1 {
@@ -690,7 +719,7 @@ fn apply_canonical_component_set(
     let request = component_set_request(
         component_set,
         operation,
-        options.component.is_none() || options.yes,
+        lifecycle_invocation_confirms_plan(operation, options.component.is_some(), options.yes),
         options.adopt,
     )?;
     let mut writer =
@@ -1152,6 +1181,7 @@ pub(crate) async fn handle_install_command(
     no_dashboard: bool,
     automation: Option<CodexAutomationInstall>,
     adopt: bool,
+    git_hook: bool,
 ) -> tracedecay_domain::errors::Result<()> {
     validate_codex_automation_flags(agent.as_deref(), automation)?;
     if local {
@@ -1159,8 +1189,11 @@ pub(crate) async fn handle_install_command(
             message: "`tracedecay install --local` requires a project-capable `--agent`"
                 .to_string(),
         })?;
-        return handle_project_local_lifecycle_command(agent_id, HostBundleCliOperation::Install)
-            .await;
+        handle_project_local_lifecycle_command(agent_id, HostBundleCliOperation::Install).await?;
+        if git_hook {
+            install_requested_git_hook()?;
+        }
+        return Ok(());
     }
     let home = tracedecay_agent_hosts::agents::home_dir().ok_or_else(|| {
         tracedecay_domain::errors::TraceDecayError::Config {
@@ -1223,7 +1256,7 @@ pub(crate) async fn handle_install_command(
             })?;
     } else {
         let (to_install, to_uninstall) =
-            tracedecay_agent_hosts::agents::pick_integrations_interactive(
+            tracedecay_agent_hosts::agents::select_detected_integrations(
                 &home,
                 &user_cfg.installed_agents,
             )?;
@@ -1305,8 +1338,22 @@ pub(crate) async fn handle_install_command(
             })?;
     }
 
-    tracedecay_agent_hosts::agents::offer_git_post_commit_hook(&tracedecay_bin);
+    if git_hook {
+        install_requested_git_hook()?;
+    } else {
+        tracedecay_agent_hosts::agents::report_git_post_commit_hook_status();
+    }
     Ok(())
+}
+
+pub(crate) fn install_requested_git_hook() -> tracedecay_domain::errors::Result<()> {
+    let tracedecay_bin = tracedecay_agent_hosts::agents::which_tracedecay().ok_or_else(|| {
+        tracedecay_domain::errors::TraceDecayError::Config {
+            message: "tracedecay not found on PATH".to_string(),
+        }
+    })?;
+    tracedecay_agent_hosts::agents::install_git_post_commit_hook(&tracedecay_bin)
+        .map_err(|message| tracedecay_domain::errors::TraceDecayError::Config { message })
 }
 
 pub(crate) async fn handle_reinstall_command(adopt: bool) -> tracedecay_domain::errors::Result<()> {
@@ -1757,13 +1804,51 @@ mod tests {
         HostBundleCliOperation, apply_canonical_component_set,
         apply_default_canonical_component_set, broker_codex_daemon_automation_project,
         canonical_host_component_set, canonical_host_component_set_with_tracedecay_bin,
-        component_is_not_applicable, component_set_request,
+        component_is_not_applicable, component_mutation_still_requires_yes, component_set_request,
+        lifecycle_invocation_confirms_plan,
         reinstall_agent_integrations_with_persisted_dashboard_policies,
     };
     use tracedecay_agent_hosts::agents::host_bundle::{
         CompetingHostExtensionClaimV1, HostBundleError, HostComponentSetExecutionRequestV1,
         HostComponentSetLifecyclePreviewV1, HostComponentSetRegistrationV1, HostComponentSetV1,
     };
+
+    #[test]
+    fn reversible_component_commands_do_not_wait_for_a_second_yes() {
+        for operation in [
+            HostBundleCliOperation::Install,
+            HostBundleCliOperation::Update,
+            HostBundleCliOperation::Repair,
+        ] {
+            assert!(
+                !component_mutation_still_requires_yes(operation, true, false, false),
+                "{operation:?} must proceed from the named command"
+            );
+            assert!(lifecycle_invocation_confirms_plan(operation, true, false));
+        }
+        assert!(component_mutation_still_requires_yes(
+            HostBundleCliOperation::Uninstall,
+            true,
+            false,
+            false
+        ));
+        assert!(!lifecycle_invocation_confirms_plan(
+            HostBundleCliOperation::Uninstall,
+            true,
+            false
+        ));
+        assert!(lifecycle_invocation_confirms_plan(
+            HostBundleCliOperation::Uninstall,
+            true,
+            true
+        ));
+        assert!(!component_mutation_still_requires_yes(
+            HostBundleCliOperation::Uninstall,
+            true,
+            true,
+            false
+        ));
+    }
 
     const OPENCODE_UNRELATED_CONFIG: &[u8] = br#"{"lsp":{"other":{"command":["tracedecay","lsp","bridge","--stdio"]}},"unrelated":{"keep":true}}
 "#;

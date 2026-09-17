@@ -1,8 +1,9 @@
 //! Optional global git `post-commit` hook that runs `tracedecay sync`.
 //!
-//! Offered interactively at install time; reads and edits the operator's
-//! global gitconfig `core.hooksPath` with a minimal parser so no git binary
-//! is required.
+//! Installed only when the operator passes `--git-hook`. Setting
+//! `core.hooksPath` can redirect every repository away from `.git/hooks`, so
+//! this stays an explicit authorization rather than a prompt. The install path
+//! never reads stdin.
 
 use std::path::{Path, PathBuf};
 
@@ -27,113 +28,158 @@ fn post_commit_snippet(tracedecay_bin: &str) -> String {
     )
 }
 
-/// If a global git `post-commit` hook is not already set up for tracedecay,
-/// interactively asks the user whether to install one. Silently succeeds if
-/// the hook is already present, if stdin is not a terminal, or if the user
-/// declines.
-#[hotpath::measure(label = "agent_hosts.agents.git.offer_post_commit")]
-pub fn offer_git_post_commit_hook(tracedecay_bin: &str) {
-    let Some(home) = home_dir() else { return };
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitPostCommitHookStatus {
+    Present,
+    Absent,
+}
 
-    // Determine the global hooks directory by reading core.hooksPath from
-    // the global gitconfig file(s). Falls back to ~/.config/git/hooks/.
-    let hooks_dir = read_global_hooks_path(&home);
+/// What installing the hook did. `Installed` includes the case where
+/// `core.hooksPath` was unset and this call set it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitPostCommitHookInstall {
+    AlreadyPresent,
+    Installed { hooks_path_set: bool },
+}
 
+/// Report the hook without reading stdin or changing gitconfig.
+///
+/// Setting `core.hooksPath` redirects repositories away from `.git/hooks`, so
+/// that step stays behind `--git-hook`. Supervision is the printed receipt, not a prompt.
+#[hotpath::measure(label = "agent_hosts.agents.git.report_post_commit")]
+pub fn report_git_post_commit_hook_status() {
+    let Some(home) = home_dir() else {
+        return;
+    };
+    match git_post_commit_hook_status(&home) {
+        GitPostCommitHookStatus::Present => {
+            eprintln!("  Global git post-commit hook already contains tracedecay");
+        }
+        GitPostCommitHookStatus::Absent => {
+            eprintln!(
+                "Git post-commit hook left unchanged. Pass --git-hook to install it. \
+                 Setting core.hooksPath can redirect every repository away from .git/hooks, \
+                 so that step stays explicit and never waits on stdin."
+            );
+        }
+    }
+}
+
+/// Install the reversible sync hook. Never reads stdin.
+#[hotpath::measure(label = "agent_hosts.agents.git.install_post_commit")]
+pub fn install_git_post_commit_hook(tracedecay_bin: &str) -> std::result::Result<(), String> {
+    let home = home_dir().ok_or_else(|| "could not determine home directory".to_string())?;
+    match install_git_post_commit_hook_at(&home, tracedecay_bin)? {
+        GitPostCommitHookInstall::AlreadyPresent => {
+            eprintln!("  Global git post-commit hook already contains tracedecay, skipping");
+        }
+        GitPostCommitHookInstall::Installed { hooks_path_set } => {
+            if hooks_path_set {
+                eprintln!(
+                    "\x1b[32m✔\x1b[0m Set git core.hooksPath for the tracedecay post-commit hook"
+                );
+            }
+            eprintln!("\x1b[32m✔\x1b[0m Installed global git post-commit hook");
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn install_git_post_commit_hook_at(
+    home: &Path,
+    tracedecay_bin: &str,
+) -> std::result::Result<GitPostCommitHookInstall, String> {
+    let hooks_dir = read_global_hooks_path(home);
     let (hooks_dir, need_set_hookspath) = match hooks_dir {
         Some(dir) => (dir, false),
         None => (home.join(".config").join("git").join("hooks"), true),
     };
-
     let hook_path = hooks_dir.join("post-commit");
-
-    if hook_path.exists()
-        && let Ok(contents) = std::fs::read_to_string(&hook_path)
-        && contents.contains(HOOK_MARKER)
-    {
-        eprintln!("  Global git post-commit hook already contains tracedecay, skipping");
-        return;
+    if hook_contains_marker(&hook_path) {
+        return Ok(GitPostCommitHookInstall::AlreadyPresent);
     }
+    write_git_post_commit_hook(
+        home,
+        &hooks_dir,
+        need_set_hookspath,
+        &hook_path,
+        tracedecay_bin,
+    )?;
+    Ok(GitPostCommitHookInstall::Installed {
+        hooks_path_set: need_set_hookspath,
+    })
+}
 
-    // Only prompt on a real terminal.
-    if !atty_stdin() {
-        return;
+fn git_post_commit_hook_status(home: &Path) -> GitPostCommitHookStatus {
+    let Some(hooks_dir) = read_global_hooks_path(home) else {
+        let default = home
+            .join(".config")
+            .join("git")
+            .join("hooks")
+            .join("post-commit");
+        return if hook_contains_marker(&default) {
+            GitPostCommitHookStatus::Present
+        } else {
+            GitPostCommitHookStatus::Absent
+        };
+    };
+    if hook_contains_marker(&hooks_dir.join("post-commit")) {
+        GitPostCommitHookStatus::Present
+    } else {
+        GitPostCommitHookStatus::Absent
     }
+}
 
-    eprintln!();
-    eprint!(
-        "Install a global git post-commit hook to auto-run \x1b[1mtracedecay sync\x1b[0m after each commit? [y/N] "
-    );
+fn hook_contains_marker(hook_path: &Path) -> bool {
+    hook_path.exists()
+        && std::fs::read_to_string(hook_path).is_ok_and(|contents| contents.contains(HOOK_MARKER))
+}
 
-    let mut answer = String::new();
-    if std::io::stdin().read_line(&mut answer).is_err() {
-        return;
-    }
-    if !matches!(answer.trim(), "y" | "Y" | "yes" | "Yes") {
-        eprintln!("  Skipped git post-commit hook");
-        return;
-    }
-
-    if let Err(e) = std::fs::create_dir_all(&hooks_dir) {
-        eprintln!(
-            "  \x1b[31m✘\x1b[0m Failed to create {}: {e}",
-            hooks_dir.display()
-        );
-        return;
-    }
+fn write_git_post_commit_hook(
+    home: &Path,
+    hooks_dir: &Path,
+    need_set_hookspath: bool,
+    hook_path: &Path,
+    tracedecay_bin: &str,
+) -> std::result::Result<(), String> {
+    std::fs::create_dir_all(hooks_dir)
+        .map_err(|error| format!("Failed to create {}: {error}", hooks_dir.display()))?;
 
     // If no global hooksPath was configured, set it in ~/.gitconfig.
     if need_set_hookspath {
         let gitconfig_path = home.join(".gitconfig");
-        if let Err(msg) = set_global_hooks_path(&gitconfig_path, &hooks_dir) {
-            eprintln!("  \x1b[31m✘\x1b[0m {msg} — hook not installed");
-            return;
-        }
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Set git core.hooksPath to {}",
-            hooks_dir.display()
-        );
+        set_global_hooks_path(&gitconfig_path, hooks_dir)?;
     }
 
     let snippet = post_commit_snippet(tracedecay_bin);
-
     if hook_path.exists() {
         use std::io::Write;
-        let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&hook_path) else {
-            eprintln!(
-                "  \x1b[31m✘\x1b[0m Failed to open {} for writing",
-                hook_path.display()
-            );
-            return;
-        };
-        if write!(f, "\n{snippet}").is_err() {
-            eprintln!(
-                "  \x1b[31m✘\x1b[0m Failed to write to {}",
-                hook_path.display()
-            );
-            return;
-        }
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(hook_path)
+            .map_err(|error| {
+                format!(
+                    "Failed to open {} for writing: {error}",
+                    hook_path.display()
+                )
+            })?;
+        write!(file, "\n{snippet}")
+            .map_err(|error| format!("Failed to write to {}: {error}", hook_path.display()))?;
     } else {
         let contents = format!("#!/bin/sh\n{snippet}");
-        if std::fs::write(&hook_path, contents).is_err() {
-            eprintln!(
-                "  \x1b[31m✘\x1b[0m Failed to create {}",
-                hook_path.display()
-            );
-            return;
-        }
+        std::fs::write(hook_path, contents)
+            .map_err(|error| format!("Failed to create {}: {error}", hook_path.display()))?;
     }
 
     // Make executable (Unix).
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755));
+        std::fs::set_permissions(hook_path, std::fs::Permissions::from_mode(0o755)).map_err(
+            |error| format!("Failed to mark {} executable: {error}", hook_path.display()),
+        )?;
     }
-
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Installed global git post-commit hook at {}",
-        hook_path.display()
-    );
+    Ok(())
 }
 
 /// Reads `core.hooksPath` from the global gitconfig files.
@@ -319,12 +365,6 @@ fn expand_tilde(s: &str, home: &Path) -> String {
     s.to_string()
 }
 
-/// Returns true if stdin is connected to a terminal.
-fn atty_stdin() -> bool {
-    use std::io::IsTerminal;
-    std::io::stdin().is_terminal()
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -370,5 +410,37 @@ mod tests {
     fn expand_tilde_with_slash() {
         let home = Path::new("/home/test");
         assert_eq!(expand_tilde("~/hooks", home), "/home/test/hooks");
+    }
+
+    #[test]
+    fn install_writes_the_hook_without_reading_stdin_and_is_idempotent() {
+        let home = tempfile::tempdir().unwrap();
+        let first = install_git_post_commit_hook_at(home.path(), "/usr/bin/tracedecay").unwrap();
+        assert_eq!(
+            first,
+            GitPostCommitHookInstall::Installed {
+                hooks_path_set: true
+            }
+        );
+        let hook = std::fs::read_to_string(
+            home.path()
+                .join(".config")
+                .join("git")
+                .join("hooks")
+                .join("post-commit"),
+        )
+        .unwrap();
+        assert!(hook.contains(HOOK_MARKER));
+        assert!(hook.contains("/usr/bin/tracedecay"));
+        let gitconfig = std::fs::read_to_string(home.path().join(".gitconfig")).unwrap();
+        assert!(gitconfig.contains("hooksPath"));
+        assert_eq!(
+            install_git_post_commit_hook_at(home.path(), "/usr/bin/tracedecay").unwrap(),
+            GitPostCommitHookInstall::AlreadyPresent
+        );
+        assert_eq!(
+            git_post_commit_hook_status(home.path()),
+            GitPostCommitHookStatus::Present
+        );
     }
 }

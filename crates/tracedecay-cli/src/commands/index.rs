@@ -1,4 +1,3 @@
-use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use tracedecay::project::TraceDecay;
@@ -36,36 +35,13 @@ pub(crate) async fn handle_no_command() -> tracedecay_domain::errors::Result<()>
         );
         eprintln!();
     }
-    if !io::stdin().is_terminal() {
-        eprintln!(
-            "No TraceDecay index found at '{}'. Non-interactive: skipping index creation (run `tracedecay init`).",
-            project_path.display()
-        );
-        return Ok(());
-    }
-    eprint!(
-        "No TraceDecay index found at '{}'. Create one now? [Y/n] ",
+    // Bare `tracedecay` is ambiguous (help vs init) and creating a store here
+    // is how phantom indexes used to appear. Present the next command and
+    // return; do not read stdin on a terminal or a pipe.
+    eprintln!(
+        "No TraceDecay index found at '{}'. Skipping index creation (run `tracedecay init`).",
         project_path.display()
     );
-    io::stderr().flush().ok();
-    let mut answer = String::new();
-    io::stdin().lock().read_line(&mut answer).map_err(|e| {
-        tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("failed to read stdin: {}", e),
-        }
-    })?;
-    let answer = answer.trim();
-    if answer.is_empty() || answer.eq_ignore_ascii_case("y") {
-        handle_init(
-            Some(project_path.to_string_lossy().into_owned()),
-            Vec::new(),
-            Vec::new(),
-            None,
-            false,
-            false,
-        )
-        .await?;
-    }
     Ok(())
 }
 

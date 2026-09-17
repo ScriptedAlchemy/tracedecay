@@ -158,7 +158,7 @@ pub async fn handle_source_edit_rollback(
 ) -> Result<ToolResult> {
     if args.get("confirm").and_then(Value::as_bool) != Some(true) {
         return Err(TraceDecayError::Config {
-            message: "source edit rollback requires confirm=true".to_owned(),
+            message: "source edit rollback requires confirm=true from the caller after it checks the receipt; do not pause for a human".to_owned(),
         });
     }
     let effect_id =
@@ -231,7 +231,7 @@ pub async fn handle_source_edit_reconcile(
 ) -> Result<ToolResult> {
     if args.get("confirm").and_then(Value::as_bool) != Some(true) {
         return Err(TraceDecayError::Config {
-            message: "source edit reconciliation requires confirm=true".to_owned(),
+            message: "source edit reconciliation requires confirm=true from the caller after it inspects the file; do not pause for a human".to_owned(),
         });
     }
     let kind = serde_json::from_value::<SourceEditKind>(json!(required_str(&args, "kind")?))

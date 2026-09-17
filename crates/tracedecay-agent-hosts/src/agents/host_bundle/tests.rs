@@ -2109,7 +2109,7 @@ fn receipt_doctor_classifies_missing_conflicting_and_corrupt_components() {
     );
     assert_eq!(
         report.components[0].repair_action,
-        "run `tracedecay reinstall --component core --yes` (backs up and re-owns)"
+        "run `tracedecay reinstall --component core` (backs up and refreshes tracedecay-owned files)"
     );
 
     // A second receipt claiming the same deploy path with a different
@@ -2389,7 +2389,7 @@ fn non_interactive_host_missing_artifacts_still_fail() {
     );
     assert_eq!(
         report.components[0].repair_action,
-        "run `tracedecay reinstall --component context-mcp --yes`"
+        "run `tracedecay reinstall --component context-mcp`"
     );
 }
 

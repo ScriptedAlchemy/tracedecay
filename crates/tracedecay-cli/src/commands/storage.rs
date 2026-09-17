@@ -310,6 +310,13 @@ mod wipe_safety_tests {
     use super::*;
 
     #[test]
+    fn nonterminal_wipe_without_yes_does_not_wait_on_stdin() {
+        assert!(wipe_must_not_wait_for_stdin(false, false));
+        assert!(!wipe_must_not_wait_for_stdin(true, false));
+        assert!(!wipe_must_not_wait_for_stdin(false, true));
+    }
+
+    #[test]
     fn complete_wipe_accepts_an_exact_canonical_profile_directory() {
         let profile = tempfile::TempDir::new().expect("create temporary profile");
         let profile = profile
@@ -406,6 +413,11 @@ fn handle_wipe_inner(
                 tracedecay_agent_hosts::agents::home_dir().as_deref(),
             )?;
         }
+        if wipe_must_not_wait_for_stdin(assume_yes, io::stdin().is_terminal()) {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "wipe is irreversible and stdin is not a terminal; pass --yes to confirm. Nothing was wiped.".to_string(),
+            });
+        }
         // A wedged daemon never exits on its own, so the lease is acquired
         // through the bounded profile-offline sequence instead of a bare
         // fail-fast attempt whose only advice was to wait for it.
@@ -448,6 +460,12 @@ pub(crate) fn join_outcome_and_restore(
             })
         }
     }
+}
+
+/// Non-terminal wipe must not read stdin. Irreversible deletion still requires
+/// `--yes`; a hanging prompt would make the human the pipeline.
+pub(crate) fn wipe_must_not_wait_for_stdin(assume_yes: bool, stdin_is_terminal: bool) -> bool {
+    !assume_yes && !stdin_is_terminal
 }
 
 /// The destructive wipe body, run inside the profile-offline window. The
@@ -507,6 +525,12 @@ async fn wipe_under_profile_offline(
 
         if assume_yes {
             eprintln!("\x1b[33m--yes supplied — proceeding without the interactive prompt.\x1b[0m");
+        } else if wipe_must_not_wait_for_stdin(assume_yes, io::stdin().is_terminal()) {
+            // Wipe deletes stores. A non-terminal caller must pass `--yes`.
+            // Reading stdin here hangs an agent whose pipe stays open.
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "wipe is irreversible and stdin is not a terminal; pass --yes to confirm. Nothing was wiped.".to_string(),
+            });
         } else {
             eprint!("Type \x1b[1;32mgo!\x1b[0m to confirm (anything else aborts): ");
             io::stderr().flush().ok();
@@ -518,9 +542,6 @@ async fn wipe_under_profile_offline(
             })?;
             if answer.trim() != "go!" {
                 eprintln!("\x1b[33mAborted — nothing was wiped.\x1b[0m");
-                if !io::stdin().is_terminal() {
-                    eprintln!("(no terminal on stdin — pass --yes to confirm a scripted wipe)");
-                }
                 return Ok(());
             }
         }
