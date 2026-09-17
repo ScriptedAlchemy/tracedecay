@@ -27,20 +27,34 @@ import type {
   DashboardDomainStateV1,
 } from '../../contracts/generated.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
+import type { ScopeWritability } from '../../data/scope/store.ts';
 import {
   codeHits,
   knowledgeHits,
   sessionHits,
   type Hit,
   type LaneId,
+  type SourceLaneId,
 } from './model.ts';
 
-/** Which coordinator source answers for each lane. */
-export const LANE_SOURCE_ID: Record<LaneId, ExplorerSourceIdV1> = {
+/** Which coordinator source answers for each source lane. */
+export const LANE_SOURCE_ID: Record<SourceLaneId, ExplorerSourceIdV1> = {
   code: 'code_graph',
   sessions: 'sessions',
   knowledge: 'knowledge',
 };
+
+/**
+ * Why the semantic lane has no rows, stated as the contract fact it is.
+ *
+ * `ExplorerSourceIdV1` names three sources and none of them is semantic
+ * retrieval; the dense retrieval path was retired from the daemon. The lane
+ * is still drawn, because a reader comparing four authorities must see that
+ * the fourth did not answer for a reason — not find three columns and infer
+ * the fourth was never asked.
+ */
+export const SEMANTIC_UNREGISTERED_DETAIL =
+  'no semantic retrieval source is registered with the query coordinator';
 
 /**
  * One lane's condition, as a closed union.
@@ -75,6 +89,9 @@ export type ExplorerLaneReadModel =
        * dropped row shows up as a stated omission instead of shrinking the
        * result set silently. */
       readonly unreadableRows: number;
+      /** Whether the source said rows remain past this page; `null` when the
+       * read carries no pagination at all (the browse overviews). */
+      readonly hasMore: boolean | null;
     }
   /** The source answered with real rows but its own read reported omitted
    * records: what is shown is genuine and less than what exists. */
@@ -84,6 +101,7 @@ export type ExplorerLaneReadModel =
       readonly hits: readonly Hit[];
       readonly reportedTotal: number | null;
       readonly unreadableRows: number;
+      readonly hasMore: boolean | null;
       readonly errorCode: string | null;
       readonly detail: string | null;
     }
@@ -129,17 +147,59 @@ export type ExplorerLaneReadModel =
   | { readonly state: 'unauthorized'; readonly lane: LaneId }
   /** The daemon knows the identity and will not serve this scope. */
   | { readonly state: 'denied'; readonly lane: LaneId }
+  /** The project gateway serves the selected scope read-only, so the query
+   * run this lane needs cannot be created there. Nothing was dispatched;
+   * `detail` is the scope authority's own sentence. */
+  | { readonly state: 'locked'; readonly lane: LaneId; readonly detail: string }
   /** The response did not decode against the contract. */
   | { readonly state: 'unsupported_schema'; readonly lane: LaneId }
   /** The run reached a terminal state without ever naming this source. */
   | { readonly state: 'unanswered'; readonly lane: LaneId }
+  /** No production authority exists for this lane at all: the coordinator
+   * names no such source, so there is nothing to ask and nothing to poll.
+   * Distinct from `unavailable`, which is a registered source declining. */
+  | { readonly state: 'unregistered'; readonly lane: LaneId; readonly detail: string }
   /** The transport reported a domain state that carries no lane-level reading.
    * The state is kept verbatim rather than folded into an error. */
   | {
       readonly state: 'indeterminate';
       readonly lane: LaneId;
       readonly domainState: DashboardDomainStateV1;
+      readonly detail: string | null;
     };
+
+/** The semantic lane's standing condition. */
+export function semanticLane(): ExplorerLaneReadModel {
+  return { state: 'unregistered', lane: 'semantic', detail: SEMANTIC_UNREGISTERED_DETAIL };
+}
+
+/**
+ * The lane's condition when the current scope will not accept the query run.
+ *
+ * Creating a run is a POST, and the project gateway refuses every non-read
+ * request for a project that is not the active one. The controller consults
+ * the scope authority before dispatching, so a refused scope is rendered from
+ * its reason rather than from a 405 the daemon would have had to send back —
+ * and a scope the registry has not yet resolved is `unknown`, not refused.
+ * Returns `null` when the scope is writable and the run may proceed.
+ */
+export function laneFromScope(
+  lane: LaneId,
+  writability: ScopeWritability,
+): ExplorerLaneReadModel | null {
+  switch (writability.state) {
+    case 'writable':
+      return null;
+    case 'read_only':
+      return { state: 'locked', lane, detail: writability.reason };
+    case 'unknown':
+      return { state: 'indeterminate', lane, domainState: 'unknown', detail: writability.reason };
+    default: {
+      const exhaustive: never = writability;
+      return exhaustive;
+    }
+  }
+}
 
 /**
  * The one place an Explorer result row stops being `unknown`.
@@ -174,7 +234,7 @@ function narrowPageRows(page: ExplorerResultPageV1): Record<string, unknown>[] {
 
 /** Row grammar for the lane, so no caller picks the wrong normaliser. */
 function hitsForLane(
-  lane: LaneId,
+  lane: SourceLaneId,
   rows: readonly Record<string, unknown>[],
   terms: readonly string[],
 ): Hit[] {
@@ -215,7 +275,7 @@ export function runIsTerminal(state: ExplorerRunStateV1): boolean {
  * or cross-source rank.
  */
 export function laneFromSourceProgress(
-  lane: LaneId,
+  lane: SourceLaneId,
   source: ExplorerSourceProgressV1,
   terms: readonly string[],
 ): ExplorerLaneReadModel {
@@ -235,7 +295,14 @@ export function laneFromSourceProgress(
       // having answered.
       const page = source.page;
       if (page === null) {
-        return { state: 'ready', lane, hits: [], reportedTotal: null, unreadableRows: 0 };
+        return {
+          state: 'ready',
+          lane,
+          hits: [],
+          reportedTotal: null,
+          unreadableRows: 0,
+          hasMore: null,
+        };
       }
       const hits = hitsForLane(lane, narrowPageRows(page), terms);
       return {
@@ -244,6 +311,7 @@ export function laneFromSourceProgress(
         hits,
         reportedTotal: page.total,
         unreadableRows: page.rows.length - hits.length,
+        hasMore: page.next_offset !== null,
       };
     }
     case 'partial': {
@@ -255,6 +323,7 @@ export function laneFromSourceProgress(
         hits,
         reportedTotal: page?.total ?? null,
         unreadableRows: page === null ? 0 : page.rows.length - hits.length,
+        hasMore: page === null ? null : page.next_offset !== null,
         errorCode: source.error_code,
         detail: source.message,
       };
@@ -305,9 +374,18 @@ export function laneFromTransport(
       return { state: 'cancelled', lane, errorCode: null, detail };
     case 'error':
       return { state: 'error', lane, errorCode: null, detail };
+    // The gateway refused the run as a write against a read-only scope. The
+    // controller normally catches this before dispatch, so reaching it here
+    // means the scope changed under an in-flight read; the daemon's sentence
+    // is carried as the detail either way.
+    case 'locked':
+      return {
+        state: 'locked',
+        lane,
+        detail: detail ?? 'the project gateway serves this scope read-only',
+      };
     case 'complete_zero_findings':
     case 'conflicting':
-    case 'locked':
     case 'partial':
     case 'ready':
     case 'redacted':
@@ -315,7 +393,7 @@ export function laneFromTransport(
     case 'timed_out':
     case 'unknown':
     case 'unsupported':
-      return { state: 'indeterminate', lane, domainState };
+      return { state: 'indeterminate', lane, domainState, detail };
     default: {
       const exhaustive: never = domainState;
       return exhaustive;
@@ -331,7 +409,7 @@ export function laneFromTransport(
  * query's results to the text on screen.
  */
 export function searchLane(
-  lane: LaneId,
+  lane: SourceLaneId,
   result: EnvelopeResult<ExplorerQueryRunV1> | undefined,
   submittedQuery: string,
   terms: readonly string[],
@@ -359,7 +437,7 @@ export function searchLane(
  * it is holding, not how much there is.
  */
 export function browseLane<T>(
-  lane: LaneId,
+  lane: SourceLaneId,
   result: EnvelopeResult<T> | undefined,
   isPending: boolean,
   rowsOf: (data: T) => readonly Record<string, unknown>[],
@@ -378,6 +456,7 @@ export function browseLane<T>(
     hits,
     reportedTotal: null,
     unreadableRows: rows.length - hits.length,
+    hasMore: null,
   };
 }
 
@@ -431,10 +510,16 @@ export function laneStateKind(read: ExplorerLaneReadModel): DomainStateKind {
       return 'unauthorized';
     case 'denied':
       return 'denied';
+    case 'locked':
+      return 'locked';
     case 'unsupported_schema':
       return 'unsupported_schema';
     case 'unanswered':
       return 'unknown';
+    // No registered source is the taxonomy's `unavailable`: the lane is
+    // inaccessible for a stated reason. The detail carries what kind.
+    case 'unregistered':
+      return 'unavailable';
     case 'indeterminate':
       return 'unknown';
     default: {
@@ -523,10 +608,13 @@ export function laneStateDetail(read: ExplorerLaneReadModel): string | undefined
     case 'denied':
     case 'unsupported_schema':
       return undefined;
+    case 'locked':
+    case 'unregistered':
+      return read.detail;
     case 'unanswered':
       return 'the run never named this source';
     case 'indeterminate':
-      return read.domainState;
+      return read.detail ?? read.domainState;
     default: {
       const exhaustive: never = read;
       return exhaustive;
@@ -562,8 +650,10 @@ export function laneEvidence(read: ExplorerLaneReadModel | undefined): EvidenceQ
     case 'error':
     case 'unauthorized':
     case 'denied':
+    case 'locked':
     case 'unsupported_schema':
     case 'unanswered':
+    case 'unregistered':
     case 'indeterminate':
       return 'unknown';
     default: {

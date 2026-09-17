@@ -13,7 +13,20 @@
  */
 import { matchedFieldNames, matchWindow } from '../../ui/search/terms.ts';
 
-export type LaneId = 'code' | 'sessions' | 'knowledge';
+/**
+ * The four Explorer lanes. Three are backed by a coordinator source and can
+ * deliver rows; `semantic` is the lane the product contract names for
+ * semantic/graph retrieval, for which no production authority is registered
+ * today. It is a lane so its absence is rendered as a typed state beside the
+ * lanes that answer, never as a missing column a reader could mistake for
+ * "nothing to say".
+ */
+export type LaneId = 'code' | 'sessions' | 'knowledge' | 'semantic';
+
+/** The lanes a coordinator source answers for — the only lanes rows come from. */
+export type SourceLaneId = Exclude<LaneId, 'semantic'>;
+
+export const SOURCE_LANE_IDS: readonly SourceLaneId[] = ['code', 'sessions', 'knowledge'];
 
 export interface LaneSpec {
   readonly id: LaneId;
@@ -22,6 +35,8 @@ export interface LaneSpec {
   readonly searches: string;
   /** What the lane shows before a query is submitted. */
   readonly browseLabel: string;
+  /** Legend over the lane's headline count. */
+  readonly countLabel: string;
   /** Utility class for the lane's identity rail. */
   readonly railClass: string;
   readonly textClass: string;
@@ -32,9 +47,10 @@ export interface LaneSpec {
 export const LANES: readonly LaneSpec[] = [
   {
     id: 'code',
-    label: 'Code graph',
-    searches: 'name, qualified_name, signature, and file_path',
+    label: 'Code',
+    searches: 'name, qualified_name, signature, and file_path in the code graph',
     browseLabel: 'most-connected symbols',
+    countLabel: 'Exact symbol matches',
     railClass: 'bg-accent',
     textClass: 'text-accent',
     facetLabel: 'Symbol kind',
@@ -44,6 +60,7 @@ export const LANES: readonly LaneSpec[] = [
     label: 'Sessions',
     searches: 'message content and summary text in the active LCM store',
     browseLabel: 'latest session summaries',
+    countLabel: 'Transcript matches',
     railClass: 'bg-state-partial',
     textClass: 'text-state-partial',
     facetLabel: 'Role',
@@ -53,9 +70,20 @@ export const LANES: readonly LaneSpec[] = [
     label: 'Knowledge',
     searches: 'content and tags in a bounded fact overview',
     browseLabel: 'a bounded fact overview',
+    countLabel: 'Fact matches',
     railClass: 'bg-state-ready',
     textClass: 'text-state-ready',
     facetLabel: 'Category',
+  },
+  {
+    id: 'semantic',
+    label: 'Semantic',
+    searches: 'nothing: no semantic retrieval authority is registered with the coordinator',
+    browseLabel: 'nothing: no semantic index is served',
+    countLabel: 'Semantic matches',
+    railClass: 'bg-state-locked',
+    textClass: 'text-state-locked',
+    facetLabel: 'Basis',
   },
 ];
 
@@ -71,7 +99,7 @@ export interface Signal {
 
 export interface Hit {
   readonly key: string;
-  readonly lane: LaneId;
+  readonly lane: SourceLaneId;
   /** 1-based position in the named response collection. */
   readonly rank: number;
   readonly orderLabel: string;

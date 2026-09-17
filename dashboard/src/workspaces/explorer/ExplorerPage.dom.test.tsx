@@ -1,13 +1,16 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { FIXTURES } from '../../../stories/fixtures/data.ts';
+import { useScope } from '../../data/scope/store.ts';
 import { ExplorerPage } from './ExplorerPage.tsx';
 
 type Route = { status: number; body: unknown };
 
 function serve(routes: Record<string, Route>) {
-  return vi.fn(async (input: RequestInfo | URL) => {
+  return vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
     const url = String(input);
     const hit = Object.entries(routes).find(([path]) => url.includes(path));
     const response = hit?.[1] ?? { status: 404, body: { error: 'not found' } };
@@ -19,20 +22,39 @@ function serve(routes: Record<string, Route>) {
   });
 }
 
-function mount(fetchImpl: unknown) {
+/** Prints the router's current search string so a test can read the URL the
+ * page writes without reaching into history. */
+function LocationProbe() {
+  const location = useLocation();
+  return <output data-testid="location">{location.search}</output>;
+}
+
+function mount(fetchImpl: unknown, initialEntry = '/explorer') {
   vi.stubGlobal('fetch', fetchImpl);
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
   return render(
     <QueryClientProvider client={client}>
-      <ExplorerPage />
+      <MemoryRouter initialEntries={[initialEntry]}>
+        <Routes>
+          <Route
+            path="/explorer"
+            element={
+              <>
+                <ExplorerPage />
+                <LocationProbe />
+              </>
+            }
+          />
+        </Routes>
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }
 
-function renderExplorer(routes: Record<string, Route>) {
-  return mount(serve(routes));
+function renderExplorer(routes: Record<string, Route>, initialEntry?: string) {
+  return mount(serve(routes), initialEntry);
 }
 
 const CODE_ROW = {
@@ -108,15 +130,31 @@ function source(sourceId: SourceId, rows: Record<string, unknown>[], total: numb
   };
 }
 
+/** A source the coordinator is still reading. */
+function reading(sourceId: SourceId) {
+  const base = source(sourceId, [], null);
+  return {
+    ...base,
+    phase: 'reading',
+    outcome: 'pending',
+    completed_units: null,
+    total_units: null,
+    page: null,
+  };
+}
+
+type RunState = 'pending' | 'partial' | 'completed';
+
 function plannerEnvelope(
   sources: unknown[] = [
     source('code_graph', [CODE_ROW], 1),
     source('sessions', [MESSAGE_ROW, SUMMARY_ROW], 2),
     source('knowledge', [FACT_ROW], null),
   ],
-  state: 'partial' | 'completed' = 'partial',
+  state: RunState = 'partial',
   query = 'graph',
 ) {
+  const domainState = state === 'completed' ? 'ready' : state === 'pending' ? 'loading' : 'partial';
   return {
     schema_revision: 1,
     scope: {
@@ -141,7 +179,7 @@ function plannerEnvelope(
       omission_reasons: state === 'completed' ? [] : ['knowledge coverage is unknown'],
     },
     freshness: { state: 'unknown', observed_at_micros: null, watermark: null },
-    domain_state: state === 'completed' ? 'ready' : 'partial',
+    domain_state: domainState,
     legal_actions: [],
     payload: {
       run_id: 'explorer-run-fixture',
@@ -154,10 +192,10 @@ function plannerEnvelope(
       explanation:
         'Search the code graph, active-project session store, and bounded project fact authority in parallel; preserve each source own order and coverage.',
       submitted_at_micros: 1,
-      completed_at_micros: 10,
+      completed_at_micros: state === 'pending' ? null : 10,
       elapsed_micros: 9,
       state,
-      finality: state === 'completed' ? 'complete' : 'partial',
+      finality: state === 'completed' ? 'complete' : state === 'pending' ? 'pending' : 'partial',
       sources,
     },
   };
@@ -197,52 +235,25 @@ const SEARCH_ROUTES = {
     status: 200,
     body: plannerEnvelope(),
   },
+  // Browse reads are the same canonical overview envelopes the visual-audit
+  // fixtures serve, so a browse row here is one the daemon's contract admits.
   '/api/plugins/graph/overview': {
     status: 200,
-    body: { top_connected: [CODE_ROW] },
+    body: FIXTURES['/api/plugins/graph/overview'],
   },
   '/api/plugins/hermes-lcm/overview': {
     status: 200,
-    body: { latest_summary_nodes: [SUMMARY_ROW], overview: { messages_total: 1 } },
-  },
-  '/api/plugins/graph/search': {
-    status: 200,
-    body: {
-      total: 1,
-      results: [CODE_ROW],
-    },
-  },
-  '/api/plugins/hermes-lcm/search': {
-    status: 200,
-    body: {
-      path: '/data/sessions.db',
-      storage_scope: 'global',
-      exists: true,
-      engine: 'like',
-      engine_detail: { messages: 'fts', summary_nodes: 'like' },
-      total: { messages: 1, summary_nodes: 1 },
-      matches: {
-        messages: [MESSAGE_ROW],
-        summary_nodes: [SUMMARY_ROW],
-      },
-    },
+    body: FIXTURES['/api/plugins/hermes-lcm/overview'],
   },
   '/api/plugins/holographic/': {
     status: 200,
-    body: {
-      limit: 25,
-      holographic: {
-        path: '/data/memory.db',
-        exists: true,
-        error: '',
-        facts: [FACT_ROW],
-      },
-    },
+    body: FIXTURES['/api/plugins/holographic/'],
   },
 };
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  useScope.getState().selectAllProjects();
 });
 
 /** A source that reached a terminal outcome without returning a page. */
@@ -275,8 +286,19 @@ function unavailable(sourceId: SourceId, code: string, message: string) {
   return withoutAnswer(sourceId, 'unavailable', code, message);
 }
 
-describe('ExplorerPage no-falsified-UI invariant', () => {
-  it('never counts a source that did not answer in the result caption', async () => {
+function lane(name: 'Code' | 'Sessions' | 'Knowledge' | 'Semantic') {
+  return screen.getByRole('region', { name: `${name} lane` });
+}
+
+async function search(query = 'graph') {
+  const user = userEvent.setup();
+  await user.type(screen.getByRole('searchbox'), query);
+  await user.keyboard('{Enter}');
+  return user;
+}
+
+describe('ExplorerPage independent lane lifecycle', () => {
+  it('draws four lanes, and a ready lane never makes an unavailable neighbour look ready', async () => {
     renderExplorer({
       ...SEARCH_ROUTES,
       '/api/explorer/queries': {
@@ -291,15 +313,200 @@ describe('ExplorerPage no-falsified-UI invariant', () => {
         ),
       },
     });
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'graph');
-    await user.keyboard('{Enter}');
+    await search();
     await screen.findByRole('button', { name: /graph_search/ });
 
-    // Three rows arrived, but only two of the three memories answered with
-    // rows. The caption must not present the result set as spanning them all.
-    expect(screen.queryByText(/across 3 memories/)).toBeNull();
-    expect(screen.getByText(/across 2 of 3 memories/)).toBeTruthy();
+    expect(lane('Code').getAttribute('data-lane-state')).toBe('ready');
+    expect(lane('Sessions').getAttribute('data-lane-state')).toBe('ready');
+    expect(lane('Knowledge').getAttribute('data-lane-state')).toBe('unavailable');
+    expect(lane('Semantic').getAttribute('data-lane-state')).toBe('unregistered');
+
+    // The unavailable lane prints the source's own reason and no count —
+    // a dash, never a zero, because zero is what a source that looked says.
+    const knowledge = within(lane('Knowledge'));
+    expect(knowledge.getAllByText(/the fact authority is not mounted/).length).toBeGreaterThan(0);
+    expect(knowledge.getByText('—', { selector: '[data-cell="numeric"]' })).toBeTruthy();
+    expect(knowledge.queryByText('0')).toBeNull();
+    expect(knowledge.getByText('UNAVAILABLE')).toBeTruthy();
+
+    // The ready lanes carry their own counts and grade, untouched.
+    expect(within(lane('Code')).getByText('1')).toBeTruthy();
+    expect(within(lane('Code')).getByText('EXACT')).toBeTruthy();
+    expect(within(lane('Sessions')).getByText('2')).toBeTruthy();
+
+    // The summary counts only lanes that answered.
+    expect(screen.getByText(/2 of 4 lanes answered · 2 not served/)).toBeTruthy();
+  });
+
+  it('renders the semantic lane as a standing typed absence in browse and in search', async () => {
+    renderExplorer(SEARCH_ROUTES);
+    // Browse mode: the three source lanes hold their overview rows.
+    await screen.findByRole('button', { name: /graph_api\.rs/ });
+    expect(lane('Code').getAttribute('data-lane-state')).toBe('ready');
+    expect(within(lane('Code')).getByText('shown from the overview endpoint')).toBeTruthy();
+
+    const browse = within(lane('Semantic'));
+    expect(browse.getByText('No production authority')).toBeTruthy();
+    // Named in the header chip and again in the body, so the reason survives
+    // whichever of the two a narrow layout keeps in view.
+    expect(browse.getAllByText(/no semantic retrieval source is registered/).length).toBe(2);
+    expect(browse.getAllByText('Source unavailable').length).toBeGreaterThan(0);
+    expect(browse.queryByRole('button')).toBeNull();
+
+    await search();
+    await screen.findByText(/hits for/);
+    // Three sources answered; the fourth lane still says exactly why it has
+    // no rows, and nothing about the ready lanes leaked into it.
+    expect(lane('Semantic').getAttribute('data-lane-state')).toBe('unregistered');
+    expect(within(lane('Semantic')).getByText('No production authority')).toBeTruthy();
+    expect(within(lane('Semantic')).queryByText('EXACT')).toBeNull();
+  });
+
+  it('keeps a lane the coordinator is still reading distinct from lanes that answered', async () => {
+    renderExplorer({
+      ...SEARCH_ROUTES,
+      '/api/explorer/queries': {
+        status: 200,
+        body: plannerEnvelope(
+          [source('code_graph', [CODE_ROW], 1), reading('sessions'), reading('knowledge')],
+          'pending',
+        ),
+      },
+    });
+    await search();
+    await screen.findByRole('button', { name: /graph_search/ });
+
+    expect(lane('Code').getAttribute('data-lane-state')).toBe('ready');
+    expect(lane('Sessions').getAttribute('data-lane-state')).toBe('pending');
+    expect(within(lane('Sessions')).getByText('Reading')).toBeTruthy();
+    // Progress is counted in sources concluded — the only figure with a real
+    // denominator — and the explicit cancel is offered while the run is live.
+    expect(screen.getByRole('img', { name: '1 of 3 sources concluded' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeTruthy();
+  });
+
+  it('cancels only through the explicit control, never through Escape', async () => {
+    const fetchImpl = serve({
+      ...SEARCH_ROUTES,
+      '/api/explorer/queries': {
+        status: 200,
+        body: plannerEnvelope(
+          [source('code_graph', [CODE_ROW], 1), reading('sessions'), reading('knowledge')],
+          'pending',
+        ),
+      },
+    });
+    mount(fetchImpl);
+    const user = await search();
+    const cancel = await screen.findByRole('button', { name: 'Cancel' });
+
+    // Escape from anywhere but the dirty search field (whose own Escape clears
+    // the search) does nothing to a live run.
+    cancel.focus();
+    await user.keyboard('{Escape}');
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBe(cancel);
+    expect(fetchImpl.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(false);
+
+    await user.click(cancel);
+    await waitFor(() => {
+      expect(
+        fetchImpl.mock.calls.some(
+          ([input, init]) =>
+            String(input).includes('/api/explorer/queries/explorer-run-fixture') &&
+            init?.method === 'DELETE',
+        ),
+      ).toBe(true);
+    });
+  });
+});
+
+describe('ExplorerPage scope truth', () => {
+  it('refuses to run a query under a selected non-active project and dispatches nothing', async () => {
+    useScope.getState().selectProject('proj_other', 'Other project', 'selected');
+    const fetchImpl = serve(SEARCH_ROUTES);
+    mount(fetchImpl);
+    await search();
+
+    // Every source lane carries the scope authority's own refusal; nothing
+    // was asked of the gateway that would have refused it.
+    await waitFor(() => {
+      expect(lane('Code').getAttribute('data-lane-state')).toBe('locked');
+    });
+    expect(lane('Sessions').getAttribute('data-lane-state')).toBe('locked');
+    expect(lane('Knowledge').getAttribute('data-lane-state')).toBe('locked');
+    expect(lane('Semantic').getAttribute('data-lane-state')).toBe('unregistered');
+    expect(
+      within(lane('Code')).getAllByText(/Other project is not the active project/).length,
+    ).toBeGreaterThan(0);
+    expect(within(lane('Code')).getByText('Read-only scope')).toBeTruthy();
+    expect(
+      fetchImpl.mock.calls.some(([input]) => String(input).includes('/api/explorer/queries')),
+    ).toBe(false);
+  });
+
+  it('routes the run through the project gateway for an active selected project', async () => {
+    useScope.getState().selectProject('proj_active', 'Active project', 'active');
+    const fetchImpl = serve({
+      ...SEARCH_ROUTES,
+      '/api/projects/proj_active/explorer/queries': { status: 200, body: plannerEnvelope() },
+    });
+    mount(fetchImpl);
+    await search();
+    await screen.findByRole('button', { name: /graph_search/ });
+
+    const created = fetchImpl.mock.calls.find(([, init]) => init?.method === 'POST');
+    expect(String(created?.[0])).toBe('/api/projects/proj_active/explorer/queries');
+  });
+});
+
+describe('ExplorerPage inspection', () => {
+  it('hover inspects without selecting, and click selects', async () => {
+    const fetchImpl = serve(SEARCH_ROUTES);
+    mount(fetchImpl);
+    const user = await search();
+    const row = await screen.findByRole('button', { name: /Using graph search/ });
+
+    await user.hover(row);
+    const peek = await screen.findByRole('complementary', { name: 'Inspector' });
+    expect(peek.querySelector('[data-inspect-mode="peek"]')).toBeTruthy();
+    expect(row.getAttribute('aria-pressed')).toBe('false');
+    // A peek shows what is already on screen and opens no reads.
+    expect(within(peek).getByText(/Select this row to read its size and context/)).toBeTruthy();
+    expect(within(peek).queryByRole('button', { name: 'Close inspector' })).toBeNull();
+    expect(fetchImpl.mock.calls.some(([input]) => String(input).includes('/size'))).toBe(false);
+
+    await user.unhover(row);
+    expect(screen.queryByRole('complementary', { name: 'Inspector' })).toBeNull();
+
+    await user.click(row);
+    const selected = await screen.findByRole('complementary', { name: 'Inspector' });
+    expect(row.getAttribute('aria-pressed')).toBe('true');
+    expect(selected.querySelector('[data-inspect-mode="selected"]')).toBeTruthy();
+    expect(within(selected).getByRole('button', { name: 'Close inspector' })).toBeTruthy();
+    await waitFor(() => {
+      expect(fetchImpl.mock.calls.some(([input]) => String(input).includes('/size'))).toBe(true);
+    });
+  });
+
+  it('grades a result: exact identity, explicit transcript text, exact code text', async () => {
+    renderExplorer(SEARCH_ROUTES);
+    const user = await search();
+
+    await user.click(await screen.findByRole('button', { name: /Using graph search/ }));
+    let inspector = within(await screen.findByRole('complementary', { name: 'Inspector' }));
+    expect(inspector.getByText('TRANSCRIPT')).toBeTruthy();
+    expect(inspector.getAllByText('EXACT').length).toBeGreaterThan(0);
+    expect(inspector.getByText('EXPLICIT')).toBeTruthy();
+    // The identity key is printed beside its grade as well as in the payload.
+    expect(inspector.getAllByText('message-1').length).toBeGreaterThan(1);
+
+    await user.click(screen.getByRole('button', { name: /graph_search/ }));
+    inspector = within(await screen.findByRole('complementary', { name: 'Inspector' }));
+    expect(inspector.getByText('GRAPH')).toBeTruthy();
+    expect(inspector.queryByText('EXPLICIT')).toBeNull();
+    // The one real pivot: the graph node id is the identity Code focuses on.
+    const pivot = inspector.getByRole('link', { name: /Open symbol in Code/ });
+    expect(pivot.getAttribute('href')).toBe('/code?symbol=node-1');
   });
 
   it('renders a field the row omitted as absent rather than as a zero', async () => {
@@ -320,9 +527,7 @@ describe('ExplorerPage no-falsified-UI invariant', () => {
         ]),
       },
     });
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'graph');
-    await user.keyboard('{Enter}');
+    const user = await search();
 
     const row = await screen.findByRole('button', { name: /graph_without_degree/ });
     expect(screen.queryByRole('img', { name: /^degree/ })).toBeNull();
@@ -336,90 +541,10 @@ describe('ExplorerPage no-falsified-UI invariant', () => {
     expect(screen.queryByRole('img', { name: /^degree/ })).toBeNull();
     const provenance = screen.getByText('Payload provenance').closest('details');
     expect(within(provenance as HTMLElement).queryByText('degree')).toBeNull();
-  });
-});
 
-describe('ExplorerPage', () => {
-  it('keeps every definition term and description in a valid definition-list group', async () => {
-    const { container } = renderExplorer(SEARCH_ROUTES);
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'graph');
-    await user.keyboard('{Enter}');
-    // Drive to the inspector so the session-context and payload-provenance
-    // lists are mounted too: the axe `dlitem` / `definition-list` failures this
-    // locks down were reachable in every one of those states, so scanning only
-    // the browse state would let two thirds of them back in.
-    await user.click(await screen.findByRole('button', { name: /Using graph search/ }));
-    expect(await screen.findByText('Session context')).toBeTruthy();
-    expect(screen.getByText('What each lane searches')).toBeTruthy();
-
-    // Deliberately unscoped: a `dl dt` selector can only ever see terms that
-    // are already inside a list, which is precisely the defect it is supposed
-    // to detect. Every `dt`/`dd` in the tree has to be accounted for.
-    const items = [...container.querySelectorAll('dt, dd')];
-    expect(items.length).toBeGreaterThan(0);
-    for (const item of items) {
-      const parent = item.parentElement;
-      const grouped =
-        parent?.tagName === 'DL' ||
-        (parent?.tagName === 'DIV' && parent.parentElement?.tagName === 'DL');
-      expect(grouped, `${item.tagName} outside a dl: ${item.outerHTML.slice(0, 120)}`).toBe(true);
-    }
-
-    // axe `definition-list`: a dl may directly contain only dt, dd, div,
-    // script and template.
-    const lists = [...container.querySelectorAll('dl')];
-    expect(lists.length).toBeGreaterThan(0);
-    for (const list of lists) {
-      for (const child of [...list.children]) {
-        expect(
-          ['DT', 'DD', 'DIV', 'SCRIPT', 'TEMPLATE'].includes(child.tagName),
-          `<dl> directly contains <${child.tagName.toLowerCase()}>`,
-        ).toBe(true);
-      }
-    }
-  });
-
-  it('derives lane readout names from visible text rather than an aria-label', async () => {
-    renderExplorer(SEARCH_ROUTES);
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'graph');
-    await user.keyboard('{Enter}');
-
-    const sessions = await screen.findByRole('button', {
-      name: /Sessions\s*2\s*loaded\s*of 2 matching rows reported/,
-    });
-    // An `aria-label` here would silently replace the computed name, letting
-    // the visible label drift out of the accessible name (WCAG 2.5.3). The
-    // readout has to say the same sentence to both readers.
-    expect(sessions.getAttribute('aria-label')).toBeNull();
-    expect(sessions.textContent).toContain('loaded of 2 matching rows reported');
-  });
-
-  it('renders every result family from the real graph, LCM, and memory shapes', async () => {
-    renderExplorer(SEARCH_ROUTES);
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'graph');
-    await user.keyboard('{Enter}');
-
-    expect(await screen.findByRole('button', { name: /graph_search/ })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Using graph search/ })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Graph route investigation/ })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Graph search is bounded/ })).toBeTruthy();
-    expect(
-      screen.getByRole('button', {
-        name: /Code graph\s*1\s*loaded\s*of 1 matching rows reported/,
-      }),
-    ).toBeTruthy();
-    expect(
-      screen.getByRole('button', {
-        name: /Sessions\s*2\s*loaded\s*of 2 matching rows reported/,
-      }),
-    ).toBeTruthy();
-    expect(screen.getByText('Coordinator run')).toBeTruthy();
-    expect(screen.getByText('explorer-run-fixture')).toBeTruthy();
-    expect(screen.getByText('source_local_no_cross_source_merge')).toBeTruthy();
-    expect(screen.getByText(/active-project session store/)).toBeTruthy();
+    // And the lanes that answered empty say so, as their own answer.
+    expect(within(lane('Sessions')).getByText('Served empty')).toBeTruthy();
+    expect(within(lane('Sessions')).getByText('0')).toBeTruthy();
   });
 
   it('does not draw a measured signal bar without a denominator', async () => {
@@ -434,73 +559,17 @@ describe('ExplorerPage', () => {
         ]),
       },
     });
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'graph');
-    await user.keyboard('{Enter}');
+    await search();
 
     const meter = await screen.findByRole('img', { name: 'degree 0' });
     expect(meter.querySelector('.td-meter-fill')).toBeNull();
   });
 
-  it('closes the inspector on Escape and returns focus to the invoking row', async () => {
+  it('shows the exact payload fields behind a selected row', async () => {
     renderExplorer(SEARCH_ROUTES);
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'graph');
-    await user.keyboard('{Enter}');
-
-    // Open with the keyboard: the row is a native button, Enter activates it.
-    const row = await screen.findByRole('button', { name: /graph_search/ });
-    row.focus();
-    await user.keyboard('{Enter}');
-    expect(await screen.findByText('Payload provenance')).toBeTruthy();
-
-    // Focus moves into the inspector, as a reader tabbing into the panel
-    // does. Escape must close it AND return focus to the row that opened it —
-    // otherwise focus dies on a removed node and the reader is dropped at the
-    // top of the document.
-    screen.getByRole('button', { name: 'Close inspector' }).focus();
-    await user.keyboard('{Escape}');
-
-    expect(screen.queryByText('Payload provenance')).toBeNull();
-    expect(document.activeElement).toBe(row);
-  });
-
-  it('leaves focus in a dirty search field when its Escape clears the search', async () => {
-    renderExplorer(SEARCH_ROUTES);
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'graph');
-    await user.keyboard('{Enter}');
-
-    const row = await screen.findByRole('button', { name: /graph_search/ });
-    row.focus();
-    await user.keyboard('{Enter}');
-    expect(await screen.findByText('Payload provenance')).toBeTruthy();
-
-    // Escape inside the dirty search field is the field's own action: it
-    // clears back to the browse state (which withdraws the selection with the
-    // search it belonged to). The inspector's document-level Escape must not
-    // also fire, or focus would be yanked out of the field to the row.
-    const searchbox = screen.getByRole('searchbox');
-    searchbox.focus();
-    await user.keyboard('{Escape}');
-    expect(searchbox).toHaveProperty('value', '');
-    expect(screen.queryByText('Payload provenance')).toBeNull();
-    expect(document.activeElement).toBe(searchbox);
-  });
-
-  it('shows the exact payload fields behind an inspected row', async () => {
-    renderExplorer(SEARCH_ROUTES);
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'graph');
-    await user.keyboard('{Enter}');
+    const user = await search();
     await user.click(await screen.findByRole('button', { name: /graph_search/ }));
 
-    // `name` and `degree` each appear twice on purpose: once as the label of
-    // the section that names the field a value was read from, and once as a key
-    // in the raw payload table. Asserting `getAllByText(...).length > 0` would
-    // pass on either one alone and on any number of accidental extras, so the
-    // payload keys are pinned inside the provenance region instead — one match
-    // each, in the region that is actually under test.
     const provenance = screen.getByText('Payload provenance').closest('details');
     expect(provenance).toBeTruthy();
     const payload = within(provenance as HTMLElement);
@@ -510,5 +579,127 @@ describe('ExplorerPage', () => {
     expect(payload.getByText('graph_search')).toBeTruthy();
     expect(payload.getByText('7')).toBeTruthy();
     expect(screen.getByText(/Position 1 in graph endpoint rows/)).toBeTruthy();
+  });
+
+  it('keeps every definition term and description in a valid definition-list group', async () => {
+    const { container } = renderExplorer(SEARCH_ROUTES);
+    const user = await search();
+    await user.click(await screen.findByRole('button', { name: /Using graph search/ }));
+    expect(await screen.findByText('Session context')).toBeTruthy();
+
+    const items = [...container.querySelectorAll('dt, dd')];
+    expect(items.length).toBeGreaterThan(0);
+    for (const item of items) {
+      const parent = item.parentElement;
+      const grouped =
+        parent?.tagName === 'DL' ||
+        (parent?.tagName === 'DIV' && parent.parentElement?.tagName === 'DL');
+      expect(grouped, `${item.tagName} outside a dl: ${item.outerHTML.slice(0, 120)}`).toBe(true);
+    }
+    const lists = [...container.querySelectorAll('dl')];
+    expect(lists.length).toBeGreaterThan(0);
+    for (const list of lists) {
+      for (const child of [...list.children]) {
+        expect(
+          ['DT', 'DD', 'DIV', 'SCRIPT', 'TEMPLATE'].includes(child.tagName),
+          `<dl> directly contains <${child.tagName.toLowerCase()}>`,
+        ).toBe(true);
+      }
+    }
+  });
+});
+
+describe('ExplorerPage keyboard', () => {
+  it('closes the selection on Escape and returns focus to the invoking row without reopening', async () => {
+    renderExplorer(SEARCH_ROUTES);
+    const user = await search();
+
+    const row = await screen.findByRole('button', { name: /graph_search/ });
+    row.focus();
+    await user.keyboard('{Enter}');
+    const inspector = await screen.findByRole('complementary', { name: 'Inspector' });
+    // Focus rests on the row it just selected: that is the selection, not a
+    // peek, so the panel offers its close control.
+    expect(inspector.querySelector('[data-inspect-mode="selected"]')).toBeTruthy();
+
+    screen.getByRole('button', { name: 'Close inspector' }).focus();
+    await user.keyboard('{Escape}');
+
+    expect(screen.queryByRole('complementary', { name: 'Inspector' })).toBeNull();
+    expect(document.activeElement).toBe(row);
+  });
+
+  it('inspects the focused row as the arrows move, and crosses lanes horizontally', async () => {
+    renderExplorer(SEARCH_ROUTES);
+    const user = await search();
+    const first = await screen.findByRole('button', { name: /graph_search/ });
+    first.focus();
+    const inspector = await screen.findByRole('complementary', { name: 'Inspector' });
+    expect(inspector.querySelector('[data-inspect-mode="peek"]')).toBeTruthy();
+
+    await user.keyboard('{ArrowRight}');
+    const sessionRow = screen.getByRole('button', { name: /Using graph search/ });
+    expect(document.activeElement).toBe(sessionRow);
+    expect(within(screen.getByRole('complementary', { name: 'Inspector' })).getByText('TRANSCRIPT')).toBeTruthy();
+
+    await user.keyboard('{ArrowDown}');
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: /Graph route investigation/ }));
+
+    await user.keyboard('{ArrowLeft}');
+    expect(document.activeElement).toBe(first);
+  });
+
+  it('leaves focus in a dirty search field when its Escape clears the search', async () => {
+    renderExplorer(SEARCH_ROUTES);
+    const user = await search();
+
+    const row = await screen.findByRole('button', { name: /graph_search/ });
+    row.focus();
+    await user.keyboard('{Enter}');
+    expect(await screen.findByText('Payload provenance')).toBeTruthy();
+
+    const searchbox = screen.getByRole('searchbox');
+    searchbox.focus();
+    await user.keyboard('{Escape}');
+    expect(searchbox).toHaveProperty('value', '');
+    expect(screen.queryByText('Payload provenance')).toBeNull();
+    expect(document.activeElement).toBe(searchbox);
+  });
+});
+
+describe('ExplorerPage filters and address', () => {
+  it('narrows to one lane and pivots on loaded rows without touching the query', async () => {
+    renderExplorer(SEARCH_ROUTES);
+    const user = await search();
+    await screen.findByRole('button', { name: /graph_search/ });
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Lanes' }), 'sessions');
+    expect(screen.queryByRole('region', { name: 'Code lane' })).toBeNull();
+    expect(lane('Sessions')).toBeTruthy();
+    expect(screen.getByTestId('location').textContent).toContain('lane=sessions');
+    expect(screen.getByTestId('location').textContent).toContain('q=graph');
+
+    // The pivot is over loaded rows: two session rows, one carrying a role.
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Sessions Role' }), 'assistant');
+    expect(screen.getByRole('button', { name: /Using graph search/ })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Graph route investigation/ })).toBeNull();
+    expect(within(lane('Sessions')).getByText('1 shown')).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Clear' }));
+    expect(lane('Code')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Graph route investigation/ })).toBeTruthy();
+    expect(screen.getByTestId('location').textContent).not.toContain('lane=');
+  });
+
+  it('restores a query from the address by running it against the current scope', async () => {
+    const fetchImpl = serve(SEARCH_ROUTES);
+    mount(fetchImpl, '/explorer?q=graph&lane=code');
+
+    await screen.findByRole('button', { name: /graph_search/ });
+    expect((screen.getByRole('searchbox') as HTMLInputElement).value).toBe('graph');
+    expect(screen.queryByRole('region', { name: 'Sessions lane' })).toBeNull();
+    const created = fetchImpl.mock.calls.find(([, init]) => init?.method === 'POST');
+    expect(JSON.parse(String(created?.[1]?.body))).toMatchObject({ query: 'graph' });
+    expect(screen.getByTestId('location').textContent).toContain('q=graph');
   });
 });
