@@ -242,7 +242,7 @@ impl GenerationSymbolIndexV1 {
         {
             return Err(LineageResolutionErrorV1::DuplicateOccurrence);
         }
-        let mut identities = std::collections::BTreeSet::new();
+        let mut identities = HashSet::with_capacity(symbols.len());
         if symbols
             .iter()
             .any(|symbol| !identities.insert(symbol.identity.clone()))
@@ -257,6 +257,7 @@ impl GenerationSymbolIndexV1 {
 
     /// Wrap an already-sorted, duplicate-free Arc symbol list under a serving
     /// generation id.
+    #[cfg(test)]
     pub(crate) fn from_sorted_arcs(
         generation_id: CodeGenerationId,
         symbols: Vec<Arc<LineageSymbolRecordV1>>,
@@ -277,6 +278,66 @@ impl GenerationSymbolIndexV1 {
         {
             return Err(LineageResolutionErrorV1::DuplicateIdentity);
         }
+        Ok(Self {
+            generation_id,
+            symbols,
+        })
+    }
+
+    pub(crate) fn from_parent_delta_arcs(
+        generation_id: CodeGenerationId,
+        parent: &Self,
+        replaced_parent_symbols: &HashSet<*const LineageSymbolRecordV1>,
+        mut fresh_symbols: Vec<Arc<LineageSymbolRecordV1>>,
+    ) -> Result<Self, LineageResolutionErrorV1> {
+        generation_id
+            .validate()
+            .map_err(|error| LineageResolutionErrorV1::Contract(error.to_string()))?;
+        fresh_symbols.sort_by(|left, right| left.occurrence.cmp(&right.occurrence));
+        if fresh_symbols
+            .windows(2)
+            .any(|pair| pair[0].occurrence >= pair[1].occurrence)
+        {
+            return Err(LineageResolutionErrorV1::DuplicateOccurrence);
+        }
+        let mut fresh_identities = HashSet::with_capacity(fresh_symbols.len());
+        if fresh_symbols
+            .iter()
+            .any(|symbol| !fresh_identities.insert(symbol.identity.clone()))
+        {
+            return Err(LineageResolutionErrorV1::DuplicateIdentity);
+        }
+
+        let mut retained = Vec::with_capacity(
+            parent
+                .symbols
+                .len()
+                .saturating_sub(replaced_parent_symbols.len()),
+        );
+        for symbol in &parent.symbols {
+            if replaced_parent_symbols.contains(&Arc::as_ptr(symbol)) {
+                continue;
+            }
+            if fresh_identities.contains(&symbol.identity) {
+                return Err(LineageResolutionErrorV1::DuplicateIdentity);
+            }
+            retained.push(Arc::clone(symbol));
+        }
+
+        let mut symbols = Vec::with_capacity(retained.len().saturating_add(fresh_symbols.len()));
+        let mut retained = retained.into_iter().peekable();
+        let mut fresh = fresh_symbols.into_iter().peekable();
+        while let (Some(left), Some(right)) = (retained.peek(), fresh.peek()) {
+            match left.occurrence.cmp(&right.occurrence) {
+                std::cmp::Ordering::Less => symbols.push(retained.next().expect("peeked")),
+                std::cmp::Ordering::Greater => symbols.push(fresh.next().expect("peeked")),
+                std::cmp::Ordering::Equal => {
+                    return Err(LineageResolutionErrorV1::DuplicateOccurrence);
+                }
+            }
+        }
+        symbols.extend(retained);
+        symbols.extend(fresh);
         Ok(Self {
             generation_id,
             symbols,
@@ -1079,6 +1140,59 @@ mod tests {
 
     fn resolver() -> SymbolLineageResolver {
         SymbolLineageResolver::new()
+    }
+
+    #[test]
+    fn parent_delta_replaces_only_named_symbols_and_preserves_uniqueness() {
+        let old = Arc::new(record("sym.old", 'a', "crate::old", "function", 'f', '0'));
+        let shared = Arc::new(record(
+            "sym.shared",
+            'b',
+            "crate::shared",
+            "function",
+            'f',
+            '1',
+        ));
+        let parent = GenerationSymbolIndexV1::from_sorted_arcs(
+            generation(1),
+            vec![Arc::clone(&old), Arc::clone(&shared)],
+        )
+        .expect("parent");
+        let fresh = Arc::new(record("sym.new", 'c', "crate::new", "function", 'f', '2'));
+        let replaced = HashSet::from([Arc::as_ptr(&old)]);
+        let current = GenerationSymbolIndexV1::from_parent_delta_arcs(
+            generation(2),
+            &parent,
+            &replaced,
+            vec![fresh],
+        )
+        .expect("parent delta");
+        assert_eq!(
+            current
+                .symbols
+                .iter()
+                .map(|symbol| symbol.occurrence.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sym.new", "sym.shared"]
+        );
+
+        let duplicate_identity = Arc::new(record(
+            "sym.other",
+            'b',
+            "crate::other",
+            "function",
+            'e',
+            '3',
+        ));
+        assert!(matches!(
+            GenerationSymbolIndexV1::from_parent_delta_arcs(
+                generation(3),
+                &parent,
+                &replaced,
+                vec![duplicate_identity],
+            ),
+            Err(LineageResolutionErrorV1::DuplicateIdentity)
+        ));
     }
 
     #[test]

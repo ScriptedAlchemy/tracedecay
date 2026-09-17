@@ -2095,10 +2095,25 @@ where
                         })?
                         .full_replay_digest
                         .clone();
+                    let unshared_occurrences = active
+                        .files
+                        .iter()
+                        .map(|file| &file.artifacts.chunks.document.file_occurrence_id)
+                        .filter(|occurrence| !shared.contains(*occurrence))
+                        .chain(
+                            staged
+                                .files
+                                .iter()
+                                .map(|file| &file.artifacts.chunks.document.file_occurrence_id)
+                                .filter(|occurrence| !shared.contains(*occurrence)),
+                        )
+                        .cloned()
+                        .collect::<BTreeSet<_>>();
                     plan_chunk_increment_arc_shared(
                         &active.chunks,
                         &staged.chunks,
                         shared,
+                        &unshared_occurrences,
                         &parent_full_replay,
                     )
                     .map_err(CodeIndexProductionErrorV1::Increment)?

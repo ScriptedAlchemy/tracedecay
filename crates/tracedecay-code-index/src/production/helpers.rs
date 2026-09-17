@@ -4,17 +4,14 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1, ImportReexportScopeV1};
-use tracedecay_domain::{
-    CodeSearchChunkV1, EdgeAuthorityV1, RelationEdgeKindV1, SymbolOccurrenceId,
-};
+use tracedecay_domain::{EdgeAuthorityV1, RelationEdgeKindV1, SymbolOccurrenceId};
 
 use crate::chunks::{
     CROSS_FILE_REFERENCE_BLOCKLIST, cross_file_reference_name_is_blocklisted,
     relation_target_kind_is_compatible, rust_qualified_name_is_ufcs_trait_impl,
     rust_type_path_alias_for_trait_impl_method,
 };
-use crate::incremental::ChunkIncrementErrorV1;
-use crate::lineage::{LineageResolutionErrorV1, LineageSymbolRecordV1};
+use crate::lineage::LineageSymbolRecordV1;
 
 pub(crate) struct StagedGenerationV1 {
     pub(crate) files: Vec<Arc<FileGenerationArtifactsV1>>,
@@ -128,86 +125,45 @@ fn aggregate_from_parent(
         }
     }
 
-    let shared_occurrence_set = shared_occurrences.iter().cloned().collect::<HashSet<_>>();
+    let replaced_parent_occurrences = parent_by_occurrence
+        .keys()
+        .filter(|occurrence| !shared_occurrences.contains(*occurrence))
+        .cloned()
+        .collect::<BTreeSet<_>>();
 
-    // One parent pointer copy + in-place retain of shared rows, then merge the
-    // tiny fresh set. Avoids building a second nearly-full filter vec.
-    let mut chunks = parent.chunks.chunks().to_vec();
-    chunks.retain(|chunk| shared_occurrence_set.contains(&chunk.anchor.file_occurrence_id));
-    let mut fresh_chunks = fresh_files
+    // Ordinary increments replace a tiny complement of the parent. Track that
+    // complement instead of hashing nearly every shared file and symbol.
+    let fresh_chunks = fresh_files
         .iter()
         .flat_map(|file| file.artifacts.chunks.chunks.iter().cloned())
         .collect::<Vec<_>>();
-    // Fresh set is tiny on ordinary increments (often one file); keep serial.
-    fresh_chunks.sort_by(|left, right| left.id.cmp(&right.id));
-    chunks = merge_sorted_chunk_arcs(chunks, fresh_chunks)?;
 
-    let shared_symbol_ptrs = shared_occurrences
+    let replaced_symbol_ptrs = replaced_parent_occurrences
         .iter()
         .filter_map(|occurrence| parent_by_occurrence.get(occurrence))
         .flat_map(|file| file.artifacts.symbols.iter())
         .map(Arc::as_ptr)
         .collect::<HashSet<_>>();
-    let mut symbols = parent.symbols.symbols.to_vec();
-    symbols.retain(|symbol| shared_symbol_ptrs.contains(&Arc::as_ptr(symbol)));
-    let mut fresh_symbols = fresh_files
+    let fresh_symbols = fresh_files
         .iter()
         .flat_map(|file| file.artifacts.symbols.iter().cloned())
         .collect::<Vec<_>>();
-    fresh_symbols.sort_by(|left, right| left.occurrence.cmp(&right.occurrence));
-    symbols = merge_sorted_symbol_arcs(symbols, fresh_symbols)?;
 
-    let chunks = GenerationChunkManifestV1::from_sorted_arcs(generation_id.clone(), chunks)
-        .map_err(CodeIndexProductionErrorV1::Increment)?;
-    let symbols = GenerationSymbolIndexV1::from_sorted_arcs(generation_id, symbols)
-        .map_err(CodeIndexProductionErrorV1::Lineage)?;
+    let chunks = GenerationChunkManifestV1::from_parent_delta_arcs(
+        generation_id.clone(),
+        &parent.chunks,
+        &replaced_parent_occurrences,
+        fresh_chunks,
+    )
+    .map_err(CodeIndexProductionErrorV1::Increment)?;
+    let symbols = GenerationSymbolIndexV1::from_parent_delta_arcs(
+        generation_id,
+        &parent.symbols,
+        &replaced_symbol_ptrs,
+        fresh_symbols,
+    )
+    .map_err(CodeIndexProductionErrorV1::Lineage)?;
     Ok((chunks, symbols, shared_occurrences))
-}
-
-fn merge_sorted_chunk_arcs(
-    left: Vec<Arc<CodeSearchChunkV1>>,
-    right: Vec<Arc<CodeSearchChunkV1>>,
-) -> Result<Vec<Arc<CodeSearchChunkV1>>, CodeIndexProductionErrorV1> {
-    let mut merged = Vec::with_capacity(left.len().saturating_add(right.len()));
-    let mut left = left.into_iter().peekable();
-    let mut right = right.into_iter().peekable();
-    while let (Some(l), Some(r)) = (left.peek(), right.peek()) {
-        match l.id.cmp(&r.id) {
-            std::cmp::Ordering::Less => merged.push(left.next().expect("peeked")),
-            std::cmp::Ordering::Greater => merged.push(right.next().expect("peeked")),
-            std::cmp::Ordering::Equal => {
-                return Err(CodeIndexProductionErrorV1::Increment(
-                    ChunkIncrementErrorV1::DuplicateChunk(l.id.clone()),
-                ));
-            }
-        }
-    }
-    merged.extend(left);
-    merged.extend(right);
-    Ok(merged)
-}
-
-fn merge_sorted_symbol_arcs(
-    left: Vec<Arc<LineageSymbolRecordV1>>,
-    right: Vec<Arc<LineageSymbolRecordV1>>,
-) -> Result<Vec<Arc<LineageSymbolRecordV1>>, CodeIndexProductionErrorV1> {
-    let mut merged = Vec::with_capacity(left.len().saturating_add(right.len()));
-    let mut left = left.into_iter().peekable();
-    let mut right = right.into_iter().peekable();
-    while let (Some(l), Some(r)) = (left.peek(), right.peek()) {
-        match l.occurrence.cmp(&r.occurrence) {
-            std::cmp::Ordering::Less => merged.push(left.next().expect("peeked")),
-            std::cmp::Ordering::Greater => merged.push(right.next().expect("peeked")),
-            std::cmp::Ordering::Equal => {
-                return Err(CodeIndexProductionErrorV1::Lineage(
-                    LineageResolutionErrorV1::DuplicateOccurrence,
-                ));
-            }
-        }
-    }
-    merged.extend(left);
-    merged.extend(right);
-    Ok(merged)
 }
 
 /// Pin one descriptor registry to the languages this generation can actually
