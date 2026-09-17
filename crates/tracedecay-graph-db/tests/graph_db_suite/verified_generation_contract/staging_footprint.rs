@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use tracedecay_graph_db::{
-    GraphGenerationManifestProvider, GraphTraversalDirection, TraversalRequest,
+    GraphGenerationManifestProvider, GraphTraversalDirection,
+    MAX_NATIVE_GENERATION_STAGE_MUTATIONS, MAX_VERIFIED_GENERATION_BATCH_MUTATIONS,
+    TraversalRequest,
 };
 
 use super::*;
@@ -1649,15 +1651,6 @@ fn a_cancelled_release_never_leaves_a_row_set_recovery_cannot_serve() {
     eprintln!("cancelled_release_partial_row_sets_observed={observed_partial}");
 }
 
-/// Mirrors the crate-private `limits::MAX_NATIVE_GENERATION_STAGE_MUTATIONS`,
-/// the mutation ceiling one native staging page flushes at. Kept in sync by
-/// hand; the geometry assertion below fails loudly if it drifts.
-const NATIVE_STAGE_PAGE_MUTATIONS: usize = 65_536;
-
-/// Mirrors `limits::MAX_VERIFIED_GENERATION_BATCH_MUTATIONS`, the rows one
-/// durable release transaction removes.
-const RELEASE_PAGE_MUTATIONS: usize = 4_096;
-
 /// A manifest in the two-page staging geometry an interrupted release can
 /// misrepresent: one full native page plus a second page wider than a single
 /// release transaction. Carries the same readable evidence entities and
@@ -1732,7 +1725,8 @@ fn two_page_manifest(
 /// leaves the partial row set in the container.
 #[test]
 fn a_partially_released_generation_is_repaired_from_its_manifest_and_swept() {
-    let entity_count = NATIVE_STAGE_PAGE_MUTATIONS + 2 * RELEASE_PAGE_MUTATIONS;
+    let entity_count =
+        MAX_NATIVE_GENERATION_STAGE_MUTATIONS + 2 * MAX_VERIFIED_GENERATION_BATCH_MUTATIONS;
     let temp = TempDir::new().unwrap();
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let mut authority = RelationalAuthority::default();
@@ -1768,7 +1762,7 @@ fn a_partially_released_generation_is_repaired_from_its_manifest_and_swept() {
     // bounded page.
     //
     // The budget is measured in cancellation *polls*, and a release page polls
-    // once per row it enumerates before it commits `RELEASE_PAGE_MUTATIONS` of
+    // once per row it enumerates before it commits `MAX_VERIFIED_GENERATION_BATCH_MUTATIONS` of
     // them -- so the first durable page costs on the order of the whole row
     // count in polls, not the few dozen a short linear walk reaches. Start at
     // that scale and double: the first budget that commits cannot reach a
@@ -1801,9 +1795,9 @@ fn a_partially_released_generation_is_repaired_from_its_manifest_and_swept() {
     let counts =
         partial.expect("an interrupted release must commit at least one durable entity page");
     assert!(
-        counts.0 >= NATIVE_STAGE_PAGE_MUTATIONS && counts.0 < full.0,
+        counts.0 >= MAX_NATIVE_GENERATION_STAGE_MUTATIONS && counts.0 < full.0,
         "this fixture must reach the state the count heuristic misreads: \
-         {counts:?} of {full:?}, first stage page ends at {NATIVE_STAGE_PAGE_MUTATIONS}"
+         {counts:?} of {full:?}, first stage page ends at {MAX_NATIVE_GENERATION_STAGE_MUTATIONS}"
     );
 
     assert!(registered.close().unwrap());

@@ -87,7 +87,7 @@ pub fn resources_list_result() -> Value {
             {
                 "uri": "tracedecay://schema",
                 "name": "SQLite Schema",
-                "description": "Installed project-store DDL for this binary, generated from the fresh-store shape create_schema admits. Code topology is not in these tables.",
+                "description": "SQLite tables, indexes, triggers, and views this binary creates, rendered from the migration inventory.",
                 "mimeType": "text/markdown"
             }
         ]

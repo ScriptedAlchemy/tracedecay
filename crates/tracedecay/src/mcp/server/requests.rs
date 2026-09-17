@@ -13,6 +13,7 @@ use tracedecay_mcp::{
     ToolResult, mark_semantic_tool_error, semantic_failure_reason, server::resources_list_result,
     tool_error_response, tool_result_has_semantic_error,
 };
+use tracedecay_runtime_core::db::migrations::render_expected_final_schema_markdown;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 /// Prefix of the out-of-band token-accounting block appended after a tool's
@@ -721,18 +722,13 @@ impl McpServer {
         )
     }
 
-    /// Returns the project-store schema as markdown rendered from the admitted
-    /// fresh-store inventory. There is no second document to keep in sync.
+    /// Returns the `SQLite` shape this binary creates, rendered from the migration inventory.
     pub(crate) fn read_resource_schema(id: Value) -> JsonRpcResponse {
-        match tracedecay_runtime_core::db::migrations::schema_resource_markdown() {
+        match render_expected_final_schema_markdown() {
             Ok(markdown) => {
                 Self::resource_contents(id, "tracedecay://schema", "text/markdown", &markdown)
             }
-            Err(error) => JsonRpcResponse::error(
-                id,
-                ErrorCode::InternalError,
-                format!("schema resource unavailable: {error}"),
-            ),
+            Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
         }
     }
 

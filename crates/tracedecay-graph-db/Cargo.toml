@@ -67,8 +67,9 @@ graph-disk-tier = ["grafeo-engine/spill"]
 # a flat address over the epoch's chunks, so an epoch grows to the 4 GiB a
 # u32 can reach and exhaustion is a typed error.
 #
-# The fix holds -- `tests/tiered_storage_rss.rs` commits 65,536-row pages,
-# twice the old ceiling, without panicking. It just does not pay off. The
+# The fix holds -- `tests/tiered_storage_rss.rs` commits full native staging
+# pages (`MAX_NATIVE_GENERATION_STAGE_MUTATIONS`), twice the old ~32 Ki
+# ceiling, without panicking. It just does not pay off. The
 # arena costs resident memory rather than saving it, because nothing here is
 # ever written to disk: measured with that harness on the fork, live VmRSS
 # with the store open runs +22% at 100k rows, +32% at 500k, and +28% at 1M

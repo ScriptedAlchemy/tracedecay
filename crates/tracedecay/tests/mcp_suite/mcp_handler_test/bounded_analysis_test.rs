@@ -14,10 +14,7 @@ use crate::support::*;
 use serde_json::{Value, json};
 use std::fmt::Write as _;
 use std::fs;
-
-/// Mirrors `crate::mcp::tools::MAX_RESPONSE_CHARS`, the point at which a tool
-/// response is replaced by a preview envelope plus a retrieval handle.
-const MAX_RESPONSE_CHARS: usize = 15_000;
+use tracedecay_mcp::MAX_RESPONSE_CHARS;
 
 fn assert_not_truncated(text: &str, tool: &str) {
     let payload: Value = serde_json::from_str(text)

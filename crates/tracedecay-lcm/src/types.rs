@@ -367,15 +367,12 @@ pub struct LcmSummaryConvergenceStatus {
 }
 
 /// Default fresh-tail size applied when the host omits `fresh_tail_count`.
-/// Mirrors `compression.rs` `DEFAULT_FRESH_TAIL_COUNT`; keep in sync.
 pub const LCM_DEFAULT_FRESH_TAIL_COUNT: usize = 2;
 
 /// Default condensation fan-in applied when the host omits `summary_fan_in`.
-/// Mirrors `compression.rs` `DEFAULT_SUMMARY_FAN_IN`; keep in sync.
 pub const LCM_DEFAULT_SUMMARY_FAN_IN: usize = 4;
 
-/// Compression-boundary skip cooldown in seconds. Mirrors `compression.rs`
-/// `COMPRESSION_BOUNDARY_COOLDOWN_SECONDS`; keep in sync.
+/// Compression-boundary skip cooldown in seconds.
 pub const LCM_COMPRESSION_BOUNDARY_COOLDOWN_SECONDS: i64 = 60;
 
 /// Raw-store size diagnostics mirroring the hermes-lcm `lcm_status` `store`

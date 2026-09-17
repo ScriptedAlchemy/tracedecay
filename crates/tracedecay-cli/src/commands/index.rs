@@ -128,14 +128,22 @@ fn annotate_reset_required_init_error(
     if !is_reset_required {
         return error;
     }
+    let project_path = project_path.to_string_lossy();
+    let reset_command = shell_words::join([
+        "tracedecay",
+        "storage",
+        "reset-project-store",
+        "--project-root",
+        project_path.as_ref(),
+        "--yes",
+    ]);
+    let init_command = shell_words::join(["tracedecay", "init", project_path.as_ref()]);
     tracedecay_domain::errors::TraceDecayError::Config {
         message: format!(
             "{error}\n\nthis store cannot be opened until it is reset; run:\n  \
-             tracedecay storage reset-project-store --project-root {} --yes\n\
-             then re-run `tracedecay init {}` — sessions re-ingest from the \
-             preserved transcripts",
-            project_path.display(),
-            project_path.display()
+             {reset_command}\n\
+             then re-run `{init_command}` — sessions re-ingest from the \
+             preserved transcripts"
         ),
     }
 }
@@ -268,9 +276,7 @@ async fn code_index_reconciliation_is_optional(
 #[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod init_bootstrap_tests {
-    use super::*;
-
-    fn test_handshake(
+    use super::*;    fn test_handshake(
         project_path: &Path,
         profile_root: &Path,
     ) -> tracedecay_daemon_protocol::DaemonHandshake {

@@ -63,16 +63,12 @@ use tracedecay_graph_db::{
     GraphCancellation, GraphDbLeaseV1, GraphEntity, GraphEntityId, GraphLabel, GraphMutation,
     GraphNamespace, GraphProjectionId, GraphProperty, GraphPropertyName, GraphRelation,
     GraphRelationId, GraphRelationKind, GraphTraversalDirection, GraphWatermark, GraphWriteBatch,
-    NeverCancelled, SourceGeneration, TraversalRequest,
+    MAX_NATIVE_GENERATION_STAGE_MUTATIONS, NeverCancelled, SourceGeneration, TraversalRequest,
 };
 
 mod support;
 
 use support::RegisteredGraph;
-
-/// Mirrors the crate-private `limits::MAX_NATIVE_GENERATION_STAGE_MUTATIONS`,
-/// the page size the native generation runtime actually flushes at.
-const PRODUCTION_STAGE_PAGE: usize = 65_536;
 
 /// Default row count when `TRACEDECAY_ATREST_ROWS` is unset.
 const DEFAULT_ROWS: usize = 500_000;
@@ -195,8 +191,11 @@ impl Mode {
 /// Stages `rows` entities and `rows / RELATION_DIVISOR` relations in
 /// production-sized pages.
 fn stage(db: &GraphDbLeaseV1, rows: usize) {
-    for (page, start) in (0..rows).step_by(PRODUCTION_STAGE_PAGE).enumerate() {
-        let end = (start + PRODUCTION_STAGE_PAGE).min(rows);
+    for (page, start) in (0..rows)
+        .step_by(MAX_NATIVE_GENERATION_STAGE_MUTATIONS)
+        .enumerate()
+    {
+        let end = (start + MAX_NATIVE_GENERATION_STAGE_MUTATIONS).min(rows);
         let mutations = (start..end)
             .map(|index| GraphMutation::UpsertEntity(entity(index)))
             .collect();
@@ -205,8 +204,11 @@ fn stage(db: &GraphDbLeaseV1, rows: usize) {
     }
 
     let relations = rows / RELATION_DIVISOR;
-    for (page, start) in (0..relations).step_by(PRODUCTION_STAGE_PAGE).enumerate() {
-        let end = (start + PRODUCTION_STAGE_PAGE).min(relations);
+    for (page, start) in (0..relations)
+        .step_by(MAX_NATIVE_GENERATION_STAGE_MUTATIONS)
+        .enumerate()
+    {
+        let end = (start + MAX_NATIVE_GENERATION_STAGE_MUTATIONS).min(relations);
         let mutations = (start..end)
             .map(|index| GraphMutation::UpsertRelation(relation(index)))
             .collect();
@@ -361,7 +363,7 @@ fn at_rest_reopen_probe() {
     println!("=== at-rest reopen probe ===");
     println!("mode              : {}", mode.label());
     println!(
-        "rows              : {rows} entities + {relations} relations, pages of {PRODUCTION_STAGE_PAGE}"
+        "rows              : {rows} entities + {relations} relations, pages of {MAX_NATIVE_GENERATION_STAGE_MUTATIONS}"
     );
     println!("--- staging ---");
     println!("stage wall        : {:.2}s", stage_wall.as_secs_f64());
