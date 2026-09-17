@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatCount, splitCount, splitSignedBytes } from './format.ts';
+import { formatCount, formatMicrosUtcClock, splitCount, splitSignedBytes } from './format.ts';
 
 /**
  * The magnitude language is shared so two surfaces cannot quietly abbreviate the
@@ -26,6 +26,18 @@ describe('count thresholds', () => {
   it('answers an absent count with an em dash, never a zero', () => {
     expect(formatCount(null, 1_000)).toBe('—');
     expect(splitCount(undefined, 1_000)).toEqual({ value: '—' });
+  });
+});
+
+describe('formatMicrosUtcClock', () => {
+  it('prints a microsecond stamp as a UTC ledger column with seconds', () => {
+    expect(formatMicrosUtcClock(1_746_807_242_000_000)).toBe('2025-05-09 16:14:02');
+    expect(formatMicrosUtcClock(0)).toBe('1970-01-01 00:00:00');
+  });
+
+  it('answers an unreported stamp with an em dash', () => {
+    expect(formatMicrosUtcClock(null)).toBe('—');
+    expect(formatMicrosUtcClock(Number.NaN)).toBe('—');
   });
 });
 
