@@ -13,7 +13,8 @@ use tempfile::TempDir;
 use tracedecay_code_index_retention::code_index_generations::{
     CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1, DurablePublicationPointerV1,
     MAX_CODE_GENERATION_RETENTION_BATCH_V1, acquire_code_generation_store_lock,
-    durable_generation_index_digest, execute_code_generation_retention_cancellable,
+    acquire_code_generation_store_read_lock, durable_generation_index_digest,
+    execute_code_generation_retention_cancellable,
     prepare_next_code_generation_retention_cancellable, run_code_generation_retention,
 };
 use tracedecay_domain::{
@@ -518,6 +519,69 @@ fn lazy_lexical_source_cancels_when_retention_retires_its_unread_segments() {
         "corrupt authority is terminal, never transient store contention"
     );
     assert_eq!(corrupt_source.cursor(), &cursor);
+}
+
+#[test]
+fn generation_decode_shares_the_store_and_waits_for_an_exclusive_writer() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn ready() -> usize { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    drop(scheduler);
+
+    let open_cold = |root: &Path, project: &Path| {
+        super::super::DaemonCodeIndexPublicationStoreV1::new(
+            root,
+            project,
+            SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+                .expect("sanitizer revision"),
+        )
+        .expect("open cold publication store")
+    };
+
+    // `new` takes the exclusive store lock while it records the scope root, so
+    // the store must be open before either probe hold or this test deadlocks.
+    let publication = open_cold(store.path(), fixture.path());
+    let shared = acquire_code_generation_store_read_lock(store.path()).expect("shared hold");
+    let (sent, received) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        sent.send(publication.load_active_shared())
+            .expect("return shared decode");
+    });
+    let decoded = received
+        .recv_timeout(Duration::from_secs(5))
+        .expect("a shared generation decode must finish while another shared hold is still taken");
+    assert!(
+        decoded.expect("shared decode").is_some(),
+        "published generation must decode under a shared store hold"
+    );
+    drop(shared);
+    reader.join().expect("shared reader exits");
+
+    let publication = open_cold(store.path(), fixture.path());
+    let exclusive = acquire_code_generation_store_lock(store.path()).expect("exclusive hold");
+    let (sent, received) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        sent.send(publication.load_active_shared())
+            .expect("return exclusive-wait decode");
+    });
+    assert!(
+        matches!(
+            received.recv_timeout(Duration::from_millis(400)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ),
+        "an exclusive publication hold must park generation decode"
+    );
+    drop(exclusive);
+    let decoded = received
+        .recv_timeout(Duration::from_secs(5))
+        .expect("generation decode resumes once the exclusive hold is released");
+    reader.join().expect("exclusive reader exits");
+    assert!(decoded.expect("decode after unlock").is_some());
 }
 
 #[test]
