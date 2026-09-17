@@ -276,7 +276,9 @@ async fn code_index_reconciliation_is_optional(
 #[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod init_bootstrap_tests {
-    use super::*;    fn test_handshake(
+    use super::*;
+
+    fn test_handshake(
         project_path: &Path,
         profile_root: &Path,
     ) -> tracedecay_daemon_protocol::DaemonHandshake {
@@ -490,6 +492,46 @@ mod init_bootstrap_tests {
         assert!(!code_index_reconciliation_is_optional(&git, &unavailable).await);
         assert!(!code_index_reconciliation_is_optional(&nested_git, &unavailable).await);
         assert!(!code_index_reconciliation_is_optional(&non_git, &unrelated).await);
+    }
+
+    #[test]
+    fn reset_remedy_commands_survive_paths_with_spaces_and_apostrophes() {
+        let error = annotate_reset_required_init_error(
+            tracedecay_domain::errors::TraceDecayError::ResetRequired {
+                project_id: "project-fixture".to_owned(),
+            },
+            Path::new("/repo/it's an example"),
+        );
+
+        let text = error.to_string();
+        assert!(text.contains("this store cannot be opened until it is reset"));
+        let reset_command = text
+            .split_once("run:\n  ")
+            .expect("reset command must be named")
+            .1;
+        let (reset_command, then_part) = reset_command
+            .split_once("\n")
+            .expect("reset command ends before the init remedy");
+        assert_eq!(
+            shell_words::split(reset_command).unwrap(),
+            [
+                "tracedecay",
+                "storage",
+                "reset-project-store",
+                "--project-root",
+                "/repo/it's an example",
+                "--yes",
+            ]
+        );
+        let init_command = then_part
+            .split_once("`tracedecay init ")
+            .map(|(_, tail)| tail)
+            .and_then(|tail| tail.split_once('`').map(|(command, _)| command))
+            .expect("init remedy must be named");
+        assert_eq!(
+            shell_words::split(&format!("tracedecay init {init_command}")).unwrap(),
+            ["tracedecay", "init", "/repo/it's an example"]
+        );
     }
 }
 

@@ -542,4 +542,3 @@ mod fingerprint_tests {
         );
     }
 }
-
