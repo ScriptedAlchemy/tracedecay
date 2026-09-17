@@ -219,31 +219,51 @@ export function RegistryScene({
     const neighborhood = inspectedId === null
       ? null
       : new Set([inspectedId, ...(model.pathsByBody.get(inspectedId) ?? []).flatMap((path) => [path.from, path.to])]);
+    // A narrow aperture has no room for secondary lines at all.
+    const roomy = viewport.width >= 480;
     const candidates: Array<LabelCandidate & { body: SceneBody; lines: readonly string[]; dimmed: boolean }> = model.bodies.map((body) => {
       const anchor = project(camera, viewport, spreadX(body.x, spread), body.y);
       const crownPx = body.radius / camera.scale;
       const lines =
         body.kind === 'repository'
           ? ['hub · massless']
-          : detailed || byMass.includes(body.id)
+          : roomy && (detailed || byMass.includes(body.id))
             ? detail(body)
             : [];
-      const longest = Math.max(body.label.length, ...lines.map((line) => line.length));
+      const longest = Math.max(body.label.length + (body.kind === 'repository' ? 5 : 0), ...lines.map((line) => line.length));
+      const width = longest * 6.6 + 8;
+      const height = 14 + lines.length * 12;
+      const offset = crownPx * (body.kind === 'repository' ? 2.6 : 1.05) + 6;
+      // Beside the crown first, then the other side, then under the tail,
+      // then above the crown: the first placement that prints whole wins.
+      const placements = [
+        { px: anchor.px + offset, py: anchor.py - 8 },
+        { px: anchor.px - offset - width, py: anchor.py - 8 },
+        { px: anchor.px - width / 2, py: anchor.py + crownPx * (body.kind === 'repository' ? 2.6 : 1.9) + 4 },
+        { px: anchor.px - width / 2, py: anchor.py - crownPx * (body.kind === 'repository' ? 2.6 : 1.1) - height - 4 },
+      ];
       return {
         id: body.id,
         priority: body.kind === 'repository' ? Number.MAX_SAFE_INTEGER : body.mass,
-        px: anchor.px + crownPx * (body.kind === 'repository' ? 2.6 : 1.05) + 6,
-        py: anchor.py - 8,
-        width: longest * 6.6 + 8,
-        height: 14 + lines.length * 12,
+        placements,
+        width,
+        height,
         forced: body.id === inspectedId || emphasis?.has(body.id) === true,
         body,
         lines,
         dimmed: (neighborhood !== null && !neighborhood.has(body.id)) || (emphasis !== null && !emphasis.has(body.id)),
       };
     });
-    const chosen = selectLabels(candidates, viewport, labelBudget(zoom, model.bodies.length));
-    return candidates.filter((candidate) => chosen.has(candidate.id));
+    // In a repository view only the members and an inspected body are named;
+    // everything else has receded to context and keeps its name in the rail.
+    const named = emphasis === null
+      ? candidates
+      : candidates.filter((candidate) => emphasis.has(candidate.id) || candidate.id === inspectedId);
+    const chosen = selectLabels(named, viewport, labelBudget(zoom, model.bodies.length, viewport));
+    return named.flatMap((candidate) => {
+      const placed = chosen.get(candidate.id);
+      return placed ? [{ ...candidate, px: placed.px, py: placed.py, side: placed.placement }] : [];
+    });
   }, [view, model, detail, inspectedId, emphasis]);
 
   if (model.bodies.length === 0) {
@@ -274,7 +294,7 @@ export function RegistryScene({
         role="img"
         aria-label={ariaLabel}
         className={cn(
-          'relative min-h-0 flex-1 cursor-crosshair overflow-hidden rounded-[var(--radius-card)] border border-edge-subtle/60',
+          'relative min-h-0 flex-1 cursor-crosshair overflow-hidden rounded-[var(--radius-card)] border border-edge-subtle/60 md:max-h-[62vw] lg:max-h-none',
           'td-graph-field td-grain td-scanlines shadow-[var(--shadow-field)]',
           canvasClassName,
         )}
@@ -335,8 +355,10 @@ export function RegistryScene({
                   'absolute flex flex-col leading-[12px] transition-opacity duration-150',
                   label.body.kind === 'repository' ? 'text-text-secondary' : 'text-text-primary',
                   label.dimmed && 'opacity-40',
+                  label.side === 1 && 'items-end text-right',
+                  label.side >= 2 && 'items-center text-center',
                 )}
-                style={{ left: label.px, top: label.py }}
+                style={{ left: label.px, top: label.py, width: label.width }}
               >
                 <span className={cn('td-value whitespace-nowrap text-[11px]', label.id === inspectedId && 'text-accent')}>
                   {label.body.kind === 'repository' ? `repo:${label.body.label}` : label.body.label}
@@ -404,6 +426,11 @@ function AxisOverlay({ model, view }: { model: RegistrySceneModel; view: SceneVi
   const top = project(camera, viewport, 0, model.massAxis.high);
   const bottom = project(camera, viewport, 0, model.massAxis.low);
   const axisX = project(camera, viewport, spreadX(model.extent.x[0], spread) + 0.06, 0).px;
+  // Tick text degrades with the room a column has: both lines, the bound
+  // alone, or dividers only. The caption below the field always prints every
+  // column and its count in the DOM flow.
+  const columnPx = spread / camera.scale;
+  const tickLines = columnPx >= 104 ? 2 : columnPx >= 58 ? 1 : 0;
   return (
     <svg
       aria-hidden
@@ -426,19 +453,23 @@ function AxisOverlay({ model, view }: { model: RegistrySceneModel; view: SceneVi
           />
         );
       })}
-      {model.columns.map((column) => {
-        const { px } = project(camera, viewport, spreadX(column.x, spread), 0);
-        return (
-          <g key={column.id} transform={`translate(${px} 14)`} textAnchor="middle" className="td-legend">
-            <text fill="currentColor" fillOpacity={0.9} fontSize={9} letterSpacing="0.14em">
-              {column.bound.toUpperCase()}
-            </text>
-            <text y={12} fill="currentColor" fillOpacity={0.6} fontSize={9}>
-              {column.label} · {column.count}
-            </text>
-          </g>
-        );
-      })}
+      {tickLines > 0
+        ? model.columns.map((column) => {
+            const { px } = project(camera, viewport, spreadX(column.x, spread), 0);
+            return (
+              <g key={column.id} transform={`translate(${px} 14)`} textAnchor="middle" className="td-legend">
+                <text fill="currentColor" fillOpacity={0.9} fontSize={9} letterSpacing="0.14em">
+                  {column.bound.toUpperCase()}
+                </text>
+                {tickLines > 1 ? (
+                  <text y={12} fill="currentColor" fillOpacity={0.6} fontSize={9}>
+                    {column.label} · {column.count}
+                  </text>
+                ) : null}
+              </g>
+            );
+          })
+        : null}
       <line
         x1={axisX}
         x2={axisX}
