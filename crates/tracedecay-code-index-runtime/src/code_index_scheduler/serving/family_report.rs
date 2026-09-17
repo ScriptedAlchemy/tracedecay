@@ -268,7 +268,7 @@ fn report_path_matches(path: &str, scope: Option<&str>, include_generated_paths:
         && (include_generated_paths || !is_generated_path(path))
 }
 
-fn interrupt_family_batch(
+pub(super) fn interrupt_family_batch(
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), RetrievalPortError> {
     if control.is_cancelled() {
