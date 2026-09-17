@@ -813,6 +813,19 @@ fn is_terminal_publication_authority_park(parked: &CodeIndexConvergenceParkedV1)
     parked.blocked_reason == Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt)
 }
 
+/// Whether `slot` holds the terminal publication-authority park.
+///
+/// Admission (`publication_authority_reset`) and the background worker share
+/// this read. A worker-local bool only the observing pass can set would keep
+/// reconciling a park planted by another path, drifting from the authority
+/// hooks already refuse.
+fn publication_authority_terminal(slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>) -> bool {
+    slot.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(is_terminal_publication_authority_park)
+}
+
 /// Record one observation of a deterministic contract violation on a mounted
 /// worktree's park slot.
 ///
@@ -953,6 +966,31 @@ mod terminal_publication_park_tests {
         assert_eq!(
             parked.blocked_reason,
             Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt)
+        );
+    }
+
+    #[test]
+    fn publication_authority_terminal_reads_the_shared_park() {
+        let slot = RwLock::new(None);
+        assert!(!publication_authority_terminal(&slot));
+        *slot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(terminal_park("planted"));
+        assert!(publication_authority_terminal(&slot));
+        *slot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(CodeIndexConvergenceParkedV1 {
+                reason: "resident".to_owned(),
+                blocked_reason: Some(CodeIndexBuildBlockedReasonV1::ResidentMemory),
+                remediation: "free memory".to_owned(),
+                parked_at_micros: 1,
+                observed_passes: 1,
+                retries_on_wake: true,
+            });
+        assert!(
+            !publication_authority_terminal(&slot),
+            "only PublicationAuthorityCorrupt is the terminal park"
         );
     }
 
@@ -2578,10 +2616,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
-            .filter(|parked| {
-                parked.blocked_reason
-                    == Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt)
-            })
+            .filter(is_terminal_publication_authority_park)
     }
 
     #[cfg(any(test, feature = "test-helpers"))]

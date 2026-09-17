@@ -35,7 +35,7 @@ use super::{
     PendingWakeV1, PublishedTextProjectionOutcomeV1, ServingSwapOutcomeV1,
     TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1, clear_convergence_park,
     convergence_park_retries_on_wake, is_repeated_conflict_verdict, park_convergence,
-    retained_noop_requires_follow_up_wake,
+    publication_authority_terminal, retained_noop_requires_follow_up_wake,
 };
 
 impl CodeIndexSchedulerRegistryV1 {
@@ -385,7 +385,6 @@ impl CodeIndexSchedulerRegistryV1 {
             // artifact build. Releasing that capacity emits no wake, so this
             // worker must schedule its own.
             let mut capacity_retry = ReconcileCapacityRetryV1::new();
-            let mut publication_authority_terminal = false;
             // The last arrival this worker restored for a nothing-seated
             // warming outcome. A quiet remount's seat pass restores its
             // arrival exactly once so the next pass can restore and warm the
@@ -428,7 +427,10 @@ impl CodeIndexSchedulerRegistryV1 {
                     .await;
                     return;
                 }
-                if publication_authority_terminal {
+                // The shared park is the terminal authority admission already
+                // refuses. Reading it here, instead of a bool only this pass
+                // can set, suppresses a planted or cross-path corruption too.
+                if publication_authority_terminal(&worker_convergence_park) {
                     let _ = Self::take_pending_arrival(
                         &worker_pending_wake,
                         CodeIndexCadenceTriggerV1::Mount,
@@ -2095,9 +2097,9 @@ impl CodeIndexSchedulerRegistryV1 {
                                         CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt,
                                     );
                                 // Mid-wait branch publication rechecks the park on
-                                // serving-generation notifications.
+                                // serving-generation notifications. The next
+                                // wake reads that same slot; no local flag.
                                 worker_serving_generation_changed.send_replace(());
-                                publication_authority_terminal = true;
                             } else if transient_capacity {
                                 // Shared process capacity was held by another
                                 // holder when this pass asked for it. Releasing
@@ -2169,7 +2171,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         ),
                         Ok((Ok(_), _, _)) => {}
                     }
-                    if !publication_authority_terminal {
+                    if !publication_authority_terminal(&worker_convergence_park) {
                         // Restore arrival so the next pass measures this wake's full queue wait.
                         Self::restore_pending_arrival(&worker_pending_wake, arrival, trigger);
                     }

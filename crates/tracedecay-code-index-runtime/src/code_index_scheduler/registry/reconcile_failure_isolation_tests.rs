@@ -539,6 +539,55 @@ async fn corrupt_publication_authority_stops_after_one_attempt_and_reports_termi
     fixture.registry.shutdown().await;
 }
 
+/// A terminal park planted without a worker-observed failure must still stop
+/// the loop. Admission already refuses that slot; a stack flag the observing
+/// pass alone sets would keep dispatching reconcile against it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn planted_terminal_publication_park_suppresses_worker_reconcile() {
+    let fixture = Fixture::mount("project.reconcile-planted-terminal-park").await;
+    fixture
+        .plant_terminal_publication_park("planted before any reconcile")
+        .await;
+    let fault = fixture
+        .install_fault(ReconcileFaultKindV1::PublicationCorruption, usize::MAX)
+        .await;
+
+    fixture.wake_with_pending_arrival().await;
+    let deadline = tokio::time::Instant::now() + SETTLE_DEADLINE;
+    while fixture.pending_wake_micros().await != 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "planted terminal park did not drain the pending arrival"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    fixture.drive_external_wakes().await;
+    fixture.settle_for(TERMINATION_QUIET_WINDOW).await;
+
+    assert_eq!(
+        fault.attempts(),
+        0,
+        "the worker must read the shared PublicationAuthorityCorrupt park, not a local flag"
+    );
+    assert_eq!(
+        fixture.pending_wake_micros().await,
+        0,
+        "terminal suppression must leave no rebuild arrival"
+    );
+    assert!(
+        matches!(
+            fixture
+                .registry
+                .notify_hook_overflow(&fixture.project)
+                .await,
+            CodeIndexDemandAdmissionV1::Terminal(_)
+        ),
+        "admission and the worker must refuse the same planted park"
+    );
+
+    fixture.registry.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn corrupt_publication_without_build_progress_returns_terminal_admission() {
     let fixture = Fixture::mount("project.reconcile-cold-publication-corruption").await;
