@@ -186,6 +186,8 @@ pub struct ExtractedImportEvidenceV1 {
     #[serde(default)]
     pub is_public: bool,
     #[serde(default)]
+    pub is_restricted_public: bool,
+    #[serde(default)]
     pub is_glob: bool,
     pub namespace: ImportNamespaceV1,
     pub module_kind: ImportModuleKindV1,
@@ -203,6 +205,7 @@ impl Ord for ExtractedImportEvidenceV1 {
             .then_with(|| self.imported_name.cmp(&other.imported_name))
             .then_with(|| self.local_name.cmp(&other.local_name))
             .then_with(|| self.is_public.cmp(&other.is_public))
+            .then_with(|| self.is_restricted_public.cmp(&other.is_restricted_public))
             .then_with(|| self.is_glob.cmp(&other.is_glob))
             .then_with(|| self.namespace.cmp(&other.namespace))
             .then_with(|| self.module_kind.cmp(&other.module_kind))
