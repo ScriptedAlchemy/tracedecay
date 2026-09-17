@@ -385,6 +385,13 @@ impl CodeIndexSchedulerRegistryV1 {
             // artifact build. Releasing that capacity emits no wake, so this
             // worker must schedule its own.
             let mut capacity_retry = ReconcileCapacityRetryV1::new();
+            // Cache of the shared park, not a second authority. Seeded from the
+            // typed park so a remount or test plant is visible before the first
+            // pass; later writes to PublicationAuthorityCorrupt set this in the
+            // same breath as the park. Re-reading the lock on every ordinary
+            // wake is unnecessary and changes pass timing.
+            let mut publication_authority_terminal =
+                publication_authority_is_terminal(&worker_convergence_park);
             // The last arrival this worker restored for a nothing-seated
             // warming outcome. A quiet remount's seat pass restores its
             // arrival exactly once so the next pass can restore and warm the
@@ -427,7 +434,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     .await;
                     return;
                 }
-                if publication_authority_is_terminal(&worker_convergence_park) {
+                if publication_authority_terminal {
                     let _ = Self::take_pending_arrival(
                         &worker_pending_wake,
                         CodeIndexCadenceTriggerV1::Mount,
@@ -2096,6 +2103,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 // Mid-wait branch publication rechecks the park on
                                 // serving-generation notifications.
                                 worker_serving_generation_changed.send_replace(());
+                                publication_authority_terminal = true;
                             } else if transient_capacity {
                                 // Shared process capacity was held by another
                                 // holder when this pass asked for it. Releasing
@@ -2167,7 +2175,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         ),
                         Ok((Ok(_), _, _)) => {}
                     }
-                    if !publication_authority_is_terminal(&worker_convergence_park) {
+                    if !publication_authority_terminal {
                         // Restore arrival so the next pass measures this wake's full queue wait.
                         Self::restore_pending_arrival(&worker_pending_wake, arrival, trigger);
                     }
