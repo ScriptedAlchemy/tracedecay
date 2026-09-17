@@ -32,7 +32,7 @@ const BUTTON_CLASS =
   'min-h-[var(--touch-target-min)] rounded-sm border border-edge px-2.5 py-1 text-2xs text-text-primary hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:text-text-muted';
 
 const CELL = 'border border-edge-subtle p-1 align-top';
-const HEAD = `${CELL} td-legend text-left text-text-muted`;
+const HEAD = `${CELL} td-legend whitespace-normal text-left text-text-muted`;
 
 export function RunLookupPanel({
   runId,
@@ -247,11 +247,11 @@ function RunStepTable({ rows, runId }: { rows: RunStepRow[]; runId: string }) {
     <div className="flex min-w-0 flex-col gap-1 border-t border-edge-subtle pt-2">
       <span className="td-legend">decoded step sequence · {runId}</span>
       <div className="min-w-0 overflow-x-auto">
-        <table className="w-full min-w-[30rem] border-collapse text-3xs" data-workflow-run-steps={rows.length}>
+        <table className="w-full border-collapse text-3xs" data-workflow-run-steps={rows.length}>
           <caption className="sr-only">Steps of run {runId} in pinned definition order</caption>
           <thead>
             <tr>
-              {['#', 'step', 'status', 'started (utc)', 'duration', 'placement', 'effect'].map(
+              {['step', 'status · effect', 'started (utc) · duration', 'placement'].map(
                 (column) => (
                   <th key={column} scope="col" className={HEAD}>
                     {column}
@@ -268,53 +268,56 @@ function RunStepTable({ rows, runId }: { rows: RunStepRow[]; runId: string }) {
                 data-step-status={row.status}
                 className={cn(!row.declared && 'bg-surface-2')}
               >
-                <td className={cn(CELL, 'td-value text-text-muted')} data-cell="numeric">
-                  {row.index}
-                </td>
-                <th scope="row" className={cn(CELL, 'td-value text-left text-text-primary')}>
+                <th scope="row" className={cn(CELL, 'td-value break-words text-left text-text-primary')}>
+                  <span className="mr-1 text-text-muted" data-cell="numeric">
+                    {row.index}
+                  </span>
                   {row.stepId}
                   {row.declared ? null : (
-                    <span className="ml-1 text-text-muted">· not in pinned definition</span>
+                    <span className="block text-text-muted">not in pinned definition</span>
                   )}
                 </th>
                 <td className={CELL}>
-                  <span className="inline-flex items-center gap-1.5">
-                    <Lamp tone={stepStatusTone(row.status)} />
-                    <span className="uppercase tracking-[0.08em] text-text-secondary">
-                      {row.status === 'absent' ? 'absent from projection' : row.status}
+                  <span className="flex flex-col gap-0.5">
+                    <span className="inline-flex items-center gap-1.5">
+                      <Lamp tone={stepStatusTone(row.status)} />
+                      <span className="uppercase tracking-[0.08em] text-text-secondary">
+                        {row.status === 'absent' ? 'absent from projection' : row.status}
+                      </span>
                     </span>
+                    {row.effect === null ? (
+                      <span className="text-text-muted">no effect receipt</span>
+                    ) : (
+                      <span className="uppercase tracking-[0.08em] text-text-secondary">
+                        effect {row.effect}
+                      </span>
+                    )}
                   </span>
                 </td>
                 <td className={cn(CELL, 'td-value text-text-secondary')} data-cell="numeric">
-                  {row.startedAt === null ? (
-                    <span className="text-text-muted">not started</span>
-                  ) : (
-                    formatMicrosUtcClock(row.startedAt)
-                  )}
-                </td>
-                <td className={cn(CELL, 'td-value text-text-secondary')} data-cell="numeric">
-                  {row.durationMicros === null ? (
-                    <span className="text-text-muted">
-                      {row.startedAt === null ? '—' : 'not settled'}
-                    </span>
-                  ) : (
-                    formatDurationMicros(row.durationMicros)
-                  )}
+                  <span className="flex flex-col gap-0.5">
+                    {row.startedAt === null ? (
+                      <span className="text-text-muted">not started</span>
+                    ) : (
+                      <ClockStamp micros={row.startedAt} />
+                    )}
+                    {row.durationMicros === null ? (
+                      <span className="text-text-muted">
+                        {row.startedAt === null ? '—' : 'not settled'}
+                      </span>
+                    ) : (
+                      <span>{formatDurationMicros(row.durationMicros)}</span>
+                    )}
+                  </span>
                 </td>
                 <td className={cn(CELL, 'text-text-secondary')}>
                   {row.placement === null ? (
                     <span className="text-text-muted">no placement receipt</span>
                   ) : (
-                    <span className="td-value break-all">
-                      {row.placement.backend} · {row.placement.model}
+                    <span className="td-value flex flex-col gap-0.5 break-words">
+                      <span>{row.placement.backend}</span>
+                      <span className="text-text-muted">{row.placement.model}</span>
                     </span>
-                  )}
-                </td>
-                <td className={cn(CELL, 'text-text-secondary')}>
-                  {row.effect === null ? (
-                    <span className="text-text-muted">no effect receipt</span>
-                  ) : (
-                    <span className="uppercase tracking-[0.08em]">{row.effect}</span>
                   )}
                 </td>
               </tr>
@@ -323,6 +326,18 @@ function RunStepTable({ rows, runId }: { rows: RunStepRow[]; runId: string }) {
         </table>
       </div>
     </div>
+  );
+}
+
+/** A UTC instant that may break between its date and its time in a narrow
+ * column, so the table never scrolls just to keep one stamp on one line. The
+ * text content stays `YYYY-MM-DD HH:MM:SS`. */
+function ClockStamp({ micros }: { micros: number }) {
+  const [date, time] = formatMicrosUtcClock(micros).split(' ');
+  return (
+    <span className="inline-flex flex-wrap gap-x-1">
+      <span>{date}</span> <span>{time}</span>
+    </span>
   );
 }
 
@@ -341,7 +356,7 @@ function RunJournal({ events }: { events: readonly WorkflowRunEvent[] }) {
           tabIndex={0}
           className="max-h-56 min-w-0 overflow-auto"
         >
-          <table className="w-full min-w-[24rem] border-collapse text-3xs" data-workflow-run-journal={events.length}>
+          <table className="w-full min-w-[20rem] border-collapse text-3xs" data-workflow-run-journal={events.length}>
             <caption className="sr-only">Run journal events in sequence order</caption>
             <thead>
               <tr>

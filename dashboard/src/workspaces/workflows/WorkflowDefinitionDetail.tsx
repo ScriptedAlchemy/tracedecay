@@ -27,7 +27,7 @@ import {
  */
 
 const CELL = 'border border-edge-subtle p-1 align-top';
-const HEAD = `${CELL} td-legend text-left text-text-muted`;
+const HEAD = `${CELL} td-legend whitespace-normal text-left text-text-muted`;
 
 export function SelectedDefinitionPanel({
   entry,
@@ -194,7 +194,7 @@ export function VersionTrackPanel({
             onKeyDown={(event: KeyboardEvent) => {
               moveRovingFocus(tableRef.current, event);
             }}
-            className="w-full min-w-[30rem] border-collapse text-3xs"
+            className="w-full min-w-[26rem] border-collapse text-3xs"
             data-workflow-version-track={rows.length}
           >
             <caption className="sr-only">
@@ -284,23 +284,23 @@ export function VersionTrackPanel({
   );
 }
 
+/** The delta chip carries the reading; the full digest rides on `title` and is
+ * printed in full by the selected-definition panel for the selected version. */
 function PinDeltaCell({ delta, digest }: { delta: PinDelta; digest: string }) {
-  const short = `${digest.slice(0, 14)}…${digest.slice(-6)}`;
   return (
-    <span className="flex min-w-0 flex-col gap-0.5" title={digest} data-pin-delta={delta}>
-      <span
-        className={cn(
-          'w-fit border px-1 uppercase tracking-[0.1em]',
-          delta === 'changed'
-            ? 'border-solid border-state-partial text-text-secondary'
-            : delta === 'first'
-              ? 'border-dotted border-edge-subtle text-text-muted'
-              : 'border-dashed border-edge-subtle text-text-muted',
-        )}
-      >
-        {delta}
-      </span>
-      <span className="td-value truncate text-3xs text-text-muted">{short}</span>
+    <span
+      className={cn(
+        'inline-block w-fit border px-1 uppercase tracking-[0.1em]',
+        delta === 'changed'
+          ? 'border-solid border-state-partial text-text-secondary'
+          : delta === 'first'
+            ? 'border-dotted border-edge-subtle text-text-muted'
+            : 'border-dashed border-edge-subtle text-text-muted',
+      )}
+      title={digest}
+      data-pin-delta={delta}
+    >
+      {delta}
     </span>
   );
 }
@@ -341,7 +341,7 @@ export function DecodedStepsPanel({ definition }: { definition: WorkflowDefiniti
             moveRovingFocus(tableRef.current, event);
           }}
           onMouseLeave={() => setHovered(null)}
-          className="w-full min-w-[40rem] border-collapse text-3xs"
+          className="w-full min-w-[34rem] border-collapse text-3xs"
           data-workflow-steps={definition.steps.length}
         >
           <caption className="sr-only">

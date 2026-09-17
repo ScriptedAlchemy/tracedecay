@@ -86,7 +86,7 @@ export function WorkflowsPage() {
       <WorkspaceHeader
         path="workflows"
         title="Workflows"
-        note="definition ledger · immutable versions, pinned references, daemon-validated lifecycle, exact run lookup · /application/workflow"
+        note="definition ledger · immutable versions · pinned references · daemon-validated CAS · exact run lookup"
       />
 
       <div
@@ -162,7 +162,7 @@ export function WorkflowsPage() {
               onSelectDefinition={selectVersion}
             />
             {selectedDefinition === null ? (
-              <Panel legend="Lifecycle controls · daemon-validated CAS" bodyClassName="p-3">
+              <Panel legend="Lifecycle · daemon-validated CAS" bodyClassName="p-3">
                 <p className="text-3xs text-text-muted">
                   Activate, retire and reject act on one selected immutable version. Nothing is
                   offered until a definition is selected.
