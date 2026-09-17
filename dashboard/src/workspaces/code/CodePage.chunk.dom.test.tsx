@@ -120,7 +120,7 @@ describe('Code page trace chunk', () => {
     expect(await screen.findByRole('button', { name: HUB })).toBeTruthy();
     expect(
       screen
-        .getByRole('button', { name: 'Topology' })
+        .getByRole('button', { name: 'Cortex' })
         .getAttribute('aria-current'),
     ).toBe('page');
     // And the page takes input while the trace module is still unfetched.
@@ -141,9 +141,13 @@ describe('Code page trace chunk', () => {
     const user = userEvent.setup();
     renderCode();
 
-    // Opening a hub is the one gesture that enters the trace, so it is also
-    // the only thing that should fetch the module.
+    // Pinning a hub opens the inspector; its Trace control is the one gesture
+    // that enters the trace, so it is also the only thing that should fetch
+    // the module. The pin itself must not.
     await user.click(await screen.findByRole('button', { name: HUB }));
+    const trace = await screen.findByRole('button', { name: /trace call topography/i });
+    expect(chunk.requests).toBe(0);
+    await user.click(trace);
     const fallback = await screen.findByTestId('trace-chunk-fallback');
     expect(chunk.requests).toBe(1);
     expect(

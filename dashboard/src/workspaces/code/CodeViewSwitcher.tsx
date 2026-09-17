@@ -16,6 +16,11 @@ export function codeViewNote(view: CodeView): string {
   return CODE_VIEW_DEFINITIONS[view].note;
 }
 
+/**
+ * The lens tabs: engraved, uppercase, the active one framed in the signal
+ * hue with a cyan position bar. Sits in the workspace's control bar beside the
+ * symbol search, so it carries no border of its own.
+ */
 export function CodeViewSwitcher({
   active,
   focusAvailable,
@@ -30,7 +35,7 @@ export function CodeViewSwitcher({
   return (
     <nav
       aria-label="Code view"
-      className="flex min-w-0 flex-wrap items-center gap-1 border-b border-edge-subtle bg-surface-1 p-1"
+      className="flex min-w-0 flex-wrap items-center gap-1 p-1"
       data-code-view={active}
     >
       <ol className="flex min-w-0 flex-wrap items-center gap-1">
@@ -47,20 +52,27 @@ export function CodeViewSwitcher({
                 aria-current={selected ? 'page' : undefined}
                 aria-controls={CODE_VIEW_PANEL_ID}
                 disabled={disabled}
+                title={
+                  definition.status === 'pending'
+                    ? `${definition.label} is not mounted: ${definition.note}`
+                    : disabled
+                      ? `${definition.label} needs a pinned symbol`
+                      : definition.note
+                }
                 onClick={() => onSelect(view)}
                 className={cn(
-                  'flex min-h-[44px] items-center gap-2 border px-3 text-2xs',
+                  'relative flex min-h-[44px] min-w-24 items-center justify-center gap-2 border px-3 text-2xs uppercase tracking-[0.14em]',
                   'focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40',
                   selected
-                    ? 'border-edge-strong bg-surface-3 text-text-primary'
-                    : 'border-transparent text-text-secondary hover:bg-surface-2',
+                    ? 'border-accent/70 bg-surface-2 text-text-primary shadow-[inset_0_1px_0_var(--raw-membrane-lift)]'
+                    : 'border-edge-subtle text-text-secondary hover:border-edge-strong hover:bg-surface-2',
                 )}
               >
                 <span
                   aria-hidden
                   className={cn(
-                    'h-3 w-px shrink-0',
-                    selected ? 'bg-accent' : 'bg-edge-strong',
+                    'absolute inset-x-2 bottom-0 h-px',
+                    selected ? 'bg-accent' : 'bg-transparent',
                   )}
                 />
                 {definition.label}

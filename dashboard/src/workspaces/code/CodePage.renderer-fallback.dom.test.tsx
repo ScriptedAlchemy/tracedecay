@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resolveFixture } from '../../../stories/fixtures/data.ts';
@@ -60,7 +60,7 @@ describe('a browser without a WebGL context', () => {
     // rendering an empty box that reads as "no graph".
     expect(await screen.findByText(/no WebGL context/i)).toBeTruthy();
     expect(
-      screen.getByText(/symbol results and inspector below remain available/i),
+      screen.getByText(/symbol list and inspector beside this field remain available/i),
     ).toBeTruthy();
   });
 
@@ -79,16 +79,18 @@ describe('a browser without a WebGL context', () => {
     const user = userEvent.setup();
     renderCode();
 
-    // The hub cards are the accessible selection surface. Selecting one must
-    // open the inspector with the symbol's own identity — the selection model
+    // The hub cards are the accessible selection surface. Pinning one must
+    // open the inspector on the symbol's own identity — the selection model
     // is stable IDs in payloads, not anything the renderer owns.
     await user.click(
       await screen.findByRole('button', { name: /find_direct_child_by_kind/ }),
     );
 
-    expect(await screen.findByText('Symbol')).toBeTruthy();
+    const inspector = await screen.findByRole('complementary', { name: 'Inspector' });
+    expect(await within(inspector).findByText('selection · pinned')).toBeTruthy();
+    expect(within(inspector).getByRole('heading', { name: 'find_direct_child_by_kind' })).toBeTruthy();
     expect(
-      await screen.findByRole('button', { name: /tracing this symbol/i }),
+      within(inspector).getByRole('button', { name: /trace call topography/i }),
     ).toBeTruthy();
   });
 });

@@ -91,13 +91,23 @@ export interface TraceNeighborhood {
  * neighbour that fails leaves a hole that gets COUNTED rather than one that
  * takes the surface down.
  */
-export function useTraceNeighborhood(focusId: string): TraceNeighborhood {
-  const scope = useScope((s) => s.scope);
-  const root = useEnvelope(
+/**
+ * One symbol's hop-1 neighbourhood: the read the Cortex inspector lists callers
+ * and callees from, and the root read Trace expands. Same key and URL, so a
+ * symbol pinned in Cortex and then traced costs one request, not two.
+ */
+export function useSymbolNeighbors(focusId: string, options?: { enabled?: boolean }) {
+  return useEnvelope(
     ['graph', 'neighbors', focusId],
     neighborsUrl(focusId),
     GraphNeighborsPayloadV1Schema,
+    { enabled: options?.enabled ?? true },
   );
+}
+
+export function useTraceNeighborhood(focusId: string): TraceNeighborhood {
+  const scope = useScope((s) => s.scope);
+  const root = useSymbolNeighbors(focusId);
 
   const hop1 = useMemo<readonly string[]>(() => {
     const payload = envelopePayload(root.data);
