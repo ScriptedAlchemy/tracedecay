@@ -541,8 +541,24 @@ export function settingsScopeDirty(
   state: SettingsEditorState,
   scope: SettingsScope,
 ): boolean {
-  if (state.status === 'editor_unavailable') return false;
-  return planFor(state.authority, state.draft, scope).outcome !== 'unchanged';
+  const plan = settingsScopePlan(state, scope);
+  return plan !== null && plan.outcome !== 'unchanged';
+}
+
+/**
+ * The change this scope's draft currently amounts to, replanned live.
+ *
+ * This is the same plan `review_requested` freezes, computed without freezing
+ * it, so a surface can state validity — `ready`, `unchanged`, or `invalid`
+ * with the daemon-shaped field errors — while the value is still being typed.
+ * `null` while the read names no revision to plan against.
+ */
+export function settingsScopePlan(
+  state: SettingsEditorState,
+  scope: SettingsScope,
+): SettingsPlan | null {
+  if (state.status === 'editor_unavailable') return null;
+  return planFor(state.authority, state.draft, scope);
 }
 
 /* --------------------------------------------------------------- helpers --*/
@@ -587,7 +603,7 @@ function draftOf(authority: SettingsEditor): SettingsDraft {
   };
 }
 
-type SettingsPlan = SettingsChangePlan<
+export type SettingsPlan = SettingsChangePlan<
   ProjectSettingsChangeSet | UserSettingsChangeSet | CodeIndexWorkerSettingsChangeSet
 >;
 

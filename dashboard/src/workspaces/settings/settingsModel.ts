@@ -29,6 +29,7 @@
 
 import { z } from 'zod';
 import {
+  CodeIndexWorkerSelectionV1Schema,
   SettingsPayloadV1Schema,
   type CodeIndexWorkerSelectionV1,
   type CodeIndexWorkerStatusV1,
@@ -45,7 +46,21 @@ export type ConfigRowKind =
   | 'path'
   | 'string'
   | 'null'
-  | 'list';
+  | 'list'
+  /** The code-index worker selection: one `{mode, workers?}` value, one row. */
+  | 'selection';
+
+/**
+ * The provenance `/api/settings` serves for one key, and nothing more.
+ *
+ * `unserved` is the honest default: the payload states an effective value
+ * without saying which layer supplied it. Only `environment.variables[]`
+ * carries per-value provenance — `explicit` when the variable is set in the
+ * daemon's process environment (an override in force), `default` when it is
+ * unset so whatever default applies, applies. Nothing here is inferred from a
+ * value; a key whose provenance is not on the wire stays `unserved`.
+ */
+export type ServedProvenance = 'unserved' | 'explicit' | 'default';
 
 export interface ConfigRow {
   /** Dotted path within the section — unique, and the row's React key. */
@@ -59,6 +74,10 @@ export interface ConfigRow {
   readonly value: unknown;
   /** Scalar rendering + search text. Empty for groups. */
   readonly text: string;
+  /** Per-key provenance exactly as far as the wire states it. */
+  readonly provenance: ServedProvenance;
+  /** The daemon's own description, when the payload carries one for this key. */
+  readonly description: string | null;
   /** For groups: how many scalar settings live underneath. */
   count: number;
 }
@@ -303,11 +322,14 @@ const ORIGIN_ORDER: Readonly<Record<OriginKind, number>> = {
 };
 
 /**
- * Keys consumed by a dedicated renderer, so the generic row flattener does not
- * also emit them and show the same facts twice.
+ * Keys the generic flattener must skip because a dedicated builder emits their
+ * rows: `environment.variables[]` becomes one row per variable carrying the
+ * only served provenance, and `user.code_index_workers` becomes one selection
+ * row rather than a `mode`/`workers` pair that could be edited apart.
  */
 const SPECIALIZED: Readonly<Record<string, ReadonlySet<string>>> = {
   environment: new Set(['variables']),
+  user: new Set(['code_index_workers']),
 };
 
 /**
@@ -746,7 +768,10 @@ function buildSection(key: string, value: unknown): ConfigSection {
   let settingCount = 0;
   if (isRecord(value)) {
     for (const [childKey, childValue] of Object.entries(value)) {
-      if (skip?.has(childKey)) continue;
+      if (skip?.has(childKey)) {
+        settingCount += specializedRows(key, childKey, childValue, rows);
+        continue;
+      }
       settingCount += flatten(childKey, childValue, childKey, 0, rows);
     }
   } else {
@@ -923,8 +948,72 @@ function itemLabel(item: Record<string, unknown>, index: number): string {
   return `#${index}`;
 }
 
+/**
+ * Rows for the keys `SPECIALIZED` reserves. Returns the scalar count they
+ * contribute, like `flatten`.
+ *
+ * Environment variables are the one place the payload carries per-value
+ * provenance, so each becomes a row whose `provenance` is `explicit` (set in
+ * the process environment, value shown) or `default` (unset), taken from a
+ * literal `active: true` exactly as `readOverrides` takes it. The worker
+ * selection is one value on the wire and one CAS-guarded write, so it is one
+ * row; splitting it into `mode` and `workers` would offer two edits for a
+ * resource that accepts one.
+ */
+function specializedRows(
+  section: string,
+  key: string,
+  value: unknown,
+  out: ConfigRow[],
+): number {
+  if (section === 'environment' && key === 'variables') {
+    const overrides = readOverrides({ variables: value });
+    for (const item of overrides) {
+      out.push({
+        id: `${key}.${item.name}`,
+        label: item.name,
+        depth: 0,
+        kind: 'string',
+        value: item.value,
+        text: item.value ?? 'unset',
+        provenance: item.active ? 'explicit' : 'default',
+        description: item.description.length > 0 ? item.description : null,
+        count: 1,
+      });
+    }
+    return overrides.length;
+  }
+  if (section === 'user' && key === 'code_index_workers') {
+    const selection = CodeIndexWorkerSelectionV1Schema.safeParse(value);
+    if (!selection.success) {
+      out.push(scalarRow(key, key, 0, 'string', value, scalarText(value)));
+      return 1;
+    }
+    out.push(
+      scalarRow(key, key, 0, 'selection', selection.data, selectionText(selection.data)),
+    );
+    return 1;
+  }
+  return flatten(key, value, key, 0, out);
+}
+
+/** The worker selection as one readable value. */
+export function selectionText(selection: CodeIndexWorkerSelectionV1): string {
+  return selection.mode === 'automatic' ? 'automatic' : `exact · ${selection.workers} workers`;
+}
+
 function groupRow(label: string, id: string, depth: number): ConfigRow {
-  return { id, label, depth, kind: 'group', value: null, text: '', count: 0 };
+  return {
+    id,
+    label,
+    depth,
+    kind: 'group',
+    value: null,
+    text: '',
+    provenance: 'unserved',
+    description: null,
+    count: 0,
+  };
 }
 
 function scalarRow(
@@ -935,7 +1024,17 @@ function scalarRow(
   value: unknown,
   text: string,
 ): ConfigRow {
-  return { id, label, depth, kind, value, text, count: 1 };
+  return {
+    id,
+    label,
+    depth,
+    kind,
+    value,
+    text,
+    provenance: 'unserved',
+    description: null,
+    count: 1,
+  };
 }
 
 function classify(value: unknown): ConfigRowKind {

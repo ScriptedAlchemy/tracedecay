@@ -7,120 +7,62 @@
  * and a request exists only where the machine has reached `submitting` — which
  * it only does after re-deriving the confirmed change against the revision the
  * editor currently holds. There is no path from a click straight to a PATCH.
+ *
+ * It is a hook rather than a panel because the effective-configuration table,
+ * the inline review, and the inspector all read the same machine: the row that
+ * says `edited`, the panel that shows the frozen patch, and the register that
+ * says `review pending` are three views of one state.
  */
 
 import { useMutation } from '@tanstack/react-query';
-import { useEffect, useMemo, useReducer, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
 import type { SettingsPayloadV1 } from '../../contracts/generated.ts';
 import { mintBrowserIdempotencyKey } from '../../data/identity.ts';
-import { ProjectSettingsFields, UserSettingsFields } from './SettingsFields.tsx';
-import { SettingsReviewDialog } from './SettingsReviewDialog.tsx';
+import type { ScopeWritability } from '../../data/scope/store.ts';
 import {
   initialSettingsEditorState,
   reduceSettingsEditor,
-  settingsApplied,
-  settingsFieldErrors,
-  settingsRejection,
-  settingsScopeDirty,
   settingsSubmission,
+  type SettingsEditorAction,
+  type SettingsEditorState,
   type SettingsRoutes,
 } from './settingsEditorMachine.ts';
-import { buildSettingsEditor } from './settingsModel.ts';
+import { PROFILE_WORKER_WRITABILITY } from './settingsGates.ts';
+import { buildSettingsEditor, type SettingsScope } from './settingsModel.ts';
 import { applySettingsMutation } from './settingsMutation.ts';
-import type { ScopeWritability } from '../../data/scope/store.ts';
+import { authorityValue, withFieldValue, type SettingsBinding } from './settingsRows.ts';
 
-/**
- * Whether a settings scope may be written, and why not when it may not.
- *
- * Two independent authorities have to agree, and a boolean could only report
- * their conjunction — which left a disabled editor claiming "this dashboard is
- * not authorized" when the real obstacle was that the selected project is not
- * the active one. They stay distinguishable:
- *
- *   - `unauthorized`: the envelope advertises no apply action for this scope,
- *     so the daemon has no mounted authority for it.
- *   - `read_only` / `unknown`: the scope this dashboard is pointed at, from
- *     `scopeWritable`.
- */
-export type SettingsWriteGate =
-  | { readonly state: 'writable'; readonly target: string }
-  | { readonly state: 'unauthorized' }
-  | { readonly state: 'read_only'; readonly reason: string }
-  | { readonly state: 'unknown'; readonly reason: string };
-
-export interface WritableScopes {
-  readonly project: SettingsWriteGate;
-  readonly user: SettingsWriteGate;
-  readonly codeIndexWorkers: SettingsWriteGate;
+export interface SettingsEditorHandle {
+  readonly state: SettingsEditorState;
+  /** Replace one bound field in the draft. Drops any open review, as the machine does. */
+  readonly edit: (binding: SettingsBinding, value: unknown) => void;
+  /** Take the authority's value back for one bound field, leaving other edits alone. */
+  readonly revert: (binding: SettingsBinding) => void;
+  /** Freeze this scope's change against the held revision. */
+  readonly review: (scope: SettingsScope) => void;
+  readonly setConfirmed: (confirmed: boolean) => void;
+  readonly apply: () => void;
+  readonly dismiss: () => void;
+  /** Discard every draft and take the authority's current values. */
+  readonly reload: () => void;
 }
 
-const PROFILE_WORKER_WRITABILITY: ScopeWritability = {
-  state: 'writable',
-  target: 'your TraceDecay profile',
-};
-
-/**
- * Fold the two authorities into one gate.
- *
- * Server authorization is checked first: without an advertised apply action
- * there is nothing to write in any scope, so naming the scope would point at
- * the wrong obstacle. Exhaustive over `ScopeWritability`.
- */
-export function settingsWriteGate(
-  authorized: boolean,
-  writability: ScopeWritability,
-): SettingsWriteGate {
-  if (!authorized) return { state: 'unauthorized' };
-  switch (writability.state) {
-    case 'writable':
-      return { state: 'writable', target: writability.target };
-    case 'read_only':
-      return { state: 'read_only', reason: writability.reason };
-    case 'unknown':
-      return { state: 'unknown', reason: writability.reason };
-    default: {
-      const exhaustive: never = writability;
-      return exhaustive;
-    }
-  }
-}
-
-export function SettingsEditorPanel({
+export function useSettingsEditor({
   payload,
-  writable,
+  routes,
   writability,
-  readUrl,
-  codeIndexWorkerReadUrl,
-  projectPatchUrl,
-  userPatchUrl,
-  codeIndexWorkerPatchUrl,
   onApplied,
 }: {
   payload: SettingsPayloadV1;
-  writable: WritableScopes;
+  routes: SettingsRoutes;
   writability: ScopeWritability;
-  readUrl: string;
-  codeIndexWorkerReadUrl: string;
-  projectPatchUrl: string;
-  userPatchUrl: string;
-  codeIndexWorkerPatchUrl: string;
   onApplied: () => void;
-}) {
+}): SettingsEditorHandle {
   const authority = useMemo(() => buildSettingsEditor(payload), [payload]);
   const [state, dispatch] = useReducer(
     reduceSettingsEditor,
     authority,
     initialSettingsEditorState,
-  );
-  const routes = useMemo<SettingsRoutes>(
-    () => ({
-      readUrl,
-      codeIndexWorkerReadUrl,
-      projectPatchUrl,
-      userPatchUrl,
-      codeIndexWorkerPatchUrl,
-    }),
-    [readUrl, codeIndexWorkerReadUrl, projectPatchUrl, userPatchUrl, codeIndexWorkerPatchUrl],
   );
 
   useEffect(() => {
@@ -163,112 +105,68 @@ export function SettingsEditorPanel({
     });
   }, [state, routes, mutate, writability]);
 
-  if (state.status === 'editor_unavailable') {
-    return (
-      <section className="border-b border-edge-subtle p-3" aria-label="Supported settings changes">
-        <p className="text-xs text-state-error">
-          Settings editing requires project configuration values and configuration_revision_id
-          from GET /api/settings, plus user settings and configuration_revision_id from the same
-          authority. The response omitted at least one required field.
-        </p>
-      </section>
-    );
-  }
-
-  const applied = settingsApplied(state);
-  const rejection = settingsRejection(state);
-  const errors = settingsFieldErrors(state);
-
-  return (
-    <section
-      className="border-b border-edge-subtle bg-surface-0 p-3"
-      aria-labelledby="settings-editor-title"
-    >
-      <div className="mb-3 flex flex-wrap items-baseline gap-2">
-        <h2 id="settings-editor-title" className="td-title">
-          Supported settings changes
-        </h2>
-        <span className="text-2xs text-text-muted">
-          validate → review → confirm against the resource revision
-        </span>
-      </div>
-
-      {applied ? (
-        <div
-          role="status"
-          className="mb-3 flex flex-wrap gap-2 border border-state-ready/40 bg-surface-1 px-3 py-2 text-xs text-text-secondary"
-        >
-          <strong className="font-semibold text-text-primary">{applied.message}</strong>
-          {applied.resyncRecommended ? <span>Resync recommended</span> : null}
-          {applied.restartRecommended ? <span>Restart recommended</span> : null}
-        </div>
-      ) : null}
-
-      {rejection?.origin === 'server' ? (
-        // A refusal by the write authority is not the same statement as a
-        // value this form declined to send, so the surface names which one it
-        // is rather than leaving both as red text beside a field.
-        <p role="status" className="mb-3 text-xs text-state-error">
-          The daemon rejected this {rejection.scope} settings change: {rejection.detail}
-        </p>
-      ) : null}
-
-      <div className="grid gap-3 xl:grid-cols-2">
-        <ProjectSettingsFields
-          values={state.draft.project}
-          errors={errors}
-          dirty={settingsScopeDirty(state, 'project')}
-          writable={writable.project}
-          onChange={(values) => dispatch({ type: 'project_drafted', values })}
-          onReview={() =>
-            dispatch({
-              type: 'review_requested',
-              scope: 'project',
-              idempotencyKey: mintBrowserIdempotencyKey('dashboard-settings'),
-            })
-          }
-        />
-        <UserSettingsFields
-          values={state.draft.user}
-          codeIndexWorkers={state.draft.codeIndexWorkers}
-          errors={errors}
-          dirty={settingsScopeDirty(state, 'user')}
-          codeIndexWorkersDirty={settingsScopeDirty(state, 'code_index_workers')}
-          writable={writable.user}
-          codeIndexWorkersWritable={writable.codeIndexWorkers}
-          onChange={(values) => dispatch({ type: 'user_drafted', values })}
-          onCodeIndexWorkersChange={(values) =>
-            dispatch({ type: 'code_index_workers_drafted', values })
-          }
-          onReview={() =>
-            dispatch({
-              type: 'review_requested',
-              scope: 'user',
-              idempotencyKey: mintBrowserIdempotencyKey('dashboard-settings'),
-            })
-          }
-          onCodeIndexWorkersReview={() =>
-            dispatch({
-              type: 'review_requested',
-              scope: 'code_index_workers',
-              idempotencyKey: mintBrowserIdempotencyKey('dashboard-settings'),
-            })
-          }
-        />
-      </div>
-
-      <SettingsReviewDialog
-        state={state}
-        onConfirmedChange={(confirmed) => dispatch({ type: 'confirmation_set', confirmed })}
-        onDismiss={() => dispatch({ type: 'review_dismissed' })}
-        onApply={() => dispatch({ type: 'submit_started' })}
-        onReload={() => {
-          dispatch({ type: 'reloaded_from_authority' });
-          onApplied();
-        }}
-      />
-    </section>
+  const edit = useCallback(
+    (binding: SettingsBinding, value: unknown) => {
+      if (state.status === 'editor_unavailable') return;
+      dispatch(draftAction(binding, withFieldValue(state.draft, binding, value)));
+    },
+    [state],
   );
+
+  const revert = useCallback(
+    (binding: SettingsBinding) => {
+      if (state.status === 'editor_unavailable') return;
+      dispatch(
+        draftAction(
+          binding,
+          withFieldValue(state.draft, binding, authorityValue(state.authority, binding)),
+        ),
+      );
+    },
+    [state],
+  );
+
+  const review = useCallback((scope: SettingsScope) => {
+    dispatch({
+      type: 'review_requested',
+      scope,
+      idempotencyKey: mintBrowserIdempotencyKey('dashboard-settings'),
+    });
+  }, []);
+
+  const setConfirmed = useCallback((confirmed: boolean) => {
+    dispatch({ type: 'confirmation_set', confirmed });
+  }, []);
+  const apply = useCallback(() => dispatch({ type: 'submit_started' }), []);
+  const dismiss = useCallback(() => dispatch({ type: 'review_dismissed' }), []);
+  const reload = useCallback(() => {
+    dispatch({ type: 'reloaded_from_authority' });
+    onApplied();
+  }, [onApplied]);
+
+  return useMemo(
+    () => ({ state, edit, revert, review, setConfirmed, apply, dismiss, reload }),
+    [state, edit, revert, review, setConfirmed, apply, dismiss, reload],
+  );
+}
+
+/** The one draft action a binding's scope answers to. */
+function draftAction(
+  binding: SettingsBinding,
+  draft: ReturnType<typeof withFieldValue>,
+): SettingsEditorAction {
+  switch (binding.scope) {
+    case 'project':
+      return { type: 'project_drafted', values: draft.project };
+    case 'user':
+      return { type: 'user_drafted', values: draft.user };
+    case 'code_index_workers':
+      return { type: 'code_index_workers_drafted', values: draft.codeIndexWorkers };
+    default: {
+      const exhaustive: never = binding;
+      return exhaustive;
+    }
+  }
 }
 
 /** `applySettingsMutation` answers every failure it can name; anything that
