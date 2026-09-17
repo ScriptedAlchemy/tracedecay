@@ -322,6 +322,15 @@ const ORIGIN_ORDER: Readonly<Record<OriginKind, number>> = {
 };
 
 /**
+ * Top-level payload members that are write receipts, not configuration groups.
+ * `settings_api.rs` sets them on the envelope a PATCH answers with, and the
+ * mutation reads them into the applied record; rendered as sections they
+ * appeared as a one-row group named "Restart recommended" after every worker
+ * write, counted among the settings.
+ */
+const RECEIPT_FLAGS: ReadonlySet<string> = new Set(['resync_recommended', 'restart_recommended']);
+
+/**
  * Keys the generic flattener must skip because a dedicated builder emits their
  * rows: `environment.variables[]` becomes one row per variable carrying the
  * only served provenance, and `user.code_index_workers` becomes one selection
@@ -379,6 +388,7 @@ export function buildSettingsModel(payload: unknown): SettingsModel {
   }
   const sections: ConfigSection[] = [];
   for (const [key, value] of Object.entries(payload)) {
+    if (RECEIPT_FLAGS.has(key)) continue;
     sections.push(buildSection(key, value));
   }
   const ordered = sections

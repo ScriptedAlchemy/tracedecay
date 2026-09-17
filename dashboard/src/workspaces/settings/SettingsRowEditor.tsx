@@ -193,6 +193,12 @@ function WorkerSelectionEditor({
           ? `The running daemon admits up to ${maximum} exact workers, bounded by ${status.available_logical_cpus} logical CPUs and ${status.memory_safe_workers} memory-safe workers.`
           : 'Current CPU and memory admission limits are unavailable; an exact count is judged when the daemon restarts.'}
       </p>
+      {status?.environment_override_workers != null ? (
+        <p className="border border-state-unsupported-schema bg-surface-0 p-2 text-2xs text-text-primary">
+          TRACEDECAY_INDEX_WORKERS={status.environment_override_workers} overrides the persisted
+          worker selection for this running daemon.
+        </p>
+      ) : null}
       <FieldError id={errorId} error={error} />
     </fieldset>
   );

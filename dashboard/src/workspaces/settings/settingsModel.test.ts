@@ -59,12 +59,52 @@ describe('Settings read model', () => {
     expect(model.activeOverrides).toBe(1);
   });
 
-  it('does not double-report environment variables as generic rows', () => {
-    const model = buildSettingsModel(payload);
+  it('reports each environment variable once, as a row carrying the served provenance', () => {
+    const model = buildSettingsModel({
+      environment: {
+        pricing_offline: true,
+        variables: [
+          { name: 'A', active: true, value: '1', description: 'set' },
+          { name: 'C', active: false, value: null, description: 'unset' },
+        ],
+      },
+    });
     const environment = model.sections.find((s) => s.id === 'environment');
-    expect(environment?.rows.some((row) => row.id.startsWith('variables'))).toBe(false);
-    // The plain scalars in the same group are still reported.
-    expect(environment?.rows.map((r) => r.label)).toContain('pricing_offline');
+    const variables = environment?.rows.filter((row) => row.id.startsWith('variables.')) ?? [];
+    expect(variables.map((row) => [row.id, row.provenance, row.text, row.description])).toEqual([
+      ['variables.A', 'explicit', '1', 'set'],
+      ['variables.C', 'default', 'unset', 'unset'],
+    ]);
+    // No generic flattening of the array beside the dedicated rows.
+    expect(environment?.rows.filter((row) => row.id.startsWith('variables[')).length).toBe(0);
+    // The plain scalars in the same group are still reported, and say `unserved`.
+    const pricing = environment?.rows.find((r) => r.label === 'pricing_offline');
+    expect(pricing?.provenance).toBe('unserved');
+    expect(environment?.settingCount).toBe(3);
+  });
+
+  it('reports the worker selection as one row rather than a mode/workers pair', () => {
+    const model = buildSettingsModel(payload);
+    const user = model.sections.find((s) => s.id === 'user');
+    const selection = user?.rows.find((row) => row.id === 'code_index_workers');
+    expect(selection?.kind).toBe('selection');
+    expect(selection?.text).toBe('automatic');
+    expect(user?.rows.some((row) => row.id === 'code_index_workers.mode')).toBe(false);
+    expect(
+      buildSettingsModel({ user: { code_index_workers: { mode: 'exact', workers: 4 } } })
+        .sections[0]?.rows[0]?.text,
+    ).toBe('exact · 4 workers');
+  });
+
+  it('does not render the PATCH receipt flags as configuration groups', () => {
+    const model = buildSettingsModel({
+      ...payload,
+      resync_recommended: true,
+      restart_recommended: true,
+    });
+    expect(model.sections.map((section) => section.id)).not.toContain('resync_recommended');
+    expect(model.sections.map((section) => section.id)).not.toContain('restart_recommended');
+    expect(model.settingCount).toBe(buildSettingsModel(payload).settingCount);
   });
 
   it('classifies leaf values by type', () => {
