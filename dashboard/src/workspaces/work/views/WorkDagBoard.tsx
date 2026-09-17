@@ -1,6 +1,7 @@
 import {
   useCallback,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -170,6 +171,13 @@ export function WorkDagBoard({
     }
     setZoom(Math.max(ZOOM_MIN, Math.min(1, width / layout.width)));
   }, [layout.width]);
+
+  // A graph wider than its field opens fitted — the 200%-zoom and narrow-
+  // viewport focus mode — and re-fits when the graph version changes shape.
+  // A field that cannot be measured leaves the zoom at 100%.
+  useLayoutEffect(() => {
+    fit();
+  }, [fit]);
 
   const focusCard = (taskId: string | undefined) => {
     if (taskId === undefined) return;
@@ -677,8 +685,12 @@ function TaskCard({
           <span className="td-value shrink-0 text-3xs" data-cell="numeric">
             e{task.effort}
           </span>
-          <span className="td-value shrink-0 text-3xs" data-cell="numeric">
-            {inbound}↓{outbound}
+          <span
+            className="td-value shrink-0 text-3xs"
+            data-cell="numeric"
+            title={`${inbound} gating in · ${outbound} gating out`}
+          >
+            ↑{inbound} ↓{outbound}
           </span>
         </span>
       ) : null}
