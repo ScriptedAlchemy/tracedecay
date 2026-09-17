@@ -257,7 +257,7 @@ function couplingReadout(region: CortexRegion): string {
     case 'none':
       return '—';
     case 'sealed':
-      return 'sealed';
+      return 'unbounded';
     case 'open':
       return region.coupling === null ? '—' : `${region.coupling.toFixed(2)} i/b`;
     default: {
@@ -275,6 +275,23 @@ function contourReadout(region: CortexRegion): string {
       return 'sealed';
     case 'open':
       return String(region.contours);
+    default: {
+      const unhandled: never = region.contour;
+      return unhandled;
+    }
+  }
+}
+
+/** One phrase for the ring channel in the selected readout, so a sealed or
+ * hollow region is named once rather than as a ratio and a count it lacks. */
+function contourPhrase(region: CortexRegion): string {
+  switch (region.contour) {
+    case 'none':
+      return 'no relief';
+    case 'sealed':
+      return 'unbounded coupling · drawn sealed';
+    case 'open':
+      return `${couplingReadout(region)} · ${region.contours} contours`;
     default: {
       const unhandled: never = region.contour;
       return unhandled;
@@ -307,8 +324,7 @@ function SelectedRegion({ region }: { region: CortexRegion }) {
         · <span className="td-value text-text-secondary">{region.fileCount}</span> files ·{' '}
         <span className="td-value text-text-secondary">{region.internalEdges}</span> internal ·{' '}
         <span className="td-value text-text-secondary">{region.density.toFixed(2)}</span> e/file ·{' '}
-        <span className="td-value text-text-secondary">{couplingReadout(region)}</span> ·{' '}
-        <span className="td-value text-text-secondary">{contourReadout(region)}</span> contours ·{' '}
+        <span className="td-value text-text-secondary">{contourPhrase(region)}</span> ·{' '}
         <span className="td-value text-text-secondary">{region.incomingEdges}</span> in /{' '}
         <span className="td-value text-text-secondary">{region.outgoingEdges}</span> out
       </span>

@@ -504,7 +504,7 @@ export function cortexLegendPanels(model: CortexModel): readonly CortexPanel[] {
     {
       label: 'contours',
       reading: `${CONTOUR_INTERVAL.toFixed(2)} i / boundary`,
-      teach: `one line per ${CONTOUR_INTERVAL} internal dependency edges per boundary edge. Area already carries file mass, so rings are coupling and not edges per file — that rate stays in the table. Every ${CONTOUR_INDEX_EVERY}th ring is an index contour.${
+      teach: `one line per ${CONTOUR_INTERVAL} internal dependency edges per boundary edge. Rings are coupling, not edges per file: area already carries file mass, and that rate stays in the table. Every ${CONTOUR_INDEX_EVERY}th ring is an index contour.${
         model.tightestCoupling
           ? ` ${model.tightestCoupling.label} is most closed at ${model.tightestCoupling.ratio.toFixed(2)} i/b.`
           : ''
@@ -581,7 +581,7 @@ export function cortexDescription(model: CortexModel): string {
     bands.length > 0 ? `By stratum: ${bands}.` : '',
     `Area carries the file count; contour rings carry internal edges per boundary edge at ${CONTOUR_INTERVAL} per line.`,
     model.sealedRegions > 0
-      ? `${model.sealedRegions} regions have internal edges and a measured-zero boundary, so the ratio is unbounded and they are drawn sealed.`
+      ? `${model.sealedRegions} ${model.sealedRegions === 1 ? 'region has' : 'regions have'} internal edges and a measured-zero boundary, so the ratio is unbounded and ${model.sealedRegions === 1 ? 'it is' : 'they are'} drawn sealed.`
       : '',
     model.relieflessRegions > 0
       ? `${model.relieflessRegions} regions measured zero internal edges and are drawn hollow.`
