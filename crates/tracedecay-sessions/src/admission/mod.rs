@@ -174,6 +174,12 @@ impl HostAdmissionOutcome {
         }
     }
 
+    /// The demand does not apply. Ack the replay record and do not retry it.
+    #[hotpath::skip]
+    pub const fn not_applicable(reason_code: &'static str) -> Self {
+        Self::new(HostAdmissionStatus::NotApplicable, false, Some(reason_code))
+    }
+
     #[hotpath::skip]
     pub const fn spool_overflow() -> Self {
         Self::new(

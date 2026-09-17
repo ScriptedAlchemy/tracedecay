@@ -175,6 +175,16 @@ pub(crate) fn typescript_import_module_kind(module_specifier: &str) -> ImportMod
     }
 }
 
+/// Scope that a restricted Rust re-export exposes.
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "module")]
+pub enum ImportReexportScopeV1 {
+    Crate,
+    Super,
+    SelfModule,
+    Module(String),
+}
+
 /// One parser-backed import binding or side-effect statement.
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Hash)]
 #[serde(deny_unknown_fields)]
@@ -185,8 +195,8 @@ pub struct ExtractedImportEvidenceV1 {
     pub local_name: Option<String>,
     #[serde(default)]
     pub is_public: bool,
-    #[serde(default)]
-    pub is_restricted_public: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reexport_scope: Option<ImportReexportScopeV1>,
     #[serde(default)]
     pub is_glob: bool,
     pub namespace: ImportNamespaceV1,
@@ -205,7 +215,7 @@ impl Ord for ExtractedImportEvidenceV1 {
             .then_with(|| self.imported_name.cmp(&other.imported_name))
             .then_with(|| self.local_name.cmp(&other.local_name))
             .then_with(|| self.is_public.cmp(&other.is_public))
-            .then_with(|| self.is_restricted_public.cmp(&other.is_restricted_public))
+            .then_with(|| self.reexport_scope.cmp(&other.reexport_scope))
             .then_with(|| self.is_glob.cmp(&other.is_glob))
             .then_with(|| self.namespace.cmp(&other.namespace))
             .then_with(|| self.module_kind.cmp(&other.module_kind))

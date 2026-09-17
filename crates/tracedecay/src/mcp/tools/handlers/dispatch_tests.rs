@@ -667,7 +667,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
                         rebuild_in_flight,
                         ..Default::default()
                     };
-                Box::pin(async move { Some(freshness) })
+                Box::pin(async move { Ok(Some(freshness)) })
             });
         reader
     };
@@ -766,7 +766,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
                     staleness_state: Some(staleness.to_owned()),
                     ..Default::default()
                 };
-                Box::pin(async move { Some(freshness) })
+                Box::pin(async move { Ok(Some(freshness)) })
             });
         reader
     };
@@ -901,7 +901,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
                 staleness_state: Some("fresh".to_owned()),
                 ..Default::default()
             };
-            Box::pin(async move { Some(freshness) })
+            Box::pin(async move { Ok(Some(freshness)) })
         });
     let published_feature = handle_tool_call_with_registry_options(
         &cg,
@@ -1011,7 +1011,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
                     staleness_state: Some("stale".to_owned()),
                     ..Default::default()
                 };
-            Box::pin(async move { Some(freshness) })
+            Box::pin(async move { Ok(Some(freshness)) })
         });
     let aged = handle_tool_call_with_registry_options(
         &cg,

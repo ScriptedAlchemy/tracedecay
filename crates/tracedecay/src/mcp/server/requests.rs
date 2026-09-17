@@ -676,10 +676,7 @@ impl McpServer {
         // durable spool record is authoritatively committed (Committed or
         // ExactDuplicate). Failures are best-effort and must never change the
         // admission outcome already decided above.
-        if matches!(
-            outcome.status,
-            HostAdmissionStatus::Committed | HostAdmissionStatus::ExactDuplicate
-        ) {
+        if outcome.status.commits_replay_record() {
             if let Some(wake) = &dispatch_server.project_session_refresh_wake {
                 wake.wake();
             }
@@ -2184,6 +2181,8 @@ mod activity_dispatch_tests {
                     None,
                 )
                 .await
+                .ok()
+                .flatten()
                 .is_some_and(|replay| {
                     replay.records.iter().any(|record| {
                         record.pulse.family

@@ -1,4 +1,6 @@
-use tracedecay_code_extraction::{ImportModuleKindV1, LanguageExtractor, RustExtractor};
+use tracedecay_code_extraction::{
+    ImportModuleKindV1, ImportReexportScopeV1, LanguageExtractor, RustExtractor,
+};
 use tracedecay_domain::*;
 use tree_sitter::Parser;
 
@@ -367,17 +369,18 @@ use read::Private;
             .iter()
             .find(|import| import.local_name.as_deref() == Some(name))
             .unwrap_or_else(|| panic!("{name} missing from {:?}", artifact.imports));
-        (import.is_public, import.is_restricted_public)
+        (import.is_public, import.reexport_scope.clone())
     };
-    assert_eq!(visibility("Open"), (true, false));
-    for restricted in ["CrateOnly", "ParentOnly", "SelfOnly", "InOnly"] {
-        assert_eq!(
-            visibility(restricted),
-            (false, true),
-            "{restricted} is restricted public evidence, not an unrestricted re-export"
-        );
+    assert_eq!(visibility("Open"), (true, None));
+    for (name, scope) in [
+        ("CrateOnly", ImportReexportScopeV1::Crate),
+        ("ParentOnly", ImportReexportScopeV1::Super),
+        ("SelfOnly", ImportReexportScopeV1::SelfModule),
+        ("InOnly", ImportReexportScopeV1::Module("read".to_owned())),
+    ] {
+        assert_eq!(visibility(name), (false, Some(scope)));
     }
-    assert_eq!(visibility("Private"), (false, false));
+    assert_eq!(visibility("Private"), (false, None));
 }
 
 #[test]
@@ -814,6 +817,9 @@ impl Greet for Bot {
         .filter(|n| n.kind == NodeKind::Impl)
         .collect();
     assert_eq!(impls.len(), 1);
+    assert!(result.nodes.iter().any(|node| {
+        node.kind == NodeKind::Method && node.qualified_name == "greet.rs::<Bot as Greet>::hello"
+    }));
     assert!(
         result
             .unresolved_refs

@@ -11,10 +11,14 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tracedecay_contracts::ResolvedScope;
 
-use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
+use tracedecay_runtime_core::git_discovery::{
+    GitRepositoryIdentityOutcome, discover_repository_identity,
+};
 
 use super::demand_admission::{
     CodeIndexDemandAdmissionV1, CodeIndexDemandUnavailableV1, CodeIndexDemandV1,
@@ -125,7 +129,7 @@ impl Drop for CodeIndexActivationRetirementV1 {
 #[derive(Clone)]
 pub struct CodeIndexActivationV1 {
     project_root: PathBuf,
-    identity: Option<IndexingIdentityV1>,
+    identity: Arc<Mutex<Option<IndexingIdentityV1>>>,
     route_registered: Arc<AtomicBool>,
     cancellation: CancellationToken,
     automatic_admission: CodeIndexAutomaticAdmissionV1,
@@ -168,7 +172,7 @@ impl CodeIndexActivationV1 {
         let project_root = project_root
             .canonicalize()
             .unwrap_or_else(|_| project_root.to_path_buf());
-        let identity = IndexingIdentityV1::resolve(&project_root).ok();
+        let identity = Arc::new(Mutex::new(IndexingIdentityV1::resolve(&project_root).ok()));
         Self {
             project_root,
             identity,
@@ -200,8 +204,11 @@ impl CodeIndexActivationV1 {
             .is_ok_and(|root| root == self.project_root)
     }
 
-    pub fn identity(&self) -> Option<&IndexingIdentityV1> {
-        self.identity.as_ref()
+    pub fn identity(&self) -> Option<IndexingIdentityV1> {
+        self.identity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn install_retirement(&self, callback: Box<dyn FnOnce() + Send + 'static>) {
@@ -211,7 +218,7 @@ impl CodeIndexActivationV1 {
     pub fn authorizes_scope(&self, scope: &ResolvedScope) -> bool {
         self.route_is_live()
             && scope.validate().is_ok()
-            && self.identity.as_ref().is_some_and(|identity| {
+            && self.identity().is_some_and(|identity| {
                 identity.repository_id() == &scope.repository_id
                     && identity.worktree_id() == &scope.worktree_id
             })
@@ -264,7 +271,7 @@ impl CodeIndexActivationV1 {
         {
             return false;
         }
-        let Some(expected_identity) = self.identity.clone() else {
+        let Some(expected_identity) = self.identity() else {
             return false;
         };
         match self.state.compare_exchange(
@@ -349,6 +356,64 @@ impl CodeIndexActivationV1 {
         true
     }
 
+    /// Classify a missing constructor identity. A confirmed non-repository is
+    /// terminal. An undecided probe is retryable and is not cached.
+    async fn ensure_indexing_identity(&self) -> Result<(), CodeIndexDemandAdmissionV1> {
+        if self.identity().is_some() {
+            return Ok(());
+        }
+        let deadline = MonotonicDeadline::at(Instant::now() + Duration::from_secs(1));
+        match discover_repository_identity(&self.project_root, deadline, &self.cancellation).await {
+            GitRepositoryIdentityOutcome::NotRepository => {
+                Err(CodeIndexDemandAdmissionV1::NotApplicable)
+            }
+            GitRepositoryIdentityOutcome::Resolved(_) => {
+                match IndexingIdentityV1::resolve(&self.project_root) {
+                    Ok(identity) => {
+                        *self
+                            .identity
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(identity);
+                        Ok(())
+                    }
+                    Err(_) => Err(CodeIndexDemandAdmissionV1::Unavailable(
+                        CodeIndexDemandUnavailableV1::IdentityUnresolved,
+                    )),
+                }
+            }
+            GitRepositoryIdentityOutcome::Unknown(_) => {
+                Err(CodeIndexDemandAdmissionV1::Unavailable(
+                    CodeIndexDemandUnavailableV1::IdentityUnresolved,
+                ))
+            }
+        }
+    }
+
+    /// Route, policy, and identity checks shared by demand admission and the
+    /// freshness probe. `None` means the scheduler may be asked.
+    pub async fn gate_demand(
+        &self,
+        project_root: &Path,
+        demand: &CodeIndexDemandV1,
+    ) -> Option<CodeIndexDemandAdmissionV1> {
+        if !self.route_is_live() {
+            return Some(CodeIndexDemandAdmissionV1::Unavailable(
+                CodeIndexDemandUnavailableV1::RouteRetired,
+            ));
+        }
+        if !self.accepts_root(project_root) {
+            return Some(CodeIndexDemandAdmissionV1::Unavailable(
+                CodeIndexDemandUnavailableV1::ForeignRoot,
+            ));
+        }
+        if demand.is_watcher_policy_governed()
+            && self.automatic_admission != CodeIndexAutomaticAdmissionV1::Admitted
+        {
+            return Some(CodeIndexDemandAdmissionV1::RefusedByPolicy);
+        }
+        self.ensure_indexing_identity().await.err()
+    }
+
     /// The one front door for code-index demand.
     ///
     /// Every caller above — MCP after-edit hooks, `tracedecay sync`, the
@@ -363,23 +428,8 @@ impl CodeIndexActivationV1 {
         project_root: &Path,
         demand: CodeIndexDemandV1,
     ) -> CodeIndexDemandAdmissionV1 {
-        if !self.route_is_live() {
-            return CodeIndexDemandAdmissionV1::Unavailable(
-                CodeIndexDemandUnavailableV1::RouteRetired,
-            );
-        }
-        if !self.accepts_root(project_root) {
-            return CodeIndexDemandAdmissionV1::Unavailable(
-                CodeIndexDemandUnavailableV1::ForeignRoot,
-            );
-        }
-        if demand.is_watcher_policy_governed()
-            && self.automatic_admission != CodeIndexAutomaticAdmissionV1::Admitted
-        {
-            return CodeIndexDemandAdmissionV1::RefusedByPolicy;
-        }
-        if self.identity.is_none() {
-            return CodeIndexDemandAdmissionV1::NotApplicable;
+        if let Some(verdict) = self.gate_demand(project_root, &demand).await {
+            return verdict;
         }
         let overflow = !matches!(demand, CodeIndexDemandV1::HookPaths(_));
         let rel_paths = match demand {

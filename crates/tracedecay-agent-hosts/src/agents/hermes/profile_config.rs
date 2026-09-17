@@ -112,9 +112,17 @@ pub(super) fn registration_state(
 }
 
 pub(super) fn enable_plugin(config_path: &Path) -> Result<bool> {
-    let existing = std::fs::read_to_string(config_path).unwrap_or_default();
+    let existing = match std::fs::read_to_string(config_path) {
+        Ok(existing) => existing,
+        Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!("failed to read {}: {error}", config_path.display()),
+            });
+        }
+    };
     let original_path = original_config_path(config_path);
-    if config_path.is_file() && !original_path.exists() {
+    if !existing.is_empty() && config_path.is_file() && !original_path.exists() {
         crate::agents::safe_write_bytes_file(&original_path, existing.as_bytes(), None)?;
     }
     let updated = enable_plugin_config(&existing).map_err(|message| TraceDecayError::Config {
@@ -1080,5 +1088,16 @@ mod tests {
         let backup = dir.path().join("config.yaml.bak");
         assert!(backup.exists());
         assert_eq!(read(&backup), original);
+    }
+
+    #[test]
+    fn enable_plugin_does_not_replace_a_config_it_could_not_read() {
+        let dir = TempDir::new().unwrap();
+        let config = dir.path().join("config.yaml");
+        std::fs::create_dir(&config).unwrap();
+
+        let error = enable_plugin(&config).unwrap_err();
+        assert!(error.to_string().contains("failed to read"));
+        assert!(!original_config_path(&config).exists());
     }
 }

@@ -249,7 +249,23 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
     ) -> Option<tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1> {
-        let canonical_root = project_root.canonicalize().ok()?;
+        self.dashboard_freshness_read(project_root)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    pub async fn dashboard_freshness_read(
+        &self,
+        project_root: &Path,
+    ) -> Result<
+        Option<tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1>,
+        tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReadFailureV1,
+    > {
+        let canonical_root = match project_root.canonicalize() {
+            Ok(root) => root,
+            Err(_) => return Ok(None),
+        };
         let cadence_telemetry = Arc::clone(&self.cadence_telemetry);
         let (
             scheduler,
@@ -266,7 +282,9 @@ impl CodeIndexSchedulerRegistryV1 {
             graph_activation_enabled,
         ) = {
             let mounted = self.mounted.lock().await;
-            let worktree = mounted.get(&canonical_root)?;
+            let Some(worktree) = mounted.get(&canonical_root) else {
+                return Ok(None);
+            };
             (
                 Arc::clone(&worktree.scheduler),
                 Arc::clone(&worktree.reconcile_in_progress),
@@ -510,7 +528,10 @@ impl CodeIndexSchedulerRegistryV1 {
             }
         })
         .await
-        .ok()
+        .map(Some)
+        .map_err(|_| {
+            tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReadFailureV1::ReadFailed
+        })
     }
 
     /// The deterministic contract violation currently parking background

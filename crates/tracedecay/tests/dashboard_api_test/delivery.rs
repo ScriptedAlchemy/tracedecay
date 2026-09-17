@@ -306,7 +306,7 @@ fn delivery_http_admission_snapshot() -> ProjectDeliverySnapshotV1 {
 fn delivery_http_admission_freshness_reader() -> CodeIndexFreshnessReader {
     Arc::new(|_project_root: PathBuf| -> CodeIndexFreshnessReadFuture {
         Box::pin(async move {
-            Some(CodeIndexWorktreeFreshnessV1 {
+            Ok(Some(CodeIndexWorktreeFreshnessV1 {
                 worktree_root: "/tmp/delivery-http-admission".to_owned(),
                 repository_id: Some("repository.delivery-http-admission".to_owned()),
                 worktree_id: Some("worktree.delivery-http-admission".to_owned()),
@@ -317,7 +317,7 @@ fn delivery_http_admission_freshness_reader() -> CodeIndexFreshnessReader {
                 staleness_state: Some("fresh".to_owned()),
                 sealed_at_micros: Some(30),
                 ..CodeIndexWorktreeFreshnessV1::default()
-            })
+            }))
         })
     })
 }

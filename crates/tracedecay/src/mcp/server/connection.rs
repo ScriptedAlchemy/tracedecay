@@ -433,10 +433,7 @@ impl McpServer {
                         break;
                     }
                 }
-            } else if matches!(
-                canonical_outcome.status,
-                HostAdmissionStatus::Committed | HostAdmissionStatus::ExactDuplicate
-            ) {
+            } else if canonical_outcome.status.commits_replay_record() {
                 match replay.commit(record.seq).await {
                     Ok(_) => canonical_outcome,
                     Err(outcome) => {

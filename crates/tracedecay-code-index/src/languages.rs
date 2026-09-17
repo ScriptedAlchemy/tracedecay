@@ -205,8 +205,8 @@ impl StaticLanguageRegistry {
             // SQL v3 retained canonical schema evidence. Rust v8 names dotted
             // calls on typed bindings only from explicit type annotations or
             // struct-literal initialisers (never method calls or constructor-like
-            // names), records unrestricted and restricted `pub` re-exports on
-            // separate bits, and resolves inherent impl methods across files of
+            // names), records restricted `pub` re-export scopes separately
+            // from unrestricted exports, and resolves inherent impl methods across files of
             // the owning type. Pinning these behaviors forces older file
             // artifacts to be re-extracted.
             let extractor_revision = if language == "rust" {

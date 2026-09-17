@@ -19,6 +19,9 @@ pub enum HostAdmissionStatus {
     AcceptedForReplay,
     Committed,
     ExactDuplicate,
+    /// The demand does not apply. The replay record is acknowledged and is
+    /// not retried.
+    NotApplicable,
 }
 
 impl HostAdmissionStatus {
@@ -43,7 +46,17 @@ impl HostAdmissionStatus {
             Self::AcceptedForReplay => "accepted_for_replay",
             Self::Committed => "committed",
             Self::ExactDuplicate => "exact_duplicate",
+            Self::NotApplicable => "not_applicable",
         }
+    }
+
+    /// Statuses that finish a durable replay record. Anything else stays leased.
+    #[hotpath::skip]
+    pub const fn commits_replay_record(self) -> bool {
+        matches!(
+            self,
+            Self::Committed | Self::ExactDuplicate | Self::NotApplicable
+        )
     }
 }
 
@@ -243,7 +256,7 @@ impl HostAdmissionStatus {
     pub const fn is_replay_progress(self) -> bool {
         matches!(
             self,
-            Self::Committed | Self::ExactDuplicate | Self::AcceptedForReplay
+            Self::Committed | Self::ExactDuplicate | Self::AcceptedForReplay | Self::NotApplicable
         )
     }
 }
@@ -263,6 +276,7 @@ mod tests {
             HostAdmissionStatus::AcceptedForReplay,
             HostAdmissionStatus::Committed,
             HostAdmissionStatus::ExactDuplicate,
+            HostAdmissionStatus::NotApplicable,
         ] {
             assert_eq!(
                 serde_json::to_value(status).unwrap(),

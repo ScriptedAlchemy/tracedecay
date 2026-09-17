@@ -852,9 +852,10 @@ pub async fn overview(
 ) -> Json<DashboardEnvelopeV1<DeliveryOverviewV1>> {
     let (changes, commits) = read_git_projections(&state).await;
     let indexed_commit = match &state.code_index_freshness_reader {
-        Some(reader) => reader(state.project_root.clone())
-            .await
-            .and_then(|freshness| freshness.source_revision),
+        Some(reader) => match reader(state.project_root.clone()).await {
+            Ok(Some(freshness)) => freshness.source_revision,
+            _ => None,
+        },
         None => None,
     };
     let generation_freshness = hotpath::measure_block!(
@@ -991,11 +992,14 @@ pub async fn inbox(
                 .map(str::to_owned)
                 .unwrap_or_else(|| project.display_root.clone());
             let project_root = PathBuf::from(&project.canonical_root);
-            let indexed = match state.code_index_freshness_reader.as_ref() {
-                Some(reader) => reader(project_root.clone())
-                    .await
-                    .and_then(indexed_delivery_head),
-                None => None,
+            let freshness = match state.code_index_freshness_reader.as_ref() {
+                Some(reader) => reader(project_root.clone()).await,
+                None => Ok(None),
+            };
+            let project_root_for_proximity = project_root.clone();
+            let indexed = match freshness.as_ref() {
+                Ok(Some(freshness)) => indexed_delivery_head(freshness.clone()),
+                _ => None,
             };
             let delivery_read = async {
                 match (state.delivery_read_authority.as_ref(), indexed.as_ref()) {
@@ -1024,21 +1028,27 @@ pub async fn inbox(
             let proximity_read = async {
                 match (
                     state.proximity_attention_read_authority.as_ref(),
+                    &freshness,
                     indexed.as_ref(),
                 ) {
-                    (Some(authority), Some(_)) => {
+                    (Some(authority), Ok(Some(_)), Some(_)) => {
                         authority
                             .read(
                                 control.clone(),
                                 DashboardDeliveryProjectV1 {
                                     project_id: project.project_id.clone(),
-                                    project_root,
+                                    project_root: project_root_for_proximity,
                                 },
                             )
                             .await
                     }
-                    // An omitted project has no consumer for this result.
-                    _ => ProjectDeliveryProximityAttentionSourceV1::Unsupported,
+                    // No proximity authority and a successful read: the feature
+                    // is not mounted. A failed or missing index is unavailable,
+                    // not an invented unsupported claim.
+                    (None, Ok(_), _) | (Some(_), Ok(_), None) => {
+                        ProjectDeliveryProximityAttentionSourceV1::Unsupported
+                    }
+                    _ => ProjectDeliveryProximityAttentionSourceV1::Unavailable,
                 }
             };
             let (delivery, proximity) = tokio::join!(delivery_read, proximity_read);

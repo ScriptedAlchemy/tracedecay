@@ -489,5 +489,6 @@ fn host_admission_status_rank(status: HostAdmissionStatus) -> u8 {
         HostAdmissionStatus::AcceptedForReplay => 5,
         HostAdmissionStatus::Committed => 6,
         HostAdmissionStatus::ExactDuplicate => 7,
+        HostAdmissionStatus::NotApplicable => 8,
     }
 }

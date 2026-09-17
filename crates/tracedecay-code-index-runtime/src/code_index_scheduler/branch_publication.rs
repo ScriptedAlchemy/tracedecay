@@ -28,6 +28,7 @@ use super::{
 const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
 const CODE_INDEX_ACTIVATION_UNAVAILABLE: &str = "code_index_activation_unavailable";
 const CODE_INDEX_IDENTITY_MISMATCH: &str = "code_index_scheduler_identity_mismatch";
+const CODE_INDEX_NOT_APPLICABLE: &str = "code_index_not_applicable";
 const GIT_SNAPSHOT_UNAVAILABLE: &str = "git_snapshot_unavailable";
 const BRANCH_TRACKING_FAILED: &str = "branch_tracking_failed";
 const BRANCH_GENERATION_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -451,7 +452,7 @@ impl BranchPublicationContextV1 {
             CodeIndexDemandAdmissionV1::Queued => {}
             CodeIndexDemandAdmissionV1::NotApplicable => {
                 return Err(TraceDecayError::project_route(
-                    CODE_INDEX_IDENTITY_MISMATCH,
+                    CODE_INDEX_NOT_APPLICABLE,
                     false,
                     format!(
                         "branch generation publication does not apply to '{}': the route has no repository identity",
@@ -473,16 +474,6 @@ impl BranchPublicationContextV1 {
                     true,
                     format!(
                         "code-index scheduler rejected refresh for branch worktree '{}'",
-                        canonical_worktree_root.display()
-                    ),
-                ));
-            }
-            CodeIndexDemandAdmissionV1::NotApplicable => {
-                return Err(TraceDecayError::project_route(
-                    CODE_INDEX_IDENTITY_MISMATCH,
-                    false,
-                    format!(
-                        "code indexing does not apply to branch worktree '{}': the route has no repository identity",
                         canonical_worktree_root.display()
                     ),
                 ));

@@ -499,8 +499,13 @@ impl<'a> McpToolContext<'a> {
     /// the lanes settle so the verdict describes serve time, not bind time.
     pub async fn freshness(&self) -> Option<CodeIndexFreshnessPayloadV1> {
         let reader = self.request.freshness?;
-        let worktree = reader(self.project_root().to_path_buf()).await;
-        Some(CodeIndexFreshnessPayloadV1::from_scheduler_read(worktree))
+        Some(match reader(self.project_root().to_path_buf()).await {
+            Ok(worktree) => CodeIndexFreshnessPayloadV1::from_scheduler_read(worktree),
+            Err(_) => CodeIndexFreshnessPayloadV1 {
+                worktrees: Vec::new(),
+                note: "code-index freshness read failed".to_owned(),
+            },
+        })
     }
 
     #[must_use]

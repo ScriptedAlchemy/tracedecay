@@ -36,7 +36,7 @@ use tracedecay_session_runtime::session_retrieval::{
     DaemonSessionRetrievalRoot, DaemonSessionRetrievalService, SessionApplicationRetrievalPortV1,
     SessionRetrievalServingIdentityV1, UnavailableSessionApplicationRetrievalV1,
 };
-use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionStatus};
+use tracedecay_sessions::admission::HostAdmissionOutcome;
 use tracedecay_sessions::runtime::git_correlation::{
     self as git_correlation, DEFAULT_SPAN_MERGE_GAP_SECS, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
     SpanObservation, SpanSource,
@@ -132,6 +132,8 @@ pub(crate) const CODE_INDEX_ROUTE_RETIRED: &str = "code_index_route_retired";
 pub(crate) const CODE_INDEX_FOREIGN_ROOT: &str = "code_index_foreign_root";
 
 pub(crate) const CODE_INDEX_NO_PROVEN_CHANGE: &str = "code_index_no_proven_change";
+pub(crate) const CODE_INDEX_NOT_APPLICABLE: &str = "code_index_not_applicable";
+pub(crate) const CODE_INDEX_IDENTITY_UNRESOLVED: &str = "code_index_identity_unresolved";
 
 pub(crate) fn code_index_publication_corrupt(
     parked: CodeIndexConvergenceParkedV1,
@@ -170,6 +172,9 @@ pub(crate) fn code_index_unavailable_host_outcome(
         CodeIndexDemandUnavailableV1::NoProvenChange => {
             HostAdmissionOutcome::terminal_unavailable(CODE_INDEX_NO_PROVEN_CHANGE)
         }
+        CodeIndexDemandUnavailableV1::IdentityUnresolved => {
+            HostAdmissionOutcome::retained_unavailable(CODE_INDEX_IDENTITY_UNRESOLVED)
+        }
     }
 }
 
@@ -195,6 +200,11 @@ pub(crate) fn code_index_unavailable_error(cause: CodeIndexDemandUnavailableV1) 
             false,
             "code-index demand carried no proven change to admit",
         ),
+        CodeIndexDemandUnavailableV1::IdentityUnresolved => TraceDecayError::project_route(
+            CODE_INDEX_IDENTITY_UNRESOLVED,
+            true,
+            "code-index repository identity could not be decided",
+        ),
     }
 }
 
@@ -211,7 +221,7 @@ pub(crate) fn code_index_host_outcome(
     match admission {
         CodeIndexDemandAdmissionV1::Queued => HostAdmissionOutcome::replay_completed(true, false),
         CodeIndexDemandAdmissionV1::NotApplicable => {
-            HostAdmissionOutcome::replay_completed(false, false)
+            HostAdmissionOutcome::not_applicable(CODE_INDEX_NOT_APPLICABLE)
         }
         CodeIndexDemandAdmissionV1::RefusedByPolicy => {
             HostAdmissionOutcome::degraded(CODE_INDEX_LINKED_WORKTREE_DISABLED)

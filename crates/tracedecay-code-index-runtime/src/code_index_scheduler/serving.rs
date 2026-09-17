@@ -1307,7 +1307,7 @@ impl DaemonCodeTextArtifactStoreV1 {
             manifest,
             &manifest_bytes,
             identity.digest.clone(),
-            move |digest, expected_size, buffer| {
+            move |digest, expected_size, buffer, control| {
                 publication.read_retained_partitioned_segment(
                     &source_identity,
                     SealedGenerationSegmentReadV1::Whole {
@@ -1315,6 +1315,7 @@ impl DaemonCodeTextArtifactStoreV1 {
                         size_bytes: expected_size,
                     },
                     buffer,
+                    control,
                 )
             },
             TEXT_ARTIFACT_PAGE_CHUNKS_V1,

@@ -468,11 +468,11 @@ fn rust_trait_impl_methods_do_not_masquerade_as_inherent_methods() {
     let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
     let first = symbol_occurrence(
         &generation,
-        "crates/widgets/src/first.rs::crate::Builder::build",
+        "crates/widgets/src/first.rs::<crate::Builder as crate::First>::build",
     );
     let second = symbol_occurrence(
         &generation,
-        "crates/widgets/src/second.rs::crate::Builder::build",
+        "crates/widgets/src/second.rs::<crate::Builder as crate::Second>::build",
     );
 
     assert!(generation.edges().iter().all(|edge| {

@@ -148,7 +148,8 @@ pub fn host_admission_error(
         HostAdmissionStatus::Supported
         | HostAdmissionStatus::AcceptedForReplay
         | HostAdmissionStatus::Committed
-        | HostAdmissionStatus::ExactDuplicate => "observation_admission_incomplete",
+        | HostAdmissionStatus::ExactDuplicate
+        | HostAdmissionStatus::NotApplicable => "observation_admission_incomplete",
     });
     TranscriptIngestError::HostAdmission {
         provider,
@@ -175,7 +176,8 @@ pub fn host_admission_status_message(provider_label: &str, status: HostAdmission
         HostAdmissionStatus::Supported
         | HostAdmissionStatus::AcceptedForReplay
         | HostAdmissionStatus::Committed
-        | HostAdmissionStatus::ExactDuplicate => {
+        | HostAdmissionStatus::ExactDuplicate
+        | HostAdmissionStatus::NotApplicable => {
             format!("{provider_label} observation admission was incomplete")
         }
     }

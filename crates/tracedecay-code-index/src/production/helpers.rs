@@ -3,7 +3,7 @@ use super::*;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Component, Path, PathBuf};
 
-use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1};
+use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1, ImportReexportScopeV1};
 use tracedecay_domain::{
     CodeSearchChunkV1, EdgeAuthorityV1, RelationEdgeKindV1, SymbolOccurrenceId,
 };
@@ -753,7 +753,7 @@ fn unique_import<'a>(
     matches.next().is_none().then_some(binding)
 }
 
-type RustReexportCacheV1 = HashMap<(usize, usize, bool, String, usize, String), bool>;
+type RustReexportCacheV1 = HashMap<(usize, usize, usize, String, usize, String), bool>;
 
 struct RustResolutionContextV1<'a> {
     files: &'a RustFileIndexV1,
@@ -947,7 +947,6 @@ where
         root_index,
         scope_index,
         access_index,
-        true,
         imported_name,
         target,
         member,
@@ -995,8 +994,8 @@ where
     let Some((origin, path)) = rust_expand_path_head(rust, file, &segments) else {
         return false;
     };
-    let (origin_index, root_path, require_unrestricted) = match origin {
-        RustPathOriginV1::InCrate => (index, source_path, false),
+    let (origin_index, root_path) = match origin {
+        RustPathOriginV1::InCrate => (index, source_path),
         RustPathOriginV1::Crate { root_index } => {
             if target.symbol.visibility != "public" {
                 return false;
@@ -1004,7 +1003,6 @@ where
             (
                 root_index,
                 files[root_index].as_ref().authority.logical_path.as_str(),
-                true,
             )
         }
     };
@@ -1032,7 +1030,6 @@ where
             origin_index,
             scope_index,
             index,
-            require_unrestricted,
             &path[k],
             target,
             &member,
@@ -1170,8 +1167,72 @@ fn unique_named_import<'a>(
     matches.next().is_none().then_some(binding)
 }
 
+fn rust_reexport_visible<T>(
+    files: &[T],
+    binding: &CodeIndexImportEvidenceV1,
+    access_index: usize,
+    scope_index: usize,
+) -> bool
+where
+    T: AsRef<FileGenerationArtifactsV1>,
+{
+    if binding.is_public {
+        return true;
+    }
+    let Some(reexport_scope) = binding.reexport_scope.as_ref() else {
+        return false;
+    };
+    let access_path = files[access_index].as_ref().authority.logical_path.as_str();
+    let scope_path = files[scope_index].as_ref().authority.logical_path.as_str();
+    let (Some(access_root), Some(scope_root)) =
+        (rust_source_root(access_path), rust_source_root(scope_path))
+    else {
+        return false;
+    };
+    if access_root != scope_root {
+        return false;
+    }
+    if *reexport_scope == ImportReexportScopeV1::Crate {
+        return true;
+    }
+    let Some(access_module) = access_path
+        .strip_prefix(access_root)
+        .and_then(|path| path.strip_prefix('/'))
+        .and_then(rust_file_module)
+    else {
+        return false;
+    };
+    let Some(scope_module) = scope_path
+        .strip_prefix(scope_root)
+        .and_then(|path| path.strip_prefix('/'))
+        .and_then(rust_file_module)
+    else {
+        return false;
+    };
+    let visible_module = match reexport_scope {
+        ImportReexportScopeV1::Crate => Some(String::new()),
+        ImportReexportScopeV1::SelfModule => Some(scope_module.to_owned()),
+        ImportReexportScopeV1::Super => Some(
+            scope_module
+                .rsplit_once('/')
+                .map_or("", |(parent, _)| parent)
+                .to_owned(),
+        ),
+        ImportReexportScopeV1::Module(module) => Some(module.clone()),
+    };
+    visible_module.is_some_and(|module| rust_module_contains(&module, access_module))
+}
+
+fn rust_module_contains(container: &str, candidate: &str) -> bool {
+    container.is_empty()
+        || candidate == container
+        || candidate
+            .strip_prefix(container)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
 /// Whether `exported_name` in the scope file `scope_index` reaches `target`,
-/// directly or through the scope's public re-exports. `member` is the
+/// directly or through re-exports visible to `access_index`. `member` is the
 /// `::segment` suffix below the exported name (`::build` for a method on a
 /// re-exported type; empty for the export itself). `origin_index` is the
 /// file whose Cargo source root anchors every qualified-name comparison.
@@ -1182,7 +1243,6 @@ fn rust_export_resolves_to_target<T>(
     origin_index: usize,
     scope_index: usize,
     access_index: usize,
-    require_unrestricted: bool,
     exported_name: &str,
     target: RustSymbolTargetV1<'_>,
     member: &str,
@@ -1194,7 +1254,7 @@ where
     let cache_key = (
         origin_index,
         scope_index,
-        require_unrestricted,
+        access_index,
         format!("{exported_name}{member}"),
         target.index,
         target.symbol.qualified_name.clone(),
@@ -1251,7 +1311,7 @@ where
             .imports
             .iter()
             .filter(|binding| {
-                (binding.is_public || (!require_unrestricted && binding.is_restricted_public))
+                rust_reexport_visible(files, binding, access_index, scope_index)
                     && binding.local_name.as_deref() == Some(exported_name)
             });
         match (bindings.next(), bindings.next()) {
@@ -1264,7 +1324,6 @@ where
                     rust,
                     origin_index,
                     access_index,
-                    require_unrestricted,
                     scope_path,
                     binding,
                     target,
@@ -1289,7 +1348,6 @@ fn rust_project_import_resolves_to_target<T>(
     rust: &mut RustResolutionContextV1<'_>,
     origin_index: usize,
     access_index: usize,
-    require_unrestricted: bool,
     scope_path: &str,
     binding: &CodeIndexImportEvidenceV1,
     target: RustSymbolTargetV1<'_>,
@@ -1326,7 +1384,6 @@ where
         origin_index,
         next_scope,
         access_index,
-        require_unrestricted,
         imported_name,
         target,
         member,
@@ -1558,7 +1615,6 @@ where
                 rust,
                 origin_index,
                 target.index,
-                false,
                 impl_path,
                 binding,
                 type_target,
@@ -1585,7 +1641,6 @@ where
                     origin_index,
                     glob_scope,
                     target.index,
-                    false,
                     exported_name,
                     type_target,
                     "",

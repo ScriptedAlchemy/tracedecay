@@ -41,23 +41,24 @@ pub fn acquire_code_generation_store_lock(
     lock_file(store_root, STORE_LOCK_FILE, true)
 }
 
-/// Hold the generation store as a reader for one bounded read of immutable,
-/// content-addressed evidence. Readers share the hold with each other and
-/// wait for an exclusive writer (publication, retention) to finish instead of
-/// failing; writers in turn wait for in-flight reads. The hold is never an
-/// attachment authority.
-pub fn acquire_code_generation_store_read_lock(
+/// Try to hold the generation store as a reader for one bounded read of
+/// immutable, content-addressed evidence. The caller owns cancellation and
+/// deadline-aware retry while an exclusive writer is active.
+pub fn try_acquire_code_generation_store_read_lock(
     store_root: &Path,
-) -> Result<CodeGenerationStoreLockV1, CodeGenerationRetentionErrorV1> {
+) -> Result<Option<CodeGenerationStoreLockV1>, CodeGenerationRetentionErrorV1> {
     let store_root = canonical_store_root(store_root)?;
     let lock = open_lock_file(&store_root.join(STORE_LOCK_FILE))?;
-    lock.lock_shared().map_err(storage)?;
-    Ok(CodeGenerationStoreLockV1 {
-        file: lock,
-        store_root,
-        generation_store: true,
-        shared: true,
-    })
+    match FileExt::try_lock_shared(&lock) {
+        Ok(()) => Ok(Some(CodeGenerationStoreLockV1 {
+            file: lock,
+            store_root,
+            generation_store: true,
+            shared: true,
+        })),
+        Err(error) if tracedecay_private_fs::is_lock_contended(&error) => Ok(None),
+        Err(error) => Err(storage(error)),
+    }
 }
 
 pub fn try_acquire_code_generation_store_lock(

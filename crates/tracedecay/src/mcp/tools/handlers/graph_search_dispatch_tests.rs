@@ -280,7 +280,7 @@ fn freshness_reader(
             coverage: "complete".to_owned(),
             ..Default::default()
         };
-        Box::pin(async move { Some(freshness) })
+        Box::pin(async move { Ok(Some(freshness)) })
     })
 }
 

@@ -2531,8 +2531,13 @@ fn snapshot_file_keys<'a>(
     Ok(keys)
 }
 
-type LexicalSegmentReaderV1 =
-    dyn FnMut(&ManifestDigest, u64, &mut Vec<u8>) -> Result<(), CodeIndexProductionErrorV1> + Send;
+type LexicalSegmentReaderV1 = dyn FnMut(
+        &ManifestDigest,
+        u64,
+        &mut Vec<u8>,
+        &dyn CodeIndexExecutionControlV1,
+    ) -> Result<(), CodeIndexProductionErrorV1>
+    + Send;
 
 pub(super) struct PartitionedLexicalFileSourceV1 {
     generation_id: CodeGenerationId,
@@ -2651,6 +2656,7 @@ impl PartitionedLexicalFileSourceV1 {
                     &descriptor.segment_digest,
                     descriptor.segment_size_bytes,
                     segment,
+                    control,
                 )?;
                 checkpoint(control)
             },
@@ -2739,6 +2745,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             &ManifestDigest,
             u64,
             &mut Vec<u8>,
+            &dyn CodeIndexExecutionControlV1,
         ) -> Result<(), CodeIndexProductionErrorV1>
         + Send
         + 'static,

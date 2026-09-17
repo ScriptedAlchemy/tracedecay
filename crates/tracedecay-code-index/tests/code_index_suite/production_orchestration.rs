@@ -4414,7 +4414,7 @@ fn carried_forward_clone_bodies_admit_through_the_reused_sealed_segment() {
         Cursor::new(Vec::<u8>::new()),
         &child_manifest,
         state_digest,
-        move |digest, _, buffer| {
+        move |digest, _, buffer, _control| {
             let bytes = segments.get(digest.as_str()).ok_or_else(|| {
                 CodeIndexProductionErrorV1::Contract("published segment is missing".to_owned())
             })?;

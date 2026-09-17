@@ -5,7 +5,8 @@ use std::{cmp::Ordering, collections::BTreeMap, sync::Arc};
 use serde::{Deserialize, Serialize};
 use tracedecay_code_extraction::{
     ExtractedImportEvidenceV1, ExtractedSchemaEvidenceV1, ExtractionArtifactV1, ImportModuleKindV1,
-    ImportNamespaceV1, SchemaEvidenceLanguageV1, SchemaEvidenceStatusV1, import_module_kind,
+    ImportNamespaceV1, ImportReexportScopeV1, SchemaEvidenceLanguageV1, SchemaEvidenceStatusV1,
+    import_module_kind,
 };
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, FileOccurrenceId, ManifestDigest,
@@ -30,8 +31,8 @@ pub struct CodeIndexImportEvidenceV1 {
     pub local_name: Option<String>,
     #[serde(default)]
     pub is_public: bool,
-    #[serde(default)]
-    pub is_restricted_public: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reexport_scope: Option<ImportReexportScopeV1>,
     #[serde(default)]
     pub is_glob: bool,
     pub namespace: ImportNamespaceV1,
@@ -53,7 +54,7 @@ impl CodeIndexImportEvidenceV1 {
             imported_name: row.imported_name.clone(),
             local_name: row.local_name.clone(),
             is_public: row.is_public,
-            is_restricted_public: row.is_restricted_public,
+            reexport_scope: row.reexport_scope.clone(),
             is_glob: row.is_glob,
             namespace: row.namespace,
             module_kind: row.module_kind,
@@ -70,7 +71,7 @@ impl CodeIndexImportEvidenceV1 {
             imported_name: self.imported_name.clone(),
             local_name: self.local_name.clone(),
             is_public: self.is_public,
-            is_restricted_public: self.is_restricted_public,
+            reexport_scope: self.reexport_scope.clone(),
             is_glob: self.is_glob,
             namespace: self.namespace,
             module_kind: self.module_kind,
@@ -106,6 +107,13 @@ impl CodeIndexImportEvidenceV1 {
             return Err(ChunkingFailureV1::NonCanonicalIdentity(
                 crate::noncanonical::NonCanonicalCauseV1::new(
                     crate::noncanonical::NonCanonicalReasonCodeV1::ImportEmptyBindingName,
+                ),
+            ));
+        }
+        if self.is_public && self.reexport_scope.is_some() {
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::ImportAuthorityMismatch,
                 ),
             ));
         }

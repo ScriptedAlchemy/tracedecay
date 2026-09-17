@@ -13,9 +13,9 @@ use tempfile::TempDir;
 use tracedecay_code_index_retention::code_index_generations::{
     CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1, DurablePublicationPointerV1,
     MAX_CODE_GENERATION_RETENTION_BATCH_V1, acquire_code_generation_store_lock,
-    acquire_code_generation_store_read_lock, durable_generation_index_digest,
-    execute_code_generation_retention_cancellable,
+    durable_generation_index_digest, execute_code_generation_retention_cancellable,
     prepare_next_code_generation_retention_cancellable, run_code_generation_retention,
+    try_acquire_code_generation_store_read_lock,
 };
 use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, SanitizerRevision, UtcMicros, encode_lowercase_hex,
@@ -31,13 +31,38 @@ use super::{
 };
 use crate::{
     code_index::production::{
-        CodeIndexAtomicPublicationPort, CodeIndexInterruptionV1, CodeIndexProductionErrorV1,
-        CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-        SEALED_GENERATION_FORMAT_REVISION_V1, SealedGenerationSegmentReadV1,
-        UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageReadV1,
+        CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1, CodeIndexInterruptionV1,
+        CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
+        CodeIndexPublishedGenerationV1, SEALED_GENERATION_FORMAT_REVISION_V1,
+        SealedGenerationSegmentReadV1, UninterruptibleCodeIndexControlV1,
+        VerifiedSealedLexicalPageReadV1,
     },
     code_index_scheduler::{CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1},
 };
+
+struct CancelledCodeIndexControlV1;
+
+impl CodeIndexExecutionControlV1 for CancelledCodeIndexControlV1 {
+    fn is_cancelled(&self) -> bool {
+        true
+    }
+
+    fn is_deadline_exceeded(&self) -> bool {
+        false
+    }
+}
+
+struct ExpiredCodeIndexControlV1;
+
+impl CodeIndexExecutionControlV1 for ExpiredCodeIndexControlV1 {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+
+    fn is_deadline_exceeded(&self) -> bool {
+        true
+    }
+}
 
 #[test]
 fn partitioned_reclamation_is_bounded_and_preserves_retained_segments() {
@@ -443,6 +468,20 @@ fn lazy_lexical_source_cancels_when_retention_retires_its_unread_segments() {
         .expect("open lazy source without retaining every file");
     let initial_cursor = source.cursor().clone();
     let lock = acquire_code_generation_store_lock(store.path()).expect("hold publication lock");
+    assert!(matches!(
+        source.next_page(&CancelledCodeIndexControlV1),
+        Err(CodeIndexProductionErrorV1::Interrupted(
+            CodeIndexInterruptionV1::Cancelled
+        ))
+    ));
+    assert_eq!(source.cursor(), &initial_cursor);
+    assert!(matches!(
+        source.next_page(&ExpiredCodeIndexControlV1),
+        Err(CodeIndexProductionErrorV1::Interrupted(
+            CodeIndexInterruptionV1::DeadlineExceeded
+        ))
+    ));
+    assert_eq!(source.cursor(), &initial_cursor);
     let (sent, received) = std::sync::mpsc::channel();
     let reader = std::thread::spawn(move || {
         let result = source.next_page(&UninterruptibleCodeIndexControlV1);
@@ -522,7 +561,7 @@ fn lazy_lexical_source_cancels_when_retention_retires_its_unread_segments() {
 }
 
 #[test]
-fn generation_decode_shares_the_store_and_waits_for_an_exclusive_writer() {
+fn generation_decode_shares_store_and_refuses_exclusive_writer_contention() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn ready() -> usize { 1 }\n")]);
     let store = TempDir::new().expect("store root");
     let mut scheduler = scheduler(
@@ -546,7 +585,9 @@ fn generation_decode_shares_the_store_and_waits_for_an_exclusive_writer() {
     // `new` takes the exclusive store lock while it records the scope root, so
     // the store must be open before either probe hold or this test deadlocks.
     let publication = open_cold(store.path(), fixture.path());
-    let shared = acquire_code_generation_store_read_lock(store.path()).expect("shared hold");
+    let shared = try_acquire_code_generation_store_read_lock(store.path())
+        .expect("shared hold")
+        .expect("shared hold not contended");
     let (sent, received) = std::sync::mpsc::channel();
     let reader = std::thread::spawn(move || {
         sent.send(publication.load_active_shared())
@@ -564,24 +605,21 @@ fn generation_decode_shares_the_store_and_waits_for_an_exclusive_writer() {
 
     let publication = open_cold(store.path(), fixture.path());
     let exclusive = acquire_code_generation_store_lock(store.path()).expect("exclusive hold");
-    let (sent, received) = std::sync::mpsc::channel();
-    let reader = std::thread::spawn(move || {
-        sent.send(publication.load_active_shared())
-            .expect("return exclusive-wait decode");
-    });
     assert!(
         matches!(
-            received.recv_timeout(Duration::from_millis(400)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            publication.load_active_shared(),
+            Err(CodeIndexPublicationStoreErrorV1::Unavailable(message))
+                if message.contains("contended")
         ),
-        "an exclusive publication hold must park generation decode"
+        "an unscoped generation decode must fail retryably instead of blocking indefinitely"
     );
     drop(exclusive);
-    let decoded = received
-        .recv_timeout(Duration::from_secs(5))
-        .expect("generation decode resumes once the exclusive hold is released");
-    reader.join().expect("exclusive reader exits");
-    assert!(decoded.expect("decode after unlock").is_some());
+    assert!(
+        publication
+            .load_active_shared()
+            .expect("decode after unlock")
+            .is_some()
+    );
 }
 
 #[test]

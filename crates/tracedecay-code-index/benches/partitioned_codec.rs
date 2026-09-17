@@ -505,7 +505,7 @@ fn open_lexical(
         Cursor::new(Vec::<u8>::new()),
         &fixture.manifest,
         source_digest,
-        move |digest, _, buffer| {
+        move |digest, _, buffer, _control| {
             let bytes = segments.get(digest.as_str()).ok_or_else(|| {
                 CodeIndexProductionErrorV1::Contract("benchmark segment is missing".to_owned())
             })?;

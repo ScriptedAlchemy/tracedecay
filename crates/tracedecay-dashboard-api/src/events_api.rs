@@ -139,6 +139,9 @@ pub enum DashboardEventKindV1 {
         first_available: u64,
         dropped_events: u64,
     },
+    /// Durable activity replay failed. A live stream is not proof that history
+    /// was empty.
+    ReplayUnavailable { reason: String },
 }
 
 impl DashboardEventKindV1 {
@@ -156,7 +159,7 @@ impl DashboardEventKindV1 {
             Self::CodeIndexActivity { .. } => ActivityFamilyV1::CodeIndex.stream_name(),
             Self::ToolCallActivity { .. } => ActivityFamilyV1::ToolCall.stream_name(),
             Self::TaskActivity { .. } => ActivityFamilyV1::Task.stream_name(),
-            Self::ResumeGap { .. } => "control",
+            Self::ResumeGap { .. } | Self::ReplayUnavailable { .. } => "control",
         }
     }
 
@@ -532,7 +535,7 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
             )
             .await
         }
-        _ => None,
+        _ => Ok(None),
     };
 
     tokio::spawn(async move {
@@ -540,6 +543,7 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
         let connection_ref = crate::events_delivery::connection_ref(&run_id, &scope);
         let connection_ref_for_stream = connection_ref.clone();
         async {
+        let activity_run_id = run_id.clone();
         let mut stream_state = EventStreamState::new(run_id);
         let mut interval = tokio::time::interval(POLL_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -550,32 +554,45 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
             std::collections::BTreeMap::new();
         let mut producer_cursor = requested.as_ref().map_or(0, |resume| resume.sequence);
         let mut control = Vec::new();
-        if let Some(mut replay) = initial_replay {
+        if let Err(reason) = &initial_replay {
+            control.push(replay_unavailable_event(&activity_run_id, &scope, reason));
+        }
+        if let Ok(Some(mut replay)) = initial_replay {
             let run_mismatch = requested
                 .as_ref()
                 .is_some_and(|resume| resume.run_id != replay.frontier.run_id);
             let invalid_frontier = requested
                 .as_ref()
                 .is_some_and(|resume| resume.sequence >= replay.frontier.next_sequence);
+            let mut replay_failed = false;
             if (run_mismatch || invalid_frontier)
                 && let (Some(db), Some(project_id)) =
                     (activity_db.as_deref(), activity_project_id.as_deref())
-                && let Some(from_start) =
-                    tracedecay_session_memory::event_lane::replay_after(db, project_id, None).await
             {
-                replay = from_start;
+                match tracedecay_session_memory::event_lane::replay_after(db, project_id, None)
+                    .await
+                {
+                    Ok(Some(from_start)) => replay = from_start,
+                    Err(reason) => {
+                        control.push(replay_unavailable_event(&activity_run_id, &scope, &reason));
+                        replay_failed = true;
+                    }
+                    Ok(None) => {}
+                }
             }
-            if replay.resume_gap || run_mismatch || invalid_frontier {
-                control.push(resume_gap_event(
-                    requested.as_ref().map_or(0, |resume| resume.sequence),
-                    &replay.frontier,
-                    &scope,
-                ));
-                producer_cursor = replay.frontier.retained_from_sequence.saturating_sub(1);
-            }
-            for record in replay.records {
-                producer_cursor = producer_cursor.max(record.producer_sequence);
-                accumulate_record(&mut pending, record);
+            if !replay_failed {
+                if replay.resume_gap || run_mismatch || invalid_frontier {
+                    control.push(resume_gap_event(
+                        requested.as_ref().map_or(0, |resume| resume.sequence),
+                        &replay.frontier,
+                        &scope,
+                    ));
+                    producer_cursor = replay.frontier.retained_from_sequence.saturating_sub(1);
+                }
+                for record in replay.records {
+                    producer_cursor = producer_cursor.max(record.producer_sequence);
+                    accumulate_record(&mut pending, record);
+                }
             }
         }
 
@@ -628,12 +645,15 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
                         Some(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
                             if let (Some(db), Some(project_id)) =
                                 (activity_db.as_deref(), activity_project_id.as_deref())
-                                && let Some(replay) = tracedecay_session_memory::event_lane::replay_after(
+                            {
+                                match tracedecay_session_memory::event_lane::replay_after(
                                     db,
                                     project_id,
                                     Some(producer_cursor),
-                                ).await
-                            {
+                                )
+                                .await
+                                {
+                                    Ok(Some(replay)) => {
                                 if replay.resume_gap {
                                     let event = resume_gap_event(producer_cursor, &replay.frontier, &scope);
                                     if send_event(
@@ -651,6 +671,27 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
                                         producer_cursor = record.producer_sequence;
                                         accumulate_record(&mut pending, record);
                                     }
+                                }
+                                    }
+                                    Err(reason) => {
+                                        let event = replay_unavailable_event(
+                                            &activity_run_id,
+                                            &scope,
+                                            &reason,
+                                        );
+                                        if send_event(
+                                            &tx,
+                                            delivery_settlements.as_ref(),
+                                            connection_ref_for_stream.as_deref(),
+                                            event,
+                                        )
+                                        .await
+                                        .is_err()
+                                        {
+                                            return;
+                                        }
+                                    }
+                                    Ok(None) => {}
                                 }
                             }
                         }
@@ -752,6 +793,30 @@ async fn receive_activity(
     match receiver {
         Some(receiver) => Some(receiver.recv().await),
         None => std::future::pending().await,
+    }
+}
+
+fn replay_unavailable_event(
+    run_id: &str,
+    scope: &DashboardScopeV1,
+    reason: &str,
+) -> DashboardEventV1 {
+    DashboardEventV1 {
+        stream: "control".to_string(),
+        run_id: run_id.to_owned(),
+        event_revision: 0,
+        producer_sequence: None,
+        retained_from_sequence: None,
+        dropped_events: 0,
+        entity_revision: None,
+        scope: scope.clone(),
+        observation_time_micros: now_micros(),
+        source_watermark: None,
+        coverage: DashboardCoverageV1::unknown(),
+        delivery_receipt: None,
+        kind: DashboardEventKindV1::ReplayUnavailable {
+            reason: reason.to_owned(),
+        },
     }
 }
 

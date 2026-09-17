@@ -11,7 +11,8 @@ use tree_sitter::{Node as TsNode, Tree};
 use crate::common::local_node_id;
 use crate::complexity::{RUST_COMPLEXITY, count_complexity};
 use crate::extraction_artifact::{
-    ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportNamespaceV1, import_module_kind,
+    ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportNamespaceV1, ImportReexportScopeV1,
+    import_module_kind,
 };
 use crate::types::{
     ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, SourceSpan,
@@ -646,7 +647,10 @@ impl RustExtractor {
         Self::extract_annotations_from_modifiers(state, node, &id);
 
         // Visit impl body: functions become Method nodes.
-        state.node_stack.push((type_name, id));
+        let method_owner = trait_name.as_ref().map_or(type_name.clone(), |trait_name| {
+            format!("<{type_name} as {trait_name}>")
+        });
+        state.node_stack.push((method_owner, id));
         if let Some(body) = node.child_by_field_name("body") {
             Self::visit_children(state, body);
         }
@@ -675,8 +679,8 @@ impl RustExtractor {
             .filter(|parent| parent.kind() == "source_file")
             .and_then(|_| node.child_by_field_name("argument"));
         if let Some(argument) = top_level_argument {
-            let (is_public, is_restricted_public) = Self::use_reexport_visibility(node, state);
-            Self::extract_use_bindings(state, argument, None, is_public, is_restricted_public);
+            let (is_public, reexport_scope) = Self::use_reexport_visibility(node, state);
+            Self::extract_use_bindings(state, argument, None, is_public, reexport_scope.as_ref());
         }
         let qualified_name = format!("{}::{}", state.qualified_prefix(), path);
         let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &path, node);
@@ -761,7 +765,7 @@ impl RustExtractor {
         node: TsNode<'_>,
         prefix: Option<&str>,
         is_public: bool,
-        is_restricted_public: bool,
+        reexport_scope: Option<&ImportReexportScopeV1>,
     ) {
         match node.kind() {
             "scoped_use_list" => {
@@ -775,20 +779,14 @@ impl RustExtractor {
                         list,
                         combined.as_deref(),
                         is_public,
-                        is_restricted_public,
+                        reexport_scope,
                     );
                 }
             }
             "use_list" => {
                 let mut cursor = node.walk();
                 for child in node.named_children(&mut cursor) {
-                    Self::extract_use_bindings(
-                        state,
-                        child,
-                        prefix,
-                        is_public,
-                        is_restricted_public,
-                    );
+                    Self::extract_use_bindings(state, child, prefix, is_public, reexport_scope);
                 }
             }
             "use_as_clause" => {
@@ -806,7 +804,7 @@ impl RustExtractor {
                         state.node_text(alias),
                         node,
                         is_public,
-                        is_restricted_public,
+                        reexport_scope,
                     );
                 }
             }
@@ -818,7 +816,7 @@ impl RustExtractor {
                     .or(prefix)
                     .or_else(|| text.strip_suffix("::*"));
                 if let Some(module) = module {
-                    Self::push_glob_binding(state, module, node, is_public, is_restricted_public);
+                    Self::push_glob_binding(state, module, node, is_public, reexport_scope);
                 }
             }
             _ => {
@@ -831,7 +829,7 @@ impl RustExtractor {
                         local_name,
                         node,
                         is_public,
-                        is_restricted_public,
+                        reexport_scope,
                     );
                 }
             }
@@ -854,7 +852,7 @@ impl RustExtractor {
         local_name: &str,
         evidence_node: TsNode<'_>,
         is_public: bool,
-        is_restricted_public: bool,
+        reexport_scope: Option<&ImportReexportScopeV1>,
     ) {
         let (module_specifier, imported_name) = match full_path.rsplit_once("::") {
             Some(parts) => parts,
@@ -871,7 +869,7 @@ impl RustExtractor {
             imported_name: Some(imported_name.to_owned()),
             local_name: Some(local_name.to_owned()),
             is_public,
-            is_restricted_public,
+            reexport_scope: reexport_scope.cloned(),
             is_glob: false,
             namespace: ImportNamespaceV1::Value,
             module_kind,
@@ -889,7 +887,7 @@ impl RustExtractor {
         module: &str,
         evidence_node: TsNode<'_>,
         is_public: bool,
-        is_restricted_public: bool,
+        reexport_scope: Option<&ImportReexportScopeV1>,
     ) {
         let module_specifier = Self::canonical_rust_import_module(state, module);
         let Some(module_kind) = import_module_kind("rust", &module_specifier) else {
@@ -901,7 +899,7 @@ impl RustExtractor {
             imported_name: Some("*".to_owned()),
             local_name: None,
             is_public,
-            is_restricted_public,
+            reexport_scope: reexport_scope.cloned(),
             is_glob: true,
             namespace: ImportNamespaceV1::Value,
             module_kind,
@@ -1248,22 +1246,37 @@ impl RustExtractor {
             .map(|n| state.node_text(n).to_string())
     }
 
-    fn use_reexport_visibility(node: TsNode<'_>, state: &ExtractionState<'_>) -> (bool, bool) {
+    fn use_reexport_visibility(
+        node: TsNode<'_>,
+        state: &ExtractionState<'_>,
+    ) -> (bool, Option<ImportReexportScopeV1>) {
         let mut cursor = node.walk();
         if !cursor.goto_first_child() {
-            return (false, false);
+            return (false, None);
         }
         loop {
             let child = cursor.node();
             if child.kind() == "visibility_modifier" {
-                return if state.node_text(child) == "pub" {
-                    (true, false)
-                } else {
-                    (false, true)
+                let visibility = state.node_text(child);
+                return match visibility {
+                    "pub" => (true, None),
+                    "pub(crate)" | "pub(in crate)" => (false, Some(ImportReexportScopeV1::Crate)),
+                    "pub(super)" | "pub(in super)" => (false, Some(ImportReexportScopeV1::Super)),
+                    "pub(self)" | "pub(in self)" => {
+                        (false, Some(ImportReexportScopeV1::SelfModule))
+                    }
+                    _ => (
+                        false,
+                        visibility
+                            .strip_prefix("pub(in crate::")
+                            .and_then(|module| module.strip_suffix(')'))
+                            .filter(|module| !module.is_empty())
+                            .map(|module| ImportReexportScopeV1::Module(module.replace("::", "/"))),
+                    ),
                 };
             }
             if !cursor.goto_next_sibling() {
-                return (false, false);
+                return (false, None);
             }
         }
     }

@@ -39,7 +39,20 @@ async fn project_code_index_freshness(
     let authority_attached = state.code_index_freshness_reader.is_some();
     let read = match &state.code_index_freshness_reader {
         Some(reader) => reader(state.project_root.clone()).await,
-        None => None,
+        None => Ok(None),
+    };
+    let read = match read {
+        Err(_) => {
+            return DashboardEnvelopeV1::unavailable(
+                scope_from_state(state),
+                CodeIndexFreshnessPayloadV1 {
+                    worktrees: Vec::new(),
+                    note: "code-index freshness read failed".to_owned(),
+                },
+                "code-index freshness read failed",
+            );
+        }
+        Ok(read) => read,
     };
     let live = read.as_ref();
     let payload = match (authority_attached, read.clone()) {
@@ -166,7 +179,7 @@ mod tests {
         let (_project, mut state) = state_for_test().await;
         state.code_index_freshness_reader = Some(Arc::new(|root| {
             Box::pin(async move {
-                Some(CodeIndexWorktreeFreshnessV1 {
+                Ok(Some(CodeIndexWorktreeFreshnessV1 {
                     worktree_root: root.display().to_string(),
                     repository_id: None,
                     worktree_id: None,
@@ -187,7 +200,7 @@ mod tests {
                     progress: None,
                     parked: None,
                     generation_recovery: None,
-                })
+                }))
             })
         }));
 
@@ -201,7 +214,7 @@ mod tests {
     async fn attached_registry_without_a_mount_is_unknown_not_unsupported() {
         let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, mut state) = state_for_test().await;
-        state.code_index_freshness_reader = Some(Arc::new(|_| Box::pin(async { None })));
+        state.code_index_freshness_reader = Some(Arc::new(|_| Box::pin(async { Ok(None) })));
 
         let Json(envelope) = freshness(State(state)).await;
 
@@ -216,14 +229,14 @@ mod tests {
             let (_project, mut state) = state_for_test().await;
             state.code_index_freshness_reader = Some(Arc::new(move |root| {
                 Box::pin(async move {
-                    Some(CodeIndexWorktreeFreshnessV1 {
+                    Ok(Some(CodeIndexWorktreeFreshnessV1 {
                         worktree_root: root.display().to_string(),
                         latest_generation_id: Some("generation.fixture".to_owned()),
                         staleness_state: Some(staleness.to_owned()),
                         coverage: "complete".to_owned(),
                         hook_hint_count: Some(1),
                         ..Default::default()
-                    })
+                    }))
                 })
             }));
 
@@ -246,13 +259,13 @@ mod tests {
         let (_project, mut state) = state_for_test().await;
         state.code_index_freshness_reader = Some(Arc::new(|root| {
             Box::pin(async move {
-                Some(CodeIndexWorktreeFreshnessV1 {
+                Ok(Some(CodeIndexWorktreeFreshnessV1 {
                     worktree_root: root.display().to_string(),
                     latest_generation_id: Some("generation.fixture".to_owned()),
                     staleness_state: Some("fresh".to_owned()),
                     coverage: "partial_hook_hint_overflow".to_owned(),
                     ..Default::default()
-                })
+                }))
             })
         }));
 

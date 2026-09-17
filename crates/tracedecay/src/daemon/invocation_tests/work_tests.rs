@@ -822,6 +822,7 @@ async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
         tracedecay_session_memory::event_lane::replay_after(&database, project_id.as_str(), None)
             .await
             .expect("activity replay")
+            .expect("activity replay present")
             .records
             .is_empty(),
         "a prepared Work mutation must not publish task activity"
@@ -845,7 +846,8 @@ async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
     let replay =
         tracedecay_session_memory::event_lane::replay_after(&database, project_id.as_str(), None)
             .await
-            .expect("activity replay");
+            .expect("activity replay")
+            .expect("activity replay present");
     assert_eq!(
         replay.records.len(),
         1,
@@ -884,6 +886,7 @@ async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
         tracedecay_session_memory::event_lane::replay_after(&database, project_id.as_str(), None)
             .await
             .expect("activity replay")
+            .expect("activity replay present")
             .records
             .len(),
         1,

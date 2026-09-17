@@ -253,10 +253,7 @@ impl HostAdmissionRuntime {
         seq: u64,
         canonical_outcome: HostAdmissionOutcome,
     ) -> HostAdmissionOutcome {
-        if !matches!(
-            canonical_outcome.status,
-            HostAdmissionStatus::Committed | HostAdmissionStatus::ExactDuplicate
-        ) {
+        if !canonical_outcome.status.commits_replay_record() {
             return canonical_outcome;
         }
         match self.spool.ack(seq) {

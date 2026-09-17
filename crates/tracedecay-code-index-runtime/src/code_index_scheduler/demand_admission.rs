@@ -40,6 +40,9 @@ pub enum CodeIndexDemandUnavailableV1 {
     ForeignRoot,
     /// No mounted scheduler owns this route and nothing queued the demand.
     SchedulerUnmounted,
+    /// Repository membership could not be decided. Retry; do not treat this as
+    /// a non-repository.
+    IdentityUnresolved,
     /// The bounded freshness ladder found no source change to admit.
     NoProvenChange,
 }
@@ -50,6 +53,7 @@ impl CodeIndexDemandUnavailableV1 {
             Self::RouteRetired => "route_retired",
             Self::ForeignRoot => "foreign_root",
             Self::SchedulerUnmounted => "scheduler_unmounted",
+            Self::IdentityUnresolved => "identity_unresolved",
             Self::NoProvenChange => "no_proven_change",
         }
     }

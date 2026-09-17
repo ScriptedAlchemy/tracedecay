@@ -275,7 +275,7 @@ fn partitioned_reopen_reports_encoded_byte_progress_and_bounds_prefetch() {
         Cursor::new(Vec::<u8>::new()),
         &manifest,
         fixture.state_digest.clone(),
-        move |digest, _, buffer| {
+        move |digest, _, buffer, _control| {
             read_count.fetch_add(1, Ordering::SeqCst);
             buffer.clear();
             buffer.extend_from_slice(read_segments.get(digest).expect("sealed segment exists"));
@@ -351,7 +351,7 @@ fn partitioned_reopen_reports_encoded_byte_progress_and_bounds_prefetch() {
         Cursor::new(Vec::<u8>::new()),
         &manifest,
         fixture.state_digest.clone(),
-        move |digest, _, buffer| {
+        move |digest, _, buffer, _control| {
             buffer.clear();
             buffer.extend_from_slice(segments.get(digest).expect("sealed segment exists"));
             buffer[0] ^= 1;

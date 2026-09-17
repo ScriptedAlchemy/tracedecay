@@ -218,21 +218,51 @@ async fn brokered_init(
         init_deadline,
     )
     .await;
-    if let Err(error) = reconcile {
-        if !code_index_reconciliation_is_optional(project_path, &error).await {
-            return Err(error);
+    let reconcile = match reconcile {
+        Err(error) => {
+            if !code_index_reconciliation_is_optional(project_path, &error).await {
+                return Err(error);
+            }
+            eprintln!(
+                "initialized {}; code indexing is unavailable for this non-Git project",
+                project_path.display()
+            );
+            return Ok(());
         }
-        eprintln!(
-            "initialized {}; code indexing is unavailable for this non-Git project",
+        Ok(reconcile) => reconcile,
+    };
+    match admin_sync_status(&reconcile).as_deref() {
+        Some("queued") => eprintln!(
+            "initialized {}; daemon code-index reconciliation queued",
             project_path.display()
-        );
-        return Ok(());
+        ),
+        Some("not_applicable") => eprintln!(
+            "initialized {}; code indexing does not apply to this non-Git project",
+            project_path.display()
+        ),
+        Some(status) => eprintln!(
+            "initialized {}; daemon code-index reconciliation status is {status}",
+            project_path.display()
+        ),
+        None => eprintln!(
+            "initialized {}; daemon code-index reconciliation returned no status",
+            project_path.display()
+        ),
     }
-    eprintln!(
-        "initialized {}; daemon code-index reconciliation requested",
-        project_path.display()
-    );
     Ok(())
+}
+
+fn admin_sync_status(envelope: &serde_json::Value) -> Option<String> {
+    let text = envelope
+        .get("content")?
+        .as_array()?
+        .iter()
+        .find_map(|block| block.get("text").and_then(|text| text.as_str()))?;
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()?
+        .get("status")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 async fn code_index_reconciliation_is_optional(
@@ -517,10 +547,24 @@ pub(crate) async fn handle_sync(
             serde_json::to_string_pretty(&result).unwrap_or_default()
         );
     }
-    eprintln!(
-        "code-index reconciliation queued via daemon for {}",
-        resolved.project_path.display()
-    );
+    match admin_sync_status(&result).as_deref() {
+        Some("queued") => eprintln!(
+            "code-index reconciliation queued via daemon for {}",
+            resolved.project_path.display()
+        ),
+        Some("not_applicable") => eprintln!(
+            "code indexing does not apply to {}",
+            resolved.project_path.display()
+        ),
+        Some(status) => eprintln!(
+            "code-index reconciliation status is {status} for {}",
+            resolved.project_path.display()
+        ),
+        None => eprintln!(
+            "daemon code-index reconciliation returned no status for {}",
+            resolved.project_path.display()
+        ),
+    }
     if doctor {
         tracedecay::doctor::run_doctor(crate::cloud::doctor_network_probes()).await?;
     }

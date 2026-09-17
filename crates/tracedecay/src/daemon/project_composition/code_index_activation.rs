@@ -373,13 +373,11 @@ pub(super) fn code_index_freshness_probe_sink(
         let schedulers = schedulers.clone();
         let activation = Arc::clone(&activation);
         Box::pin(async move {
-            // The ladder is a read, not a demand, so it never reaches the
-            // front door; the watcher policy still governs whether this route
-            // may be probed on the daemon's own initiative.
-            if activation.automatic_admission()
-                == code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled
+            if let Some(verdict) = activation
+                .gate_demand(&root, &CodeIndexDemandV1::Reconcile)
+                .await
             {
-                return CodeIndexDemandAdmissionV1::RefusedByPolicy;
+                return verdict;
             }
             schedulers.probe_freshness_admission(&root).await
         })
@@ -432,9 +430,10 @@ mod tests {
     #[test]
     fn host_outcome_maps_corrupt_terminal_unavailable_not_degraded() {
         use crate::mcp::server::{
-            CODE_INDEX_FOREIGN_ROOT, CODE_INDEX_LINKED_WORKTREE_DISABLED,
-            CODE_INDEX_NO_PROVEN_CHANGE, CODE_INDEX_ROUTE_RETIRED,
-            CODE_INDEX_SCHEDULER_UNAVAILABLE, code_index_host_outcome,
+            CODE_INDEX_FOREIGN_ROOT, CODE_INDEX_IDENTITY_UNRESOLVED,
+            CODE_INDEX_LINKED_WORKTREE_DISABLED, CODE_INDEX_NO_PROVEN_CHANGE,
+            CODE_INDEX_NOT_APPLICABLE, CODE_INDEX_ROUTE_RETIRED, CODE_INDEX_SCHEDULER_UNAVAILABLE,
+            code_index_host_outcome,
         };
         use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandUnavailableV1;
         use tracedecay_contracts::code_index_freshness::CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT;
@@ -447,6 +446,18 @@ mod tests {
             corrupt.reason_code,
             Some(CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT)
         );
+
+        let not_applicable = code_index_host_outcome(&CodeIndexDemandAdmissionV1::NotApplicable);
+        assert_eq!(not_applicable.status, HostAdmissionStatus::NotApplicable);
+        assert!(!not_applicable.retryable);
+        assert!(not_applicable.status.commits_replay_record());
+        assert_eq!(not_applicable.reason_code, Some(CODE_INDEX_NOT_APPLICABLE));
+
+        let unresolved = code_index_host_outcome(&CodeIndexDemandAdmissionV1::Unavailable(
+            CodeIndexDemandUnavailableV1::IdentityUnresolved,
+        ));
+        assert!(unresolved.retryable);
+        assert_eq!(unresolved.reason_code, Some(CODE_INDEX_IDENTITY_UNRESOLVED));
 
         let linked = code_index_host_outcome(&CodeIndexDemandAdmissionV1::RefusedByPolicy);
         assert_eq!(linked.status, HostAdmissionStatus::Degraded);

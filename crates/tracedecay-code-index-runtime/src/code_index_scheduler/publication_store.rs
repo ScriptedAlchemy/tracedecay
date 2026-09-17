@@ -9,7 +9,7 @@ use std::{
         Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use same_file::Handle;
@@ -19,8 +19,8 @@ use tracedecay_code_index_retention::code_index_generations::{
     CodeGenerationStoreLockV1, DurableGenerationCardinalityV1, DurableGenerationIndexEntryV1,
     DurablePublicationPointerV1, DurableSealedCodeGenerationIdentityV1,
     MAX_DURABLE_GENERATION_INDEX_BYTES_V1, MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1,
-    acquire_code_generation_store_lock, acquire_code_generation_store_read_lock,
     durable_generation_index_digest, retain_bounded_generation_index,
+    try_acquire_code_generation_store_lock, try_acquire_code_generation_store_read_lock,
 };
 use tracedecay_domain::{
     CodeGenerationId, ContentDigest, ManifestDigest, ProjectionBatchRequestV1,
@@ -741,8 +741,9 @@ impl DaemonCodeIndexPublicationStoreV1 {
         std::fs::create_dir_all(&generations_root)?;
         let segments_root = store_root.join("code-generation-segments-v1");
         std::fs::create_dir_all(&segments_root)?;
-        let _store_lock = acquire_code_generation_store_lock(store_root)
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let _store_lock = try_acquire_code_generation_store_lock(store_root)
+            .map_err(|error| std::io::Error::other(error.to_string()))?
+            .ok_or_else(|| std::io::Error::other("code-generation store has an active owner"))?;
         // Scope reconciliation only sees this directory's hash; the record
         // lets it collect the scope as soon as the checkout is deleted rather
         // than after the stranding age.
@@ -868,7 +869,9 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .active_path
             .parent()
             .ok_or_else(|| Self::unavailable("active code-generation pointer has no store root"))?;
-        acquire_code_generation_store_read_lock(store_root).map_err(Self::unavailable)
+        try_acquire_code_generation_store_read_lock(store_root)
+            .map_err(Self::unavailable)?
+            .ok_or_else(|| Self::unavailable("generation store read lock is contended"))
     }
 
     fn remove_abandoned_evidence_packs(
@@ -1266,17 +1269,30 @@ impl DaemonCodeIndexPublicationStoreV1 {
         identity: &DurableSealedCodeGenerationIdentityV1,
         request: SealedGenerationSegmentReadV1<'_>,
         buffer: &mut Vec<u8>,
+        control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<(), CodeIndexProductionErrorV1> {
         let root = self
             .active_path
             .parent()
             .ok_or_else(|| Self::unavailable("active code-generation pointer has no store root"))?;
-        // A retained segment is immutable and content-addressed; the read
-        // only needs retention and publication writers held off between the
-        // pointer check and the byte read. A shared hold does that without
-        // turning a concurrent retention tick or graph seal into a typed
-        // failure of the whole projection (issue #1103 / #1226).
-        let _lock = acquire_code_generation_store_read_lock(root).map_err(Self::unavailable)?;
+        let _lock = loop {
+            if control.is_cancelled() {
+                return Err(CodeIndexProductionErrorV1::Interrupted(
+                    CodeIndexInterruptionV1::Cancelled,
+                ));
+            }
+            if control.is_deadline_exceeded() {
+                return Err(CodeIndexProductionErrorV1::Interrupted(
+                    CodeIndexInterruptionV1::DeadlineExceeded,
+                ));
+            }
+            if let Some(lock) =
+                try_acquire_code_generation_store_read_lock(root).map_err(Self::unavailable)?
+            {
+                break lock;
+            }
+            std::thread::park_timeout(Duration::from_millis(1));
+        };
         let pointer = self.read_publication_pointer()?;
         if !pointer.as_ref().is_some_and(|pointer| {
             pointer.generation_index.iter().any(|entry| {
@@ -2141,8 +2157,9 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                 }
             }
         };
-        let _store_lock =
-            acquire_code_generation_store_lock(store_root).map_err(Self::unavailable)?;
+        let _store_lock = try_acquire_code_generation_store_lock(store_root)
+            .map_err(Self::unavailable)?
+            .ok_or_else(|| Self::unavailable("code-generation store has an active owner"))?;
         let prior_pointer = if let Some(expected) = undecoded_expectation.as_ref() {
             if expected_active_generation.is_some() {
                 return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);

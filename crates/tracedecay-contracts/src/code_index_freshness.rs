@@ -356,8 +356,23 @@ pub struct CodeIndexWorktreeFreshnessV1 {
     pub generation_recovery: Option<CodeIndexGenerationRecoveryV1>,
 }
 
-pub type CodeIndexFreshnessReadFuture =
-    Pin<Box<dyn Future<Output = Option<CodeIndexWorktreeFreshnessV1>> + Send + 'static>>;
+/// A freshness read failed. Distinct from an unmounted route, which is `Ok(None)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodeIndexFreshnessReadFailureV1 {
+    ReadFailed,
+}
+
+pub type CodeIndexFreshnessReadFuture = Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    Option<CodeIndexWorktreeFreshnessV1>,
+                    CodeIndexFreshnessReadFailureV1,
+                >,
+            > + Send
+            + 'static,
+    >,
+>;
 pub type CodeIndexFreshnessReader =
     Arc<dyn Fn(PathBuf) -> CodeIndexFreshnessReadFuture + Send + Sync + 'static>;
 

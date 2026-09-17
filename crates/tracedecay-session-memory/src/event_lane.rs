@@ -361,8 +361,10 @@ pub async fn replay_after(
     db: &RegisteredGlobalDb,
     project_id: &str,
     after: Option<u64>,
-) -> Option<ActivityReplayV1> {
-    authoritative_project_id(db, Some(project_id))?;
+) -> Result<Option<ActivityReplayV1>, String> {
+    if authoritative_project_id(db, Some(project_id)).is_none() {
+        return Ok(None);
+    }
     let port = RegisteredObservabilityPortV1::new(db);
     let page = ObservabilityApplicationV1::new(port, port)
         .query(ObservabilityQueryV1 {
@@ -376,7 +378,7 @@ pub async fn replay_after(
             limit: (RETAINED_ACTIVITY_CAPACITY + 1) as u32,
         })
         .await
-        .ok()?;
+        .map_err(|error| error.to_string())?;
     let capped =
         page.events.len() > RETAINED_ACTIVITY_CAPACITY || page.coverage == CoverageStateV1::Capped;
     let mut records = page
@@ -431,7 +433,7 @@ pub async fn replay_after(
     let latest = records
         .last()
         .map_or(requested, |record| record.producer_sequence);
-    Some(ActivityReplayV1 {
+    Ok(Some(ActivityReplayV1 {
         records,
         frontier: ActivityFrontierV1 {
             run_id: "registered-observability-v1".to_owned(),
@@ -441,7 +443,7 @@ pub async fn replay_after(
             watermark: format!("analytics:{latest}"),
         },
         resume_gap,
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -493,7 +495,8 @@ mod tests {
         .await;
         let replay = replay_after(db, project_id.as_str(), None)
             .await
-            .expect("activity replay");
+            .expect("activity replay")
+            .expect("activity replay present");
         assert_eq!(replay.records.len(), 1);
         assert_eq!(replay.records[0].pulse.units, 2);
         assert_eq!(replay.records[0].pulse.project_root, PathBuf::new());
@@ -506,7 +509,8 @@ mod tests {
         let after = replay.records[0].producer_sequence;
         let caught_up = replay_after(db, project_id.as_str(), Some(after))
             .await
-            .expect("caught-up replay");
+            .expect("caught-up replay")
+            .expect("caught-up replay present");
         assert!(caught_up.records.is_empty());
         assert!(!caught_up.resume_gap);
         assert!(

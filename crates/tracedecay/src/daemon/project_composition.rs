@@ -1760,7 +1760,7 @@ fn project_dashboard_freshness_reader(
     let reader: tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader =
         Arc::new(move |project_root| {
             let schedulers = schedulers.clone();
-            Box::pin(async move { schedulers.dashboard_freshness(&project_root).await })
+            Box::pin(async move { schedulers.dashboard_freshness_read(&project_root).await })
         });
     reader
 }

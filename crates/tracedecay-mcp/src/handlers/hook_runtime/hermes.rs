@@ -7,7 +7,7 @@ use tracedecay_automation_runtime::automation::run_ledger::AutomationRunStatus;
 use tracedecay_domain::errors::Result;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_host_admission::{SharedHostAdmissionBroker, TerminalReason};
-use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionStatus};
+use tracedecay_sessions::admission::HostAdmissionOutcome;
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
 use super::required_str;
@@ -181,10 +181,7 @@ async fn replay_projectless_hermes_receipts(
             }
         };
         let canonical_outcome = apply_projectless_hermes_receipt_plan(profile_root, plan).await;
-        let outcome = if matches!(
-            canonical_outcome.status,
-            HostAdmissionStatus::Committed | HostAdmissionStatus::ExactDuplicate
-        ) {
+        let outcome = if canonical_outcome.status.commits_replay_record() {
             match replay.commit(record.seq).await {
                 Ok(_) => canonical_outcome,
                 Err(outcome) => {
@@ -342,10 +339,7 @@ pub(super) async fn hermes_receipt(
     let outcome = replay_projectless_hermes_receipts(broker, profile_root, Some(admitted.seq))
         .await
         .map_err(|outcome| map_host_admission_outcome(&outcome))?;
-    if !matches!(
-        outcome.status,
-        HostAdmissionStatus::Committed | HostAdmissionStatus::ExactDuplicate
-    ) {
+    if !outcome.status.commits_replay_record() {
         return Err(map_host_admission_outcome(&outcome));
     }
     if is_turn_ingested {
