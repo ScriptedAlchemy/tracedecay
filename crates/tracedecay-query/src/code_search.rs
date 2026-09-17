@@ -696,10 +696,10 @@ mod tests {
         assert!(partial.graph.is_servable());
     }
 
-    /// The dogfood defect (#917): a natural-language task whose common terms
-    /// exceed the lexical document-frequency budget is served from the
-    /// current complete generation with pruned recall. The lane must say so,
-    /// rather than reading like an incomplete index.
+    /// A natural-language task whose common terms exceed the lexical
+    /// document-frequency budget is served from the current complete
+    /// generation with pruned recall. The lane must say so rather than
+    /// reading like an incomplete index.
     #[test]
     fn a_pruned_lexical_lane_names_why_its_recall_is_partial() {
         let fallback = std::collections::BTreeMap::from([
