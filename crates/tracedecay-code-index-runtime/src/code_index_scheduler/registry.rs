@@ -1116,11 +1116,15 @@ pub(super) fn dashboard_code_graph_serving(
     ))
 }
 
-/// Whether status may report this worktree as terminal (`fresh` / `current`).
+/// Whether the lane owners alone would let status report this worktree as
+/// terminal (`fresh` / `current`).
 ///
 /// Refused graph activation remains terminal for text serving, preserving the
 /// existing status behavior; strict dogfood can distinguish it from Ready via
-/// the separate typed projection.
+/// the separate typed projection. Lane readiness is not seat identity: a
+/// publication installs the replacement text owner before the serving swap
+/// (`registry/mount.rs`), and search still answers the incumbent seat.
+/// [`dashboard_terminal_status`] is what freshness reads use.
 fn dashboard_generation_is_ready(
     latest: Option<&LatestCompleteCodeIndexV1>,
     text_ready: bool,
@@ -1132,6 +1136,61 @@ fn dashboard_generation_is_ready(
     } else {
         latest.is_some() || text_ready
     }
+}
+
+/// Whether the generation status advertises is the one search will serve.
+///
+/// `advertised_text_generation_id` is `None` when no text owner is installed;
+/// freshness then names the serving seat, so there is no split to refuse.
+pub(super) fn serving_seat_matches_advertised_generation(
+    serving_generation_id: Option<&str>,
+    advertised_text_generation_id: Option<&str>,
+) -> bool {
+    match advertised_text_generation_id {
+        None => true,
+        Some(advertised) => serving_generation_id == Some(advertised),
+    }
+}
+
+pub(super) fn serving_seat_matches_advertised_text_owner(
+    serving: Option<&LatestCompleteCodeIndexV1>,
+    text: Option<&LatestCodeTextGenerationV1>,
+) -> bool {
+    serving_seat_matches_advertised_generation(
+        serving.map(|serving| serving.generation().manifest().generation_id.as_str()),
+        text.map(|text| text.metadata().manifest().generation_id.as_str()),
+    )
+}
+
+/// Terminal freshness: lane owners are ready and the serving seat is the
+/// generation status will advertise.
+pub(super) fn dashboard_terminal_status(
+    latest: Option<&LatestCompleteCodeIndexV1>,
+    text: Option<&LatestCodeTextGenerationV1>,
+    text_ready: bool,
+    graph_activation_enabled: bool,
+    code_graph_serving: &Option<CodeGraphServingReadinessV1>,
+) -> bool {
+    terminal_status_from_lanes(
+        dashboard_generation_is_ready(
+            latest,
+            text_ready,
+            graph_activation_enabled,
+            code_graph_serving,
+        ),
+        serving_seat_matches_advertised_text_owner(latest, text),
+    )
+}
+
+/// Lane readiness and seat identity are one freshness verdict.
+///
+/// The graph-rebuild receipt had ready lanes and a serving seat that still
+/// held the predecessor. That combination is not terminal.
+pub(super) fn terminal_status_from_lanes(
+    lanes_ready: bool,
+    serving_matches_advertised: bool,
+) -> bool {
+    lanes_ready && serving_matches_advertised
 }
 
 fn dashboard_text_freshness_identity(

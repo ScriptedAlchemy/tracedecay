@@ -20,7 +20,7 @@ use super::scope_identity::{latest_matches_scope_identity, text_matches_scope_id
 use super::{
     CodeIndexMountedScopeV1, CodeIndexSchedulerRegistryV1, CodeIndexServingScopeV1,
     MountedCodeIndexWorktreeV1, PendingWakeClaimV1, ReadyProbeServingPartsV1,
-    dashboard_code_graph_serving, dashboard_freshness_identity, dashboard_generation_is_ready,
+    dashboard_code_graph_serving, dashboard_freshness_identity, dashboard_terminal_status,
     dashboard_text_freshness_identity, unique_mounted_for_scope,
 };
 
@@ -369,8 +369,9 @@ impl CodeIndexSchedulerRegistryV1 {
                                 &text.metadata().manifest().generation_id,
                             )
                     });
-                    let ready = dashboard_generation_is_ready(
+                    let ready = dashboard_terminal_status(
                         latest.as_ref(),
+                        text.as_ref(),
                         text_ready,
                         graph_activation_enabled,
                         &code_graph_serving,
@@ -443,8 +444,9 @@ impl CodeIndexSchedulerRegistryV1 {
                         &text.metadata().manifest().generation_id,
                     )
             });
-            let ready = dashboard_generation_is_ready(
+            let ready = dashboard_terminal_status(
                 latest.as_ref(),
+                text.as_ref(),
                 text_ready,
                 graph_activation_enabled,
                 &code_graph_serving,
