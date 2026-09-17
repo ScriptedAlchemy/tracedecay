@@ -828,6 +828,15 @@ export const CodeIndexConvergenceParkedV1Schema = z.object({
 });
 export type CodeIndexConvergenceParkedV1 = z.infer<typeof CodeIndexConvergenceParkedV1Schema>;
 
+/** Coverage of one freshness read. Distinct from [`CodeIndexStalenessStateV1`]:
+a generation can be fresh and still omit hook-hint counts, or unverified
+while the ladder would otherwise say ready.
+
+`Unobserved` is only the constructed default. A projected read never emits
+it, so an absent observation cannot be mistaken for `complete`. */
+export const CodeIndexFreshnessCoverageV1Schema = z.enum(["complete", "partial_hook_hint_overflow", "partial_refresh_in_progress", "partial_source_verification", "partial_unverified_restore", "unobserved"]);
+export type CodeIndexFreshnessCoverageV1 = z.infer<typeof CodeIndexFreshnessCoverageV1Schema>;
+
 export const CodeIndexFreshnessPayloadV1Schema = z.object({
   note: z.string(),
   worktrees: z.array(z.lazy(() => CodeIndexWorktreeFreshnessV1Schema)),
@@ -846,6 +855,14 @@ export const CodeIndexGenerationRecoveryV1Schema = z.object({
   serving: z.lazy(() => CodeIndexGenerationRecoveryServingV1Schema),
 });
 export type CodeIndexGenerationRecoveryV1 = z.infer<typeof CodeIndexGenerationRecoveryV1Schema>;
+
+/** Closed staleness ladder for one mounted worktree.
+
+The scheduler publishes one of these tokens. MCP, the dashboard, and the
+CLI must match the variant — not a hand-copied string — so a new ladder
+state cannot appear at one caller and be missed at the others. */
+export const CodeIndexStalenessStateV1Schema = z.enum(["fresh", "indexing", "parked", "refreshing", "stale", "verifying"]);
+export type CodeIndexStalenessStateV1 = z.infer<typeof CodeIndexStalenessStateV1Schema>;
 
 export const CodeIndexWorkerLimitingReasonV1Schema = z.enum(["automatic_all_cores", "automatic_half_cores", "configured_exact", "environment_override", "resident_memory"]);
 export type CodeIndexWorkerLimitingReasonV1 = z.infer<typeof CodeIndexWorkerLimitingReasonV1Schema>;
@@ -888,7 +905,7 @@ keeping one authority for the freshness shape. */
 export const CodeIndexWorktreeFreshnessV1Schema = z.object({
   clone_index: z.union([z.lazy(() => CodeCloneIndexStatusV1Schema), z.null()]).optional(),
   code_graph_serving: z.union([z.lazy(() => CodeGraphServingReadinessV1Schema), z.null()]).optional(),
-  coverage: z.string(),
+  coverage: z.lazy(() => CodeIndexFreshnessCoverageV1Schema),
   generation_recovery: z.union([z.lazy(() => CodeIndexGenerationRecoveryV1Schema), z.null()]).optional(),
   hook_hint_count: z.number().int().safe().min(0).nullable(),
   last_reconcile_micros: z.number().int().safe().nullable(),
@@ -901,7 +918,7 @@ export const CodeIndexWorktreeFreshnessV1Schema = z.object({
   snapshot_content_identity: z.string().nullable(),
   source_reference: z.string().nullable(),
   source_revision: z.string().nullable(),
-  staleness_state: z.string().nullable(),
+  staleness_state: z.union([z.lazy(() => CodeIndexStalenessStateV1Schema), z.null()]),
   worktree_id: z.string().nullable(),
   worktree_root: z.string(),
 });
