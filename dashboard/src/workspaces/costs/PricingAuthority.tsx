@@ -38,11 +38,7 @@ export function PricingAuthority({
           value={modelCount === null ? 'not reported' : modelCount.toLocaleString()}
           muted={modelCount === null}
         />
-        <Fact
-          label="last fetch"
-          value={fetchedAt ?? 'never fetched · bundled snapshot'}
-          muted={fetchedAt === null}
-        />
+        <Fact label="last fetch" value={fetchedAt ?? 'never · bundled'} muted={fetchedAt === null} />
         <div className="col-span-2 flex min-w-0 flex-col gap-0.5">
           <dt className="td-legend">revision</dt>
           <dd className="td-value break-all text-3xs text-text-secondary" title={revision ?? undefined}>

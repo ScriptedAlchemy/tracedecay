@@ -74,7 +74,7 @@ export function CostsInspector({
         </span>
       </div>
       <p className="text-2xs leading-relaxed text-text-secondary">{pricingClassSentence(row)}.</p>
-      <dl className="grid grid-cols-2 gap-x-3 gap-y-2 sm:grid-cols-3">
+      <dl className="grid grid-cols-2 gap-x-3 gap-y-2">
         <Fact label="priced spend" value={formatUsd(row.pricedCostUsd)} />
         <Fact label="share of priced" value={formatShare(row.share)} />
         <Fact label="complete total" value={formatUsd(row.totalCostUsd)} muted={row.totalCostUsd === null} />
