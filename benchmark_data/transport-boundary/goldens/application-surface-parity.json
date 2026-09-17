@@ -57,6 +57,18 @@
         "http": "binding.http.feedback_list.v1"
       }
     },
+    "feedback_proximity": {
+      "request": {
+        "observed_at": 0
+      },
+      "request_schema": "schema.application.feedback.proximity.request",
+      "result_schema": "schema.application.feedback.proximity.result",
+      "bindings": {
+        "cli": "binding.cli.feedback_proximity.v1",
+        "mcp": "binding.mcp.feedback_proximity.v1",
+        "http": "binding.http.feedback_proximity.v1"
+      }
+    },
     "feedback_impact": {
       "request": {
         "node_id": "node.application-parity.fixture"

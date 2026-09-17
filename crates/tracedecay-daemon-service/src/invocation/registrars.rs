@@ -731,6 +731,23 @@ impl DaemonAdvisoryRuntimeRegistrar {
             .await
             .map_err(Into::into)
     }
+
+    /// Publishes the early proximity-only advisory-cycle owner. Like Delivery,
+    /// this remounts on every project open so a fresher checkout observation
+    /// replaces a displaced incumbent instead of wedging a stale gate. Full
+    /// advisory publication later replaces this owner under the same slot.
+    #[hotpath::skip]
+    pub async fn publish_proximity_owner(
+        &self,
+        project_root: &Path,
+        owner: DaemonAdvisoryCycleInvocationOwner,
+    ) -> Result<(), DaemonAdvisoryRuntimeRegistrationError> {
+        self.service
+            .project_runtimes
+            .publish(project_root.to_path_buf(), owner)
+            .await
+            .map_err(Into::into)
+    }
 }
 
 impl tracedecay_dashboard_api::feedback_api::FeedbackStatusRuntime

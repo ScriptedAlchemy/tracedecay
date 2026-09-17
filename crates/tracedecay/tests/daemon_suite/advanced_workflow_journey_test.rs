@@ -474,7 +474,24 @@ fn feedback_proximity_http_is_mounted_in_an_isolated_project() {
     wait_for_work_mount(&client);
     let dashboard = task_session::DashboardProcess::start(&home, &project);
 
-    let (status, body) = dashboard.read_proximity(now());
+    // Proximity mounts with dependent owners (beside Delivery), after Work can
+    // already answer. Poll until the early proximity authority is published
+    // rather than racing the project-open dependent phase.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let (status, body) = loop {
+        let (status, body) = dashboard.read_proximity(now());
+        if !(status == 503
+            && body.pointer("/value/problem/code").and_then(Value::as_str)
+                == Some("feedback.proximity.unavailable"))
+        {
+            break (status, body);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for feedback proximity HTTP mount; last body: {body}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
 
     assert_eq!(status, 200, "POST /api/feedback/proximity failed: {body}");
     assert!(

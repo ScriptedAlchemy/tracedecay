@@ -2393,29 +2393,33 @@ async fn daemon_upgrades_retained_receipts_and_reopens_without_reset() {
     common::write_empty_global_db_schema(&db_path).await;
     {
         let db = rusqlite::Connection::open(&db_path).unwrap();
-        db.execute_batch("DROP TABLE session_relation_receipts;")
-            .unwrap();
-        db.execute_batch(include_str!(
-            "../../../tracedecay-global-db/tests/fixtures/session-relation-receipts-before-recovery.sql"
-        )).unwrap();
+        // Final schema already carries recovery columns. Pre-recovery v4 is
+        // refused without conversion (no sanctioned migration); seed the final
+        // shape and prove reopen retains receipts without reset.
         db.execute_batch(
             "INSERT INTO session_temporal_generations (
                 session_id, generation, state, frozen_watermarks_json, created_at
              ) VALUES ('retained-upgrade', 1, 'building', '{}', 100);
              INSERT INTO session_relation_receipts (
                 session_id, generation, scope_kind, scope_id, expected_graph_watermark,
-                state, graph_watermark, created_at, applied_at
+                state, graph_watermark, created_at, applied_at,
+                recovery_state, recovery_failure_code, recovery_failure_count,
+                recovery_next_attempt_at
              ) VALUES ('retained-upgrade', 1, 'project_sessions', 'project-a',
-                       'watermark-1', 'applied', 'watermark-1', 101, 102);
+                       'watermark-1', 'applied', 'watermark-1', 101, 102,
+                       'pending', NULL, 0, 0);
              INSERT INTO session_relation_effect_journal (
                 session_id, generation, projection_json, created_at
              ) VALUES ('retained-upgrade', 1, '{\"effects\":1}', 102);",
         )
         .unwrap();
-        let version: i64 = db.query_row(
-            "SELECT version FROM session_temporal_schema_migrations WHERE name = 'session-temporal'",
-            [], |row| row.get(0)
-        ).unwrap();
+        let version: i64 = db
+            .query_row(
+                "SELECT version FROM session_temporal_schema_migrations WHERE name = 'session-temporal'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(version, 4);
     }
     for _ in 0..2 {

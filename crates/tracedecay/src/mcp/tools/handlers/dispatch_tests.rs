@@ -565,6 +565,9 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
         "tracedecay_status",
         json!({
             "format": "json",
+            // Compact-by-default status omits ingest unless requested; opt in so
+            // this authority check shares the same surface as tracedecay_runtime.
+            "include_session_ingest": true,
             "include_branch_diagnostics": false,
             "include_storage_health": false,
             "include_staleness": false,
@@ -775,7 +778,9 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     let stale_public = handle_tool_call_with_registry_options(
         &cg,
         "tracedecay_status",
-        json!({"format": "json"}),
+        // Full branch claim fields (branch_resolution, diagnostics) are opt-in
+        // after compact-by-default status; serving truth still uses the freshness path.
+        json!({"format": "json", "include_branch_diagnostics": true}),
         None,
         None,
         ToolCallRegistryOptions {
@@ -798,7 +803,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     let current_public = handle_tool_call_with_registry_options(
         &cg,
         "tracedecay_status",
-        json!({"format": "json"}),
+        json!({"format": "json", "include_branch_diagnostics": true}),
         None,
         None,
         ToolCallRegistryOptions {
@@ -910,7 +915,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     let published_feature = handle_tool_call_with_registry_options(
         &cg,
         "tracedecay_status",
-        json!({"format": "json"}),
+        json!({"format": "json", "include_branch_diagnostics": true}),
         None,
         None,
         ToolCallRegistryOptions {
