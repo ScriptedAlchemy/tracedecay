@@ -971,7 +971,6 @@ pub(crate) async fn dashboard_state_fixture(
         lcm_read_authority: None,
         git_correlation_read_authority: None,
         delivery_read_authority: None,
-        proximity_attention_read_authority: None,
         savings_db: None,
         savings_db_path: String::new(),
         project_root,

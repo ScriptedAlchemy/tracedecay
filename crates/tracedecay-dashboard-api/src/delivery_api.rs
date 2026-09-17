@@ -820,6 +820,9 @@ pub struct DashboardDeliveryProjectV1 {
 /// registered project's live head. HTTP supplies the registered target and an
 /// observed head only as bounded consistency inputs; it never constructs a
 /// `RequestContext`.
+///
+/// Proximity is a read on this same port. Inbox HTTP must not thread a second
+/// authority for a join the delivery adapter already owns.
 pub trait DashboardDeliveryReadPortV1: Send + Sync {
     fn read(
         &self,
@@ -827,22 +830,23 @@ pub trait DashboardDeliveryReadPortV1: Send + Sync {
         project: DashboardDeliveryProjectV1,
         request: ProjectDeliveryReadRequestV1,
     ) -> DashboardDeliveryReadFutureV1<'_>;
+
+    /// Canonical proximity folded into Delivery's join input.
+    ///
+    /// The default is `Unsupported`: a port that does not read proximity must
+    /// not invent Clear. Production adapters override this and keep denied,
+    /// unavailable, and partial coverage distinct.
+    fn read_proximity_attention(
+        &self,
+        _control: DashboardHttpRequestControlV1,
+        _project: DashboardDeliveryProjectV1,
+    ) -> DashboardProximityAttentionReadFutureV1<'_> {
+        Box::pin(async { ProjectDeliveryProximityAttentionSourceV1::Unsupported })
+    }
 }
 
 pub type DashboardProximityAttentionReadFutureV1<'a> =
     Pin<Box<dyn Future<Output = ProjectDeliveryProximityAttentionSourceV1> + Send + 'a>>;
-
-/// Canonical feedback-proximity read folded into Delivery's join input.
-/// Missing mount → `Unsupported`; denied/unavailable → `Unavailable`; ready
-/// pages carry typed coverage. The inbox HTTP handler is the only production
-/// join site — the dashboard never re-joins client-side.
-pub trait DashboardProximityAttentionReadPortV1: Send + Sync {
-    fn read(
-        &self,
-        control: DashboardHttpRequestControlV1,
-        project: DashboardDeliveryProjectV1,
-    ) -> DashboardProximityAttentionReadFutureV1<'_>;
-}
 
 #[hotpath::measure(label = "dashboard_api.delivery.overview", future = true)]
 pub async fn overview(
@@ -1002,15 +1006,16 @@ pub async fn inbox(
                 .and_then(indexed_delivery_head),
             None => None,
         };
+        let target = DashboardDeliveryProjectV1 {
+            project_id: project.project_id.clone(),
+            project_root,
+        };
         let delivery = match (state.delivery_read_authority.as_ref(), indexed.as_ref()) {
             (Some(authority), Some(indexed)) => {
                 authority
                     .read(
                         control.clone(),
-                        DashboardDeliveryProjectV1 {
-                            project_id: project.project_id.clone(),
-                            project_root: project_root.clone(),
-                        },
+                        target.clone(),
                         ProjectDeliveryReadRequestV1 {
                             kind: ProjectDeliveryReadKindV1::Inbox,
                             expected_head_commit_id: indexed.head_commit_id.clone(),
@@ -1024,23 +1029,14 @@ pub async fn inbox(
             }
             _ => ProjectDeliveryReadOutcomeV1::Unavailable,
         };
-        let proximity = match (
-            state.proximity_attention_read_authority.as_ref(),
-            indexed.as_ref(),
-        ) {
+        // Same delivery port. Absent mount leaves proximity Unsupported;
+        // the adapter never invents Clear.
+        let proximity = match (state.delivery_read_authority.as_ref(), indexed.as_ref()) {
             (Some(authority), Some(_)) => {
                 authority
-                    .read(
-                        control.clone(),
-                        DashboardDeliveryProjectV1 {
-                            project_id: project.project_id.clone(),
-                            project_root,
-                        },
-                    )
+                    .read_proximity_attention(control.clone(), target)
                     .await
             }
-            // No proximity authority mounted: leave proximity sources
-            // Unsupported rather than inventing Clear/Active attention.
             _ => ProjectDeliveryProximityAttentionSourceV1::Unsupported,
         };
         sources.push(ProjectDeliveryInboxSourceV1 {

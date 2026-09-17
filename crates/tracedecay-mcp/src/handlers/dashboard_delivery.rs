@@ -30,7 +30,6 @@ use tracedecay_daemon_service::{
 use tracedecay_dashboard_api::{
     DashboardDeliveryProjectV1, DashboardDeliveryReadFutureV1, DashboardDeliveryReadPortV1,
     DashboardHttpRequestControlV1, DashboardProximityAttentionReadFutureV1,
-    DashboardProximityAttentionReadPortV1,
 };
 
 pub struct DashboardDeliveryReadAdapter {
@@ -187,32 +186,14 @@ fn attached_head_commit(
     CommitId::new(commit.as_str().to_owned()).ok()
 }
 
-impl DashboardDeliveryReadPortV1 for DashboardDeliveryReadAdapter {
-    fn read(
-        &self,
-        control: DashboardHttpRequestControlV1,
-        project: DashboardDeliveryProjectV1,
-        request: ProjectDeliveryReadRequestV1,
-    ) -> DashboardDeliveryReadFutureV1<'_> {
-        Box::pin(async move { self.execute(control, project, request).await })
-    }
-}
-
-/// Folds the registered project's canonical feedback-proximity read into
-/// Delivery's join input. This is the production authority for
-/// overlapping_edit / confirmed_conflict / divergent_shared_implementation —
-/// the dashboard never re-joins `/api/feedback/proximity` client-side.
-pub struct DashboardProximityAttentionReadAdapter {
-    service: DaemonInvocationService,
-}
-
-impl DashboardProximityAttentionReadAdapter {
-    pub fn new(service: DaemonInvocationService) -> Self {
-        Self { service }
-    }
-
+impl DashboardDeliveryReadAdapter {
+    /// Folds the registered project's canonical feedback-proximity read into
+    /// Delivery's join input. Same invocation service as provider reads.
+    /// This is the production authority for `overlapping_edit` /
+    /// `confirmed_conflict` / `divergent_shared_implementation` — the
+    /// dashboard never re-joins `/api/feedback/proximity` client-side.
     #[hotpath::measure(label = "mcp.dashboard.delivery.proximity.total")]
-    async fn execute(
+    async fn read_proximity(
         &self,
         control: DashboardHttpRequestControlV1,
         project: DashboardDeliveryProjectV1,
@@ -271,13 +252,22 @@ impl DashboardProximityAttentionReadAdapter {
     }
 }
 
-impl DashboardProximityAttentionReadPortV1 for DashboardProximityAttentionReadAdapter {
+impl DashboardDeliveryReadPortV1 for DashboardDeliveryReadAdapter {
     fn read(
         &self,
         control: DashboardHttpRequestControlV1,
         project: DashboardDeliveryProjectV1,
+        request: ProjectDeliveryReadRequestV1,
+    ) -> DashboardDeliveryReadFutureV1<'_> {
+        Box::pin(async move { self.execute(control, project, request).await })
+    }
+
+    fn read_proximity_attention(
+        &self,
+        control: DashboardHttpRequestControlV1,
+        project: DashboardDeliveryProjectV1,
     ) -> DashboardProximityAttentionReadFutureV1<'_> {
-        Box::pin(async move { self.execute(control, project).await })
+        Box::pin(async move { self.read_proximity(control, project).await })
     }
 }
 

@@ -29,7 +29,7 @@ use tracedecay_daemon_service::{
 };
 use tracedecay_dashboard_api::{
     DashboardDeliveryProjectV1, DashboardDeliveryReadFutureV1, DashboardDeliveryReadPortV1,
-    DashboardHttpRequestControlV1,
+    DashboardHttpRequestControlV1, DashboardProximityAttentionReadFutureV1,
 };
 use tracedecay_domain::feedback::{
     FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewCoverageV1,
@@ -41,7 +41,7 @@ use tracedecay_domain::{
     ObservationSourceIdentityV1, ProjectId, ProviderId, RefId, RepositoryId, SessionId, SourceSpan,
     SymbolOccurrenceId, UtcMicros, WorktreeId,
 };
-use tracedecay_mcp::handlers::dashboard_delivery::DashboardProximityAttentionReadAdapter;
+use tracedecay_mcp::handlers::dashboard_delivery::DashboardDeliveryReadAdapter;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::dashboard_api_support::*;
@@ -75,10 +75,36 @@ impl DashboardDeliveryReadPortV1 for FakeDeliveryReadPortV1 {
     }
 }
 
+/// HTTP admission uses the fake provider snapshot and the production delivery
+/// adapter's proximity read. One port, so inbox cannot join a second authority.
+struct DeliveryHttpAdmissionPort {
+    provider: FakeDeliveryReadPortV1,
+    proximity: DashboardDeliveryReadAdapter,
+}
+
+impl DashboardDeliveryReadPortV1 for DeliveryHttpAdmissionPort {
+    fn read(
+        &self,
+        control: DashboardHttpRequestControlV1,
+        project: DashboardDeliveryProjectV1,
+        request: ProjectDeliveryReadRequestV1,
+    ) -> DashboardDeliveryReadFutureV1<'_> {
+        self.provider.read(control, project, request)
+    }
+
+    fn read_proximity_attention(
+        &self,
+        control: DashboardHttpRequestControlV1,
+        project: DashboardDeliveryProjectV1,
+    ) -> DashboardProximityAttentionReadFutureV1<'_> {
+        self.proximity.read_proximity_attention(control, project)
+    }
+}
+
 /// Daemon proximity owner that returns one OverlappingEdit encounter naming
 /// the admitted indexed head. Mounted under the fixture root so the
-/// production `DashboardProximityAttentionReadAdapter` must look it up,
-/// invoke, and fold evidence — not a pre-folded Ready stub.
+/// production delivery adapter must look it up, invoke, and fold evidence —
+/// not a pre-folded Ready stub.
 struct DeliveryHttpProximityOwner {
     project_id: ProjectId,
 }
@@ -333,11 +359,11 @@ fn delivery_inbox_admits_only_indexed_pull_requests_over_http() {
         // after the fixture owns a real project root/id. Lookup happens on
         // the HTTP request, so a pre-start empty registry is fine.
         let service = DaemonInvocationService::default();
-        let proximity_adapter =
-            Arc::new(DashboardProximityAttentionReadAdapter::new(service.clone()));
         let mut fixture = start_dashboard_fixture_with_delivery_authority(FakeDeliveryAuthority {
-            delivery_read_authority: Arc::new(FakeDeliveryReadPortV1),
-            proximity_attention_read_authority: Some(proximity_adapter),
+            delivery_read_authority: Arc::new(DeliveryHttpAdmissionPort {
+                provider: FakeDeliveryReadPortV1,
+                proximity: DashboardDeliveryReadAdapter::new(service.clone()),
+            }),
             code_index_freshness_reader: delivery_http_admission_freshness_reader(),
         })
         .await;

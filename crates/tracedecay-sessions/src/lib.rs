@@ -57,7 +57,7 @@ pub use serving::{
     SessionProjectionServingState, SessionProjectionServingStatus,
     SessionProjectionServingStatusPort, SessionProjectionStaleReason,
     SessionProjectionUnavailableReason, SessionProjectionWorkerBlocker,
-    SessionProjectionWorkerRetryClass,
+    SessionProjectionWorkerRetryClass, SessionRefreshWorkerPort,
 };
 pub use workflow::{
     WorkflowAgent, WorkflowGitScope, WorkflowIndexReadPort, WorkflowIndexState, WorkflowReadError,

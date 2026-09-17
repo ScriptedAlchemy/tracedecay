@@ -10,14 +10,13 @@ use std::sync::atomic::AtomicBool;
 
 use crate::project::TraceDecay;
 use tracedecay_contracts::{
-    ProfileIdentityReadPort, SessionTemporalRefreshWakePort,
-    remote::status::RemoteOperationalStatusReaderV1,
+    ProfileIdentityReadPort, remote::status::RemoteOperationalStatusReaderV1,
 };
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_session_memory::session::SessionRefreshServicePort;
-use tracedecay_sessions::serving::SessionProjectionServingStatusPort;
+use tracedecay_sessions::serving::{SessionProjectionServingStatusPort, SessionRefreshWorkerPort};
 
 use super::hook_writes::{BackgroundRefreshWriter, direct_background_refresh_writer};
 
@@ -27,13 +26,16 @@ fn wrap_profile_identity(
     Arc::new(identity)
 }
 
-fn wrap_refresh_wake(
+fn share_refresh_wake(
     wake: tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
-) -> (
-    Arc<dyn SessionTemporalRefreshWakePort>,
-    Arc<dyn SessionProjectionServingStatusPort>,
-) {
-    (Arc::new(wake.clone()), Arc::new(wake))
+) -> Arc<dyn SessionRefreshWorkerPort> {
+    Arc::new(wake)
+}
+
+pub(crate) fn refresh_worker_serving_port(
+    wake: &Arc<dyn SessionRefreshWorkerPort>,
+) -> Arc<dyn SessionProjectionServingStatusPort> {
+    Arc::clone(wake) as Arc<dyn SessionProjectionServingStatusPort>
 }
 
 /// Updates daemon ownership routing after this server changes physical graph DB.
@@ -127,13 +129,11 @@ pub(crate) struct McpServerConstructionContext {
     /// bootstrap worker plan installed; direct servers leave it absent and
     /// capture fails closed as `background_cpu_unavailable`.
     pub(crate) background_cpu: Option<Arc<ProcessBackgroundCpuV1>>,
-    pub(crate) project_session_refresh_wake: Option<Arc<dyn SessionTemporalRefreshWakePort>>,
-    pub(crate) user_session_refresh_wake: Option<Arc<dyn SessionTemporalRefreshWakePort>>,
+    pub(crate) project_session_refresh_wake: Option<Arc<dyn SessionRefreshWorkerPort>>,
+    pub(crate) user_session_refresh_wake: Option<Arc<dyn SessionRefreshWorkerPort>>,
     /// Daemon-wide profile session refresh service; absent on core and direct
     /// servers, where profile-scoped refresh answers typed unavailable.
     pub(crate) profile_session_refresh: Option<Arc<dyn SessionRefreshServicePort>>,
-    pub(crate) project_session_refresh_serving: Option<Arc<dyn SessionProjectionServingStatusPort>>,
-    pub(crate) user_session_refresh_serving: Option<Arc<dyn SessionProjectionServingStatusPort>>,
     /// When true (daemon-owned project servers), spawn a cancellable worker that
     /// continues bounded host-admission replay passes until idle.
     pub(crate) own_project_host_admission_replay: bool,
@@ -270,8 +270,6 @@ impl McpServerConstructionContext {
             project_session_refresh_wake: None,
             user_session_refresh_wake: None,
             profile_session_refresh: None,
-            project_session_refresh_serving: None,
-            user_session_refresh_serving: None,
             own_project_host_admission_replay: false,
             startup_catch_up_enabled: true,
             automation_scheduler_reconciler: None,
@@ -360,10 +358,8 @@ impl McpServerConstructionContext {
         } = authority;
         let profile_root = profile_identity.profile_root().to_path_buf();
         let registry = databases.registry;
-        let (project_session_refresh_wake, project_session_refresh_serving) =
-            wrap_refresh_wake(project_session_refresh_wake);
-        let (user_session_refresh_wake, user_session_refresh_serving) =
-            wrap_refresh_wake(user_session_refresh_wake);
+        let project_session_refresh_wake = share_refresh_wake(project_session_refresh_wake);
+        let user_session_refresh_wake = share_refresh_wake(user_session_refresh_wake);
         Self {
             cg: cg.into(),
             scope_prefix,
@@ -380,8 +376,6 @@ impl McpServerConstructionContext {
             project_session_refresh_wake: Some(project_session_refresh_wake),
             user_session_refresh_wake: Some(user_session_refresh_wake),
             profile_session_refresh: Some(profile_session_refresh),
-            project_session_refresh_serving: Some(project_session_refresh_serving),
-            user_session_refresh_serving: Some(user_session_refresh_serving),
             own_project_host_admission_replay: true,
             startup_catch_up_enabled: true,
             automation_scheduler_reconciler: None,
@@ -450,8 +444,6 @@ impl McpServerConstructionContext {
             project_session_refresh_wake: None,
             user_session_refresh_wake: None,
             profile_session_refresh: None,
-            project_session_refresh_serving: None,
-            user_session_refresh_serving: None,
             own_project_host_admission_replay: false,
             startup_catch_up_enabled: false,
             automation_scheduler_reconciler: None,
