@@ -6,7 +6,7 @@ Read line numbers on `b80dd58`, not on master without that commit.
 
 ## Outcome
 
-90 seconds is not too short for the predicate that test asserts. It is too short for the clone-fingerprint page walk, and that walk is not a precondition of the predicate. Cut the walk off the receipt. Do not budget for it.
+90 seconds is not too short for the predicate. The window is spent twice: the wait helper busy-polls status (~16k calls) and each poll recaptures a fingerprint, and the workers spend CPU on clone-body JSON, canonical rewrite, and token deserialize. Edge projection is not the burn. `edge_count` 0 with 98305 symbols is the no-call fixture. Cut that work and make the readiness check cheap. Do not raise `RECEIPT_TIMEOUT`.
 
 `seated_generation_age_seconds` is seal age, not time since the serving swap. At ~89s the replacement generation has existed for almost the whole receipt and the wait at `graph_rebuild_status_test.rs:176` still has not returned.
 
@@ -16,11 +16,27 @@ On tip `b80dd58` (`fix(code-index): seat text through retryable graph activation
 
 - The wait helper times out at `crates/tracedecay/tests/transport_acceptance_suite/graph_rebuild_status_test.rs:176`. `RECEIPT_TIMEOUT` is 90s (`:26`). The helper is shared. The failing call is the second one (`:289`), after `install_background_batch` (`:229-245`): 768 files × 128 functions, plus `src/lib.rs`. That is 98305 symbols. The functions do not call each other. `collect_edge_evidence` (`crates/tracedecay-code-index/src/production/helpers.rs:358`) therefore reports `edge_count` 0. That is not a missing projector.
 - The local prove after the seat fix: serving seat matches the advertised generation, search returns the probe, `seated_generation_age_seconds` ≈ 89, still line 176.
+- Interim pstack, same prove: the wait helper issued about 16k status calls. Fingerprint capture on each of those calls is expensive. Worker CPU is clone-body JSON serde, canonical rewrite, and token deserialize. It is not edge projection.
 - `seated_generation_age_seconds` is `now - sealed_at_micros` (`crates/tracedecay-mcp/src/handlers/info/status.rs:114-120` and `:296`). It is not the timestamp of `code_index_serving_generation_seated`.
 - Linux CI before the seat fix (run 35258386278, recorded in #1557): both attempts died at the same line. Clone index `0/2305` and `1024/2305`. Graph census `symbol_count` 98305, `edge_count` 0. `code_graph_serving` was `ready` while search still served the predecessor. This plan does not re-run that job.
 - CI nextest slow-timeout is 10s × 36 = 6 minutes (`.config/nextest.toml` profile `ci`). A timeout raise that chased the page walk would hit that cap. That is a second reason not to raise 90s, not a reason to raise the nextest cap.
 
-This VM did not re-run the journey. Estimates below are from those receipts plus the control flow on `b80dd58`. Label them as estimates.
+This VM did not re-run the journey. The pstack counts are the interim synthesis. Estimates below stay labeled.
+
+## Where the pstack time is
+
+The wait is a `yield_now` loop with no sleep (`graph_rebuild_status_test.rs:171`). About 16k full `tracedecay_status` calls fit in 90s. That is the poller's wall time, on a runtime started with 4 worker threads (`:248`).
+
+Each status, including the test's call with branch diagnostics off (`:103-109`), still builds branch diagnostics before the include flag is checked (`status.rs:331-335`). That calls `current_branch`, which opens a gix repository (`crates/tracedecay-runtime-core/src/branch.rs:107-117`). The fingerprint the samples name is `GitMetadataFingerprintV1::capture` (`identity.rs:166-176`): another gix open, a HEAD read, and a hash of loose refs. It sits on the readiness fence (`reconcile.rs:540-562`, `ready_without_stat`). `dashboard_freshness` is documented not to open git (`serving_reads.rs:243-245`). A poll must keep that promise. Recapturing either of those on every status is the expensive check. The ladder the test needs is already the last scheduler observation.
+
+Worker samples are not `collect_edge_evidence`. They are the clone body that every callable gets before the 30-token exclusion:
+
+- `extract_clone_body` always runs conservative tokenization and rename tokenization (`clone_body.rs:157-185`). Exclusion is after the tokens exist (`:229`).
+- Those tokens are cloned into `CloneBodyPayloadV1` (`clones.rs:413-443`).
+- The sealed file segment serde-encodes that payload and rewrites it through `canonicalize_json_into` (`partitioned_codec.rs:1230-1236`). The rewrite is named in `canonical_json.rs:654`.
+- The successor reads them back with `serde_json::from_slice` on occurrence and payload (`clone_census.rs:46-49`) and writes them again with `serde_json::to_vec` (`clone_successor.rs:440-458`).
+
+A one-line `pub fn` is under 30 tokens. The fixture is 98305 of those. The projector that would build edges is idle because nothing calls anything. Do not spend the next change on graph publication.
 
 ## What the 90s actually waits for
 
@@ -68,55 +84,57 @@ Graph publication has no 90s deadline. `sealed_projection_deadline` is `GRAPH_BA
 
 ## Ranked changes
 
-Do these in order. Stop when the Mac prove passes the success criteria. Do not stack the later rows onto an unmeasured first row.
+Do these in order. Stop when the Mac prove passes the success criteria. Do not stack a later row onto an unmeasured first row. Do not raise 90s. Do not touch graph publication on this evidence.
 
-### 1. Successor must not be inside the receipt
+### 1. Readiness poll must not recapture a fingerprint
 
 Files:
 
-- `crates/tracedecay-code-index-runtime/src/code_index_scheduler/serving.rs:3212-3217`
-- `crates/tracedecay-code-index-runtime/src/code_index_scheduler/registry/mount.rs:1113-1121` and `:1168-1173`
-- `crates/tracedecay-code-index-runtime/src/code_index_scheduler/query_runtime.rs:718-720`
+- `crates/tracedecay/tests/transport_acceptance_suite/graph_rebuild_status_test.rs:148-172`
+- `crates/tracedecay-mcp/src/handlers/info/status.rs:331-335`
+- `crates/tracedecay-runtime-core/src/branch.rs:107-117`
+- `crates/tracedecay-code-index-runtime/src/code_index_scheduler/identity.rs:166-176`
+- `crates/tracedecay-code-index-runtime/src/code_index_scheduler/reconcile.rs:540-562`
 
 Work:
 
-- After `install_artifact_owners`, do not call `begin_clone_successor` on the publication advance. Leave the slot as `CloneSuccessorPending` and return unfinished for the retained driver.
-- Drop `reconcile_pass` before that retained spawn when the only remaining text work is the successor. The comment at `mount.rs:1168-1171` already says the guard must not cover clone backfill. The copy at `clone_successor.rs:286` still runs under the publication await today.
-- In search admission, wake only when owners are not `Ready`. Delete the `|| text.text_projection_needs_work()` arm for ordinary search. `tracedecay_similar` already drives one slice itself (`serving.rs:1948-1966`). The continuation at `mount.rs:1735-1739` is the background owner.
+- Compact status, the path this test already selects, must not call `build_branch_diagnostics` / `current_branch`. The include flag is checked after the gix open today.
+- A status freshness read returns the last ladder. It does not call `GitMetadataFingerprintV1::capture`. If a stack still shows `capture` under `tracedecay_status`, that call is the defect; `dashboard_freshness` is not allowed to grow one.
+- The test loop can sleep a few milliseconds between polls once status is cheap. Do not use the sleep to hide a capture that is still on the poll. 16k captures are the bug. A slower poll of a cheap read is optional.
 
-Estimate: removes the ~650 MiB copy and the ~200s page walk from the path that decides `current`. If the dump shows graph `Ready` and `rebuild_in_flight: true`, this is the entire miss: the wait should return on the first poll after the seat, which the seal age says is already inside the window. If the dump shows graph not `Ready`, this does not make line 176 pass. It still stops shutdown from joining the walk.
+Estimate: 16k polls are the observed wall. A capture that opens gix at 2–5ms is 30–80s of the receipt, on a 4-thread runtime that is also supposed to be sealing. Removing it is the largest cut that does not change indexed bytes. If the workers were already CPU-bound on clone bodies, this is still required: the poll is a fifth consumer of those four threads.
 
-Do not change `dashboard_terminal_status` to ignore graph. The test's `current` means the serving graph is the sealed generation. #1557 already refused the split.
-
-### 2. Do not replay pages when every body is under 30 tokens
+### 2. Do not tokenize, serialize, or canonically rewrite a body that is under 30 tokens
 
 Files:
 
-- `crates/tracedecay-code-extraction/src/clone_body.rs:13` and `:229`
-- `crates/tracedecay-query/src/retrieval/lexical/projection/artifact/clone_successor.rs:141-180` and `:433-505`
-- `serving.rs:3222-3282` (`advance_clone_successor`)
+- `crates/tracedecay-code-extraction/src/clone_body.rs:157-185` and `:229`
+- `crates/tracedecay-code-index/src/clones.rs:413-443`
+- `crates/tracedecay-code-index/src/production/partitioned_codec.rs:1230-1236`
+- `crates/tracedecay-query/src/retrieval/lexical/projection/artifact/clone_census.rs:46-49`
+- `crates/tracedecay-query/src/retrieval/lexical/projection/artifact/clone_successor.rs:433-505`
 
 Work:
 
-- The sealed source already knows eligibility. If `excluded_too_small_bodies` is the whole census and eligible bodies are 0, write the V16 freeze from the copied prior without `append_clone_rows`. `finish` must still see `page_count` (`clone_successor.rs:208-211`), so record the sealed page count from the source receipt instead of visiting each page.
-- The artifact digest must match what a full walk writes today, or the walk is the one that changes. Excluded bodies are currently inserted. Either keep those rows with a set-based insert of the already-sealed payloads, or prove a zero-eligible V16 receipt was never shipped and write the empty section in the same commit that stops emitting excluded rows. Do not add a second layout revision for this. V16 is the live layout (`schema.rs` `has_clone_fingerprints`).
+- Count tokens, or bound the body by source bytes, before `rename_fields` and before retaining `conservative_tokens`. An excluded body stores eligibility and the span. It does not store token vectors.
+- Those bodies then never enter `CloneBodyPayloadV1::from_extracted`, never sit in the file-segment JSON, and never pass `canonicalize_json_into`.
+- The successor's `append_clone_rows` and the census `from_slice` then have nothing to serde for this fixture. Eligible bodies (30 tokens and up) keep today's payload and V16 postings. No new layout revision.
 
-Estimate: for this fixture, the page loop goes from "1024 pages did not finish in ~90s" to one metadata commit. That is the work cut. It does not by itself flip `current` if row 1 is skipped and graph is the gate. It is what keeps the same test's `shutdown` and the two reopen waits (`graph_rebuild_status_test.rs:300-328`) from inheriting the walk. Real clones (eligible bodies > 0) keep the existing advance loop.
+Estimate: this fixture is 98305 one-line functions. pstack says this is the worker CPU. Dropping token retention and the canonical rewrite for excluded bodies is most of that CPU, not a constant-factor squeeze of the same JSON. The page walk's "1024 pages did not finish in ~90s" (#1557) was walking these payloads. If they are not sealed, that walk's body loop is empty. Real clones are unchanged.
 
-### 3. Graph publish of 98305 nodes, only if the dump says it is the gate
+### 3. Keep the successor off the receipt if any payload still remains
 
 Files:
 
-- `crates/tracedecay-code-index/src/graph_projection/builder.rs:47-70`
-- `crates/tracedecay-store-runtime/src/session_registry/code_graph.rs:1233` (`publish_verified_snapshot`)
-- `graph_activation.rs:734-749`
-- `registry.rs:1166-1176`
+- `serving.rs:3212-3217`
+- `mount.rs:1113-1121` and `:1168-1173`
+- `query_runtime.rs:718-720`
 
-Work: do not start this until a prove shows `code_graph_serving` is not `ready` for most of the seal age, with `rebuild_in_flight: false`. The span is `code_graph.activation.publish_verified_snapshot`. `edge_count` 0 does not skip symbol entities. A retry must reuse `memoized_graph_manifest` (`builder.rs:55-56`) and must not rebuild the manifest. The 50ms test-helpers backoff makes a failed attempt into a loop; fix the failure, do not widen the floor.
+Only if row 2 still leaves a successor on the critical path (eligible bodies, or excluded rows that are still inserted). After `install_artifact_owners`, do not call `begin_clone_successor` on the publication advance. Drop `reconcile_pass` before the retained spawn. Ordinary search wakes only when owners are not `Ready`.
 
-Estimate: no speedup number until that span is timed on this fixture. Upper bound is the ~89s seal age, because the seat cannot be installed before `activate` returns (`mount.rs:1598-1610` then the swap at `:1818`). If the span is a small slice of those 89s, this row is the wrong cut.
+Estimate: the ~650 MiB copy and the ~200s page walk (one 1024-page advance did not finish in the Linux 90s; `2305/1024 ≈ 2.25` advances) leave the `current` decision. Do this row only if row 2 did not already delete that work for this fixture. Do not change `dashboard_terminal_status` to ignore graph.
 
-Not in this plan: `graph_superseded_replay_retirement_failed` on a missing `projects/proj_*` parent. #1557 showed it on one attempt, at teardown, swallowed `Unavailable`. It is not the shared timeout.
+Not in this plan: graph symbol publication (`builder.rs:47-70`, `publish_verified_snapshot`). pstack did not show it. `edge_count` 0 is the fixture. Also not in this plan: `graph_superseded_replay_retirement_failed` on a missing `projects/proj_*` parent. That was teardown on one #1557 attempt.
 
 ## What lands where
 
@@ -124,9 +142,10 @@ Do not amend #1562. It is the seat fix. The prove says that fix is in effect: se
 
 | Change | PR |
 | --- | --- |
-| Seat text through retryable activation (`b80dd58`) | #1562, already drafted. Leave it. Do not merge it as a green receipt. Do not add a timeout, a fixture shrink, or clone changes. |
-| Row 1, and row 2 if the baseline dump shows the successor still running at the panic | One follow-up from `b80dd58`. Same commit only if both are required for the prove; otherwise row 1 first, row 2 if shutdown or the reopen waits still sit on the walk. |
-| Row 3 | Separate follow-up, only with the span. |
+| Seat text through retryable activation (`b80dd58`) | #1562. Leave it. Do not merge it as a green receipt. No timeout, fixture shrink, or clone changes. |
+| Row 1 then row 2 | One follow-up from `b80dd58`. Row 1 is the poll. Row 2 is the worker CPU. Land row 1 first so the next sample is not dominated by 16k captures. Row 2 in the same PR only after that sample still shows clone-body serde. |
+| Row 3 | Same follow-up only if excluded bodies are still sealed and the successor is still on the receipt. |
+| Graph publish | Not this evidence. |
 
 #1562's next step is the baseline capture below, not more seating code.
 
@@ -142,7 +161,7 @@ scripts/require-exact-test.sh cargo test -p tracedecay --features test-transport
 
 The helper fails the run when libtest reports 0 tests. A bare `--exact` filter that matches nothing exits 0.
 
-Baseline first, on `b80dd58` as it is, before any row above. On failure, the panic already prints `status` and `search`. Record these fields from that JSON, not a new logger:
+The interim pstack is the baseline that ordered the rows. Do not re-run `b80dd58` just to re-pick them. After row 1, the panic still prints `status` and `search`. Record:
 
 - `code_index_freshness.status`
 - `code_index_freshness.worktree.staleness_state`
@@ -156,11 +175,12 @@ Baseline first, on `b80dd58` as it is, before any row above. On failure, the pan
 
 Also the log lines, with timestamps: `code_index_generation_published`, `code_index_serving_generation_seated` or `code_index_serving_generation_seated_stale`, `code_index_graph_activation_retry_scheduled`, `code_index_graph_activation_failed`.
 
-Branch:
+The pstack already picked the order. Do not wait for another profile before row 1. After row 1, one more sample:
 
-- `code_graph_serving` not `ready`, `rebuild_in_flight` false: row 3, not row 1. The receipt is the graph publish.
-- `code_graph_serving` `ready`, `rebuild_in_flight` true, clone pages moving: row 1.
-- `code_graph_serving` `ready`, `rebuild_in_flight` false, pages still below `total_source_pages`: the ladder is already free. Look at `staleness_state` and `source_revision`. Do not touch the successor until that field is explained. Row 2 is still required if shutdown or the reopen waits then sit on the walk.
+- stacks still in `GitMetadataFingerprintV1::capture` or `current_branch` under status: row 1 is incomplete
+- stacks in `canonicalize_json_into`, clone-body `serde_json`, or token deserialize, and not in edge projection: row 2
+- `code_graph_serving` not `ready` and stacks in `publish_verified_snapshot`: only then look at graph. This sample did not show that
+- `rebuild_in_flight` true while pages move, after row 2: row 3
 
 Pass, after the chosen row, same command, same 90s:
 
