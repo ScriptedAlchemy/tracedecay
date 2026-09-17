@@ -734,7 +734,7 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
         onBlur={leaveNode}
       >
         <title>{title}</title>
-        <rect x={node.x - halfHit} y={node.y - 18} width={Math.max(2, halfHit * 2)} height={36} fill="transparent" />
+        <rect x={node.x - halfHit} y={node.y - 22} width={Math.max(2, halfHit * 2)} height={44} fill="transparent" />
         <circle
           className="td-focus-ring"
           cx={node.x}
@@ -771,11 +771,14 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
     const toggle = branchToggleFor(lane);
     const bundleCount = clusterByLane.get(lane.id)?.counts.sessions ?? lane.collapsedDescendants;
     const detailLine = lane.kind === 'bundle' ? `${lane.provider} · bundle · ${bundleCount} sessions` : lane.provider;
+    // Lane rows and toggles are pointer affordances for the same actions the
+    // branch navigator table offers as 44px DOM controls; they stay out of the
+    // tab order so a dense page does not become hundreds of stops.
     return (
       <g key={lane.id}>
         <g
           role="button"
-          tabIndex={0}
+          tabIndex={-1}
           aria-label={`Open session ${lane.label}`}
           aria-pressed={lane.focus === 'selected'}
           data-lane-row={lane.id}
@@ -803,7 +806,7 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
         {toggle && (
           <g
             role="button"
-            tabIndex={0}
+            tabIndex={-1}
             aria-expanded={toggle.expanded}
             aria-label={toggle.label}
             data-branch-toggle={lane.id}
