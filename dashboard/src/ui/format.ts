@@ -108,6 +108,15 @@ export function formatMicrosUtc(
   return new Date(Math.floor(micros / 1000)).toISOString();
 }
 
+/** The same UTC instant as a ledger column: `YYYY-MM-DD HH:MM:SS`, seconds
+ * kept because a workflow journal's steps are seconds apart, no `T` or `Z`
+ * because the column header already says UTC. `null` in, em dash out. */
+export function formatMicrosUtcClock(micros: number | null | undefined): string {
+  if (micros == null || !Number.isFinite(micros)) return '—';
+  const iso = new Date(Math.floor(micros / 1000)).toISOString();
+  return `${iso.slice(0, 10)} ${iso.slice(11, 19)}`;
+}
+
 /** `splitBytes` for a figure whose direction is part of the reading: a store
  * that shrank has to read as a shrink, and the magnitude language must not fork
  * to say so. The sign rides on the value so the unit stays a bare unit. */
