@@ -365,7 +365,7 @@ function Provenance({
     typeof metadata === 'object' &&
     Object.keys(metadata as Record<string, unknown>).length > 0;
   return (
-    <dl className="grid grid-cols-[minmax(6rem,8rem)_1fr] gap-x-3 gap-y-1 text-2xs">
+    <dl className="grid grid-cols-[minmax(7rem,9.5rem)_1fr] gap-x-3 gap-y-1 text-2xs">
       <Term label="source label">
         {subject.source_label ?? <span className="text-text-muted">none recorded</span>}
       </Term>
@@ -444,7 +444,9 @@ function stamp(micros: number | null | undefined): ReactNode {
 function Term({ label, children }: { label: string; children: ReactNode }) {
   return (
     <>
-      <dt className="td-legend pt-px">{label}</dt>
+      {/* Legends are nowrap by default; a two-word term in a 24rem inspector
+        * has to be allowed to break rather than run under its value. */}
+      <dt className="td-legend whitespace-normal pt-px leading-snug">{label}</dt>
       <dd className="min-w-0 break-words text-text-secondary">{children}</dd>
     </>
   );
