@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master, feature/holographic-memory, codex/tracedecay-total-redesign-plan-reopened]
+    branches: [master, feature/holographic-memory]
   pull_request:
     branches: ['**']
 
@@ -310,7 +310,7 @@ jobs:
       # standard methods the client declared, and the upstream `initialize`
       # response is the only authority for those. Without the component the
       # runner still has rustup's `rust-analyzer` proxy on PATH, so the daemon
-      # routes the language and only the spawn fails — the test would then
+      # routes the language and only the spawn fails. The test would then
       # measure a missing component instead of the negotiation contract. This
       # action exports `RUSTUP_TOOLCHAIN`, so the component has to be installed
       # here rather than through `rust-toolchain.toml`, which it overrides.
@@ -366,8 +366,8 @@ jobs:
       # then nextest under the `ci` policy and the perf cargo profile with
       # `--no-tests=fail`. One target directory for the group, so a later
       # partition's shared units are fingerprint hits. Every partition runs
-      # even after an earlier one fails — as nextest's `ci` policy runs every
-      # test — and the step fails if any did. Every nextest run rewrites the
+      # even after an earlier one fails, as nextest's `ci` policy runs every
+      # test, and the step fails if any did. Every nextest run rewrites the
       # `ci` profile's junit.xml, so each partition's report is moved under
       # its own name before the next runs. The per-partition wall times this
       # prints are the measurements the manifest's macOS budgets wait for.
@@ -463,9 +463,9 @@ jobs:
   # shape) keeps the whole 55 min compile plus an archive round trip on the
   # path and then the dashboard rebuild and parity on the same job: ~88 min,
   # or ~70 with both moved elsewhere. The partitions pay for the shorter path
-  # with duplicated compile — each root partition rebuilds the library chain
+  # with duplicated compile. Each root partition rebuilds the library chain
   # beneath the root crate, about 200 core-minutes per run across the seven
-  # jobs — which is free on hosted runners where only wall time and the
+  # jobs, which is free on hosted runners where only wall time and the
   # 20-job concurrency cap count. A cold dependency cache adds ~6 min to every
   # job alike (the dependencies compile at opt-level 0 in ~17 core-minutes).
   # The floor no partitioning reaches is the root chain itself: library
@@ -511,7 +511,7 @@ jobs:
       # standard methods the client declared, and the upstream `initialize`
       # response is the only authority for those. Without the component the
       # runner still has rustup's `rust-analyzer` proxy on PATH, so the daemon
-      # routes the language and only the spawn fails — the test would then
+      # routes the language and only the spawn fails. The test would then
       # measure a missing component instead of the negotiation contract. This
       # action exports `RUSTUP_TOOLCHAIN`, so the component has to be installed
       # here rather than through `rust-toolchain.toml`, which it overrides.
@@ -545,7 +545,7 @@ jobs:
       # the CLI and the evaluator), so its save covers the other root
       # partitions exactly. The three lower partitions unify dependency
       # features differently and each recompile ~30 small dependency units
-      # (syn, serde_json, futures, chrono, ...) against it every run — a few
+      # (syn, serde_json, futures, chrono, ...) against it every run. A few
       # minutes inside jobs that are far from the critical path, cheaper than
       # three more cache entries. Restored before the first `cargo metadata`
       # below so the registry index comes from the cache too.
@@ -616,8 +616,8 @@ jobs:
   # hotpath/, and the `#[ignore]`d test in the crate's library test target
   # (`controlled_workloads::tests::hotpath_off_vs_on_durable_results_are_
   # identical`) spawns them from there; `--run-ignored only` with
-  # `--no-tests=fail` is the only way it runs, and nothing else — no
-  # partition, artifact upload or junit merge — consumes the executables.
+  # `--no-tests=fail` is the only way it runs, and nothing else. No
+  # partition, artifact upload or junit merge consumes the executables.
   #
   # Its own job rather than a tail on the `root-lib` partition, where it ran
   # after the root library's tests: the feature-on build recompiles every
@@ -625,12 +625,12 @@ jobs:
   # the feature flip changes each one's metadata hash) plus the example,
   # ~10 min on top of the ~26 min root chain, which made that job the lane's
   # critical path. Here the graph beneath the evaluator compiles from the
-  # checkout in both modes — a serial chain domain → contracts →
+  # checkout in both modes. A serial chain domain → contracts →
   # rusqlite-runtime → runtime-core → code-index → sessions → query →
   # search-eval → example of ~9 min per mode with four compile slots (cargo
   # `--timings`, -j4 on EPYC 7742 cores; the same pair of builds took 19.5
   # min on a hosted runner in run 34138693824, when the single-job lane
-  # still built them as their own resolution) — then the library test target
+  # still built them as their own resolution). Then the library test target
   # (24 s against the feature-off graph) and the test itself (under 1 s).
   # With setup, ~24 min hosted: beside the partitions and no longer than the
   # slowest of them (25.9 and 27.4 min in run 34296614024), so the `Test
@@ -1058,7 +1058,7 @@ jobs:
   # builds, a graph the perf-profile test lanes share nothing with, so there
   # is no compiled tree to reuse and nothing to gain from waiting for one.
   # As the last steps of the Linux test job they ran only after a green
-  # suite — never once on this branch — and would have held the Linux shards
+  # suite, never once on this branch, and would have held the Linux shards
   # back by their own duration. Here the verdict lands independently at
   # about clippy's cost: the cold `cargo clippy --workspace --all-targets`
   # took 13.7 min (run 34231734416), the second check re-resolves only the
@@ -1095,8 +1095,8 @@ jobs:
       - uses: actions/checkout@v7
       # Judge formatting with the toolchain `rust-toolchain.toml` pins, not
       # whatever `stable` is on the runner. rustfmt's output changes between
-      # releases — 1.98.1 breaks a `.unwrap_or_else(|err| { ... })` chain that
-      # 1.97.1 keeps inline — so a `stable` rustfmt rejects a tree the pinned
+      # releases. 1.98.1 breaks a `.unwrap_or_else(|err| { ... })` chain that
+      # 1.97.1 keeps inline, so a `stable` rustfmt rejects a tree the pinned
       # rustfmt developers run formats exactly, and every contributor sees a
       # red lane they cannot reproduce. `dtolnay/rust-toolchain@stable` also
       # exports `RUSTUP_TOOLCHAIN`, which overrides the toolchain file rather
@@ -1153,7 +1153,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     env:
-      # Stock (upstream) Hermes pin — the generated plugin must keep working
+      # Stock (upstream) Hermes pin. The generated plugin must keep working
       # against this exact upstream commit. Bump deliberately after rerunning
       # scripts/hermes_stock_integration.sh against the new ref locally.
       HERMES_UPSTREAM_REPO: https://github.com/NousResearch/hermes-agent.git
@@ -1207,7 +1207,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     env:
-      # Stock host pins — the installed bundle must keep working against these
+      # Stock host pins. The installed bundle must keep working against these
       # exact host releases. Bump deliberately after rerunning
       # scripts/claude_stock_integration.sh and
       # scripts/opencode_stock_integration.sh against the new versions locally.

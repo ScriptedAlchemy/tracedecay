@@ -3,9 +3,6 @@
   "release-type": "simple",
   "include-v-in-tag": true,
   "include-component-in-tag": false,
-  "versioning": "prerelease",
-  "prerelease": true,
-  "prerelease-type": "beta",
   "draft-pull-request": true,
   "pull-request-title-pattern": "chore(release): release ${version}",
   "packages": {
@@ -22,6 +19,21 @@
           "type": "json",
           "path": "server.json",
           "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "sdks/typescript/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "sdks/typescript/package-lock.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "sdks/typescript/package-lock.json",
+          "jsonpath": "$.packages[''].version"
         }
       ]
     }
