@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -90,15 +91,34 @@ class DevSkillMirrorTests(unittest.TestCase):
             self.assertTrue(any(action.startswith("write claude/") for action in actions))
             self.assertTrue(any(action.startswith("delete claude/") for action in actions))
 
-    def test_optional_agents_tree_is_included_when_present(self) -> None:
+    def test_managed_agents_tree_is_not_a_host_mirror(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             self.write_tree(root)
             agents = root / ".agents/skills/demo"
             agents.mkdir(parents=True)
             (agents / "SKILL.md").write_text("diverged\n", encoding="utf-8")
+            self.assertEqual(self.mirrors.check(root), [])
+
+    def test_sync_copies_and_checks_executable_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            self.write_tree(root)
+            claude_helper = root / ".claude/skills/demo/scripts/helper.sh"
+            codex_helper = root / ".codex/skills/demo/scripts/helper.sh"
+            claude_helper.parent.mkdir()
+            claude_helper.write_text("#!/bin/sh\n", encoding="utf-8")
+            codex_helper.write_text("#!/bin/sh\n", encoding="utf-8")
+            claude_helper.chmod(0o755)
+            codex_helper.chmod(0o644)
+
             errors = self.mirrors.check(root)
-            self.assertTrue(any("demo/SKILL.md" in error for error in errors))
+            self.assertTrue(any("executable mode differs" in error for error in errors))
+
+            actions = self.mirrors.sync(root, "claude")
+            self.assertEqual(self.mirrors.check(root), [])
+            self.assertEqual(stat.S_IMODE(codex_helper.stat().st_mode) & 0o111, 0o111)
+            self.assertIn("chmod codex/demo/scripts/helper.sh", actions)
 
 
 if __name__ == "__main__":

@@ -36,8 +36,8 @@ shared checkouts and follow repository worktree/build rules. For source skill
 edits, change one host tree and run `scripts/check-dev-skill-mirrors.py sync
 --from claude` or `--from codex`, then `scripts/check-dev-skill-mirrors.py
 check`. Do not copy shared files by hand. The script leaves host-private
-`agents/openai.yaml` and `*.test.sh` files alone and includes `.agents/skills`
-when that tree exists. For profile-managed skills, use
+`agents/openai.yaml` and `*.test.sh` files alone. It never changes
+`.agents/skills`; for profile-managed skills, use
 `writing-agent-managed-skills` and the canonical administrative/writer path.
 An audit does not itself authorize deleting memory or changing schedules.
 

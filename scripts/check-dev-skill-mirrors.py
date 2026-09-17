@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Keep repository dev-skill host copies identical without a hand reconcile.
 
-Shared files under `.claude/skills`, `.codex/skills`, and `.agents/skills`
-(when that directory exists) must be the same bytes. Host-private files are
-only `agents/openai.yaml` and `*.test.sh`. Any other file that exists in one
-tree and not the others is drift.
+Shared files under `.claude/skills` and `.codex/skills` must have the same
+bytes and executable mode. Host-private files are only `agents/openai.yaml`
+and `*.test.sh`. `.agents/skills` is managed by TraceDecay's skill authority,
+not this host-bundle mirror.
 
     scripts/check-dev-skill-mirrors.py check
     scripts/check-dev-skill-mirrors.py sync --from claude
@@ -18,11 +18,11 @@ host-private files.
 from __future__ import annotations
 
 import argparse
+import stat
 import sys
 from pathlib import Path
 
 HOSTS = ("claude", "codex")
-OPTIONAL_ROOTS = (".agents/skills",)
 
 
 class SkillMirrorError(Exception):
@@ -42,20 +42,18 @@ def iter_files(root: Path) -> list[Path]:
     return sorted(path for path in root.rglob("*") if path.is_file())
 
 
-def shared_files(root: Path) -> dict[Path, bytes]:
-    files: dict[Path, bytes] = {}
+def shared_files(root: Path) -> dict[Path, tuple[bytes, int]]:
+    files: dict[Path, tuple[bytes, int]] = {}
     for path in iter_files(root):
         relative = path.relative_to(root)
         if is_host_private(relative):
             continue
-        files[relative] = path.read_bytes()
+        files[relative] = (path.read_bytes(), stat.S_IMODE(path.stat().st_mode) & 0o111)
     return files
 
 
 def present_roots(repo: Path) -> list[tuple[str, Path]]:
-    roots = [(name, repo / f".{name}/skills") for name in HOSTS]
-    roots.extend((path, repo / path) for path in OPTIONAL_ROOTS if (repo / path).is_dir())
-    return roots
+    return [(name, repo / f".{name}/skills") for name in HOSTS]
 
 
 def require_host_roots(repo: Path) -> list[tuple[str, Path]]:
@@ -81,8 +79,13 @@ def check(repo: Path) -> list[str]:
                 errors.append(f"{name} has shared file missing from {canonical_name}: {relative}")
             elif relative not in right:
                 errors.append(f"{canonical_name} has shared file missing from {name}: {relative}")
-            elif left[relative] != right[relative]:
+            elif left[relative][0] != right[relative][0]:
                 errors.append(f"shared skill bytes differ: {relative} ({canonical_name} vs {name})")
+            elif left[relative][1] != right[relative][1]:
+                errors.append(
+                    f"shared skill executable mode differs: {relative} "
+                    f"({canonical_name} vs {name})"
+                )
     return errors
 
 
@@ -100,13 +103,17 @@ def sync(repo: Path, source_name: str) -> list[str]:
             continue
         destination.mkdir(parents=True, exist_ok=True)
         current = shared_files(destination)
-        for relative, data in sorted(source_files.items()):
+        for relative, (data, executable_bits) in sorted(source_files.items()):
             target = destination / relative
-            if current.get(relative) == data:
+            if current.get(relative) == (data, executable_bits):
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
-            actions.append(f"write {name}/{relative.as_posix()}")
+            if current.get(relative, (None, 0))[0] != data:
+                target.write_bytes(data)
+                actions.append(f"write {name}/{relative.as_posix()}")
+            target.chmod((stat.S_IMODE(target.stat().st_mode) & ~0o111) | executable_bits)
+            if current.get(relative, (None, 0))[1] != executable_bits:
+                actions.append(f"chmod {name}/{relative.as_posix()}")
         for relative in sorted(set(current) - set(source_files)):
             (destination / relative).unlink()
             actions.append(f"delete {name}/{relative.as_posix()}")
@@ -119,7 +126,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     subcommands = parser.add_subparsers(dest="command", required=True)
     subcommands.add_parser("check")
     sync_parser = subcommands.add_parser("sync")
-    sync_parser.add_argument("--from", dest="source", required=True, choices=(*HOSTS, *OPTIONAL_ROOTS))
+    sync_parser.add_argument("--from", dest="source", required=True, choices=HOSTS)
     return parser.parse_args(argv)
 
 
