@@ -2,7 +2,7 @@
 
 `probes_for(discovered)` returns a `{tool_name: [args_dict, ...]}` mapping.
 Each tool gets exactly 5 query variants. `discovered` is the dict produced
-by probe.py's discover() step — it contains real node ids, qualified names,
+by probe.py's discover() step, it contains real node ids, qualified names,
 names, and file paths harvested from the repo via tracedecay_search /
 tracedecay_node, so the per-node tools get plausible inputs.
 """

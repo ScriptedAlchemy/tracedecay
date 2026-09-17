@@ -13,8 +13,8 @@ pub const ADD_COMPARISON_REPORT_FLOOR_MILLIONTHS: u32 = 500_000;
 /// conflict between two similar facts.
 ///
 /// Ported (adapted) from the mnemon project's `negationWords` list
-/// (`internal/search/diff.go`, Apache-2.0 — see the repository NOTICE file).
-/// Single common words like "not" are intentionally excluded — mnemon's
+/// (`internal/search/diff.go`, Apache-2.0, see the repository NOTICE file).
+/// Single common words like "not" are intentionally excluded, mnemon's
 /// comments note they appear constantly in ordinary prose and cause false
 /// CONFLICT classifications; only clear multi-word or unambiguous
 /// state-change markers are kept.

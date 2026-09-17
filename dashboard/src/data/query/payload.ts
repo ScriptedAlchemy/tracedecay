@@ -25,7 +25,7 @@ export type PayloadResult<T> =
       outcome: 'unavailable';
       /** The transport status that carried it, kept for the log and the report. */
       httpStatus: number;
-      /** The payload's own discriminant — `not_found`, `missing_registry`, … */
+      /** The payload's own discriminant, `not_found`, `missing_registry`, … */
       status: string;
       /** The payload's `error`, when it sent one. */
       reason: string | null;
@@ -85,15 +85,15 @@ async function readPayloadResponse<T>(
     // the abandoned scope's cache entry, so switching back would render a
     // daemon-is-down state for a request nobody ever heard the answer to.
     //
-    // Rethrowing is also what React Query expects — it recognises the
+    // Rethrowing is also what React Query expects, it recognises the
     // cancellation and leaves the entry untouched rather than storing an
-    // error — so the abandoned scope simply has no reading, which is true.
+    // error, so the abandoned scope simply has no reading, which is true.
     if (init?.signal?.aborted === true) throw err;
     return { outcome: 'offline' };
   }
   // An authorization refusal is its own reading, not an error carrying a
   // status code. 401 means the daemon accepted no identity for this read and
-  // 403 means it knows the identity and will not serve this scope — two
+  // 403 means it knows the identity and will not serve this scope, two
   // different next actions for the reader, and neither one is "retry".
   if (response.status === 401) return { outcome: 'unauthorized' };
   if (response.status === 403) return { outcome: 'denied' };
@@ -147,7 +147,7 @@ async function readPayloadResponse<T>(
  * Read a typed payload endpoint.
  *
  * A caller that passes a mutating `init` gets the refusal folded into `error`,
- * carrying the daemon's own sentence — truthful, but without the arm a control
+ * carrying the daemon's own sentence, truthful, but without the arm a control
  * needs to disable itself. Writes should use {@link fetchPayloadWrite}.
  */
 export async function fetchPayload<T>(

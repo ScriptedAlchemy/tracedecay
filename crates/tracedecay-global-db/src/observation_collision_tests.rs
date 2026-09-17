@@ -2,26 +2,26 @@
 //! collision failures observed on 5ddd16271 (ancestral on 2be2b9478 /
 //! 0.1.0-beta.34):
 //!
-//! 1. `observation_identity_collision` — a rewritten native record presents
+//! 1. `observation_identity_collision`, a rewritten native record presents
 //!    the same canonical observation id with a different payload digest. The
 //!    refusal is deterministic and non-retryable, so it must record durable
 //!    terminal coverage in the typed cursor-advance ledger; later catch-up and
 //!    temporal triggers must not decode, classify, canonicalize, or hash that
 //!    row again, and the retained row must stay byte-identical.
-//! 2. projection-drain provenance collision with an existing output — a
+//! 2. projection-drain provenance collision with an existing output, a
 //!    queued observation whose drain collides with an already-persisted
 //!    provenance row must converge to a durable `output_collision` skip
 //!    (checkpoint advances, queue drains) instead of permanently wedging.
 //!    The converged skip must satisfy the skip authority contract
 //!    (`schema_contract::invariants`): zero provenance rows for the
-//!    observation plus exactly one disposition — never a skip that
+//!    observation plus exactly one disposition, never a skip that
 //!    contradicts a retained provenance binding.
 //!
 //! Pinned contracts:
 //! * the refusal terminal survives cursor-advance retention and is bound to
 //!   the exact refused candidate digest, so a later canonical payload
 //!   revision replay still converges as `CoveredDuplicate`;
-//! * coverage is recorded only at the sequential scan frontier — covered
+//! * coverage is recorded only at the sequential scan frontier, covered
 //!   replays and gap-shaped candidates leave every ledger untouched;
 //! * only the narrow existing-output collision converges on drain; divergent
 //!   workflow/effect state stays a hard error;
@@ -32,7 +32,7 @@
 //!   post-admission corruption setup). The marker fast path never touches
 //!   that row, so re-admission still returns the typed `IdentityCollision`
 //!   with converged coverage; any regression that re-decodes, re-derives, or
-//!   re-hashes stored data hits the corrupted bytes and fails loudly — and by
+//!   re-hashes stored data hits the corrupted bytes and fails loudly, and by
 //!   the real sessions JSONL `FileBytes` path: zero bytes consumed and zero
 //!   calls at the fully materialized host-admission boundary means no frame
 //!   was deserialized on a subsequent trigger.
@@ -201,7 +201,7 @@ async fn overwrite_stored_observation_row(
 }
 
 /// Original stored-row authority bytes captured before the tripwire arms, so
-/// restart-bearing tests can restore the row before remount — mount-time
+/// restart-bearing tests can restore the row before remount, mount-time
 /// invariant convergence legitimately decodes committed observation rows.
 struct StoredRowBytes {
     payload_digest: String,
@@ -209,7 +209,7 @@ struct StoredRowBytes {
     committed_cursor_json: String,
 }
 
-/// Arms the no-rework corruption tripwire on one retained observation row —
+/// Arms the no-rework corruption tripwire on one retained observation row,
 /// an engine fixture for post-admission corruption setup, which the harness
 /// doc explicitly sanctions.
 ///
@@ -415,7 +415,7 @@ fn decode_raw_source_record(
 
 /// One sanitized native transcript record at an explicit source range.
 /// Candidates built with the same `record_id` share a canonical observation
-/// id regardless of `generation`, range, or payload text — exactly the shape
+/// id regardless of `generation`, range, or payload text, exactly the shape
 /// a rewritten source file produces.
 fn collision_observation_at(
     session_id: &SessionId,
@@ -715,7 +715,7 @@ async fn provenance_rows(runtime: &HostAdmissionTestRuntimeV1) -> Vec<Provenance
 }
 
 /// The first non-retryable identity collision must keep the retained row
-/// byte-identical and record durable terminal coverage — the typed source
+/// byte-identical and record durable terminal coverage, the typed source
 /// cursor converges past the colliding record and the refusal lands in the
 /// `source_cursor_advances` ledger with the typed
 /// `observation_identity_collision` reason.
@@ -1143,7 +1143,7 @@ async fn re_admitted_identity_collision_uses_marker_without_retained_row_access(
             }
         ),
         "re-admission over the corrupted retained row must stay the typed terminal \
-         collision — any stored-row decode, identity re-derivation, or payload re-hash \
+         collision, any stored-row decode, identity re-derivation, or payload re-hash \
          would have failed on the tripwire bytes; {second:?}"
     );
     assert_eq!(
@@ -1153,8 +1153,8 @@ async fn re_admitted_identity_collision_uses_marker_without_retained_row_access(
         },
         "the terminal marker path must use the bounded preflight snapshot"
     );
-    // Any access to the retained row — including an ignored bare-column read
-    // that would evade a byte-corruption tripwire — would have failed because
+    // Any access to the retained row, including an ignored bare-column read
+    // that would evade a byte-corruption tripwire, would have failed because
     // the production table name is no longer present.
     assert_eq!(
         raw_hidden_observation_json(&runtime, original.observation_id().as_str()).await,
@@ -1278,8 +1278,8 @@ async fn replacement_domain_collision_records_terminal_coverage_without_rework()
 
 /// A projection drain that collides with an existing provenance row for the
 /// same observation (an earlier projection era left a divergent output
-/// binding behind) must converge to a durable `output_collision` skip —
-/// checkpoint advances, the queue drains, replay is an exact duplicate —
+/// binding behind) must converge to a durable `output_collision` skip,
+/// checkpoint advances, the queue drains, replay is an exact duplicate,
 /// while the real pre-existing output stays durable and no partial
 /// replacement output rows leak.
 #[tokio::test]
@@ -1619,7 +1619,7 @@ async fn raw_hidden_observation_json(
 /// One real catch-up pass over raw persisted source input: read the durable
 /// cursor, decode only the records the cursor does not cover, and persist
 /// each decoded candidate exactly as ingest would. Mirrors production provider ingest by
-/// ABORTING the pass on a persist error — an identity collision ends the
+/// ABORTING the pass on a persist error, an identity collision ends the
 /// pass, it does not skip to the next record.
 async fn run_catch_up_pass(
     store: &crate::GlobalDbObservationStore,
@@ -2250,8 +2250,8 @@ async fn canonical_payload_revision_replay_survives_an_earlier_refusal() {
 }
 
 /// Atomicity gate: the refusal marker commits before its cursor advance, so a
-/// failure between the two — the injected cursor-advance failure state, here
-/// seeded durably as exactly what such a crash leaves behind — produces a
+/// failure between the two, the injected cursor-advance failure state, here
+/// seeded durably as exactly what such a crash leaves behind, produces a
 /// marker with unconverged coverage. That orphan must be self-repairing: the
 /// next frontier pass answers from the marker AND repairs coverage, so the
 /// record is reopened at most once and never again.
@@ -2282,7 +2282,7 @@ async fn orphaned_refusal_marker_repairs_coverage_on_the_next_frontier_pass() {
     ));
 
     // Injected cursor-advance failure: the marker transaction committed, the
-    // advance did not. Seed exactly that durable state — the refusal marker
+    // advance did not. Seed exactly that durable state, the refusal marker
     // exists while the cursor still sits at generation 1.
     let refused = decode_raw_source_record(
         &session_id,
@@ -2338,7 +2338,7 @@ async fn orphaned_refusal_marker_repairs_coverage_on_the_next_frontier_pass() {
             })
         ),
         "the orphan-marker re-admit over the corrupted retained row must stay the typed \
-         terminal collision — any stored-row decode, identity re-derivation, or payload \
+         terminal collision, any stored-row decode, identity re-derivation, or payload \
          re-hash would have failed on the tripwire bytes; {:?}",
         receipts[0]
     );
@@ -2796,7 +2796,7 @@ async fn vibe_jsonl_eof_refusal_survives_retention_generation_and_restart_withou
     );
 }
 
-/// Linux gate 2: a REAL injected cursor-advance failure — a conflicting
+/// Linux gate 2: a REAL injected cursor-advance failure, a conflicting
 /// coverage row already owns the exact advance-ledger key the refusal must
 /// claim, so recording coverage genuinely fails inside the authority
 /// transaction. Marker and coverage are one atomic transaction: the failure
@@ -3132,8 +3132,8 @@ async fn runtime_cursor_replay_preserves_storage_failure() {
 }
 
 /// Narrow-collision gate: a durable provenance row that names the SAME output
-/// as the drain now derives but disagrees on its content — corrupt digest,
-/// receipt, or anchor — is corrupt provenance authority, not an
+/// as the drain now derives but disagrees on its content, corrupt digest,
+/// receipt, or anchor, is corrupt provenance authority, not an
 /// existing-output collision. It must stay a hard `ProvenanceCollision` with
 /// the queue item retained and the checkpoint unmoved; only a row binding a
 /// DIFFERENT output converges to the durable skip.
@@ -3234,7 +3234,7 @@ async fn drain_keeps_corrupt_provenance_with_matching_output_a_hard_error() {
     drop(rows);
 
     // Main store: the SAME observation with its projected output rows already
-    // durable — but the provenance row naming that SAME output carries a
+    // durable, but the provenance row naming that SAME output carries a
     // corrupt digest. This is discordant provenance authority, not an
     // existing-output collision.
     let tmp = TempDir::new().unwrap();
@@ -3366,7 +3366,7 @@ async fn drain_keeps_corrupt_provenance_with_matching_output_a_hard_error() {
 
 /// Linux P1-2: only the narrow existing-output collision converges to a
 /// durable skip. Divergent durable workflow-fact state is corrupt authority,
-/// not an output collision — it must stay a hard `ProvenanceCollision` error
+/// not an output collision, it must stay a hard `ProvenanceCollision` error
 /// with the queue item retained and the checkpoint unmoved.
 #[tokio::test]
 async fn drain_keeps_divergent_workflow_fact_state_a_hard_error() {

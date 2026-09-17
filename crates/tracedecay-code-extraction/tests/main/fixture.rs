@@ -1219,7 +1219,7 @@ fn test_fixture_ruby() {
     );
 
     // Top-level function (log is defined inside a module, class_depth > 0, so it's a Method;
-    // but `log` is at module level — class_depth is incremented for modules too).
+    // but `log` is at module level, class_depth is incremented for modules too).
     // Accept either Function or Method for `log`.
     assert!(
         result.nodes.iter().any(

@@ -74,7 +74,7 @@ async fn current_lcm_schema_reopens_without_republishing_its_marker() {
 /// A store installed before the LCM status performance indexes existed is
 /// already at the current LCM schema version, so the in-transaction LCM
 /// stage skips it. A short-lived attach must still converge the indexes in
-/// place — and retire the superseded plain payload owner index — without
+/// place, and retire the superseded plain payload owner index, without
 /// touching the version marker or the rows those indexes cover.
 #[tokio::test]
 async fn short_lived_attach_convergence_rebuilds_queryable_lcm_status_indexes() {

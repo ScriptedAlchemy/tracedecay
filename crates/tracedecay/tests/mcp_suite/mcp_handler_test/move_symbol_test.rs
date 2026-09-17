@@ -516,8 +516,8 @@ async fn test_move_symbol_first_in_file_docs_travel() {
     let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub mod a;\npub mod b;\n").unwrap();
-    // The doc comment is literally the first line of the file — no module doc,
-    // no leading blank — so attrs_start_line must resolve to line 0.
+    // The doc comment is literally the first line of the file, no module doc,
+    // no leading blank, so attrs_start_line must resolve to line 0.
     fs::write(
         project.join("src/a.rs"),
         "/// The very first thing in the file.\n\
@@ -598,7 +598,7 @@ async fn test_move_symbol_dot_prefixed_same_file_refuses() {
         p["message"].as_str().unwrap().contains("symbol's own file"),
         "refusal must be the same-file error: {p}"
     );
-    // The symbol is untouched — no silent deletion.
+    // The symbol is untouched, no silent deletion.
     assert_eq!(
         fs::read_to_string(project.join("src/pricing.rs")).unwrap(),
         before_pricing,
@@ -741,7 +741,7 @@ async fn test_move_symbol_leaves_contiguous_module_doc_behind() {
     let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub mod a;\npub mod b;\n").unwrap();
-    // Module doc is contiguous with the first item — no blank line between.
+    // Module doc is contiguous with the first item, no blank line between.
     fs::write(
         project.join("src/a.rs"),
         "//! module a doc\npub fn fact() -> u32 {\n    1\n}\n",
@@ -841,7 +841,7 @@ async fn test_move_symbol_non_utf8_destination_refuses() {
             .contains("failed to read destination"),
         "refusal message must name the read failure: {p}"
     );
-    // The destination is untouched — not clobbered with the moved symbol.
+    // The destination is untouched, not clobbered with the moved symbol.
     assert_eq!(
         fs::read(&dest).unwrap(),
         before_dest,

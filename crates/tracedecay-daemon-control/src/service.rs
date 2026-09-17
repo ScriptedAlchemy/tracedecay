@@ -58,7 +58,7 @@ const DAEMON_OPEN_FILE_LIMIT: u32 = 8_192;
 /// restarting unit the kill can catch the replacement instance too.
 ///
 /// Stating the bound explicitly, strictly above `DAEMON_SHUTDOWN_DEADLINE`,
-/// makes the daemon's deadline the one that fires first — so a slow shutdown
+/// makes the daemon's deadline the one that fires first, so a slow shutdown
 /// ends in a named timeout receipt instead of an anonymous SIGKILL. This is
 /// not extra grace for slow work: the daemon still self-limits at 45s.
 const DAEMON_STOP_TIMEOUT_SECS: u64 =
@@ -109,7 +109,7 @@ pub struct QuiescedDaemonLifecycle {
     lifecycle_lease: Option<tracedecay_runtime_core::lifecycle_lease::LifecycleLease>,
     /// Version the daemon protocol must report to lifecycle operations: the
     /// quiesced daemon's version at acquire time, replaced by the freshly
-    /// installed version once a maintenance action reports an install —
+    /// installed version once a maintenance action reports an install,
     /// restore starts that binary, so readiness must validate it.
     expected_version: String,
     runner: ServiceRunner,
@@ -857,7 +857,7 @@ fn default_socket_path_for_profile(profile_root: &Path) -> PathBuf {
 }
 
 /// Deterministic short bind path for a profile whose own directory would
-/// overflow `sockaddr_un` (`SUN_LEN` — 104 bytes on macOS/BSD).
+/// overflow `sockaddr_un` (`SUN_LEN`, 104 bytes on macOS/BSD).
 ///
 /// Daemon and clients all derive the endpoint through this one function, so
 /// hashing the profile root keeps them convergent without any extra
@@ -1376,7 +1376,7 @@ fn wait_for_installed_service_state_with_runner(
     // A freshly restored daemon may legitimately spend a while on startup
     // recovery (schema migrations, projection rebuilds, transcript catch-up)
     // before it answers its first initialize, so the restoration window is
-    // generous — bounded, with progress visibility — rather than a snap
+    // generous, bounded, with progress visibility, rather than a snap
     // judgement that fails a healthy, still-converging service.
     const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(3);
     wait_for_installed_service_state_with(runner, expected, expected_version, TOTAL_TIMEOUT)
@@ -1394,8 +1394,8 @@ fn wait_for_installed_service_state_with(
     // multiplies that per-probe timeout by the attempt count in the worst
     // case, which can stretch total wait time (and the progress-message
     // cadence) far past what the caller's window promises. Bounding by
-    // elapsed wall-clock time keeps the overall wait — and how often we
-    // report progress — independent of per-probe cost.
+    // elapsed wall-clock time keeps the overall wait, and how often we
+    // report progress, independent of per-probe cost.
     const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
     const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
 

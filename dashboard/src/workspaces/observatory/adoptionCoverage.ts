@@ -159,7 +159,7 @@ export function arrivalDimensions(model: ObservatoryReadModelV1): PlanDimension[
       id: 'dropped_lower_bound',
       label: 'dropped (lower bound)',
       requirement:
-        'proved drop lower bound from producer-sequence gaps — a floor on the loss, never a total',
+        'proved drop lower bound from producer-sequence gaps, a floor on the loss, never a total',
       reading: readMetric(model.metrics, 'telemetry_drops_lower_bound', NO_LATENESS_PROJECTION),
     },
     {

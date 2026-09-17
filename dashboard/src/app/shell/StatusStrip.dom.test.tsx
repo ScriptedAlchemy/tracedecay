@@ -4,8 +4,8 @@
  * The strip must not let a healthy socket vouch for stale data.
  *
  * A canonical refresh can reject, and when it does the reducer stays stale on
- * purpose and does not retry by itself. The link is still `live` at that moment —
- * the transport is fine, the projection is not — so the two readings are
+ * purpose and does not retry by itself. The link is still `live` at that moment,
+ * the transport is fine, the projection is not, so the two readings are
  * independent and the feed reading is the only thing standing between a reader
  * and a dashboard that looks current while knowingly being behind.
  */
@@ -116,7 +116,7 @@ describe('StatusStrip', () => {
  * The feed reading changes with no user action, which is why it is a live region
  * at all. `role="status"` sat on the state word alone and the sentence saying
  * what is owed was a sibling outside it, so an assistive technology was told
- * `stale` and never `a refresh is owed: overflow` — the half that names a cause
+ * `stale` and never `a refresh is owed: overflow`, the half that names a cause
  * and a next action, changing silently. Asserted through the region's own text
  * rather than the page's: `getByText(/overflow/)` passes either way, which is
  * how the split survived.

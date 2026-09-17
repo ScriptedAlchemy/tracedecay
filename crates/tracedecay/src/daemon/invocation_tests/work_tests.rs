@@ -675,7 +675,7 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
 
 /// The Task-family activity producer behind the dashboard's `task_activity`
 /// stream. A committed Work mutation must raise exactly one Task pulse against
-/// the registered project, and a projection read must raise none — the
+/// the registered project, and a projection read must raise none, the
 /// dispatcher's read arms never reach the effect path that publishes.
 #[tokio::test]
 async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {

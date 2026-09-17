@@ -39,8 +39,8 @@ import { SectionsRail } from './SettingsSections.tsx';
  * namespace, so this surface draws no override stack. What it draws is real:
  *
  *   - one row per served key with its effective value;
- *   - PROVENANCE exactly as far as the wire carries it — `explicit`/`default`
- *     for process-environment overrides, `unserved` for everything else — plus
+ *   - PROVENANCE exactly as far as the wire carries it, `explicit`/`default`
+ *     for process-environment overrides, `unserved` for everything else, plus
  *     `edited` for this reader's own unapplied proposal;
  *   - ORIGIN per group: the file path or endpoint the payload names, or a
  *     stated absence;
@@ -101,7 +101,7 @@ export function SettingsPage() {
  * zod strips every key the contract does not name and the groups that survive
  * are all identifiers. But `buildSettingsModel` takes ids straight from the
  * payload's top-level keys and is written to accept `unknown` precisely so a
- * group the daemon starts reporting appears rather than vanishes — so the
+ * group the daemon starts reporting appears rather than vanishes, so the
  * safety rests on a parse step outside this function. Comparison is preferred
  * to `CSS.escape` because there is no escaping to get right, it costs one pass
  * over a handful of headings, and it stays exercisable under jsdom.
@@ -148,8 +148,8 @@ function SettingsSurface({
     (key: string | null) => (key === null ? null : rows.find((row) => row.key === key) ?? null),
     [rows],
   );
-  // The inspector follows the last row the pointer or focus rested on — the
-  // Brain precedent, so it does not flicker on pointer leave — and falls back
+  // The inspector follows the last row the pointer or focus rested on, the
+  // Brain precedent, so it does not flicker on pointer leave, and falls back
   // to the selected row until any row has been inspected.
   const inspectedRow = rowByKey(inspectedKey) ?? rowByKey(selectedKey);
 
@@ -208,7 +208,7 @@ function SettingsSurface({
               className="td-graticule flex min-h-[var(--pane-min-height)] flex-1 items-center justify-center p-8"
             >
               <p className="border border-dashed border-edge-strong px-4 py-3 text-center text-xs text-text-muted">
-                no key or value matches “{query}”
+                no key or value matches "{query}"
               </p>
             </div>
           ) : (
@@ -227,7 +227,7 @@ function SettingsSurface({
           )}
           <p className="shrink-0 border-t border-edge-subtle px-3 py-1.5 text-3xs leading-relaxed text-text-muted">
             Showing effective configuration only. Origins are shown only when the server names
-            them; otherwise a key’s provenance is <span className="td-value">unserved</span>. Hover
+            them; otherwise a key's provenance is <span className="td-value">unserved</span>. Hover
             or focus a row to inspect it; Enter or click opens its review; Escape closes.
           </p>
         </section>
@@ -273,7 +273,7 @@ function groupBySection(model: SettingsModel, rows: readonly EffectiveRow[]): Se
 
 /**
  * The register under the header: the search over key, value, and served
- * description, and the three readings a reader needs before touching a row —
+ * description, and the three readings a reader needs before touching a row , 
  * what the scope permits, that this is the effective-only mode, and where the
  * one review the editor can hold currently stands.
  */

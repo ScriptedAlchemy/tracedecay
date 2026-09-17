@@ -115,7 +115,7 @@ async fn hook_orchestration_backpressures_without_waiting() {
     // A distinct hook event at a distinct work address is real new work, so it
     // must contend for the single permit rather than join or supersede the
     // admitted boundary. Address identity is the envelope's project, repository,
-    // worktree, and protected session — not the event id or scout lifecycle.
+    // worktree, and protected session, not the event id or scout lifecycle.
     let mut other_envelope = hook_envelope(HookEventV2::SavedEdit {
         file_id: [8; 16],
         changed_range_count: 1,
@@ -510,8 +510,8 @@ async fn retryable_hook_work_does_not_acknowledge_the_durable_admission() {
 
 /// The durable-replay half of the retryable contract: after a cycle fails
 /// retryably and settles, the spool consumer re-admits the exact same
-/// envelope. The orchestrator must run a fresh cycle for it — not treat the
-/// settled failure as still in flight — and only the genuinely successful
+/// envelope. The orchestrator must run a fresh cycle for it, not treat the
+/// settled failure as still in flight, and only the genuinely successful
 /// cycle may fire the acknowledgement that clears the pending hook work.
 #[tokio::test]
 async fn replayed_admission_after_retryable_failure_completes_a_fresh_cycle() {

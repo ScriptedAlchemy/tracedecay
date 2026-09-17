@@ -14,7 +14,7 @@ import { CodePage } from './CodePage.tsx';
  * subject. Here it IS the subject, and jsdom's missing WebGL context is not
  * an obstacle but the exact browser this contract exists for: one with no
  * usable GPU context. The default renderer (Sigma) must degrade to a stated
- * truthful reading — never a blank rectangle — while the semantic surfaces
+ * truthful reading, never a blank rectangle, while the semantic surfaces
  * beside it (hub list, search results, inspector) keep carrying the same
  * stable-ID selection model on their own. The canvas is supplementary; the
  * accessible equivalent is authoritative.
@@ -80,7 +80,7 @@ describe('a browser without a WebGL context', () => {
     renderCode();
 
     // The hub cards are the accessible selection surface. Pinning one must
-    // open the inspector on the symbol's own identity — the selection model
+    // open the inspector on the symbol's own identity, the selection model
     // is stable IDs in payloads, not anything the renderer owns.
     await user.click(
       await screen.findByRole('button', { name: /find_direct_child_by_kind/ }),

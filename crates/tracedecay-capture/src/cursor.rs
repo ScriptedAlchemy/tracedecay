@@ -380,7 +380,7 @@ fn append_cursor_usage_fact(
         // The counters ride the message record itself, so they are correlated
         // to this exact session/message (the envelope relations) and count that
         // one message's tokens: message scope, delta semantics. The model comes
-        // only from the record's own spellings — never from tracedecay-injected
+        // only from the record's own spellings, never from tracedecay-injected
         // session enrichment, which is neighboring-session evidence.
         facts.push(CanonicalObservationFactV1::ProviderUsage {
             model: cursor_record_message_model(native, message.unwrap_or(native)).map_or(

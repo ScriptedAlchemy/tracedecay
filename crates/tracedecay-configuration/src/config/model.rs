@@ -40,16 +40,16 @@ pub const CONFIG_FILENAME: &str = "config.json";
 
 /// Returns `true` if any component of `path` is a generated/vendored
 /// directory segment, or `path` itself carries a minified-asset suffix
-/// (`app.min.js`, `app.min.css`, ...) — mirrors the `**/*.min.*` default
+/// (`app.min.js`, `app.min.css`, ...). This mirrors the `**/*.min.*` default
 /// exclude pattern built by [`default_exclude_patterns`].
 ///
-/// Path-level (not just directory-level) so callers can filter a flat list
-/// of file paths in one pass.
+/// Path-level, including individual file paths, so callers can filter a flat
+/// list of file paths in one pass.
 pub fn is_generated_path_segment(path: &str) -> bool {
     has_minified_suffix(path) || path.split('/').any(is_generated_dir_segment)
 }
 
-/// `true` for paths like `app.min.js` / `app.min.css.map` — a `.min.`
+/// `true` for paths like `app.min.js` / `app.min.css.map`: a `.min.`
 /// component followed by at least one more character.
 fn has_minified_suffix(path: &str) -> bool {
     path.rfind(".min.").is_some_and(|idx| idx + 5 < path.len())
@@ -62,15 +62,15 @@ fn has_minified_suffix(path: &str) -> bool {
 /// appear at the project root or anywhere below it) plus site-local
 /// additions that intentionally are *not* part of the shared segment set:
 ///
-/// - `.git/**`, `.tracedecay/**` — VCS and `TraceDecay`'s own metadata dirs;
+/// - `.git/**`, `.tracedecay/**`. VCS and `TraceDecay`'s own metadata dirs;
 ///   these are tool/repo bookkeeping, not generated *code*, so they stay
 ///   local to the config's default patterns rather than joining
 ///   [`GENERATED_DIR_SEGMENTS`] (which migrate and scan call sites also
 ///   consult for non-config-driven decisions).
-/// - `bin/**` — historically excluded here by default, but not treated as
+/// - `bin/**`. Historically excluded here by default, but not treated as
 ///   "generated" elsewhere: a `bin/` directory can hold real source in some
 ///   project layouts, so it isn't added to the shared segment list.
-/// - `**/*.min.*` — mirrors [`is_generated_path_segment`]'s suffix check.
+/// - `**/*.min.*`. Mirrors [`is_generated_path_segment`]'s suffix check.
 fn default_exclude_patterns() -> Vec<String> {
     let mut patterns: Vec<String> = vec![
         ".git/**".to_string(),

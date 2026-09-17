@@ -1,4 +1,4 @@
-//! `tracedecay_unsafe_patterns` — risky-construct scan over indexed source.
+//! `tracedecay_unsafe_patterns`, risky-construct scan over indexed source.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -179,7 +179,7 @@ pub async fn handle_unsafe_patterns(
                 };
                 // Cheap raw pre-filter before the tree-sitter mask and the per-file
                 // store read. Masking only blanks content, so a keyword absent from
-                // the raw source cannot appear in the masked copy — skipping here
+                // the raw source cannot appear in the masked copy, skipping here
                 // is equivalent, and spares most files in a repository two
                 // expensive steps that could never produce a match.
                 if !kinds
@@ -194,14 +194,13 @@ pub async fn handle_unsafe_patterns(
                 // masked copy; the original line is kept for the emitted snippet.
                 // Non-Rust files are scanned raw (the Rust grammar would
                 // mis-tokenise them).
-                let masked = if path_is_rust(file) {
+                let masked_owned = path_is_rust(file).then(|| {
                     tracedecay_code_extraction::source_mask::masked_rust_source_with(
                         &source,
                         tracedecay_code_extraction::source_mask::MaskOptions::CODE_SCAN,
                     )
-                } else {
-                    source.clone()
-                };
+                });
+                let masked = masked_owned.as_deref().unwrap_or(&source);
                 let test_lines = if path_is_rust(file) {
                     tracedecay_code_extraction::source_mask::rust_test_lines(&source).map_err(
                         |error| {
@@ -336,7 +335,7 @@ mod unsafe_pattern_detection_tests {
 
     #[test]
     fn detects_unsafe_block_inside_safe_fn() {
-        // An `unsafe { }` block living inside an otherwise-safe function — the
+        // An `unsafe { }` block living inside an otherwise-safe function, the
         // exact shape the audit fixture plants.
         assert!(line_matches_unsafe_kind(
             "    unsafe { *ptr as usize }",

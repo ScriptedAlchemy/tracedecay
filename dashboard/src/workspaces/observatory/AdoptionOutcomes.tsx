@@ -169,7 +169,7 @@ function OutcomeReadModel({
           </div>
           <p className="text-3xs leading-snug text-text-muted">
             Plan 26 refuses these nine as success outcomes. Two of them are readable from the
-            diagnostics route right now — per-tool invocation counts and tool calls per message —
+            diagnostics route right now, per-tool invocation counts and tool calls per message,
             which is why the refusal is printed rather than merely honoured. None contributes to
             any numerator on this page.
           </p>

@@ -3,9 +3,9 @@
 //! Kiro persists chat history under VS Code-style globalStorage at
 //! `Kiro/User/globalStorage/kiro.kiroagent`. Two layouts are supported:
 //!
-//! * **Legacy** — `<workspace-hash>/<execution-id>.chat` JSON with a `chat`
+//! * **Legacy**, `<workspace-hash>/<execution-id>.chat` JSON with a `chat`
 //!   array (`human`/`bot` roles) and `metadata` (model, workflow id, times).
-//! * **Modern** — extensionless execution JSON under workspace hash dirs or
+//! * **Modern**, extensionless execution JSON under workspace hash dirs or
 //!   `workspace-sessions/<encoded-workspace-path>/<session-id>.json` with a
 //!   top-level `messages`/`conversation`/`chat` array.
 //!

@@ -302,7 +302,7 @@ impl RetainedSurfaceEvidenceFactsV1 {
     /// `EvidenceCoverage::validate` rejects `Complete` unless both `visited`
     /// and `eligible` are present, so a lower authority that reports a
     /// complete retrieval without them would be projected into an envelope the
-    /// transport refuses — the answer is lost as
+    /// transport refuses. The answer is lost as
     /// `application.retained.authority-unavailable`. Nothing is invented here:
     /// "complete" is that authority's own claim that every eligible item was
     /// returned and none omitted, which fixes `eligible` at `returned`, and a

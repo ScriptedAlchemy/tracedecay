@@ -2,12 +2,12 @@
 //!
 //! Content-size estimation has two quality tiers:
 //!
-//! 1. **tokenized** — stored text counted with a
+//! 1. **tokenized**, stored text counted with a
 //!    real BPE tokenizer (tiktoken). Exact for OpenAI-family models
 //!    (`o200k_base` / `cl100k_base` per family); for other vendors
-//!    (Claude/Gemini have no public tokenizer) `o200k_base` serves as a
+//!    (Claude/Gemini have no public tokenizer) `o200k_base` is a
 //!    much-better-than-chars/4 approximation and is labeled as such.
-//! 2. **estimated** — the legacy `(len+3)/4` chars/4 heuristic, used when
+//! 2. **estimated**, the legacy `(len+3)/4` chars/4 heuristic, used when
 //!    the `token-counting` feature is compiled out (or a count failed).
 //!
 //! Provider-reported billing usage comes exclusively from the canonical raw
@@ -188,7 +188,7 @@ pub struct TokenCountCache {
     /// then message id and guarded by a content fingerprint. Bounded LRU
     /// levels prevent a long-lived dashboard from retaining every message it
     /// has ever rendered. Two levels let a hit borrow the caller's `&str`
-    /// keys without allocating — every polled search/session/overview/timeline
+    /// keys without allocating, every polled search/session/overview/timeline
     /// message takes this path.
     /// Kept apart from `map`: LCM counts canonically hydrated display
     /// content with `o200k_base` specifically, while `map` counts stored
@@ -303,7 +303,7 @@ pub async fn non_usage_message_tokens(state: &DashboardState) -> Option<Arc<Vec<
     Some(overlay)
 }
 
-/// Aggregate fingerprint of `session_messages` — see [`OverlayCache`].
+/// Aggregate fingerprint of `session_messages`, see [`OverlayCache`].
 async fn overlay_fingerprint(conn: &(impl QueryExecutor + ?Sized)) -> Option<OverlayFingerprint> {
     let rows = query_rows(
         conn,
@@ -324,7 +324,7 @@ async fn build_overlay(
     state: &DashboardState,
     conn: &(impl QueryExecutor + ?Sized),
 ) -> Option<Vec<MessageTokens>> {
-    // Metadata only — text never leaves SQLite unless a count is missing.
+    // Metadata only, text never leaves SQLite unless a count is missing.
     let sql = format!(
         "SELECT provider, message_id, session_id, role, timestamp, model, msg_len
          FROM ({MESSAGE_TOKENS_CTE})"
@@ -388,7 +388,7 @@ async fn build_overlay(
 /// runtime, then updates the process-local derived cache.
 ///
 /// Chunks are keyed `(provider, message_id)` so the lookup can use the
-/// table's composite primary key — a `message_id IN (…)` filter alone cannot,
+/// table's composite primary key, a `message_id IN (…)` filter alone cannot,
 /// and full-scanned the text-heavy table once per 200-row chunk (a 15k-message
 /// first warm paid ~75 full scans).
 async fn count_and_store(
@@ -517,7 +517,7 @@ mod tests {
         let cache = TokenCountCache::new();
         let fingerprint = content_fingerprint("hello");
         // Hits are looked up with `&str` keys borrowed from caller-owned
-        // data — the hit path must never require freshly owned Strings.
+        // data, the hit path must never require freshly owned Strings.
         let composed = "codex m1".to_owned();
         let (provider, message_id) = composed.split_once(' ').expect("two borrowed keys");
         assert_eq!(

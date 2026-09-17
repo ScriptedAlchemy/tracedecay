@@ -361,7 +361,7 @@ describe('similarityReading', () => {
     expect(reading.min).toBeNull();
     expect(reading.max).toBeNull();
     expect(reading.denominators).toBe(
-      '1 query-time encoded fact — a pair needs two, so nothing was scored',
+      '1 query-time encoded fact, a pair needs two, so nothing was scored',
     );
   });
 });

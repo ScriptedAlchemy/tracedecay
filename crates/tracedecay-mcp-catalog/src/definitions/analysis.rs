@@ -13,7 +13,7 @@ pub(super) fn def_dead_code() -> ToolDefinition {
         "Dead Code",
         "Find symbols with no incoming edges (potentially unreachable code). \
          Always excludes `main` and `test*` functions. By default also excludes \
-         `pub` items (they may be referenced outside the indexed scope) — pass \
+         `pub` items (they may be referenced outside the indexed scope), pass \
          `include_public: true` to audit pub items with zero indexed callers, \
          which is what you want for workspace-internal cleanup.",
         json!({
@@ -83,11 +83,11 @@ pub(super) fn def_unmounted_files() -> ToolDefinition {
     def(
         "tracedecay_unmounted_files",
         "Unmounted Files",
-        "Find source files present on disk that nothing reaches — files the code graph indexes as \
+        "Find source files present on disk that nothing reaches, files the code graph indexes as \
          healthy symbols while no compiler, bundler, or test runner ever loads them. Reports one \
          section per ecosystem in a typed `ecosystems` field, each carrying its own verdict, \
          counts, and blind-spot list. RUST (cargo): walks every package found by manifest sweep \
-         — workspace members, path dependencies, nested independent workspaces — from its own \
+, workspace members, path dependencies, nested independent workspaces, from its own \
          roots (src/lib.rs, src/main.rs, src/bin/*, every tests/*.rs and tests/<name>/main.rs, \
          benches, examples, build.rs), follows `mod name;`, `#[path = \"...\"]`, \
          `#[cfg_attr(..., path = \"...\")]` and `include!(\"literal.rs\")`, and diffs the \
@@ -96,12 +96,12 @@ pub(super) fn def_unmounted_files() -> ToolDefinition {
          plus the exact `mod` line to add. TYPESCRIPT/JAVASCRIPT (npm, incl. pnpm/npm/yarn \
          workspaces, discovered per package.json rather than per glob): walks static `import`, \
          `require`, `export ... from`, and literal dynamic `import()` from declared entry points \
-         — package.json main/module/browser/types/bin/exports and the file paths named in \
+, package.json main/module/browser/types/bin/exports and the file paths named in \
          `scripts`, string literals in root `*.config.*` files (how an rsbuild/vite entry or a \
          vitest setup file is found without executing the config), tsconfig `files` and `paths` \
          aliases, plus conventional roots (tests, stories, `*.d.ts`, `src/index.*`, Next.js \
          app/pages route files); a finding means only that no static import path reaches the file \
-         — `tsc` may still type-check it via a tsconfig `include`, so no repair line is invented. \
+, `tsc` may still type-check it via a tsconfig `include`, so no repair line is invented. \
          Predicates are never evaluated: a cfg-gated module or a conditionally-aliased file \
          counts as mounted. Languages with no reachability model here (Python, Go, Java, C/C++, \
          Ruby, and the rest) are reported with status `unsupported` and a file count, never \
@@ -115,7 +115,7 @@ pub(super) fn def_unmounted_files() -> ToolDefinition {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Filter findings to files under this directory path (e.g. 'src/daemon'). The whole project is still walked — reachability is not a per-directory question."
+                    "description": "Filter findings to files under this directory path (e.g. 'src/daemon'). The whole project is still walked, reachability is not a per-directory question."
                 },
                 "ecosystem": {
                     "type": "string",
@@ -328,7 +328,7 @@ pub(super) fn def_health() -> ToolDefinition {
     def_path_flag_tool(
         "tracedecay_health",
         "Health Score",
-        "Get quality signal (0-10000) with root cause breakdown (acyclicity, depth, equality, redundancy, modularity). Quality signal = geometric mean of 5 dimensions — maximize this ONE number.",
+        "Get quality signal (0-10000) with root cause breakdown (acyclicity, depth, equality, redundancy, modularity). Quality signal = geometric mean of 5 dimensions, maximize this ONE number.",
         "Filter to files under this directory path",
         "details",
         "If true, include full dimension breakdown (default: false)",

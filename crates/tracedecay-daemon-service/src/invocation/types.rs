@@ -356,8 +356,8 @@ impl BoundedHookOrchestratorV1 {
                 // Supersession is not owner retirement: the incumbent's work
                 // already started, its receipt terminal is owed, and the
                 // successor inherits this permit. Both must follow the real
-                // end of that work — including nested blocking work the
-                // future cannot cancel — so join it here instead of dropping
+                // end of that work, including nested blocking work the
+                // future cannot cancel, so join it here instead of dropping
                 // it. Owner retirement still preempts the join.
                 tokio::select! {
                     biased;

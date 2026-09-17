@@ -339,7 +339,7 @@ async fn validate_legacy_alias_ownership(
 /// These live outside the loop below because an array literal iterated in
 /// place leaves a `std::array::IntoIter` alive across the query `await`, and
 /// that iterator's `MaybeDangling`/`ManuallyDrop`/`MaybeUninit` layers are
-/// re-entered for every auto-trait obligation raised on the enclosing future —
+/// re-entered for every auto-trait obligation raised on the enclosing future,
 /// at the deepest point of the schema-install chain that daemon project-open
 /// awaits. Borrowing a promoted slice keeps a plain `slice::Iter` there.
 const ALIAS_COPY_CONFLICT_QUERIES: &[&str] = &[

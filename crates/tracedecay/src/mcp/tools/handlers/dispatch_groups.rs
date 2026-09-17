@@ -460,7 +460,7 @@ fn dispatch_git_tools_inner<'a>(
 ///
 /// Every served route publishes a checkout at project-open. Absence is a
 /// typed root failure, not a second binding shape. The session store is the
-/// canonical `registered_project_session_db` lease only — never a silent
+/// canonical `registered_project_session_db` lease only, never a silent
 /// fallback to `session_authorities.project`. Attached means admitted;
 /// absent is the typed unavailable/denied state.
 fn admitted_project_authorities(
@@ -574,10 +574,10 @@ fn graph_freshness_reader<'a>(
 
 /// Binds the admitted authorities a moved handler family reads.
 ///
-/// Everything the family may touch — the resolved project scope, the caller's
+/// Everything the family may touch, the resolved project scope, the caller's
 /// deadline and cancellation, the registered project session store that
 /// authenticates PR-context cursors, and the daemon-owned code-index executors
-/// with the authorization proved for them — crosses into `tracedecay-mcp` as
+/// with the authorization proved for them, crosses into `tracedecay-mcp` as
 /// one validated binding, under the single checkout the serving route was
 /// admitted for. An authority the daemon did not admit stays absent and the
 /// handler reports its own typed unavailable state; an authority that

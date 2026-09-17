@@ -532,8 +532,8 @@ impl<S> RetainedDispatchAuthority<S> {
             message: format!("invalid MCP dispatch deadline: {error}"),
         })?;
         // A caller that named its own deadline is the authority on its budget,
-        // up to the tool's ceiling. Without this, every `tools/call` — the CLI
-        // compatibility route and every MCP host — was served on the ceiling no
+        // up to the tool's ceiling. Without this, every `tools/call`, the CLI
+        // compatibility route and every MCP host, was served on the ceiling no
         // matter what the caller asked for, so a caller-visible deadline could
         // never reach admission or settlement and the typed terminals it exists
         // to produce were unreachable through this transport. An already
@@ -694,8 +694,8 @@ impl DispatchControl {
         F: Future<Output = Result<T>> + Send + 'static,
     {
         // A pre-cancelled cooperative dispatch is still admitted: its
-        // invocation authority observes the already-cancelled signal itself —
-        // that is the cooperative contract — so the settlement it records is
+        // invocation authority observes the already-cancelled signal itself.
+        // That is the cooperative contract, so the settlement it records is
         // the authoritative one, and a cancellation that raced request
         // registration still reaches the application executor. Only a tool
         // with no live cancellation observer keeps the pre-admission refusal,
@@ -757,7 +757,7 @@ impl DispatchControl {
                 // owners report a `PartialEffect` carrying the committed
                 // receipt and a Reconcile-only legal action when their budget
                 // expires after the commit point. Abandoning it here replaced
-                // that typed terminal with `tool_dispatch_effect_unknown` —
+                // that typed terminal with `tool_dispatch_effect_unknown`,
                 // telling the caller to "inspect the daemon receipt" while the
                 // daemon was holding the receipt and about to hand it over.
                 // Effect-unknown is for a result that is genuinely
@@ -1017,8 +1017,8 @@ mod tests {
 
     /// A cooperative dispatch cancelled before admission is still admitted so
     /// its invocation authority observes the signal and records the
-    /// authoritative settlement — a cancellation that raced request
-    /// registration must still reach the application executor — while the
+    /// authoritative settlement, a cancellation that raced request
+    /// registration must still reach the application executor, while the
     /// caller reads the plain pre-admission cancelled terminal.
     #[tokio::test]
     async fn pre_cancelled_cooperative_dispatch_still_reaches_its_worker() {

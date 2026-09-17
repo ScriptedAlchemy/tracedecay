@@ -661,7 +661,7 @@ async fn concurrent_full_batches_converge_without_split_brain_or_partial_writes(
 /// summarization pipeline recognizes. `native_summary_evidence` scans
 /// `session_messages` for a non-empty body plus `kind = "summary"` and the
 /// provider's metadata discriminators, and only a recognized row reaches
-/// compression — the sole production writer of `lcm_summary_nodes`. Dropping
+/// compression, the sole production writer of `lcm_summary_nodes`. Dropping
 /// or rewriting either column at persist time would strand every host
 /// compaction with no failing count to show for it.
 #[tokio::test]

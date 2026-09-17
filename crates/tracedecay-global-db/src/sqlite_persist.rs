@@ -3,7 +3,7 @@
 //! Git-index, native-integration, and configuration each own their tables and
 //! conflict kinds. The commit, rollback, receipt-replay, CAS row-count, and
 //! insert-or-equal decisions used to be copied beside those tables and then
-//! dropped the engine cause — or, on rollback failure, the original outcome.
+//! dropped the engine cause, or, on rollback failure, the original outcome.
 //! One helper keeps both errors.
 
 use std::fmt;

@@ -97,8 +97,8 @@ export function CapacityBar({
     return <span className="text-2xs text-text-muted">size unknown</span>;
   }
   // An absent free-page figure is not zero free pages. Coercing it drew a
-  // completely filled bar announcing "0.0% free pages" — a measurement of a
-  // full store — for a store whose pages nobody sampled.
+  // completely filled bar announcing "0.0% free pages", a measurement of a
+  // full store, for a store whose pages nobody sampled.
   if (freeBytes == null) {
     return <span className="text-2xs text-text-muted">free pages unknown</span>;
   }

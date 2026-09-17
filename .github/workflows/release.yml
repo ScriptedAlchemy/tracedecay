@@ -915,7 +915,7 @@ jobs:
       # Authentication is tokenless npm trusted publishing: the reviewed npm
       # CLI (>= 11.5.1) exchanges this job's GitHub OIDC token itself, and npm
       # attaches provenance automatically. No token, registry-url, or .npmrc
-      # auth may exist here — a configured token would shadow the OIDC path.
+      # auth may exist here. A configured token would shadow the OIDC path.
       - name: Publish the exact conformance-tested tarball with reviewed npm
         working-directory: artifact
         run: |

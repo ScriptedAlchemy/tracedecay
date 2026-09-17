@@ -820,8 +820,8 @@ pub(in super::super) enum ConvergedRendering {
 /// releases wrote.
 ///
 /// Reached only from the authority audit, which has already proven the stored
-/// provenance row is the digest of the output row this store holds — the
-/// rendering a release wrote — rather than a row disagreeing with its own
+/// provenance row is the digest of the output row this store holds, the
+/// rendering a release wrote, rather than a row disagreeing with its own
 /// output. The message row and its LCM raw twin are pure derivations of the
 /// durable observation, so rewriting them loses nothing; the digest is
 /// re-stamped last so an interrupted transaction leaves the released pairing
@@ -877,7 +877,7 @@ pub(in super::super) async fn converge_released_output_rendering(
 /// byte-identical state by removing the outputs this observation created with
 /// their LCM raw twins, dropping its provenance and workflow rows, and writing
 /// that disposition in their place. An output row a *different* observation
-/// created keeps its own provenance and is not this retirement's to remove —
+/// created keeps its own provenance and is not this retirement's to remove,
 /// a fresh capture would not have created it either.
 ///
 /// Only the projection is retired. The durable observation, its payload, and
@@ -1343,8 +1343,8 @@ async fn apply_provenance(
         // deterministic existing-output collision the drain converges into a
         // durable skip. A ghost binding or a retained row that names
         // the SAME output but disagrees on anchor, receipt, or digest is
-        // corrupt provenance authority — as is a row that disagrees right
-        // after this insert claimed to write it — and stays a hard error.
+        // corrupt provenance authority, as is a row that disagrees right
+        // after this insert claimed to write it, and stays a hard error.
         Err(ProjectionStoreError::ProvenanceCollision) if inserted == 0 => {
             let (stored_provider, stored_message_id, output_exists) =
                 read_provenance_output_binding(conn, provenance, projection.output_ordinal())

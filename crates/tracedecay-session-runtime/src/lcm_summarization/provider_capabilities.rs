@@ -1,9 +1,9 @@
 //! Provider-keyed capabilities behind authoritative LCM summarization.
 //!
-//! Every place a host differs — how its own native compaction summary is
+//! Every place a host differs, how its own native compaction summary is
 //! recognized, what corroborating evidence that recognition needs, the route
 //! label the recognition records, and whether the host can be asked to produce
-//! a summary on demand — is registered here as one capability implementation.
+//! a summary on demand, is registered here as one capability implementation.
 //! The scan in the parent module stays provider-neutral: it reads rows, hands
 //! each one to the registered recognizers, and never names a provider.
 
@@ -97,7 +97,7 @@ impl NativeSummaryRecognizerV1 for CodexNativeCompactionV1 {
     }
 }
 
-/// Cursor stores the compacted text twice — once as the message body and once
+/// Cursor stores the compacted text twice, once as the message body and once
 /// as the compaction fact's summary. The row is authoritative only when the
 /// two agree exactly, which is what proves the body was not truncated or
 /// re-rendered on the way into the store.

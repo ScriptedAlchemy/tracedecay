@@ -3088,7 +3088,7 @@ fn binding(
 }
 
 /// One admitted exact candidate retained during bounded selection: the
-/// canonical ranking key plus ordinals into the request literals — the
+/// canonical ranking key plus ordinals into the request literals, the
 /// admitting literal and every matched literal. Winner materialization
 /// resolves the proof from the per-request cache and clones the literals
 /// only then. Ordering is by key alone.
@@ -3164,8 +3164,8 @@ fn retain_bounded<K: Ord>(ranked: &mut BinaryHeap<K>, cap: usize, entry: K) {
 }
 
 /// The lexical ranking key: the checked sum of the filter-admitted field
-/// scores, or `None` when the typed field filters admit no scored field —
-/// the same exclusion the lexical lane applies after the port returns.
+/// scores, or `None` when the typed field filters admit no scored field.
+/// The same exclusion the lexical lane applies after the port returns.
 fn admitted_score_micros(
     score: &LexicalRowScoreV1,
     filters: &[LexicalFieldFilterV1],

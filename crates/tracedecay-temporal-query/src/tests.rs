@@ -1298,7 +1298,7 @@ fn derived_group_candidate_never_ranks_as_a_standalone_row() {
         // Coverage counts what this query could have returned. Nothing here
         // could: the only candidate is a container, and its member matched no
         // channel of its own. Counting that member would report a result the
-        // query never had — and, once groups are wide, thousands of them.
+        // query never had, and, once groups are wide, thousands of them.
         assert_eq!(result.coverage.total(), Some(0));
     });
 }

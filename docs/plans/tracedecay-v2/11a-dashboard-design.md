@@ -20,8 +20,8 @@ and still exited successfully is superseded.
 
 ## User authority versus design decisions
 
-The user supplied the quality bar — beautiful and functional, world class,
-novel, interactive, and magnificent on every page — and named "very generic
+The user supplied the quality bar, beautiful and functional, world class,
+novel, interactive, and magnificent on every page, and named "very generic
 and clinical and simple" as the failure mode. He did **not** state a preference
 for typography, colour palette, dark/light mode, spacing scale, motion, or
 easing. Every concrete choice on those axes below is a design-owner/agent plan
@@ -46,7 +46,7 @@ ADR, no Module Federation or Vite, and no shadcn adoption yet.
 
 1. **Truth before polish.** The plan's sixteen domain states, coverage
    denominators, and evidence quality are the product. Layout and styling
-   exist to make truthful states legible at a glance — never to smooth them
+   exist to make truthful states legible at a glance, never to smooth them
    over. An `unknown` is designed, not blank.
 2. **Calm density.** Dense data with generous rhythm: one type scale, one
    spacing scale, restrained borders, whitespace doing the separation work.
@@ -72,7 +72,7 @@ One responsive shell, four fixed regions plus content:
 - **Left navigation rail.** The twelve workspaces (Brain, Explorer, Loom,
   Sessions, Agents, Code, Knowledge, Delivery, Automations, Observatory,
   Costs, Settings; Work joins with the Work delivery), icon+label, collapsible to icons at
-  narrow widths, bottom-anchored Settings. The rail is navigation only — no
+  narrow widths, bottom-anchored Settings. The rail is navigation only, no
   status, no badges except a single Doctor attention dot driven by typed
   findings.
 - **Top scope bar.** The active scope (profile/project/repository/worktree/
@@ -81,7 +81,7 @@ One responsive shell, four fixed regions plus content:
   side: freshness indicator (SSE liveness + last watermark), theme toggle,
   command palette affordance.
 - **Command palette** (Cmd/Ctrl-K, Radix Dialog): scope-aware search across
-  workspaces, entities, saved deep links, and *legal actions only* — an
+  workspaces, entities, saved deep links, and *legal actions only*, an
   action appears solely when its typed action reference exists for the
   current selection. Palette results carry the same truth metadata as lists
   (state chip, scope).
@@ -121,7 +121,7 @@ Every workspace composes from four archetypes; no bespoke layouts:
 
 ## Scope model: all-projects first (every workspace)
 
-The entire dashboard defaults to ALL-projects scope — one connected brain.
+The entire dashboard defaults to ALL-projects scope, one connected brain.
 Every workspace renders the cross-project aggregate as its primary view and
 narrows to a specific project (or repository/worktree/branch/session) only
 through the ordinary scope-bar chips or an explicit in-view scope transition
@@ -129,7 +129,7 @@ through the ordinary scope-bar chips or an explicit in-view scope transition
 workspace is a project picker; narrowing never changes a workspace's shape,
 only its population. Concretely:
 
-- Brain: one aggregate map across every registered project — projects as
+- Brain: one aggregate map across every registered project, projects as
   named clusters/regions, cross-project edges styled distinctly; clicking a
   cluster is an explicit narrow.
 - Explorer/Sessions/Knowledge: search and lists span all projects by
@@ -150,7 +150,7 @@ Rules that hold everywhere:
   level grouping is the natural first clustering level.
 - Aggregate coverage statements enumerate projects consulted vs unavailable;
   an unreachable project's store renders as a truthful partial/unavailable
-  region or row — never silently omitted.
+  region or row, never silently omitted.
 - Deep links always capture whether scope was all-projects or narrowed, and
   to what.
 
@@ -178,7 +178,7 @@ Token architecture (Tailwind v4, two-stage so runtime theming works):
   `state-conflicting`, `state-offline`, `state-unknown`,
   `state-cancelled`, `state-timed-out`, `state-error`,
   `state-unsupported-schema`, `state-complete-zero`). Every state chip is
-  token + icon + label — never color alone.
+  token + icon + label, never color alone.
 - **Severity axis**: five ordered steps (`sev-info` → `sev-critical`),
   expressed as border/fill weight on a single hue ramp.
 - **Evidence-quality axis**: four steps (`ev-measured`, `ev-associated`,
@@ -229,14 +229,14 @@ and feel unmistakably its own.
   shifts; skeletons match final geometry exactly (zero CLS by design).
 - **Iconography**: Lucide (ISC license), 16px grid, 1.5px stroke,
   consistent metaphors registered per domain entity (finding, generation,
-  worktree, anchor…) in one icon map — no ad-hoc icon picks in workspaces.
+  worktree, anchor…) in one icon map, no ad-hoc icon picks in workspaces.
 - **Data-ink discipline in charts**: no gridline lattices, direct labels
   over legends where feasible, axis text at `text-muted`, series colors from
   the categorical ramp with perceptually even lightness in both themes;
   uncertainty always drawn (bands/intervals), never implied.
 - **Crafted truthful states.** Empty/partial/stale/denied states are
   designed compositions (icon + one sentence + next action), unique per
-  workspace where the meaning differs — never a generic illustration, never
+  workspace where the meaning differs, never a generic illustration, never
   a bare spinner. `complete_zero_findings` celebrates quietly with its
   coverage receipt.
 - **Design review.** Every workspace slice is opened in real Google Chrome;
@@ -275,7 +275,7 @@ side is recorded as the final product requirement.
   do not require an isolated baseline commit or separate evidence document.
 - **Automated audit rules** run over the same renders: axe (WCAG) per
   surface, token-compliance scan (computed styles must resolve to token
-  variables — raw hex/px drift fails), focus-visibility check (every
+  variables, raw hex/px drift fails), focus-visibility check (every
   focusable element screenshotted in :focus-visible), CLS probe (skeleton
   vs settled geometry), and information-density heuristics (min touch
   targets, max competing accents per region) as warnings.
@@ -291,7 +291,7 @@ side is recorded as the final product requirement.
 
 ## Component conventions
 
-- **EvidenceTruthStrip**: one-line strip on every compact result — authority
+- **EvidenceTruthStrip**: one-line strip on every compact result, authority
   icon, coverage fraction (never a bare percent without denominator),
   freshness age, citation count, omission count, score kind label. Always
   visible; the inspector expands each element.
@@ -322,7 +322,7 @@ once and reused everywhere:
    lane virtualization via a visible-track bounds list, zoned hit-testing to
    stable IDs (CPU interval-tree, no GPU readback), visible-time-window data
    querying with server-side quantization, Canvas2D first with an optional
-   eval-free WebGL batch path (CSP forbids eval-based WebGL — the speedscope
+   eval-free WebGL batch path (CSP forbids eval-based WebGL, the speedscope
    lesson). Serves: Loom span waterfalls, causal arcs, dual-time scrubber
    lanes, execution-topology lanes/rails, commit rails, conflict heatmap.
 2. **The playback controller** (bespoke): event-sourced fold over immutable
@@ -332,7 +332,7 @@ once and reused everywhere:
    shape), follow-live via suspend-on-scroll-back + floating return-to-live.
    Shared by Loom, Sessions replay, and execution topology.
 3. **The selection store** (Zustand, stable-ID pub/sub using the crossfilter
-   technique — filter mask over sorted ID indices, IDs only, no payloads):
+   technique, filter mask over sorted ID indices, IDs only, no payloads):
    one selection resolved identically across graph/table/lanes/timeline.
 
 Per-domain assignments:
@@ -360,7 +360,7 @@ Per-domain assignments:
 
 Disqualifications and adoption criteria (from license/size research): elkjs (EPL-2.0,
 ~500 KB) is banned from the default path; Cosmograph the product is
-CC BY-NC and disqualified — the optional GPU overflow adapter targets
+CC BY-NC and disqualified, the optional GPU overflow adapter targets
 **cosmos.gl (MIT, OpenJS)** instead, under Plan 11's existing acceptance criteria. Any
 WebGL dependency must pass an eval/CSP audit before adoption.
 
@@ -379,7 +379,7 @@ WebGL dependency must pass an eval/CSP audit before adoption.
 
 Verified against the owner's real profile (43 repositories, 109.1K symbols,
 257.6K edges, 2,298 files, live SSE): the instrument language holds at real
-magnitude — display-tier counts, degree rails on most-connected symbols, and
+magnitude, display-tier counts, degree rails on most-connected symbols, and
 the connection-honest signal panel all read correctly. Guidance below is
 measured, not hypothetical; align future dashboard slices with it.
 
@@ -405,7 +405,7 @@ measured, not hypothetical; align future dashboard slices with it.
    under-test this; every graph surface must also be judged against a dense
    real neighborhood before shipping.
 
-4. **Fixtures under-represent scale shape, not just scale size.** Real data
+4. **Fixtures under-represent both scale shape and scale size.** Real data
    differs in DISTRIBUTION (43 single-checkout repos; one 5069-degree hub
    symbol) rather than only in count. Wire-true fixtures should include at
    least one skewed-distribution case per graph surface.

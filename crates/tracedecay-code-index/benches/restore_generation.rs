@@ -176,8 +176,8 @@ fn restore_concurrently(
     })
 }
 
-/// One restore's recovered coverage — every restored file's logical path in
-/// canonical order — and the elapsed time at which it completed.
+/// One restore's recovered coverage, every restored file's logical path in
+/// canonical order, and the elapsed time at which it completed.
 fn restore_once(
     manifest: &[u8],
     segments: &Path,

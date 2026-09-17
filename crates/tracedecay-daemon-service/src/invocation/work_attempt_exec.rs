@@ -3,7 +3,7 @@
 //!
 //! Every durable transition routes through
 //! [`tracedecay_contracts::WorkAttemptService`]; this module owns only the
-//! live process — spawn, bounded stream capture, the cancellation ladder, and
+//! live process, spawn, bounded stream capture, the cancellation ladder, and
 //! terminal evidence capture. Provider resolution is fail-closed through the
 //! pinned executable-binding authority; an unresolved provider is a typed
 //! availability state, never an invented fallback.
@@ -156,7 +156,7 @@ mod tests;
 const CANCELLATION_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Joined process owners for provider attempts owned by this daemon process.
-/// This is runtime plumbing only — the durable cancellation request lives in
+/// This is runtime plumbing only, the durable cancellation request lives in
 /// the attempt row, and restart recovery never consults this map.
 pub struct WorkAttemptProcessRegistryV1 {
     state: ProcessMapMutex<WorkAttemptProcessRegistryStateV1>,
@@ -1124,7 +1124,7 @@ struct AppServerSessionOutput {
 /// cancellation handle a Work attempt needs and had no other caller).
 ///
 /// The session client is blocking, so it runs on a blocking worker while the
-/// deadline and cancellation arms stay on the runtime — the same three-armed
+/// deadline and cancellation arms stay on the runtime, the same three-armed
 /// shape the stdio path uses.
 #[hotpath::measure(label = "daemon.service.work_attempt.app_server", future = true)]
 async fn execute_app_server<S>(

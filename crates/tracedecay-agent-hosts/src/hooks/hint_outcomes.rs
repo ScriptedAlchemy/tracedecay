@@ -3,16 +3,16 @@
 //! Hooks record a `hint_emitted` analytics event (carrying a first-class
 //! `hint_id`, `hint_category`, `session_id`, and `hook_<agent>` provider) every
 //! time a soft hint surfaces. Whether the model *acted* on that hint is not
-//! known at emit time — it depends on which tools fire next. This module closes
+//! known at emit time, it depends on which tools fire next. This module closes
 //! that loop after the fact: for each emitted hint that has not yet been
 //! resolved, it inspects the session's ingested [`session_messages`] activity
 //! *after* the hint timestamp and appends a new `hint_outcome` analytics event:
 //!
-//! * `acted`   — a tracedecay tool matching the hint's category fired inside the
+//! * `acted`  , a tracedecay tool matching the hint's category fired inside the
 //!   bounded horizon after the hint.
-//! * `ignored` — the horizon closed (see below) with post-hint activity but no
+//! * `ignored`, the horizon closed (see below) with post-hint activity but no
 //!   matching tool.
-//! * *(unresolved)* — the session has no ingested tool activity after the hint
+//! * *(unresolved)*, the session has no ingested tool activity after the hint
 //!   yet, so nothing is written and a later pass re-evaluates it.
 //!
 //! ## Horizon
@@ -62,7 +62,7 @@ const HORIZON_TOOL_STEPS: usize = 25;
 
 /// Upper bound on session-message rows fetched per hint when scanning for
 /// post-hint tool activity. Comfortably exceeds [`HORIZON_TOOL_STEPS`] so the
-/// horizon — not this cap — decides the window.
+/// horizon, not this cap, decides the window.
 const SESSION_SCAN_LIMIT: u32 = 256;
 
 /// Upper bound on emitted/outcome hint events pulled per correlation pass.

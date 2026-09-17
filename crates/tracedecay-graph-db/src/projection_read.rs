@@ -357,8 +357,8 @@ fn authenticate_relation_cursor(
 ///
 /// Pages are answered from a cached ordered identity index rather than by
 /// rescanning the projection, so paging N identities costs one O(N log N) build
-/// plus O(log N + limit) per page instead of the O(N) scan *per page* — an
-/// O(N^2) catalog warm — this used to run. See
+/// plus O(log N + limit) per page instead of the O(N) scan *per page*, an
+/// O(N^2) catalog warm, this used to run. See
 /// [`crate::projection_identity_index`]. A projection too large to index falls
 /// back to the bounded streaming scan below.
 #[hotpath::measure(label = "graph_db.projection.identity_index.seek")]

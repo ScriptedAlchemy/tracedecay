@@ -23,7 +23,7 @@ use super::{
 /// Canonical spelling of every source-edit candidate: `/`-joined normal
 /// components, on every host.
 ///
-/// This string is the candidate's identity — it is matched against the exact
+/// This string is the candidate's identity, it is matched against the exact
 /// preview plan, digested into the expected/predicted state, and written to
 /// the durable journal. Rendering it through `PathBuf::to_string_lossy` made
 /// that identity platform-dependent: the same edit spelled `src/b.rs` in its
@@ -170,7 +170,7 @@ pub(super) fn reconciliation_attempt_effect_id(
 }
 
 /// `io::Write` sink that refuses the write which would carry it past `limit`,
-/// so `serde_json::to_writer` stops encoding — and the buffer stops growing —
+/// so `serde_json::to_writer` stops encoding and the buffer stops growing
 /// before an oversized record has been materialized just to be rejected.
 struct BoundedRecordBytes {
     bytes: Vec<u8>,
@@ -331,7 +331,7 @@ mod tests {
 
     /// The bound applies to the encoded output, so content whose raw length
     /// is under the limit but whose JSON escaping is not must be refused as
-    /// well — and the refusal must not touch the journal already on disk.
+    /// well, and the refusal must not touch the journal already on disk.
     #[test]
     fn oversized_records_are_refused_before_publication() {
         let directory = tempdir().unwrap();

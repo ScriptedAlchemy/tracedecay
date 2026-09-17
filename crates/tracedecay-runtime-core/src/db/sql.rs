@@ -63,8 +63,8 @@ where
 /// after the columns `map_fn` reads, orders by `rowid`, and `cursor_index` is
 /// the position of that trailing cursor column.
 ///
-/// A `WHERE` clause is not a bound. A partition of a graph table — one node
-/// kind, one edge kind, one path prefix — routinely holds far more rows on a
+/// A `WHERE` clause is not a bound. A partition of a graph table, one node
+/// kind, one edge kind, one path prefix, routinely holds far more rows on a
 /// real repository than the `SQLite` runtime will materialize for one query,
 /// and the runtime refuses an oversized query outright rather than truncating
 /// it. Filtered whole-partition reads therefore have to page exactly like
@@ -176,7 +176,7 @@ pub struct CappedRowidScan<T> {
 /// any query that materializes more than its per-query row limit outright, so a
 /// budget larger than that limit turns the budget check itself into a hard
 /// failure at exactly the scale it exists to protect. Paging fixes that, but a
-/// naive paged rewrite reintroduces the opposite defect — reading the whole
+/// naive paged rewrite reintroduces the opposite defect, reading the whole
 /// table just to discover it was too large, or worse, silently returning a
 /// truncated result that reads as a complete measurement.
 ///

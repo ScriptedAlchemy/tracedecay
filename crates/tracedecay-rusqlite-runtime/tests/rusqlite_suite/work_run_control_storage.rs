@@ -546,7 +546,7 @@ fn control_rows_are_isolated_per_authority_and_survive_a_restart() {
         .publish_run_control(&mine, None, &control, &[])
         .unwrap();
 
-    // Another actor sees no control row at all — not a running one.
+    // Another actor sees no control row at all, not a running one.
     assert_eq!(
         store
             .storage()

@@ -8,7 +8,7 @@ use semver::Version;
 /// Takes the product release version because `env!` expands against the
 /// crate that writes it: evaluating `CARGO_PKG_VERSION` here would bake this
 /// crate's own version and report "stable" for every beta product build.
-/// Only the version core is inspected — semver build metadata after `+`
+/// Only the version core is inspected, semver build metadata after `+`
 /// (source SHA, dirty marker) never selects a channel.
 pub fn is_beta(release_version: &str) -> bool {
     release_version
@@ -29,7 +29,7 @@ pub fn is_newer_version(current: &str, latest: &str) -> bool {
     let Ok(latest) = Version::parse(latest) else {
         return false;
     };
-    // Beta and stable are separate channels — never suggest cross-channel updates.
+    // Beta and stable are separate channels, never suggest cross-channel updates.
     if current.pre.is_empty() != latest.pre.is_empty() {
         return false;
     }
@@ -60,7 +60,7 @@ static FETCH_LATEST_VERSION: OnceLock<FetchLatestVersion> = OnceLock::new();
 
 /// Admits the CLI binary's sync ureq implementations. A second admission is
 /// ignored so tests that re-enter process start stay idempotent. Unregistered
-/// lookups return `None` — the same best-effort miss as a network failure.
+/// lookups return `None`, the same best-effort miss as a network failure.
 pub fn admit_sync_cloud_probes(
     flush_pending: FlushPending,
     fetch_latest_version: FetchLatestVersion,

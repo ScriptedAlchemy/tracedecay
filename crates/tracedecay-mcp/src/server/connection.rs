@@ -61,8 +61,8 @@ pub trait McpConnectionContext: Send + Sync + 'static {
     fn tool_is_read_only(&self, tool_name: &str) -> bool;
     fn tool_supports_live_cancellation(&self, tool_name: &str) -> bool;
     /// The token is sticky: once cancelled it stays cancelled, so a late
-    /// sample never misses a cancel. Sticky is not the same as interruptible —
-    /// an implementation that only samples after resolving its route leaves
+    /// sample never misses a cancel. Sticky is not the same as interruptible.
+    /// An implementation that only samples after resolving its route leaves
     /// the whole route window uncancellable, so the token must be raced
     /// *around* asynchronous route resolution as well as sampled before
     /// dispatch admission.
@@ -81,7 +81,7 @@ pub trait McpConnectionContext: Send + Sync + 'static {
     /// `prepare_dispatch_control`. Transports must wait on
     /// [`Self::cancellation_registered`] (as the legacy connection does) so
     /// the sticky sample and selected target still settle. Abandon only when
-    /// the cancel can never register — no registration wait channel.
+    /// the cancel can never register, no registration wait channel.
     fn dispatch<'a>(
         &'a self,
         request: McpDispatchRequest<'a>,
@@ -180,7 +180,7 @@ struct QueuedRequestLine {
     request_id: Option<Value>,
     independent_read: bool,
     /// `Some(id)` only when the line is a `tools/call` for a
-    /// live-cancellable tool — the only lines a queued cancellation matches.
+    /// live-cancellable tool, the only lines a queued cancellation matches.
     cancellable_request_id: Option<Value>,
     queued_at: std::time::Instant,
     _depth: PendingRequestGaugeGuard,

@@ -2,7 +2,7 @@
  * The drawn field: one canvas, one simulation, and the loop between them.
  *
  * `buildSimSpec` decides the forces and `render.ts` decides nothing, so what is
- * left is the wiring those two need to live in a browser — a viewport measured
+ * left is the wiring those two need to live in a browser, a viewport measured
  * from the host box, a palette resampled when the theme flips, pointer gestures
  * translated into world coordinates, and the frame that steps the integrator.
  * That is a separate job from saying what the picture means, which is why it is
@@ -16,7 +16,7 @@
  * Two states are printed instead of drawn, because a field that cannot be
  * measured must not be shown: a column narrower than `MIN_FIELD_WIDTH`, and a
  * browser that hands back no 2D context. In both, the accessible list below
- * carries every figure this would have drawn — which is what keeps the canvas
+ * carries every figure this would have drawn, which is what keeps the canvas
  * legitimately one `role="img"` rather than the only copy of the data.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -131,7 +131,7 @@ export function TraceCanvas({
       // carries every figure the field encodes, so the honest move is to say
       // the picture does not fit rather than to draw an unreadable one.
       // A zero measurement means "not laid out yet" (or a detached/jsdom
-      // tree), which is not the same claim as "too narrow" — so it is not
+      // tree), which is not the same claim as "too narrow", so it is not
       // treated as one.
       const tooNarrow = box.width > 0 && box.width < MIN_FIELD_WIDTH;
       narrowRef.current = tooNarrow;

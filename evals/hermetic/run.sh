@@ -248,7 +248,7 @@ run_agent_turn() {
   local out
   case "${agent}" in
     claude)
-      # `</dev/null`: the agent must never inherit the caller's stdin — the
+      # `</dev/null`: the agent must never inherit the caller's stdin, the
       # corpus while-read loop feeds from it, and an agent that slurps stdin
       # (codex exec does) would silently eat every remaining scenario line.
       out="$(cd "${cwd}" && claude -p "${prompt}" \
@@ -360,7 +360,7 @@ stage_fixtures() {
     if [[ "${name}" == "tool-args" ]]; then
       python3 - "${env_dir}/fixtures/${name}/cargo-output.txt" <<'PY'
 import sys
-line = "error[E0308]: mismatched types in fixture module alpha::beta — expected `i32`, found `String`\n"
+line = "error[E0308]: mismatched types in fixture module alpha::beta, expected `i32`, found `String`\n"
 with open(sys.argv[1], "w") as fh:
     fh.write(line * 2000)  # ~190 KiB, comfortably over MAX_ARG_STRLEN
 PY

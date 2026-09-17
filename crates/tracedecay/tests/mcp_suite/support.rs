@@ -199,7 +199,7 @@ pub(crate) fn retained_envelope_payload(text: &str) -> Option<Value> {
 ///
 /// Handlers that return `Err` are mapped to a JSON-RPC error rather than an
 /// `isError` tool result (see `crate::mcp::server::tool_errors`), so tests
-/// asserting on infrastructure failures need the envelope, not just `result`.
+/// asserting on infrastructure failures need the full JSON-RPC envelope.
 #[cfg(feature = "test-transport")]
 pub(crate) async fn handle_real_server_tool_call_raw(
     server: &McpServer,
@@ -255,7 +255,7 @@ pub(crate) async fn warm_code_index_search(server: &McpServer, query: &str) {
 
 /// Poll `tracedecay_status` and `tracedecay_search` until the current
 /// worktree generation is sealed and the exact, lexical, and graph lanes
-/// report complete coverage — the same terminal signal daemon journeys
+/// report complete coverage, the same terminal signal daemon journeys
 /// wait on. Ranked matches are not stable while a required lane is still
 /// warming or the search generation has not caught the sealed worktree.
 #[cfg(feature = "test-transport")]
@@ -581,8 +581,8 @@ pub(crate) async fn handle_tool_call(
     //
     // Every retained-surface tool (LCM, message search, fact store, session
     // and workflow reads) executes through the daemon retained owner in
-    // production, so dispatch it through the registered test server — which
-    // mounts that owner in process — rather than the bare registry path whose
+    // production, so dispatch it through the registered test server, which
+    // mounts that owner in process, rather than the bare registry path whose
     // missing executor truthfully reports the transport as unavailable.
     #[cfg(feature = "test-transport")]
     if tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name).is_some() {

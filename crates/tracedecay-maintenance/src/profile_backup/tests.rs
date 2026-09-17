@@ -123,9 +123,9 @@ fn complete_backup_rehearses_from_restored_isolated_copy() {
 }
 
 /// A backup copy creates its destination; it never adopts one that is already
-/// there. On Windows the discarded alternative — copy, then rewrite owner and
-/// DACL — would silently take ownership of whatever object occupied the path.
-/// The exclusive create refuses instead, on every host.
+/// there. On Windows the discarded alternative was to copy, then rewrite owner
+/// and DACL. That would silently take ownership of whatever object occupied
+/// the path. The exclusive create refuses instead, on every host.
 #[test]
 fn copying_a_backup_artifact_refuses_an_existing_destination() {
     let temp = tempfile::tempdir().unwrap();

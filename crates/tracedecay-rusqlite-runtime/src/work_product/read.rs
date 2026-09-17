@@ -15,7 +15,7 @@
 //! So the coverage is reported, not guessed:
 //!
 //! * a graph that declares no accepted attempts gets `Complete` with zero
-//!   attempts — a true and complete empty reading, not an absence;
+//!   attempts, a true and complete empty reading, not an absence;
 //! * a graph that declares accepted attempts gets `Unavailable` without an
 //!   executor authority;
 //! * an authority-bound read loads those exact attempts and reports complete or
@@ -26,8 +26,8 @@
 //! A selection names a slice of the owner's work, not the whole journal. An
 //! event outside the selection falls outside the slice; it does not invalidate
 //! the events inside it. So a read is answered over the journal's covered
-//! prefix — see [`covered_prefix`](super::covered_prefix) for why the covered
-//! slice is always a prefix — and carries a
+//! prefix, see [`covered_prefix`](super::covered_prefix) for why the covered
+//! slice is always a prefix, and carries a
 //! [`WorkGraphSelectionCoverageV1`](tracedecay_contracts::WorkGraphSelectionCoverageV1)
 //! that says how much lies outside it. Answering the slice silently would be
 //! the real falsification; refusing the whole read because a later event was
@@ -43,8 +43,8 @@
 //! point reads of a version, and a version identity requires a non-zero event
 //! sequence, so there is no representable "empty current graph": the absence is
 //! typed as not-found-or-not-authorized. `Evolution` and `Forensic` are range
-//! reads, and their explicit zero state *is* representable — an empty timeline
-//! with `Complete { returned: 0 }` coverage — so that is what they answer.
+//! reads, and their explicit zero state *is* representable, an empty timeline
+//! with `Complete { returned: 0 }` coverage, so that is what they answer.
 
 use tracedecay_contracts::{
     MAX_WORK_GRAPH_TEMPORAL_ENTRIES_V1, OpaqueCursor, VerifiedWorkEvidenceRootV1,
@@ -108,7 +108,7 @@ impl WorkGraphReadPortV1 for AuthorizedWorkProductReadStorageV1 {
 // The bound runtime authority only licenses hydrating accepted attempt rows for
 // the graph read. Evidence roots are scoped by the port context and attempt
 // receipts by the authority the caller passes, so binding one here would either
-// be ignored or override the caller's — both routes answer from the same
+// be ignored or override the caller's, both routes answer from the same
 // storage.
 impl WorkEvidenceRootReadPortV1 for AuthorizedWorkProductReadStorageV1 {
     fn read_evidence_root(

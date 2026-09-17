@@ -173,7 +173,7 @@ enum DecodeSubjectV1 {
 /// Decoded-generation cache state.
 ///
 /// Guarded by [`DecodedGenerationCacheV1::state`]. The lock is only ever held
-/// for pointer-sized bookkeeping — never across a decode.
+/// for pointer-sized bookkeeping, never across a decode.
 #[derive(Default)]
 struct DecodedGenerationStateV1 {
     /// The pinned active generation.
@@ -237,8 +237,8 @@ impl DecodedGenerationStateV1 {
 /// - the decode NEVER runs while the cache lock is held, so a reader that only
 ///   needs an already-decoded generation is not queued behind an unrelated
 ///   decode;
-/// - concurrent callers wanting the SAME generation share one decode — the
-///   first claims a lease, the rest park on the condvar — so a request that
+/// - concurrent callers wanting the SAME generation share one decode, the
+///   first claims a lease, the rest park on the condvar, so a request that
 ///   arrives mid-decode joins the in-flight work instead of duplicating it;
 /// - only success is published. A failed decode leaves no memo, so the next
 ///   caller re-runs the complete check and observes the same error. The
@@ -1618,7 +1618,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
     /// Serve one sealed generation by identity, decoding it at most once.
     ///
     /// The active generation answers from its pinned slot. Any other generation
-    /// is served from the decoded LRU, or decoded exactly once under a lease —
+    /// is served from the decoded LRU, or decoded exactly once under a lease,
     /// concurrent pinned or cursor-paged readers of the same generation join the
     /// in-flight decode instead of each rescanning the store.
     pub(super) fn load_generation(
@@ -1813,7 +1813,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
     /// It never claims a decode lease, never parks on the barrier, and never
     /// reads sealed bytes, so a caller that already has something servable can
     /// resolve freshness without being preempted by an in-flight O(store)
-    /// decode. `None` means "not decoded here, yet" — it is an abstention, not
+    /// decode. `None` means "not decoded here, yet", it is an abstention, not
     /// evidence that no generation exists, and callers must never turn it into a
     /// fail-closed verdict on its own.
     pub(super) fn active_already_decoded(
@@ -2133,8 +2133,8 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                 match self.load_active_shared()? {
                     Some(_) => None,
                     // An active pointer whose sealed generation this build
-                    // abstains from decoding — a retired format revision, a
-                    // superseded sanitizer — is still the incumbent this
+                    // abstains from decoding, a retired format revision, a
+                    // superseded sanitizer, is still the incumbent this
                     // publication replaces, and its caller has no decoded
                     // generation id to expect. The compare-and-swap token is
                     // then the pointer identity the abstention observed,

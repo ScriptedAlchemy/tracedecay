@@ -33,7 +33,7 @@ struct ShadowedCallNames {
 /// call on such a binding also names the method by its type
 /// (`builder.build()` → `ignore::WalkBuilder::build`), which is the only form
 /// the resolver can bind across files. Method calls and constructor-like names
-/// (`new`, `with_*`, `from_*`, `default`) are never treated as return-type evidence —
+/// (`new`, `with_*`, `from_*`, `default`) are never treated as return-type evidence.
 /// Rust does not require those associated functions to return their owning
 /// type. Bindings are function-scoped: a name bound more than once to
 /// different or unknown types is withheld rather than guessed.
@@ -64,8 +64,8 @@ impl ReceiverTypes {
 /// Internal state used during AST traversal.
 ///
 /// Borrows the caller's source for the lifetime of the walk: copying the
-/// whole file here made every `extract_parsed` pass — including incremental
-/// walks of one tiny item — pay a full-file memcpy before visiting a node.
+/// whole file here made every `extract_parsed` pass, including incremental
+/// walks of one tiny item, pay a full-file memcpy before visiting a node.
 struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
@@ -101,7 +101,7 @@ impl<'s> ExtractionState<'s> {
     ///
     /// The file root is pushed onto `node_stack` as the first frame when
     /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
+    /// path as the leading segment. Prepending `self.file_path` here was
     /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
         self.node_stack
@@ -498,7 +498,7 @@ impl RustExtractor {
 
         Self::extract_annotations_from_modifiers(state, node, &id);
 
-        // Supertrait bounds (`trait Leaf: Middle + Base`) — emit one
+        // Supertrait bounds (`trait Leaf: Middle + Base`). Emit one
         // unresolved `Extends` ref per bound so the resolver can hook them
         // up to the corresponding trait nodes. Each bound is a
         // `type_identifier` reachable through the `bounds: trait_bounds`
@@ -545,7 +545,7 @@ impl RustExtractor {
     fn extract_trait_bound_name(state: &ExtractionState<'_>, bound: TsNode<'_>) -> Option<String> {
         match bound.kind() {
             "type_identifier" => Some(state.node_text(bound).to_string()),
-            // `Module::Trait` or `Trait<Generics>` — take the right-most
+            // `Module::Trait` or `Trait<Generics>`. Take the right-most
             // identifier so we ignore module paths and generic args.
             "scoped_type_identifier" | "generic_type" => {
                 let mut cursor = bound.walk();
@@ -1639,7 +1639,7 @@ impl RustExtractor {
                     "token_tree" => {
                         Self::extract_calls_in_token_tree(state, child, fn_node_id);
                     }
-                    // Skip nested function definitions — they are handled separately.
+                    // Skip nested function definitions. They are handled separately.
                     "function_item" => {}
                     _ => {
                         Self::extract_call_sites(state, child, fn_node_id, receivers);
@@ -1779,8 +1779,8 @@ impl RustExtractor {
     }
 
     /// The type a `let` initialiser states in syntax: a `T { .. }` literal,
-    /// optionally behind `?`. Method names are never return-type evidence —
-    /// abstain rather than fabricate a receiver type.
+    /// optionally behind `?`. Method names are never return-type evidence.
+    /// Abstain rather than fabricate a receiver type.
     fn stated_initializer_type_path(
         state: &ExtractionState<'_>,
         value: TsNode<'_>,
@@ -1909,10 +1909,10 @@ impl RustExtractor {
                     continue;
                 }
             } else if cur.kind() == "token_tree" {
-                // Standalone token_tree (e.g. `{…}` or `(…)` block) — recurse.
+                // Standalone token_tree (e.g. `{…}` or `(…)` block). Recurse.
                 Self::extract_calls_in_token_tree(state, cur, fn_node_id);
             } else if cur.kind() == "macro_invocation" {
-                // Nested macro inside a macro — handled via extract_call_sites.
+                // Nested macro inside a macro. Handled via extract_call_sites.
                 // Receiver types are not tracked through macro token trees.
                 Self::extract_call_sites(state, cur, fn_node_id, &ReceiverTypes::default());
             }
@@ -1995,7 +1995,7 @@ impl RustExtractor {
     /// Walks a type expression and emits an `UnresolvedRef` of the given kind
     /// for every named type identifier it contains. For a type like
     /// `Result<Vec<T>, MyError>` this yields refs for `Result`, `Vec`, `T`,
-    /// and `MyError` — letting the resolver wire them up to declared nodes.
+    /// and `MyError`, letting the resolver wire them up to declared nodes.
     fn emit_type_refs(
         state: &mut ExtractionState<'_>,
         type_node: TsNode<'_>,
@@ -2064,7 +2064,7 @@ impl RustExtractor {
         while let Some(sibling) = current {
             if sibling.kind() == "attribute_item" {
                 let text = state.node_text(sibling);
-                // Skip derive attributes — they are handled by extract_derive_macros.
+                // Skip derive attributes. They are handled by extract_derive_macros.
                 if !text.contains("derive") {
                     Self::extract_annotations_from_node(state, sibling, target_id);
                 }

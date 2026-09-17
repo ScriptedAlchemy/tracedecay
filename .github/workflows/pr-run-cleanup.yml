@@ -5,7 +5,7 @@
 # branch, and the Rust lanes restore by key prefix: rust-cache picks the
 # newest `v0-rust-<lane>-<env>-` entry. Everything older on
 # `refs/pull/N/merge` is unreachable, yet it counts against the repository's
-# 10 GB cache budget until GitHub's least-recently-used eviction removes it —
+# 10 GB cache budget until GitHub's least-recently-used eviction removes it,
 # and LRU does not know which entries are dead. Measured 2026-09-08 (PR 707,
 # run 34231734416, 2.5 hours after the previous push's run): CI alone saved
 # 9.6 GB per push, so the `ci-dev`, `ci-clippy-full`, optional Hawk, and Windows
@@ -18,7 +18,7 @@
 # runner queue and their concurrency-group slots, so an afternoon of merges
 # leaves dozens of runs that can never be acted on ahead of the integration
 # branch's own run. The same event drops all of the pull request's Actions
-# caches, which nothing can restore any more — measured 2026-09-07: 4.6 GB of
+# caches, which nothing can restore any more. Measured 2026-09-07: 4.6 GB of
 # the budget held entries from seven merged child PRs while the Linux test
 # lane's cache had been evicted, so every one of its runs was a cold build.
 name: Pull request run hygiene

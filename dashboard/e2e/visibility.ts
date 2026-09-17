@@ -32,8 +32,8 @@ export interface VisibilityReport {
  * function handed to `page.evaluate` throws on arrival. A string is evaluated
  * as an expression, and this one evaluates to the report.
  *
- * The sweep is deliberately layout-free — no `getBoundingClientRect` per
- * element — because that keeps it identical under jsdom, where the unit test
+ * The sweep is deliberately layout-free, no `getBoundingClientRect` per
+ * element, because that keeps it identical under jsdom, where the unit test
  * runs, and a real browser, where the harness runs.
  */
 export const VISIBILITY_PROBE = `(function () {
@@ -107,7 +107,7 @@ export function assertVisibilityReport(report: VisibilityReport, tag: string): v
   if (report.faded > 0) {
     throw new Error(
       `${tag}: ${report.faded}/${report.sampled} rendered regions sit at opacity ` +
-        `${report.worst} — the capture is blank where they are ` +
+        `${report.worst}. The capture is blank where they are ` +
         `(${report.worstSample}) (data-motion=${report.motion})`,
     );
   }

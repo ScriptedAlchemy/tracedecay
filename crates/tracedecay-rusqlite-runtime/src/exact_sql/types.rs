@@ -219,7 +219,7 @@ pub enum ExactSqlWriteIntent {
 ///
 /// `Ordinary` is the default for every mutation: one fixed lease, no renewal.
 /// `AuthorizedLongLease` exists for the three write shapes that legitimately
-/// outrun a single lease while continuously making progress — fresh-schema
+/// outrun a single lease while continuously making progress, fresh-schema
 /// installation, real-scale index installation, and full-index bulk
 /// replacement. None of them steps an existing store forward from an older
 /// shape; there is no version ladder behind this policy.

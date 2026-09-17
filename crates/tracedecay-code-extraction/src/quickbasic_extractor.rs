@@ -11,7 +11,7 @@ use tree_sitter::Tree;
 /// Extracts code graph nodes and edges from `QuickBasic` 4.5 source files.
 ///
 /// Uses the same tree-sitter grammar and extraction logic as
-/// [`QBasicExtractor`] — the languages are syntactically identical.
+/// [`QBasicExtractor`]. The languages are syntactically identical.
 pub struct QuickBasicExtractor;
 
 impl crate::LanguageExtractor for QuickBasicExtractor {

@@ -468,7 +468,7 @@ impl CodeIndexSchedulerRegistryV1 {
         validate_search_policy(&input)?;
         // Stale-while-revalidate, resolved serve-old first. The ready gate
         // admits only an *already current* generation, so it abstains for the
-        // whole window of any rebuild — freshness unknown, git metadata moved,
+        // whole window of any rebuild, freshness unknown, git metadata moved,
         // staleness threshold elapsed. Every other callable code query keeps
         // serving the last complete generation through that window, and search
         // must not be the one lane that collapses.
@@ -579,7 +579,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         // Nothing servable and the ready gate refused. Search is the
                         // one lane whose resolution never runs the freshness ladder,
                         // so nothing else on this path will ever request the rebuild
-                        // that would remedy the failure — it would return this typed
+                        // that would remedy the failure, it would return this typed
                         // error forever. Ask for the remedy exactly once per
                         // admission (debounced on the pending wake), never inline and
                         // never parking, then still fail typed rather than degrade
@@ -625,7 +625,7 @@ impl CodeIndexSchedulerRegistryV1 {
         validate_search_policy(&input)?;
         // Checkout-identity gate: the caller pinned this generation
         // explicitly, so a foreign project/repository/worktree is refused
-        // while a branch-label difference stays servable — the sealed
+        // while a branch-label difference stays servable, the sealed
         // reference is attribution, not identity (see
         // [`super::registry::latest_matches_scope_identity`]).
         if !super::registry::latest_matches_scope_identity(&latest, scope) {

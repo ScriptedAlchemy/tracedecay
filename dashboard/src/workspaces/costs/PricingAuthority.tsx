@@ -99,7 +99,7 @@ export function PricingAuthority({
           </div>
           <p className="text-3xs leading-relaxed text-text-muted">
             usage events whose observation named no model. They are counted and tokenised, and
-            cannot be priced — there is no rate for an unknown model.
+            cannot be priced, there is no rate for an unknown model.
           </p>
           {coverageStatus !== null && coverageStatus !== 'complete' ? (
             <div role="status" className="border-t border-edge-subtle pt-2">

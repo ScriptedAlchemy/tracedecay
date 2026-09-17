@@ -9,7 +9,7 @@
  *             act on it.
  *   PREVIEW   the symbol the pointer or focus is on in the field or ledger.
  *             Inspection only: identity, position, layering, and how it is
- *             drawn against the pinned symbol — all from what is already in
+ *             drawn against the pinned symbol, all from what is already in
  *             hand, because a pointer crossing eighty bodies must not cost
  *             eighty requests. It stacks ABOVE the pinned block rather than
  *             replacing it, so a hover never takes the selection's evidence
@@ -23,11 +23,11 @@
  * Every section is an independent authority and reports its own state:
  *
  *   identity       the graph row the field or list handed over
- *   strata         `GET /api/plugins/graph/strata` — the file's dependency depth
- *   callers/callees `GET /api/plugins/graph/node/{id}/neighbors` — one row per call site
- *   diagnostics    `GET /api/plugins/code-diagnostics` — engines, and rows in this file
+ *   strata         `GET /api/plugins/graph/strata`, the file's dependency depth
+ *   callers/callees `GET /api/plugins/graph/node/{id}/neighbors`, one row per call site
+ *   diagnostics    `GET /api/plugins/code-diagnostics`, engines, and rows in this file
  *   graph          the subgraph envelope's version and observation time
- *   index          `GET /api/code-index/freshness` — what generation this is a picture of
+ *   index          `GET /api/code-index/freshness`, what generation this is a picture of
  *
  * A section that cannot answer prints the reason in its place. Nothing here
  * turns a missing authority into an empty list or a green zero.
@@ -493,7 +493,7 @@ function StrataLine({ reading }: { reading: StrataReading }) {
           this file is not in the layering scan; its directory{' '}
           <span className="td-value">{reading.directory}</span> sits at depth{' '}
           {reading.depths.join(', ')}
-          {reading.capped ? ' — the scan stopped at its budget' : ''}
+          {reading.capped ? ', the scan stopped at its budget' : ''}
         </Absent>
       );
     case 'not_in_scan':
@@ -582,7 +582,7 @@ function RelationSection({
               : ''}
             {measured.sites.toLocaleString()} call {measured.sites === 1 ? 'site' : 'sites'}
             {measured.capped
-              ? ` listed — the read stopped at its ${measured.limit.toLocaleString()}-row budget, so more may exist`
+              ? ` listed, the read stopped at its ${measured.limit.toLocaleString()}-row budget, so more may exist`
               : ' listed'}
           </p>
         </>

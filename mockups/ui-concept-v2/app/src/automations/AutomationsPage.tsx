@@ -247,7 +247,7 @@ function AutomationCanvas({ trace, focusedAttemptId, onAttempt, onAttention, onT
       <div><span>QUEUE WAIT REASON</span><b>{trace.waitReason}</b></div>
       {attention ? <button type="button" onClick={onAttention}><span>ATTENTION EVIDENCE · {attention.evidence}</span><b>{attention.title}</b><small>{attention.owner} · {attention.observedAt}</small></button> : <div><span>ATTENTION EVIDENCE</span><b>none in this fixture lineage</b></div>}
     </div>
-    <details className="am-canvas-fallback"><summary>Exact lineage text</summary><ol><li>Trigger — {trace.trigger}</li><li>Queue — {trace.queue}; wait reason: {trace.waitReason}</li>{trace.attempts.map((attempt) => <li key={attempt.id}>Attempt {attempt.order} · {attempt.id} · {attempt.outcome} · {attempt.recordedAt} · {attempt.detail}</li>)}<li>Receipt — {trace.receipt}</li></ol></details>
+    <details className="am-canvas-fallback"><summary>Exact lineage text</summary><ol><li>Trigger, {trace.trigger}</li><li>Queue, {trace.queue}; wait reason: {trace.waitReason}</li>{trace.attempts.map((attempt) => <li key={attempt.id}>Attempt {attempt.order} · {attempt.id} · {attempt.outcome} · {attempt.recordedAt} · {attempt.detail}</li>)}<li>Receipt, {trace.receipt}</li></ol></details>
   </section>;
 }
 

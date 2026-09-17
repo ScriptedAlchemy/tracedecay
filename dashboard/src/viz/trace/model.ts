@@ -13,13 +13,13 @@
  * - `callers` / `callees` are `calls` edges ONLY, one ROW PER EDGE. A caller
  *   with three call sites appears three times with different `edge_line`, so
  *   the call-site count of a pair is the number of its rows. That count is the
- *   channel's width AND its spring stiffness — the drawn channel and the felt
+ *   channel's width AND its spring stiffness, the drawn channel and the felt
  *   channel are the same number by construction.
  * - `degree` is the node's total (in + out) edge count over ALL edge kinds.
  *   Subtracting the call sites this frame draws gives the edges it does not,
  *   which is what a dashed mouth reports.
  * - `edges` carries every edge kind incident on the focus, including
- *   `contains`. Membranes are derived from those rows and from nothing else —
+ *   `contains`. Membranes are derived from those rows and from nothing else,
  *   no shared-file-path guessing. When the payload carries no `contains` rows,
  *   `coverage.membranesAvailable` is false, the field draws no enclosures, and
  *   the caption says the wire did not carry them.
@@ -28,7 +28,7 @@
  *
  * Depth: the caller fetches hop 1 for the focus and then hop 1 for as many of
  * the drawn hop-1 neighbours as the budget allows. There is no server-side
- * depth-2 query, so hop 2 is assembled here — bounded, deduped, and counted.
+ * depth-2 query, so hop 2 is assembled here, bounded, deduped, and counted.
  */
 import type {
   GraphEdgeV1,
@@ -126,7 +126,7 @@ function rows(list: readonly NeighborRow[] | null | undefined): NeighborRow[] {
 }
 
 /**
- * Distinct ids in a row list, with the number of rows each appeared in — which
+ * Distinct ids in a row list, with the number of rows each appeared in, which
  * is that pair's call-site count, because the endpoint emits one row per edge.
  */
 function callSites(list: NeighborRow[]): Map<string, { row: NeighborRow; calls: number }> {
@@ -171,7 +171,7 @@ interface Draft {
  *
  * Every exclusion this makes lands in `coverage`, and every number in
  * `coverage` is counted from rows in hand. Nothing is estimated, and symbols
- * beyond the fetched hops are never counted — they were never named to us.
+ * beyond the fetched hops are never counted, they were never named to us.
  */
 export function buildTraceModel(input: TraceModelInput): TraceModel {
   const { focus, root, expanded } = input;
@@ -192,7 +192,7 @@ export function buildTraceModel(input: TraceModelInput): TraceModel {
   /** Every symbol any fetched list named, drawn or not. */
   const named = new Set<string>([focus.id]);
   /**
-   * Field names actually observed on neighbour rows. Read, never assumed —
+   * Field names actually observed on neighbour rows. Read, never assumed,
    * this is what decides which sensory channels this field may drive.
    */
   const rowFields = new Set<string>();
@@ -267,7 +267,7 @@ export function buildTraceModel(input: TraceModelInput): TraceModel {
 
   // Hop 2, assembled client-side from the expanded neighbours' own payloads.
   // A symbol first reached through an upstream neighbour is drawn upstream,
-  // whichever arm of that neighbour named it — the row is hop DISTANCE, and
+  // whichever arm of that neighbour named it, the row is hop DISTANCE, and
   // the side is which arm of the search got there first.
   let expandedCount = 0;
   let upTwo = 0;
@@ -374,7 +374,7 @@ export function buildTraceModel(input: TraceModelInput): TraceModel {
   /**
    * Rings are laid out from the focus outward, and each ring is ordered by the
    * call-site-weighted mean x of the neighbours already placed on the ring
-   * inside it — a one-pass barycentre ordering.
+   * inside it, a one-pass barycentre ordering.
    *
    * Without it, ordering a ring by raw strength puts a symbol nowhere near the
    * symbols it actually calls, and every channel has to cross the field to
@@ -494,7 +494,7 @@ function directionOf(ringA: number, ringB: number): TraceChannelDirection {
 /**
  * Field names that would carry each unbound sensory measurement.
  *
- * These are candidate names, matched against `coverage.rowFields` — the fields
+ * These are candidate names, matched against `coverage.rowFields`, the fields
  * the payload actually delivered. The point of matching rather than asserting is
  * that a producer which starts serving one of these makes the channel go live
  * on its own; nothing here has to be re-edited, and the surface cannot end up
@@ -532,8 +532,8 @@ function served(coverage: TraceCoverage, candidates: readonly string[]): string 
 /**
  * The five sensory channels, each resolved against the payload in hand.
  *
- * The sensory contract is app-wide and fixed — weight is always connectedness,
- * tension is always coupling — but which channels a given field can actually
+ * The sensory contract is app-wide and fixed, weight is always connectedness,
+ * tension is always coupling, but which channels a given field can actually
  * DRIVE depends on what arrived. This returns all five either way, so the
  * surface can show a channel as inert instead of omitting it, and a reader
  * learns the same mapping everywhere even where a measurement is missing.
@@ -553,7 +553,7 @@ export function sensoryChannels(model: TraceModel): readonly SensoryChannel[] {
       state: anyDegree ? 'measured' : 'not-on-this-wire',
       staticEquivalent: 'sill width',
       note: anyDegree
-        ? 'degree sets each body’s mass, so hover latency, bloom depth and settle time all scale with it'
+        ? 'degree sets each body's mass, so hover latency, bloom depth and settle time all scale with it'
         : 'no row on this payload carried a degree, so every body is at the mass floor and weight reads nothing',
     },
     {
@@ -572,8 +572,8 @@ export function sensoryChannels(model: TraceModel): readonly SensoryChannel[] {
       state: complexityField ? 'measured' : 'not-on-this-wire',
       staticEquivalent: 'contour tightness',
       note: complexityField
-        ? `driven by the payload’s ${complexityField} field`
-        : 'this route’s rows carry no complexity field, so the channel is inert — the symbols are not being claimed to be simple',
+        ? `driven by the payload's ${complexityField} field`
+        : 'this route's rows carry no complexity field, so the channel is inert, the symbols are not being claimed to be simple',
     },
     {
       feel: 'warmth',
@@ -581,8 +581,8 @@ export function sensoryChannels(model: TraceModel): readonly SensoryChannel[] {
       state: churnField ? 'measured' : 'not-on-this-wire',
       staticEquivalent: 'heat tint held at its current value',
       note: churnField
-        ? `driven by the payload’s ${churnField} field`
-        : 'this route’s rows carry no churn or last-modified field, so nothing is tinted — untinted here means unmeasured, not cold',
+        ? `driven by the payload's ${churnField} field`
+        : 'this route's rows carry no churn or last-modified field, so nothing is tinted, untinted here means unmeasured, not cold',
     },
     {
       feel: 'pulse',
@@ -590,7 +590,7 @@ export function sensoryChannels(model: TraceModel): readonly SensoryChannel[] {
       state: activityField ? 'measured' : 'coarser-scope',
       staticEquivalent: 'pinned-lit',
       note: activityField
-        ? `driven by the payload’s ${activityField} field`
+        ? `driven by the payload's ${activityField} field`
         : 'the live activity stream is project-scoped and carries no path, so no strike can be attributed to a symbol on this field',
     },
   ];
@@ -626,7 +626,7 @@ export function coverageCaption(model: TraceModel): string {
   parts.push(
     c.membranesAvailable
       ? `${model.membranes.length} type ${model.membranes.length === 1 ? 'membrane' : 'membranes'} from contains edges`
-      : 'the payload carried no contains edges, so no type membranes are drawn — this says nothing about whether these symbols have types',
+      : 'the payload carried no contains edges, so no type membranes are drawn, this says nothing about whether these symbols have types',
   );
   return parts.join(' · ');
 }
@@ -649,7 +649,7 @@ export function fieldDescription(model: TraceModel): string {
 /**
  * Translate the model into the simulation's vocabulary: mass IS degree,
  * stiffness IS the call-site count, and the anchor IS the layout position. No
- * shaping and no normalisation that would launder the measurement — the
+ * shaping and no normalisation that would launder the measurement, the
  * simulation's own parameters do the scaling, in one place, where they can be
  * read off a table.
  *

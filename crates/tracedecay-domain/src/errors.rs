@@ -107,7 +107,7 @@ pub type Result<T> = std::result::Result<T, TraceDecayError>;
 /// Flatten an error and its [`std::error::Error::source`] chain into one
 /// message string.
 ///
-/// Many error families embed their source's `Display` inside their own — e.g.
+/// Many error families embed their source's `Display` inside their own, e.g.
 /// `#[error("SQLite error: {0}")]` paired with `#[from]` (the displayed field
 /// *is* the `#[source]`), or every `std::io::Error::other` wrapper (its
 /// `Display` delegates straight to the wrapped error). Naively appending each

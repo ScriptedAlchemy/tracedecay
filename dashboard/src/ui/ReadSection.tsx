@@ -9,8 +9,8 @@ import { StateChip, type DomainStateKind } from './StateChip';
  * One read, resolved: either a value to render or a domain state that says why
  * there is none.
  *
- * Every wire ladder in this dashboard — the bare-payload JSON routes, the
- * `DashboardEnvelopeV1` routes, the structure reads, the Work envelope — is a
+ * Every wire ladder in this dashboard, the bare-payload JSON routes, the
+ * `DashboardEnvelopeV1` routes, the structure reads, the Work envelope, is a
  * different union at the transport edge and the same question at the render
  * edge: *may the body run, and if not, what does the reader get told?* Each
  * ladder answers that once, in an adapter beside its fetcher, and every surface
@@ -44,11 +44,11 @@ export type ReadState<T> =
     };
 
 /**
- * The states a payload read can be blocked in — the six failure outcomes plus
+ * The states a payload read can be blocked in, the six failure outcomes plus
  * the two the ladder itself contributes.
  *
  * Narrower than `DomainStateKind` on purpose. A surface that words these in its
- * own terms — the Automations scheduler queues do — can then switch over them
+ * own terms, the Automations scheduler queues do, can then switch over them
  * exhaustively and fail to build when the set grows, which is the guarantee the
  * per-surface `PayloadResult` switches used to hold individually.
  */
@@ -77,7 +77,7 @@ export type PayloadReadState<T> =
  *
  * Exhaustive over the failure outcomes, so a new one added to `PayloadResult`
  * fails to build here rather than falling into whichever arm a chain of
- * ternaries happened to end on — which is how 401 and 403 spent their whole
+ * ternaries happened to end on, which is how 401 and 403 spent their whole
  * life rendering as a generic error whose only discriminator was status text. */
 function payloadFailureState(
   result: Exclude<PayloadResult<unknown>, { outcome: 'ok' }>,
@@ -135,8 +135,8 @@ export function payloadReadState<T>(
  * The envelope ladder, resolved to the envelope itself.
  *
  * The value is the whole `DashboardEnvelopeV1<T>` rather than its payload because the
- * truth header — coverage, freshness, authorization, the server's own legal
- * actions — is what every envelope surface renders beside the body, and a
+ * truth header, coverage, freshness, authorization, the server's own legal
+ * actions, is what every envelope surface renders beside the body, and a
  * reader handed only the payload would have to fetch it back out.
  *
  * The three sentences are per-site because what a reader needs to be told about
@@ -175,7 +175,7 @@ export function envelopeReadState<T>(
  *
  * The two chromes are the two places a blocked read can land, and they differ
  * because the surrounding surface differs. `centered` is for a channel that has
- * nothing else on it — the state takes the whole plate, and the title rides
+ * nothing else on it, the state takes the whole plate, and the title rides
  * inside it because there is no heading above. `panel` is for a titled section
  * among others: the heading and its blurb stay drawn, and only the body becomes
  * a chip, so the reader can still see which of six sections is the one that
@@ -234,7 +234,7 @@ export function PayloadBoundary<T>({
    * state for it.
    *
    * For payloads that carry their own `status` discriminant, where the child
-   * switches on it and has a sentence per condition — "the project registry is
+   * switches on it and has a sentence per condition, "the project registry is
    * not configured" says what to do about it, and the generic chip cannot,
    * because it does not know which source this is. Opt-in, because a child
    * that does not check `status` would otherwise render a failure body as
@@ -306,7 +306,7 @@ export function EnvelopeSection<T>({
  * come from the caller; these are the designed defaults per state.
  *
  * Partial on purpose. Every state listed has one next action that holds
- * wherever it appears — start the daemon, authenticate, update the build,
+ * wherever it appears, start the daemon, authenticate, update the build,
  * retry. `unavailable` has none: what to do about a source that cannot serve
  * depends on which source and on the reason it reported, both of which reach
  * the chip as its detail. A generic sentence here would either restate the
@@ -378,7 +378,7 @@ export function CenteredState({
   // Sized by its CONTAINER, not the viewport: this plate renders both on
   // full-width channels and inside narrow query rails, and the wide-plate
   // padding (p-8 outside, px-8 inside) left a ~230px rail about 90px of text
-  // column — the guidance wrapped one or two words per line. Below the @md
+  // column, the guidance wrapped one or two words per line. Below the @md
   // container width the paddings drop and the card takes the rail's full
   // width; the wide plates keep their original geometry.
   return (

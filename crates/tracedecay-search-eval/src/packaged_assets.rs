@@ -84,15 +84,15 @@ pub(crate) fn materialize() -> Result<PackagedEvaluatorAssets, SearchEvalError> 
 /// The pack is a genuine sparse subset of the product repository: it carries
 /// the exact commit, tree spine, and blob objects the checked-in workload pins
 /// for its historical queries, under their real object identities. Writing it
-/// into a repository therefore only backfills objects — it can never replace or
+/// into a repository therefore only backfills objects. It can never replace or
 /// contradict an object the repository already holds.
 ///
 /// The evaluator needs that backfill because the pinned historical commits live
 /// on a long-running integration branch. A rebase there re-parents the commit,
 /// which mints a new commit identity and leaves the pinned one unreachable from
 /// every ref. Local clones keep resolving it, because cloning a path on the same
-/// filesystem hard-links the whole object store including unreachable objects,
-/// but a wire-protocol clone — which is what CI checks out — transfers only
+/// filesystem hard-links the whole object store including unreachable objects.
+/// A wire-protocol clone, which is what CI checks out, transfers only
 /// ref-reachable objects and drops it. Materializing the checked-in pack keeps
 /// the pinned history resolvable in both.
 fn write_checked_in_object_pack(git: &Path) -> Result<(), SearchEvalError> {

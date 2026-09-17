@@ -63,8 +63,8 @@ impl Default for SessionEvidenceBudgetBackoff {
 }
 
 impl SessionEvidenceBudgetBackoff {
-    /// A zero window would degenerate into "attempt on every tick" — exactly
-    /// the retry loop this contract exists to stop — so it is unrepresentable:
+    /// A zero window would degenerate into "attempt on every tick", exactly
+    /// the retry loop this contract exists to stop, so it is unrepresentable:
     /// the constructor only accepts non-zero windows.
     #[must_use]
     pub const fn new(suppression_secs: NonZeroU64) -> Self {

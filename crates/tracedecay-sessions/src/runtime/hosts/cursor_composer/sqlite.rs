@@ -106,8 +106,8 @@ pub(super) struct ReadOnlyDb {
 /// `-wal`/`-shm` writes) via a `file:…?immutable=1&mode=ro` URI. The runtime
 /// helper also pins `busy_timeout = 0` and verifies `query_only = ON`.
 ///
-/// Missing, unreadable, or concurrently replaced paths are typed `Err` —
-/// callers that already proved the path is a regular file must defer, not
+/// Missing, unreadable, or concurrently replaced paths are typed `Err`.
+/// Callers that already proved the path is a regular file must defer, not
 /// treat this as a no-op.
 pub(super) async fn open_readonly_immutable(db_path: &Path) -> Result<ReadOnlyDb, String> {
     let path = db_path.to_path_buf();
@@ -130,7 +130,7 @@ pub(super) async fn open_readonly_immutable(db_path: &Path) -> Result<ReadOnlyDb
 /// One keyset page of `composerData:` keys with their value byte lengths.
 /// Passing `after = None` starts at the prefix lower bound; passing the last
 /// key of the previous page continues the primary-key-ordered scan. Never
-/// materializes envelope text — keys and byte lengths only.
+/// materializes envelope text, keys and byte lengths only.
 #[hotpath::measure(label = "sessions.hosts.cursor.composer_scan", future = true)]
 pub(super) async fn scan_composer_keys_page(
     conn: &CursorConn,

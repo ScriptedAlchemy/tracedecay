@@ -103,8 +103,8 @@ mod legacy_cleanup_identity_tests {
 /// relational verified-head CAS has not yet run.
 ///
 /// This is the boundary that lets a serving gate cover only the atomic swap:
-/// everything in here — native staging, the sealed-store build, and the
-/// recovered-digest proof — reads the immutable staged generation and writes
+/// everything in here, native staging, the sealed-store build, and the
+/// recovered-digest proof, reads the immutable staged generation and writes
 /// derived artifacts, so it runs without any publication gate held. The CAS
 /// and the read-side lease install in
 /// [`GraphDbRegistry::complete_verified_publication`] are the only phases a
@@ -927,7 +927,7 @@ impl GraphDbRegistry {
     /// Publishing generation N+1 supersedes N through the verified-head
     /// compare-and-swap, but N's journal row, native staging rows, and sealed
     /// artifact stayed on disk until code-index retention happened to delete
-    /// the code generation naming them — and projections with no code-index
+    /// the code generation naming them, and projections with no code-index
     /// owner (session git evidence, memory relations) never retired at all.
     /// This is the ordinary reclaim: every active replay of `projection`
     /// other than the head that is not pending, not a dependency of any
@@ -1365,9 +1365,9 @@ impl GraphDbRegistry {
         )
     }
 
-    /// Runs the gateless phase of one verified publication — replay
+    /// Runs the gateless phase of one verified publication, replay
     /// resolution, native staging, the sealed-store build, and the durable
-    /// recovered-digest proof — without advancing the relational verified
+    /// recovered-digest proof, without advancing the relational verified
     /// head or installing a read-side lease.
     ///
     /// A publication that turns out to be already durably linearized
@@ -1501,7 +1501,7 @@ impl GraphDbRegistry {
         // sealed straight from that manifest: the journal (and the code
         // generation it names) is the recovery source for every failure
         // boundary of the build, so no staging copy is ever needed. Inline
-        // and supplied manifests keep the staging proof — their rows have no
+        // and supplied manifests keep the staging proof, their rows have no
         // durable home other than the staging database.
         let direct_seal_source =
             matches!(source, GraphGenerationReplaySource::SealedCodeGeneration(_));
@@ -3226,8 +3226,8 @@ mod historical_publication_reuse_tests {
 
     /// The recover-after-publish idempotent arm: republishing the exact
     /// journaled key whose verified head is already current must reuse the
-    /// lease this same mounted instance proved moments earlier — zero
-    /// additional stored-row enumerations — and still seat the head for
+    /// lease this same mounted instance proved moments earlier, zero
+    /// additional stored-row enumerations, and still seat the head for
     /// reads. A follow-up recover on the same instance stays cache-served.
     #[test]
     fn recover_after_publish_reuses_the_instance_proof() {
@@ -3295,7 +3295,7 @@ mod historical_publication_reuse_tests {
     }
 
     /// A crash-recovery republication on a genuinely fresh-from-disk
-    /// instance must pay the full recovered-digest proof — but exactly once.
+    /// instance must pay the full recovered-digest proof, but exactly once.
     /// Before the duplicate-proof fix this path enumerated the stored rows
     /// twice: once for the close/reopen digest proof and once more re-loading
     /// the head it had just proven.
@@ -3347,7 +3347,7 @@ mod historical_publication_reuse_tests {
     /// A remount that recovers the generation adopts the on-disk sealed
     /// artifact through its verify-once marker: the artifact's bytes are the
     /// ones the build's post-reopen proof ran over, so adoption resolves by
-    /// stat instead of re-streaming the sealed row proof — which is exactly
+    /// stat instead of re-streaming the sealed row proof, which is exactly
     /// the second half of the boot-from-sealed double verification.
     #[test]
     fn a_fresh_from_disk_recover_adopts_the_sealed_artifact_by_marker() {

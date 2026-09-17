@@ -39,7 +39,7 @@ pub type SymbolGraphCursorFuture<'a, T> =
 /// A read's exclusive hold on one graph generation.
 ///
 /// The claim carries the snapshot identity that was live when the read began,
-/// so every page the read serves — and every continuation it mints — is
+/// so every page the read serves, and every continuation it mints, is
 /// answered under that one generation or refused as stale. A page may never be
 /// served under a generation other than the one its claim was minted against.
 #[derive(Debug)]
@@ -1227,8 +1227,8 @@ fn failed<T>(
     )
 }
 
-/// Surfaces a typed cursor failure — notably the stale answer a superseded
-/// generation produces — without flattening it into the generic unavailable
+/// Surfaces a typed cursor failure, notably the stale answer a superseded
+/// generation produces, without flattening it into the generic unavailable
 /// reason [`failed`] carries.
 fn failed_with<T>(
     context: SymbolGraphPortContext<'_>,

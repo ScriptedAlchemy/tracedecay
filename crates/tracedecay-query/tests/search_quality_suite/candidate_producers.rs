@@ -430,7 +430,7 @@ fn real_lexical_source_fixture() -> RealLexicalSourceFixture {
 }
 
 /// The in-memory projection over every admitted chunk of `generation`,
-/// carrying the generation's own extracted qualified names — the same
+/// carrying the generation's own extracted qualified names, the same
 /// authority the sealed-page artifact path reads per chunk.
 fn generation_backed_projection(
     metadata: CodeLexicalProjectionMetadataV1,
@@ -2355,7 +2355,7 @@ fn hot_only_fingerprints_are_partial_while_exact_digest_reads_still_work() {
 /// row sources. Over a real multi-file corpus whose every chunk matches the
 /// query, a request cancelled after its `k`-th control consultation unwinds
 /// with the typed cancellation error and stops consulting the control at that
-/// checkpoint — far short of the candidate set — while the same request under
+/// checkpoint, far short of the candidate set, while the same request under
 /// an active control completes, agrees byte-for-byte between the sealed
 /// artifact and the in-memory projection, and is stable across runs.
 #[test]
@@ -5517,7 +5517,7 @@ fn disk_artifact_bounded_work_budget_exhaustion_resumes_activation() {
     // lane: daemon PID 32033 still `warming` after ~56 minutes,
     // `latest_generation_id: null`, graph `exact_scope_generation_not_ready`,
     // pre-embedding (no model.onnx/generation/graph-replay FD), ~135% CPU
-    // across 115 threads, and VmRSS 6.88GB — past every advertised memory
+    // across 115 threads, and VmRSS 6.88GB, past every advertised memory
     // ceiling. This regression drives the same retry shape through the real
     // sealed source: every exhausted window must stay a typed, resumable
     // interruption that never advances a row twice, the retry storm must

@@ -41,8 +41,8 @@ describe('sampleRibbon', () => {
     upper.forEach((point, i) => {
       const t = i / (SAMPLE_STEPS - 1);
       // The renderer's own law: accumulate flow linearly down the channel, then
-      // take its root. Both endpoints are measurements — the head fraction at
-      // t=0 and the full measured width at the mouth — and the shaping happens
+      // take its root. Both endpoints are measurements, the head fraction at
+      // t=0 and the full measured width at the mouth, and the shaping happens
       // strictly between them.
       expect(Math.abs(HEIGHT / 2 - point.y - maxHalf * taperAt(t))).toBeLessThanOrEqual(ROUNDING);
     });

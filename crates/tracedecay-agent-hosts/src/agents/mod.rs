@@ -269,7 +269,7 @@ pub trait AgentIntegration {
     /// [`AgentIntegration::prepare_non_interactive_install`] returns: doctor
     /// needs the same fact without an `InstallContext` and without staging
     /// anything. Every integration returning `Some` here must also return
-    /// [`NonInteractiveInstallOutcome::DeferredUserAction`] from preflight —
+    /// [`NonInteractiveInstallOutcome::DeferredUserAction`] from preflight,
     /// otherwise doctor would downgrade a state that an unattended reinstall
     /// could actually have repaired.
     fn interactive_activation_guidance(&self) -> Option<String> {
@@ -282,7 +282,7 @@ pub trait AgentIntegration {
     ///
     /// The removal twin of [`AgentIntegration::interactive_activation_guidance`].
     /// A host that activates only through an interactive UI also *deactivates*
-    /// only there, so `Uninstall` must refuse while the registration stands —
+    /// only there, so `Uninstall` must refuse while the registration stands,
     /// deleting the receipt-owned artifacts underneath a live registration
     /// leaves the host resolving a bundle that no longer exists. The refusal
     /// travels as [`host_bundle::HostBundleError::NativeRemovalRequired`],
@@ -304,7 +304,7 @@ pub trait AgentIntegration {
     /// The default reports [`UpdatePluginOutcome::ConfigOnly`]: most agents
     /// keep their entire tracedecay integration inside shared config files
     /// (MCP entries, hook blocks, prompt rules), so there is nothing to
-    /// refresh that would not be a config write — `tracedecay reinstall`
+    /// refresh that would not be a config write. `tracedecay reinstall`
     /// remains the path that reconciles those.
     fn update_plugin(&self, _ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
         Ok(UpdatePluginOutcome::ConfigOnly)
@@ -317,7 +317,7 @@ pub trait AgentIntegration {
     /// empty list for agents that either do not distribute managed skills
     /// or have no detected tracedecay installation under `home`.
     ///
-    /// Implementors must never create a new installation here — only refresh
+    /// Implementors must never create a new installation here, only refresh
     /// artifacts already owned by a catalog receipt.
     fn export_managed_skills(
         &self,
@@ -568,7 +568,7 @@ pub enum UpdatePluginOutcome {
     /// Generated artifacts were refreshed at these locations.
     Refreshed(Vec<PathBuf>),
     /// The integration ships generated artifacts, but none were detected on
-    /// this machine — nothing was written.
+    /// this machine, nothing was written.
     NotInstalled,
     /// The integration only writes shared config files; there are no
     /// tracedecay-generated artifacts to refresh without touching config.
@@ -792,7 +792,7 @@ impl DoctorCounters {
 #[macro_export]
 macro_rules! cli_fallback_args_invocation_lit {
     () => {
-        "`tracedecay tool <name> --args '<json>'` — the same JSON arguments object as the MCP tool; \
+        "`tracedecay tool <name> --args '<json>'`, the same JSON arguments object as the MCP tool; \
 pipe it via `--args -` (a quoted heredoc) when it contains quotes or newlines"
     };
 }

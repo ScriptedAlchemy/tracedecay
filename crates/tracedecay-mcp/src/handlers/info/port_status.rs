@@ -1,4 +1,4 @@
-//! `tracedecay_port_status` — cross-directory symbol coverage between a source and target port.
+//! `tracedecay_port_status`, cross-directory symbol coverage between a source and target port.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -48,7 +48,7 @@ type PortKey = (String, Option<String>, u8);
 
 /// Returns true for kinds that conceptually have a parent type/owner whose
 /// identity matters for matching (methods, fields, variants, etc.). Top-level
-/// items (struct, function, …) return false — their parent in `qualified_name`
+/// items (struct, function, …) return false, their parent in `qualified_name`
 /// is just the file path and is not useful for cross-port matching.
 fn port_kind_has_parent(kind: &str) -> bool {
     matches!(

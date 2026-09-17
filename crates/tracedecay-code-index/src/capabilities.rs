@@ -148,9 +148,9 @@ pub fn capability_manifest_digest(
 }
 
 /// The base capability-manifest emitter. Everything the manifest pins that
-/// the generation manifest does not already carry — descriptor revisions,
+/// the generation manifest does not already carry, descriptor revisions,
 /// supported languages, available grains, exact-term kinds, edge-authority
-/// classes, source coverage, and sanitization receipts — is supplied at
+/// classes, source coverage, and sanitization receipts, is supplied at
 /// construction, so one emitter describes one generation's indexing
 /// authority.
 pub struct BaseCapabilityEmitter<R: LanguageRegistry> {

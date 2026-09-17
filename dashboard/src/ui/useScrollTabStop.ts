@@ -4,7 +4,7 @@ import { useEffect, useState, type RefObject } from 'react';
  * The `tabIndex` for a region that is only sometimes a scroll container.
  *
  * A scrollable region has to be keyboard-operable (WCAG 2.1.1), and when its
- * contents hold nothing focusable — a read-out with no buttons in it — the
+ * contents hold nothing focusable, a read-out with no buttons in it, the
  * region itself has to take the tab stop, because there is nothing inside to
  * tab to. That is why several panels here carry `tabIndex={0}`.
  *
@@ -12,7 +12,7 @@ import { useEffect, useState, type RefObject } from 'react';
  * scroll container has no such need, and a tab stop on it is a stop that does
  * nothing. Panels whose overflow is applied at a breakpoint (`lg:overflow-auto`)
  * are both things at different widths, so a literal `tabIndex={0}` gives every
- * keyboard user on a narrow screen a dead stop in front of the content — at the
+ * keyboard user on a narrow screen a dead stop in front of the content, at the
  * width where tabbing is most of the navigation.
  *
  * So the answer is measured rather than assumed. Reading the computed

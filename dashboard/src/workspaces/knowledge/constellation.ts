@@ -1,12 +1,12 @@
 /**
- * FACT CONSTELLATION — the memory graph laid out so that position is a
+ * FACT CONSTELLATION, the memory graph laid out so that position is a
  * measurement rather than a simulation.
  *
  * The overview route serves one verified memory topology (`holographic.graph`):
  * fact roots, the entities they mention, active assertions, retrieval anchors,
  * and the typed relations between them. This module turns that payload into
  * stable coordinates without a force layout, because a force layout of a
- * bounded slice of an append-only store has no shape to discover — it would
+ * bounded slice of an append-only store has no shape to discover, it would
  * rearrange itself on every reload and imply proximity the wire never stated.
  *
  * The composition is polar and every axis is printed by the view:
@@ -19,7 +19,7 @@
  *            the outer ring, hollow, rather than being given a number.
  *   entities, assertions and anchors have no trust of their own, so they take
  *            the circular mean of the facts they are wired to and sit one step
- *            further out — the relation is what places them, and a node the
+ *            further out, the relation is what places them, and a node the
  *            graph wired to nothing drawn lands on the rim at an angle derived
  *            from its own id.
  *
@@ -76,7 +76,7 @@ export interface ConstellationNode {
   readonly payloadAccess: PayloadAccessState | null;
   readonly x: number;
   readonly y: number;
-  /** Body radius in world units — trust plus wiring, never decoration. */
+  /** Body radius in world units, trust plus wiring, never decoration. */
   readonly r: number;
   /** How many drawn relations touch this node. */
   readonly degree: number;
@@ -130,7 +130,7 @@ export interface ConstellationCoverage {
   readonly drawnFacts: number;
   /** Satellites (entities, assertions, anchors) drawn. */
   readonly drawnSatellites: number;
-  /** Relations drawn — edges whose both ends were among the drawn nodes. */
+  /** Relations drawn, edges whose both ends were among the drawn nodes. */
   readonly drawnRelations: number;
   /** Edges the payload carried but which name a node it did not include. */
   readonly danglingRelations: number;

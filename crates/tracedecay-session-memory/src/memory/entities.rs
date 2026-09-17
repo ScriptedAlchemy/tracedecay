@@ -49,14 +49,14 @@ pub fn extract_entities(text: &str) -> Vec<String> {
 /// Returns true when a normalized span is shaped like a real entity name.
 ///
 /// Two accepted shapes:
-/// 1. A single code-like token — a file path, a `::`-qualified symbol, a
+/// 1. A single code-like token, a file path, a `::`-qualified symbol, a
 ///    `snake_case` / `camelCase` identifier, or a `tracedecay_*` tool name. These
 ///    legitimately contain `.`, `/`, `:` and `_`, so they bypass the
 ///    sentence-punctuation checks below.
 /// 2. A short proper-noun / phrase span (<= [`MAX_ENTITY_WORDS`] words) whose
 ///    every word is an identifier-ish or alphanumeric token. Anything carrying
 ///    sentence punctuation (`.`, `;`, `—`, unbalanced parens, ...) or exceeding
-///    the length caps is rejected — that is what a mangled multi-sentence
+///    the length caps is rejected, that is what a mangled multi-sentence
 ///    fragment looks like, and it must never become an "entity".
 fn is_valid_entity(entity: &str) -> bool {
     if entity.is_empty() || entity.chars().count() > MAX_ENTITY_CHARS {
@@ -75,7 +75,7 @@ fn is_valid_entity(entity: &str) -> bool {
 
     // Shape 2: a short phrase of clean words. Reject any word carrying stray
     // symbols or sentence punctuation (commas, dots, semicolons, dashes,
-    // parentheses, slashes, colons) — an entity is not a sentence fragment.
+    // parentheses, slashes, colons), an entity is not a sentence fragment.
     words
         .iter()
         .all(|word| word.chars().all(is_entity_word_char))
@@ -341,7 +341,7 @@ fn is_non_entity_leading_word(token: &str) -> bool {
 /// because they sit at the start of a sentence (articles, pronouns, auxiliary
 /// verbs, prepositions, ...). These are not entities; capturing them would add
 /// noise that pollutes entity-graph retrieval (Risk G). Intentionally
-/// conservative — ambiguous proper nouns such as the month "May" are excluded.
+/// conservative, ambiguous proper nouns such as the month "May" are excluded.
 fn is_common_sentence_word(token: &str) -> bool {
     const COMMON_WORDS: &[&str] = &[
         // articles
@@ -565,8 +565,8 @@ fn is_file_path(token: &str) -> bool {
 }
 
 /// Returns true for `snake_case` / `camelCase` code identifiers (`update_plan`,
-/// `turn_context`, `cursorDiskKV`). Requires a structural signal — an
-/// underscore or an internal lower→upper "hump" — so plain words (`Postgres`,
+/// `turn_context`, `cursorDiskKV`). Requires a structural signal, an
+/// underscore or an internal lower→upper "hump", so plain words (`Postgres`,
 /// `database`) are left to the capitalized-name path instead of being force
 /// captured here.
 fn is_code_identifier(token: &str) -> bool {
@@ -623,13 +623,13 @@ mod tests {
     // Representative of the live fact #122 that motivated the fix: long,
     // em-dash-heavy, apostrophe-laden prose with file paths, snake/camelCase
     // identifiers, parentheticals and "X/Y/Z" slash-runs.
-    const REPRO_FACT: &str = "Codex session ingestion (crates/tracedecay-sessions/src/runtime/codex.rs:378) reads the session's own JSONL — update_plan, turn_context governance (approval/sandbox/effort) — while crates/tracedecay-sessions/src/runtime/claude.rs and crates/tracedecay-sessions/src/runtime/cursor.rs read cursorDiskKV; the pipeline's ingestion path normalizes each provider's records before the reducer merges them into a single turn-ordered transcript that downstream tooling can replay deterministically.";
+    const REPRO_FACT: &str = "Codex session ingestion (crates/tracedecay-sessions/src/runtime/codex.rs:378) reads the session's own JSONL, update_plan, turn_context governance (approval/sandbox/effort), while crates/tracedecay-sessions/src/runtime/claude.rs and crates/tracedecay-sessions/src/runtime/cursor.rs read cursorDiskKV; the pipeline's ingestion path normalizes each provider's records before the reducer merges them into a single turn-ordered transcript that downstream tooling can replay deterministically.";
 
     #[test]
     fn long_punctuation_heavy_fact_yields_only_sane_entities() {
         let entities = extract_entities(REPRO_FACT);
 
-        // Every entity must be short and free of sentence punctuation — no
+        // Every entity must be short and free of sentence punctuation, no
         // mangled multi-sentence fragments.
         for entity in &entities {
             assert!(
@@ -781,7 +781,7 @@ mod tests {
         assert!(entities.contains(&"Kubernetes".to_string()));
         assert!(!entities.contains(&"The".to_string()));
 
-        // Sentence-initial content word is still captured — this is what makes
+        // Sentence-initial content word is still captured, this is what makes
         // reason(["database"]) non-empty against the eval fixture (F7).
         let entities = extract_entities("Database backups run via pg_dump every night");
         assert!(entities.contains(&"Database".to_string()));

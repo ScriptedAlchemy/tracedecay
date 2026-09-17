@@ -110,7 +110,7 @@ fn write_codex_rollouts(home: &Path, project: &Path) {
 }
 
 /// Replaces the target rollout with byte-identical content under a new file
-/// identity — what a restore, a copy, or a host rewrite does to a transcript.
+/// identity, what a restore, a copy, or a host rewrite does to a transcript.
 /// Every observation the file yields now carries a new source generation, so
 /// its anchors no longer verify against the ones the pre-reset admission wrote.
 fn replace_codex_rollout_identity(home: &Path) {
@@ -430,7 +430,7 @@ fn observation_authority_reset_recovers_the_retained_temporal_authority() {
     // transcripts. The doctor answers evidence throughout, so it is the
     // surface that names where that stands: a store still converging is
     // partial evidence whose projection carries the historical state, and a
-    // store that has already converged is complete and current — and only
+    // store that has already converged is complete and current, and only
     // once its generations are rebuilt. Neither reading may be an unavailable
     // projection or the reset store read as converged.
     let reset_log = home.join("reset-reopen.log");

@@ -272,8 +272,8 @@ cargo build \
   --bins
 
 echo "distribution acceptance: staging the product package tree"
-# `tracedecay` is `crates/tracedecay`, but the assets it ships — host plugins,
-# vendored payloads, benchmark corpora, and the packaged fixtures — are
+# `tracedecay` is `crates/tracedecay`, but the assets it ships, host plugins,
+# vendored payloads, benchmark corpora, and the packaged fixtures, are
 # repository-root directories shared with the whole workspace. Cargo packs
 # only what lives inside the package directory, so packaging the checkout
 # as-is yields a `tracedecay` archive with none of them, and the `include`
@@ -405,7 +405,7 @@ echo "distribution acceptance: packaging every workspace crate"
 # the per-crate source trees the acceptance battery runs against, so skip the
 # per-package lockfile: generating it would resolve the unpublished internal
 # dependencies against crates.io and fail. Nothing downstream reads the
-# embedded lock — every extracted tree resolves through the [patch.crates-io]
+# embedded lock, every extracted tree resolves through the [patch.crates-io]
 # path overlay below, and the install step builds from a path, not an archive.
 cargo package \
   --manifest-path "$staged/Cargo.toml" \
@@ -443,7 +443,7 @@ for package in metadata["packages"]:
 PY
 
 # `tracedecay-agent-hosts` stamps the product version, and that value now lives
-# in `[workspace.package]` at the workspace root — two directories above each
+# in `[workspace.package]` at the workspace root, two directories above each
 # crate. The sibling symlinks below already reproduce the `crates/<name>` shape
 # a build script sees in the repository; this reproduces the workspace root
 # that sits above it, so the battery resolves the same version the repository
@@ -487,8 +487,8 @@ version = "$product_version"
 TOML
 
 # Twenty-five `include_str!`/`include_bytes!` sites across `tracedecay-agent-hosts`
-# and `tracedecay-application` embed repository-root assets — `plugin/`, `tests/`,
-# `dashboard/hermes-wrapper/` and `benchmark_data/` — that `cargo package` cannot carry into an archive
+# and `tracedecay-application` embed repository-root assets. `plugin/`, `tests/`,
+# `dashboard/hermes-wrapper/` and `benchmark_data/`, that `cargo package` cannot carry into an archive
 # because they sit outside the package directory. The repository build resolves
 # them two directories above `crates/<name>`, so the stub root has to present
 # the same trees. They are linked from the staged copy rather than the live
@@ -516,8 +516,8 @@ while IFS=$'\t' read -r name version; do
   cp -- "$staged/Cargo.lock" "$directory/Cargo.lock"
   # Extracted archives are named `<name>-<version>`, but in the workspace every
   # crate sits at `crates/<name>`. Sources that reach a sibling crate by
-  # relative `#[path]` — e.g. `tracedecay/src/daemon.rs` includes scheduler
-  # test modules from `tracedecay-code-index-runtime` — resolve against that
+  # relative `#[path]`, e.g. `tracedecay/src/daemon.rs` includes scheduler
+  # test modules from `tracedecay-code-index-runtime`, resolve against that
   # unversioned shape. `cargo package` cannot carry a file from outside the
   # package, so give the battery the same sibling layout the workspace has
   # rather than a copy that could drift from it.

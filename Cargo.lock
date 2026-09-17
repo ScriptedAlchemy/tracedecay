@@ -5330,7 +5330,6 @@ dependencies = [
  "criterion",
  "dirs",
  "filetime",
- "fs2",
  "futures-util",
  "gix",
  "glob",
@@ -5416,7 +5415,6 @@ version = "0.1.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
- "fs2",
  "getrandom 0.2.17",
  "gix",
  "hex",
@@ -5485,7 +5483,6 @@ version = "0.1.0"
 dependencies = [
  "cap-std",
  "criterion",
- "fs2",
  "getrandom 0.2.17",
  "gix",
  "glob",
@@ -5551,7 +5548,6 @@ version = "0.1.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
- "fs2",
  "getrandom 0.2.17",
  "hex",
  "hotpath",
@@ -5608,7 +5604,6 @@ dependencies = [
  "crossterm",
  "dirs",
  "flate2",
- "fs2",
  "futures-util",
  "hex",
  "hotpath",
@@ -5721,7 +5716,6 @@ version = "0.1.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
- "fs2",
  "gix",
  "hotpath",
  "libc",
@@ -5843,7 +5837,6 @@ dependencies = [
 name = "tracedecay-daemon-identity"
 version = "0.1.0"
 dependencies = [
- "fs2",
  "getrandom 0.2.17",
  "hex",
  "hotpath",
@@ -5881,7 +5874,6 @@ name = "tracedecay-daemon-service"
 version = "0.1.0"
 dependencies = [
  "axum",
- "fs2",
  "getrandom 0.2.17",
  "hex",
  "hotpath",
@@ -6040,7 +6032,6 @@ name = "tracedecay-graph-db"
 version = "0.1.0"
 dependencies = [
  "criterion",
- "fs2",
  "grafeo-adapters",
  "grafeo-common",
  "grafeo-core",
@@ -6421,7 +6412,6 @@ name = "tracedecay-runtime-core"
 version = "0.1.0"
 dependencies = [
  "criterion",
- "fs2",
  "getrandom 0.2.17",
  "gix",
  "hex",

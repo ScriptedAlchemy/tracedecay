@@ -4,7 +4,7 @@
 //! transport. Every durable diagnostic is bound to an immutable
 //! code-intelligence generation, a canonical file occurrence with content
 //! digest and range encoding, and full producer provenance. Dirty LSP
-//! overlays can never be represented by this contract — overlay state is
+//! overlays can never be represented by this contract, overlay state is
 //! session-only and lives outside the durable record. Dirty-overlay
 //! diagnostics are never sealed into a clean code-intelligence generation;
 //! stale findings cannot cross snapshots.

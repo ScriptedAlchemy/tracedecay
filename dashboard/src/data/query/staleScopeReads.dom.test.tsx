@@ -12,7 +12,7 @@
  * stack refetches against.
  *
  * The second half is the truthfulness half. Once a request can be aborted,
- * `fetch` rejects — and the transport used to answer every rejection with
+ * `fetch` rejects, and the transport used to answer every rejection with
  * `offline`. That would file a daemon-is-down reading against the abandoned
  * project's cache entry, so switching back would show a failure that never
  * happened. These tests hold both halves: the request really is cancelled, and
@@ -56,7 +56,7 @@ function RegistryProbe() {
 interface Attempt {
   readonly url: string;
   /** `null` is what `RequestInit` uses for "explicitly no signal", and it is
-   * distinct from the field being absent — both mean nothing will be
+   * distinct from the field being absent, both mean nothing will be
    * cancelled, which is the state these tests exist to rule out. */
   readonly signal: AbortSignal | null | undefined;
   settle: (project: string) => void;
@@ -98,7 +98,7 @@ function renderProbe(gcTime = 0) {
 /** The same probe against a route `scopedUrl` never rewrites.
  *
  * A real `staleTime` here, because the question is whether a scope change
- * re-asks a question whose answer has not changed — with `staleTime: 0` every
+ * re-asks a question whose answer has not changed, with `staleTime: 0` every
  * observer refetches on mount regardless of key, which would make the two
  * behaviours indistinguishable. */
 function renderRegistryProbe() {
@@ -138,7 +138,7 @@ describe('a scoped read whose scope changed', () => {
     await waitFor(() => expect(first.signal?.aborted).toBe(true));
   });
 
-  it('never paints the abandoned project’s late answer into the new scope', async () => {
+  it('never paints the abandoned project's late answer into the new scope', async () => {
     useScope.getState().selectProject('proj_a', 'Project A', 'active');
     const { findByText } = renderProbe();
     await waitFor(() => expect(attempts).toHaveLength(1));
@@ -158,7 +158,7 @@ describe('a scoped read whose scope changed', () => {
   it('leaves no fabricated offline reading behind for the project it left', async () => {
     // The regression the transport guard prevents. An aborted `fetch` rejects,
     // and a transport that answered every rejection with `offline` would file
-    // one against `proj_a` — so coming back to that project would open on a
+    // one against `proj_a`, so coming back to that project would open on a
     // daemon-is-down panel for a request that was cancelled, not failed.
     useScope.getState().selectProject('proj_a', 'Project A', 'active');
     const { client } = renderProbe();
@@ -180,9 +180,9 @@ describe('a scoped read whose scope changed', () => {
 /**
  * The reads that carry no project, and must not be filed under one.
  *
- * `scopedUrl` deliberately leaves `/api/projects` and `/api/dashboard` alone —
+ * `scopedUrl` deliberately leaves `/api/projects` and `/api/dashboard` alone,
  * the registry is the thing that lists projects, and the chrome sits above all
- * of them — so the identical URL is fetched under every scope. Keying them by
+ * of them, so the identical URL is fetched under every scope. Keying them by
  * scope anyway split one answer into an entry per project: switching project
  * refetched a listing that had not changed, and an entry warmed under one
  * scope was invisible under the next, which is why several surfaces each ended

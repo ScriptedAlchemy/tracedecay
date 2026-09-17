@@ -27,7 +27,7 @@ export function branchName(branchRef: string): string {
  * A Compare deep link with the head half prefilled from exact Delivery
  * identities. The base half is left for the reader because the provider
  * projection does not carry the base branch name, and Compare refuses to run
- * on an incomplete pair — so this is a why-to-code pivot that requires
+ * on an incomplete pair, so this is a why-to-code pivot that requires
  * selection, never a silently guessed comparison.
  */
 export function compareHref(target: {
@@ -62,7 +62,7 @@ export interface ReviewLanes {
   readonly counts: Readonly<Record<DeliveryReviewLifecycleV1, number>>;
   readonly files: readonly ReviewFile[];
   readonly threads: readonly ReviewThread[];
-  /** Items whose observations were all absent — never counted as resolved. */
+  /** Items whose observations were all absent, never counted as resolved. */
   readonly unobserved: number;
 }
 
@@ -226,7 +226,7 @@ export interface PullRequestIdentity {
 
 /** The identity the provider reported on its last complete `pull_request`
  * read; `null` fields when no complete read exists. Never falls back to the
- * latest attempt — an incomplete read does not name a merge base. */
+ * latest attempt, an incomplete read does not name a merge base. */
 export function providerIdentity(item: DeliveryPullRequestV1 | null): PullRequestIdentity {
   const snapshot =
     item?.operations.find((operation) => operation.operation === 'pull_request')?.last_complete ??

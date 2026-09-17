@@ -156,8 +156,8 @@ pub(super) fn insert_row(
 /// every one of them matches what the caller expects.
 ///
 /// `Ok(None)` means no such row exists. Each column is projected through
-/// `CAST(... AS TEXT)` so a value that SQLite converted on the way in — a text
-/// binding landing in an `INTEGER` column, say — still compares equal to what
+/// `CAST(... AS TEXT)` so a value that SQLite converted on the way in, a text
+/// binding landing in an `INTEGER` column, say, still compares equal to what
 /// the caller wrote, and so one comparison covers every storage class.
 pub(super) fn stored_row_matches(
     connection: &rusqlite::Connection,
@@ -206,9 +206,9 @@ pub(super) fn stored_row_matches(
 /// violation from the driver.
 ///
 /// `keys` must cover the constraint that `OR IGNORE` can swallow. When it does,
-/// the read-back always finds the conflicting row; when it would not — every
+/// the read-back always finds the conflicting row; when it would not, every
 /// caller here keys on the primary key, satisfies its `CHECK`s by construction,
-/// and foreign-key violations are not swallowed by `OR IGNORE` at all — the
+/// and foreign-key violations are not swallowed by `OR IGNORE` at all, the
 /// missing row surfaces as [`rusqlite::Error::QueryReturnedNoRows`].
 pub(super) fn idempotent_insert(
     connection: &rusqlite::Connection,

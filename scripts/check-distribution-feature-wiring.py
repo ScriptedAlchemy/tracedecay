@@ -242,7 +242,7 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     # Source manifests default to this checkout; packaged manifests must be
-    # the extracted `.crate` trees, so they have no default — comparing a
+    # the extracted `.crate` trees, so they have no default, comparing a
     # manifest with itself is not package verification.
     parser.add_argument("--root-source", type=Path, default=root_manifest)
     parser.add_argument("--root-packaged", type=Path, required=True)

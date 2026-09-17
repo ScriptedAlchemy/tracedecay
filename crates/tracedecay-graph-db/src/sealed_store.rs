@@ -22,7 +22,7 @@
 //! namespaces. Before release, and for configurations without an installed
 //! sealed store, the WAL-backed staging database remains authoritative.
 //! Retirement deletes the artifact directory with the generation; quarantine
-//! discards it. Nothing ever writes to a sealed store after compaction — the
+//! discards it. Nothing ever writes to a sealed store after compaction, the
 //! handle is marked read-only and refuses writes with a typed error.
 //!
 //! On-disk layout, next to the staging database file:
@@ -39,7 +39,7 @@
 //! # Sealed-read-bundle integration point
 //!
 //! Each `<physical-namespace-hex>/` directory is a self-describing,
-//! digest-bound, immutable artifact — exactly the shape a sealed-read bundle
+//! digest-bound, immutable artifact, exactly the shape a sealed-read bundle
 //! catalogs. The bundle manifest work owns the catalog; its integration
 //! point here is the directory plus `sealed.json` (identity, physical
 //! namespace, recovered digest, row counts, and the `form` the store was
@@ -244,8 +244,8 @@ pub(crate) enum SealedStoreInstall {
     /// database's rows: that enumeration plus the matching post-reopen digest
     /// is the evidence that the staging container serves exactly the
     /// authority's rows, so the caller may file a verify-once marker against
-    /// it. An adopted pre-existing artifact proves only itself — its rows
-    /// were never read out of this container — so it carries `None` and the
+    /// it. An adopted pre-existing artifact proves only itself, its rows
+    /// were never read out of this container, so it carries `None` and the
     /// staging container earns its marker the next time a full proof runs.
     Installed { staging_proof: Option<u64> },
 }
@@ -271,7 +271,7 @@ pub(crate) struct SealedGenerationStore {
     recovered_digest: String,
     entity_count: usize,
     relation_count: usize,
-    /// Canonical bytes hashed by the post-reopen digest proof — the size of
+    /// Canonical bytes hashed by the post-reopen digest proof, the size of
     /// the exact row stream `recovered_digest` covers.
     canonical_bytes: u64,
     directory: PathBuf,
@@ -302,7 +302,7 @@ impl SealedGenerationStore {
         (self.entity_count, self.relation_count)
     }
 
-    /// Canonical bytes the post-reopen digest proof covered — the served
+    /// Canonical bytes the post-reopen digest proof covered, the served
     /// index size this generation is retained for.
     pub(crate) fn canonical_bytes(&self) -> u64 {
         self.canonical_bytes
@@ -449,7 +449,7 @@ fn directory_bytes(directory: &Path) -> std::io::Result<u64> {
 ///
 /// A seal builds into `.staging-<digest>` and installs by rename, so a staging
 /// directory that survives to the next open of the same store belongs to a
-/// build the process never finished — a crash, a kill, or an OOM between
+/// build the process never finished, a crash, a kill, or an OOM between
 /// container write and rename. Nothing reads it and the next seal of that
 /// generation starts over, so on the live profile these accumulated to 7.4 GB
 /// under one store. Run at open: the exclusive store lock means no seal of
@@ -515,7 +515,7 @@ fn remove_sealed_directory(directory: &Path) {
 /// Open options for a sealed artifact: read-only, so a reopen for proof,
 /// adoption, or serving never re-serializes the immutable container on close
 /// and never moves the identity its marker binds. A sealed container is only
-/// ever opened this way — its bytes are written once, by
+/// ever opened this way, its bytes are written once, by
 /// [`GrafeoDB::write_compact_container`], before any engine opens them.
 fn sealed_artifact_database_options(path: PathBuf) -> GraphDbOpenOptions {
     GraphDbOpenOptions {
@@ -796,7 +796,7 @@ where
 /// The commit a sealed namespace's projection-state node records: the
 /// generation's source and watermark, the canonical digest of the empty
 /// finalization batch for that namespace (the same batch native staging
-/// commits last), and — for the physical namespace only — the dependency
+/// commits last), and, for the physical namespace only, the dependency
 /// closure digest the recovered proof requires.
 fn sealed_namespace_commit(
     namespace: &GraphNamespace,
@@ -1266,7 +1266,7 @@ impl GraphDb {
 /// Where a sealed build reads the generation's rows from.
 ///
 /// Both sources yield the recovered digest's row stream in its canonical
-/// order — sorted, unique entities, then sorted, unique relations — so the two
+/// order, sorted, unique entities, then sorted, unique relations, so the two
 /// build byte-identical containers for the same generation, and the reopen
 /// proof against the relational authority's digest is the same proof.
 pub(crate) enum SealedRowSource<'a> {
@@ -1381,7 +1381,7 @@ fn build_or_open_sealed_store(
 /// and relation enumerations of the physical namespace, plus every
 /// dependency-generation endpoint those relations reach, each written once
 /// in its own namespace. `check` runs per row; a cancelled or failed build
-/// has written nothing under `staging` that the caller keeps — the container
+/// has written nothing under `staging` that the caller keeps, the container
 /// appears complete or not at all, and the next attempt rebuilds from the
 /// same source.
 fn build_sealed_container(
@@ -1414,7 +1414,7 @@ fn build_sealed_container(
 
     // Finalization: one projection commit per written namespace, in
     // namespace order, then the format marker at the final sequence. The
-    // physical namespace's commit binds the dependency-closure digest — the
+    // physical namespace's commit binds the dependency-closure digest, the
     // recovered proof requires it, and it is what marks these rows as a
     // *sealed* generation rather than an unfinished stage.
     let mut sequence = 0_u64;
@@ -1772,7 +1772,7 @@ fn open_sealed_store_checked(
     // Lazily: installing a sealed reader must not retain a whole in-memory
     // graph. grafeo's store is heap resident, so an eager open here kept the
     // artifact's entire block log in RAM for every generation this process
-    // ever sealed — five retained generations meant five whole graphs (#799),
+    // ever sealed, five retained generations meant five whole graphs (#799),
     // and one published worktree scope meant one more (#830). The proof below
     // opens the engine once, resolves by marker whenever the verify-once
     // marker covers the exact container the engine loaded, and the engine is
@@ -1787,8 +1787,8 @@ fn open_sealed_store_checked(
     // before it answers a single read. The artifact is immutable after its
     // build, so a proof established by an earlier open of these exact
     // container bytes stands: the marker beside the artifact resolves it
-    // against the container the engine opened, and anything else — a missing
-    // or foreign marker, or a container whose identity moved — falls back to
+    // against the container the engine opened, and anything else, a missing
+    // or foreign marker, or a container whose identity moved, falls back to
     // the full row proof and files the marker for the next open. `expected`
     // still comes from the relational authority, exactly as on the staging
     // container.
@@ -1873,8 +1873,8 @@ fn sealed_copy_proof(
     // read-only engine never checkpoints, so the container stays exactly the
     // one this engine opened for as long as this process serves it:
     // publishing under that identity lets every further open of the artifact
-    // in the same boot — the direct-sealed recover and the registry adoption
-    // were each paying this proof — resolve by marker. The close-time publish
+    // in the same boot, the direct-sealed recover and the registry adoption
+    // were each paying this proof, resolve by marker. The close-time publish
     // then re-records the container as the closed handle reports it for the
     // next boot. A marker is a cache of completed proofs; failing to write one
     // costs the next open a re-proof and nothing else.

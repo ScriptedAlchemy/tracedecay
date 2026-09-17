@@ -85,7 +85,7 @@ describe('scopeWritable', () => {
     if (writability.state !== 'read_only') throw new Error('unreachable');
     expect(writability.reason).toContain('proj_ghost');
     expect(writability.reason).toContain('no project');
-    expect(writability.reason).toContain('switch to a registered project');
+    expect(writability.reason).toContain('Switch to a registered project');
     // Not the pending-read sentence, which would be false here.
     expect(writability.reason).not.toContain('not known yet');
   });
@@ -139,7 +139,7 @@ describe('reconciledLabel', () => {
   /**
    * The truncation defect, at the level of the function that had it. This used
    * to search the `/api/projects` listing and substitute the raw project id when
-   * the id was not on the page — and the daemon truncates that listing to 100
+   * the id was not on the page, and the daemon truncates that listing to 100
    * entries by default, so a project past the end was indistinguishable from one
    * that does not exist. Nothing can express absence any more, so nothing can
    * assert it: an answer that named no project leaves the claim standing.
@@ -290,7 +290,7 @@ describe('scopedUrl and scopeKey', () => {
  * This was first written as "did `scopedUrl` rewrite this request?", which
  * reads like the same question and is not. `scopedUrl` rewrites nothing under
  * the all-projects scope, so every route collapsed into the unscoped bucket
- * there and stopped agreeing with `scopeKey` — and `useSchedulerControl` writes
+ * there and stopped agreeing with `scopeKey`, and `useSchedulerControl` writes
  * the reading it gets back to `scopeKey`. The result was a pause that took
  * effect on the daemon and never appeared on the button, because the fresh
  * reading went into a key no reader was watching.

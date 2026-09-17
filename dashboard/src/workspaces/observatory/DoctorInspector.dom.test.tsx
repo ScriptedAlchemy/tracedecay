@@ -49,7 +49,7 @@ describe('DoctorInspector', () => {
   });
 
   /** The three named degradation reasons must render as the observations they
-   * are — an unreachable source, a rebuild-required source, a corrupt source —
+   * are, an unreachable source, a rebuild-required source, a corrupt source,
    * and never collapse back into the undetermined "unknown" they were carried
    * as before the reasons were named. */
   it('names each degraded source coverage gap with its own reason', async () => {

@@ -217,7 +217,7 @@ function stub(options: { holographic?: Partial<MemoryHolographicPayloadV1>; fact
             error: '',
             fact: {
               ...row,
-              content: row.content ? `${row.content} — canonical and complete` : null,
+              content: row.content ? `${row.content}, canonical and complete` : null,
               linked_entities: [{ entity_id: 'Rspeedy', name: 'Rspeedy', fact_count: 21 }],
             },
           }),
@@ -298,7 +298,7 @@ describe('Facts camera: inspect, select, and the address', () => {
     expect(screen.queryByTestId('store-summary')).toBeNull();
 
     await userEvent.click(row);
-    expect(await within(inspector()).findByText('alpha fact content — canonical and complete')).toBeTruthy();
+    expect(await within(inspector()).findByText('alpha fact content, canonical and complete')).toBeTruthy();
     expect(within(inspector()).getByText('selected fact')).toBeTruthy();
     expect(lastSearch).toContain('fact=fact-alpha');
     expect(requested.some((url) => url.includes('/fact/fact-alpha'))).toBe(true);
@@ -319,8 +319,8 @@ describe('Facts camera: inspect, select, and the address', () => {
     expect(inspector().getAttribute('data-fact-id')).toBe('fact-beta');
     expect(body!.getAttribute('data-inspected')).toBe('true');
     // Hover dims the material the body is not wired to: gamma is not drawn
-    // (redacted) and alpha is wired to beta, so the entity Rspeedy — wired
-    // only to alpha — is the dimmed one.
+    // (redacted) and alpha is wired to beta, so the entity Rspeedy, wired
+    // only to alpha, is the dimmed one.
     const entity = container.querySelector('[data-node="entity:Rspeedy"]');
     expect(Number(entity!.getAttribute('opacity'))).toBeLessThan(0.3);
 

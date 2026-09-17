@@ -98,7 +98,7 @@ function coverageBlocker(source: ExplorerSourceProgressV1): string | null {
  *
  * Sources are checked before finality, because a source's own numbers are
  * evidence the surface can see, whereas finality is the coordinator's summary of
- * them — and when the two disagree the surface sides with the evidence.
+ * them, and when the two disagree the surface sides with the evidence.
  */
 export function absenceVerdict(run: ExplorerQueryRunV1 | undefined): AbsenceVerdict {
   if (run === undefined) {

@@ -117,7 +117,7 @@ export function SettingsRowEditor({
  * The worker selection is one value with two shapes. The exact count's upper
  * bound comes from the daemon's admitted plan when it is on the wire; when it
  * is not, the contract's ceiling applies and the daemon judges the count at
- * restart — stated beside the field rather than invented as a capacity.
+ * restart, stated beside the field rather than invented as a capacity.
  */
 function WorkerSelectionEditor({
   label,

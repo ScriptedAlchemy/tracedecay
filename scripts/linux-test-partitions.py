@@ -29,8 +29,8 @@ on.
 
 `cargo-args` prints the selection for one partition as a shell-quoted
 argument list. `build-args` prints that selection plus the partition's
-`executables` — the binaries and examples its tests spawn rather than link,
-which a test build does not produce on its own — for a `cargo build` that
+`executables`, the binaries and examples its tests spawn rather than link,
+which a test build does not produce on its own, for a `cargo build` that
 shares the test build's resolution; it prints nothing for a partition with no
 executables. `matrix` and `macos-matrix` print the `strategy.matrix`
 documents the Linux and macOS jobs feed through `fromJSON`.

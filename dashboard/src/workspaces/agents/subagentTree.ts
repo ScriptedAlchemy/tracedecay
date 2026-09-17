@@ -8,7 +8,7 @@ import type {
  *
  * This is the measure the sibling `/agents` rollup cannot give. That route
  * counts sessions per managed agent, which says how often each agent was
- * delegated to but nothing at all about who delegated to whom — every count on
+ * delegated to but nothing at all about who delegated to whom, every count on
  * it is an island. Delegation is an edge, and an edge cannot be recovered from
  * two counts after the fact, which is why `/api/plugins/analytics/subagent-tree`
  * is served separately rather than folded into the rollup.
@@ -16,7 +16,7 @@ import type {
  * The daemon does the tree assembly and hands back a PRE-ORDER flattening:
  * every node appears after its own parent and before that parent's later
  * siblings. So `depth` alone is enough to draw the tree, and nothing here
- * re-derives edges client-side — a second assembly could disagree with the
+ * re-derives edges client-side, a second assembly could disagree with the
  * first, and then the drawn shape would be this build's opinion rather than the
  * store's reading.
  *
@@ -72,7 +72,7 @@ export function subagentLabel(node: AnalyticsSubagentNodeV1): string {
  * storing), so this subtraction is already in seconds and must not be divided
  * by a thousand on its way to a reader.
  *
- * `null` means at least one end is unrecorded — an open session and a session
+ * `null` means at least one end is unrecorded, an open session and a session
  * that ended instantly are different facts, and neither may be drawn as zero.
  */
 export function subagentElapsedSeconds(node: AnalyticsSubagentNodeV1): number | null {

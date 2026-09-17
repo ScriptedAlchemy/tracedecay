@@ -5,11 +5,11 @@
 //! Retry and continuation parsing fail closed. A `Retry-After` delay outside
 //! `0..=24h` is provider noise or a hostile wedge and is discarded. A `Link`
 //! header that does not name exactly the next sequential page of the issuing
-//! endpoint — one rel="next" entry, same https host, no credentials or
+//! endpoint, one rel="next" entry, same https host, no credentials or
 //! fragment, only the expected `page`/`per_page` query, and a path that is
 //! either byte-identical to the request path or GitHub's documented
 //! `/repos/{owner}/{repo}` → `/repositories/{numeric id}` rewrite with the
-//! same remainder — is an error, so a malformed or malicious continuation
+//! same remainder, is an error, so a malformed or malicious continuation
 //! can never steer a pagination loop.
 
 use tracedecay_contracts::now_micros;
@@ -150,8 +150,8 @@ fn parse_link_next_page(
 }
 
 /// GitHub REST rewrites `/repos/{owner}/{repo}` to `/repositories/{id}` in
-/// `Link` headers. The numeric id is not rebound here — GitHub does not echo
-/// owner/repo on that form — so only the designator prefix and the remainder
+/// `Link` headers. The numeric id is not rebound here, GitHub does not echo
+/// owner/repo on that form, so only the designator prefix and the remainder
 /// derived from the request path are compared. Suffix matching is not used.
 fn github_link_path_matches_request(actual: &str, expected: &str) -> bool {
     if actual == expected {

@@ -142,8 +142,8 @@ impl FixedGitIndexRunner {
     /// Whether an external driver can rewrite this repository's content.
     ///
     /// `git config --get-regexp` answers over the whole configuration stack,
-    /// `/etc/gitconfig` included. `git lfs install --system` — what every
-    /// GitHub-hosted runner image and most developer installs do — defines
+    /// `/etc/gitconfig` included. `git lfs install --system`, what every
+    /// GitHub-hosted runner image and most developer installs do, defines
     /// `filter.lfs.clean|smudge|process` for every repository on the host, so
     /// treating a *defined* driver as an *applied* one refused every preview
     /// and apply on such a machine, permanently and repository-independently.
@@ -153,8 +153,8 @@ impl FixedGitIndexRunner {
     /// repository's attributes actually bind. The intersection stays
     /// fail-closed: an ambient definition that some attribute *does* bind is
     /// still refused, wherever that definition or that attribute came from.
-    /// `diff.external` has no name to bind — it replaces the diff machinery
-    /// for every diff — so it refuses unconditionally.
+    /// `diff.external` has no name to bind, it replaces the diff machinery
+    /// for every diff, so it refuses unconditionally.
     pub fn has_external_drivers(&self) -> Result<bool, NativeGitIndexError> {
         let (external_diff_driver, named_drivers) = self.configured_drivers()?;
         if external_diff_driver {
@@ -212,8 +212,8 @@ impl FixedGitIndexRunner {
 
     /// Driver names this repository's gitattributes bind to a path.
     ///
-    /// The path domain is the same one `tracked_worktree_digest` binds —
-    /// tracked entries plus non-ignored untracked entries — because an
+    /// The path domain is the same one `tracked_worktree_digest` binds,
+    /// tracked entries plus non-ignored untracked entries, because an
     /// untracked path may become an index entry during the intended
     /// publication and must be fenced before, not after, it is staged.
     fn attribute_bound_driver_names(&self) -> Result<BTreeSet<String>, NativeGitIndexError> {

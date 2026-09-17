@@ -300,8 +300,8 @@ mod tests {
     };
 
     /// Staging builder connections stay inside the kernel SQLite window:
-    /// no mmap grant, page cache at most 64 MiB, and `synchronous = NORMAL`
-    /// — never a silent mmap/cache/sync override. Sealed readers mmap the
+    /// no mmap grant, page cache at most 64 MiB, and `synchronous = NORMAL`,
+    /// never a silent mmap/cache/sync override. Sealed readers mmap the
     /// immutable file on purpose; that path is not this connection.
     #[test]
     fn builder_connections_stay_inside_the_kernel_sqlite_window() {

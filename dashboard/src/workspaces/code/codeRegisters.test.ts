@@ -79,7 +79,7 @@ describe('the index register', () => {
     parked: null,
   } as unknown as CodeIndexFreshnessPayloadV1['worktrees'][number];
 
-  it('leads with the scheduler’s staleness word and the sealed clock', () => {
+  it('leads with the scheduler's staleness word and the sealed clock', () => {
     expect(
       indexRegister(false, {
         outcome: 'envelope',
@@ -104,7 +104,7 @@ describe('the index register', () => {
     expect(register.detail).toBe('no sealed generation · +1 more worktree');
   });
 
-  it('carries the route’s own note when no worktree is mounted', () => {
+  it('carries the route's own note when no worktree is mounted', () => {
     expect(
       indexRegister(false, {
         outcome: 'envelope',

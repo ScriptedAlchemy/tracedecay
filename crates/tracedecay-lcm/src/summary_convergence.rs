@@ -452,8 +452,8 @@ pub(crate) async fn retire_predecessor_range_rewrite(
 
 /// Read-side probe: is the role-aware predecessor-range rewrite still owed?
 ///
-/// An incomplete journal always has work — either a page to rewrite or the
-/// completion marker to write — so this never scans the raw corpus and an
+/// An incomplete journal always has work, either a page to rewrite or the
+/// completion marker to write, so this never scans the raw corpus and an
 /// idle pass takes no writer transaction.
 pub async fn predecessor_range_rewrite_has_work(
     conn: &(impl QueryExecutor + ?Sized),
@@ -478,8 +478,8 @@ pub async fn predecessor_range_rewrite_has_work(
 /// until its page runs. That is deliberate: the typed absent states cover an
 /// interval that is missing, not one that is stale, and a row that already
 /// carries provenance must not be downgraded to unavailable while its repair
-/// is pending. The pre-fix interval fails over-inclusive — it starts at or
-/// before the conversational predecessor, never after — so a caller sees a
+/// is pending. The pre-fix interval fails over-inclusive, it starts at or
+/// before the conversational predecessor, never after, so a caller sees a
 /// widened window rather than a gap, and each page narrows the remaining rows
 /// monotonically toward the filtered interval.
 pub async fn predecessor_range_rewrite_page(

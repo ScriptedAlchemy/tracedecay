@@ -269,7 +269,7 @@ struct PreparedExactInsertPlanV1<'a> {
     entries: Vec<PreparedExactInsertRefV1<'a>>,
     merge_heap: BinaryHeap<Reverse<PreparedExactMergeCursorV1<'a>>>,
     /// The batch's distinct exact terms with the ids this plan
-    /// content-addressed, ascending by id — the order `exact_vocabulary` was
+    /// content-addressed, ascending by id, the order `exact_vocabulary` was
     /// always interned in.
     interned_terms: Vec<(&'a [u8], i64)>,
 }
@@ -3784,7 +3784,7 @@ const PAYLOAD_DIGEST_CONFLICT_CHECK_CHUNK: usize = 512;
 
 /// Verify that every payload digest about to be staged in this batch
 /// agrees, byte for byte, with the payload already recorded under that
-/// digest — either earlier in this same batch (checked in memory, no I/O)
+/// digest. Either earlier in this same batch (checked in memory, no I/O)
 /// or in a prior batch already committed to `clone_body_payloads` (checked
 /// with one batched `SELECT ... WHERE payload_digest IN (...)` per chunk of
 /// unique digests, rather than a `SELECT` after every single insert). A
@@ -4042,7 +4042,7 @@ fn append_prepared_postings(
     // (this file) rejects any batch whose document ids are not a strictly
     // contiguous continuation of the already-committed cursor, and
     // `prepare_pages_inner` only ever prepares the fresh suffix of pages
-    // that cursor has not yet accepted — a resumed or replayed call reuses
+    // that cursor has not yet accepted, a resumed or replayed call reuses
     // no document id that is already durable. Together those invariants
     // make every (field, term, document_id) key in a prepared batch globally
     // unique, both within the batch and against every already-committed
@@ -5229,8 +5229,8 @@ fn build_serving_index_step(
         // `cardinality` rides in the index purely so the statistics
         // aggregation below is covered. Without it the index carries only the
         // reordered WITHOUT ROWID key columns, and every `SUM(cardinality)`
-        // fetch through it is one random main-tree lookup per posting row —
-        // an N+1 access pattern over a tree dominated by `documents` blobs
+        // fetch through it is one random main-tree lookup per posting row.
+        // An N+1 access pattern over a tree dominated by `documents` blobs
         // that collapses once the corpus outgrows the bounded page cache
         // (measured on a 12M-row/2.9M-group synthetic at production pragmas:
         // 121 s warm and 537 s cold non-covering, ~240 s as a sort-backed

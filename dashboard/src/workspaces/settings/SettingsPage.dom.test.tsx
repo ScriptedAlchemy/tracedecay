@@ -7,7 +7,7 @@ import { useScope, type ScopeWritability } from '../../data/scope/store.ts';
 import { SettingsPage, findConfigSection } from './SettingsPage.tsx';
 import { applySettingsMutation } from './settingsMutation.ts';
 
-/** The dashboard pointed at the project the daemon has active — the scope every
+/** The dashboard pointed at the project the daemon has active, the scope every
  * case below is about something other than. */
 const ACTIVE_SCOPE: ScopeWritability = { state: 'writable', target: 'tracedecay' };
 
@@ -35,7 +35,7 @@ function projectPatchResponse(current: unknown) {
  * These suites assert the exact request sequence the settings write protocol
  * performs: read, re-read for the confirmation, patch, refresh. The page also
  * reads `/api/capabilities` and `/api/remote/status` for the inspector, which
- * are neither part of that protocol nor able to affect it — so the recorders
+ * are neither part of that protocol nor able to affect it, so the recorders
  * below keep only settings traffic.
  */
 function isSettingsRoute(url: string): boolean {
@@ -743,7 +743,7 @@ describe('SettingsPage effective configuration review', () => {
 
     await user.clear(filter);
     await user.type(filter, 'zzzz-no-such-key');
-    expect(screen.getByText('no key or value matches “zzzz-no-such-key”')).toBeTruthy();
+    expect(screen.getByText('no key or value matches "zzzz-no-such-key"')).toBeTruthy();
     expect(document.querySelector('[role="grid"]')).toBeNull();
   });
 });
@@ -1099,7 +1099,7 @@ describe('Settings response authority', () => {
  * The section rail's jump, against ids this dashboard does not choose.
  *
  * `buildSettingsModel` takes a section's id straight from the payload's
- * top-level key — including keys no `GROUP_META` entry names, which is
+ * top-level key, including keys no `GROUP_META` entry names, which is
  * deliberate, so a group the daemon starts reporting appears rather than
  * vanishes. Those keys reached a `[data-section="${id}"]` selector, so one
  * double quote closed the attribute early and `querySelector` threw
@@ -1139,7 +1139,7 @@ describe('Settings section navigation', () => {
     expect(findConfigSection(sectionsFixture(['project']), 'project.sync')).toBeUndefined();
   });
 
-  it('jumps to the section the rail names and marks the inspected row’s section', async () => {
+  it('jumps to the section the rail names and marks the inspected row's section', async () => {
     const user = userEvent.setup();
     const scrollTo = vi.fn();
     vi.spyOn(Element.prototype, 'scrollTo').mockImplementation(scrollTo);

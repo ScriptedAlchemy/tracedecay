@@ -7,7 +7,7 @@
 //! discoverable but never *natively loaded*: the host does not treat a managed
 //! skill as one of its own skills.
 //!
-//! This module closes that gap the way Hermes does — by writing each active
+//! This module closes that gap the way Hermes does, by writing each active
 //! managed skill as a real, host-loadable `SKILL.md` into the host's own skills
 //! directory (`<base>/.claude/skills/<slug>/SKILL.md` for Claude Code, the
 //! `.codex` twin for Codex), so the agent loads it like any other skill.
@@ -233,7 +233,7 @@ struct MaterializationManifest {
     /// Stable id of the profile/installation that materialized this package.
     /// Absent on manifests written before this field existed (and on packages
     /// re-derived from disk without a known installation); such packages are
-    /// never auto-removed from a *project* scope — they may be another user's
+    /// never auto-removed from a *project* scope, they may be another user's
     /// committed files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     materialized_by: Option<String>,
@@ -346,7 +346,7 @@ fn collect_on_disk_support_files(dir: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>> 
 /// disk (package-hash domain). Reconstructs the render placeholder by
 /// swapping the recorded `content-hash` back to `<package-hash>`, folds in the
 /// on-disk support files exactly as [`ManagedSkill::materialized_package_hash`]
-/// does, and — when the result matches the recorded hash — returns a re-derived
+/// does. When the result matches the recorded hash, it returns a re-derived
 /// manifest proving the package is pristine (safe to treat as owned). Returns
 /// `Ok(None)` when the file is missing, has no content-hash, or has drifted.
 fn recompute_on_disk_package(
@@ -379,7 +379,7 @@ fn recompute_on_disk_package(
     for (relative, bytes) in &supports {
         // Hash the slash-normalized key, not Path display form. On Windows,
         // `strip_prefix` relatives stringify with `\`, while authoring hashes
-        // use forward-slash support paths — a mismatch would make every
+        // use forward-slash support paths, a mismatch would make every
         // pristine lost-manifest package look forked.
         let key = support_relative_key(relative)?;
         hasher.update(b"\0file:");
@@ -427,7 +427,7 @@ const INSTALLATION_ID_FILE: &str = ".materialization-installation-id";
 /// Returns a stable id for the local profile/installation, persisting a random
 /// token in the profile root on first use. Stamped into every manifest this
 /// installation writes so orphan cleanup in *project* scopes only removes files
-/// this installation authored — never another user's committed materialization.
+/// this installation authored, never another user's committed materialization.
 ///
 /// Best-effort: if the token cannot be read or written (read-only profile), a
 /// per-process fallback is returned. A fallback id never matches a persisted
@@ -496,7 +496,7 @@ struct PackageLock(fs::File);
 
 impl Drop for PackageLock {
     fn drop(&mut self) {
-        let _ = fs2::FileExt::unlock(&self.0);
+        let _ = self.0.unlock();
     }
 }
 
@@ -507,7 +507,6 @@ fn package_lock_path(package_dir: &Path) -> PathBuf {
 
 #[hotpath::measure(label = "hosts.automation.skill_materialization.lock")]
 fn lock_package(package_dir: &Path) -> Result<PackageLock> {
-    use fs2::FileExt;
     let path = package_lock_path(package_dir);
     let file = fs::OpenOptions::new()
         .read(true)
@@ -515,7 +514,7 @@ fn lock_package(package_dir: &Path) -> Result<PackageLock> {
         .create(true)
         .truncate(false)
         .open(&path)?;
-    tracedecay_runtime_core::storage::retry_transient_file_op(|| file.lock_exclusive())?;
+    tracedecay_runtime_core::storage::retry_transient_file_op(|| file.lock())?;
     Ok(PackageLock(file))
 }
 
@@ -545,7 +544,7 @@ fn ensure_not_symlink(path: &Path) -> Result<()> {
     }
 }
 
-/// Rejects a symlink at any component the reconciler itself creates — i.e. only
+/// Rejects a symlink at any component the reconciler itself creates, i.e. only
 /// the `relative` components under `base`. `base` (the host skills directory and
 /// everything above it) may legitimately traverse symlinks: dotfile managers
 /// (stow, chezmoi, nix-home-manager) routinely symlink `~/.claude`, `.codex`, or
@@ -1200,9 +1199,9 @@ fn safe_support_relative(path: &Path) -> Result<&Path> {
 /// Whether this installation may auto-remove an owned package. Global (home)
 /// packages are the local user's own and are always removable. Project-scope
 /// packages live inside a repo working tree and are routinely committed and
-/// shared, so they are removed only when this installation authored them —
-/// never another developer's committed materialization (or a manifest-less
-/// package whose author is unknown).
+/// shared, so they are removed only when this installation authored them,
+/// never another developer's committed materialization or a manifest-less
+/// package whose author is unknown.
 fn may_remove_owned(
     scope: &MaterializationScope,
     manifest: &MaterializationManifest,
@@ -1439,7 +1438,7 @@ fn managed_slugs_in_scope(scope: &MaterializationScope) -> Result<Vec<(String, S
 // ---------------------------------------------------------------------------
 
 /// Loads the active managed skills for materialization. Only `Active` skills
-/// that target Claude are materialized to Claude scopes, Codex to Codex — the
+/// that target Claude are materialized to Claude scopes, Codex to Codex, the
 /// same target filtering the overlay/prompt-index export applies.
 fn load_active_managed_skills(profile_root: &Path) -> Result<Vec<ManagedSkill>> {
     crate::automation::skill_targets::load_active_managed_skills(profile_root)

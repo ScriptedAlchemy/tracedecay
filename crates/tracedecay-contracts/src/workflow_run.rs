@@ -267,8 +267,8 @@ where
 /// Counts every durably appended run transition on a bounded static gauge
 /// key for the status it entered, so failed and cancelled runs are recorded
 /// with the same weight as completed ones. The run's wall lifetime spans
-/// daemon restarts through the journal, so a per-transition counter — not an
-/// in-process RAII lifetime — is the truthful application-layer record.
+/// daemon restarts through the journal, so a per-transition counter, not an
+/// in-process RAII lifetime, is the truthful application-layer record.
 fn observe_run_status_entered(projection: &WorkflowRunProjection) {
     #[cfg(feature = "hotpath")]
     {
@@ -410,7 +410,7 @@ pub trait WorkflowArtifactStorePort: Send + Sync {
 /// The daemon derives every admission digest itself: the definition's own
 /// pinned policy/configuration/catalog digests are checked against the live
 /// environment, the topology digest comes from the evaluated topology policy,
-/// and the provider registry digest is computed from this registration — the
+/// and the provider registry digest is computed from this registration. The
 /// caller never supplies a digest the runtime must trust.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

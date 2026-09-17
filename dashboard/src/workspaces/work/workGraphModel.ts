@@ -30,7 +30,7 @@ import type { WorkChannel } from './workChannel.ts';
  *
  * Shaped like `WorkAttemptReading` on purpose: a read is pending, refused, or
  * answered, and there is no fourth case and no empty default. The one
- * difference is that this read has no typed `absent` — the daemon conceals
+ * difference is that this read has no typed `absent`, the daemon conceals
  * absence and denial behind one 404, which `workRefusal` reports as `denied`,
  * so an absence arrives here as a refusal wearing that state rather than as an
  * answer.
@@ -48,7 +48,7 @@ export type WorkGraphReading =
  * a timeline of them plus the coverage that timeline was read under. Every
  * channel below is a property of ONE graph version, so a timeline read is
  * reduced to its newest entry and the rest of the timeline is reported as
- * `entries` and `coverage` rather than folded into a channel — an average over
+ * `entries` and `coverage` rather than folded into a channel, an average over
  * versions would be a number no version holds.
  *
  * `entry` is null exactly when a timeline came back with no entries in it. That
@@ -64,7 +64,7 @@ export interface WorkGraphPage {
   /** How many versions the read carried: one for the two snapshot modes, the
    * length of the timeline for the other two. */
   readonly entries: number;
-  /** The timeline's own coverage, or null for a snapshot mode — which returns
+  /** The timeline's own coverage, or null for a snapshot mode, which returns
    * one version by construction and has no window to be partial over. */
   readonly coverage: WorkGraphTimelineCoverageV1 | null;
 }
@@ -85,8 +85,8 @@ function newestEntry(
 /**
  * The graph read as a reading.
  *
- * `undefined` is the request still being in flight — or never issued, because a
- * disabled query has no data — which is distinct from every answer the daemon
+ * `undefined` is the request still being in flight, or never issued, because a
+ * disabled query has no data, which is distinct from every answer the daemon
  * can give.
  */
 export function workGraphReading(
@@ -180,7 +180,7 @@ export function terminalWorkAttempt(state: WorkAttemptStateV1): boolean {
  * contract carries these measurements, so reporting them as
  * `unsupported_schema` would tell a reader the build cannot do something it
  * can. Each case is the state the read actually returned, in that state's own
- * words — including the one that is not a failure at all.
+ * words, including the one that is not a failure at all.
  */
 export function graphChannelGap(
   reading: WorkGraphReading,
@@ -206,7 +206,7 @@ export function graphChannelGap(
       return {
         available: false,
         state: 'complete_zero_findings',
-        detail: `the work-product graph read returned no graph version at all, so there is no version for ${measure} to be a property of — this is the authority reporting an empty window, not a read that failed`,
+        detail: `the work-product graph read returned no graph version at all, so there is no version for ${measure} to be a property of, this is the authority reporting an empty window, not a read that failed`,
       };
     default: {
       const unhandled: never = reading;
@@ -250,7 +250,7 @@ export interface WorkEffortMassReading {
    * so the authority returns them only under COMPLETE runtime coverage and
    * returns nothing at all otherwise (`work_product_projection.rs` gates all
    * three on `runtime_complete`). Absent here therefore means the split could
-   * not be taken — never that nothing is ready.
+   * not be taken, never that nothing is ready.
    */
   readonly split: WorkChannel<WorkEffortSplitReading>;
 }
@@ -413,7 +413,7 @@ export function runtimeReading(runtime: WorkRuntimeProjectionV1): WorkChannel<Wo
       available: false,
       state: 'unavailable',
       detail:
-        'the runtime projection could not be read at all, so the attempts under this graph version are unmeasured — this is not a reading of zero attempts, and nothing about what is running follows from it',
+        'the runtime projection could not be read at all, so the attempts under this graph version are unmeasured, this is not a reading of zero attempts, and nothing about what is running follows from it',
     };
   }
   return {

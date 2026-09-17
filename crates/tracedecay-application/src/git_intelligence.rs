@@ -91,7 +91,7 @@ struct RawFileEntry {
 }
 
 /// One parsed hunk with its retained body lines (adapter-internal only;
-/// bodies never leave this module — the domain value carries digests).
+/// bodies never leave this module, the domain value carries digests).
 #[derive(Debug)]
 struct ParsedHunk {
     old_start: u32,
@@ -271,7 +271,7 @@ impl NativeGitIntelligence {
     /// This is the canonical lightweight identity read for feedback, LSP, and
     /// managed-test consumers that do not need worktree status entries. It
     /// reuses the native repository snapshot, so it spawns no subprocess on
-    /// repositories `gix` can open — including linked worktrees, where the
+    /// repositories `gix` can open, including linked worktrees, where the
     /// snapshot resolves the checkout-specific HEAD rather than the common
     /// directory's.
     #[hotpath::measure(label = "usecases.git_intelligence.head")]
@@ -1203,7 +1203,7 @@ impl NativeGitIntelligence {
     }
 
     /// Native content identity or explicit absence of worktree files.
-    /// Present content is hashed by `git hash-object` WITHOUT `-w` — hashing
+    /// Present content is hashed by `git hash-object` WITHOUT `-w`, hashing
     /// only, no object write.
     #[hotpath::measure(label = "usecases.git_intelligence.worktree_blobs")]
     fn worktree_blobs_for_paths(
@@ -1429,8 +1429,8 @@ fn parse_diff_raw(text: &str) -> Result<Vec<RawFileEntry>, GitIntelligenceError>
                 "raw record without ':' prefix: {record:?}"
             )));
         };
-        // A merge in progress emits combined records — one extra leading ':'
-        // per additional parent, with parents+1 modes and blobs — for its
+        // A merge in progress emits combined records, one extra leading ':'
+        // per additional parent, with parents+1 modes and blobs, for its
         // unmerged paths (`git diff --raw` during a conflict).
         let mut parents = 1usize;
         while let Some(rest) = meta.strip_prefix(':') {

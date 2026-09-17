@@ -513,7 +513,7 @@ fn generate_candidate_outputs_sharing_corpora(
     })
 }
 
-/// Direct production call for one query/profile — used by tests to prove the
+/// Direct production call for one query/profile, used by tests to prove the
 /// generator emits identical candidate bytes.
 pub fn retrieve_partition_query_bytes(
     repo_root: &Path,

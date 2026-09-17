@@ -17,8 +17,8 @@ Open `http://127.0.0.1:5195/`. [Current application screenshots](screenshots/REA
 are rendered UI; [the gallery](GALLERY.md) contains design references.
 
 Jayse Hansen / Cantina Avengers FUI grammar applied to TraceDecay's fourteen
-dashboard workspaces. Borrow the grammar—night glass, hairline frames, amber
-attention, cyan signal, and measured fields—without copying Marvel marks.
+dashboard workspaces. Borrow the grammar, night glass, hairline frames, amber
+attention, cyan signal, and measured fields, without copying Marvel marks.
 
 These are implementation-facing concept plates, not runtime receipts or
 visual-audit goldens. Sample data is synthetic unless a same-stem brief names a

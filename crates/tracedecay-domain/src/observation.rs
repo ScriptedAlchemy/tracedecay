@@ -1074,9 +1074,9 @@ fn visit_structure_value(values: &mut usize, depth: usize) -> Result<(), Structu
     Ok(())
 }
 
-/// Counts the JSON values `serde_json` serialization would produce — with the
+/// Counts the JSON values `serde_json` serialization would produce, with the
 /// same per-node accounting as [`validate_value_structure`] over the
-/// materialized tree — without building that tree.
+/// materialized tree, without building that tree.
 ///
 /// Each `serialize_*` case mirrors how `serde_json::value::Serializer`
 /// constructs a `Value`: scalars are one value, sequences and maps are one
@@ -2983,8 +2983,8 @@ fn domain_digest(
 /// first. Element zero is the only one ever written; the rest exist so rows
 /// committed under an earlier derivation stay decodable.
 ///
-/// A stored row carries this digest under two names — `observation_id` and its
-/// `idempotency_key` alias, see [`DurableObservationV1::idempotency_key`] — so
+/// A stored row carries this digest under two names. `observation_id` and its
+/// `idempotency_key` alias, see [`DurableObservationV1::idempotency_key`], so
 /// the two fields must accept exactly the same set. Accepting an older entry
 /// grants nothing: every one digests the same identity material under a domain
 /// separator, so a row still binds to its own evidence. Rejecting them makes

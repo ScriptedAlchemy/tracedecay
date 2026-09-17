@@ -29,11 +29,11 @@ pub fn replay_backoff(attempt: u32, shift_cap: u32) -> Duration {
 
 /// How a worker should proceed after one replay pass.
 pub enum ReplayPassDecision {
-    /// The spool shrank and more work remains — yield and re-run immediately.
+    /// The spool shrank and more work remains. Yield and re-run immediately.
     ProgressPending,
-    /// No progress but the outcome is retryable — apply bounded backoff.
+    /// No progress but the outcome is retryable. Apply bounded backoff.
     Backoff,
-    /// Terminal disposition — log and stop until the next external kick.
+    /// Terminal disposition. Log and stop until the next external kick.
     Stop,
     /// Re-evaluate the work condition without backoff.
     Requeue,

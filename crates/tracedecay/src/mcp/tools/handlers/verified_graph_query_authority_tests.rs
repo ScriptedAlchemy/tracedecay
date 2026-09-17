@@ -265,7 +265,7 @@ async fn absent_query_port_fails_closed_for_every_awaiting_graph_handler() {
 /// Changelog is git-first: its diff is the answer and the verified graph query
 /// only enriches it, so an absent query port is a typed
 /// `symbol_changes_coverage` section carrying the same `code_index_unavailable`
-/// token `CapabilityUnavailable` publishes — not the fail-closed refusal the
+/// token `CapabilityUnavailable` publishes, not the fail-closed refusal the
 /// handlers in `graph_handlers_that_await_query` return.
 #[tokio::test]
 async fn changelog_reports_absent_query_port_as_typed_coverage() {

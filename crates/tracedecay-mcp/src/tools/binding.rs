@@ -139,7 +139,7 @@ fn application_surface_branch_sensitivity(
     match operation {
         // Mixed ApplicationSurface group: these operations read configuration,
         // host-integration lifecycle, session identity, store identity, or
-        // process observability — never the checkout, code graph, or files.
+        // process observability, never the checkout, code graph, or files.
         ConfigurationList
         | ConfigurationGet
         | ConfigurationSet
@@ -619,9 +619,9 @@ pub fn canonical_tool_dispatch_ceiling(
 /// The three predicates below run several times per dispatched request
 /// (connection loop, routing, dispatch controls), and each uncached
 /// evaluation linearly scans the application catalog
-/// (`application_capability_for_tool`). Their inputs — the static binding
+/// (`application_capability_for_tool`). Their inputs, the static binding
 /// table, the application-surface catalog, and the Work/Workflow executable
-/// registries — are process-stable, so the answers are precomputed for every
+/// registries, are process-stable, so the answers are precomputed for every
 /// cataloged name. The dispatch-contract cancellation/effect metadata is not
 /// a substitute: it folds in workflow bindings and per-capability contracts
 /// that deliberately diverge from these predicates.
@@ -1044,8 +1044,8 @@ mod tests {
     }
 
     /// The budget that cut `tracedecay_context` at ten seconds in the #1203
-    /// dogfood run is this capability's own deadline contract — the retrieval
-    /// primitive declares `DeadlineContract::new(10_000, ..)` — and not
+    /// dogfood run is this capability's own deadline contract, the retrieval
+    /// primitive declares `DeadlineContract::new(10_000, ..)`, and not
     /// `TOOL_DISPATCH_CEILING`, the CLI request deadline, or any settlement or
     /// ledger budget. `prepare_dispatch_control` hands this ceiling straight to
     /// `DispatchControl`, and a caller deadline can only shorten it, so this
@@ -1141,7 +1141,7 @@ mod tests {
     #[rustfmt::skip]
     const PINNED_BRANCH_SENSITIVITY: &[(&str, BranchSensitivity)] = &[
         // Memory: ledger / skill / analytics reads. Handlers use project_root,
-        // store_layout, and memory identity — never the code graph.
+        // store_layout, and memory identity, never the code graph.
         ("tracedecay_automation_run_list", BranchSensitivity::Independent),
         ("tracedecay_automation_run_view", BranchSensitivity::Independent),
         ("tracedecay_automation_run_artifact_view", BranchSensitivity::Independent),

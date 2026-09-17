@@ -49,9 +49,9 @@ case "$query" in
     ;;
   *"COUNT(*) FROM analytics_events"*) printf '4\n' ;;
   *"GROUP BY tool_name HAVING"*) printf 'tracedecay_status|10|2\n' ;;
-  *"'  '||tool_name"*) printf '  tracedecay_status — 10 call(s)\n' ;;
+  *"'  '||tool_name"*) printf '  tracedecay_status, 10 call(s)\n' ;;
   *"FROM memory_v2_current_facts"*) printf '2 5 2 1 1\n' ;;
-  *"GROUP BY session_id, provider"*) printf '  session-1 — 2 errors, provider=codex\n' ;;
+  *"GROUP BY session_id, provider"*) printf '  session-1, 2 errors, provider=codex\n' ;;
   *)
     printf 'unexpected query: %s\n' "$query" >&2
     exit 90
@@ -71,7 +71,7 @@ for scope in project all; do
     assert_contains "$output" "TraceDecay friction scan"
     assert_contains "$output" "hook events: 8    tracedecay tool calls: 4"
     assert_contains "$output" "memory_v2_current_facts"
-    assert_contains "$output" "session-1 — 2 errors, provider=codex"
+    assert_contains "$output" "session-1, 2 errors, provider=codex"
   done
 done
 

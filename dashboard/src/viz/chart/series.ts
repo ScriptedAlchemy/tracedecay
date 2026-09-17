@@ -4,7 +4,7 @@
  * `Chart` assigns its token palette by series index. These two tables give a
  * legend the same index → mark mapping so the swatch beside a name is drawn
  * in the same register as the line, and give every series a line style as
- * well as a hue — colour is never the sole carrier of which provider a line
+ * well as a hue, colour is never the sole carrier of which provider a line
  * is, so the styles cycle independently of the palette and the two together
  * stay distinct well past six series.
  */

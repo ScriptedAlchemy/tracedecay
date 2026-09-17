@@ -222,7 +222,7 @@ fn backstop_covers_elapsed_intervals_regardless_of_watcher_liveness() {
 /// A test config with a tiny debounce so the real debounce path settles fast.
 ///
 /// Production defaults (`SyncConfig::default()` in `src/config.rs`) are
-/// `watch_debounce_ms = 2_000` and `watch_max_delay_ms = 30_000` — a healthy
+/// `watch_debounce_ms = 2_000` and `watch_max_delay_ms = 30_000`, a healthy
 /// production watcher may legitimately hold a sync for up to 30s to coalesce
 /// a busy rebase. Tests have no reason to wait out that budget: they only
 /// need the debounce/max-delay *shape* (a short quiet period bounded by a
@@ -246,7 +246,7 @@ fn fast_watch_config() -> SyncConfig {
 /// Ceiling for [`ensure_watching_or_skip`]'s readiness race and for
 /// [`debounce_loop_coalesces_and_drains_events`]'s drain wait.
 ///
-/// This has no production counterpart — `GitWatcher` never itself waits on
+/// This has no production counterpart, `GitWatcher` never itself waits on
 /// "has a task become ready"; it is purely a test diagnostic bound: how long
 /// we are willing to wait for the real watch task to signal `entered_debounce`
 /// or flip `degraded` before concluding the watch task is genuinely hung (a
@@ -280,7 +280,7 @@ fn git(dir: &Path, args: &[&str]) {
     );
 }
 
-/// A bare temp git repo with one commit. Not indexed by tracedecay — these
+/// A bare temp git repo with one commit. Not indexed by tracedecay, these
 /// tests exercise the watcher's registration/debounce plumbing, which runs
 /// regardless of whether a store exists (a sync on a non-indexed project is
 /// a cheap no-op).
@@ -366,7 +366,7 @@ async fn currently_watch_limited(repo: &Path) -> bool {
 }
 
 /// Registers `repo` with `watcher` and waits for its watch task to reach
-/// `debounce_loop`, unless the OS/sandbox is out of inotify watches — in
+/// `debounce_loop`, unless the OS/sandbox is out of inotify watches, in
 /// which case this skips (loudly, on stderr) instead of failing. Full
 /// assertion strength is unchanged whenever a watch can be installed: the
 /// happy path is the exact same wait-then-return the tests used directly
@@ -377,26 +377,26 @@ async fn currently_watch_limited(repo: &Path) -> bool {
 /// `fs.inotify.max_user_watches` that call fails with
 /// `notify::ErrorKind::MaxFilesWatch` (logged by the production task as
 /// `watch_install_failed error="OS file watch limit reached"`), which is an
-/// environment fact rather than a regression in this module — the watch task
+/// environment fact rather than a regression in this module, the watch task
 /// falls back to `degraded_poll_loop` and never reaches `debounce_loop`.
 ///
 /// We deliberately do NOT pre-probe before registering: this crate's own
 /// watch limit is a shared, global, momentarily-contended resource (sibling
 /// tests in this same suite register watches concurrently), so a probe taken
-/// before the real registration can pass while the real install — racing
-/// against those siblings a moment later — still fails. Instead, we let the
+/// before the real registration can pass while the real install, racing
+/// against those siblings a moment later, still fails. Instead, we let the
 /// real watch task run and race its readiness signal against a fast poll of
 /// `degraded`: as soon as EITHER fires we react, rather than always waiting
 /// out the full [`TEST_READY_TIMEOUT`] budget first. That matters here
-/// specifically because the contention is often a brief spike — confirming
+/// specifically because the contention is often a brief spike, confirming
 /// "is the OS out of watches" only *after* burning the whole timeout would
 /// check long after sibling tests released theirs, wrongly concluding the
 /// install was healthy. Once `degraded` flips we confirm the cause
 /// immediately (within one ~20ms poll tick of the real failure) with a fresh
 /// `install_watches` attempt on the same repo: `MaxFilesWatch` there means
-/// the OS is still (or again) out of watches, so we skip. Any other outcome —
+/// the OS is still (or again) out of watches, so we skip. Any other outcome,
 /// the [`TEST_READY_TIMEOUT`] budget elapsing with neither signal, or
-/// degraded for an unconfirmed reason — is treated as a real regression and
+/// degraded for an unconfirmed reason, is treated as a real regression and
 /// panics, exactly as the unconditional wait did before.
 async fn ensure_watching_or_skip(watcher: &GitWatcher, repo: &Path) -> Option<Arc<WatchState>> {
     enum Ready {
@@ -763,7 +763,7 @@ async fn shutdown_cancels_and_joins_repository_watcher_tasks() {
     // FSEvents can mark dirty during watch install, before shutdown joins the
     // task. The debounce never drains after join, so requiring `is_clean()`
     // fails on macOS even when the post-shutdown commit is ignored. Snapshot
-    // the set and require it unchanged — `last_event` moves if a detached
+    // the set and require it unchanged, `last_event` moves if a detached
     // watcher still classifies metadata.
     let dirty_before_commit = {
         let dirty = state.dirty.lock().await;
@@ -839,18 +839,18 @@ async fn shutdown_cancels_and_joins_active_metadata_scan() {
 ///
 /// This test proves a NEGATIVE about a REAL inotify event (a working-tree
 /// write that must not be delivered/acted on), so it deliberately runs on the
-/// real clock — paused time cannot manufacture "an OS event that never
+/// real clock, paused time cannot manufacture "an OS event that never
 /// arrives". Determinism instead comes from making both the readiness and the
 /// negative window OBSERVABLE rather than fixed sleeps:
 ///   1. We wait on the `entered_debounce` state signal, so the watch is
-///      PROVABLY installed before the edit — closing the old false-pass
+///      PROVABLY installed before the edit, closing the old false-pass
 ///      window where a 200ms sleep elapsed before inotify was armed (a real
 ///      regression could then slip through unseen).
 ///   2. After the edit we poll the accepted-request timestamp across a window
 ///      several times the
 ///      debounce+max-delay budget and fail on the FIRST advance. A scheduler
-///      stall only lengthens the safe window — it can never produce a false
-///      negative — so no magic epsilon is needed.
+///      stall only lengthens the safe window, it can never produce a false
+///      negative, so no magic epsilon is needed.
 #[tokio::test]
 async fn source_file_edit_triggers_no_freshness_request() {
     let repo = temp_repo();
@@ -872,7 +872,7 @@ async fn source_file_edit_triggers_no_freshness_request() {
     // every tick, so the test is non-vacuous even against an unindexed repo
     // (where an unmounted scheduler would reject a request):
     //   * the accepted-request timestamp never advances, AND
-    //   * the dirty set never becomes marked — no working-tree event ever
+    //   * the dirty set never becomes marked, no working-tree event ever
     //     reached `classify_and_mark`. The dirty mark is the ROOT observable:
     //     if a regression recursively watched the working tree, the edit
     //     would set `dirty` for the ~debounce+max-delay window, which this

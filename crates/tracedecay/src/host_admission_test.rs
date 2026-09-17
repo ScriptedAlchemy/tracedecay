@@ -235,7 +235,7 @@ async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stab
     // Host ingress commits the observation durably but leaves the
     // external-source projection queued, so the truthful outcome is
     // `AcceptedForReplay` carrying the underlying committed persist outcome
-    // with a `Pending` projection state — never a fake immediate persist.
+    // with a `Pending` projection state, never a fake immediate persist.
     let (initial_attachment, initial_generation) = match initial {
         CaptureObservationOutcome::AcceptedForReplay {
             projection_state,

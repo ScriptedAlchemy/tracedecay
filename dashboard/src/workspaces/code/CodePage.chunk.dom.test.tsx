@@ -1,21 +1,21 @@
 /**
  * The trace drill-in is its own chunk.
  *
- * `TraceView` is a thousand lines and pulls in the whole of `viz/trace` — the
- * canvas renderer, the spring integrator, the palette resolver — none of which
+ * `TraceView` is a thousand lines and pulls in the whole of `viz/trace`, the
+ * canvas renderer, the spring integrator, the palette resolver, none of which
  * a reader who only looks at the spine ever needs. This suite holds the split
  * boundary to two claims that a bundle report cannot make for us:
  *
  *   1. rendering the Code page does not request the trace module at all, and
  *      the page is fully interactive in that state;
- *   2. while the chunk is in flight the surface says so, and says nothing else
- *      — no field, no plate, no figure, because no call edge has been read.
+ *   2. while the chunk is in flight the surface says so, and says nothing else:
+ *      no field, no plate, no figure, because no call edge has been read.
  *
  * The module is mocked behind a gate that is released by hand, which is what
  * makes "was it requested" and "what is on screen before it resolves"
  * observable at all. A static import trips that gate while this file's own
  * imports are still evaluating, so claim 1 is what fails if the boundary
- * regresses — verified by putting the static import back and watching it go
+ * regresses, verified by putting the static import back and watching it go
  * red on the request count.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -41,7 +41,7 @@ vi.mock('./TraceView.tsx', async () => {
   // The gate is what makes the in-flight state observable at all. It is
   // BOUNDED because a regression to a static import reaches this factory while
   // this file's own imports are still evaluating, and an unbounded wait there
-  // deadlocks the whole suite — reported as a timeout, with nothing pointing at
+  // deadlocks the whole suite, reported as a timeout, with nothing pointing at
   // the cause. Bounded, the same regression falls through to the request-count
   // assertion below and names itself.
   let valve: ReturnType<typeof setTimeout> | undefined;
@@ -93,7 +93,7 @@ function renderCode() {
 }
 
 /**
- * Requests recorded by the time this file finished evaluating — which is after
+ * Requests recorded by the time this file finished evaluating, which is after
  * `./CodePage.tsx` above has been imported and before any test body runs. A
  * static import makes this 1: importing the page is what pulls the trace module
  * in. It is read as an absolute figure rather than a per-test baseline, because

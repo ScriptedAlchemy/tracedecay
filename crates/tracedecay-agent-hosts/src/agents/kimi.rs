@@ -15,8 +15,8 @@
 //!
 //! **Deferral re-verified 2026-08-08 under the CLI-first policy.** `kimi
 //! --help` was probed directly: its command set is
-//! `export, provider, acp, web, server, login, doctor, vis, migrate, upgrade`
-//! — there is no `mcp` subcommand and no plugin subcommand of any kind. The
+//! `export, provider, acp, web, server, login, doctor, vis, migrate, upgrade`,
+//! there is no `mcp` subcommand and no plugin subcommand of any kind. The
 //! documented way to add, edit, or delete a server is the in-TUI
 //! `/mcp-config`. So there is nothing to adopt, and the deferral above is the
 //! honest lifecycle rather than a preference. See
@@ -607,7 +607,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path, kimi_code_home: &Pa
     let installed_path = kimi_installed_json_path(kimi_code_home);
     if !installed_json_has_tracedecay(kimi_code_home) {
         dc.warn(&format!(
-            "no tracedecay entry in {} — run `tracedecay install --agent kimi` if you use Kimi Code CLI",
+            "no tracedecay entry in {}, run `tracedecay install --agent kimi` if you use Kimi Code CLI",
             installed_path.display()
         ));
         return;
@@ -620,7 +620,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path, kimi_code_home: &Pa
     match kimi_managed_bundle_matches_staged(home, kimi_code_home) {
         Ok(true) => dc.pass("Kimi Code CLI managed plugin matches its staged source"),
         Ok(false) => dc.fail(
-            "Kimi Code CLI managed plugin is stale — run the staged `/plugins install` action",
+            "Kimi Code CLI managed plugin is stale, run the staged `/plugins install` action",
         ),
         Err(error) => dc.fail(&format!(
             "could not verify Kimi Code CLI managed plugin: {error}"
@@ -650,7 +650,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path, kimi_code_home: &Pa
         }
     } else {
         dc.fail(&format!(
-            "Kimi Code CLI plugin manifest missing or invalid at {} — run `tracedecay install --agent kimi`",
+            "Kimi Code CLI plugin manifest missing or invalid at {}, run `tracedecay install --agent kimi`",
             manifest_path.display()
         ));
     }

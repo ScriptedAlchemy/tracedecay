@@ -146,7 +146,7 @@ pub fn parse_skill_frontmatter(contents: &str) -> Result<BTreeMap<String, SkillF
 /// Strips one level of YAML quoting from an inline scalar.
 ///
 /// Plain scalars and the borrowed interior of a simple `'`-quoted scalar are
-/// returned without allocating. Applies no schema or policy — a caller decides
+/// returned without allocating. Applies no schema or policy, a caller decides
 /// what the decoded text means.
 pub fn decode_yaml_scalar(value: &str) -> std::result::Result<Cow<'_, str>, YamlScalarError> {
     if let Some(quoted) = value.strip_prefix('\'') {

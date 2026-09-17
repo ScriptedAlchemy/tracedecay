@@ -178,7 +178,7 @@ async fn try_mount(
     // reads an already-seated complete generation and asks the scheduler for
     // nothing. When nothing is seated it answers `None` and demands nothing,
     // so a deferred owner that only ever took this arm waited for a
-    // publication that only demand produces — the project then served
+    // publication that only demand produces, the project then served
     // indefinitely with the typed-unavailable feedback cycle.
     // Its demand and recovered-text arms both require current source evidence
     // before this owner may admit their generation.
@@ -213,7 +213,7 @@ async fn try_mount(
     // feedback cycle is still the typed-unavailable placeholder, so a
     // diagnostics publication that lands in that window has nowhere truthful to
     // go. The cycle depends only on the sealed generation this attempt already
-    // holds, not on the session factory — only the advisory owner needs that.
+    // holds, not on the session factory, only the advisory owner needs that.
     let (feedback_cycle, feedback_scope) =
         match register_production_feedback_cycle(invocation, project_root, state, indexed.clone())
             .await
@@ -340,7 +340,7 @@ async fn classify_failure(
         // `latest_complete_ready` for the exact root. When the text projection
         // is ahead of that authority the composition fails with "project-open
         // provider code-index identity is inconsistent with the application
-        // contract" — earliness, not a missing composition. Classifying it
+        // contract", earliness, not a missing composition. Classifying it
         // terminal abandoned the upgrade for the daemon's whole life: the
         // project kept the typed-unavailable feedback cycle and the warming
         // LSP owner that advertises no analyzer method at all.

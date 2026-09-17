@@ -230,7 +230,7 @@ fn session_meta_with_provenance_from_record(
             .unwrap_or("unknown")
             .to_string()
     });
-    // Note: real rollouts have no `model` in session_meta — only
+    // Note: real rollouts have no `model` in session_meta, only
     // `model_provider` (e.g. "openai"), which is *not* a model and must
     // not be stored as one; `turn_context` lines carry the actual model.
     let model = payload

@@ -287,8 +287,8 @@ async fn codex_usage_preserves_cache_only_total_only_and_reasoning_counters() {
 /// A turn's tool loop emits one `token_count` per API call (most *before* the
 /// final agent_message); real rollouts showed ~64% of input spend in those
 /// mid-turn reports. The observation family retains every native report as
-/// immutable evidence — including an exact duplicate, whose unchanged
-/// cumulative checkpoint is what lets read-time derivation skip it — instead
+/// immutable evidence, including an exact duplicate, whose unchanged
+/// cumulative checkpoint is what lets read-time derivation skip it, instead
 /// of summing a turn ledger onto the reply message.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]

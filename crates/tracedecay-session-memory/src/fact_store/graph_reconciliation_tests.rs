@@ -981,7 +981,7 @@ async fn source_mutation_during_publication_conflicts_and_republishes() {
     // with nothing pending: its finish must reload the canonical source,
     // surface the conflict, and its publisher must schedule the follow-up
     // pass that republishes the mutated source. The tail is therefore
-    // exactly two loads of the mutated source — the conflicted finish's
+    // exactly two loads of the mutated source, the conflicted finish's
     // fallback reload plus the scheduled republication's own load.
     runtime.release_held_reconcile();
     held_publisher

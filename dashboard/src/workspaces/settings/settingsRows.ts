@@ -6,8 +6,8 @@
  * Two authorities meet here and stay distinguishable. The PROVENANCE of a row
  * is whatever `/api/settings` stated (`settingsModel.ts`); the WRITE CAPABILITY
  * of a row is whether a real PATCH route exists for exactly that key and
- * whether the current gates admit it. A key with no binding has no write path
- * — not a locked one, not a denied one — and says so.
+ * whether the current gates admit it. A key with no binding has no write path,
+ * not a locked one, not a denied one, and says so.
  */
 
 import type { CodeIndexWorkerSelectionV1 } from '../../contracts/generated.ts';
@@ -25,7 +25,7 @@ import type {
 } from './settingsModel.ts';
 
 export interface EffectiveRow {
-  /** `${section.id}.${row.id}` — unique across the whole payload. */
+  /** `${section.id}.${row.id}`, unique across the whole payload. */
   readonly key: string;
   readonly section: ConfigSection;
   readonly row: ConfigRow;
@@ -235,7 +235,7 @@ export function scopeNoun(scope: SettingsScope): string {
  * ahead of time: it is read at startup, so a saved change waits for a restart.
  * Project and user writes report `resync_recommended` / `restart_recommended`
  * in the PATCH response, so before apply their requirement is genuinely not
- * yet known — and is labelled as such rather than guessed.
+ * yet known, and is labelled as such rather than guessed.
  */
 export type ApplyRequirement =
   | { readonly kind: 'restart'; readonly detail: string }
@@ -277,7 +277,7 @@ export function draftValue(draft: SettingsDraft, binding: SettingsBinding): unkn
   }
 }
 
-/** The authority's value for a bound field — what the daemon last reported. */
+/** The authority's value for a bound field, what the daemon last reported. */
 export function authorityValue(authority: SettingsEditor, binding: SettingsBinding): unknown {
   switch (binding.scope) {
     case 'project':

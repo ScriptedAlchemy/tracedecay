@@ -361,7 +361,7 @@ pub(super) fn project_open_retry_backoff(error: &TraceDecayError) -> Option<Dura
         // its verdict is a property of the stored data: a row rejected now is
         // rejected identically 250ms from now. Back off for the whole family
         // and name the exceptions, rather than listing the failures that
-        // deserve a backoff — that ordering meant every newly surfaced
+        // deserve a backoff, that ordering meant every newly surfaced
         // invariant message spun warm-up at the debounce cadence until someone
         // noticed the CPU. Decode failures and column-versus-JSON
         // disagreements both land here without being enumerated.

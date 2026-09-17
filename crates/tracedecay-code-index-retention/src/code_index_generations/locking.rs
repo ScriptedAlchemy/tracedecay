@@ -1,8 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
-use fs2::FileExt;
-
 use super::{CodeGenerationRetentionErrorV1, SCOPE_RETENTION_LOCK_FILE, STORE_LOCK_FILE, storage};
 
 pub struct CodeGenerationStoreLockV1 {
@@ -31,7 +29,7 @@ impl CodeGenerationStoreLockV1 {
 
 impl Drop for CodeGenerationStoreLockV1 {
     fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.file);
+        let _ = self.file.unlock();
     }
 }
 
@@ -49,7 +47,11 @@ pub fn try_acquire_code_generation_store_read_lock(
 ) -> Result<Option<CodeGenerationStoreLockV1>, CodeGenerationRetentionErrorV1> {
     let store_root = canonical_store_root(store_root)?;
     let lock = open_lock_file(&store_root.join(STORE_LOCK_FILE))?;
-    match FileExt::try_lock_shared(&lock) {
+    match lock
+        .try_lock_shared()
+        .map_err(std::io::Error::from)
+        .map_err(std::io::Error::from)
+    {
         Ok(()) => Ok(Some(CodeGenerationStoreLockV1 {
             file: lock,
             store_root,
@@ -66,7 +68,7 @@ pub fn try_acquire_code_generation_store_lock(
 ) -> Result<Option<CodeGenerationStoreLockV1>, CodeGenerationRetentionErrorV1> {
     let store_root = canonical_store_root(store_root)?;
     let lock = open_lock_file(&store_root.join(STORE_LOCK_FILE))?;
-    match lock.try_lock_exclusive() {
+    match lock.try_lock().map_err(std::io::Error::from) {
         Ok(()) => Ok(Some(CodeGenerationStoreLockV1 {
             file: lock,
             store_root,
@@ -94,7 +96,7 @@ fn lock_file(
 ) -> Result<CodeGenerationStoreLockV1, CodeGenerationRetentionErrorV1> {
     let store_root = canonical_store_root(store_root)?;
     let lock = open_lock_file(&store_root.join(lock_file))?;
-    lock.lock_exclusive().map_err(storage)?;
+    lock.lock().map_err(storage)?;
     Ok(CodeGenerationStoreLockV1 {
         file: lock,
         store_root,

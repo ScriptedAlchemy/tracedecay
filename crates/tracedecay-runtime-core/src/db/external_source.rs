@@ -32,14 +32,14 @@ pub async fn install_external_source_schema(
 /// receipts_v1` rows carrying about a gigabyte of `receipt_json`, the whole
 /// rewrite measured around ten minutes. Inside the leased schema transaction
 /// that made every open of a large store fail its per-statement execution
-/// limit, so it runs here instead — after admission, on the writer, as
+/// limit, so it runs here instead, after admission, on the writer, as
 /// bounded work that never blocks admission or ordinary retrieval.
 ///
 /// The retired table's remaining contents are the durable progress: each
 /// chunk moves its rows and removes them from the retired table in one
 /// transaction, so an interrupted migration resumes exactly where it stopped,
-/// no row is moved twice — the successors are keyed and the moves are
-/// `INSERT OR IGNORE` — and none is lost. A store already at the current
+/// no row is moved twice, the successors are keyed and the moves are
+/// `INSERT OR IGNORE`, and none is lost. A store already at the current
 /// shape carries none of these tables and pays one catalog probe each.
 pub async fn migrate_retired_mutation_copy_tables(conn: &crate::db::Database) -> Result<()> {
     const OPERATION: &str = "migrate retired external source mutation copies";

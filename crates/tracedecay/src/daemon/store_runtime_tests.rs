@@ -949,7 +949,7 @@ async fn migrating_session_row_count(connection: &(impl QueryExecutor + ?Sized))
 
 /// The incident, end to end. Both of these migrations once ran inside the
 /// open's leased schema transaction: on a large store each outran its
-/// execution deadline, the batch was interrupted, and the daemon exited — so
+/// execution deadline, the batch was interrupted, and the daemon exited, so
 /// systemd restarted it into the same failure forever.
 ///
 /// Admission must therefore leave both alone and complete, the store must

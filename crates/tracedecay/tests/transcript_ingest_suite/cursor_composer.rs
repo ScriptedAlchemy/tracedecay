@@ -195,7 +195,7 @@ async fn composer_envelope_and_bubbles_ingest_rows() {
     // Token accounting lives in the observation family. A composer bubble's
     // tokenCount rides the bubble record itself, so it is correlated to its
     // composer session and bubble message and lands as a provider-usage row
-    // (message scope, delta semantics) — never as message metadata. The bubble
+    // (message scope, delta semantics), never as message metadata. The bubble
     // carries no model spelling of its own and the envelope's session-level
     // modelConfig is not per-message evidence, so the model stays typed-unknown.
     assert!(meta.get("usage").is_none());
@@ -832,7 +832,7 @@ async fn composer_sql_oversized_bubble_is_non_durable_without_payload_leak() {
         rusqlite::params!["bubbleId:comp-oversize:b-ok", ok_bubble.to_string()],
     )
     .unwrap();
-    // 1 MiB + 2 of hex zeros via zeroblob — never a Rust String of that size
+    // 1 MiB + 2 of hex zeros via zeroblob, never a Rust String of that size
     // in the product path. length(value) = 2 * 524289 = 1_048_578.
     conn.execute(
         "INSERT OR REPLACE INTO cursorDiskKV (key, value) \
@@ -1090,7 +1090,7 @@ async fn composer_envelope_todo_secret_is_sanitized_before_persistence() {
 }
 
 /// Same todo checkpoint with divergent envelope evidence (createdAt) after a
-/// generation change is an identity collision — first durable facts remain.
+/// generation change is an identity collision, first durable facts remain.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn composer_envelope_todos_conflict_does_not_overwrite() {

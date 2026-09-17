@@ -2,7 +2,7 @@
 design_status: current
 ---
 
-# Loom 08 — Work proximity
+# Loom 08, Work proximity
 
 - **Image:** [Generated concept](08-work-proximity.png)
 - **Interactive concept:** [Open the existing concept application](../../app/README.md)

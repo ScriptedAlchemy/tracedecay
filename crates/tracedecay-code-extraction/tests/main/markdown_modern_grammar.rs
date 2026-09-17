@@ -36,7 +36,7 @@ fn yaml_frontmatter_hang_reproducer() {
 fn frontmatter_is_opaque() {
     // YAML frontmatter content that would otherwise look like markdown
     // (a `# heading`-like line, a `- list item`) must NOT produce Module
-    // nodes — it's metadata, not document structure.
+    // nodes. It's metadata, not document structure.
     let src = "---\ntitle: My Doc\n# this is yaml comment style\n- bogus\n---\n\n# Real Heading\n";
     let res = tracedecay_code_extraction::MarkdownExtractor::extract_markdown("doc.md", src);
     let module_names: Vec<&str> = res

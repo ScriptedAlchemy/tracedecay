@@ -1216,8 +1216,8 @@ mod tests {
     ///
     /// `production_lsp_input` builds the root URI with
     /// `Url::from_directory_path`, which requires an absolute path. Windows
-    /// does not consider a rootless `/workspace` absolute — it has no drive
-    /// prefix — so the bare Unix spelling made every fixture here fail with
+    /// does not consider a rootless `/workspace` absolute, it has no drive
+    /// prefix, so the bare Unix spelling made every fixture here fail with
     /// `Inconsistent { field: "project-open feedback root URI" }`.
     #[cfg(windows)]
     const WORKSPACE_ROOT: &str = r"C:\workspace";

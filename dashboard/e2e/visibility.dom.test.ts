@@ -99,7 +99,7 @@ describe('visibility policy', () => {
         { ...healthy, faded: 1, worst: 0, worstSample: 'p: Awaiting-review counts' },
         'automations-unreadable',
       ),
-    ).toThrow(/opacity 0 — the capture is blank/);
+    ).toThrow(/opacity 0. The capture is blank/);
   });
 });
 

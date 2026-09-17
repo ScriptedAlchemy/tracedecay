@@ -28,7 +28,7 @@ function TokenRow({ handoff }: { handoff: ListedTaskHandoffV1 }) {
  * handoff that was offered and never taken up leaves a trace at all.
  *
  * The empty case is the one that has to be said carefully. The daemon answers
- * this route with exactly the grants the caller could itself redeem — same
+ * this route with exactly the grants the caller could itself redeem, same
  * session, same scope, same recipient principal. So nothing here is ever
  * evidence that no tokens exist; it is evidence that none was addressed to this
  * reader. Those are different facts and the surface prints the second one.
@@ -62,7 +62,7 @@ export function AgentHandoffTokens({ reading }: { reading: HandoffTokenReading }
           <>
             No handoff token in <span className="td-value">{reading.sessionId}</span> is addressed
             to this reader. The daemon answers this route with only the grants the caller could
-            itself redeem, so this is a statement about who the reader is — not evidence that no
+            itself redeem, so this is a statement about who the reader is, not evidence that no
             handoff tokens exist.
           </>
         ) : (

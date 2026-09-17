@@ -120,12 +120,12 @@ pub struct CloneBodyPayloadV1 {
     pub token_count: u32,
     pub conservative_normalization_revision: u16,
     pub conservative_digest: ManifestDigest,
-    pub conservative_tokens: Vec<ConservativeCloneTokenV1>,
+    pub conservative_tokens: Arc<[ConservativeCloneTokenV1]>,
     pub tokenization_status: CloneBodyTokenizationStatusV1,
     pub tokenization_issues: Vec<CloneBodyTokenizationIssueV1>,
     pub rename_normalization_revision: Option<u16>,
     pub rename_digest: Option<ManifestDigest>,
-    pub rename_tokens: Option<Vec<ConservativeCloneTokenV1>>,
+    pub rename_tokens: Option<Arc<[ConservativeCloneTokenV1]>>,
     pub rename_coverage: CloneBodyRenameStatusV1,
     pub rename_issues: Vec<CloneBodyRenameIssueV1>,
 }
@@ -432,7 +432,7 @@ impl CloneBodyPayloadV1 {
             token_count: body.non_trivia_token_count,
             conservative_normalization_revision: body.normalization_revision,
             conservative_digest: digests.conservative,
-            conservative_tokens: body.conservative_tokens.clone(),
+            conservative_tokens: Arc::clone(&body.conservative_tokens),
             tokenization_status: body.tokenization_status,
             tokenization_issues: body.tokenization_issues.clone(),
             rename_normalization_revision: body.rename_normalization_revision,
@@ -668,7 +668,7 @@ pub fn verify_exact_clone_payload(
                 if payload.conservative_normalization_revision == key.normalization_revision
                     && payload.conservative_digest == key.digest =>
             {
-                Some(&payload.conservative_tokens)
+                Some(&payload.conservative_tokens[..])
             }
             CloneNormalizationClassV1::Rename
                 if payload.rename_normalization_revision == Some(key.normalization_revision)
@@ -1304,10 +1304,12 @@ mod fingerprint_tests {
             .validate()
             .expect("extracted tokens match their digests");
         let mut colliding = payload;
-        colliding.conservative_tokens[0] = ConservativeCloneTokenV1::Syntax {
+        let mut tokens = colliding.conservative_tokens.to_vec();
+        tokens[0] = ConservativeCloneTokenV1::Syntax {
             syntax_kind: "identifier".to_owned(),
             text: "colliding-but-different".to_owned(),
         };
+        colliding.conservative_tokens = tokens.into();
         assert_eq!(
             colliding.validate(),
             Err("clone payload digests do not match their canonical tokens".to_owned())

@@ -337,8 +337,8 @@ fn generate_plugin_bundle() {
 /// `env!("CARGO_PKG_VERSION")` is resolved per compiled crate, so inside this
 /// library it is this crate's own version rather than the version of the
 /// `tracedecay` product a user installed. Everything this crate stamps into a
-/// place a host can see — plugin manifests, plugin cache paths, staleness
-/// warnings, provenance headers — is compared against that product version, so
+/// place a host can see, plugin manifests, plugin cache paths, staleness
+/// warnings, provenance headers, is compared against that product version, so
 /// it is read here from the one place that authors it:
 /// `[workspace.package].version` in the workspace-root `Cargo.toml`.
 ///

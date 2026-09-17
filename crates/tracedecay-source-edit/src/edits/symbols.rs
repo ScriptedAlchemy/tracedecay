@@ -187,7 +187,7 @@ pub(crate) fn resolve_symbol_for_edit(
 /// Whether a module-qualified request names the stored candidate: the
 /// request's segments (with `crate::` stripped) must be a suffix of the
 /// candidate's segment chain, where file-path segments expand into their
-/// path components with the source extension removed — `src/pricing.rs::t`
+/// path components with the source extension removed, `src/pricing.rs::t`
 /// and `pricing::t` describe the same chain tail.
 fn module_qualified_request_matches(requested: &str, candidate_qualified_name: &str) -> bool {
     let requested = requested.strip_prefix("crate::").unwrap_or(requested);

@@ -11,9 +11,9 @@
 //! means a caller depends on the protocol, not on the server that happens to
 //! implement it.
 //!
-//! Behavior stays with the daemon. Anything that interprets a request —
-//! authority minting, scope resolution, dispatch — remains in
-//! `tracedecay-daemon-service`; only construction, validation, and the
+//! Behavior stays with the daemon. Anything that interprets a request remains
+//! in `tracedecay-daemon-service`. That includes authority minting, scope
+//! resolution, and dispatch. Only construction, validation, and the
 //! application-DTO conversions travel with the types they belong to.
 
 mod feedback;

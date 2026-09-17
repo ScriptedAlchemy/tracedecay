@@ -60,7 +60,7 @@ async fn init_and_open_leave_a_git_working_tree_unchanged() {
         after.difference(&before).collect::<Vec<_>>(),
         before.difference(&after).collect::<Vec<_>>()
     );
-    // The identity did persist — in the sanctioned `.git/` anchor, which is
+    // The identity did persist, in the sanctioned `.git/` anchor, which is
     // deliberately outside the guarded snapshot.
     assert!(
         read_repository_identity_marker(&project).unwrap().is_some(),
@@ -86,7 +86,7 @@ async fn init_and_open_leave_a_non_git_working_tree_unchanged() {
     assert_eq!(
         before,
         after,
-        "a non-git project must gain no entries at all — its identity is \
+        "a non-git project must gain no entries at all, its identity is \
          deterministic and lives only in the profile registry; \
          new entries: {:?}",
         after.difference(&before).collect::<Vec<_>>()

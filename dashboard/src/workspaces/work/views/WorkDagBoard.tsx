@@ -27,7 +27,7 @@ import type { WorkDagReading } from '../workViewsModel.ts';
 import { EmptyReading, ViewCaption } from './WorkViewChannel.tsx';
 
 /**
- * The task dependency board — the hero of channel thirteen.
+ * The task dependency board, the hero of channel thirteen.
  *
  * Hybrid on purpose. The DOM owns every card: each is a real button with the
  * task's exact identity, title, and the authority's projected lane as text, so
@@ -42,7 +42,7 @@ import { EmptyReading, ViewCaption } from './WorkViewChannel.tsx';
  *
  * Interaction follows the design system's grammar:
  *
- *   hover / focus   inspects — isolates the one-hop neighbourhood and dims the
+ *   hover / focus   inspects, isolates the one-hop neighbourhood and dims the
  *                   rest. It never moves the selection.
  *   click / Enter   selects, and the selection lives in the address.
  *   arrows          traverse the visible graph: left/right along a stratum,
@@ -102,7 +102,7 @@ function relationDash(kind: WorkDagRelationKind): string | undefined {
 
 /** The gating edges that join consecutive tasks of the authority's chain. The
  * chain is over the whole graph version, so a consecutive pair with no drawn
- * edge between them is simply not emphasised — never invented. */
+ * edge between them is simply not emphasised, never invented. */
 function criticalEmphasis(layout: WorkDagLayout, chain: readonly string[]): Emphasis {
   const tasks = new Set(chain);
   const edges = new Set<string>();
@@ -172,8 +172,8 @@ export function WorkDagBoard({
     setZoom(Math.max(ZOOM_MIN, Math.min(1, width / layout.width)));
   }, [layout.width]);
 
-  // A graph wider than its field opens fitted — the 200%-zoom and narrow-
-  // viewport focus mode — and re-fits when the graph version changes shape.
+  // A graph wider than its field opens fitted, the 200%-zoom and narrow-
+  // viewport focus mode, and re-fits when the graph version changes shape.
   // A field that cannot be measured leaves the zoom at 100%.
   useLayoutEffect(() => {
     fit();
@@ -227,8 +227,8 @@ export function WorkDagBoard({
     }
   };
 
-  // Roving tabindex: one stop in the page's tab order — the selected card, or
-  // the first card when nothing is selected — and the arrows move within.
+  // Roving tabindex: one stop in the page's tab order, the selected card, or
+  // the first card when nothing is selected, and the arrows move within.
   const tabStop =
     selected !== null && layout.byId.has(selected) ? selected : layout.nodes[0]?.taskId ?? null;
 

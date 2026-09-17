@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# project-analytics.sh — TraceDecay usage & fact-store adoption snapshot.
+# project-analytics.sh. TraceDecay usage & fact-store adoption snapshot.
 #
 # Fills the gaps `tracedecay analytics diagnostics` leaves open: a per-tool MCP
 # call breakdown, and fact-store *adoption* (how often facts are seen vs. rated).
@@ -49,7 +49,7 @@ GLOBAL_DB="$TD_HOME/global.db"
 q() { sqlite3 -noheader -separator '  ' "$1" "$2" 2>/dev/null; }
 
 echo "================================================================"
-echo " TraceDecay usage & fact-store adoption — $PROJECT_ID"
+echo " TraceDecay usage & fact-store adoption, $PROJECT_ID"
 echo "================================================================"
 
 # --- 1. MCP tool adoption (per-tool breakdown; the CLI only groups by kind). --
@@ -92,7 +92,7 @@ if [ "$FB" -gt 0 ]; then
   printf '  %-26s %s : 1\n' "seen : feedback ratio:" "$(( SEEN / FB ))"
   RATE=$("$PY" -c "print(f'{100*$FB/max($RETR,1):.2f}%')")
   printf '  %-26s %s of retrievals\n' "feedback rate:" "$RATE"
-  echo "  signal: feedback loop is ACTIVE but sparse — confirm trust scores are earned, not just seeded."
+  echo "  signal: feedback loop is ACTIVE but sparse. Confirm trust scores are earned, not only seeded."
 else
   echo "  seen : feedback ratio:     ${SEEN} : 0"
   echo "  >> DEAD FEEDBACK LOOP: facts are seen ${SEEN}x but never rated helpful/unhelpful."
@@ -101,10 +101,10 @@ fi
 
 # --- 3. Feedback ledger (transport-agnostic: CLI + MCP + automation). ---------
 echo
-echo "## Feedback ledger (memory_v2_feedback_history — all transports)"
+echo "## Feedback ledger (memory_v2_feedback_history, all transports)"
 LEDGER="$(q "$SERVING_DB" "SELECT action, datetime(occurred_at,'unixepoch'), COALESCE(source,'unknown'), substr(COALESCE(note,''),1,60)
               FROM memory_v2_feedback_history ORDER BY occurred_at, event_id;")"
-if [ -n "$LEDGER" ]; then printf '%s\n' "$LEDGER" | sed 's/^/  /'; else echo "  (none — no fact has ever received feedback)"; fi
+if [ -n "$LEDGER" ]; then printf '%s\n' "$LEDGER" | sed 's/^/  /'; else echo "  (none, no fact has ever received feedback)"; fi
 
 # --- 4. Read vs write activity (oplog is write-side; retrievals are read-side).
 echo

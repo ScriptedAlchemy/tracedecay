@@ -123,8 +123,8 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     )]
     /// Reads one keyset page of journals that can still require recovery.
     /// Journals may each retain multi-megabyte source frontiers, so the page
-    /// query returns keys only — a page of values could exceed the exact-SQL
-    /// byte budget together even though each value fits alone — and every
+    /// query returns keys only, a page of values could exceed the exact-SQL
+    /// byte budget together even though each value fits alone, and every
     /// value then arrives through its own single-row read.
     #[hotpath::skip]
     pub async fn list_incomplete_session_sync_journal_page(
