@@ -43,6 +43,10 @@ export interface LiveActivityPulse {
   streamId: string;
   /** Client receipt time (ms since epoch). */
   at: number;
+  /** The daemon's bounded detail word for the pulse (`leased`, `file_edit`,
+   * …) when the family carried one; `null` when the frame named none. Absent
+   * on pulses built before this field existed. */
+  detail?: string | null;
 }
 
 export interface SseConnection {
@@ -93,6 +97,7 @@ export function connectEvents(url = '/api/events'): SseConnection {
         isRecord(payload) && typeof payload.family === 'string' ? payload.family : event.stream.stream_id,
       streamId: event.stream.stream_id,
       at: Date.now(),
+      detail: isRecord(payload) && typeof payload.detail === 'string' ? payload.detail : null,
     });
     if (activity.length > MAX_ACTIVITY_PULSES) activity.shift();
     activityRevision += 1;
