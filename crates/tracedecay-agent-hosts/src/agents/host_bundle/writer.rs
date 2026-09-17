@@ -21,9 +21,9 @@ use super::control::{
     HOST_BUNDLE_QUARANTINE_DIR, HOST_COMPONENT_SET_JOURNAL_FILE, HOST_COMPONENT_SET_STAGE_DIR,
     MAX_CONTROL_FILE_BYTES, backup_name, component_set_journal_file, component_set_receipt_file,
     host_bundle_backup_receipt_file, host_bundle_restore_receipt_file, host_bundle_snapshot_name,
-    is_safe_component, latest_host_component_set_receipt_at, receipt_file, validate_backup_receipt,
-    validate_component_set_journal, validate_component_set_receipt, validate_journal,
-    validate_receipt, validate_restore_receipt,
+    is_safe_component, journal_file, latest_host_component_set_receipt_at, receipt_file,
+    validate_backup_receipt, validate_component_set_journal, validate_component_set_receipt,
+    validate_journal, validate_receipt, validate_restore_receipt, writer_lock_file,
 };
 use super::model::{HostBundleExecutionRequestV1, HostBundleLifecycleStorageV1};
 use super::planner::{
@@ -43,23 +43,41 @@ use super::{
 
 static HOST_BUNDLE_TEMP_NONCE: AtomicU64 = AtomicU64::new(1);
 
+/// Exclusive owner of one host's mutable bundle state.
+///
+/// The lock is released when the writer switches hosts or is dropped. A
+/// second host does not share this file: their artifact trees, journals, and
+/// receipts are already disjoint.
+struct HostWriterLock {
+    host: HostKindV1,
+    file: fs::File,
+}
+
+impl Drop for HostWriterLock {
+    fn drop(&mut self) {
+        if let Err(error) = self.file.unlock() {
+            tracing::warn!(
+                error = %error,
+                host = ?self.host,
+                "host bundle writer lock could not be released"
+            );
+        }
+    }
+}
+
 /// Atomic, capability-rooted host-bundle writer. Every descendant directory
 /// is opened without following symlinks; files are staged, fsynced, renamed,
 /// and followed by a directory sync before receipt publication.
+///
+/// Opening does not take a lifecycle-root lock and does not recover another
+/// host's journal. Mutation acquires `writer.{slug}.v1.lock` for the host
+/// being written and holds it until the writer switches hosts or drops.
 pub struct HostBundleWriterV1 {
     pub(super) root_path: PathBuf,
     pub(super) lifecycle_root_path: PathBuf,
     root: Dir,
     control: Dir,
-    _writer_lock: fs::File,
-}
-
-impl Drop for HostBundleWriterV1 {
-    fn drop(&mut self) {
-        if let Err(error) = self._writer_lock.unlock() {
-            tracing::warn!(error = %error, "host bundle writer lock could not be released");
-        }
-    }
+    host_lock: Option<HostWriterLock>,
 }
 
 impl HostBundleWriterV1 {
@@ -81,26 +99,55 @@ impl HostBundleWriterV1 {
         let lifecycle_root = Dir::open_ambient_dir(&lifecycle_root_path, ambient_authority())
             .map_err(|_| HostBundleError::UnsafeInstallPath)?;
         let control = open_or_create_nofollow_dir(&lifecycle_root, HOST_BUNDLE_CONTROL_DIR)?;
-        let writer_lock = open_writer_lock(&control)?;
-        let mut writer = Self {
+        Ok(Self {
             root_path,
             lifecycle_root_path,
             root,
             control,
-            _writer_lock: writer_lock,
-        };
-        writer.recover_interrupted_operation()?;
-        Ok(writer)
+            host_lock: None,
+        })
+    }
+
+    /// Acquire this host's writer lock, releasing any other host's lock first.
+    ///
+    /// Same-host re-entry on this writer is a no-op. A different process that
+    /// already holds the host lock is refused; that is the one shared writer
+    /// this host actually needs. Independent hosts are not refused.
+    pub(super) fn ensure_host_lock(&mut self, host: HostKindV1) -> Result<(), HostBundleError> {
+        if self
+            .host_lock
+            .as_ref()
+            .is_some_and(|lock| lock.host == host)
+        {
+            return Ok(());
+        }
+        self.host_lock = None;
+        if writer_lock_file(host) == HOST_BUNDLE_LOCK_FILE {
+            return Err(HostBundleError::UnsafeInstallPath);
+        }
+        self.host_lock = Some(open_host_writer_lock(&self.control, host)?);
+        Ok(())
     }
 
     /// Recover by rolling an incomplete transaction back from its immutable
     /// backups. A receipt matching the journal operation is a durable commit
     /// marker and is never rolled back after a crash between receipt/journal
     /// cleanup.
-    pub fn recover_interrupted_operation(&mut self) -> Result<(), HostBundleError> {
-        let Some(journal) = self.load_journal()? else {
+    pub fn recover_interrupted_operation(
+        &mut self,
+        host: HostKindV1,
+    ) -> Result<(), HostBundleError> {
+        self.ensure_host_lock(host)?;
+        self.recover_host_journal_locked(host)
+    }
+
+    fn recover_host_journal_locked(&mut self, host: HostKindV1) -> Result<(), HostBundleError> {
+        let Some(journal) = self.load_journal_for(host)? else {
             return Ok(());
         };
+        if journal.host != host {
+            return Err(HostBundleError::ReceiptCorrupted);
+        }
         validate_journal(&journal)?;
         if let Some(receipt) =
             self.load_receipt(journal.host, journal.component)?
@@ -110,7 +157,7 @@ impl HostBundleWriterV1 {
                         && receipt.manifest_digest == journal.manifest_digest
                 })
         {
-            self.remove_control_file(HOST_BUNDLE_JOURNAL_FILE)?;
+            self.remove_journal(host)?;
             if receipt.rollback_boundary == HostBundleRollbackBoundaryV1::Passed {
                 self.cleanup_unreferenced_backup_dir(journal.operation_id)?;
             }
@@ -169,7 +216,7 @@ impl HostBundleWriterV1 {
             Some(receipt) => self.write_receipt(&receipt)?,
             None => self.remove_receipt(journal.host, journal.component)?,
         }
-        self.remove_control_file(HOST_BUNDLE_JOURNAL_FILE)?;
+        self.remove_journal(host)?;
         self.cleanup_unreferenced_backup_dir(journal.operation_id)
     }
 
@@ -186,6 +233,7 @@ impl HostBundleWriterV1 {
         if request.operation_id == [0; 16] {
             return Err(HostBundleError::InvalidManifest);
         }
+        self.ensure_host_lock(manifest.host)?;
         verifier.verify_manifest(manifest)?;
         let content_by_path = validate_artifact_contents(manifest, request, contents)?;
         // Scoped to this manifest's own host: another host's pending
@@ -196,7 +244,7 @@ impl HostBundleWriterV1 {
         {
             return Err(host_bundle_recovery_required!());
         }
-        self.recover_interrupted_operation()?;
+        self.recover_host_journal_locked(manifest.host)?;
         let previous_receipt = self.load_receipt(manifest.host, manifest.component)?;
         let manifest_digest = manifest.canonical_digest()?;
         if let Some(receipt) = previous_receipt.as_ref()
@@ -361,7 +409,7 @@ impl HostBundleWriterV1 {
         self.write_receipt(&receipt)?;
         journal.state = HostBundleJournalStateV1::Committed;
         self.write_journal(&journal)?;
-        self.remove_control_file(HOST_BUNDLE_JOURNAL_FILE)?;
+        self.remove_journal(manifest.host)?;
         if receipt.rollback_boundary == HostBundleRollbackBoundaryV1::Passed {
             self.cleanup_unreferenced_backup_dir(request.operation_id)?;
         }
@@ -569,12 +617,35 @@ impl HostBundleWriterV1 {
         self.remove_control_file(&component_set_receipt_file(operation_id))
     }
 
-    pub(super) fn load_journal(&self) -> Result<Option<HostBundleJournalV1>, HostBundleError> {
-        read_control_json(&self.control, HOST_BUNDLE_JOURNAL_FILE)?
+    fn read_journal_file(
+        &self,
+        file_name: &str,
+    ) -> Result<Option<HostBundleJournalV1>, HostBundleError> {
+        read_control_json(&self.control, file_name)?
             .map(|bytes| {
                 serde_json::from_slice(&bytes).map_err(|_| HostBundleError::ReceiptCorrupted)
             })
             .transpose()
+    }
+
+    /// Load the pending single-component journal for one host.
+    ///
+    /// A journal written by an older binary lives under the shared legacy name
+    /// and carries its own `host` field, so it is attributed to exactly one
+    /// host. Recovering a different host must not see it.
+    pub(super) fn load_journal_for(
+        &self,
+        host: HostKindV1,
+    ) -> Result<Option<HostBundleJournalV1>, HostBundleError> {
+        if let Some(journal) = self.read_journal_file(&journal_file(host))? {
+            if journal.host != host {
+                return Err(HostBundleError::ReceiptCorrupted);
+            }
+            return Ok(Some(journal));
+        }
+        Ok(self
+            .read_journal_file(HOST_BUNDLE_JOURNAL_FILE)?
+            .filter(|journal| journal.host == host))
     }
 
     fn read_component_set_journal_file(
@@ -651,7 +722,29 @@ impl HostBundleWriterV1 {
     fn write_journal(&self, journal: &HostBundleJournalV1) -> Result<(), HostBundleError> {
         validate_journal(journal)?;
         let bytes = serde_json::to_vec(journal).map_err(|_| HostBundleError::ReceiptCorrupted)?;
-        atomic_write_nofollow(&self.control, HOST_BUNDLE_JOURNAL_FILE, &bytes, true)
+        atomic_write_nofollow(&self.control, &journal_file(journal.host), &bytes, true)?;
+        // A journal written by an older binary lives under the shared legacy
+        // name. Once its host-scoped successor is durable, retire it so the
+        // legacy file can never shadow or double-recover this transaction.
+        // Never unlink a legacy journal that belongs to a different host.
+        if self
+            .read_journal_file(HOST_BUNDLE_JOURNAL_FILE)?
+            .is_some_and(|legacy| legacy.host == journal.host)
+        {
+            self.remove_control_file(HOST_BUNDLE_JOURNAL_FILE)?;
+        }
+        Ok(())
+    }
+
+    fn remove_journal(&self, host: HostKindV1) -> Result<(), HostBundleError> {
+        self.remove_control_file(&journal_file(host))?;
+        if self
+            .read_journal_file(HOST_BUNDLE_JOURNAL_FILE)?
+            .is_some_and(|legacy| legacy.host == host)
+        {
+            self.remove_control_file(HOST_BUNDLE_JOURNAL_FILE)?;
+        }
+        Ok(())
     }
 
     #[hotpath::measure(label = "hosts.agent.host_bundle.component_set_journal_persist")]
@@ -701,6 +794,7 @@ impl HostBundleWriterV1 {
         host: HostKindV1,
         now_unix: u64,
     ) -> Result<Option<PathBuf>, HostBundleError> {
+        self.ensure_host_lock(host)?;
         let mut moved = None;
         for file in [
             component_set_journal_file(host),
@@ -840,7 +934,7 @@ impl HostBundleWriterV1 {
     /// the same operation id returns the existing receipt after revalidation.
     /// A missing, edited, or foreign artifact fails before receipt publication.
     pub fn backup_component<V: HostBundleVerificationAdapterV1>(
-        &self,
+        &mut self,
         manifest: &HostBundleManifestV1,
         operation_id: [u8; 16],
         explicit_confirmation: bool,
@@ -852,6 +946,7 @@ impl HostBundleWriterV1 {
         if !explicit_confirmation {
             return Err(HostBundleError::ConfirmationRequired);
         }
+        self.ensure_host_lock(manifest.host)?;
         manifest.validate_structure()?;
         verifier.verify_manifest(manifest)?;
         if let Some(receipt) = self.load_backup_receipt(operation_id)? {
@@ -978,7 +1073,7 @@ impl HostBundleWriterV1 {
     }
 
     pub fn publish_feedback_component_set_receipt(
-        &self,
+        &mut self,
         manifest: &HostBundleManifestV1,
         component_receipt: &HostBundleInstallReceiptV1,
     ) -> Result<HostComponentSetReceiptV1, HostBundleError> {
@@ -988,6 +1083,7 @@ impl HostBundleWriterV1 {
         {
             return Err(HostBundleError::WrongTarget);
         }
+        self.ensure_host_lock(component_receipt.host)?;
         let previous = latest_host_component_set_receipt_at(
             &self.lifecycle_root_path,
             component_receipt.host,
@@ -1130,7 +1226,14 @@ impl HostBundleWriterV1 {
 
 impl HostBundleLifecycleStorageV1 for HostBundleWriterV1 {
     fn recover_lifecycle(&mut self) -> Result<(), HostBundleError> {
-        self.recover_interrupted_operation()
+        // Explicit recover-all. Each host owns its journal, so each recovery
+        // takes only that host's lock and releases it before the next host.
+        for host in stock_host_kinds() {
+            if self.load_journal_for(host)?.is_some() {
+                self.recover_interrupted_operation(host)?;
+            }
+        }
+        Ok(())
     }
 
     fn execute_lifecycle<V: HostBundleVerificationAdapterV1>(
@@ -1175,9 +1278,14 @@ fn open_or_create_nofollow_dir(parent: &Dir, name: &str) -> Result<Dir, HostBund
     match parent.open_dir_nofollow(name) {
         Ok(directory) => Ok(directory),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            parent
-                .create_dir(name)
-                .map_err(|_| host_bundle_storage_failure!())?;
+            match parent.create_dir(name) {
+                Ok(()) => {}
+                // Two hosts may create a shared parent (`backups/`, `.config/`)
+                // at once. The directory is a namespace, not a shared state
+                // object; the loser retries the open instead of failing.
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(_) => return Err(host_bundle_storage_failure!()),
+            }
             parent
                 .open_dir_nofollow(name)
                 .map_err(|_| HostBundleError::UnsafeInstallPath)
@@ -1186,7 +1294,14 @@ fn open_or_create_nofollow_dir(parent: &Dir, name: &str) -> Result<Dir, HostBund
     }
 }
 
-fn open_writer_lock(control: &Dir) -> Result<fs::File, HostBundleError> {
+fn open_host_writer_lock(
+    control: &Dir,
+    host: HostKindV1,
+) -> Result<HostWriterLock, HostBundleError> {
+    let name = writer_lock_file(host);
+    if !is_safe_component(&name) {
+        return Err(HostBundleError::UnsafeInstallPath);
+    }
     let mut options = CapOpenOptions::new();
     options
         .read(true)
@@ -1194,12 +1309,12 @@ fn open_writer_lock(control: &Dir) -> Result<fs::File, HostBundleError> {
         .create(true)
         .follow(FollowSymlinks::No);
     let file = control
-        .open_with(HOST_BUNDLE_LOCK_FILE, &options)
+        .open_with(&name, &options)
         .map_err(|_| HostBundleError::UnsafeInstallPath)?
         .into_std();
     file.try_lock_exclusive()
         .map_err(|_| host_bundle_recovery_required!())?;
-    Ok(file)
+    Ok(HostWriterLock { host, file })
 }
 
 pub(super) fn read_regular_nofollow(

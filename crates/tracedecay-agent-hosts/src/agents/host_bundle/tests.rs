@@ -5,9 +5,10 @@ use sha2::{Digest, Sha256};
 use tracedecay_host_integration::host_bundle_storage_failure;
 
 use super::control::{
-    HOST_BUNDLE_CONTROL_DIR, HOST_COMPONENT_SET_JOURNAL_FILE, component_set_journal_file,
-    expected_ownership_marker, host_bundle_backup_receipt_file, host_bundle_restore_receipt_file,
-    receipt_file, validate_component_set_journal,
+    HOST_BUNDLE_CONTROL_DIR, HOST_BUNDLE_JOURNAL_FILE, HOST_BUNDLE_LOCK_FILE,
+    HOST_COMPONENT_SET_JOURNAL_FILE, component_set_journal_file, expected_ownership_marker,
+    host_bundle_backup_receipt_file, host_bundle_restore_receipt_file, journal_file, receipt_file,
+    validate_component_set_journal, writer_lock_file,
 };
 use super::doctor::doctor_artifact_state;
 use super::planner::plan_artifact_action;
@@ -896,6 +897,160 @@ fn host_scoped_component_set(host: HostKindV1, slug: &str, tag: &[u8]) -> HostCo
     }
 }
 
+/// Defect: one `writer.v1.lock` and one `journal.v1.json` still serialized
+/// every host after component-set journals were split. A writer that has
+/// already admitted OpenCode must not stop Codex, and must not roll back
+/// OpenCode's legacy single-component journal.
+#[test]
+fn a_host_lock_does_not_exclude_an_unrelated_host() {
+    let root = tempfile::tempdir().unwrap();
+    let opencode = host_scoped_component_set(HostKindV1::OpenCode, "opencode", b"v1");
+    let opencode_request =
+        component_set_request(HostKindV1::OpenCode, HostBundleLifecycleOpV1::Install, 61);
+    let mut holder = HostBundleWriterV1::open(root.path()).unwrap();
+    HostComponentSetTransactionV1::new(&mut holder)
+        .execute(
+            &opencode,
+            &opencode_request,
+            &ComponentSetVerifier::from_set(&opencode),
+            &mut ArtifactOnlyTestRegistration,
+        )
+        .expect("opencode install admits the host lock");
+    assert!(
+        root.path()
+            .join(HOST_BUNDLE_CONTROL_DIR)
+            .join(writer_lock_file(HostKindV1::OpenCode))
+            .is_file()
+    );
+    assert!(
+        !root
+            .path()
+            .join(HOST_BUNDLE_CONTROL_DIR)
+            .join(HOST_BUNDLE_LOCK_FILE)
+            .exists(),
+        "the retired lifecycle-root lock must not be recreated"
+    );
+
+    let codex = host_scoped_component_set(HostKindV1::Codex, "codex", b"v1");
+    let codex_request =
+        component_set_request(HostKindV1::Codex, HostBundleLifecycleOpV1::Install, 62);
+    let mut other = HostBundleWriterV1::open(root.path()).unwrap();
+    HostComponentSetTransactionV1::new(&mut other)
+        .execute(
+            &codex,
+            &codex_request,
+            &ComponentSetVerifier::from_set(&codex),
+            &mut ArtifactOnlyTestRegistration,
+        )
+        .expect("codex must not wait on opencode's writer lock");
+    assert_eq!(
+        fs::read(root.path().join("codex/core.json")).unwrap(),
+        b"v1"
+    );
+
+    let contended = host_scoped_component_set(HostKindV1::OpenCode, "opencode", b"v2");
+    let contended_request =
+        component_set_request(HostKindV1::OpenCode, HostBundleLifecycleOpV1::Repair, 63);
+    assert!(
+        matches!(
+            HostComponentSetTransactionV1::new(&mut other)
+                .execute(
+                    &contended,
+                    &contended_request,
+                    &ComponentSetVerifier::from_set(&contended),
+                    &mut ArtifactOnlyTestRegistration,
+                )
+                .err(),
+            Some(HostBundleError::RecoveryRequired(_))
+        ),
+        "the same host still has exactly one writer"
+    );
+}
+
+/// Defect: `journal.v1.json` was still one file for every host. Recovering or
+/// installing Codex must not roll back an OpenCode journal left by an older
+/// binary. OpenCode's own recovery retires that legacy name.
+#[test]
+fn a_legacy_single_component_journal_is_attributed_to_its_own_host() {
+    let root = tempfile::tempdir().unwrap();
+    let artifact = root.path().join("opencode/core.json");
+    fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+    fs::write(&artifact, b"opencode-bytes").unwrap();
+    let digest: [u8; 32] = Sha256::digest(b"opencode-bytes").into();
+    let journal = HostBundleJournalV1 {
+        schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
+        operation_id: [71; 16],
+        host: HostKindV1::OpenCode,
+        component: HostComponentV1::Core,
+        operation: HostBundleLifecycleOpV1::Install,
+        manifest_digest: digest,
+        state: HostBundleJournalStateV1::Prepared,
+        previous_receipt: None,
+        entries: vec![HostBundleJournalEntryV1 {
+            relative_path: "opencode/core.json".to_string(),
+            backup_name: None,
+            backup_created: false,
+            wrote_new: true,
+            installed_digest: Some(digest),
+        }],
+    };
+    let control = root.path().join(HOST_BUNDLE_CONTROL_DIR);
+    fs::create_dir_all(&control).unwrap();
+    fs::write(
+        control.join(HOST_BUNDLE_JOURNAL_FILE),
+        serde_json::to_vec(&journal).unwrap(),
+    )
+    .unwrap();
+
+    let codex = host_scoped_component_set(HostKindV1::Codex, "codex", b"v1");
+    let codex_request =
+        component_set_request(HostKindV1::Codex, HostBundleLifecycleOpV1::Install, 72);
+    let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+    HostComponentSetTransactionV1::new(&mut writer)
+        .execute(
+            &codex,
+            &codex_request,
+            &ComponentSetVerifier::from_set(&codex),
+            &mut ArtifactOnlyTestRegistration,
+        )
+        .expect("codex install must not refuse on opencode's legacy journal");
+    assert_eq!(fs::read(&artifact).unwrap(), b"opencode-bytes");
+    assert!(
+        control.join(HOST_BUNDLE_JOURNAL_FILE).is_file(),
+        "codex must not retire opencode's legacy journal"
+    );
+
+    let doctor = inspect_installed_host_bundle_components_at(
+        root.path(),
+        root.path(),
+        &CurrentRegistration,
+        crate::agents::TEST_GENERATOR_COMMIT,
+    )
+    .unwrap();
+    assert!(
+        doctor.components.iter().any(|component| {
+            component.host == Some(HostKindV1::OpenCode)
+                && component.component == Some(HostComponentV1::Core)
+                && component.state == HostBundleComponentDoctorStateV1::Repairable
+        }),
+        "doctor still reports the legacy single-component journal"
+    );
+
+    HostComponentSetTransactionV1::new(&mut writer)
+        .recover_host(HostKindV1::OpenCode, &mut ArtifactOnlyTestRegistration)
+        .expect("opencode recovery owns the legacy journal");
+    assert!(
+        !artifact.exists(),
+        "opencode recovery rolls its own interrupted install back"
+    );
+    assert!(!control.join(HOST_BUNDLE_JOURNAL_FILE).exists());
+    assert!(!control.join(journal_file(HostKindV1::OpenCode)).exists());
+    assert_eq!(
+        fs::read(root.path().join("codex/core.json")).unwrap(),
+        b"v1"
+    );
+}
+
 /// Defect: one shared journal per lifecycle root meant a wedged opencode
 /// repair blocked codex, cursor, cline, roo-code, kilo, kiro, and kimi in
 /// the same `tracedecay reinstall`. Journals are host-scoped now, and the
@@ -1352,7 +1507,7 @@ fn feedback_switch_apply_restore_and_aggregate_receipt_share_writer_recovery() {
             &[],
         )
         .unwrap();
-    let writer = switch.into_lifecycle().into_storage();
+    let mut writer = switch.into_lifecycle().into_storage();
     let aggregate = writer
         .publish_feedback_component_set_receipt(&previous, &restore.restore_receipt)
         .unwrap();

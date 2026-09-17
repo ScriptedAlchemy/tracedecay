@@ -10,7 +10,7 @@ use tracedecay_host_integration::host_bundle_storage_failure;
 
 use super::control::{
     HOST_BUNDLE_CONTROL_DIR, HOST_BUNDLE_JOURNAL_FILE, HOST_COMPONENT_SET_JOURNAL_FILE,
-    MAX_CONTROL_FILE_BYTES, component_set_journal_file, component_slug, receipt_file,
+    MAX_CONTROL_FILE_BYTES, component_set_journal_file, component_slug, journal_file, receipt_file,
     receipt_identity_from_file_name, validate_component_set_journal, validate_journal,
     validate_receipt,
 };
@@ -365,44 +365,50 @@ pub fn inspect_installed_host_bundle_components_at(
             repair_action: component_repair_action,
         });
     }
-    let journal_path = control_root.join(HOST_BUNDLE_JOURNAL_FILE);
-    if journal_path.exists() {
-        let journal = fs::read(&journal_path)
-            .ok()
-            .filter(|bytes| !bytes.is_empty() && bytes.len() <= MAX_CONTROL_FILE_BYTES)
-            .and_then(|bytes| serde_json::from_slice::<HostBundleJournalV1>(&bytes).ok())
-            .filter(|journal| validate_journal(journal).is_ok());
-        match journal {
-            Some(journal) => {
-                if let Some(component) = components.iter_mut().find(|component| {
-                    component.host == Some(journal.host)
-                        && component.component == Some(journal.component)
-                }) {
-                    component.state = HostBundleComponentDoctorStateV1::Repairable;
-                    component.repair_action = repair_action(
-                        journal.host,
-                        journal.component,
-                        HostBundleComponentDoctorStateV1::Repairable,
-                        HostBundleRegistrationStateV1::Current,
-                    );
-                } else {
-                    components.push(HostBundleComponentDoctorResultV1 {
-                        receipt_path: journal_path.clone(),
-                        host: Some(journal.host),
-                        component: Some(journal.component),
-                        state: HostBundleComponentDoctorStateV1::Repairable,
-                        registration: None,
-                        artifacts: Vec::new(),
-                        repair_action: repair_action(
+    // Single-component journals are host-scoped; the legacy shared name is
+    // still inspected so a journal left by an older binary stays visible.
+    let journal_paths = std::iter::once(HOST_BUNDLE_JOURNAL_FILE.to_string())
+        .chain(stock_host_kinds().into_iter().map(journal_file))
+        .map(|file| control_root.join(file));
+    for journal_path in journal_paths {
+        if journal_path.exists() {
+            let journal = fs::read(&journal_path)
+                .ok()
+                .filter(|bytes| !bytes.is_empty() && bytes.len() <= MAX_CONTROL_FILE_BYTES)
+                .and_then(|bytes| serde_json::from_slice::<HostBundleJournalV1>(&bytes).ok())
+                .filter(|journal| validate_journal(journal).is_ok());
+            match journal {
+                Some(journal) => {
+                    if let Some(component) = components.iter_mut().find(|component| {
+                        component.host == Some(journal.host)
+                            && component.component == Some(journal.component)
+                    }) {
+                        component.state = HostBundleComponentDoctorStateV1::Repairable;
+                        component.repair_action = repair_action(
                             journal.host,
                             journal.component,
                             HostBundleComponentDoctorStateV1::Repairable,
                             HostBundleRegistrationStateV1::Current,
-                        ),
-                    });
+                        );
+                    } else {
+                        components.push(HostBundleComponentDoctorResultV1 {
+                            receipt_path: journal_path.clone(),
+                            host: Some(journal.host),
+                            component: Some(journal.component),
+                            state: HostBundleComponentDoctorStateV1::Repairable,
+                            registration: None,
+                            artifacts: Vec::new(),
+                            repair_action: repair_action(
+                                journal.host,
+                                journal.component,
+                                HostBundleComponentDoctorStateV1::Repairable,
+                                HostBundleRegistrationStateV1::Current,
+                            ),
+                        });
+                    }
                 }
+                None => components.push(corrupt_component_result(journal_path, None, None)),
             }
-            None => components.push(corrupt_component_result(journal_path, None, None)),
         }
     }
     // Component-set journals are host-scoped; the legacy shared name is still

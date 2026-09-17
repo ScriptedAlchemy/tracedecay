@@ -23,6 +23,11 @@ use super::{
 };
 
 pub(super) const HOST_BUNDLE_CONTROL_DIR: &str = ".tracedecay-host-bundle-v1";
+/// Legacy shared single-component journal. One file per lifecycle root meant
+/// recovering host Y rolled back host X, and a wedged journal blocked every
+/// other host. Journals are host-scoped now; this name is still read (and
+/// retired) so a journal left by an older binary is recovered rather than
+/// orphaned.
 pub(super) const HOST_BUNDLE_JOURNAL_FILE: &str = "journal.v1.json";
 /// Legacy shared component-set journal name. One journal per lifecycle root
 /// meant an interrupted transaction for any host blocked every other host.
@@ -33,6 +38,9 @@ pub(super) const HOST_COMPONENT_SET_STAGE_DIR: &str = "component-set-staging";
 /// Set-aside directory for journals an operator explicitly abandoned with
 /// `tracedecay host-bundle recover --quarantine --yes`. Backups stay in place.
 pub(super) const HOST_BUNDLE_QUARANTINE_DIR: &str = "quarantine";
+/// Retired lifecycle-root lock. Hosts do not share a write target, so each
+/// host owns `writer.{slug}.v1.lock`. This name is not acquired; a new binary
+/// must not recreate it or independent hosts serialize again.
 pub(super) const HOST_BUNDLE_LOCK_FILE: &str = "writer.v1.lock";
 pub(super) const MAX_CONTROL_FILE_BYTES: usize = 256 * 1024;
 
@@ -561,10 +569,19 @@ pub(super) fn receipt_file(host: HostKindV1, component: HostComponentV1) -> Stri
 /// reason to refuse Y. `first_party_host_artifact_prefixes_are_disjoint`
 /// pins that premise as a test, so a future host that violates it fails the
 /// suite rather than silently widening the blast radius. The receipt namespace
-/// is already host-scoped (`receipt_file`), and the single writer lock still
-/// serializes all mutation within a lifecycle root.
+/// is already host-scoped (`receipt_file`). The writer lock is host-scoped
+/// too (`writer_lock_file`): one host's in-flight mutation is a real
+/// invariant, a second host's is not.
 pub(super) fn component_set_journal_file(host: HostKindV1) -> String {
     format!("component-set-journal.{}.v1.json", host.descriptor().slug())
+}
+
+pub(super) fn journal_file(host: HostKindV1) -> String {
+    format!("journal.{}.v1.json", host.descriptor().slug())
+}
+
+pub(super) fn writer_lock_file(host: HostKindV1) -> String {
+    format!("writer.{}.v1.lock", host.descriptor().slug())
 }
 
 pub(super) fn component_set_receipt_file(operation_id: [u8; 16]) -> String {
