@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ProjectRepoGroup } from '../../contracts/generated.ts';
 import { ActivationField } from '../../viz/graph/activation.ts';
@@ -18,13 +18,18 @@ import { RegistryScene } from './RegistryScene.tsx';
 
 const runtime = vi.hoisted(() => ({
   instance: null as (RegistryRuntime & { calls: string[] }) | null,
+  created: 0,
   webgl: true,
   picked: null as SceneBody | null,
+  context: null as { onLost: () => void; onRestored: () => void } | null,
 }));
 
 vi.mock('../../viz/graph/renderer.ts', () => ({
   hasWebGl: () => runtime.webgl,
-  watchWebGlContext: () => () => {},
+  watchWebGlContext: (_canvases: unknown, handlers: { onLost: () => void; onRestored: () => void }) => {
+    runtime.context = handlers;
+    return () => {};
+  },
 }));
 
 vi.mock('../../viz/scene/registryRuntime.ts', () => ({
@@ -58,6 +63,7 @@ vi.mock('../../viz/scene/registryRuntime.ts', () => ({
       dispose: () => void calls.push('dispose'),
     };
     runtime.instance = instance;
+    runtime.created += 1;
     return instance;
   },
 }));
@@ -107,8 +113,10 @@ function mount(overrides: Partial<Parameters<typeof RegistryScene>[0]> = {}) {
 describe('RegistryScene host contract', () => {
   beforeEach(() => {
     runtime.instance = null;
+    runtime.created = 0;
     runtime.webgl = true;
     runtime.picked = null;
+    runtime.context = null;
     Object.defineProperties(HTMLElement.prototype, {
       clientWidth: { configurable: true, get: () => 640 },
       clientHeight: { configurable: true, get: () => 320 },
@@ -146,8 +154,28 @@ describe('RegistryScene host contract', () => {
     expect(screen.getByText(/today · 1/i)).toBeTruthy();
     expect(screen.getByText('repo:shared')).toBeTruthy();
     expect(screen.getByText('hub · massless')).toBeTruthy();
-    expect(screen.getByRole('group', { name: 'Registry field camera controls' })).toBeTruthy();
+    // Controls and the minimap are siblings of the image, never children of a
+    // `role="img"` (whose children are presentational to assistive tech).
+    const image = screen.getByRole('img', { name: 'Registry field: test' });
+    const controls = screen.getByRole('group', { name: 'Registry field camera controls' });
+    expect(image.contains(controls)).toBe(false);
     expect(screen.getByLabelText('Registry field zoom').textContent).toBe('100%');
+  });
+
+  it('states a lost context as a typed absence and rebuilds when the browser restores it', () => {
+    mount();
+    expect(runtime.created).toBe(1);
+    expect(runtime.context).not.toBeNull();
+    act(() => runtime.context!.onLost());
+    const absence = screen.getByRole('status');
+    expect(absence.getAttribute('data-state')).toBe('unavailable');
+    expect(absence.textContent).toMatch(/lost its WebGL context/);
+    expect(absence.textContent).toMatch(/returns if the browser restores/);
+    expect(runtime.instance!.calls).toContain('dispose');
+    act(() => runtime.context!.onRestored());
+    expect(screen.queryByText(/lost its WebGL context/)).toBeNull();
+    expect(screen.getByRole('img', { name: 'Registry field: test' })).toBeTruthy();
+    expect(runtime.created).toBe(2);
   });
 
   it('turns pointer movement into inspection only: no heat, no selection', () => {
@@ -169,7 +197,7 @@ describe('RegistryScene host contract', () => {
     expect(activation.warm).toBe(false);
   });
 
-  it('selects a project body on click and never a repository hub', () => {
+  it('selects a project body on a primary click and never a repository hub or another button', () => {
     const { activation, onSelect } = mount();
     const field = screen.getByRole('img', { name: 'Registry field: test' });
     runtime.picked = MODEL.byId.get('repo:/shared/.git')!;
@@ -177,10 +205,43 @@ describe('RegistryScene host contract', () => {
     fireEvent.pointerUp(field, { button: 0, clientX: 10, clientY: 10, pointerId: 1 });
     expect(onSelect).not.toHaveBeenCalled();
     runtime.picked = MODEL.byId.get('wt')!;
+    // A middle or secondary button is not a selection gesture.
+    fireEvent.pointerDown(field, { button: 1, clientX: 10, clientY: 10, pointerId: 1 });
+    fireEvent.pointerUp(field, { button: 1, clientX: 10, clientY: 10, pointerId: 1 });
+    fireEvent.pointerDown(field, { button: 2, clientX: 10, clientY: 10, pointerId: 1 });
+    fireEvent.pointerUp(field, { button: 2, clientX: 10, clientY: 10, pointerId: 1 });
+    expect(onSelect).not.toHaveBeenCalled();
     fireEvent.pointerDown(field, { button: 0, clientX: 10, clientY: 10, pointerId: 1 });
     fireEvent.pointerUp(field, { button: 0, clientX: 10, clientY: 10, pointerId: 1 });
     expect(onSelect).toHaveBeenCalledWith('wt');
     expect(activation.warm).toBe(false);
+  });
+
+  it('un-dims the names when the pointer leaves, even while the inspector retains the project', () => {
+    const { rerender, activation, onInspect, onSelect } = mount();
+    const field = screen.getByRole('img', { name: 'Registry field: test' });
+    runtime.picked = MODEL.byId.get('lone')!;
+    fireEvent.pointerMove(field, { clientX: 100, clientY: 100, buttons: 0 });
+    // The page retains the inspection (it swallows the null), as BrainPage does.
+    rerender(
+      <RegistryScene
+        model={MODEL}
+        activation={activation}
+        inspectedId="lone"
+        onInspect={onInspect}
+        onSelect={onSelect}
+        emphasis={null}
+        ariaLabel="Registry field: test"
+        fallbackDescription="the registry list remains available"
+        caption={<p>caption</p>}
+        detail={() => []}
+      />,
+    );
+    const labelOf = (id: string) => screen.getByText(id).parentElement!;
+    expect(labelOf('main').className).toMatch(/opacity-40/);
+    fireEvent.pointerLeave(field);
+    expect(runtime.instance!.calls).toContain('focus:null');
+    expect(labelOf('main').className).not.toMatch(/opacity-40/);
   });
 
   it('treats a drag as a pan, not a click', () => {
