@@ -27,9 +27,8 @@ mod workflow_emit;
 
 pub use cost_latency::{provider_latency_read_model, unavailable_provider_latency};
 pub use costs::{
-    costs_cli_value, costs_export_bytes, costs_mcp_value, costs_read_model,
-    costs_read_model_with_provider_usage, costs_read_model_with_provider_usage_and_observability,
-    costs_unavailable_read_model,
+    costs_read_model, costs_read_model_with_provider_usage,
+    costs_read_model_with_provider_usage_and_observability, costs_unavailable_read_model,
 };
 pub use delivery_recorder::{
     BoundedDeliverySettlementRecorderV1, DeliverySettlementRecordOutcomeV1,
@@ -100,40 +99,6 @@ use tracedecay_contracts::feedback::observations::FeedbackCoverageV1;
 const ANALYTICS_DESCRIPTOR: &str = "analytics-events.v1";
 pub(super) const COST_DESCRIPTOR: &str = "provider-costs.v1";
 const FEEDBACK_DESCRIPTOR: &str = "feedback-system-quality.v1";
-
-/// Canonical wire projection used by every dashboard wire surface. Adapters may wrap the
-/// value in their transport framing but may not recompute metrics or coverage.
-fn canonical_observatory_value(
-    model: &ObservatoryReadModelV1,
-) -> Result<serde_json::Value, serde_json::Error> {
-    serde_json::to_value(model)
-}
-
-pub fn observatory_cli_value(
-    model: &ObservatoryReadModelV1,
-) -> Result<serde_json::Value, serde_json::Error> {
-    canonical_observatory_value(model)
-}
-
-pub fn observatory_mcp_value(
-    model: &ObservatoryReadModelV1,
-) -> Result<serde_json::Value, serde_json::Error> {
-    canonical_observatory_value(model)
-}
-
-pub fn observatory_http_value(
-    model: &ObservatoryReadModelV1,
-) -> Result<serde_json::Value, serde_json::Error> {
-    canonical_observatory_value(model)
-}
-
-/// Bounded public JSON export. It is the same canonical model as interactive
-/// surfaces, including absent values, exact denominator, and coverage state.
-pub fn observatory_export_bytes(
-    model: &ObservatoryReadModelV1,
-) -> Result<Vec<u8>, serde_json::Error> {
-    serde_json::to_vec(model)
-}
 
 fn coverage(
     eligible: Option<u64>,
@@ -529,46 +494,36 @@ mod tests {
             10,
             "fixture_source_unavailable",
         );
-        let cli = observatory_cli_value(&observatory).expect("CLI JSON");
-        let mcp = observatory_mcp_value(&observatory).expect("MCP JSON");
-        let http = observatory_http_value(&observatory).expect("HTTP JSON");
-        let dashboard = serde_json::to_value(&observatory).expect("dashboard payload");
+        let wire = serde_json::to_value(&observatory).expect("observatory wire");
         let export: serde_json::Value =
-            serde_json::from_slice(&observatory_export_bytes(&observatory).expect("export JSON"))
-                .expect("decode export JSON");
-        assert_eq!(cli, mcp);
-        assert_eq!(cli, http);
-        assert_eq!(cli, dashboard);
-        assert_eq!(cli, export);
-        assert_eq!(cli["metrics"][0]["value"], serde_json::Value::Null);
+            serde_json::from_slice(&serde_json::to_vec(&observatory).expect("observatory export"))
+                .expect("decode observatory export");
+        assert_eq!(wire, export);
+        assert_eq!(wire["metrics"][0]["value"], serde_json::Value::Null);
         assert_eq!(
-            cli["metrics"][0]["denominator_value"],
+            wire["metrics"][0]["denominator_value"],
             serde_json::Value::Null
         );
-        assert_eq!(cli["metrics"][0]["coverage"]["state"], "unknown");
+        assert_eq!(wire["metrics"][0]["coverage"]["state"], "unknown");
         assert_eq!(
-            cli["metrics"][0]["unavailable_reason"],
+            wire["metrics"][0]["unavailable_reason"],
             "fixture_source_unavailable"
         );
 
         let costs =
             costs_unavailable_read_model(Some("scope:parity"), 10, "fixture_cost_unavailable");
-        let cli = costs_cli_value(&costs).expect("CLI costs JSON");
-        let mcp = costs_mcp_value(&costs).expect("MCP costs JSON");
-        let dashboard = serde_json::to_value(&costs).expect("dashboard costs payload");
+        let wire = serde_json::to_value(&costs).expect("costs wire");
         let export: serde_json::Value =
-            serde_json::from_slice(&costs_export_bytes(&costs).expect("costs export JSON"))
-                .expect("decode costs export JSON");
-        assert_eq!(cli, mcp);
-        assert_eq!(cli, dashboard);
-        assert_eq!(cli, export);
-        assert_eq!(cli["usage"][0]["coverage"]["state"], "unknown");
+            serde_json::from_slice(&serde_json::to_vec(&costs).expect("costs export"))
+                .expect("decode costs export");
+        assert_eq!(wire, export);
+        assert_eq!(wire["usage"][0]["coverage"]["state"], "unknown");
         assert_eq!(
-            cli["usage"][0]["denominator_value"],
+            wire["usage"][0]["denominator_value"],
             serde_json::Value::Null
         );
         assert_eq!(
-            cli["usage"][0]["unavailable_reason"],
+            wire["usage"][0]["unavailable_reason"],
             "fixture_cost_unavailable"
         );
     }

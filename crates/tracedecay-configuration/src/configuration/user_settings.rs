@@ -41,7 +41,8 @@ pub struct UserSettingsSnapshotV1 {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UserSettingsMutationV1 {
     pub upload_enabled: Option<bool>,
-    pub watcher_debounce: Option<String>,
+    /// Positive milliseconds already parsed at the settings boundary.
+    pub watcher_debounce_ms: Option<u64>,
     pub extraction_timeout_secs: Option<u64>,
 }
 
@@ -204,9 +205,7 @@ pub fn plan_user_settings_mutation(
             ConfigurationValueV1::Boolean(upload_enabled),
         )?);
     }
-    if let Some(watcher_debounce) = mutation.watcher_debounce {
-        let watcher_debounce_ms = parse_duration_millis(&watcher_debounce)
-            .ok_or_else(|| unavailable("canonical watcher debounce duration"))?;
+    if let Some(watcher_debounce_ms) = mutation.watcher_debounce_ms {
         mutations.push(set(
             layer.clone(),
             USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
@@ -328,7 +327,7 @@ mod tests {
             profile_id.clone(),
             UserSettingsMutationV1 {
                 upload_enabled: Some(true),
-                watcher_debounce: Some("15s".to_owned()),
+                watcher_debounce_ms: Some(15_000),
                 extraction_timeout_secs: Some(60),
             },
         )
@@ -336,6 +335,13 @@ mod tests {
 
         assert_eq!(plan.mutations.len(), 3);
         assert!(plan.restart_recommended);
+        assert!(plan.mutations.iter().any(|mutation| matches!(
+            mutation,
+            DirectConfigurationMutation::Set {
+                value,
+                ..
+            } if matches!(value.as_ref(), ConfigurationValueV1::Unsigned(15_000))
+        )));
         assert!(plan.mutations.iter().all(|mutation| {
             matches!(
                 mutation.target_layer(),

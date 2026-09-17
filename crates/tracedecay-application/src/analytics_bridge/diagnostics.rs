@@ -81,7 +81,7 @@ pub async fn analytics_diagnostics_with_db(
     let observatory = hotpath::measure_block!("analytics.observatory", {
         let observatory =
             crate::observability::observatory_read_model(gdb, project_filter.as_deref(), 0).await;
-        crate::observability::observatory_cli_value(&observatory).map_err(cli_error)?
+        serde_json::to_value(&observatory).map_err(cli_error)?
     });
     let provider_scope = if all_projects {
         None
@@ -105,7 +105,7 @@ pub async fn analytics_diagnostics_with_db(
             0,
         )
         .await;
-        crate::observability::costs_cli_value(&costs).map_err(cli_error)?
+        serde_json::to_value(&costs).map_err(cli_error)?
     });
     let event_rows: Vec<Value> = events.iter().map(durable_analytics_event_row).collect();
 

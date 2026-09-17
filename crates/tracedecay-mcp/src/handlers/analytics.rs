@@ -396,8 +396,7 @@ async fn observatory_and_costs_sections(
         label = "mcp.analytics.report.observatory"
     )
     .await;
-    let observatory = tracedecay_application::observability::observatory_mcp_value(&observatory)
-        .map_err(config_error)?;
+    let observatory = serde_json::to_value(&observatory).map_err(config_error)?;
     let provider_scope = if all_projects {
         None
     } else {
@@ -426,8 +425,7 @@ async fn observatory_and_costs_sections(
         label = "mcp.analytics.report.costs"
     )
     .await;
-    let costs =
-        tracedecay_application::observability::costs_mcp_value(&costs).map_err(config_error)?;
+    let costs = serde_json::to_value(&costs).map_err(config_error)?;
     let object = value
         .as_object_mut()
         .ok_or_else(|| config_error("analytics response must be a JSON object"))?;

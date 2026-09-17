@@ -12,11 +12,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tracedecay_api::configuration::{
     DashboardConfigurationRouteErrorV1, PROJECT_SETTINGS_APPLY_OPERATION,
-    SETTINGS_REFRESH_OPERATION, configuration_application_problem_error,
+    SETTINGS_REFRESH_OPERATION, admit_user_settings_patch, configuration_application_problem_error,
     configuration_authority_unavailable_error, configuration_revision_conflict_error,
     parse_code_index_worker_settings_patch, parse_project_settings_patch,
     parse_user_settings_patch, settings_validation_error,
-    validate_code_index_worker_settings_patch, validate_user_settings_patch,
+    validate_code_index_worker_settings_patch,
 };
 use tracedecay_contracts::{
     ApplicationOutcome, ApplicationProblemEnvelope, ApplicationProblemKind,
@@ -426,7 +426,7 @@ pub async fn patch_user_settings(
 ) -> ApiResult {
     let patch = parse_user_settings_patch(patch)?;
     let pr_autotrack = pr_autotrack_payload(&state)?;
-    validate_user_settings_patch(&patch, |value| parse_duration_millis(value).is_some())?;
+    let admitted = admit_user_settings_patch(&patch, parse_duration_millis)?;
     let idempotency_key =
         ConfigurationIdempotencyKey::new(patch.idempotency_key.clone()).map_err(|_| {
             settings_validation_error(json!([{
@@ -458,9 +458,9 @@ pub async fn patch_user_settings(
         &current,
         profile_id,
         UserSettingsMutationV1 {
-            upload_enabled: patch.upload_enabled,
-            watcher_debounce: patch.watcher_debounce,
-            extraction_timeout_secs: patch.extraction_timeout_secs,
+            upload_enabled: admitted.upload_enabled,
+            watcher_debounce_ms: admitted.watcher_debounce_ms,
+            extraction_timeout_secs: admitted.extraction_timeout_secs,
         },
     )
     .map_err(|_| configuration_authority_unavailable_error())?;

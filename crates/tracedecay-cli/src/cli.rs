@@ -132,7 +132,10 @@ pub enum HostBundleAction {
         #[arg(long)]
         quarantine: bool,
     },
-    /// Snapshot one installed component's managed artifact files
+    /// Snapshot one installed component's managed artifact files.
+    ///
+    /// Requires the global `--yes` confirmation. The backup writer refuses an
+    /// unconfirmed receipt even though deployed files are not overwritten.
     ArtifactBackup {
         /// Agent whose selected component owns the managed artifacts
         #[arg(long, value_parser = agent_value_parser())]
