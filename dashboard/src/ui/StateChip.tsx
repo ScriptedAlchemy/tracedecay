@@ -96,8 +96,10 @@ const STATE: Record<
 
 /** The lamp bar down the chip's leading edge. Spelled out per state (rather
  * than derived from `tokenClass`) because Tailwind resolves utilities by
- * scanning literal source text — a computed class name would never be built. */
-const LAMP: Record<DomainStateKind, string> = {
+ * scanning literal source text — a computed class name would never be built.
+ * Exported so the status strip's workspace registers light their swatch from
+ * the same rule as the chip, and the two can never disagree about a state. */
+export const STATE_LAMP: Record<DomainStateKind, string> = {
   loading: 'bg-state-loading',
   complete_zero_findings: 'bg-state-complete-zero',
   ready: 'bg-state-ready',
@@ -129,7 +131,7 @@ export function StateChip({
   className?: string;
 }) {
   const s = STATE[kind] ?? UNSUPPORTED_SCHEMA_VISUAL;
-  const lampClass = LAMP[kind] ?? 'bg-state-unsupported-schema';
+  const lampClass = STATE_LAMP[kind] ?? 'bg-state-unsupported-schema';
   const Icon = s.icon;
   return (
     <span
