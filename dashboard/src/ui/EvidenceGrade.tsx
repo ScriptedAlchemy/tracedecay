@@ -103,7 +103,7 @@ export function EvidenceGrade({
 }) {
   return (
     <span
-      className={cn('inline-flex items-center gap-1.5 td-legend', INK[grade], className)}
+      className={cn('td-legend inline-flex flex-wrap items-center gap-1.5 whitespace-normal', INK[grade], className)}
       data-evidence-grade={grade}
     >
       <Glyph grade={grade} />
