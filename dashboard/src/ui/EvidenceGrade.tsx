@@ -77,3 +77,97 @@ export function Absence({
     </div>
   );
 }
+
+export type EvidenceGradeKind =
+  | 'exact'
+  | 'explicit'
+  | 'inferred'
+  | 'ambiguous'
+  | 'stale'
+  | 'unavailable';
+
+const LABEL: Record<EvidenceGradeKind, string> = {
+  exact: 'EXACT',
+  explicit: 'EXPLICIT',
+  inferred: 'INFERRED',
+  ambiguous: 'AMBIGUOUS',
+  stale: 'STALE',
+  unavailable: 'UNAVAILABLE',
+};
+
+const INK: Record<EvidenceGradeKind, string> = {
+  exact: 'text-text-secondary',
+  explicit: 'text-text-secondary',
+  inferred: 'text-text-muted',
+  ambiguous: 'text-state-partial',
+  stale: 'text-state-stale',
+  unavailable: 'text-text-muted',
+};
+
+function Glyph({ grade }: { grade: EvidenceGradeKind }) {
+  switch (grade) {
+    case 'exact':
+    case 'explicit':
+      return <span aria-hidden className="h-px w-3 shrink-0 bg-current" />;
+    case 'inferred':
+      return (
+        <span
+          aria-hidden
+          className="h-px w-3 shrink-0"
+          style={{
+            backgroundImage:
+              'repeating-linear-gradient(90deg, currentColor 0 3px, transparent 3px 5px)',
+          }}
+        />
+      );
+    case 'ambiguous':
+      return (
+        <span
+          aria-hidden
+          className="h-px w-3 shrink-0"
+          style={{
+            backgroundImage:
+              'repeating-linear-gradient(90deg, currentColor 0 1px, transparent 1px 3px)',
+          }}
+        />
+      );
+    case 'stale':
+      return (
+        <span
+          aria-hidden
+          className="h-1.5 w-3 shrink-0"
+          style={{
+            backgroundImage:
+              'repeating-linear-gradient(45deg, currentColor 0 1px, transparent 1px 3px)',
+          }}
+        />
+      );
+    case 'unavailable':
+      return <span aria-hidden className="h-1.5 w-3 shrink-0 border border-dashed border-current" />;
+    default: {
+      const unhandled: never = grade;
+      return unhandled;
+    }
+  }
+}
+
+export function EvidenceGrade({
+  grade,
+  source,
+  className,
+}: {
+  grade: EvidenceGradeKind;
+  source?: string;
+  className?: string;
+}) {
+  return (
+    <span
+      className={cn('inline-flex items-center gap-1.5 td-legend', INK[grade], className)}
+      data-evidence-grade={grade}
+    >
+      <Glyph grade={grade} />
+      {source ? <span>{source} / </span> : null}
+      <span>{LABEL[grade]}</span>
+    </span>
+  );
+}

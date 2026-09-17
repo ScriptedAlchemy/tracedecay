@@ -6,24 +6,13 @@
  * last one: a stage must never be inferred from the absence of information.
  */
 import { describe, expect, it } from 'vitest';
+import { workTaskView } from '../../test/workTaskViewFixture.ts';
 import type { WorkTaskView } from './workProductView.ts';
 
 import { coverageReading, stageState, workStage, type WorkStage } from './workModel.ts';
 
 function projection(overrides: Partial<WorkTaskView> = {}): WorkTaskView {
-  return {
-    accepted_proposal: null,
-    acceptance_evidence_required: false,
-    dependencies: [],
-    execution_admitted: false,
-    history_len: 1,
-    relation_replan: null,
-    task_accepted: false,
-    task_id: 'task-1',
-    title: 'A task',
-    version: 1,
-    ...overrides,
-  };
+  return workTaskView({ task_id: 'task-1', title: 'A task', ...overrides });
 }
 
 describe('the stage a projection reads as', () => {
