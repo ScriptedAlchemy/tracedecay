@@ -2268,12 +2268,11 @@ impl CodeIndexSchedulerRegistryV1 {
                                 .read()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .as_ref()
-                                .is_some_and(LatestCodeTextGenerationV1::text_projection_needs_work);
-                            if installed_owner_still_needs_work {
-                                Self::note_worker_continuation(
-                                    &worker_pending_wake,
-                                    &worker_wake,
+                                .is_some_and(
+                                    LatestCodeTextGenerationV1::text_projection_needs_work,
                                 );
+                            if installed_owner_still_needs_work {
+                                Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
                             }
                         }
                         PublishedTextProjectionOutcomeV1::Shutdown => {
