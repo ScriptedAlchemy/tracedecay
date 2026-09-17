@@ -603,7 +603,7 @@ fn git_read_parser_rejects_values_outside_the_catalog_schema() {
     ] {
         assert!(matches!(
             parse_application_surface_request(operation, args),
-            Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+            Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest { .. })
         ));
     }
 }
@@ -853,7 +853,7 @@ fn context_scout_controls_and_claims_preserve_the_exact_address() {
             ApplicationSurfaceOperation::ContextScoutPause,
             claim_body,
         ),
-        Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest { .. })
     ));
 
     let work = serde_json::json!({
@@ -1383,14 +1383,14 @@ fn feedback_cycle_projections_require_the_canonical_handle() {
 
         assert!(matches!(
             parse_application_surface_request(operation, serde_json::json!({"node_id": "node"})),
-            Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+            Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest { .. })
         ));
         assert!(matches!(
             parse_application_surface_request(
                 operation,
                 serde_json::json!({"files": ["src/lib.rs"]})
             ),
-            Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+            Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest { .. })
         ));
         assert!(matches!(
             parse_application_surface_request(
@@ -1423,7 +1423,7 @@ fn explicit_feedback_cycle_accepts_only_a_document_uri() {
                 "request_handle": "rh.client.selected"
             }),
         ),
-        Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest { .. })
     ));
 }
 
@@ -1443,7 +1443,7 @@ fn callable_code_page_is_transport_owned() {
     );
     assert!(matches!(
         rejected,
-        Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest { .. })
     ));
 
     let rejected = parse_application_surface_request(
@@ -1460,7 +1460,7 @@ fn callable_code_page_is_transport_owned() {
     );
     assert!(matches!(
         rejected,
-        Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest { .. })
     ));
 }
 
@@ -2128,7 +2128,7 @@ async fn sse_resume_after_memory_restart_returns_canonical_expired_problem() {
 #[test]
 fn surface_rejection_metadata_distinguishes_invalid_input_from_authorization() {
     assert_eq!(
-        surface_rejection_metadata(&ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        surface_rejection_metadata(&ApplicationSurfaceAdapterError::invalid_request("detail")),
         Some((
             FeedbackRejectedArgumentV1::RequestBody,
             FeedbackArgumentRejectionClassV1::InvalidShape,

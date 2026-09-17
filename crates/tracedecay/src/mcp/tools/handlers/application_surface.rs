@@ -237,7 +237,7 @@ fn application_surface_dispatch_error(
         AdapterError::UnknownOrNotAuthorized => {
             ("application_surface_not_found_or_not_authorized", false)
         }
-        AdapterError::InvalidRequestHandle | AdapterError::InvalidSurfaceRequest => {
+        AdapterError::InvalidRequestHandle | AdapterError::InvalidSurfaceRequest { .. } => {
             ("application_surface_invalid_request", false)
         }
         AdapterError::Catalog(_)

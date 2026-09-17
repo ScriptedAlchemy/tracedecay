@@ -56,7 +56,9 @@ pub fn application_surface_dispatch_input_with_controls(
     requested_format: RequestedOutputFormat,
 ) -> Result<DispatchInput<ApplicationSurfaceRequest>, ApplicationSurfaceAdapterError> {
     if !request.matches(operation) {
-        return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest);
+        return Err(ApplicationSurfaceAdapterError::invalid_request(
+            "request body does not belong to the addressed operation",
+        ));
     }
     Ok(DispatchInput {
         request_id,
@@ -106,7 +108,7 @@ pub async fn execute_application_surface(
             .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)?;
         (
             i64::try_from(capability.deadline().maximum_millis())
-                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?
+                .map_err(ApplicationSurfaceAdapterError::invalid_request)?
                 .saturating_mul(1_000),
             capability.cancellation().clone(),
             capability.terminal_states().clone(),
@@ -143,7 +145,7 @@ pub async fn execute_application_surface(
             ApplicationSurfaceRequest::Feedback(request),
         ) => Some(
             serde_json::to_value(request)
-                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?,
+                .map_err(ApplicationSurfaceAdapterError::invalid_request)?,
         ),
         _ => None,
     };
@@ -393,7 +395,11 @@ pub async fn execute_application_surface(
     });
     let request = request
         .with_resolved_scope(resolved_scope)
-        .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?
+        .map_err(|problem| {
+            ApplicationSurfaceAdapterError::invalid_request(format!(
+                "resolved scope was refused: {problem:?}"
+            ))
+        })?
         .with_delivery_route(delivery_route);
     let Some(executor) = executor else {
         return Ok(ApplicationSurfaceInvocationResult {

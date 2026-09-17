@@ -364,7 +364,7 @@ pub(super) fn outcome_value(
         payload
             .map(serde_json::to_value)
             .transpose()
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+            .map_err(ApplicationSurfaceAdapterError::invalid_request)
     }
 
     Ok(match outcome {

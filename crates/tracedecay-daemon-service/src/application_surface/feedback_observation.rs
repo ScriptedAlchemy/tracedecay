@@ -186,7 +186,7 @@ pub(super) fn surface_rejection_metadata(
             FeedbackArgumentRejectionClassV1::InvalidShape,
             FeedbackOutcomeV1::Rejected,
         )),
-        ApplicationSurfaceAdapterError::InvalidSurfaceRequest => Some((
+        ApplicationSurfaceAdapterError::InvalidSurfaceRequest { .. } => Some((
             FeedbackRejectedArgumentV1::RequestBody,
             FeedbackArgumentRejectionClassV1::InvalidShape,
             FeedbackOutcomeV1::Rejected,
