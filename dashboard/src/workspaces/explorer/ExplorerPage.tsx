@@ -131,6 +131,7 @@ export function ExplorerPage() {
             <RunRegister
               result={explorer.runResult}
               run={explorer.run}
+              writability={explorer.writability}
               progress={explorer.runProgress}
               cancelling={explorer.cancelling}
               onCancel={explorer.cancel}
