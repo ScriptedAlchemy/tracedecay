@@ -1716,6 +1716,9 @@ where
                 Ok(Err(RetrievalPortError::Cancelled)) => {
                     unavailable(code_search::CodeIndexSearchUnavailableReasonV1::Cancelled)
                 }
+                Ok(Err(RetrievalPortError::BudgetExceeded)) => {
+                    unavailable(code_search::CodeIndexSearchUnavailableReasonV1::TimedOut)
+                }
                 Ok(Err(RetrievalPortError::Contract(_))) => {
                     unavailable(code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest)
                 }
