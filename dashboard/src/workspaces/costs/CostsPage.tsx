@@ -24,7 +24,6 @@ import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
 import {
   buildSpendSeries,
   formatShare,
-  formatUsd,
   sumReportedTokens,
   summarizeProviderLedger,
   type ProviderLedger,
@@ -123,7 +122,7 @@ export function CostsPage() {
         provider={query.provider}
         selectedPresent={selectedPresent}
         onClearProvider={() => query.setProvider(null)}
-        states={registerStates(overviewRead, attribution, ledger)}
+        states={registerStates(overviewRead, attribution)}
       />
 
       <div className="grid gap-2 p-2 md:grid-cols-2 xl:grid-cols-12">
@@ -311,25 +310,10 @@ interface RegisterState {
   detail?: string;
 }
 
-function registerStates(
-  overview: OverviewRead,
-  attribution: AttributionRead,
-  ledger: ProviderLedger | null,
-): RegisterState[] {
+function registerStates(overview: OverviewRead, attribution: AttributionRead): RegisterState[] {
   const spend: RegisterState =
     attribution.kind === 'ready'
-      ? {
-          label: 'provider spend',
-          kind: ledger === null || ledger.usageEvents === 0
-            ? 'complete_zero_findings'
-            : ledger.complete
-              ? 'ready'
-              : 'partial',
-          detail:
-            ledger === null || ledger.usageEvents === 0
-              ? 'no usage in range'
-              : `${formatShare(ledger.coverage)} priced`,
-        }
+      ? spendState(attribution.ledger)
       : { label: 'provider spend', kind: attribution.state, detail: attribution.detail };
 
   const usage: RegisterState =
@@ -347,6 +331,18 @@ function registerStates(
           : { label: 'savings ledger', kind: 'unavailable', detail: 'not mounted' };
 
   return [spend, usage, savings];
+}
+
+/** A served ledger with no usage is a measured empty, not a ready reading. */
+function spendState(ledger: ProviderLedger): RegisterState {
+  if (ledger.usageEvents === 0) {
+    return { label: 'provider spend', kind: 'complete_zero_findings', detail: 'no usage in range' };
+  }
+  return {
+    label: 'provider spend',
+    kind: ledger.complete ? 'ready' : 'partial',
+    detail: `${formatShare(ledger.coverage)} priced`,
+  };
 }
 
 function usageState(payload: SavingsOverviewPayloadV1): RegisterState {
