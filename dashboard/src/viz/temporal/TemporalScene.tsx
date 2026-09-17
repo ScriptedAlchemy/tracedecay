@@ -199,6 +199,14 @@ function drawScene(ctx: CanvasRenderingContext2D, model: TemporalSceneModel, pal
     ctx.stroke();
   }
 
+  // Records stop at a dated cursor. The layout already withholds later ones;
+  // this clip keeps a curve's easing from reaching into the unrevealed band.
+  const recordX1 = model.cursor && model.cursor.xBasis === 'time' ? Math.min(fieldX1, model.cursor.x) : fieldX1;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(fieldX0, 0, Math.max(0, recordX1 - fieldX0), height);
+  ctx.clip();
+
   for (const cluster of model.clusters) {
     const alpha = focusAlpha(cluster.focus);
     const x1 = Math.max(cluster.x1, cluster.x0 + 2);
@@ -268,6 +276,7 @@ function drawScene(ctx: CanvasRenderingContext2D, model: TemporalSceneModel, pal
     ctx.fill();
     ctx.restore();
   }
+  ctx.restore();
 
   if (model.cursor && model.cursor.x < fieldX1) {
     const x0 = Math.max(fieldX0, model.cursor.x);
@@ -542,7 +551,7 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
     const cluster = clusterByLane.get(lane.id);
     return (
       <g key={lane.id} data-lane-group={lane.id} style={laneGroupStyle(lane.id)}>
-        {lane.endSource === null && !lane.offscreen && (
+        {lane.endSource === null && !lane.offscreen && lane.revealed && (
           <g data-lane-tail={lane.id}>
             <title>extent unknown</title>
             <line
@@ -771,7 +780,7 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
           aria-pressed={lane.focus === 'selected'}
           data-lane-row={lane.id}
           className="cursor-pointer outline-none [&:focus>rect]:stroke-white"
-          opacity={lane.offscreen ? 0.55 : focusAlpha(lane.focus)}
+          opacity={lane.offscreen || !lane.revealed ? 0.55 : focusAlpha(lane.focus)}
           onClick={() => onSelectLane(lane.id)}
           onKeyDown={(event) => {
             if (isActivation(event)) {
@@ -780,7 +789,7 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
             }
           }}
         >
-          <title>{`${lane.label} · ${detailLine}${lane.offscreen ? ' · outside the window' : ''}`}</title>
+          <title>{`${lane.label} · ${detailLine}${lane.offscreen ? ' · outside the window' : ''}${lane.revealed ? '' : ' · starts after the playback cursor'}`}</title>
           <rect x={0} y={lane.y - rowHeight / 2} width={Math.max(1, viewport.left - TOGGLE_WIDTH)} height={rowHeight} fill="transparent" stroke="none" />
           <text x={indent} y={twoLine ? lane.y - 3 : lane.y + 4} fontSize={11} fill="var(--raw-graph-text)" pointerEvents="none">
             {truncateLabel(lane.label, labelWidth)}
