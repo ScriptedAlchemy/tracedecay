@@ -134,7 +134,7 @@ export function bindingFor(key: string): SettingsBinding | null {
   return BINDINGS[key] ?? null;
 }
 
-/** The full keys this dashboard can write, for tests and the inspector. */
+/** The full keys this dashboard can write, so a test can hold them to the served payload. */
 export function boundKeys(): readonly string[] {
   return Object.keys(BINDINGS);
 }

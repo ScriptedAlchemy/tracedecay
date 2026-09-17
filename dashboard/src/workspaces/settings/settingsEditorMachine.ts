@@ -532,14 +532,6 @@ export function settingsConfirmationHeld(state: SettingsEditorState): boolean {
   }
 }
 
-/** Field refusals to mark the inputs with. Only a resting editor has any. */
-export function settingsFieldErrors(
-  state: SettingsEditorState,
-): readonly SettingsValidationError[] {
-  const rejection = settingsRejection(state);
-  return rejection ? rejection.errors : [];
-}
-
 export function settingsRejection(state: SettingsEditorState): SettingsRejection | null {
   return state.status === 'editing' && state.resting.rest === 'rejected'
     ? state.resting.rejection

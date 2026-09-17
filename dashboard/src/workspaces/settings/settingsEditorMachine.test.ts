@@ -17,7 +17,6 @@ import {
   reduceSettingsEditor,
   settingsApplied,
   settingsConfirmationHeld,
-  settingsFieldErrors,
   settingsRejection,
   settingsReviewOf,
   settingsScopeDirty,
@@ -349,7 +348,7 @@ describe('settings editor: each verdict is its own state', () => {
         { field: 'max_file_size', message: 'max_file_size is denied by the active policy' },
       ],
     });
-    expect(settingsFieldErrors(rejected)).toHaveLength(1);
+    expect(settingsRejection(rejected)?.errors).toHaveLength(1);
     expect(settingsApplied(rejected)).toBeNull();
     expect(settingsReviewOf(rejected)).toBeNull();
   });
@@ -530,7 +529,7 @@ describe('settings editor: refusing to review what cannot be sent', () => {
     );
 
     expect(settingsReviewOf(state)).toBeNull();
-    expect(settingsFieldErrors(state)).toEqual([
+    expect(settingsRejection(state)?.errors).toEqual([
       {
         field: 'auto_track_pr_poll_secs',
         message: 'auto_track_pr_poll_secs must be at least 60 seconds',
@@ -544,7 +543,7 @@ describe('settings editor: refusing to review what cannot be sent', () => {
     expect(unavailable).toEqual({ status: 'editor_unavailable' });
     expect(settingsReviewOf(unavailable)).toBeNull();
     expect(settingsApplied(unavailable)).toBeNull();
-    expect(settingsFieldErrors(unavailable)).toEqual([]);
+    expect(settingsRejection(unavailable)).toBeNull();
     expect(settingsScopeDirty(unavailable, 'project')).toBe(false);
     for (const action of [
       {

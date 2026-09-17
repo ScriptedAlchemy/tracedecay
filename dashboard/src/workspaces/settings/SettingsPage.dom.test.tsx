@@ -541,6 +541,110 @@ describe('SettingsPage effective configuration review', () => {
     ]);
   });
 
+  it('keeps a verdict visible after its panel is closed, and lets a locked scope release it', async () => {
+    let getCount = 0;
+    let authorityWithdrawn = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        if (url === '/api/settings' && method === 'GET') {
+          getCount += 1;
+          if (getCount === 1) return jsonResponse(settings());
+          const current = updatedSettings('rev-43');
+          return jsonResponse(
+            authorityWithdrawn ? withoutAction(current, 'configuration_batch') : current,
+          );
+        }
+        throw new Error(`unexpected request ${method} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    const { client } = renderSettings();
+
+    await openReview(user, MAX_FILE_SIZE);
+    const input = proposal(MAX_FILE_SIZE);
+    await user.clear(input);
+    await user.type(input, '2097152');
+    await user.click(screen.getByRole('button', { name: 'Review project change' }));
+    await user.click(
+      screen.getByRole('checkbox', {
+        name: /I confirm this change against configuration revision rev-42/,
+      }),
+    );
+    await user.click(screen.getByRole('button', { name: 'Apply project settings' }));
+    await screen.findByText(/Another writer saved project settings/);
+
+    // Closing the panel does not resolve the review; the inspector still
+    // states it, and another scope's row names the real status.
+    await user.keyboard('{Escape}');
+    expect(document.querySelector('[data-settings-review]')).toBeNull();
+    const held = document.querySelector('[data-settings-held-review]');
+    expect(held?.getAttribute('data-settings-held-review')).toBe('conflicted');
+    expect(held?.textContent).toContain('in conflict');
+    expect(held?.textContent).toContain('rev-42');
+    await openReview(user, WATCHER_DEBOUNCE);
+    expect(document.querySelector('[data-settings-other-review]')?.textContent).toContain(
+      'A project review is in conflict',
+    );
+
+    // The daemon withdraws the configuration effect while the verdict is held:
+    // the refetch moves the authority (the review is superseded) and locks the
+    // scope. The locked panel cannot apply, but it can still let the review go.
+    authorityWithdrawn = true;
+    await act(() => client.invalidateQueries({ queryKey: ['settings'] }));
+    await waitFor(() => expect(row(MAX_FILE_SIZE).dataset['write']).toBe('locked'));
+    await user.keyboard('{Escape}');
+    const locked = await openReview(user, MAX_FILE_SIZE);
+    expect(locked.querySelector('[data-settings-gate="unauthorized"]')).toBeTruthy();
+    expect(locked.querySelector('[data-settings-stage="review_superseded"]')).toBeTruthy();
+    await user.click(within(locked).getByRole('button', { name: 'Cancel review' }));
+    expect(document.querySelector('[data-settings-held-review]')).toBeNull();
+    expect(document.querySelector('[data-settings-stage]')).toBeNull();
+  });
+
+  it('lets a fresh proposal take over from the last receipt', async () => {
+    let applied = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        if (url === '/api/settings' && method === 'GET') {
+          return jsonResponse(applied ? updatedSettings('rev-43') : settings());
+        }
+        if (url === '/api/settings/project' && method === 'PATCH') {
+          applied = true;
+          return jsonResponse(projectPatchResponse(updatedSettings('rev-43')));
+        }
+        throw new Error(`unexpected request ${method} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    renderSettings();
+
+    await openReview(user, MAX_FILE_SIZE);
+    const input = proposal(MAX_FILE_SIZE);
+    await user.clear(input);
+    await user.type(input, '2097152');
+    await user.click(screen.getByRole('button', { name: 'Review project change' }));
+    await user.click(
+      screen.getByRole('checkbox', {
+        name: /I confirm this change against configuration revision rev-42/,
+      }),
+    );
+    await user.click(screen.getByRole('button', { name: 'Apply project settings' }));
+    expect(await screen.findByText('Project settings saved')).toBeTruthy();
+    await waitFor(() => expect(row(MAX_FILE_SIZE).dataset['provenance']).toBe('unserved'));
+
+    await user.clear(proposal(MAX_FILE_SIZE));
+    await user.type(proposal(MAX_FILE_SIZE), '4096');
+    expect(screen.queryByText('Project settings saved')).toBeNull();
+    expect(reviewReadout()).toBe('proposal');
+    expect(row(MAX_FILE_SIZE).dataset['provenance']).toBe('edited');
+  });
+
   it('pins the review while its write is in flight so the verdict cannot be hidden', async () => {
     let releasePatch: (() => void) | null = null;
     vi.stubGlobal(
@@ -1080,11 +1184,12 @@ function renderSettings() {
       mutations: { retry: false },
     },
   });
-  return render(
+  const rendered = render(
     <QueryClientProvider client={client}>
       <SettingsPage />
     </QueryClientProvider>,
   );
+  return { ...rendered, client };
 }
 
 /** The envelope `/api/settings` answers with, as the route serves it. */
@@ -1118,11 +1223,14 @@ function updatedWorkerSettings(revision: string): Record<string, unknown> {
 /** The same envelope with one write scope withdrawn, as a dashboard without
  * that scope's authority receives it. */
 function settingsWithout(operation: string): Record<string, unknown> {
-  const value = settings();
-  value['legal_actions'] = (
-    value['legal_actions'] as Array<{ kind: string; operation: string }>
+  return withoutAction(settings(), operation);
+}
+
+function withoutAction(envelope: Record<string, unknown>, operation: string): Record<string, unknown> {
+  envelope['legal_actions'] = (
+    envelope['legal_actions'] as Array<{ kind: string; operation: string }>
   ).filter((action) => action.operation !== operation);
-  return value;
+  return envelope;
 }
 
 function jsonResponse(body: unknown, status = 200): Response {

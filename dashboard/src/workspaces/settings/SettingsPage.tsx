@@ -148,8 +148,9 @@ function SettingsSurface({
     (key: string | null) => (key === null ? null : rows.find((row) => row.key === key) ?? null),
     [rows],
   );
-  // The inspector follows the pointer and focus; when neither is on a row it
-  // holds the selected one, so opening a review never empties it.
+  // The inspector follows the last row the pointer or focus rested on — the
+  // Brain precedent, so it does not flicker on pointer leave — and falls back
+  // to the selected row until any row has been inspected.
   const inspectedRow = rowByKey(inspectedKey) ?? rowByKey(selectedKey);
 
   const jumpTo = useCallback((id: string) => {
@@ -157,7 +158,12 @@ function SettingsSurface({
     if (!container) return;
     const target = findConfigSection(container, id);
     if (!target) return;
-    container.scrollTo({ top: target.offsetTop - 4, behavior: 'auto' });
+    // The column header row is the grid's first child and sticks at the top,
+    // so a section scrolled to `offsetTop` would land underneath it. Its
+    // measured height is zero where the stacked layout hides it.
+    const header = container.firstElementChild;
+    const stuck = header instanceof HTMLElement ? header.offsetHeight : 0;
+    container.scrollTo({ top: target.offsetTop - stuck - 4, behavior: 'auto' });
   }, []);
 
   return (
