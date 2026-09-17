@@ -160,8 +160,13 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
     let (mut reader, mut writer) = transport.split();
     let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
     let (eof_tx, mut eof_rx) = tokio::sync::watch::channel(false);
+    // Keep a Sender alive for the whole proxy lifetime. `read_host` only
+    // marks EOF; if it owned the sole Sender, dropping it on host close would
+    // make later `eof.changed()` calls fail as "monitor closed" and abort
+    // before the in-flight daemon response could be drained to the host.
+    let eof_signal = eof_tx.clone();
 
-    let read_host = async {
+    let read_host = async move {
         loop {
             match reader.read_line().await {
                 Ok(Some(line)) => {
@@ -170,7 +175,7 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
                     }
                 }
                 Ok(None) => {
-                    let _ = eof_tx.send(true);
+                    let _ = eof_signal.send(true);
                     return Ok(());
                 }
                 Err(error) => return Err(error.into()),
@@ -186,7 +191,9 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
         &mut writer,
         drain_bound,
     );
-    tokio::try_join!(read_host, proxy)?;
+    let result = tokio::try_join!(read_host, proxy);
+    drop(eof_tx);
+    result?;
     Ok(())
 }
 
@@ -611,11 +618,16 @@ async fn write_proxy_request_result(
         Ok(responses) => {
             let metadata =
                 proxy_initialize_metadata_for_request(request.parsed.as_ref(), &responses);
-            if let Some(warning) = daemon_version_skew_warning_for_request(
-                request.parsed.as_ref(),
-                &responses,
-                binary_version()?,
-            ) {
+            // Skew is a warning. A process with no registered product runtime
+            // has no version to compare, and that must not drop the response
+            // the daemon already produced.
+            if let Ok(version) = binary_version()
+                && let Some(warning) = daemon_version_skew_warning_for_request(
+                    request.parsed.as_ref(),
+                    &responses,
+                    version,
+                )
+            {
                 log_daemon_event("core_proxy_warning", &[("warning", warning)]);
             }
             for response in responses {
