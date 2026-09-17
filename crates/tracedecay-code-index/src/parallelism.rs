@@ -684,6 +684,16 @@ mod tests {
     use tracedecay_domain::configuration::CodeIndexWorkerSelectionV1;
 
     #[test]
+    fn install_runs_the_caller_on_an_admitted_rayon_worker() {
+        let on_worker = install(|| rayon::current_thread_index().is_some())
+            .expect("code-index worker pool");
+        assert!(
+            on_worker,
+            "direct-seal encode only parallelizes when the caller is already a rayon worker"
+        );
+    }
+
+    #[test]
     fn automatic_width_uses_small_hosts_and_half_of_large_hosts() {
         assert_eq!(indexing_worker_target(1), 1);
         assert_eq!(indexing_worker_target(4), 4);
