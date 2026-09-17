@@ -60,7 +60,8 @@ export const STORY_SURFACES: readonly StorySurface[] = [
     id: 'sessions',
     path: '/sessions',
     label: 'Sessions',
-    description: 'Transcript search, LCM summaries, and raw-message drill-down.',
+    description:
+      'Message volume timeline, provider-qualified session index, transcript search, and the session provenance inspector.',
     wired: true,
   },
   {

@@ -3265,6 +3265,19 @@ function loomTemporalPayload(): Record<string, unknown> {
     is_subagent: row['is_subagent'],
     edited_files_recorded: i % 3 !== 2,
   }));
+  // Vocabulary is the daemon's own (`git_correlation::{CommitRelation,
+  // CommitEvidence, SpanOverlapKind}`, snake_case on the wire): a produced
+  // commit recorded by its tool result, one seen as HEAD during the session,
+  // and correlations by reflog or time overlap, so the surface exercises every
+  // evidence grade it can print.
+  const COMMIT_EVIDENCE = [
+    ['produced', 'tool_result', 'direct'],
+    ['observed', 'head_observation', 'within_span'],
+    ['produced', 'host_event', 'direct'],
+    ['observed', 'reflog_overlap', 'reflog'],
+    ['observed', 'time_overlap', 'extended_window'],
+    ['produced', 'tool_result', 'within_span'],
+  ] as const;
   const commits = sessions.slice(0, 6).map((session, i) => ({
     session_id: session.session_id,
     provider: session.provider,
@@ -3272,9 +3285,9 @@ function loomTemporalPayload(): Record<string, unknown> {
     committed_at: (session.started_at as number) + 1_800 + i * 240,
     branch: i % 2 === 0 ? 'master' : `feat/branch-${i}`,
     worktree: i % 3 === 0 ? '/fast/projects/tracedecay' : null,
-    relation: i % 2 === 0 ? 'authored_during' : 'observed_near',
-    evidence: 'session_span_overlap',
-    span_overlap_kind: i % 2 === 0 ? 'contained' : 'adjacent',
+    relation: COMMIT_EVIDENCE[i]![0],
+    evidence: COMMIT_EVIDENCE[i]![1],
+    span_overlap_kind: COMMIT_EVIDENCE[i]![2],
     confidence: 0.92 - i * 0.07,
   }));
   const editedFiles = sessions.slice(0, 5).flatMap((session, i) => [
@@ -3311,54 +3324,51 @@ function loomTemporalPayload(): Record<string, unknown> {
     commits,
     edited_files: editedFiles,
     branch_spans: branchSpans,
+    // The three source ids, labels, authorities and granularities the route
+    // emits (`loom_api.rs` `ready_git_status` / the `session_file` status), so
+    // a surface that keys on them finds them.
     source_statuses: [
       {
-        id: 'sessions',
-        label: 'Sessions',
+        id: 'session_commit',
+        label: 'Session ↔ commit',
         state: 'ready',
-        granularity: 'session',
-        authority: 'session_store',
+        granularity: 'commit attribution',
+        authority: 'verified session-git-evidence graph projection',
         required_authority: null,
-        providers: [...LOOM_PROVIDERS],
-        item_count: sessions.length,
-        reason: null,
-        coverage: coverage(sessions.length, sessions.length, 'sessions', 'every eligible session was read'),
-      },
-      {
-        id: 'commits',
-        label: 'Commit attributions',
-        state: 'ready',
-        granularity: 'commit',
-        authority: 'git_watch',
-        required_authority: null,
-        providers: ['codex', 'claude'],
+        providers: ['claude', 'codex', 'cursor'],
         item_count: commits.length,
-        reason: null,
-        coverage: coverage(commits.length, commits.length, 'commits', 'every attributed commit was read'),
+        reason: 'recovered from the verified Git evidence generation gen-42',
+        coverage: coverage(6, sessions.length, 'displayed sessions', 'recovered from the verified Git evidence generation gen-42'),
       },
       {
-        id: 'edited_files',
-        label: 'Edited files',
+        id: 'session_file',
+        label: 'Session → edited file',
         state: 'partial',
-        granularity: 'file',
-        authority: 'session_store',
+        granularity: 'recorded file rollup',
+        authority: 'sessions.metadata_json $.edited_files[]',
         required_authority: null,
-        providers: ['codex'],
+        providers: ['claude', 'codex'],
         item_count: editedFiles.length,
-        reason: 'two providers record no per-file edit evidence',
-        coverage: coverage(editedFiles.length, editedFiles.length + 4, 'files', 'two providers record no per-file edit evidence'),
+        reason:
+          'edited-file coverage is provider-native metadata; sessions without an edited_files array are omitted, never treated as no edits',
+        coverage: coverage(
+          editedFiles.length,
+          sessions.length,
+          'displayed sessions',
+          'only sessions carrying a recorded edited_files array are examined',
+        ),
       },
       {
-        id: 'branch_spans',
-        label: 'Branch spans',
+        id: 'branch_worktree',
+        label: 'Branch & worktree spans',
         state: 'ready',
-        granularity: 'span',
-        authority: 'git_watch',
+        granularity: 'coalesced activity span',
+        authority: 'verified session-git-evidence graph projection',
         required_authority: null,
         providers: [...LOOM_PROVIDERS],
         item_count: branchSpans.length,
-        reason: null,
-        coverage: coverage(branchSpans.length, branchSpans.length, 'spans', 'every recorded span was read'),
+        reason: 'recovered from the verified Git evidence generation gen-42',
+        coverage: coverage(4, sessions.length, 'displayed sessions', 'recovered from the verified Git evidence generation gen-42'),
       },
     ],
     temporal_refresh: {
@@ -3369,6 +3379,51 @@ function loomTemporalPayload(): Record<string, unknown> {
     },
     total: 6_053,
   };
+}
+
+/**
+ * One `limit`/`offset` page of the Loom temporal fixture, with the route's own
+ * coverage arithmetic: `complete` only when offset 0 covers the whole store,
+ * otherwise `partial` with the route's verbatim reason. Relations are cut to
+ * the page's `(provider, session_id)` keys exactly as `read_temporal` does.
+ * The route clamps `limit` to 1..=500 and floors `offset` at 0.
+ */
+function loomTemporalPageEnvelope(rawLimit: string | null, rawOffset: string | null): Record<string, unknown> {
+  const full = loomTemporalPayload();
+  const parsedLimit = Number(rawLimit);
+  const limit = Number.isFinite(parsedLimit) && rawLimit !== null ? Math.min(500, Math.max(1, Math.trunc(parsedLimit))) : 200;
+  const parsedOffset = Number(rawOffset);
+  const offset = Number.isFinite(parsedOffset) && rawOffset !== null ? Math.max(0, Math.trunc(parsedOffset)) : 0;
+  const sessions = (full['sessions'] as Record<string, unknown>[]).slice(offset, offset + limit);
+  const keys = new Set(sessions.map((row) => `${String(row['provider'])}\u0000${String(row['session_id'])}`));
+  const onPage = (record: Record<string, unknown>) =>
+    keys.has(`${String(record['provider'])}\u0000${String(record['session_id'])}`);
+  const total = full['total'] as number;
+  const examined = sessions.length;
+  const complete = offset === 0 && examined === total;
+  const wire = envelope(
+    {
+      ...full,
+      sessions,
+      commits: (full['commits'] as Record<string, unknown>[]).filter(onPage),
+      edited_files: (full['edited_files'] as Record<string, unknown>[]).filter(onPage),
+      branch_spans: (full['branch_spans'] as Record<string, unknown>[]).filter(onPage),
+    },
+    'partial',
+  );
+  wire['coverage'] = {
+    completeness: complete ? 'complete' : 'partial',
+    eligible: total,
+    examined,
+    matched: examined,
+    excluded: 0,
+    omitted: total - examined,
+    unknown: 0,
+    denominator: total,
+    unit: 'sessions',
+    omission_reasons: complete ? [] : ['the requested session page does not cover the full store'],
+  };
+  return wire;
 }
 
 /* ==========================================================================
@@ -5078,6 +5133,15 @@ export function resolveFixture(pathname: string, search = ''): unknown {
   if (trustHistory) return memoryTrustHistoryPayload(decodeURIComponent(trustHistory[1]!));
   const factDetail = /^\/api\/plugins\/holographic\/fact\/([^/]+)$/.exec(pathname);
   if (factDetail) return memoryFactDetailEnvelope(decodeURIComponent(factDetail[1]!));
+  // The Loom temporal read is a real `limit`/`offset` page over the session
+  // store (loom_api.rs `PAGE_CTE`), and the Sessions index pages it. Serving
+  // the whole fixture population for every page would audit a 25-row page
+  // against 34 rows, so the fixture performs the same slice and reports the
+  // same coverage the route does.
+  if (pathname === '/api/loom/temporal') {
+    const params = new URLSearchParams(search);
+    return loomTemporalPageEnvelope(params.get('limit'), params.get('offset'));
+  }
   if (pathname in FIXTURES) return FIXTURES[pathname];
   for (const [prefix, payload] of FIXTURE_PREFIXES) {
     if (pathname.startsWith(prefix)) return payload;
