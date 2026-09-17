@@ -448,7 +448,9 @@ impl BranchPublicationContextV1 {
             .notify_hook_overflow(canonical_worktree_root)
             .await
         {
-            CodeIndexDemandAdmissionV1::Queued => {}
+            // NotApplicable means this overflow wake has no repository identity.
+            // The complete-generation request above already admitted, so keep waiting.
+            CodeIndexDemandAdmissionV1::Queued | CodeIndexDemandAdmissionV1::NotApplicable => {}
             CodeIndexDemandAdmissionV1::Terminal(parked) => {
                 return Err(TraceDecayError::project_route(
                     CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT,
