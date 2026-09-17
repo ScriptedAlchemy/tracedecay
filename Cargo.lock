@@ -5945,6 +5945,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "clru",
+ "futures-util",
  "hotpath",
  "schemars",
  "semver",

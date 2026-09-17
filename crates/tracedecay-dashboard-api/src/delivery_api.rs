@@ -10,6 +10,7 @@ use std::pin::Pin;
 
 use axum::Json;
 use axum::extract::State;
+use futures_util::stream::{self, StreamExt};
 use schemars::JsonSchema;
 use serde::Serialize;
 use tracedecay_application::advisory::{GitHubReleaseV1, ProjectGitHubReleasePageV1};
@@ -978,88 +979,103 @@ pub async fn inbox(
     };
     let registry_truncated = registered.len() > MAX_DELIVERY_INBOX_PROJECTS_V1;
     registered.truncate(MAX_DELIVERY_INBOX_PROJECTS_V1);
-    let mut sources = Vec::with_capacity(registered.len());
-    for project in registered {
-        let project_id = match ProjectId::new(project.project_id.clone()) {
-            Ok(project_id) => project_id,
+    let reads = stream::iter(registered.into_iter().map(|project| {
+        let state = state.clone();
+        let control = control.clone();
+        async move {
+            let project_id = ProjectId::new(project.project_id.clone())
+                .map_err(|error| format!("registered project identity is invalid: {error}"))?;
+            let label = Path::new(&project.display_root)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+                .unwrap_or_else(|| project.display_root.clone());
+            let project_root = PathBuf::from(&project.canonical_root);
+            let indexed = match state.code_index_freshness_reader.as_ref() {
+                Some(reader) => reader(project_root.clone())
+                    .await
+                    .and_then(indexed_delivery_head),
+                None => None,
+            };
+            let delivery_read = async {
+                match (state.delivery_read_authority.as_ref(), indexed.as_ref()) {
+                    (Some(authority), Some(indexed)) => {
+                        authority
+                            .read(
+                                control.clone(),
+                                DashboardDeliveryProjectV1 {
+                                    project_id: project.project_id.clone(),
+                                    project_root: project_root.clone(),
+                                },
+                                ProjectDeliveryReadRequestV1 {
+                                    kind: ProjectDeliveryReadKindV1::Inbox,
+                                    expected_head_commit_id: indexed.head_commit_id.clone(),
+                                    max_pull_requests: MAX_PROJECT_DELIVERY_PULL_REQUESTS_V1,
+                                    max_review_items: MAX_PROJECT_DELIVERY_REVIEW_ITEMS_V1,
+                                    max_ci_checks: MAX_PROJECT_DELIVERY_CI_CHECKS_V1,
+                                    max_releases: 1,
+                                },
+                            )
+                            .await
+                    }
+                    _ => ProjectDeliveryReadOutcomeV1::Unavailable,
+                }
+            };
+            let proximity_read = async {
+                match (
+                    state.proximity_attention_read_authority.as_ref(),
+                    indexed.as_ref(),
+                ) {
+                    (Some(authority), Some(_)) => {
+                        authority
+                            .read(
+                                control.clone(),
+                                DashboardDeliveryProjectV1 {
+                                    project_id: project.project_id.clone(),
+                                    project_root,
+                                },
+                            )
+                            .await
+                    }
+                    // An omitted project has no consumer for this result.
+                    _ => ProjectDeliveryProximityAttentionSourceV1::Unsupported,
+                }
+            };
+            let (delivery, proximity) = tokio::join!(delivery_read, proximity_read);
+            Ok::<_, String>(ProjectDeliveryInboxSourceV1 {
+                registry: ProjectDeliveryRegistrySourceV1 {
+                    project_id,
+                    label,
+                    project_root: project.display_root,
+                    git_common_dir: project.git_common_dir,
+                    repository_id: indexed
+                        .as_ref()
+                        .map(|indexed| indexed.repository_id.clone()),
+                    worktree_id: indexed.as_ref().map(|indexed| indexed.worktree_id.clone()),
+                    branch_ref: indexed.as_ref().map(|indexed| indexed.branch_ref.clone()),
+                },
+                indexed,
+                delivery,
+                memberships: Vec::new(),
+                proximity,
+            })
+        }
+    }))
+    .buffer_unordered(MAX_DELIVERY_INBOX_PROJECTS_V1)
+    .collect::<Vec<_>>()
+    .await;
+    let mut sources = Vec::with_capacity(reads.len());
+    for read in reads {
+        match read {
+            Ok(source) => sources.push(source),
             Err(error) => {
                 return Json(DashboardEnvelopeV1::unavailable(
                     scope_from_state(&state),
                     unavailable(),
-                    format!("registered project identity is invalid: {error}"),
+                    error,
                 ));
             }
-        };
-        let label = Path::new(&project.display_root)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(str::to_owned)
-            .unwrap_or_else(|| project.display_root.clone());
-        let project_root = PathBuf::from(&project.canonical_root);
-        let indexed = match state.code_index_freshness_reader.as_ref() {
-            Some(reader) => reader(project_root.clone())
-                .await
-                .and_then(indexed_delivery_head),
-            None => None,
-        };
-        let delivery = match (state.delivery_read_authority.as_ref(), indexed.as_ref()) {
-            (Some(authority), Some(indexed)) => {
-                authority
-                    .read(
-                        control.clone(),
-                        DashboardDeliveryProjectV1 {
-                            project_id: project.project_id.clone(),
-                            project_root: project_root.clone(),
-                        },
-                        ProjectDeliveryReadRequestV1 {
-                            kind: ProjectDeliveryReadKindV1::Inbox,
-                            expected_head_commit_id: indexed.head_commit_id.clone(),
-                            max_pull_requests: MAX_PROJECT_DELIVERY_PULL_REQUESTS_V1,
-                            max_review_items: MAX_PROJECT_DELIVERY_REVIEW_ITEMS_V1,
-                            max_ci_checks: MAX_PROJECT_DELIVERY_CI_CHECKS_V1,
-                            max_releases: 1,
-                        },
-                    )
-                    .await
-            }
-            _ => ProjectDeliveryReadOutcomeV1::Unavailable,
-        };
-        let proximity = match (
-            state.proximity_attention_read_authority.as_ref(),
-            indexed.as_ref(),
-        ) {
-            (Some(authority), Some(_)) => {
-                authority
-                    .read(
-                        control.clone(),
-                        DashboardDeliveryProjectV1 {
-                            project_id: project.project_id.clone(),
-                            project_root,
-                        },
-                    )
-                    .await
-            }
-            // No proximity authority mounted: leave proximity sources
-            // Unsupported rather than inventing Clear/Active attention.
-            _ => ProjectDeliveryProximityAttentionSourceV1::Unsupported,
-        };
-        sources.push(ProjectDeliveryInboxSourceV1 {
-            registry: ProjectDeliveryRegistrySourceV1 {
-                project_id,
-                label,
-                project_root: project.display_root,
-                git_common_dir: project.git_common_dir,
-                repository_id: indexed
-                    .as_ref()
-                    .map(|indexed| indexed.repository_id.clone()),
-                worktree_id: indexed.as_ref().map(|indexed| indexed.worktree_id.clone()),
-                branch_ref: indexed.as_ref().map(|indexed| indexed.branch_ref.clone()),
-            },
-            indexed,
-            delivery,
-            memberships: Vec::new(),
-            proximity,
-        });
+        }
     }
     let mut aggregation =
         aggregate_project_delivery_inbox_v1(sources, MAX_DELIVERY_INBOX_PULL_REQUESTS_V1);

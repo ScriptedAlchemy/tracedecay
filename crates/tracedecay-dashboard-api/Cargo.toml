@@ -10,6 +10,7 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 [dependencies]
 axum = "0.8"
 clru = "0.6"
+futures-util = "0.3.33"
 hotpath.workspace = true
 schemars = "1.2.1"
 semver = "1"
