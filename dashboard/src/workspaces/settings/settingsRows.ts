@@ -145,20 +145,35 @@ export function boundKeys(): readonly string[] {
  * What a row's write column states. Three answers, none of which is a
  * boolean: a key may be writable (and to what), locked by a gate (and by
  * which, with the authority's reason), or simply have no write path at all.
+ *
+ * `locked` carries a fourth gate beside the three scope gates: the read itself
+ * named no revision to hold a write against, so the editor is unavailable for
+ * every bound key at once. Folded in here so the WRITE column and the review
+ * panel cannot disagree about whether a key can be edited.
  */
 export type WriteCapability =
   | { readonly kind: 'writable'; readonly target: string; readonly binding: SettingsBinding }
   | {
       readonly kind: 'locked';
-      readonly gate: Exclude<SettingsWriteGate['state'], 'writable'>;
+      readonly gate: Exclude<SettingsWriteGate['state'], 'writable'> | 'editor_unavailable';
       readonly reason: string;
       readonly binding: SettingsBinding;
     }
   | { readonly kind: 'no_write_path' };
 
-export function writeCapability(key: string, gates: WritableScopes): WriteCapability {
+export const EDITOR_UNAVAILABLE_REASON =
+  'GET /api/settings named no configuration revision to hold a write against, so nothing here can be edited until it does.';
+
+export function writeCapability(
+  key: string,
+  gates: WritableScopes,
+  editorAvailable: boolean,
+): WriteCapability {
   const binding = bindingFor(key);
   if (!binding) return { kind: 'no_write_path' };
+  if (!editorAvailable) {
+    return { kind: 'locked', gate: 'editor_unavailable', reason: EDITOR_UNAVAILABLE_REASON, binding };
+  }
   const gate = gateFor(binding.scope, gates);
   switch (gate.state) {
     case 'writable':
@@ -366,7 +381,8 @@ function withWorkerSelection(
   return isWorkerSelection(value) ? { ...values, code_index_workers: value } : values;
 }
 
-function isWorkerSelection(value: unknown): value is CodeIndexWorkerSelectionV1 {
+/** The one runtime check for a worker selection, shared by every reader of one. */
+export function isWorkerSelection(value: unknown): value is CodeIndexWorkerSelectionV1 {
   if (typeof value !== 'object' || value === null) return false;
   const candidate = value as { mode?: unknown; workers?: unknown };
   return (

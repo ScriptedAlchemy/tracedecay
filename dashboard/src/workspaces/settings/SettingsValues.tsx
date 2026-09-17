@@ -7,10 +7,23 @@
  * `settingsModel` classified it as.
  */
 
+import { Lock, PenLine } from 'lucide-react';
 import { Fragment, type ReactNode } from 'react';
 import { cn } from '../../ui/cn';
 import { Lamp } from '../../ui/instrument.tsx';
-import { splitPath, type ConfigRow, type OriginKind } from './settingsModel.ts';
+import {
+  selectionText,
+  splitPath,
+  type ConfigRow,
+  type OriginKind,
+  type ServedProvenance,
+} from './settingsModel.ts';
+import { isWorkerSelection, type WriteCapability } from './settingsRows.ts';
+
+/** The provenance column's vocabulary: what the wire served, plus the one
+ * client-side state — a proposal not yet applied — that is never confused
+ * with it. */
+export type RowProvenance = ServedProvenance | 'edited';
 
 const ORIGIN_GLYPH: Readonly<Record<OriginKind, string>> = {
   file: 'F',
@@ -159,6 +172,107 @@ export function KeyText({ value, query = '' }: { value: string; query?: string }
       </span>
     </>
   );
+}
+
+/**
+ * The typed-state treatment for provenance, per the design system's ladder:
+ * `unserved` is the gray dashed disconnected family (the layer is not on the
+ * wire), `explicit` and `default` are solid served facts, `edited` is cyan
+ * because it is this reader's own unapplied proposal. Colour never carries the
+ * state alone: every chip prints its word.
+ */
+export function ProvenanceChip({ kind }: { kind: RowProvenance }) {
+  switch (kind) {
+    case 'unserved':
+      return (
+        <span
+          className="td-value inline-flex items-center gap-1.5 border border-dashed border-edge-strong px-1.5 py-px text-3xs text-text-muted"
+          title="the API states the effective value but not the layer that supplied it"
+        >
+          unserved
+        </span>
+      );
+    case 'explicit':
+      return (
+        <span
+          className="td-value inline-flex items-center gap-1.5 border border-edge-strong px-1.5 py-px text-3xs text-text-primary"
+          title="set in the daemon's process environment: this override is in force"
+        >
+          <Lamp tone="bg-state-ready" />
+          explicit
+        </span>
+      );
+    case 'default':
+      return (
+        <span
+          className="td-value inline-flex items-center gap-1.5 border border-edge-subtle px-1.5 py-px text-3xs text-text-muted"
+          title="unset in the daemon's process environment: the default applies"
+        >
+          <Lamp tone="bg-surface-3" />
+          default
+        </span>
+      );
+    case 'edited':
+      return (
+        <span
+          className="td-value inline-flex items-center gap-1.5 border border-accent px-1.5 py-px text-3xs text-accent"
+          title="your proposal differs from the effective value and is not applied"
+        >
+          edited
+        </span>
+      );
+    default: {
+      const exhaustive: never = kind;
+      return exhaustive;
+    }
+  }
+}
+
+/** The WRITE column: capability as a word and a glyph, never a bare icon. */
+export function WriteCell({ capability }: { capability: WriteCapability }) {
+  switch (capability.kind) {
+    case 'writable':
+      return (
+        <span className="inline-flex items-center gap-1 text-2xs text-text-secondary">
+          <PenLine aria-hidden size={11} />
+          editable
+        </span>
+      );
+    case 'locked':
+      return (
+        <span
+          className="inline-flex items-center gap-1 text-2xs text-state-locked"
+          title={capability.reason}
+        >
+          <Lock aria-hidden size={11} />
+          locked
+        </span>
+      );
+    case 'no_write_path':
+      return (
+        <span className="td-value text-2xs text-text-muted" title="no write path">
+          —<span className="sr-only">no write path</span>
+        </span>
+      );
+    default: {
+      const exhaustive: never = capability;
+      return exhaustive;
+    }
+  }
+}
+
+/**
+ * A draft value as one readable line, in the same register as the effective
+ * value beside it: integers take the same thousands grouping `ValueCell`
+ * gives numbers, lists join, and a worker selection prints its one phrase.
+ */
+export function proposalText(value: unknown): string {
+  if (Array.isArray(value)) return value.length === 0 ? 'empty list' : value.map(String).join(', ');
+  if (isWorkerSelection(value)) return selectionText(value);
+  if (typeof value === 'string' && /^\d+$/.test(value.trim())) {
+    return Number(value.trim()).toLocaleString();
+  }
+  return String(value);
 }
 
 /** Marks every occurrence of the active filter inside a literal. */

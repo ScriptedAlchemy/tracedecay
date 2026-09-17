@@ -71,6 +71,9 @@ export interface SettingsReview {
 export interface SettingsAppliedRecord {
   readonly scope: SettingsScope;
   readonly message: string;
+  /** The revision the PATCH response named — the authority's own statement of
+   * where the resource now stands, ahead of the read that follows. */
+  readonly revisionId: string;
   readonly resyncRecommended: boolean;
   readonly restartRecommended: boolean;
 }
@@ -260,14 +263,24 @@ function observeAuthority(
 /**
  * An edit. A review describes a draft; once the draft moves, the review
  * describes nothing, so it goes — along with any confirmation given for it.
+ *
+ * A write in flight is the exception: leaving `submitting` would make
+ * `settleSubmit` discard the verdict when it lands, so the edit waits. A
+ * refusal the editor is resting on judged the draft as it was; once the draft
+ * moves it is no longer about anything and goes too, while a completed write
+ * stays true and stays.
  */
 function redraft(
   state: SettingsEditorState,
   next: (draft: SettingsDraft) => SettingsDraft,
 ): SettingsEditorState {
-  if (state.status === 'editor_unavailable') return state;
+  if (state.status === 'editor_unavailable' || state.status === 'submitting') return state;
   if (state.status === 'editing') {
-    return editing(state.authority, next(state.draft), state.resting);
+    return editing(
+      state.authority,
+      next(state.draft),
+      state.resting.rest === 'rejected' ? CLEAN : state.resting,
+    );
   }
   return editing(state.authority, next(state.draft), CLEAN);
 }
@@ -277,7 +290,9 @@ function requestReview(
   scope: SettingsScope,
   idempotencyKey: string,
 ): SettingsEditorState {
-  if (state.status === 'editor_unavailable') return state;
+  // A review opened over a write in flight would replace the state that
+  // write's verdict is delivered to. It waits for the verdict.
+  if (state.status === 'editor_unavailable' || state.status === 'submitting') return state;
   const plan = planFor(state.authority, state.draft, scope);
   switch (plan.outcome) {
     case 'invalid':
@@ -398,6 +413,7 @@ function settleSubmit(
         applied: {
           scope: result.scope,
           message: savedMessage(result.scope),
+          revisionId: result.revisionId,
           resyncRecommended: result.resyncRecommended,
           restartRecommended: result.restartRecommended,
         },

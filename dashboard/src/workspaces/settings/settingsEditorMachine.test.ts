@@ -262,6 +262,27 @@ describe('settings editor: a stale revision cannot reach the wire', () => {
     );
   });
 
+  /** Leaving `submitting` would make `settleSubmit` drop the verdict when it
+   * lands: a conflict or refusal for scope A would vanish because the reader
+   * touched a scope-B field meanwhile. Edits and new reviews wait instead. */
+  it('cannot be redrafted or re-reviewed out of a write that is already in flight', () => {
+    const submitting = run(confirmedProjectChange(), { type: 'submit_started' });
+    expect(submitting.status).toBe('submitting');
+
+    const redrafted = run(submitting, {
+      type: 'user_drafted',
+      values: { ...AUTHORITY.user, watcher_debounce: '15s' },
+    });
+    expect(redrafted).toBe(submitting);
+
+    const rereviewed = run(submitting, {
+      type: 'review_requested',
+      scope: 'user',
+      idempotencyKey: IDEMPOTENCY_KEY,
+    });
+    expect(rereviewed).toBe(submitting);
+  });
+
   it('cannot be dismissed out of a write that is already in flight', () => {
     const submitting = run(confirmedProjectChange(), { type: 'submit_started' });
 
@@ -397,6 +418,7 @@ describe('settings editor: a save and a pending change cannot be shown at once',
     expect(settingsApplied(state)).toEqual({
       scope: 'project',
       message: 'Project settings saved',
+      revisionId: 'rev-43',
       resyncRecommended: true,
       restartRecommended: false,
     });
@@ -432,6 +454,28 @@ describe('settings editor: a save and a pending change cannot be shown at once',
 
     expect(settingsApplied(refetched)).toMatchObject({ message: 'Project settings saved' });
     expect(settingsScopeDirty(refetched, 'project')).toBe(false);
+  });
+
+  /** A refusal judged the draft as it was; once the draft moves the refusal
+   * describes nothing, and the live plan takes over. A completed write, by
+   * contrast, stays true across an edit. */
+  it('drops a resting refusal on the next edit but keeps a completed write', () => {
+    const rejected = run(initialSettingsEditorState(AUTHORITY), {
+      type: 'project_drafted',
+      values: draftMaxFileSize('0'),
+    }, {
+      type: 'review_requested',
+      scope: 'project',
+      idempotencyKey: IDEMPOTENCY_KEY,
+    });
+    expect(settingsRejection(rejected)).not.toBeNull();
+    const retyped = run(rejected, { type: 'project_drafted', values: draftMaxFileSize('4096') });
+    expect(settingsRejection(retyped)).toBeNull();
+    expect(settingsScopeDirty(retyped, 'project')).toBe(true);
+
+    const saved = applied();
+    const edited = run(saved, { type: 'project_drafted', values: draftMaxFileSize('4096') });
+    expect(settingsApplied(edited)).not.toBeNull();
   });
 
   it('does not carry a refusal across a snapshot that replaced the values it judged', () => {

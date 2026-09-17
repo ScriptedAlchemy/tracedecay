@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { Search, X } from 'lucide-react';
 import {
   DashboardEnvelopeV1Schema,
@@ -282,7 +282,7 @@ function SettingsRegister({
 }: {
   query: string;
   onQuery: (query: string) => void;
-  searchRef: React.RefObject<HTMLInputElement | null>;
+  searchRef: RefObject<HTMLInputElement | null>;
   shown: number;
   total: number;
   writability: ScopeWritability;
@@ -349,7 +349,7 @@ function Register({
 }: {
   label: string;
   tone?: string;
-  children: React.ReactNode;
+  children: ReactNode;
   'data-review'?: string;
 }) {
   return (
@@ -366,15 +366,17 @@ function reviewReading(state: SettingsEditorState): { value: string; tone: strin
     case 'editor_unavailable':
       return { value: 'unavailable', tone: 'text-state-error' };
     case 'editing': {
-      const applied = settingsApplied(state);
-      if (applied) return { value: 'applied', tone: 'text-state-ready' };
+      // A refusal always describes the current draft (an edit clears it), so
+      // it outranks the bare fact of a proposal; a fresh proposal outranks the
+      // receipt of the last write, which survives a redraft only as the
+      // panel's receipt. The register answers "what is pending now".
       if (settingsRejection(state)) return { value: 'rejected', tone: 'text-state-error' };
       const dirty = (['project', 'user', 'code_index_workers'] as const).some((scope) =>
         settingsScopeDirty(state, scope),
       );
-      return dirty
-        ? { value: 'proposal', tone: 'text-accent' }
-        : { value: 'none', tone: 'text-text-muted' };
+      if (dirty) return { value: 'proposal', tone: 'text-accent' };
+      if (settingsApplied(state)) return { value: 'applied', tone: 'text-state-ready' };
+      return { value: 'none', tone: 'text-text-muted' };
     }
     case 'reviewing':
       return { value: 'pending', tone: 'text-accent' };
