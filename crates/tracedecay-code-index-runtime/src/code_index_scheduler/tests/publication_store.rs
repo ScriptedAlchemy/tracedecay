@@ -2338,6 +2338,63 @@ fn rewrite_active_generation_as_revision_seven(
     pointer
 }
 
+/// A same-length pointer rewrite that keeps the previous mtime must not replay
+/// the memoized generation id. Content digest is the identity.
+#[test]
+fn publication_pointer_memo_follows_bytes_not_mtime() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn ready() -> usize { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    drop(scheduler);
+
+    let publication = super::super::DaemonCodeIndexPublicationStoreV1::new(
+        store.path(),
+        fixture.path(),
+        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+            .expect("sanitizer revision"),
+    )
+    .expect("open publication store");
+    let pointer_path = store.path().join("active-code-generation-v1.json");
+    let stamped = std::fs::metadata(&pointer_path)
+        .expect("pointer metadata")
+        .modified()
+        .expect("pointer mtime");
+    let original = publication
+        .read_publication_pointer()
+        .expect("read pointer")
+        .expect("published pointer");
+
+    let mut rewritten = original.clone();
+    let mut moved_id = original.generation_id.clone();
+    let last = moved_id.pop().expect("generation id");
+    moved_id.push(if last == 'a' { 'b' } else { 'a' });
+    assert_eq!(moved_id.len(), original.generation_id.len());
+    for entry in &mut rewritten.generation_index {
+        if entry.generation_id == original.generation_id {
+            entry.generation_id = moved_id.clone();
+        }
+    }
+    rewritten.generation_id = moved_id.clone();
+    write_repaired_pointer(&pointer_path, &mut rewritten);
+    filetime::set_file_mtime(&pointer_path, filetime::FileTime::from_system_time(stamped))
+        .expect("restore coarse mtime");
+
+    let reread = publication
+        .read_publication_pointer()
+        .expect("reread pointer")
+        .expect("rewritten pointer");
+    assert_eq!(
+        reread.generation_id, moved_id,
+        "pointer memo must follow the bytes, not a repeated mtime"
+    );
+    assert_ne!(reread.generation_id, original.generation_id);
+}
+
 fn write_repaired_pointer(pointer_path: &Path, pointer: &mut DurablePublicationPointerV1) {
     pointer.generation_index_digest = Some(
         durable_generation_index_digest(
