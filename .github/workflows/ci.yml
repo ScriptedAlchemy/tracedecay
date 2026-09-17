@@ -177,6 +177,11 @@ jobs:
       - name: Test bounded commit range linting
         run: python3 scripts/test-lint-commit-range.py
 
+      - name: Test and check dev skill host copies
+        run: |
+          python3 scripts/test-check-dev-skill-mirrors.py
+          python3 scripts/check-dev-skill-mirrors.py check
+
       - name: Validate PR commit messages
         if: github.event_name == 'pull_request'
         env:
