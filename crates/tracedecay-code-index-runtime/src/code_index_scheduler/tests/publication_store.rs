@@ -2510,7 +2510,28 @@ fn publication_over_an_undecodable_active_generation_refuses_a_moved_pointer() {
     }
 
     let mut restored = observed.clone();
+    let moved_metadata = std::fs::metadata(&pointer_path).expect("moved pointer metadata");
+    let preserved_mtime = moved_metadata.modified().expect("moved pointer mtime");
+    let moved_len = moved_metadata.len();
     write_repaired_pointer(&pointer_path, &mut restored);
+    filetime::set_file_mtime(
+        &pointer_path,
+        filetime::FileTime::from_system_time(preserved_mtime),
+    )
+    .expect("preserve the moved pointer mtime on the restored identity");
+    let restored_metadata = std::fs::metadata(&pointer_path).expect("restored pointer metadata");
+    assert_eq!(
+        restored_metadata.len(),
+        moved_len,
+        "the restored identity must be invisible to a length check"
+    );
+    assert_eq!(
+        restored_metadata
+            .modified()
+            .expect("restored pointer mtime"),
+        preserved_mtime,
+        "the restored identity must be invisible to an mtime check"
+    );
     let mut admitting = publication.for_undecoded_active_rebuild(&observed);
     admitting
         .publish_atomically(&scope, None, seeded)
