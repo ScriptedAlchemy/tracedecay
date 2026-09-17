@@ -608,7 +608,7 @@ describe('LoomPage', () => {
     ).toBe(true);
     await userEvent.click(row);
     expect(await screen.findByText('src/runtime.rs')).toBeTruthy();
-    expect(screen.getByText('abc123def456')).toBeTruthy();
+    expect(screen.getByText('abc123def456').textContent).toBe('abc123def456');
     // The extent is a formatted duration, so `getAllByText('30m').length >= 1`
     // would pass on any '30m' anywhere on the page — including one printed
     // against a different term. Read it through the term it belongs to, which
@@ -626,9 +626,9 @@ describe('LoomPage', () => {
   it('reports each causal source with its real authority or dependency', async () => {
     renderLoom();
     await screen.findByText('Deliver Git primitive runtime');
-    expect(screen.getByText('Session ↔ commit')).toBeTruthy();
-    expect(screen.getByText('Session → edited file')).toBeTruthy();
-    expect(screen.getByText('Branch & worktree spans')).toBeTruthy();
+    expect(screen.getByText('Session ↔ commit').textContent).toBe('Session ↔ commit');
+    expect(screen.getByText('Session → edited file').textContent).toBe('Session → edited file');
+    expect(screen.getByText('Branch & worktree spans').textContent).toBe('Branch & worktree spans');
     expect(screen.getByText(/commit_sessions/)).toBeTruthy();
   });
 
@@ -651,8 +651,8 @@ describe('LoomPage', () => {
     await userEvent.click(await screen.findByText('Deliver Git primitive runtime'));
 
     expect(await screen.findByText('~12 tokens · o200k approximate')).toBeTruthy();
-    expect(screen.getByText('~20 tokens · o200k approximate')).toBeTruthy();
-    expect(screen.getByText('tokens unknown')).toBeTruthy();
+    expect(screen.getByText('~20 tokens · o200k approximate').textContent).toBe('~20 tokens · o200k approximate');
+    expect(screen.getByText('tokens unknown').textContent).toBe('tokens unknown');
   });
 
   it('shares reveal, picking, minimap and exact evidence through one URL cursor', async () => {
@@ -675,7 +675,7 @@ describe('LoomPage', () => {
     expect(document.querySelector('[data-event="m1"]')).not.toBeNull();
     expect(screen.getByRole('button', { name: 'Inspect stored event m1' })).toBeTruthy();
     fireEvent.keyDown(screen.getByRole('button', { name: 'Select stored event m0' }), { key: 'Enter' });
-    expect(screen.getByText('stored ordinal 0')).toBeTruthy();
+    expect(screen.getByText('stored ordinal 0').textContent).toBe('stored ordinal 0');
     await user.click(screen.getByRole('button', { name: 'Zoom into execution' }));
     expect(screen.getByTestId('loom-url').textContent).toContain('loomWindow=');
     expect(screen.getByTestId('loom-url').textContent).toContain('loomEvent=m0');
@@ -699,7 +699,7 @@ describe('LoomPage', () => {
     await user.click(screen.getByRole('button', { name: 'Select stored event m1' }));
     routes['/api/plugins/hermes-lcm/session/'].body = readyEnvelope({ ...CHAIN, messages: appended.slice(1) });
     await act(() => client.invalidateQueries({ queryKey: ['loom', 'chain'] }));
-    expect(screen.getByText('stored ordinal 1')).toBeTruthy();
+    expect(screen.getByText('stored ordinal 1').textContent).toBe('stored ordinal 1');
     expect(screen.getByTestId('loom-url').textContent).toContain('loomEvent=m1');
     routes['/api/plugins/hermes-lcm/session/'].body = readyEnvelope({ ...CHAIN, messages: appended.slice(2) });
     await act(() => client.invalidateQueries({ queryKey: ['loom', 'chain'] }));
@@ -767,16 +767,16 @@ describe('LoomPage', () => {
 
     await user.click(await screen.findByText('Deliver Git primitive runtime'));
     expect(await screen.findByText('stored ordinal 2')).toBeTruthy();
-    expect(screen.getByText('following loaded tail')).toBeTruthy();
+    expect(screen.getByText('following loaded tail').textContent).toBe('following loaded tail');
     expect(screen.getByText(/later pages remain outside this replay/)).toBeTruthy();
 
     await user.click(screen.getByRole('button', { name: 'Step to previous stored event' }));
-    expect(screen.getByText('stored ordinal 1')).toBeTruthy();
+    expect(screen.getByText('stored ordinal 1').textContent).toBe('stored ordinal 1');
     expect(screen.getByRole('button', { name: 'Return replay to latest loaded event' })).toBeTruthy();
 
     await user.click(screen.getByRole('button', { name: 'Step to previous stored event' }));
-    expect(screen.getByText('stored ordinal 0')).toBeTruthy();
-    expect(screen.getByText('linked compaction boundaries')).toBeTruthy();
+    expect(screen.getByText('stored ordinal 0').textContent).toBe('stored ordinal 0');
+    expect(screen.getByText('linked compaction boundaries').textContent).toBe('linked compaction boundaries');
     expect(screen.queryByText(/checkpoint · depth 1/)).toBeNull();
     expect(screen.getByText(/linked boundary is outside this loaded transcript page/)).toBeTruthy();
 
@@ -786,7 +786,7 @@ describe('LoomPage', () => {
     expect(screen.getByRole('button', { name: 'Pause replay' })).toBeTruthy();
     await user.click(screen.getByRole('button', { name: 'Pause replay' }));
     await user.click(screen.getByRole('button', { name: 'Return replay to latest loaded event' }));
-    expect(screen.getByText('following loaded tail')).toBeTruthy();
+    expect(screen.getByText('following loaded tail').textContent).toBe('following loaded tail');
   });
 
   it('does not render partial commit coverage as a zero result', async () => {
@@ -918,7 +918,7 @@ describe('LoomPage', () => {
     // The busiest-day readout names the failed read as a failure — not as
     // "unread", which is also what loading looks like; the threads, which
     // come from a different endpoint, still draw.
-    expect(screen.getByText('timeline read failed')).toBeTruthy();
+    expect(screen.getByText('timeline read failed').textContent).toBe('timeline read failed');
   });
 
   it('gives the canvas an accessible description and a real table alongside', async () => {

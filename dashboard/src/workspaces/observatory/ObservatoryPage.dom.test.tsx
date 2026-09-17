@@ -110,14 +110,14 @@ describe('ObservatoryPage store telemetry', () => {
     renderObservatory();
 
     await advanceTimers(0);
-    expect(screen.getByText('generation.scope.alpha')).toBeTruthy();
+    expect(screen.getByText('generation.scope.alpha').textContent).toBe('generation.scope.alpha');
     await advanceTimers(1_001);
     await advanceTimers(0);
     expect(screen.queryByText('generation.scope.alpha')).toBeNull();
 
     act(() => useScope.getState().selectProject('project.beta', 'Project Beta', 'selected'));
     await advanceTimers(0);
-    expect(screen.getByText('generation.scope.beta')).toBeTruthy();
+    expect(screen.getByText('generation.scope.beta').textContent).toBe('generation.scope.beta');
     expect(screen.queryByText('generation.scope.alpha')).toBeNull();
     expect(document.querySelectorAll('[data-code-index-generation]').length).toBe(1);
   });
@@ -162,10 +162,10 @@ describe('ObservatoryPage store telemetry', () => {
     renderObservatory();
 
     await advanceTimers(0);
-    expect(screen.getByText('generation.scope.alpha')).toBeTruthy();
+    expect(screen.getByText('generation.scope.alpha').textContent).toBe('generation.scope.alpha');
     act(() => useScope.getState().selectProject('project.beta', 'Project Beta', 'active'));
     await advanceTimers(0);
-    expect(screen.getByText('generation.scope.beta')).toBeTruthy();
+    expect(screen.getByText('generation.scope.beta').textContent).toBe('generation.scope.beta');
     expect(screen.queryByText('generation.scope.alpha')).toBeNull();
     expect(document.querySelectorAll('[data-code-index-generation]').length).toBe(1);
   });
@@ -249,7 +249,7 @@ describe('ObservatoryPage store telemetry', () => {
     expect(await screen.findByText('40.0 MiB')).toBeTruthy();
     // The capacity bar is drawn for this store rather than withheld, and says
     // what it does not know instead of filling to 100% at "0.0% free pages".
-    expect(screen.getByText('free pages unknown')).toBeTruthy();
+    expect(screen.getByText('free pages unknown').textContent).toBe('free pages unknown');
     expect(
       screen.getByText(/no page-level sample, so free pages are unmeasured rather than zero/),
     ).toBeTruthy();
@@ -409,10 +409,10 @@ describe('ObservatoryPage store telemetry', () => {
     for (const state of ['partial', 'backfilling', 'stale', 'unavailable']) {
       expect(document.querySelector(`[data-clone-index-state="${state}"]`)).toBeTruthy();
     }
-    expect(screen.getByText('positional fingerprint successor is missing')).toBeTruthy();
-    expect(screen.getByText('2 / 5 sealed pages')).toBeTruthy();
-    expect(screen.getByText('the sealed lexical artifact is unreadable')).toBeTruthy();
-    expect(screen.getByText('unavailable · graph artifact unreadable')).toBeTruthy();
+    expect(screen.getByText('positional fingerprint successor is missing').textContent).toBe('positional fingerprint successor is missing');
+    expect(screen.getByText('2 / 5 sealed pages').textContent).toBe('2 / 5 sealed pages');
+    expect(screen.getByText('the sealed lexical artifact is unreadable').textContent).toBe('the sealed lexical artifact is unreadable');
+    expect(screen.getByText('unavailable · graph artifact unreadable').textContent).toBe('unavailable · graph artifact unreadable');
   });
 });
 

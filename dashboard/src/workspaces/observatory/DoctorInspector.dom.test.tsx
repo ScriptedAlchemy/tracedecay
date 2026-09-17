@@ -172,9 +172,9 @@ describe('DoctorInspector', () => {
     renderDoctor();
 
     expect(await screen.findByText('Pending schema migration')).toBeTruthy();
-    expect(screen.getByText('Released-shape convergence in progress')).toBeTruthy();
-    expect(screen.getByText('Schema convergence degraded')).toBeTruthy();
-    expect(screen.getByText('Schema convergence completed')).toBeTruthy();
+    expect(screen.getByText('Released-shape convergence in progress').textContent).toBe('Released-shape convergence in progress');
+    expect(screen.getByText('Schema convergence degraded').textContent).toBe('Schema convergence degraded');
+    expect(screen.getByText('Schema convergence completed').textContent).toBe('Schema convergence completed');
     expect(screen.getByText(/pages 4 done \/ 7 remaining/)).toBeTruthy();
     expect(screen.getByText(/observation_id=obs-7 projector=session_message/)).toBeTruthy();
   });

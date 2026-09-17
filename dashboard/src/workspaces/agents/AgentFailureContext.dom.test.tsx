@@ -87,8 +87,8 @@ describe('AgentFailureContext', () => {
   it('reads the failures off the served tape and says what the tape is', () => {
     renderContext(readAttemptFailures(attempts()));
     const tape = document.querySelector('[data-agent-failure-tape="2"]')!;
-    expect(within(tape as HTMLElement).getByText('tracedecay_read')).toBeTruthy();
-    expect(within(tape as HTMLElement).getByText('Bash')).toBeTruthy();
+    expect(within(tape as HTMLElement).getByText('tracedecay_read').textContent).toBe('tracedecay_read');
+    expect(within(tape as HTMLElement).getByText('Bash').textContent).toBe('Bash');
     expect(within(tape as HTMLElement).queryByText('tracedecay_grep')).toBeNull();
     expect(screen.getByText(/nothing here explains why any of them failed/)).toBeTruthy();
   });
@@ -171,7 +171,7 @@ describe('AgentFailureContext', () => {
     );
 
     expect(document.querySelector('[data-agent-attempt-failures="unavailable"]')).toBeTruthy();
-    expect(screen.getByText('Source unavailable')).toBeTruthy();
+    expect(screen.getByText('Source unavailable').textContent).toBe('Source unavailable');
     expect(screen.getByText(/no failure count is drawn from it/)).toBeTruthy();
     const panel = screen.getByRole('region', { name: 'Attempt failures' });
     expect(within(panel).queryByText(/observed attempts on graph version/)).toBeNull();
@@ -187,7 +187,7 @@ describe('AgentFailureContext', () => {
     );
 
     expect(document.querySelector('[data-agent-attempt-failures="refused"]')).toBeTruthy();
-    expect(screen.getByText('Denied')).toBeTruthy();
+    expect(screen.getByText('Denied').textContent).toBe('Denied');
     expect(screen.getByText(/there is nothing to report as zero/)).toBeTruthy();
     // The analytics half of the panel is untouched: one authority refusing does
     // not blank the other.
@@ -197,7 +197,7 @@ describe('AgentFailureContext', () => {
   it('reports a pending attempt read as pending', () => {
     renderContext(readAttemptFailures(undefined));
     const panel = screen.getByRole('region', { name: 'Attempt failures' });
-    expect(within(panel).getByText('Loading')).toBeTruthy();
+    expect(within(panel).getByText('Loading').textContent).toBe('Loading');
     expect(panel.getAttribute('data-agent-attempt-failures')).toBeNull();
   });
 });

@@ -1793,8 +1793,19 @@ mod tests {
 
     #[test]
     fn bounded_sanitized_text_enforces_the_chunk_bound() {
-        assert!(BoundedSanitizedText::new("x".repeat(MAX_CHUNK_TEXT_BYTES)).is_ok());
-        assert!(BoundedSanitizedText::new("x".repeat(MAX_CHUNK_TEXT_BYTES + 1)).is_err());
+        let at_limit = "x".repeat(65_536);
+        assert_eq!(
+            BoundedSanitizedText::new(at_limit.clone())
+                .expect("64 KiB chunk text is admitted")
+                .as_str(),
+            at_limit
+        );
+        assert_eq!(
+            BoundedSanitizedText::new("x".repeat(65_537)).unwrap_err(),
+            DomainError::UnsafeText {
+                field: "bounded sanitized chunk text",
+            }
+        );
     }
 
     #[test]

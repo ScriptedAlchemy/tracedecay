@@ -49,8 +49,8 @@ describe('SignalPanel connection honesty', () => {
     expect(inspect).toHaveBeenCalledWith(null);
     const evidence = within(view.getByRole('region', { name: 'Admitted event evidence' }));
     expect(evidence.getByText(event.eventId)).toBeTruthy();
-    expect(evidence.getByText('1700000000000001')).toBeTruthy();
-    expect(evidence.getByText('unavailable: event is unscoped')).toBeTruthy();
+    expect(evidence.getByText('1700000000000001').textContent).toBe('1700000000000001');
+    expect(evidence.getByText('unavailable: event is unscoped').textContent).toBe('unavailable: event is unscoped');
     expect(evidence.getByText(/carries no session\/message identity/)).toBeTruthy();
     view.rerender(<SignalPanel pulses={[]} sseState="live" lastEventAt={NOW} />);
     expect(view.queryByRole('region', { name: 'Admitted event evidence' })).toBeNull();
@@ -69,7 +69,7 @@ describe('SignalPanel connection honesty', () => {
   it('withholds the rate while offline rather than decaying it to a healthy zero', () => {
     const { getByText, queryByText } = renderPanel('offline', NOW - 370_000);
     expect(getByText(/rate · not measured/i)).toBeTruthy();
-    expect(getByText('—')).toBeTruthy();
+    expect(getByText('—').textContent).toBe('—');
     expect(queryByText(/per min/i)).toBeNull();
   });
 
@@ -80,7 +80,7 @@ describe('SignalPanel connection honesty', () => {
     // Six minutes of quiet on an open stream: the rate is a truthful zero and
     // the age says how long the quiet has lasted.
     expect(getByText(/retained · last 60s/i)).toBeTruthy();
-    expect(getByText('6m')).toBeTruthy();
+    expect(getByText('6m').textContent).toBe('6m');
   });
 
   it('distinguishes reconnecting from both', () => {
@@ -94,7 +94,7 @@ describe('SignalPanel connection honesty', () => {
     const { getByText } = render(
       <SignalPanel pulses={[]} sseState="live" lastEventAt={null} />,
     );
-    expect(getByText('—')).toBeTruthy();
+    expect(getByText('—').textContent).toBe('—');
     expect(getByText(/no events observed yet/i)).toBeTruthy();
   });
 });

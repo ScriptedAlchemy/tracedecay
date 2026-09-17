@@ -74,7 +74,7 @@ describe('SettingsPage authorized changes', () => {
     const maxFileSize = await screen.findByLabelText('Maximum file size (bytes)');
     await user.clear(maxFileSize);
     await user.type(maxFileSize, '2097152');
-    expect(screen.getByText('Unsaved project changes')).toBeTruthy();
+    expect(screen.getByText('Unsaved project changes').textContent).toBe('Unsaved project changes');
     await user.click(screen.getByRole('button', { name: 'Review project changes' }));
 
     const dialog = screen.getByRole('dialog', { name: 'Review project settings change' });
@@ -88,8 +88,8 @@ describe('SettingsPage authorized changes', () => {
     await user.click(screen.getByRole('button', { name: 'Apply project settings' }));
 
     expect(await screen.findByText('Project settings saved')).toBeTruthy();
-    expect(screen.getByText('Current project values')).toBeTruthy();
-    expect(screen.getByText('Resync recommended')).toBeTruthy();
+    expect(screen.getByText('Current project values').textContent).toBe('Current project values');
+    expect(screen.getByText('Resync recommended').textContent).toBe('Resync recommended');
     expect(
       calls.map(({ method, url }) => `${method} ${url}`),
     ).toEqual([
@@ -143,7 +143,7 @@ describe('SettingsPage authorized changes', () => {
     for (const label of ['Configured', 'Requested', 'Effective', 'Memory-safe']) {
       expect(screen.getByText(label)).toBeTruthy();
     }
-    expect(screen.getByText('Automatic: all available cores')).toBeTruthy();
+    expect(screen.getByText('Automatic: all available cores').textContent).toBe('Automatic: all available cores');
     await user.click(screen.getByLabelText('Exact number of cores'));
     const workers = screen.getByLabelText('Code-index worker count');
     await user.clear(workers);
@@ -204,8 +204,8 @@ describe('SettingsPage authorized changes', () => {
         'TRACEDECAY_INDEX_WORKERS=7 overrides the persisted worker selection for this running daemon.',
       ),
     ).toBeTruthy();
-    expect(screen.getByText('7 via TRACEDECAY_INDEX_WORKERS')).toBeTruthy();
-    expect(screen.getByText('TRACEDECAY_INDEX_WORKERS override')).toBeTruthy();
+    expect(screen.getByText('7 via TRACEDECAY_INDEX_WORKERS').textContent).toBe('7 via TRACEDECAY_INDEX_WORKERS');
+    expect(screen.getByText('TRACEDECAY_INDEX_WORKERS override').textContent).toBe('TRACEDECAY_INDEX_WORKERS override');
   });
 
   it('states that an exact selection is evaluated on restart when current admission limits are unavailable', async () => {
@@ -556,7 +556,7 @@ describe('Settings scope authority', () => {
     });
     expect(banner.textContent).toContain('not known yet');
     expect(banner.textContent).not.toMatch(/not authorized|read-only project/i);
-    expect(screen.getByText('Applies to your TraceDecay profile.')).toBeTruthy();
+    expect(screen.getByText('Applies to your TraceDecay profile.').textContent).toBe('Applies to your TraceDecay profile.');
   });
 
   it('names the write target in the active project', async () => {
@@ -575,7 +575,7 @@ describe('Settings scope authority', () => {
     const notes = [...document.querySelectorAll('[data-settings-gate="writable"]')];
     expect(notes).toHaveLength(3);
     expect(screen.getAllByText('Applies to Active project.')).toHaveLength(2);
-    expect(screen.getByText('Applies to your TraceDecay profile.')).toBeTruthy();
+    expect(screen.getByText('Applies to your TraceDecay profile.').textContent).toBe('Applies to your TraceDecay profile.');
   });
 
   /**
@@ -595,7 +595,7 @@ describe('Settings scope authority', () => {
       return found;
     });
     for (const note of unknown) expect(note.textContent).toContain('not known yet');
-    expect(screen.getByText('Applies to your TraceDecay profile.')).toBeTruthy();
+    expect(screen.getByText('Applies to your TraceDecay profile.').textContent).toBe('Applies to your TraceDecay profile.');
 
     act(() =>
       useScope.getState().reconcileScope({
@@ -609,7 +609,7 @@ describe('Settings scope authority', () => {
     const notes = [...document.querySelectorAll('[data-settings-gate="writable"]')];
     expect(notes).toHaveLength(3);
     expect(screen.getAllByText('Applies to Production.')).toHaveLength(2);
-    expect(screen.getByText('Applies to your TraceDecay profile.')).toBeTruthy();
+    expect(screen.getByText('Applies to your TraceDecay profile.').textContent).toBe('Applies to your TraceDecay profile.');
     expect(document.body.textContent).not.toContain('Scratch sandbox');
   });
 
@@ -814,7 +814,7 @@ describe('Settings response authority', () => {
     renderSettings();
 
     expect(await screen.findByText('Automation configuration unavailable')).toBeTruthy();
-    expect(screen.getByText('project automation configuration could not be read')).toBeTruthy();
+    expect(screen.getByText('project automation configuration could not be read').textContent).toBe('project automation configuration could not be read');
     expect(screen.queryByText('Effective automation config, merged daemon-side')).toBeNull();
   });
 });

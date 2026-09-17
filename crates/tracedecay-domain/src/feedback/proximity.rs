@@ -409,6 +409,7 @@ impl ProximityContributionV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::research::DomainError;
 
     fn concealed_private_contribution() -> ProximityContributionV1 {
         ProximityContributionV1 {
@@ -447,8 +448,14 @@ mod tests {
     fn concealed_proximity_requires_matching_coverage() {
         let mut contribution = concealed_private_contribution();
         contribution.inclusion = ProximityInclusionV1::Denied;
-        assert!(contribution.validate().is_err());
+        assert_eq!(
+            contribution.validate(),
+            Err(DomainError::NonCanonical {
+                field: "proximity inclusion coverage",
+            })
+        );
         contribution.coverage = ProximityCoverageV1::Denied;
-        assert!(contribution.validate().is_ok());
+        assert_eq!(contribution.validate(), Ok(()));
+        assert_eq!(contribution.coverage, ProximityCoverageV1::Denied);
     }
 }

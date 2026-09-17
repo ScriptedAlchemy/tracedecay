@@ -130,8 +130,8 @@ describe('AgentsPage read coverage', () => {
     renderAgents();
 
     expect(await screen.findByText('Codex')).toBeTruthy();
-    expect(screen.getByText('42')).toBeTruthy();
-    expect(screen.getByText('Claude')).toBeTruthy();
+    expect(screen.getByText('42').textContent).toBe('42');
+    expect(screen.getByText('Claude').textContent).toBe('Claude');
     expect(screen.getByText(/sessions per managed subagent · source: sessions/i)).toBeTruthy();
   });
 
@@ -191,11 +191,11 @@ describe('AgentsPage read coverage', () => {
     // Tool activity lives on the demoted telemetry register, which renders
     // once its own usage read lands — awaited rather than assumed.
     expect(await screen.findByText('Tool activity')).toBeTruthy();
-    expect(screen.getByText('Failure context')).toBeTruthy();
+    expect(screen.getByText('Failure context').textContent).toBe('Failure context');
 
     // Tool activity is fed by the diagnostics read that landed.
     expect(await screen.findByText('through MCP')).toBeTruthy();
-    expect(screen.getByText('not through MCP')).toBeTruthy();
+    expect(screen.getByText('not through MCP').textContent).toBe('not through MCP');
     expect(screen.getByText(/Codex/)).toBeTruthy();
 
     // The failure accounting off the same read.

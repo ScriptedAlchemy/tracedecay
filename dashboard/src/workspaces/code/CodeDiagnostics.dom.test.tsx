@@ -55,12 +55,12 @@ describe('Code diagnostics panel', () => {
     renderPanel();
 
     expect(await screen.findByText('mismatched types')).toBeTruthy();
-    expect(screen.getByText('in GraphState::open')).toBeTruthy();
-    expect(screen.getByText('[E0308]')).toBeTruthy();
-    expect(screen.getByText('3')).toBeTruthy();
-    expect(screen.getByText('12')).toBeTruthy();
+    expect(screen.getByText('in GraphState::open').textContent).toBe('in GraphState::open');
+    expect(screen.getByText('[E0308]').textContent).toBe('[E0308]');
+    expect(screen.getByText('3').textContent).toBe('3');
+    expect(screen.getByText('12').textContent).toBe('12');
     // Engine states are the server's words: the crashed engine keeps its error.
-    expect(screen.getByText('rust')).toBeTruthy();
+    expect(screen.getByText('rust').textContent).toBe('rust');
     expect(screen.getByText(/tsserver exited with code 1/)).toBeTruthy();
   });
 
@@ -139,7 +139,7 @@ describe('Code diagnostics controls', () => {
     await screen.findByText(/the mounted engines report no diagnostics/i);
     await userEvent.click(screen.getByRole('button', { name: /refresh every analyzer engine/i }));
 
-    await waitFor(() => expect(screen.getByText('2')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('2').textContent).toBe('2'));
     expect(
       calls.some((c) => c.method === 'POST' && c.url.endsWith('/api/plugins/code-diagnostics/refresh')),
     ).toBe(true);

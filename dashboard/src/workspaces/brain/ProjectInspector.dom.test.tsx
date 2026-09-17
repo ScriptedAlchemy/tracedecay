@@ -13,10 +13,10 @@ describe('project inspection evidence', () => {
   it('shows exact registry identity and holdings without selecting scope', () => {
     const open = vi.fn();
     render(<ProjectInspector project={project} group={{ label: 'repo', git_common_dir: '/repo/.git', branches: [], project_count: 1, projects: [project] }} onClose={vi.fn()} onRepository={open} />);
-    expect(screen.getByText('exact-project-id')).toBeTruthy();
-    expect(screen.getByText('/canonical/root')).toBeTruthy();
-    expect(screen.getByText('7')).toBeTruthy();
-    expect(screen.getByText('1234567890 Unix seconds')).toBeTruthy();
+    expect(screen.getByText('exact-project-id').textContent).toBe('exact-project-id');
+    expect(screen.getByText('/canonical/root').textContent).toBe('/canonical/root');
+    expect(screen.getByText('7').textContent).toBe('7');
+    expect(screen.getByText('1234567890 Unix seconds').textContent).toBe('1234567890 Unix seconds');
     expect(open).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'View repository' }));
     expect(open).toHaveBeenCalledOnce();
@@ -24,7 +24,7 @@ describe('project inspection evidence', () => {
 
   it('does not invent a repository route when the registry has none', () => {
     render(<ProjectInspector project={project} group={{ label: 'ungrouped', git_common_dir: null, branches: [], project_count: 1, projects: [project] }} onClose={vi.fn()} onRepository={vi.fn()} />);
-    expect(screen.getByText('not recorded')).toBeTruthy();
+    expect(screen.getByText('not recorded').textContent).toBe('not recorded');
     expect(screen.queryByRole('button', { name: 'View repository' })).toBeNull();
   });
 });

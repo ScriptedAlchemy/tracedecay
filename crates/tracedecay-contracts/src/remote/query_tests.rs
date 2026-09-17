@@ -22,7 +22,7 @@ use super::query::{
     validate_returned_authority, validate_returned_observation_identity,
     validate_returned_provenance,
 };
-use crate::{RequestId, ResolvedScope};
+use crate::{ApplicationContractError, RequestId, ResolvedScope};
 use tracedecay_domain::{
     AuthorityEpoch, BrainId, BrainNodeId, CanonicalObservationIdV1, CurrentRemoteAuthorityStateV1,
     CurrentRemoteAuthorityV1, EnrollmentCredentialRecordV1, EntityId, EvidenceAvailabilityV1,
@@ -133,36 +133,67 @@ fn exact_observation_absence_round_trips_as_explicit_state() {
 
 #[test]
 fn remote_query_request_enforces_shard_inventory_bounds_and_identity() {
-    assert!(request(Vec::new()).validate().is_err());
-    assert!(request(vec![shard(1)]).validate().is_ok());
-    assert!(request(vec![shard(1), shard(2)]).validate().is_err());
-    assert!(request(vec![shard(1), shard(1)]).validate().is_err());
+    let range = ApplicationContractError::InvalidRange {
+        field: "remote query expected shard inventory",
+    };
+    let inconsistent = ApplicationContractError::Inconsistent {
+        field: "remote query expected shard inventory",
+    };
+    assert_eq!(request(Vec::new()).validate(), Err(range.clone()));
+    let accepted = request(vec![shard(1)]);
+    assert_eq!(accepted.validate(), Ok(()));
+    assert_eq!(accepted.expected_shards[0].shard_id, "shard.remote-query.1");
+    assert_eq!(request(vec![shard(1), shard(2)]).validate(), Err(range));
+    assert_eq!(
+        request(vec![shard(1), shard(1)]).validate(),
+        Err(inconsistent.clone())
+    );
 
     let mut mixed = shard(2);
     mixed.brain_id = "brain.other".to_owned();
-    assert!(request(vec![shard(1), mixed]).validate().is_err());
+    assert_eq!(request(vec![shard(1), mixed]).validate(), Err(inconsistent));
 }
 
 #[test]
 fn remote_query_request_binds_inventory_to_expected_fence() {
     let mut mismatched_brain = request(vec![shard(1)]);
     mismatched_brain.expected_shards[0].brain_id = "brain.other".into();
-    assert!(mismatched_brain.validate().is_err());
+    assert_eq!(
+        mismatched_brain.validate(),
+        Err(ApplicationContractError::Inconsistent {
+            field: "remote query authority inventory binding",
+        })
+    );
 
     let mut mismatched_shard = request(vec![shard(1)]);
     mismatched_shard.expected_shards[0].shard_id = "shard.other".into();
-    assert!(mismatched_shard.validate().is_err());
+    assert_eq!(
+        mismatched_shard.validate(),
+        Err(ApplicationContractError::Inconsistent {
+            field: "remote query authority inventory binding",
+        })
+    );
 
     let mut mismatched_generation = request(vec![shard(1)]);
     mismatched_generation.expected_shards[0].generation_id = "generation.other".into();
-    assert!(mismatched_generation.validate().is_err());
+    assert_eq!(
+        mismatched_generation.validate(),
+        Err(ApplicationContractError::Inconsistent {
+            field: "remote query authority inventory binding",
+        })
+    );
 }
 
 #[test]
 fn remote_query_request_rejects_invalid_shard_identifiers() {
     let mut invalid = shard(1);
     invalid.generation_id = " generation.remote-query ".to_owned();
-    assert!(request(vec![invalid]).validate().is_err());
+    assert_eq!(
+        request(vec![invalid]).validate(),
+        Err(ApplicationContractError::InvalidIdentifier {
+            field: "remote query generation identity",
+        })
+    );
 }
 
 #[test]

@@ -409,7 +409,7 @@ impl CiFailureLocalizationResultV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::research::{CommitId, ProjectId, RepositoryId, WorktreeId};
+    use crate::research::{CommitId, DomainError, ProjectId, RepositoryId, WorktreeId};
 
     fn result() -> CiFailureLocalizationResultV1 {
         let scope = FeedbackScopeV1 {
@@ -453,14 +453,38 @@ mod tests {
 
     #[test]
     fn complete_ci_localization_requires_exact_generation_evidence() {
-        assert!(result().validate().is_err());
+        assert_eq!(
+            result().validate(),
+            Err(DomainError::NonCanonical {
+                field: "complete ci failure generation evidence",
+            })
+        );
+        let mut complete = result();
+        complete.generation = Some(CiFailureGenerationEvidenceV1 {
+            generation_id: CodeGenerationId::new("generation.ci").expect("generation"),
+            retrieval_anchor_id: RetrievalAnchorId::new("anchor.ci.generation").expect("anchor"),
+        });
+        assert_eq!(complete.validate(), Ok(()));
+        assert_eq!(
+            complete
+                .generation
+                .expect("generation evidence")
+                .generation_id
+                .as_str(),
+            "generation.ci"
+        );
     }
 
     #[test]
     fn ci_provider_state_and_coverage_cannot_be_collapsed() {
         let mut mismatched = result();
         mismatched.state = CiFailureLocalizationStateV1::Partial;
-        assert!(mismatched.validate().is_err());
+        assert_eq!(
+            mismatched.validate(),
+            Err(DomainError::NonCanonical {
+                field: "ci failure localization coverage",
+            })
+        );
     }
 
     #[test]
@@ -472,10 +496,15 @@ mod tests {
             generation_id: CodeGenerationId::new("generation.denied").unwrap(),
             retrieval_anchor_id: RetrievalAnchorId::new("anchor.denied").unwrap(),
         });
-        assert!(denied.validate().is_err());
+        assert_eq!(
+            denied.validate(),
+            Err(DomainError::NonCanonical {
+                field: "unavailable ci localization evidence",
+            })
+        );
 
         denied.generation = None;
-        assert!(denied.validate().is_ok());
+        assert_eq!(denied.validate(), Ok(()));
 
         let mut unavailable = result();
         unavailable.state = CiFailureLocalizationStateV1::Unavailable;
@@ -484,8 +513,13 @@ mod tests {
             target: CiInertRerunTargetV1::Workflow,
             retrieval_anchor_id: None,
         });
-        assert!(unavailable.validate().is_err());
+        assert_eq!(
+            unavailable.validate(),
+            Err(DomainError::NonCanonical {
+                field: "unavailable ci localization evidence",
+            })
+        );
         unavailable.rerun_hints.clear();
-        assert!(unavailable.validate().is_ok());
+        assert_eq!(unavailable.validate(), Ok(()));
     }
 }

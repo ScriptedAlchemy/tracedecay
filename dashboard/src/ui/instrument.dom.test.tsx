@@ -23,8 +23,8 @@ describe('MeterRow', () => {
       <MeterRow label="tool_calls" value="1,945" fraction={0.25} />,
     );
 
-    expect(getByText('tool_calls')).toBeTruthy();
-    expect(getByText('1,945')).toBeTruthy();
+    expect(getByText('tool_calls').textContent).toBe('tool_calls');
+    expect(getByText('1,945').textContent).toBe('1,945');
     expect(container.querySelector<HTMLElement>('.td-meter-fill')?.style.width).toBe('25%');
     // The rail restates a number printed beside it, so it is redundant to a
     // screen reader rather than an unlabelled image.

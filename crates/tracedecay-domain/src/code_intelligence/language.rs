@@ -187,18 +187,35 @@ mod tests {
 
     #[test]
     fn descriptor_requires_sorted_unique_aliases_extensions_and_root_markers() {
-        descriptor().validate().expect("canonical descriptor");
+        let accepted = descriptor();
+        accepted.validate().expect("canonical descriptor");
+        assert_eq!(accepted.language.as_str(), "rust");
 
         let mut duplicate_alias = descriptor();
         duplicate_alias.aliases.push("rust".to_owned());
-        assert!(duplicate_alias.validate().is_err());
+        assert_eq!(
+            duplicate_alias.validate(),
+            Err(DomainError::NonCanonical {
+                field: "language descriptor alias order",
+            })
+        );
 
         let mut duplicate_extension = descriptor();
         duplicate_extension.extensions.push("rs".to_owned());
-        assert!(duplicate_extension.validate().is_err());
+        assert_eq!(
+            duplicate_extension.validate(),
+            Err(DomainError::NonCanonical {
+                field: "language descriptor extension order",
+            })
+        );
 
         let mut reordered_roots = descriptor();
         reordered_roots.root_markers.reverse();
-        assert!(reordered_roots.validate().is_err());
+        assert_eq!(
+            reordered_roots.validate(),
+            Err(DomainError::NonCanonical {
+                field: "language descriptor root marker order",
+            })
+        );
     }
 }

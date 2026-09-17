@@ -16,7 +16,7 @@ describe('CapacityBar', () => {
       <CapacityBar usedBytes={645_120_000} freeBytes={null} />,
     );
 
-    expect(getByText('free pages unknown')).toBeTruthy();
+    expect(getByText('free pages unknown').textContent).toBe('free pages unknown');
     // No bar at all: neither the fill that would read as a used fraction nor
     // the "0.0% free pages" label that would read as a measurement.
     expect(queryByRole('img')).toBeNull();
@@ -25,7 +25,7 @@ describe('CapacityBar', () => {
 
   it('says the size is unknown when there is no total', () => {
     const { getByText } = render(<CapacityBar usedBytes={null} freeBytes={4_096} />);
-    expect(getByText('size unknown')).toBeTruthy();
+    expect(getByText('size unknown').textContent).toBe('size unknown');
   });
 
   it('draws and announces the measured free share when both figures arrive', () => {

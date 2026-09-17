@@ -907,6 +907,7 @@ pub fn safe_work_topology_policy_v1() -> WorkTopologyPolicyV1 {
 mod tests {
     use super::*;
     use crate::configuration::ProtectedChange;
+    use crate::research::DomainError;
 
     #[test]
     fn github_stack_requires_probe_and_standard_fallback() {
@@ -931,11 +932,13 @@ mod tests {
         let mut weakened = safe_work_topology_policy_v1();
         weakened.protected_refs.remove(0);
         assert!(!weakened.meets_protected_ref_floor());
-        assert!(weakened.validate().is_err());
-        assert!(
-            ProtectedChange::ReplaceWorkTopologyPolicy(weakened)
-                .validate()
-                .is_err()
+        let missing_floor = DomainError::NonCanonical {
+            field: "protected ref floor",
+        };
+        assert_eq!(weakened.validate(), Err(missing_floor.clone()));
+        assert_eq!(
+            ProtectedChange::ReplaceWorkTopologyPolicy(weakened).validate(),
+            Err(missing_floor)
         );
     }
 
@@ -955,6 +958,11 @@ mod tests {
         policy.placement = WorktreePlacementModeV1::ConfiguredRoot(
             WorktreePlacementRootId::new("root.missing").unwrap(),
         );
-        assert!(policy.validate().is_err());
+        assert_eq!(
+            policy.validate(),
+            Err(DomainError::UnknownReference {
+                field: "configured worktree placement root",
+            })
+        );
     }
 }

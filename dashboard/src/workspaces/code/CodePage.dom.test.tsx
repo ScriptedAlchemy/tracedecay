@@ -319,7 +319,7 @@ describe('Shared Code: verified exact families of the selected body', () => {
     expect(await within(conservative).findByText('2')).toBeTruthy();
     expect(within(conservative).getByText(/members on this page/i)).toBeTruthy();
     expect(within(conservative).getByText(/family incomplete · more members follow/i)).toBeTruthy();
-    expect(within(conservative).getByText('Coverage: partial')).toBeTruthy();
+    expect(within(conservative).getByText('Coverage: partial').textContent).toBe('Coverage: partial');
     expect(conservative.querySelectorAll('[data-member]')).toHaveLength(2);
     expect(conservative.querySelectorAll('[data-stitch="solid"]').length).toBeGreaterThan(0);
     await waitFor(() => {
@@ -556,11 +556,11 @@ describe('Compare: two exact revisions in one union layout', () => {
     ).toEqual(['unchanged', 'changed', 'added', 'removed']);
     // The removed region keeps its former space: a head cell that says so.
     const removed = regions.querySelector('[data-region-change="removed"]')!;
-    expect(within(removed as HTMLElement).getByText('not in head')).toBeTruthy();
+    expect(within(removed as HTMLElement).getByText('not in head').textContent).toBe('not in head');
     const added = regions.querySelector('[data-region-change="added"]')!;
-    expect(within(added as HTMLElement).getByText('not in base')).toBeTruthy();
-    expect(screen.getByText('refs/heads/main')).toBeTruthy();
-    expect(screen.getByText('refs/heads/feature')).toBeTruthy();
+    expect(within(added as HTMLElement).getByText('not in base').textContent).toBe('not in base');
+    expect(screen.getByText('refs/heads/main').textContent).toBe('refs/heads/main');
+    expect(screen.getByText('refs/heads/feature').textContent).toBe('refs/heads/feature');
   });
 
   it('writes the submitted selection into the URL before reading', async () => {

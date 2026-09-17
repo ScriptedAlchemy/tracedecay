@@ -86,7 +86,7 @@ describe('Session transcript drill-down', () => {
 
     expect(await screen.findByText('token counts shown per loaded message')).toBeTruthy();
     expect(screen.queryByText('~0 est. tokens')).toBeNull();
-    expect(screen.getByText('token counts unavailable')).toBeTruthy();
+    expect(screen.getByText('token counts unavailable').textContent).toBe('token counts unavailable');
   });
 
   it('labels visible-content tokenizer counts as approximate', async () => {
@@ -111,7 +111,7 @@ describe('Session transcript drill-down', () => {
     );
 
     expect(await screen.findByText('~13 tokens · o200k approximate')).toBeTruthy();
-    expect(screen.getByText('~17 tokens · o200k approximate')).toBeTruthy();
+    expect(screen.getByText('~17 tokens · o200k approximate').textContent).toBe('~17 tokens · o200k approximate');
   });
 
   it('follows opaque cursors forward and its cursor stack backward', async () => {

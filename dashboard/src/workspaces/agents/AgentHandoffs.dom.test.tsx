@@ -61,18 +61,18 @@ describe('AgentHandoffs', () => {
 
     const table = screen.getByRole('table');
     // Both handoffs, and the actors on either end of each.
-    expect(within(table).getByText('actor.planner')).toBeTruthy();
+    expect(within(table).getByText('actor.planner').textContent).toBe('actor.planner');
     expect(within(table).getAllByText('actor.builder').length).toBe(2);
-    expect(within(table).getByText('actor.review')).toBeTruthy();
+    expect(within(table).getByText('actor.review').textContent).toBe('actor.review');
 
     // The evidence AND the unknowns. A row that printed only the evidence would
     // show a handoff carrying an open question as finished work.
     expect(
       within(table).getByText('whether the daemon stamps an actor identity'),
     ).toBeTruthy();
-    expect(within(table).getByText('evidence.tests-green')).toBeTruthy();
+    expect(within(table).getByText('evidence.tests-green').textContent).toBe('evidence.tests-green');
     // The handoff that declared none says so rather than leaving a blank cell.
-    expect(within(table).getByText('none declared')).toBeTruthy();
+    expect(within(table).getByText('none declared').textContent).toBe('none declared');
   });
 
   it('carries the actor rollup as text and not only as a rail', () => {
@@ -81,7 +81,7 @@ describe('AgentHandoffs', () => {
     // have to be readable as characters. `builder` handed one on and received
     // one; `planner` handed one on and received none.
     const rollup = screen.getByText(/actors on the frontier/).parentElement!;
-    expect(within(rollup).getByText('1↦1')).toBeTruthy();
+    expect(within(rollup).getByText('1↦1').textContent).toBe('1↦1');
     expect(within(rollup).getAllByText('1↦0').length).toBeGreaterThan(0);
   });
 
@@ -96,7 +96,7 @@ describe('AgentHandoffs', () => {
       />,
     );
 
-    expect(screen.getByText('Offline')).toBeTruthy();
+    expect(screen.getByText('Offline').textContent).toBe('Offline');
     expect(screen.getByText(/the daemon could not be reached/)).toBeTruthy();
     expect(screen.getByText(/there is no frontier to be empty/)).toBeTruthy();
     // No count of any kind, and above all no zero.
@@ -107,7 +107,7 @@ describe('AgentHandoffs', () => {
 
   it('reports a pending read as pending rather than as no handoffs', () => {
     render(<AgentHandoffs reading={readHandoffFrontier(undefined)} />);
-    expect(screen.getByText('Loading')).toBeTruthy();
+    expect(screen.getByText('Loading').textContent).toBe('Loading');
     expect(screen.queryByText(/no handoff/)).toBeNull();
   });
 

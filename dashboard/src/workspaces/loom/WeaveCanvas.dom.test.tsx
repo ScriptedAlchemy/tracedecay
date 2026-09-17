@@ -45,7 +45,7 @@ describe('WeaveCanvas time window', () => {
   it('starts fitted, with pan and fit disabled', () => {
     renderCanvas();
     expect(screen.getByRole('toolbar', { name: 'Time window' })).toBeTruthy();
-    expect(screen.getByText('whole extent')).toBeTruthy();
+    expect(screen.getByText('whole extent').textContent).toBe('whole extent');
     expect(screen.getByRole('button', { name: 'Fit the whole extent' })).toHaveProperty(
       'disabled',
       true,
@@ -80,7 +80,7 @@ describe('WeaveCanvas time window', () => {
     expect(marks()).toBeLessThan(before);
     fireEvent.click(screen.getByRole('button', { name: 'Fit the whole extent' }));
     expect(marks()).toBe(before);
-    expect(screen.getByText('whole extent')).toBeTruthy();
+    expect(screen.getByText('whole extent').textContent).toBe('whole extent');
   });
 });
 

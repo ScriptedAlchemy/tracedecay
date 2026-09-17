@@ -134,7 +134,7 @@ describe('CostsPage truth claims', () => {
     // ...and the independent canonical projection still renders its own
     // measurements rather than being blanked by its neighbour.
     expect(await screen.findByText('provider tokens')).toBeTruthy();
-    expect(screen.getByText('provider queue latency p50')).toBeTruthy();
+    expect(screen.getByText('provider queue latency p50').textContent).toBe('provider queue latency p50');
     expect(screen.getAllByText('provider_latency_scope_unavailable').length).toBeGreaterThan(0);
   });
 
@@ -162,9 +162,9 @@ describe('CostsPage truth claims', () => {
 
     expect(await screen.findByText('Execution topology accounting')).toBeTruthy();
     expect(await screen.findByText('work execution concurrency width')).toBeTruthy();
-    expect(screen.getByText('27')).toBeTruthy();
-    expect(screen.getByText('concurrency phase · active')).toBeTruthy();
-    expect(screen.getByText('support_floor_unmet')).toBeTruthy();
+    expect(screen.getByText('27').textContent).toBe('27');
+    expect(screen.getByText('concurrency phase · active').textContent).toBe('concurrency phase · active');
+    expect(screen.getByText('support_floor_unmet').textContent).toBe('support_floor_unmet');
     expect(screen.queryByText('0 effects')).toBeNull();
     expect(screen.getByText(/9 emitted · 2 delayed · 1 dropped · 4 sampled envelopes/i)).toBeTruthy();
     expect(
@@ -181,7 +181,7 @@ describe('CostsPage truth claims', () => {
 
     expect(await screen.findByText('Execution topology accounting')).toBeTruthy();
     expect(await screen.findByText('Source unavailable')).toBeTruthy();
-    expect(screen.getByText('provider tokens')).toBeTruthy();
+    expect(screen.getByText('provider tokens').textContent).toBe('provider tokens');
     expect(screen.queryByText('0 effects')).toBeNull();
   });
 });

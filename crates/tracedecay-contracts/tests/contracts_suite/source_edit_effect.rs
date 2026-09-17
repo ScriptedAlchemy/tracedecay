@@ -1,11 +1,11 @@
 use crate::common;
 
 use tracedecay_contracts::{
-    EffectId, IdempotencyKey, RenamePreviewAcceptanceV1, RenameSymbolBindingV1,
-    SourceEditEffectProofV1, SourceEditEffectRequestV1, SourceEditInvocationV1, SourceEditKind,
-    SourceEditReconciliationDispositionV1, SourceEditReconciliationInvocationV1,
-    SourceEditReconciliationRequestV1, SourceEditRequest, SourceEditRollbackInvocationV1,
-    source_edit_operation, source_edit_reconciliation_operation,
+    ApplicationContractError, EffectId, IdempotencyKey, RenamePreviewAcceptanceV1,
+    RenameSymbolBindingV1, SourceEditEffectProofV1, SourceEditEffectRequestV1,
+    SourceEditInvocationV1, SourceEditKind, SourceEditReconciliationDispositionV1,
+    SourceEditReconciliationInvocationV1, SourceEditReconciliationRequestV1, SourceEditRequest,
+    SourceEditRollbackInvocationV1, source_edit_operation, source_edit_reconciliation_operation,
 };
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{PrivacyDomainId, UtcMicros};
@@ -47,7 +47,12 @@ fn source_edit_effect_requires_the_exact_current_grant() {
     let mut request = request();
     request.authority.grant_revision += 1;
 
-    assert!(request.validate().is_err());
+    assert_eq!(
+        request.validate(),
+        Err(ApplicationContractError::Inconsistent {
+            field: "source edit request current grant",
+        })
+    );
 }
 
 #[test]
@@ -55,7 +60,12 @@ fn source_edit_effect_rejects_zero_catalog_revision() {
     let mut request = request();
     request.proof.catalog_revision = 0;
 
-    assert!(request.validate().is_err());
+    assert_eq!(
+        request.validate(),
+        Err(ApplicationContractError::ZeroValue {
+            field: "source edit effect proof catalog revision",
+        })
+    );
 }
 
 #[test]
@@ -63,7 +73,12 @@ fn source_edit_effect_rejects_zero_privacy_key_epoch() {
     let mut request = request();
     request.proof.privacy_key_epoch = 0;
 
-    assert!(request.validate().is_err());
+    assert_eq!(
+        request.validate(),
+        Err(ApplicationContractError::ZeroValue {
+            field: "source edit effect proof privacy key epoch",
+        })
+    );
 }
 
 #[test]

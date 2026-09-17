@@ -239,7 +239,7 @@ describe('KnowledgePage fact detail', () => {
     await userEvent.click(await screen.findByText('list-truncated fact…'));
 
     expect(await screen.findByText('full authoritative fact detail')).toBeTruthy();
-    expect(screen.getByText('amari_fhrr')).toBeTruthy();
+    expect(screen.getByText('amari_fhrr').textContent).toBe('amari_fhrr');
     expect(screen.getByText(/2,048 dimensions/)).toBeTruthy();
     expect(
       calls.some((url) => url.includes('/api/plugins/holographic/fact/fact-project-7')),
@@ -283,12 +283,12 @@ describe('KnowledgePage fact detail', () => {
 
   it('distinguishes unreported feedback counts from a reported zero', () => {
     const unknown = render(<FeedbackSplit helpful={null} unhelpful={null} />);
-    expect(screen.getByText('feedback counts not reported')).toBeTruthy();
+    expect(screen.getByText('feedback counts not reported').textContent).toBe('feedback counts not reported');
     expect(screen.queryByText('no feedback recorded')).toBeNull();
 
     unknown.unmount();
     render(<FeedbackSplit helpful={0} unhelpful={0} />);
-    expect(screen.getByText('no feedback recorded')).toBeTruthy();
+    expect(screen.getByText('no feedback recorded').textContent).toBe('no feedback recorded');
     expect(screen.queryByText('feedback counts not reported')).toBeNull();
   });
 

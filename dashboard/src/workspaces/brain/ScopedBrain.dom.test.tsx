@@ -164,8 +164,8 @@ describe('ScopedBrain', () => {
     expect(fetchMock.mock.calls.map(([input]) => String(input))).toContain('/api/projects/proj_x');
 
     // Real readouts, from the project's scoped daemon APIs.
-    expect(screen.getByText('12.9')).toBeTruthy();
-    expect(screen.getByText('173')).toBeTruthy();
+    expect(screen.getByText('12.9').textContent).toBe('12.9K');
+    expect(screen.getByText('173').textContent).toBe('173');
     expect(screen.getByRole('heading', { name: 'checkouts' })).toBeTruthy();
   });
 
@@ -208,9 +208,9 @@ describe('ScopedBrain', () => {
     renderScoped();
 
     expect(await screen.findByText('Pending schema migration')).toBeTruthy();
-    expect(screen.getByText('Released-shape convergence in progress')).toBeTruthy();
-    expect(screen.getByText('Schema convergence degraded')).toBeTruthy();
-    expect(screen.getByText('Schema convergence completed')).toBeTruthy();
+    expect(screen.getByText('Released-shape convergence in progress').textContent).toBe('Released-shape convergence in progress');
+    expect(screen.getByText('Schema convergence degraded').textContent).toBe('Schema convergence degraded');
+    expect(screen.getByText('Schema convergence completed').textContent).toBe('Schema convergence completed');
     expect(screen.getByText(/rows 12 done \/ 3 remaining/)).toBeTruthy();
   });
 
@@ -463,7 +463,7 @@ describe('ScopedBrain', () => {
     );
     renderScoped();
 
-    await waitFor(() => expect(screen.getByText('Source unavailable')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('Source unavailable').textContent).toBe('Source unavailable'));
     expect(screen.getByText(/unable to open \/home\/x\/\.tracedecay\/global\.db/)).toBeTruthy();
   });
 

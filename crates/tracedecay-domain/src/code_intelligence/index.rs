@@ -635,16 +635,29 @@ mod tests {
 
     #[test]
     fn generation_manifest_requires_matching_canonical_language_revisions() {
-        generation_manifest()
-            .validate()
-            .expect("canonical generation manifest");
+        let accepted = generation_manifest();
+        accepted.validate().expect("canonical generation manifest");
+        assert_eq!(
+            accepted.generation_id.as_str(),
+            "generation.v1.aaaaaaaa.00000002"
+        );
 
         let mut reordered = generation_manifest();
         reordered.grammar_revisions.reverse();
-        assert!(reordered.validate().is_err());
+        assert_eq!(
+            reordered.validate(),
+            Err(DomainError::NonCanonical {
+                field: "generation grammar revisions",
+            })
+        );
 
         let mut mismatched = generation_manifest();
         mismatched.extractor_revisions.pop();
-        assert!(mismatched.validate().is_err());
+        assert_eq!(
+            mismatched.validate(),
+            Err(DomainError::SnapshotMismatch {
+                field: "generation language revision sets",
+            })
+        );
     }
 }

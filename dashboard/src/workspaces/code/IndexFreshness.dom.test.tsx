@@ -26,10 +26,10 @@ describe('Code index freshness', () => {
     });
 
     expect(await screen.findByText('refs/heads/codex/tracedecay-total-redesign-plan')).toBeTruthy();
-    expect(screen.getByText('generation.4f21c9')).toBeTruthy();
-    expect(screen.getByText('sha256:8ab31c')).toBeTruthy();
-    expect(screen.getByText('fresh')).toBeTruthy();
-    expect(screen.getByText('Ready')).toBeTruthy();
+    expect(screen.getByText('generation.4f21c9').textContent).toBe('generation.4f21c9');
+    expect(screen.getByText('sha256:8ab31c').textContent).toBe('sha256:8ab31c');
+    expect(screen.getByText('fresh').textContent).toBe('fresh');
+    expect(screen.getByText('Ready').textContent).toBe('Ready');
     expect(document.querySelector('[data-index-freshness="ready"]')).toBeTruthy();
   });
 
@@ -74,8 +74,8 @@ describe('Code index freshness', () => {
     });
 
     expect(await screen.findByText('Loading')).toBeTruthy();
-    expect(screen.getByText('no sealed generation yet')).toBeTruthy();
-    expect(screen.getByText('indexing')).toBeTruthy();
+    expect(screen.getByText('no sealed generation yet').textContent).toBe('no sealed generation yet');
+    expect(screen.getByText('indexing').textContent).toBe('indexing');
     // An absent seal time is unreported, never the epoch.
     expect(screen.queryByText(/1970-01-01/)).toBeNull();
     expect(screen.getAllByText('not reported').length).toBeGreaterThan(0);
@@ -195,10 +195,10 @@ describe('Code index freshness', () => {
     renderWith();
 
     await advanceTimers(0);
-    expect(screen.getByText('generation.catchup.01')).toBeTruthy();
+    expect(screen.getByText('generation.catchup.01').textContent).toBe('generation.catchup.01');
     await advanceTimers(1_001);
     await advanceTimers(0);
-    expect(screen.getByText('generation.catchup.02')).toBeTruthy();
+    expect(screen.getByText('generation.catchup.02').textContent).toBe('generation.catchup.02');
     await advanceTimers(1_001);
     await advanceTimers(0);
     expect(screen.queryByText('generation.catchup.01')).toBeNull();
@@ -251,10 +251,10 @@ describe('Code index freshness', () => {
     renderWith();
 
     await advanceTimers(0);
-    expect(screen.getByText('250 / 500 files')).toBeTruthy();
+    expect(screen.getByText('250 / 500 files').textContent).toBe('250 / 500 files');
     await advanceTimers(1_001);
     await advanceTimers(0);
-    expect(screen.getByText('1 / 500 files')).toBeTruthy();
+    expect(screen.getByText('1 / 500 files').textContent).toBe('1 / 500 files');
     await advanceTimers(1_001);
     await advanceTimers(0);
     expect(screen.queryByText('250 / 500 files')).toBeNull();
@@ -304,10 +304,10 @@ describe('Code index freshness', () => {
     renderWith();
 
     await advanceTimers(0);
-    expect(screen.getByText('250 / 500 files')).toBeTruthy();
+    expect(screen.getByText('250 / 500 files').textContent).toBe('250 / 500 files');
     await advanceTimers(1_001);
     await advanceTimers(0);
-    expect(screen.getByText('1 / 500 files')).toBeTruthy();
+    expect(screen.getByText('1 / 500 files').textContent).toBe('1 / 500 files');
     await advanceTimers(1_001);
     await advanceTimers(0);
     expect(screen.queryByText('250 / 500 files')).toBeNull();
@@ -348,10 +348,10 @@ describe('Code index freshness', () => {
     renderWith();
 
     await advanceTimers(0);
-    expect(screen.getByText('generation.catchup.01')).toBeTruthy();
+    expect(screen.getByText('generation.catchup.01').textContent).toBe('generation.catchup.01');
     await advanceTimers(1_001);
     await advanceTimers(0);
-    expect(screen.getByText('Ready')).toBeTruthy();
+    expect(screen.getByText('Ready').textContent).toBe('Ready');
     expect(fetch).toHaveBeenCalledTimes(2);
     await advanceTimers(29_998);
     expect(fetch).toHaveBeenCalledTimes(2);
@@ -413,9 +413,9 @@ describe('Code index freshness', () => {
     renderWith();
 
     await advanceTimers(0);
-    expect(screen.getByText('0 / 500 files')).toBeTruthy();
-    expect(screen.getByText('no progress for')).toBeTruthy();
-    expect(screen.getByText('10m')).toBeTruthy();
+    expect(screen.getByText('0 / 500 files').textContent).toBe('0 / 500 files');
+    expect(screen.getByText('no progress for').textContent).toBe('no progress for');
+    expect(screen.getByText('10m').textContent).toBe('10m');
     expect(fetch).toHaveBeenCalledTimes(1);
     await advanceTimers(1_001);
     await advanceTimers(0);
@@ -425,8 +425,8 @@ describe('Code index freshness', () => {
     await advanceTimers(1);
     await advanceTimers(0);
     expect(fetch).toHaveBeenCalledTimes(2);
-    expect(screen.getByText('no progress for')).toBeTruthy();
-    expect(screen.getByText('10m')).toBeTruthy();
+    expect(screen.getByText('no progress for').textContent).toBe('no progress for');
+    expect(screen.getByText('10m').textContent).toBe('10m');
     await advanceTimers(4_000);
     await advanceTimers(0);
     expect(fetch).toHaveBeenCalledTimes(3);
@@ -512,10 +512,10 @@ describe('Code index freshness', () => {
     renderWith();
 
     await advanceTimers(0);
-    expect(screen.getByText('0 / 500 files')).toBeTruthy();
+    expect(screen.getByText('0 / 500 files').textContent).toBe('0 / 500 files');
     await advanceTimers(4_001);
     await advanceTimers(0);
-    expect(screen.getByText('12 / 500 files')).toBeTruthy();
+    expect(screen.getByText('12 / 500 files').textContent).toBe('12 / 500 files');
     expect(fetch).toHaveBeenCalledTimes(2);
     await advanceTimers(1_001);
     await advanceTimers(0);
@@ -552,8 +552,8 @@ describe('Code index freshness', () => {
     renderWith();
 
     await advanceTimers(0);
-    expect(screen.getByText('Partial')).toBeTruthy();
-    expect(screen.getByText('ready · 100.0%')).toBeTruthy();
+    expect(screen.getByText('Partial').textContent).toBe('Partial');
+    expect(screen.getByText('ready · 100.0%').textContent).toBe('ready · 100.0%');
     expect(fetch).toHaveBeenCalledTimes(1);
     await advanceTimers(1_001);
     await advanceTimers(0);
@@ -617,7 +617,7 @@ describe('Code index freshness', () => {
     renderWith();
 
     await advanceTimers(0);
-    expect(screen.getByText('Loading')).toBeTruthy();
+    expect(screen.getByText('Loading').textContent).toBe('Loading');
     expect(screen.getByText(/parked: publication authority is corrupt/)).toBeTruthy();
     expect(screen.getByText(/does not retry on wake/)).toBeTruthy();
     expect(screen.getByText(/restore the owner-private publication store/)).toBeTruthy();
@@ -661,7 +661,7 @@ describe('Code index freshness', () => {
     await advanceTimers(0);
     expect(screen.getByText(/parked: publication authority is corrupt/)).toBeTruthy();
     expect(screen.getByText(/does not retry on wake/)).toBeTruthy();
-    expect(screen.getByText('blocked: publication authority corrupt')).toBeTruthy();
+    expect(screen.getByText('blocked: publication authority corrupt').textContent).toBe('blocked: publication authority corrupt');
     expect(fetch).toHaveBeenCalledTimes(1);
     await advanceTimers(1_001);
     expect(fetch).toHaveBeenCalledTimes(1);
@@ -699,7 +699,7 @@ describe('Code index freshness', () => {
     renderWith();
 
     await advanceTimers(0);
-    expect(screen.getByText('blocked: publication authority corrupt')).toBeTruthy();
+    expect(screen.getByText('blocked: publication authority corrupt').textContent).toBe('blocked: publication authority corrupt');
     expect(fetch).toHaveBeenCalledTimes(1);
     await advanceTimers(1_001);
     expect(fetch).toHaveBeenCalledTimes(1);
@@ -724,7 +724,7 @@ describe('Code index freshness', () => {
     renderWith();
 
     await advanceTimers(0);
-    expect(screen.getByText('Unsupported')).toBeTruthy();
+    expect(screen.getByText('Unsupported').textContent).toBe('Unsupported');
     expect(fetch).toHaveBeenCalledTimes(1);
     await advanceTimers(1_001);
     expect(fetch).toHaveBeenCalledTimes(1);
@@ -749,7 +749,7 @@ describe('Code index freshness', () => {
     renderWith();
 
     await advanceTimers(0);
-    expect(screen.getByText('Ready')).toBeTruthy();
+    expect(screen.getByText('Ready').textContent).toBe('Ready');
     expect(fetch).toHaveBeenCalledTimes(1);
     await advanceTimers(29_999);
     expect(fetch).toHaveBeenCalledTimes(1);

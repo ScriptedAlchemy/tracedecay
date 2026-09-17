@@ -46,8 +46,8 @@ describe('AgentToolActivity', () => {
     expect(headline.textContent).toContain('1,000 tool calls in the window');
     expect(headline.textContent).toContain('0.40 per message');
     const split = document.querySelector('[data-agent-tool-split="drawn"]')!;
-    expect(within(split as HTMLElement).getByText('750')).toBeTruthy();
-    expect(within(split as HTMLElement).getByText('250')).toBeTruthy();
+    expect(within(split as HTMLElement).getByText('750').textContent).toBe('750');
+    expect(within(split as HTMLElement).getByText('250').textContent).toBe('250');
     expect(within(split as HTMLElement).getByText(/640 of them were calls into/)).toBeTruthy();
   });
 
@@ -79,7 +79,7 @@ describe('AgentToolActivity', () => {
     const codex = document.querySelector('[data-agent-attribution-agent="Codex"]')! as HTMLElement;
     // Three rows on the tape, across two sessions, and the tools it reached for
     // are readable as text rather than only encoded in a rail.
-    expect(within(codex).getByText('3')).toBeTruthy();
+    expect(within(codex).getByText('3').textContent).toBe('3');
     expect(within(codex).getByText(/2 sessions · tracedecay_grep 2 · Bash 1/)).toBeTruthy();
     // A suffix is not a total, and the surface says which it is.
     expect(screen.getByText(/a recent suffix/)).toBeTruthy();

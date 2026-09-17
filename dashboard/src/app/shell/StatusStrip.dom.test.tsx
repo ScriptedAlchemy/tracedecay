@@ -91,7 +91,7 @@ describe('StatusStrip', () => {
     sync.value = { kind: 'unmounted' };
     render(<StatusStrip />);
 
-    expect(screen.getByText('no stream')).toBeTruthy();
+    expect(screen.getByText('no stream').textContent).toBe('no stream');
     expect(screen.queryByText('synced')).toBeNull();
   });
 

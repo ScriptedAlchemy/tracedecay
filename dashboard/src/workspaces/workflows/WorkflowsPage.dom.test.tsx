@@ -331,8 +331,8 @@ describe('the Workflows page over mounted routes', () => {
     await waitFor(() => {
       expect(document.querySelector('[data-workflow-run="run.release-train.1"]')).toBeTruthy();
     });
-    expect(screen.getByText('status running')).toBeTruthy();
-    expect(screen.getByText('sequence 4')).toBeTruthy();
+    expect(screen.getByText('status running').textContent).toBe('status running');
+    expect(screen.getByText('sequence 4').textContent).toBe('sequence 4');
     const fanOut = document.querySelector('[data-workflow-run-step="fan-out"]');
     expect(fanOut?.textContent).toContain('running');
     expect(fanOut?.textContent).toContain('no effect receipt yet');

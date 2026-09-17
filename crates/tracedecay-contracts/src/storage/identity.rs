@@ -116,9 +116,12 @@ mod tests {
 
     #[test]
     fn store_key_rejects_empty_untrimmed_and_control() {
-        assert!(StoreKeyV1::new("").is_err());
-        assert!(StoreKeyV1::new(" leading").is_err());
-        assert!(StoreKeyV1::new("ctrl\u{0}char").is_err());
+        let rejected = ApplicationContractError::InvalidIdentifier {
+            field: "storage store key",
+        };
+        assert_eq!(StoreKeyV1::new("").unwrap_err(), rejected);
+        assert_eq!(StoreKeyV1::new(" leading").unwrap_err(), rejected);
+        assert_eq!(StoreKeyV1::new("ctrl\u{0}char").unwrap_err(), rejected);
         assert_eq!(
             StoreKeyV1::new("sessions.db").expect("valid").as_str(),
             "sessions.db"
@@ -140,9 +143,14 @@ mod tests {
 
     #[test]
     fn free_page_ratio_new_rejects_out_of_range() {
-        assert!(FreePageRatioV1::new(-0.1).is_err());
-        assert!(FreePageRatioV1::new(1.5).is_err());
-        assert!(FreePageRatioV1::new(f64::NAN).is_err());
-        assert!(FreePageRatioV1::new(0.5).is_ok());
+        let rejected = ApplicationContractError::InvalidRange {
+            field: "storage free page ratio",
+        };
+        assert_eq!(FreePageRatioV1::new(-0.1).unwrap_err(), rejected);
+        assert_eq!(FreePageRatioV1::new(1.5).unwrap_err(), rejected);
+        assert_eq!(FreePageRatioV1::new(f64::NAN).unwrap_err(), rejected);
+        assert_eq!(FreePageRatioV1::new(0.0).expect("zero").as_f64(), 0.0);
+        assert_eq!(FreePageRatioV1::new(0.5).expect("half").as_f64(), 0.5);
+        assert_eq!(FreePageRatioV1::new(1.0).expect("full").as_f64(), 1.0);
     }
 }

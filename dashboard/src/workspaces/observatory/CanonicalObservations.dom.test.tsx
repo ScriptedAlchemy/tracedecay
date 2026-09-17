@@ -31,7 +31,7 @@ describe('Observatory canonical observations', () => {
 
     // Event flow: the count, and the population it counted out of.
     expect(await screen.findByText('observability events')).toBeTruthy();
-    expect(screen.getByText('4,812')).toBeTruthy();
+    expect(screen.getByText('4,812').textContent).toBe('4,812');
     expect(
       screen.getAllByText('per eligible observability events · 4,812').length,
     ).toBe(3);
@@ -43,9 +43,9 @@ describe('Observatory canonical observations', () => {
     expect(drops?.textContent).toContain('0');
 
     // Latency, converted for reading, with the server's own microseconds kept.
-    expect(screen.getByText('feedback latency p95')).toBeTruthy();
-    expect(screen.getByText('43.25')).toBeTruthy();
-    expect(screen.getByText('(43,250 µs)')).toBeTruthy();
+    expect(screen.getByText('feedback latency p95').textContent).toBe('feedback latency p95');
+    expect(screen.getByText('43.25').textContent).toBe('43.25');
+    expect(screen.getByText('(43,250 µs)').textContent).toBe('(43,250 µs)');
   });
 
   it('shows an unavailable measurement as its server reason, never as zero', async () => {
@@ -111,7 +111,7 @@ describe('Observatory canonical observations', () => {
     ]);
 
     expect(await screen.findByText('Partial')).toBeTruthy();
-    expect(screen.getByText('incomplete_metric_coverage')).toBeTruthy();
+    expect(screen.getByText('incomplete_metric_coverage').textContent).toBe('incomplete_metric_coverage');
     expect(screen.getByText(/not current · watermark analytics:4821/)).toBeTruthy();
   });
 
@@ -136,7 +136,7 @@ describe('Observatory canonical observations', () => {
     // Two independent axes: the read is partial AND the identity behind it is
     // seeing a redacted projection. Neither is folded into the other.
     expect(await screen.findByText('Partial')).toBeTruthy();
-    expect(screen.getByText('Redacted')).toBeTruthy();
+    expect(screen.getByText('Redacted').textContent).toBe('Redacted');
     expect(screen.getByText(/read authorization/)).toBeTruthy();
   });
 

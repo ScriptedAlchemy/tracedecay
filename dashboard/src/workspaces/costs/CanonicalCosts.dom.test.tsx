@@ -39,10 +39,10 @@ describe('Canonical cost observations', () => {
     );
 
     expect(await screen.findByText('provider tokens')).toBeTruthy();
-    expect(screen.getByText('1,284,000')).toBeTruthy();
-    expect(screen.getByText('per provider usage events · 8,412')).toBeTruthy();
-    expect(screen.getByText('saved tokens')).toBeTruthy();
-    expect(screen.getByText('per eligible savings calls · 512')).toBeTruthy();
+    expect(screen.getByText('1,284,000').textContent).toBe('1,284,000');
+    expect(screen.getByText('per provider usage events · 8,412').textContent).toBe('per provider usage events · 8,412');
+    expect(screen.getByText('saved tokens').textContent).toBe('saved tokens');
+    expect(screen.getByText('per eligible savings calls · 512').textContent).toBe('per eligible savings calls · 512');
   });
 
   it('renders an unpriced cost as its reason, never as $0.00 or a zero', async () => {

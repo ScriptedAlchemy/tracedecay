@@ -32,7 +32,7 @@ describe('Observatory performance budgets', () => {
     renderBudgets(readModel([]), 'partial', ['incomplete_metric_coverage']);
 
     expect(await screen.findByText('Partial')).toBeTruthy();
-    expect(screen.getByText('incomplete_metric_coverage')).toBeTruthy();
+    expect(screen.getByText('incomplete_metric_coverage').textContent).toBe('incomplete_metric_coverage');
   });
 
   it('reports a daemon that never answered as offline rather than as zero budgets', async () => {

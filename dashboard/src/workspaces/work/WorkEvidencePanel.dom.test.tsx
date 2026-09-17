@@ -153,7 +153,7 @@ describe('selected task evidence', () => {
     expect(requests).toHaveLength(0);
     await userEvent.click(screen.getByRole('button', { name: 'Retrieve evidence' }));
     expect((await screen.findAllByText('codex / session.1')).length).toBeGreaterThan(0);
-    expect(screen.getByText('Provider completed the task')).toBeTruthy();
+    expect(screen.getByText('Provider completed the task').textContent).toBe('Provider completed the task');
     expect(requests[0]).toMatchObject({
       task_id: 'task.alpha',
       verified_version: VERSION,

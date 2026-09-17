@@ -1,5 +1,7 @@
 use tracedecay_domain::errors::TraceDecayError;
 
+use crate::ApplicationContractError;
+
 use super::{
     ApplicationExecutionFailureClassV1, ApplicationProblem, ApplicationProblemKind,
     ApplicationUnavailableClassV1, CancellationStage, LegalAction, ProblemTerminality,
@@ -80,12 +82,27 @@ fn cancellation_after_effect_or_during_reconciliation_is_not_a_no_effect_termina
         CancellationStage::Reconciling,
         CancellationStage::AfterCommit,
     ] {
-        assert!(ApplicationProblem::cancelled(stage).is_err());
-        assert!(ApplicationProblem::timed_out(stage).is_err());
+        assert_eq!(
+            ApplicationProblem::cancelled(stage),
+            Err(ApplicationContractError::Inconsistent {
+                field: "application problem cancellation stage",
+            })
+        );
+        assert_eq!(
+            ApplicationProblem::timed_out(stage),
+            Err(ApplicationContractError::Inconsistent {
+                field: "application problem cancellation stage",
+            })
+        );
         let wire = serde_json::json!({
             "kind": "cancelled", "stage": stage, "retry": "never", "legal_actions": []
         });
-        assert!(serde_json::from_value::<ApplicationProblem>(wire).is_err());
+        assert_eq!(
+            serde_json::from_value::<ApplicationProblem>(wire)
+                .unwrap_err()
+                .to_string(),
+            "application problem cancellation stage is inconsistent with the application contract"
+        );
     }
 }
 

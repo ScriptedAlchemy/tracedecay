@@ -45,11 +45,11 @@ describe('Brain exact interaction identity', () => {
   it('shares pointer and keyboard inspection without scope or activity changes', async () => {
     mount();
     fireEvent.mouseEnter(await screen.findByRole('button', { name: 'Canvas project' }));
-    expect(within(screen.getByRole('region', { name: 'Inspected project' })).getByText('/p1')).toBeTruthy();
+    expect(within(screen.getByRole('region', { name: 'Inspected project' })).getByText('/p1').textContent).toBe('/p1');
     expect(graph.activation?.warm).toBe(false);
     expect(useScope.getState().scope.kind).toBe('all');
     fireEvent.focus(screen.getByRole('button', { name: /^p2/ }));
-    expect(within(screen.getByRole('region', { name: 'Inspected project' })).getByText('/p2')).toBeTruthy();
+    expect(within(screen.getByRole('region', { name: 'Inspected project' })).getByText('/p2').textContent).toBe('/p2');
     fireEvent.keyDown(screen.getByRole('button', { name: /^p2/ }), { key: 'Escape' });
     expect(screen.queryByRole('region', { name: 'Inspected project' })).toBeNull();
     expect(graph.activation?.warm).toBe(false);
@@ -70,7 +70,7 @@ describe('Brain exact interaction identity', () => {
     expect(graph.activation?.heatOf('p2')).toBe(0);
     fireEvent.click(screen.getByText(/Inspect admitted events/));
     fireEvent.click(screen.getByRole('button', { name: 'hook_activity · run:activity:1' }));
-    expect(within(screen.getByRole('region', { name: 'Inspected project' })).getByText('/p1')).toBeTruthy();
+    expect(within(screen.getByRole('region', { name: 'Inspected project' })).getByText('/p1').textContent).toBe('/p1');
     expect(useScope.getState().scope.kind).toBe('all');
     fireEvent.click(screen.getByRole('button', { name: 'heartbeat · run:heartbeat:1' }));
     expect(screen.queryByRole('region', { name: 'Inspected project' })).toBeNull();

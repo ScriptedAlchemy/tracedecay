@@ -157,7 +157,7 @@ describe('TraceView', () => {
       /(\d+) drawn/.exec(screen.getByText(/drawn · ordered by hop/).textContent ?? '')?.[1],
     );
     expect(items.length).toBe(drawnCount);
-    expect(within(list).getByText('resolve_context')).toBeTruthy();
+    expect(within(list).getByText('resolve_context').textContent).toBe('resolve_context');
     expect(within(list).getAllByText(/call sites/).length).toBe(items.length);
     expect(within(list).getAllByText(/hops? (up|down)/).length).toBeGreaterThan(0);
   });

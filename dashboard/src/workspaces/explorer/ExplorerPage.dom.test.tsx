@@ -351,7 +351,7 @@ describe('ExplorerPage', () => {
     // the browse state would let two thirds of them back in.
     await user.click(await screen.findByRole('button', { name: /Using graph search/ }));
     expect(await screen.findByText('Session context')).toBeTruthy();
-    expect(screen.getByText('What each lane searches')).toBeTruthy();
+    expect(screen.getByText('What each lane searches').textContent).toBe('What each lane searches');
 
     // Deliberately unscoped: a `dl dt` selector can only ever see terms that
     // are already inside a list, which is precisely the defect it is supposed
@@ -416,9 +416,9 @@ describe('ExplorerPage', () => {
         name: /Sessions\s*2\s*loaded\s*of 2 matching rows reported/,
       }),
     ).toBeTruthy();
-    expect(screen.getByText('Coordinator run')).toBeTruthy();
-    expect(screen.getByText('explorer-run-fixture')).toBeTruthy();
-    expect(screen.getByText('source_local_no_cross_source_merge')).toBeTruthy();
+    expect(screen.getByText('Coordinator run').textContent).toBe('Coordinator run');
+    expect(screen.getByText('explorer-run-fixture').textContent).toBe('explorer-run-fixture');
+    expect(screen.getByText('source_local_no_cross_source_merge').textContent).toBe('source_local_no_cross_source_merge');
     expect(screen.getByText(/active-project session store/)).toBeTruthy();
   });
 
@@ -504,11 +504,11 @@ describe('ExplorerPage', () => {
     const provenance = screen.getByText('Payload provenance').closest('details');
     expect(provenance).toBeTruthy();
     const payload = within(provenance as HTMLElement);
-    expect(payload.getByText('name')).toBeTruthy();
-    expect(payload.getByText('file_path')).toBeTruthy();
-    expect(payload.getByText('degree')).toBeTruthy();
-    expect(payload.getByText('graph_search')).toBeTruthy();
-    expect(payload.getByText('7')).toBeTruthy();
+    expect(payload.getByText('name').textContent).toBe('name');
+    expect(payload.getByText('file_path').textContent).toBe('file_path');
+    expect(payload.getByText('degree').textContent).toBe('degree');
+    expect(payload.getByText('graph_search').textContent).toBe('graph_search');
+    expect(payload.getByText('7').textContent).toBe('7');
     expect(screen.getByText(/Position 1 in graph endpoint rows/)).toBeTruthy();
   });
 });

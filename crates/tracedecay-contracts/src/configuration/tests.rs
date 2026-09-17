@@ -128,9 +128,24 @@ fn empty_configuration_requests_reject_transport_arguments() {
 
 #[test]
 fn configuration_schema_refs_reject_unknown_operations() {
-    assert!(configuration_surface_request_schema("configuration_get").is_ok());
-    assert!(configuration_surface_result_schema("configuration_get").is_ok());
-    assert!(configuration_surface_request_schema("configuration_unknown").is_err());
+    let request =
+        configuration_surface_request_schema("configuration_get").expect("get request schema");
+    assert_eq!(
+        request.schema_id().as_str(),
+        "schema.application.configuration.configuration_get.request"
+    );
+    let result =
+        configuration_surface_result_schema("configuration_get").expect("get result schema");
+    assert_eq!(
+        result.schema_id().as_str(),
+        "schema.application.configuration.configuration_get.result"
+    );
+    assert_eq!(
+        configuration_surface_request_schema("configuration_unknown").unwrap_err(),
+        ApplicationContractError::Inconsistent {
+            field: "configuration surface operation",
+        }
+    );
 }
 
 #[test]

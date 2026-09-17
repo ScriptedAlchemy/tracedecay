@@ -692,6 +692,8 @@ mod invocation_tests {
         CommitId, ManifestDigest, ProjectId, RepositoryId, RetrievalAnchorId, WorktreeId,
     };
 
+    use crate::error::ApplicationContractError;
+
     use super::{
         CanonicalAffectedTestsProjectionV1, CanonicalFeedbackImpactProjectionV1,
         FeedbackDiagnosticsReadResultV1, FeedbackExpandResultV1, FeedbackFindingReadV1,
@@ -702,9 +704,23 @@ mod invocation_tests {
 
     #[test]
     fn invocation_handle_rejects_unbounded_or_noncanonical_feedback_reads() {
-        assert!(FeedbackHandleRequestV1::new("feedback.handle.v1").is_ok());
-        assert!(FeedbackHandleRequestV1::new(" feedback.handle.v1").is_err());
-        assert!(FeedbackHandleRequestV1::new("x".repeat(257)).is_err());
+        assert_eq!(
+            FeedbackHandleRequestV1::new("feedback.handle.v1")
+                .expect("canonical handle")
+                .request_handle,
+            "feedback.handle.v1"
+        );
+        let rejected = ApplicationContractError::InvalidIdentifier {
+            field: "feedback request handle",
+        };
+        assert_eq!(
+            FeedbackHandleRequestV1::new(" feedback.handle.v1").unwrap_err(),
+            rejected
+        );
+        assert_eq!(
+            FeedbackHandleRequestV1::new("x".repeat(257)).unwrap_err(),
+            rejected
+        );
     }
 
     #[test]

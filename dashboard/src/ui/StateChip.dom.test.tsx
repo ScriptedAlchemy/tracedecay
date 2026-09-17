@@ -100,7 +100,7 @@ describe('StateChip', () => {
 
   it('renders an optional detail suffix alongside the label', () => {
     render(<StateChip kind="stale" detail="12m ago" />);
-    expect(screen.getByText('Stale')).toBeTruthy();
+    expect(screen.getByText('Stale').textContent).toBe('Stale');
     expect(screen.getByText(/12m ago/)).toBeTruthy();
   });
 });

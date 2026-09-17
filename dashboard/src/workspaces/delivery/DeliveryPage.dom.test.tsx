@@ -181,7 +181,7 @@ describe('DeliveryPage', () => {
     await user.click(await screen.findByRole('button', { name: /Admit delivery inbox/ }));
 
     expect(screen.queryByText('Unrelated provider PR')).toBeNull();
-    expect(screen.getByText('Branch and pull request reference')).toBeTruthy();
+    expect(screen.getByText('Branch and pull request reference').textContent).toBe('Branch and pull request reference');
     expect(screen.getAllByText(/refs\/heads\/feature\/delivery/).length).toBeGreaterThan(0);
     expect(screen.getByText(/1 unrelated provider pull request excluded/)).toBeTruthy();
     expect(screen.getByTestId('location').textContent).toContain('pr=project.alpha%3Agithub%3A42');
@@ -195,9 +195,9 @@ describe('DeliveryPage', () => {
     );
 
     const detail = await screen.findByRole('region', { name: 'Pull request detail' });
-    expect(within(detail).getByText('CI failure')).toBeTruthy();
-    expect(within(detail).getByText('anchor.ci.42')).toBeTruthy();
-    expect(within(detail).getByText('Overlapping edit')).toBeTruthy();
+    expect(within(detail).getByText('CI failure').textContent).toBe('CI failure');
+    expect(within(detail).getByText('anchor.ci.42').textContent).toBe('anchor.ci.42');
+    expect(within(detail).getByText('Overlapping edit').textContent).toBe('Overlapping edit');
   });
 
   it('links to the existing verified Code views', async () => {
@@ -219,7 +219,7 @@ describe('DeliveryPage', () => {
     });
 
     expect(await screen.findByText('Provider not configured')).toBeTruthy();
-    expect(screen.getByText('No admitted pull requests')).toBeTruthy();
+    expect(screen.getByText('No admitted pull requests').textContent).toBe('No admitted pull requests');
     expect(screen.queryByText(/transport/i)).toBeNull();
   });
 
