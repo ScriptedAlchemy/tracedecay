@@ -1,4 +1,4 @@
-import { useMemo, type KeyboardEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from 'react';
 import type {
   DeliveryInboxPullRequestV1,
   DeliveryInboxV1,
@@ -7,7 +7,28 @@ import { Corners } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn.ts';
 import { gradeDash, gradeLabel } from './evidence.ts';
 import type { UmbrellaProjection } from './umbrella.ts';
-import { arcPath, layoutField } from './umbrellaLayout.ts';
+import { DEFAULT_FIELD_VIEWPORT, arcPath, layoutField, type FieldViewport } from './umbrellaLayout.ts';
+
+/** The aperture's CSS size, so marks and labels render at native pixels
+ * instead of scaling with a fixed viewBox. Falls back to the default viewport
+ * where `ResizeObserver` is absent (jsdom). */
+function useMeasuredViewport(): [RefObject<HTMLDivElement | null>, FieldViewport] {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [viewport, setViewport] = useState<FieldViewport | null>(null);
+  useEffect(() => {
+    const element = ref.current;
+    if (element === null || typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (entry !== undefined && entry.contentRect.width > 0 && entry.contentRect.height > 0) {
+        setViewport({ width: entry.contentRect.width, height: entry.contentRect.height });
+      }
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  return [ref, viewport ?? DEFAULT_FIELD_VIEWPORT];
+}
 
 /**
  * The Delivery field at outcome zoom — projects as hubs, admitted pull
@@ -40,9 +61,10 @@ export function UmbrellaField({
   onSelectUmbrella: (umbrellaId: string) => void;
   className?: string;
 }) {
+  const [containerRef, viewport] = useMeasuredViewport();
   const layout = useMemo(
-    () => layoutField(inbox, rows, projection, focusUmbrellaId),
-    [focusUmbrellaId, inbox, projection, rows],
+    () => layoutField(inbox, rows, projection, focusUmbrellaId, viewport),
+    [focusUmbrellaId, inbox, projection, rows, viewport],
   );
   const center = { x: layout.width / 2, y: layout.height / 2 };
   const dimmed = (umbrellaId: string | null, rowId: string | null): boolean => {
@@ -62,14 +84,15 @@ export function UmbrellaField({
 
   return (
     <div
+      ref={containerRef}
       className={cn('td-optic td-grain relative min-h-64 flex-1 overflow-hidden', className)}
       data-field="delivery-outcome"
     >
       <Corners tone="signal" />
       <svg
         viewBox={`0 0 ${layout.width} ${layout.height}`}
-        preserveAspectRatio="xMidYMid meet"
-        className="relative z-[1] block h-full w-full"
+        preserveAspectRatio="xMidYMid slice"
+        className="absolute inset-0 z-[1] block h-full w-full"
         role="group"
         aria-label="Delivery outcome field"
       >

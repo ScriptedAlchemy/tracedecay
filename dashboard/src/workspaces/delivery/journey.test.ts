@@ -136,6 +136,20 @@ describe('layoutJourney', () => {
     expect(layout.ticks.length).toBeLessThanOrEqual(9);
   });
 
+  it('fans out same-instant marks on one lane instead of overprinting them', () => {
+    const layout = layoutJourney(buildJourney(OVERVIEW_ALPHA, { row: ROW_42, edges: [] }), { width: 900 });
+    const reviews = layout.points.filter((point) => point.episode.lane === 'reviews');
+    const row = layout.rows.find((candidate) => candidate.lane.id === 'reviews')!;
+    expect(reviews).toHaveLength(2);
+    expect(reviews[0]!.x).toBe(reviews[1]!.x);
+    expect(new Set(reviews.map((point) => point.y)).size).toBe(2);
+    expect(reviews.map((point) => Math.abs(point.y - row.y)).sort()).toEqual([0, 9]);
+    for (const tick of layout.ticks.slice(1)) {
+      const previous = layout.ticks[layout.ticks.indexOf(tick) - 1]!;
+      expect(tick.x - previous.x).toBeGreaterThanOrEqual(44);
+    }
+  });
+
   it('compresses long empty time into a visible break', () => {
     const late: DeliveryOverviewV1 = {
       ...OVERVIEW_ALPHA,

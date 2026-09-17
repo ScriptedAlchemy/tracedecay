@@ -126,9 +126,10 @@ function JourneyBody({
   );
 }
 
+/** `MM-DD HH:MM → MM-DD HH:MM`; the year is in the exact table below. */
 function spanLabel(model: JourneyModel): string {
   if (model.span === null) return '—';
-  return `${utcStamp(model.span.start, 16)} → ${utcStamp(model.span.end, 16)}`;
+  return `${utcStamp(model.span.start, 16).slice(5)} → ${utcStamp(model.span.end, 16).slice(5)}`;
 }
 
 /** `YYYY-MM-DD HH:MM` at 16, `YYYY-MM-DD HH:MM:SS` at 19. */
