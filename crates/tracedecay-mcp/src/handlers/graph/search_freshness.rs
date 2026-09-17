@@ -13,7 +13,8 @@
 use std::fmt::Write as _;
 
 use tracedecay_contracts::code_index_freshness::{
-    CodeIndexBuildPhaseV1, CodeIndexFreshnessPayloadV1, CodeIndexWorktreeFreshnessV1,
+    CodeIndexBuildPhaseV1, CodeIndexFreshnessPayloadV1, CodeIndexStalenessStateV1,
+    CodeIndexWorktreeFreshnessV1,
 };
 use tracedecay_contracts::retrieval::{
     PrimitiveFreshnessStateV1, PrimitiveIndexingStateV1, PrimitiveSearchFreshnessV1,
@@ -88,7 +89,7 @@ pub(super) fn search_freshness(
     };
     let scheduler_says_stale = match worktree {
         WorktreeFreshnessSourceV1::Worktree(state) => {
-            state.staleness_state.as_deref() != Some("fresh")
+            state.staleness_state != Some(CodeIndexStalenessStateV1::Fresh)
                 || state.rebuild_in_flight
                 || (state.latest_generation_id.is_some()
                     && served_generation.is_some()
@@ -109,7 +110,10 @@ pub(super) fn search_freshness(
             let _ = write!(
                 summary,
                 "state={} rebuild_in_flight={}",
-                state.staleness_state.as_deref().unwrap_or("unknown"),
+                state
+                    .staleness_state
+                    .map(|state| state.as_str())
+                    .unwrap_or("unknown"),
                 state.rebuild_in_flight
             );
             (
@@ -181,7 +185,9 @@ pub(super) fn freshness_lines(freshness: &PrimitiveSearchFreshnessV1) -> String 
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_contracts::code_index_freshness::CodeIndexBuildProgressV1;
+    use tracedecay_contracts::code_index_freshness::{
+        CodeIndexBuildProgressV1, CodeIndexFreshnessCoverageV1, CodeIndexStalenessStateV1,
+    };
 
     use super::*;
 
@@ -193,10 +199,10 @@ mod tests {
         WorktreeFreshnessSourceV1::Worktree(Box::new(CodeIndexWorktreeFreshnessV1 {
             worktree_root: "/fixture".to_owned(),
             latest_generation_id: latest_generation_id.map(str::to_owned),
-            staleness_state: Some(staleness_state.to_owned()),
+            staleness_state: CodeIndexStalenessStateV1::from_wire(staleness_state),
             rebuild_in_flight,
             hook_hint_count: Some(0),
-            coverage: "complete".to_owned(),
+            coverage: CodeIndexFreshnessCoverageV1::Complete,
             ..CodeIndexWorktreeFreshnessV1::default()
         }))
     }
@@ -283,10 +289,10 @@ mod tests {
     fn unavailable_search_reports_the_indexing_state_with_progress() {
         let mut state = CodeIndexWorktreeFreshnessV1 {
             worktree_root: "/fixture".to_owned(),
-            staleness_state: Some("indexing".to_owned()),
+            staleness_state: Some(CodeIndexStalenessStateV1::Indexing),
             rebuild_in_flight: true,
             hook_hint_count: Some(3),
-            coverage: "complete".to_owned(),
+            coverage: CodeIndexFreshnessCoverageV1::Complete,
             ..CodeIndexWorktreeFreshnessV1::default()
         };
         state.progress = Some(CodeIndexBuildProgressV1 {

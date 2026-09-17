@@ -1505,8 +1505,8 @@ async fn wait_for_dashboard_ready(registry: &CodeIndexSchedulerRegistryV1, path:
                 .dashboard_freshness(path)
                 .await
                 .is_some_and(|freshness| {
-                    freshness.staleness_state.as_deref() == Some("fresh")
-                        && freshness.coverage == "complete"
+                    freshness.staleness_state == Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh)
+                        && freshness.coverage == tracedecay_contracts::code_index_freshness::CodeIndexFreshnessCoverageV1::Complete
                 });
             if ready {
                 break;

@@ -4,6 +4,9 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use tracedecay_application::tracedecay::BranchDiagnostics;
+use tracedecay_contracts::code_index_freshness::{
+    CodeIndexFreshnessCoverageV1, CodeIndexStalenessStateV1,
+};
 use tracedecay_contracts::storage::{SchemaConvergenceFindingV1, SchemaConvergenceStateV1};
 use tracedecay_domain::errors::Result;
 use tracedecay_global_db::{RegisteredGlobalDb, SessionIngestHealth};
@@ -138,8 +141,8 @@ fn ready_serving_source(
     Some(ReadyServingSourceV1 {
         reference: freshness.source_reference.as_deref()?,
         revision: freshness.source_revision.as_deref(),
-        current_source_verified: freshness.coverage == "complete"
-            && freshness.staleness_state.as_deref() == Some("fresh"),
+        current_source_verified: freshness.coverage == CodeIndexFreshnessCoverageV1::Complete
+            && freshness.staleness_state == Some(CodeIndexStalenessStateV1::Fresh),
     })
 }
 
@@ -272,10 +275,11 @@ pub async fn handle_status(
                 // exists for the worktree; until the first seal every
                 // retrieval lane refuses `generation_rebuilding`.
                 let retrieval_serving = if freshness.latest_generation_id.is_some() {
-                    let (serving_freshness, condition) = match freshness.staleness_state.as_deref()
-                    {
-                        Some("fresh") => ("current", None),
-                        Some("verifying") => ("last_complete_stale", Some("source_verification")),
+                    let (serving_freshness, condition) = match freshness.staleness_state {
+                        Some(CodeIndexStalenessStateV1::Fresh) => ("current", None),
+                        Some(CodeIndexStalenessStateV1::Verifying) => {
+                            ("last_complete_stale", Some("source_verification"))
+                        }
                         Some(_) if freshness.rebuild_in_flight => {
                             ("last_complete_stale", Some("rebuilding"))
                         }
@@ -444,14 +448,14 @@ fn code_index_freshness_projection(
     freshness: &tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1,
 ) -> (&'static str, Option<String>) {
     let authoritative = freshness.latest_generation_id.is_some()
-        && freshness.coverage == "complete"
-        && freshness.staleness_state.as_deref() == Some("fresh");
+        && freshness.coverage == CodeIndexFreshnessCoverageV1::Complete
+        && freshness.staleness_state == Some(CodeIndexStalenessStateV1::Fresh);
     if let Some(parked) = freshness.parked.as_ref() {
         let warning = format!(
             "code-index background convergence is parked: {}; {}",
             parked.reason, parked.remediation
         );
-        let status = if freshness.staleness_state.as_deref() == Some("parked") {
+        let status = if freshness.staleness_state == Some(CodeIndexStalenessStateV1::Parked) {
             "parked"
         } else if authoritative {
             "current"
@@ -462,7 +466,7 @@ fn code_index_freshness_projection(
     }
     if authoritative {
         ("current", None)
-    } else if freshness.staleness_state.as_deref() == Some("verifying") {
+    } else if freshness.staleness_state == Some(CodeIndexStalenessStateV1::Verifying) {
         (
             "stale",
             Some(
@@ -724,6 +728,9 @@ mod tests {
         code_index_freshness_projection, graph_statistics_value, historical_session_catch_up_state,
         render_status_md, schema_convergence_status,
     };
+    use tracedecay_contracts::code_index_freshness::{
+        CodeIndexFreshnessCoverageV1, CodeIndexStalenessStateV1,
+    };
     use tracedecay_contracts::storage::{
         SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStageV1,
         SchemaConvergenceStateV1,
@@ -820,8 +827,8 @@ mod tests {
     fn a_parked_deterministic_violation_reports_parked_not_warming() {
         let freshness = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
             worktree_root: "/project".to_owned(),
-            staleness_state: Some("parked".to_owned()),
-            coverage: "complete".to_owned(),
+            staleness_state: Some(CodeIndexStalenessStateV1::Parked),
+            coverage: CodeIndexFreshnessCoverageV1::Complete,
             parked: Some(
                 tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1 {
                     reason: "code text artifacts root is not owner-private (mode 775, need 700)"
@@ -876,8 +883,8 @@ mod tests {
         let freshness = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
             worktree_root: "/project".to_owned(),
             latest_generation_id: Some("generation.fixture".to_owned()),
-            staleness_state: Some("fresh".to_owned()),
-            coverage: "complete".to_owned(),
+            staleness_state: Some(CodeIndexStalenessStateV1::Fresh),
+            coverage: CodeIndexFreshnessCoverageV1::Complete,
             parked: Some(
                 tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1 {
                     reason: "code text artifacts root is not owner-private".to_owned(),
@@ -901,8 +908,8 @@ mod tests {
     fn an_unparked_incomplete_read_stays_warming() {
         let freshness = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
             worktree_root: "/project".to_owned(),
-            staleness_state: Some("indexing".to_owned()),
-            coverage: "complete".to_owned(),
+            staleness_state: Some(CodeIndexStalenessStateV1::Indexing),
+            coverage: CodeIndexFreshnessCoverageV1::Complete,
             ..Default::default()
         };
 
@@ -921,8 +928,8 @@ mod tests {
         let freshness = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
             worktree_root: "/project".to_owned(),
             latest_generation_id: Some("generation.fixture".to_owned()),
-            staleness_state: Some("verifying".to_owned()),
-            coverage: "partial_source_verification".to_owned(),
+            staleness_state: Some(CodeIndexStalenessStateV1::Verifying),
+            coverage: CodeIndexFreshnessCoverageV1::PartialSourceVerification,
             ..Default::default()
         };
 

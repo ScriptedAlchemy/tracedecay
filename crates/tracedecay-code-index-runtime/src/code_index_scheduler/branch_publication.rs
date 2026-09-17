@@ -456,6 +456,16 @@ impl BranchPublicationContextV1 {
                     format!("{}; {}", parked.reason, parked.remediation),
                 ));
             }
+            CodeIndexDemandAdmissionV1::NotApplicable => {
+                return Err(TraceDecayError::project_route(
+                    CODE_INDEX_IDENTITY_MISMATCH,
+                    false,
+                    format!(
+                        "code indexing does not apply to branch worktree '{}'; the route has no repository identity",
+                        canonical_worktree_root.display()
+                    ),
+                ));
+            }
             CodeIndexDemandAdmissionV1::RefusedByPolicy
             | CodeIndexDemandAdmissionV1::Unavailable(_) => {
                 return Err(TraceDecayError::project_route(

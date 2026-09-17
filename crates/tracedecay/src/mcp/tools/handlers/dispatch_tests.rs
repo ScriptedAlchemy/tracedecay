@@ -656,7 +656,9 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
                             staleness_state: Option<&str>,
                             rebuild_in_flight: bool| {
         let latest_generation_id = latest_generation_id.map(str::to_owned);
-        let staleness_state = staleness_state.map(str::to_owned);
+        let staleness_state = staleness_state.and_then(
+            tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::from_wire,
+        );
         let reader: tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader =
             std::sync::Arc::new(move |worktree_root: std::path::PathBuf| {
                 let freshness =
@@ -759,11 +761,11 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
                         tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready,
                     ),
                     coverage: if staleness == "fresh" {
-                        "complete".to_owned()
+                        tracedecay_contracts::code_index_freshness::CodeIndexFreshnessCoverageV1::Complete
                     } else {
-                        "partial_source_verification".to_owned()
+                        tracedecay_contracts::code_index_freshness::CodeIndexFreshnessCoverageV1::PartialSourceVerification
                     },
-                    staleness_state: Some(staleness.to_owned()),
+                    staleness_state: tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::from_wire(staleness),
                     ..Default::default()
                 };
                 Box::pin(async move { Some(freshness) })
@@ -898,7 +900,9 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
                 code_graph_serving: Some(
                     tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready,
                 ),
-                staleness_state: Some("fresh".to_owned()),
+                staleness_state: Some(
+                    tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh,
+                ),
                 ..Default::default()
             };
             Box::pin(async move { Some(freshness) })
@@ -1008,7 +1012,9 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
                     worktree_root: worktree_root.display().to_string(),
                     latest_generation_id: Some("generation.status-serving-truth.1".to_owned()),
                     sealed_at_micros: Some(sealed_at_micros),
-                    staleness_state: Some("stale".to_owned()),
+                    staleness_state: Some(
+                        tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Stale,
+                    ),
                     ..Default::default()
                 };
             Box::pin(async move { Some(freshness) })

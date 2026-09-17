@@ -813,6 +813,13 @@ fn is_terminal_publication_authority_park(parked: &CodeIndexConvergenceParkedV1)
     parked.blocked_reason == Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt)
 }
 
+fn publication_authority_is_terminal(slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>) -> bool {
+    slot.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(is_terminal_publication_authority_park)
+}
+
 /// Record one observation of a deterministic contract violation on a mounted
 /// worktree's park slot.
 ///
@@ -920,6 +927,17 @@ mod terminal_publication_park_tests {
             observed_passes: 1,
             retries_on_wake: false,
         }
+    }
+
+    #[test]
+    fn publication_authority_terminal_is_the_shared_slot_not_task_local() {
+        let slot = RwLock::new(None);
+        assert!(!publication_authority_is_terminal(&slot));
+        *slot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(terminal_park("planted by another actor"));
+        assert!(publication_authority_is_terminal(&slot));
     }
 
     #[test]
