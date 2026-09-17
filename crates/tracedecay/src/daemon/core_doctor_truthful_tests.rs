@@ -123,23 +123,33 @@ async fn live_runtime_snapshot_does_not_fabricate_store_metadata_after_observati
     .await;
 
     assert_eq!(
+        value.pointer("/doctor_runtime/status"),
+        Some(&serde_json::json!("unavailable")),
+        "a deleted store must not stay live because the admission bool is still set"
+    );
+    assert_eq!(
+        value.pointer("/doctor_runtime/reason"),
+        Some(&serde_json::json!("project_store_missing")),
+        "the missing file is the observation; retained liveness is not"
+    );
+    assert_eq!(
         value.pointer("/database/db_size_bytes"),
-        Some(&serde_json::Value::Null),
-        "unreadable store metadata must remain unavailable rather than become zero bytes"
+        None,
+        "an unavailable snapshot must not invent a size for a deleted store"
     );
     assert_eq!(
         value.pointer("/database/schema_version"),
-        Some(&serde_json::Value::Null),
-        "a live route without a schema observation must not claim the compiled schema"
+        None,
+        "a missing store must not claim the compiled schema"
     );
     assert_eq!(
         value.pointer("/database/schema_state"),
-        Some(&serde_json::Value::Null),
+        None,
         "schema state requires an observed schema version"
     );
     assert_eq!(
         value.pointer("/database/schema_drift"),
-        Some(&serde_json::Value::Null),
+        None,
         "schema drift requires an observed schema version"
     );
 }

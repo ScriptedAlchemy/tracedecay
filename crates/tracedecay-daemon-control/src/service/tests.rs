@@ -603,6 +603,116 @@ fn daemon_readiness_probe_classifies_connect_and_protocol_failures() {
 
 #[cfg(unix)]
 #[test]
+fn connectable_socket_is_not_a_live_daemon_until_initialize_answers() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let profile = TempDir::new().expect("profile temp dir");
+    let silent_socket = profile.path().join("silent.sock");
+    let _listener = UnixListener::bind(&silent_socket).expect("bind silent socket");
+    let silent = super::probe::probe_daemon_process_with_timeout(
+        &silent_socket,
+        TEST_BUILD_VERSION,
+        std::time::Duration::from_millis(50),
+    );
+    assert!(
+        matches!(silent, super::DaemonProcessProofV1::Unproven { .. }),
+        "accepting a connection must not count as a live daemon, got {silent:?}"
+    );
+    assert!(!silent.names_tracedecay());
+
+    let ready_socket = profile.path().join("ready.sock");
+    let ready_listener = UnixListener::bind(&ready_socket).expect("bind ready socket");
+    let server = serve_probe_response(
+        ready_listener,
+        "tracedecay",
+        env!("CARGO_PKG_VERSION"),
+        None,
+    );
+    let ready = super::probe::probe_daemon_process_with_timeout(
+        &ready_socket,
+        env!("CARGO_PKG_VERSION"),
+        std::time::Duration::from_secs(2),
+    );
+    server.join().expect("join initialize server");
+    assert_eq!(ready, super::DaemonProcessProofV1::Ready);
+    assert!(ready.names_tracedecay());
+    assert!(ready.version_matches());
+
+    let stale_socket = profile.path().join("stale-version.sock");
+    let stale_listener = UnixListener::bind(&stale_socket).expect("bind stale socket");
+    let stale_server = serve_probe_response(stale_listener, "tracedecay", "0.0.0-old", None);
+    let stale = super::probe::probe_daemon_process_with_timeout(
+        &stale_socket,
+        env!("CARGO_PKG_VERSION"),
+        std::time::Duration::from_secs(2),
+    );
+    stale_server.join().expect("join stale server");
+    assert!(
+        stale.names_tracedecay() && !stale.version_matches(),
+        "an older TraceDecay process is running, but not this binary: {stale:?}"
+    );
+
+    let foreign_socket = profile.path().join("foreign.sock");
+    let foreign_listener = UnixListener::bind(&foreign_socket).expect("bind foreign socket");
+    let foreign_server = serve_probe_response(foreign_listener, "not-tracedecay", "0.1.0", None);
+    let foreign = super::probe::probe_daemon_process_with_timeout(
+        &foreign_socket,
+        env!("CARGO_PKG_VERSION"),
+        std::time::Duration::from_secs(2),
+    );
+    foreign_server.join().expect("join foreign server");
+    assert!(
+        !foreign.names_tracedecay(),
+        "a foreign initialize must not count as this daemon: {foreign:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn daemon_reachable_requires_an_initialize_answer() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let profile = TempDir::new().expect("profile temp dir");
+    let missing = profile.path().join("missing.sock");
+    let missing_guard = EnvVarGuard::set(SOCKET_ENV, &missing);
+    assert!(
+        !super::daemon_reachable(),
+        "a missing socket is not a running daemon"
+    );
+    drop(missing_guard);
+
+    let ready_socket = profile.path().join("ready.sock");
+    let listener = UnixListener::bind(&ready_socket).expect("bind ready socket");
+    let server = serve_probe_response(listener, "tracedecay", env!("CARGO_PKG_VERSION"), None);
+    let ready_guard = EnvVarGuard::set(SOCKET_ENV, &ready_socket);
+    assert!(
+        super::daemon_reachable(),
+        "initialize naming tracedecay is the reachability proof"
+    );
+    drop(ready_guard);
+    server.join().expect("join initialize server");
+}
+
+#[cfg(unix)]
+#[test]
+fn daemon_status_reports_the_initialize_proof_not_only_the_socket() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let profile = TempDir::new().expect("profile temp dir");
+    let socket = profile.path().join("status.sock");
+    let listener = UnixListener::bind(&socket).expect("bind status socket");
+    let server = serve_probe_response(listener, "tracedecay", env!("CARGO_PKG_VERSION"), None);
+    let status = super::service_status(&socket, env!("CARGO_PKG_VERSION"));
+    server.join().expect("join status server");
+    assert!(
+        status.contains("protocol: Ready"),
+        "daemon status must print the initialize proof, got:\n{status}"
+    );
+    assert!(
+        status.contains("(connectable)"),
+        "the same probe may also report the socket, got:\n{status}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn daemon_readiness_probe_classifies_authentication_denial() {
     let _env_lock = lock_user_data_dir_test_env();
     let profile = TempDir::new().expect("profile temp dir");
