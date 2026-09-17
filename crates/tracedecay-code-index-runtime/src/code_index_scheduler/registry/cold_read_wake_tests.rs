@@ -8,7 +8,9 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay_contracts::ResolvedScope;
 
-use super::super::{DaemonCodeIndexControlV1, ReconcilePassGuard};
+use super::super::{
+    CodeIndexBuildProgressSlotStateV1, DaemonCodeIndexControlV1, ReconcilePassGuard,
+};
 use super::{CodeIndexReconcileAdmissionV1, CodeIndexSchedulerRegistryV1};
 use crate::code_index::production::CodeIndexExecutionControlV1;
 
@@ -145,7 +147,7 @@ async fn cold_read_wakes_do_not_cancel_an_in_flight_reconcile_snapshot() {
     {
         let mounted = registry.mounted.lock().await;
         let worktree = mounted.get(&canonical_project).expect("mounted worktree");
-        *worktree.build_progress.write().unwrap() = Default::default();
+        *worktree.build_progress.write().unwrap() = CodeIndexBuildProgressSlotStateV1::default();
     }
     registry.clear_pending_wake_for_scope(&scope).await;
     let admission_result = registry.request_query_background_reconcile(&scope).await;

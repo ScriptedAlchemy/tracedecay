@@ -45,8 +45,8 @@ use crate::{
         },
     },
     code_index_scheduler::{
-        CodeIndexCadenceOutcomeV1, CodeIndexCadenceTriggerV1, CodeIndexHintPolicyV1,
-        CodeIndexIgnoredDependencyRequestV1, CodeIndexReconcileAdmissionV1,
+        CodeIndexCadenceOutcomeV1, CodeIndexCadenceTriggerV1, CodeIndexEventToReadyReceiptV1,
+        CodeIndexHintPolicyV1, CodeIndexIgnoredDependencyRequestV1, CodeIndexReconcileAdmissionV1,
         CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
         GenerationDecodeAdmissionV1, SharedCodeIndexBytePoolV1,
         classification::{WorktreeChangeClassV1, WorktreeChangeClassificationV1},
@@ -2653,7 +2653,7 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
             .event_to_ready_receipts()
             .iter()
             .skip(receipts_before)
-            .any(|receipt| receipt.is_noop()),
+            .any(CodeIndexEventToReadyReceiptV1::is_noop),
         "source verification records an unchanged-source receipt"
     );
 

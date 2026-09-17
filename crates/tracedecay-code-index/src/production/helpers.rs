@@ -1632,24 +1632,16 @@ fn rust_inherent_method_owner<'a>(
     target_path: &str,
     target_qualified_name: &'a str,
 ) -> Option<&'a str> {
-    let Some(source_root) = rust_source_root(source_path) else {
-        return None;
-    };
+    let source_root = rust_source_root(source_path)?;
     if rust_source_root(target_path) != Some(source_root) {
         return None;
     }
-    let Some(relative_file) = target_path
+    let relative_file = target_path
         .strip_prefix(source_root)
-        .and_then(|path| path.strip_prefix('/'))
-    else {
-        return None;
-    };
-    let Some(source_file) = source_path
+        .and_then(|path| path.strip_prefix('/'))?;
+    let source_file = source_path
         .strip_prefix(source_root)
-        .and_then(|path| path.strip_prefix('/'))
-    else {
-        return None;
-    };
+        .and_then(|path| path.strip_prefix('/'))?;
     if source_file.starts_with("bin/") || relative_file.starts_with("bin/") {
         return None;
     }
@@ -1659,18 +1651,11 @@ fn rust_inherent_method_owner<'a>(
     ) {
         return None;
     }
-    let Some(symbol_path) = target_qualified_name
+    let symbol_path = target_qualified_name
         .strip_prefix(target_path)
-        .and_then(|path| path.strip_prefix("::"))
-    else {
-        return None;
-    };
-    let Some((target_owner, target_member)) = symbol_path.rsplit_once("::") else {
-        return None;
-    };
-    let Some(member) = member.strip_prefix("::") else {
-        return None;
-    };
+        .and_then(|path| path.strip_prefix("::"))?;
+    let (target_owner, target_member) = symbol_path.rsplit_once("::")?;
+    let member = member.strip_prefix("::")?;
     if target_member != member {
         return None;
     }
