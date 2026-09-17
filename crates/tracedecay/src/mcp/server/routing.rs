@@ -488,7 +488,8 @@ mod tests {
 
     use super::{
         InitializeRootResolutionError, RepositoryDiscovery, resolve_initialize_root_project_path,
-        resolve_initialize_roots_project_path, select_initialize_project_path,
+        resolve_initialize_roots_project_path, resolve_initialize_roots_project_route,
+        select_initialize_project_path,
     };
     use crate::test_support::host_admission::HostAdmissionTestRuntimeV1;
     use tracedecay_sessions::admission::HostAdmissionScope;
@@ -663,6 +664,51 @@ mod tests {
         assert_eq!(
             resolved,
             Some(nested_root.canonicalize().expect("canonical nested root"))
+        );
+    }
+
+    #[tokio::test]
+    async fn many_slow_initialize_roots_share_one_discovery_budget() {
+        let profile = TempDir::new().expect("profile");
+        let projects = TempDir::new().expect("projects");
+        let runtime = HostAdmissionTestRuntimeV1::profile(profile.path())
+            .await
+            .expect("open registered profile runtime");
+        let registry = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        let mut params_roots = Vec::new();
+        let probe = std::time::Duration::from_millis(1_500);
+        for index in 0..3 {
+            let root = projects.path().join(format!("slow-{index}"));
+            fs::create_dir_all(&root).expect("create slow root");
+            run_git(&root, &["init", "--quiet"]);
+            tracedecay_runtime_core::git_repository::delay_repository_discovery_for_test(
+                &root, probe,
+            );
+            let uri = url::Url::from_file_path(&root).expect("file uri");
+            params_roots.push(json!({"uri": uri.as_str(), "name": format!("slow-{index}")}));
+        }
+        let params = json!({"roots": params_roots});
+        let started = std::time::Instant::now();
+        let route =
+            resolve_initialize_roots_project_route(Some(&params), Some(registry), None).await;
+        let elapsed = started.elapsed();
+        for index in 0..3 {
+            tracedecay_runtime_core::git_repository::reset_repository_discovery_for_test(
+                &projects.path().join(format!("slow-{index}")),
+            );
+        }
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "three {probe:?} probes must not stack past one 2s budget, took {elapsed:?}"
+        );
+        let Some(crate::mcp::project_route::WorkspaceProjectRoute::Failed(failure)) = route else {
+            panic!("shared budget must defer before every slow root resolves");
+        };
+        assert!(
+            failure.detail.contains("deadline exceeded"),
+            "expected a deadline miss, got {failure:?}"
         );
     }
 
