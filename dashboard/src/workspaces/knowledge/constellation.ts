@@ -161,6 +161,11 @@ export interface ConstellationModel {
 
 /** How many facts carry a printed label. */
 const LABEL_BUDGET = 7;
+/** The footprint one printed label claims, in world units: a 30-character
+ * line of 10.5px mono and a row of it. Two labels closer than this on the
+ * same side would overprint. */
+const LABEL_TEXT_WIDTH = 200;
+const LABEL_ROW_HEIGHT = 13;
 
 /** The trust bands the legend prints, highest first. Edges are inclusive at
  * the lower bound so `0.80` reads in the top band. */
@@ -355,17 +360,36 @@ export function composeConstellation(graph: MemoryGraphPayloadV1): Constellation
     positioned.set(satellite.id, { ...polar(angle, radius), angle, radius });
   }
 
-  // Labels: the budget goes to the most wired facts, ties to the most trusted.
-  const labelOrder = [...factSeeds]
-    .sort(
-      (a, b) =>
-        (degree.get(b.node.id) ?? 0) - (degree.get(a.node.id) ?? 0) ||
-        (b.trust ?? -1) - (a.trust ?? -1) ||
-        a.node.fact_id.localeCompare(b.node.fact_id),
-    )
-    .slice(0, LABEL_BUDGET)
-    .map((seed) => seed.node.id);
-  const labelled = new Set(labelOrder);
+  // Labels: the budget goes to the most wired facts, ties to the most trusted,
+  // and a candidate whose text would sit on top of an accepted label's text
+  // yields its place to the next one down. Greedy and deterministic: the
+  // same graph labels the same bodies.
+  const labelCandidates = [...factSeeds].sort(
+    (a, b) =>
+      (degree.get(b.node.id) ?? 0) - (degree.get(a.node.id) ?? 0) ||
+      (b.trust ?? -1) - (a.trust ?? -1) ||
+      a.node.fact_id.localeCompare(b.node.fact_id),
+  );
+  const accepted: { x: number; y: number; side: 'left' | 'right' }[] = [];
+  const labelled = new Set<string>();
+  for (const seed of labelCandidates) {
+    if (labelled.size >= LABEL_BUDGET) break;
+    const point = positioned.get(seed.node.id);
+    if (!point) continue;
+    const side: 'left' | 'right' = Math.cos(point.angle) >= 0 ? 'right' : 'left';
+    const collides = accepted.some(
+      (other) =>
+        Math.abs(other.y - point.y) < LABEL_ROW_HEIGHT &&
+        (other.side === side
+          ? Math.abs(other.x - point.x) < LABEL_TEXT_WIDTH
+          : side === 'right'
+            ? point.x < other.x && other.x - point.x < LABEL_TEXT_WIDTH
+            : point.x > other.x && point.x - other.x < LABEL_TEXT_WIDTH),
+    );
+    if (collides) continue;
+    accepted.push({ x: point.x, y: point.y, side });
+    labelled.add(seed.node.id);
+  }
 
   const bandCounts = new Map<TrustBandId, number>();
   const nodes: ConstellationNode[] = [];

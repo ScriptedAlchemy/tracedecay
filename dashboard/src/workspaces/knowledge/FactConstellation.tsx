@@ -75,7 +75,6 @@ export function FactConstellation({
   onInspect,
   onSelect,
   graphRead,
-  className,
 }: {
   model: ConstellationModel;
   /** The fact the reader is inspecting (hover or focus, sticky until Escape). */
@@ -86,7 +85,6 @@ export function FactConstellation({
   onSelect: (factId: string) => void;
   /** The daemon's own reading of the graph sub-read, printed beside coverage. */
   graphRead: MemoryReadStatusV1 | undefined;
-  className?: string;
 }) {
   const haloId = useId();
   // A satellite under the pointer dims the field to its wiring but has no fact
@@ -98,7 +96,12 @@ export function FactConstellation({
     inspectedFactId == null ? null : (model.nodeIdByFact.get(inspectedFactId) ?? null);
   const selectedNodeId =
     selectedFactId == null ? null : (model.nodeIdByFact.get(selectedFactId) ?? null);
-  const focusNodeId = hoveredNodeId ?? inspectedNodeId;
+  // Inspection dims what it is not wired to; selection does not. A selected
+  // fact is marked by its ring and stays legible in a field drawn at full
+  // strength, so a reader who has chosen one is not left looking at a dimmed
+  // store until they press Escape.
+  const focusNodeId =
+    hoveredNodeId ?? (inspectedNodeId !== selectedNodeId ? inspectedNodeId : null);
   const focusSet = useMemo(() => {
     if (focusNodeId == null) return null;
     const set = new Set<string>([focusNodeId]);
@@ -113,7 +116,7 @@ export function FactConstellation({
 
   return (
     <figure
-      className={cn('td-optic td-grain td-scanlines relative flex min-h-0 flex-col', className)}
+      className="td-optic td-grain td-scanlines relative flex flex-col"
       data-testid="fact-constellation"
     >
       <Corners tone="signal" />
@@ -131,7 +134,7 @@ export function FactConstellation({
         </span>
       </figcaption>
       {empty ? (
-        <div className="relative z-10 flex flex-1 items-center justify-center p-6">
+        <div className="relative z-10 flex min-h-[220px] items-center justify-center p-6">
           <p className="max-w-md text-center text-xs leading-relaxed text-text-muted">
             The memory graph returned no roots to draw
             {model.coverage.completeness === 'complete'
@@ -140,12 +143,17 @@ export function FactConstellation({
           </p>
         </div>
       ) : (
+        // The key sits beside the field from `lg`, in the width the 5:3 drawing
+        // leaves free at the sides of a wider aperture, and beneath it below.
+        // The field is one of two readings of the same rows, and the ledger
+        // under it must stay in view at 1440x900 rather than below the fold.
+        <div className="relative z-10 flex flex-col lg:flex-row lg:items-stretch">
         <svg
           role="img"
           aria-label={description}
           viewBox={`0 0 ${CONSTELLATION_WORLD.width} ${CONSTELLATION_WORLD.height}`}
           preserveAspectRatio="xMidYMid meet"
-          className="relative z-10 block min-h-[240px] w-full flex-1 select-none"
+          className="block h-[clamp(180px,30vh,360px)] w-full select-none lg:min-w-0 lg:flex-1"
           data-testid="fact-constellation-svg"
           onPointerLeave={() => setHoveredNodeId(null)}
         >
@@ -171,6 +179,10 @@ export function FactConstellation({
                 inspected={node.id === focusNodeId}
                 selected={node.id === selectedNodeId}
                 onEnter={() => {
+                  // Movement, not entry, for the same reason the ledger rows
+                  // inspect on move: a field scrolling under a parked pointer
+                  // must not steal inspection from the keyboard.
+                  if (hoveredNodeId === node.id) return;
                   setHoveredNodeId(node.id);
                   if (node.factId != null) onInspect(node.factId);
                 }}
@@ -201,11 +213,12 @@ export function FactConstellation({
               ))}
           </g>
         </svg>
+        <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-1.5 px-3 pb-2 pt-1 lg:w-44 lg:shrink-0 lg:flex-col lg:justify-start lg:gap-y-3 lg:pt-2">
+          <TrustLegend model={model} />
+          <RelationLegend model={model} />
+        </div>
+        </div>
       )}
-      <div className="relative z-10 flex flex-wrap items-end justify-between gap-x-4 gap-y-2 px-3 pb-2 pt-1">
-        <TrustLegend model={model} />
-        <RelationLegend model={model} />
-      </div>
       <CoverageFooter model={model} graphRead={graphRead} />
     </figure>
   );
@@ -353,7 +366,7 @@ function Body({
       data-fact-id={node.factId ?? undefined}
       data-inspected={inspected || undefined}
       data-selected={selected || undefined}
-      onPointerEnter={onEnter}
+      onPointerMove={onEnter}
       onPointerLeave={onLeave}
       onClick={onClick}
       className={cn(
@@ -454,12 +467,15 @@ function Glyph({
   }
 }
 
+/** The legends run as ruled rows rather than stacked lists: the field is one
+ * of two readings of the same rows and the ledger beneath it has to stay in
+ * view, so the key spends width, of which there is plenty, not height. */
 function TrustLegend({ model }: { model: ConstellationModel }) {
   return (
-    <dl aria-label="Trust bands" className="flex flex-col gap-0.5">
+    <dl aria-label="Trust bands" className="flex flex-wrap items-center gap-x-3 gap-y-1">
       <dt className="td-legend">trust</dt>
       {model.bands.map((band) => (
-        <dd key={band.id} className="flex items-center gap-2 text-3xs text-text-muted">
+        <dd key={band.id} className="flex items-center gap-1.5 text-3xs text-text-muted">
           <span
             aria-hidden
             className={cn(
@@ -493,12 +509,12 @@ function RelationLegend({ model }: { model: ConstellationModel }) {
     );
   }
   return (
-    <dl aria-label="Relations and bodies" className="flex flex-col gap-0.5">
+    <dl aria-label="Relations and bodies" className="flex flex-wrap items-center gap-x-3 gap-y-1">
       <dt className="td-legend">relations · bodies</dt>
       {model.relationKinds.map((kind) => {
         const style = relationStyle(kind);
         return (
-          <dd key={kind} className="flex items-center gap-2 text-3xs text-text-muted">
+          <dd key={kind} className="flex items-center gap-1.5 text-3xs text-text-muted">
             <svg aria-hidden width="22" height="6" viewBox="0 0 22 6" className="shrink-0">
               <line
                 x1="1"
@@ -519,7 +535,7 @@ function RelationLegend({ model }: { model: ConstellationModel }) {
       {satelliteKinds.map((kind) => {
         const glyph = nodeGlyph(kind);
         return (
-          <dd key={kind} className="flex items-center gap-2 text-3xs text-text-muted">
+          <dd key={kind} className="flex items-center gap-1.5 text-3xs text-text-muted">
             <svg aria-hidden width="22" height="10" viewBox="0 0 22 10" className="shrink-0">
               <Glyph
                 shape={glyph.shape}
@@ -569,7 +585,7 @@ function CoverageFooter({
     </span>,
     <span key="relations">
       {coverage.drawnRelations.toLocaleString()} of {coverage.relationCount.toLocaleString()}{' '}
-      relations drawn under a limit of {coverage.relationLimit.toLocaleString()}
+      relations drawn, limit {coverage.relationLimit.toLocaleString()}
     </span>,
   ];
   if (coverage.unavailableFactCandidates > 0) {

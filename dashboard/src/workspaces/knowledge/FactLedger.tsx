@@ -52,8 +52,6 @@ export function FactLedger({
   loaded,
   distribution,
   query,
-  sort,
-  onSort,
   storeFactCount,
   factsCoverage,
   selectedFactId,
@@ -61,14 +59,13 @@ export function FactLedger({
   onInspect,
   onSelect,
 }: {
-  /** Already ordered by `sort`. */
+  /** Already ordered by the caller's sort; the sort control sits on the bay's
+   * title bar so the header here spends its height on the slice statement. */
   facts: MemoryFactRowV1[];
   coverageNotice: ReactNode;
   loaded: LoadedTrust | null;
   distribution: TrustDistribution;
   query: string;
-  sort: FactSort;
-  onSort: (sort: FactSort) => void;
   /** The store's own fact total from the overview summary, when it reported one. */
   storeFactCount: number | null;
   factsCoverage: MemoryFactsCoverageV1;
@@ -123,8 +120,6 @@ export function FactLedger({
                 loaded={loaded}
                 distribution={distribution}
                 query={query}
-                sort={sort}
-                onSort={onSort}
                 storeFactCount={storeFactCount}
                 factsCoverage={factsCoverage}
               />
@@ -161,23 +156,18 @@ export function FactLedger({
  * has no low-trust facts; the store in fact holds twenty-one below 0.75 that
  * this slice never reaches. That is not a detail — it is the difference
  * between "feedback never moves a score" and "you are looking at the top of
- * the list". The same header owns the sort control, because a sort is a
- * reordering of exactly this slice and nothing more.
+ * the list".
  */
 function LedgerHeader({
   loaded,
   distribution,
   query,
-  sort,
-  onSort,
   storeFactCount,
   factsCoverage,
 }: {
   loaded: LoadedTrust;
   distribution: TrustDistribution;
   query: string;
-  sort: FactSort;
-  onSort: (sort: FactSort) => void;
   storeFactCount: number | null;
   factsCoverage: MemoryFactsCoverageV1;
 }) {
@@ -189,30 +179,12 @@ function LedgerHeader({
   const beyond =
     eligible != null && eligible > loaded.total ? eligible - loaded.total : null;
   return (
-    <div className="flex flex-col gap-1 border-b border-edge-subtle px-3 py-2">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <p className="td-legend">
-          {loaded.total.toLocaleString()} facts loaded · {loaded.measured.toLocaleString()} with
-          trust · {loaded.unavailable.toLocaleString()} unavailable
-          {query ? ` · matching “${query}”` : ''}
-        </p>
-        <span aria-hidden className="td-rule" />
-        <label className="flex items-center gap-2 text-3xs text-text-muted">
-          <span className="td-legend">sort</span>
-          <select
-            aria-label="Sort loaded facts"
-            value={sort}
-            onChange={(event) => onSort(event.target.value as FactSort)}
-            className="min-h-[var(--touch-target-min)] border border-edge-subtle bg-surface-0 px-2 text-2xs text-text-secondary"
-          >
-            {FACT_SORTS.map((option) => (
-              <option key={option} value={option}>
-                {factSortLabel(option)}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
+    <div className="flex flex-col gap-0.5 border-b border-edge-subtle px-3 py-1.5">
+      <p className="td-legend">
+        {loaded.total.toLocaleString()} facts loaded · {loaded.measured.toLocaleString()} with
+        trust · {loaded.unavailable.toLocaleString()} unavailable
+        {query ? ` · matching “${query}”` : ''}
+      </p>
       <p className="text-2xs leading-relaxed text-text-muted">
         {measuredRange == null
           ? 'No loaded fact exposes a trust measurement.'
@@ -221,25 +193,50 @@ function LedgerHeader({
             : `Trust ${measuredRange.min.toFixed(2)}–${measuredRange.max.toFixed(2)}, with ${loaded.atMax.toLocaleString()} at exactly ${measuredRange.max.toFixed(2)}.`}
         {measuredRange && unreached != null && unreached > 0
           ? ` The store holds ${unreached.toLocaleString()} further facts below ${measuredRange.min.toFixed(2)} that this slice does not reach.`
-          : ''}
-      </p>
-      {/* Paging is a typed absence, not a control drawn disabled: the route
-        * serves one bounded, trust-ranked slice and no cursor, so the ledger
-        * states the bound and how much of the store lies past it. */}
-      <p
-        className="text-3xs leading-relaxed text-text-muted"
-        data-testid="fact-ledger-bound"
-      >
-        Sorted within this slice only. The read is bounded to the top{' '}
-        {factsCoverage.limit.toLocaleString()} by trust
-        {beyond != null
-          ? ` — ${beyond.toLocaleString()} more ${beyond === 1 ? 'fact lies' : 'facts lie'} beyond it`
-          : eligible == null
-            ? ' — the store did not report how many facts lie beyond it'
-            : ''}
-        ; the memory route serves no page cursor, so paging is unavailable rather than hidden.
+          : ''}{' '}
+        {/* Paging is a typed absence, not a control drawn disabled: the route
+          * serves one bounded, trust-ranked slice and no cursor, so the ledger
+          * states the bound and how much of the store lies past it. */}
+        <span data-testid="fact-ledger-bound">
+          Sorted within this slice only. The read is bounded to the top{' '}
+          {factsCoverage.limit.toLocaleString()} by trust
+          {beyond != null
+            ? ` — ${beyond.toLocaleString()} more ${beyond === 1 ? 'fact lies' : 'facts lie'} beyond it`
+            : eligible == null
+              ? ' — the store did not report how many facts lie beyond it'
+              : ''}
+          ; the memory route serves no page cursor, so paging is unavailable rather than hidden.
+        </span>
       </p>
     </div>
+  );
+}
+
+/** The sort control, drawn on the bay's title bar. A sort is a reordering of
+ * exactly the loaded slice, and the header beneath says so. */
+export function FactSortControl({
+  sort,
+  onSort,
+}: {
+  sort: FactSort;
+  onSort: (sort: FactSort) => void;
+}) {
+  return (
+    <label className="flex items-center gap-2 text-3xs text-text-muted">
+      <span className="td-legend">sort</span>
+      <select
+        aria-label="Sort loaded facts"
+        value={sort}
+        onChange={(event) => onSort(event.target.value as FactSort)}
+        className="min-h-[var(--touch-target-min)] max-w-[14rem] border border-edge-subtle bg-surface-0 px-2 text-2xs text-text-secondary"
+      >
+        {FACT_SORTS.map((option) => (
+          <option key={option} value={option}>
+            {factSortLabel(option)}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 
