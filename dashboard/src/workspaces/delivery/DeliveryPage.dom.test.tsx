@@ -3,108 +3,19 @@ import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, useLocation } from 'react-router';
-import type { DeliveryInboxV1 } from '../../contracts/generated.ts';
+import type { DeliveryInboxV1, DeliveryOverviewV1 } from '../../contracts/generated.ts';
+import {
+  INBOX,
+  INBOX_BRANCH_ONLY,
+  OVERVIEW_ALPHA,
+  OVERVIEW_LOCAL_ONLY,
+} from '../../test/deliveryFixtures.ts';
 import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
 import { DeliveryPage } from './DeliveryPage.tsx';
 
-const INBOX = {
-  registry_state: 'ready',
-  projects: [
-    {
-      project_id: 'project.alpha',
-      label: 'alpha',
-      project_root: '/src/alpha',
-      git_common_dir: '/src/alpha/.git',
-      repository_id: 'repository.alpha',
-      worktree_id: 'worktree.alpha',
-      branch_ref: 'refs/heads/feature/delivery',
-      indexed_head_commit_id: 'a'.repeat(40),
-      indexed_generation: 'generation.alpha.1',
-      provider_state: 'ready',
-    },
-  ],
-  pull_requests: [
-    {
-      id: 'project.alpha:github:42',
-      project_id: 'project.alpha',
-      repository_id: 'repository.alpha',
-      worktree_id: 'worktree.alpha',
-      branch_ref: 'refs/heads/feature/delivery',
-      indexed_head_commit_id: 'a'.repeat(40),
-      indexed_generation: 'generation.alpha.1',
-      state: 'current',
-      pull_request: {
-        id: 'github:42',
-        label: 'Pull request #42 — Admit delivery inbox',
-        provider: 'github',
-        pull_request_id: '42',
-        identity: {
-          title: 'Admit delivery inbox',
-          state: 'open',
-          draft: false,
-          additions: 120,
-          deletions: 35,
-          changed_files: 8,
-        },
-        operations: [],
-      },
-      attention: [
-        {
-          id: 'project.alpha:42:ci_failure',
-          project_id: 'project.alpha',
-          pull_request_id: '42',
-          source: 'ci_failure',
-          state: 'active',
-          evidence: [{ kind: 'ci_failure', failure_anchor: 'anchor.ci.42' }],
-          coverage: 'complete',
-          observed_at_micros: 1_700_000_000_000_000,
-        },
-        {
-          id: 'project.alpha:42:overlapping_edit',
-          project_id: 'project.alpha',
-          pull_request_id: '42',
-          source: 'overlapping_edit',
-          state: 'unavailable',
-          evidence: [],
-          coverage: 'unsupported',
-          observed_at_micros: null,
-        },
-      ],
-      shared_code: [
-        {
-          kind: 'shared_code',
-          state: 'requires_selection',
-          href: '/code?view=shared-code',
-          source_generation: 'generation.alpha.1',
-        },
-        {
-          kind: 'compare',
-          state: 'requires_selection',
-          href: '/code?view=compare',
-          source_generation: 'generation.alpha.1',
-        },
-      ],
-    },
-  ],
-  membership_edges: [
-    {
-      id: 'project.alpha:42:branch_pull_request_reference',
-      project_id: 'project.alpha',
-      pull_request_id: '42',
-      basis: {
-        kind: 'branch_pull_request_reference',
-        branch_ref: 'refs/heads/feature/delivery',
-        head_commit_id: 'a'.repeat(40),
-      },
-    },
-  ],
-  omitted_projects: 0,
-  excluded_pull_requests: 1,
-} satisfies DeliveryInboxV1;
-
 /** Inbox already joined by the server — overlapping_edit is Active with typed
  * proximity evidence (no client `/api/feedback/proximity` re-join). */
-const INBOX_WITH_PROXIMITY_ATTENTION = {
+const INBOX_WITH_PROXIMITY_ATTENTION: DeliveryInboxV1 = {
   ...INBOX,
   pull_requests: [
     {
@@ -129,8 +40,9 @@ const INBOX_WITH_PROXIMITY_ATTENTION = {
         },
       ],
     },
+    ...INBOX.pull_requests.slice(1),
   ],
-} satisfies DeliveryInboxV1;
+};
 
 function LocationProbe() {
   return <output data-testid="location">{useLocation().search}</output>;
@@ -149,70 +61,187 @@ function serveRoutes(routes: Record<string, { status: number; body: unknown }>) 
   });
 }
 
-function renderDelivery(payload: DeliveryInboxV1, domainState = 'ready', route = '/delivery') {
-  vi.stubGlobal(
-    'fetch',
-    serveRoutes({
-      '/api/delivery/inbox': { status: 200, body: fixtureEnvelope(payload, domainState) },
-    }),
-  );
+export function renderDelivery(
+  payload: DeliveryInboxV1,
+  options: {
+    domainState?: string;
+    route?: string;
+    overview?: DeliveryOverviewV1;
+    overviewStatus?: number;
+  } = {},
+) {
+  const fetchMock = serveRoutes({
+    '/api/delivery/inbox': {
+      status: 200,
+      body: fixtureEnvelope(payload, options.domainState ?? 'ready'),
+    },
+    ...(options.overview === undefined
+      ? {}
+      : {
+          '/delivery/overview': {
+            status: options.overviewStatus ?? 200,
+            body: fixtureEnvelope(options.overview, 'ready'),
+          },
+        }),
+  });
+  vi.stubGlobal('fetch', fetchMock);
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
-  return render(
+  const view = render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={[route]}>
+      <MemoryRouter initialEntries={[options.route ?? '/delivery']}>
         <DeliveryPage />
         <LocationProbe />
       </MemoryRouter>
     </QueryClientProvider>,
   );
+  return { ...view, fetchMock };
 }
+
+const PR_42 = 'project.alpha%3Agithub%3A42';
 
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('DeliveryPage', () => {
-  it('renders only admitted pull requests and explains membership', async () => {
+describe('DeliveryPage · inbox', () => {
+  it('renders only admitted pull requests, selects through the URL and explains membership', async () => {
     const user = userEvent.setup();
     renderDelivery(INBOX);
 
-    await user.click(await screen.findByRole('button', { name: /Admit delivery inbox/ }));
+    const queue = await screen.findByRole('region', { name: 'Admitted pull requests' });
+    expect(within(queue).getAllByRole('button', { pressed: false })).toHaveLength(3);
+    await user.click(within(queue).getByRole('button', { name: /Admit delivery inbox/ }));
 
-    expect(screen.queryByText('Unrelated provider PR')).toBeNull();
-    expect(screen.getByText('Branch and pull request reference')).toBeTruthy();
-    expect(screen.getAllByText(/refs\/heads\/feature\/delivery/).length).toBeGreaterThan(0);
+    expect(screen.getByTestId('location').textContent).toContain(`pr=${PR_42}`);
+    const detail = screen.getByRole('region', { name: 'Pull request detail' });
+    const correlation = within(detail).getByRole('region', { name: /Correlation · 3 edges/ });
+    expect(within(correlation).getByText('Branch and pull request reference')).toBeTruthy();
+    expect(within(correlation).getByText('Shared Work objective')).toBeTruthy();
+    expect(within(correlation).getByText('Session and Git relation')).toBeTruthy();
+    expect(within(detail).getAllByText(/refs\/heads\/feature\/delivery/).length).toBeGreaterThan(0);
     expect(screen.getByText(/1 unrelated provider pull request excluded/)).toBeTruthy();
-    expect(screen.getByTestId('location').textContent).toContain('pr=project.alpha%3Agithub%3A42');
+    expect(screen.queryByText('Unrelated provider PR')).toBeNull();
+  });
+
+  it('prints basis and grade on every correlation edge and never upgrades one', async () => {
+    renderDelivery(INBOX, { route: `/delivery?pr=${PR_42}` });
+    const detail = await screen.findByRole('region', { name: 'Pull request detail' });
+    const correlation = within(detail).getByRole('region', { name: /Correlation · 3 edges/ });
+    expect(within(correlation).getByText('COMMIT / EXACT')).toBeTruthy();
+    expect(within(correlation).getByText('WORK / EXPLICIT')).toBeTruthy();
+    expect(within(correlation).getByText('TRANSCRIPT / INFERRED')).toBeTruthy();
+    expect(within(correlation).getByRole('link', { name: /Open in Loom/ }).getAttribute('href')).toBe(
+      '/loom?loomSession=session.alpha.1',
+    );
   });
 
   it('restores project, pull request, attention source, and evidence from the URL', async () => {
-    renderDelivery(
-      INBOX,
-      'ready',
-      '/delivery?project=project.alpha&pr=project.alpha%3Agithub%3A42&attention=ci_failure&evidence=anchor.ci.42',
-    );
+    renderDelivery(INBOX, {
+      route: `/delivery?project=project.alpha&pr=${PR_42}&attention=ci_failure&evidence=anchor.ci.42`,
+    });
 
     const detail = await screen.findByRole('region', { name: 'Pull request detail' });
     expect(within(detail).getByText('CI failure')).toBeTruthy();
-    expect(within(detail).getByText('anchor.ci.42')).toBeTruthy();
+    expect(within(detail).getByRole('button', { name: 'anchor.ci.42', pressed: true })).toBeTruthy();
     expect(within(detail).getByText('Overlapping edit')).toBeTruthy();
+    expect((screen.getByRole('combobox', { name: 'Attention source' }) as HTMLSelectElement).value).toBe(
+      'ci_failure',
+    );
   });
 
-  it('links to the existing verified Code views', async () => {
-    renderDelivery(INBOX);
+  it('links to the existing verified Code views and a head-prefilled Compare', async () => {
+    renderDelivery(INBOX, { route: `/delivery?pr=${PR_42}` });
 
     const shared = await screen.findByRole('link', { name: 'Open Shared Code' });
     const compare = screen.getByRole('link', { name: 'Open Compare' });
     expect(shared.getAttribute('href')).toBe('/code?view=shared-code');
     expect(compare.getAttribute('href')).toBe('/code?view=compare');
+    const head = screen.getByRole('link', { name: 'Compare head revision' }).getAttribute('href')!;
+    const params = new URLSearchParams(head.slice('/code?'.length));
+    expect(params.get('head')).toBe('feature/delivery');
+    expect(params.get('head_revision')).toBe('a'.repeat(40));
+    expect(params.get('base')).toBeNull();
   });
 
-  it('renders provider-not-configured as a typed zero, not a transport failure', async () => {
+  it('exposes no provider mutation: only read-only badges and links', async () => {
+    renderDelivery(INBOX, { route: `/delivery?pr=${PR_42}` });
+    await screen.findByRole('region', { name: 'Pull request detail' });
+    for (const verb of [/merge/i, /rerun/i, /re-run/i, /resolve/i, /post/i, /approve/i]) {
+      expect(screen.queryByRole('button', { name: verb })).toBeNull();
+    }
+    expect(screen.getAllByText(/read-only provider/i).length).toBeGreaterThan(0);
+  });
+
+  it('filters by status, provider state and unresolved evidence from the URL', async () => {
+    renderDelivery(INBOX, { route: '/delivery?status=draft' });
+    const queue = await screen.findByRole('region', { name: 'Admitted pull requests' });
+    expect(within(queue).getAllByRole('button')).toHaveLength(1);
+    expect(within(queue).getByRole('button', { name: /Persist retry backoff/ })).toBeTruthy();
+  });
+
+  it('narrows to unresolved pull requests only', async () => {
+    renderDelivery(INBOX, { route: '/delivery?unresolved=1' });
+    const queue = await screen.findByRole('region', { name: 'Admitted pull requests' });
+    expect(within(queue).getAllByRole('button')).toHaveLength(1);
+    expect(within(queue).getByRole('button', { name: /Admit delivery inbox/ })).toBeTruthy();
+  });
+
+  it('narrows by provider state without erasing the other projects', async () => {
+    renderDelivery(INBOX, { route: '/delivery?provider=stale' });
+    const queue = await screen.findByRole('region', { name: 'Admitted pull requests' });
+    expect(within(queue).getByRole('button', { name: /Emit retry events/ })).toBeTruthy();
+    expect(within(queue).queryByRole('button', { name: /Admit delivery inbox/ })).toBeNull();
+    expect(screen.getByRole('button', { name: /alpha/ , pressed: false })).toBeTruthy();
+  });
+
+  it('renders the exact table fallback with basis, grade, scope and destinations', async () => {
+    renderDelivery(INBOX, { route: '/delivery?layout=table' });
+    const table = await screen.findByRole('table', { name: 'Admitted pull requests table' });
+    const rows = within(table).getAllByRole('row');
+    expect(rows).toHaveLength(4);
+    expect(within(table).getAllByText('WORK / EXPLICIT')).toHaveLength(2);
+    expect(within(table).getAllByRole('button', { name: 'Journey' })).toHaveLength(3);
+    expect(screen.queryByRole('group', { name: 'Delivery outcome field' })).toBeNull();
+  });
+
+  it('separates the scoped project queue from correlated cross-project pull requests', async () => {
+    renderDelivery(INBOX, { route: '/delivery?project=project.alpha' });
+    const queue = await screen.findByRole('region', { name: 'Admitted pull requests' });
+    expect(within(queue).getAllByRole('button')).toHaveLength(2);
+    const related = screen.getByRole('region', { name: 'Related pull requests' });
+    expect(within(related).getByRole('button', { name: /Emit retry events/ })).toBeTruthy();
+    expect(within(related).getByText('WORK / EXPLICIT')).toBeTruthy();
+    expect(within(related).getByText(/1 qualified by a served basis/)).toBeTruthy();
+  });
+
+  it('reports correlation as unavailable when only branch references are served', async () => {
+    renderDelivery(INBOX_BRANCH_ONLY, { route: `/delivery?project=project.alpha&pr=${PR_42}` });
+    const related = await screen.findByRole('region', { name: 'Related pull requests' });
+    expect(within(related).getByText(/correlation unavailable · no cross-PR edge served/)).toBeTruthy();
+    const detail = screen.getByRole('region', { name: 'Pull request detail' });
+    expect(within(detail).getByText(/served no cross-PR correlation edge/)).toBeTruthy();
+    expect(screen.getByText('correlation unavailable')).toBeTruthy();
+  });
+
+  it('opens the outcome field node and the umbrella root from the same selection', async () => {
+    const user = userEvent.setup();
+    renderDelivery(INBOX);
+    const field = await screen.findByRole('group', { name: 'Delivery outcome field' });
+    await user.click(within(field).getByRole('button', { name: /Pull request #8/ }));
+    expect(screen.getByTestId('location').textContent).toContain('pr=project.beta%3Agithub%3A8');
+    await user.click(within(field).getByRole('button', { name: /Umbrella Shared Work objective/ }));
+    expect(screen.getByTestId('location').textContent).toContain('mode=umbrella');
+    expect(screen.getByTestId('location').textContent).toContain(
+      'umbrella=shared_work_objective%3Awork.retry-backoff',
+    );
+  });
+
+  it('renders provider-not-configured as a typed absence, not a transport failure or zero', async () => {
     renderDelivery({
       ...INBOX,
-      projects: [{ ...INBOX.projects[0]!, provider_state: 'not_configured' }],
+      projects: INBOX.projects.map((project) => ({ ...project, provider_state: 'not_configured' })),
       pull_requests: [],
       membership_edges: [],
       excluded_pull_requests: 0,
@@ -220,6 +249,10 @@ describe('DeliveryPage', () => {
 
     expect(await screen.findByText('Provider not configured')).toBeTruthy();
     expect(screen.getByText('No admitted pull requests')).toBeTruthy();
+    expect(screen.getByText(/requires github_read_authority/)).toBeTruthy();
+    expect(screen.getByRole('link', { name: /Open Settings · Provider authority/ }).getAttribute('href')).toBe(
+      '/settings',
+    );
     expect(screen.queryByText(/transport/i)).toBeNull();
   });
 
@@ -233,7 +266,7 @@ describe('DeliveryPage', () => {
         omitted_projects: 0,
         excluded_pull_requests: 0,
       },
-      'unknown',
+      { domainState: 'unknown' },
     );
 
     expect(await screen.findByText('Project registry unavailable')).toBeTruthy();
@@ -241,10 +274,54 @@ describe('DeliveryPage', () => {
   });
 
   it('renders server-joined overlapping_edit proximity evidence from the inbox', async () => {
-    renderDelivery(INBOX_WITH_PROXIMITY_ATTENTION);
+    renderDelivery(INBOX_WITH_PROXIMITY_ATTENTION, { route: `/delivery?pr=${PR_42}` });
 
     const detail = await screen.findByRole('region', { name: 'Pull request detail' });
     expect(await within(detail).findByText('sha256:overlap:overlapping_edit')).toBeTruthy();
     expect(within(detail).queryByText('This source has no mounted Delivery authority.')).toBeNull();
+  });
+
+  it('disables journey and review until a pull request is selected, then addresses them by URL', async () => {
+    const user = userEvent.setup();
+    renderDelivery(INBOX, { overview: OVERVIEW_ALPHA });
+    const modes = await screen.findByRole('navigation', { name: 'Delivery modes' });
+    const journey = () => within(modes).getByRole('button', { name: 'Journey' }) as HTMLButtonElement;
+    const review = () => within(modes).getByRole('button', { name: 'Review' }) as HTMLButtonElement;
+    expect(journey().disabled).toBe(true);
+    expect(review().disabled).toBe(true);
+    expect(journey().title).toMatch(/Select a pull request/);
+
+    const queue = await screen.findByRole('region', { name: 'Admitted pull requests' });
+    await user.click(within(queue).getByRole('button', { name: /Admit delivery inbox/ }));
+    expect(journey().disabled).toBe(false);
+    await user.click(within(modes).getByRole('button', { name: 'Journey' }));
+    expect(screen.getByTestId('location').textContent).toContain('mode=journey');
+    expect(screen.getByTestId('location').textContent).toContain(`pr=${PR_42}`);
+  });
+
+  it('tells a deep link to journey without a selection that it requires one', async () => {
+    renderDelivery(INBOX, { route: '/delivery?mode=journey' });
+    expect(await screen.findByText('Journey requires a pull request')).toBeTruthy();
+  });
+});
+
+describe('DeliveryPage · local-first wing', () => {
+  it('keeps local Git evidence and the daemon reason when the scoped provider cannot serve', async () => {
+    renderDelivery(
+      {
+        ...INBOX,
+        projects: [
+          { ...INBOX.projects[0]!, provider_state: 'not_published' },
+          INBOX.projects[1]!,
+        ],
+        pull_requests: INBOX.pull_requests.filter((row) => row.project_id !== 'project.alpha'),
+      },
+      { route: '/delivery?project=project.alpha', overview: OVERVIEW_LOCAL_ONLY },
+    );
+    const wing = await screen.findByRole('region', { name: /Local-first/i });
+    expect(within(wing).getAllByText(/requires github_read_authority/).length).toBeGreaterThan(0);
+    expect(within(wing).getByText(/feature\/delivery/)).toBeTruthy();
+    expect(within(wing).getByText(/feat\(ingest\): add retry backoff/)).toBeTruthy();
+    expect(within(wing).getByRole('link', { name: /Open Settings · Provider authority/ })).toBeTruthy();
   });
 });
