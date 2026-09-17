@@ -217,13 +217,9 @@ async fn resolve_initialize_roots_project_route(
     }
     let discovery = repository_discovery();
     for root in roots {
-        let route = resolve_private_project_route_within(
-            &root,
-            registry_db,
-            resolver.clone(),
-            &discovery,
-        )
-        .await;
+        let route =
+            resolve_private_project_route_within(&root, registry_db, resolver.clone(), &discovery)
+                .await;
         if !matches!(
             &route,
             WorkspaceProjectRoute::Failed(ProjectRouteFailure {
@@ -376,7 +372,9 @@ async fn resolve_initialize_roots_project_path(
     }
     let registry_db = registry_db?;
     for root in roots {
-        match resolve_initialize_root_project_path(&root, registry_db, &repository_discovery()).await {
+        match resolve_initialize_root_project_path(&root, registry_db, &repository_discovery())
+            .await
+        {
             Ok(Some(project_path)) => return Some(project_path),
             Ok(None) => {}
             Err(_) => return None,
