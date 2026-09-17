@@ -3292,6 +3292,75 @@ mod tests {
         );
     }
 
+    /// A later panic must not drop an earlier typed failure, and a panic that
+    /// is itself the earliest unit must come back named rather than unwinding
+    /// the sweep.
+    #[test]
+    fn parallel_sweep_keeps_the_earliest_unit_when_a_later_unit_panics() {
+        let chunks = wide_chunks(48);
+        let early = 3usize;
+        let late = chunks.chunks.len() - 1;
+        assert!(chunks.chunks.len() >= PARALLEL_CHUNK_THRESHOLD);
+        assert!(early < late);
+
+        let kept = try_for_each_chunk_ordered(
+            |unit| crate::parallelism::with_background_cpu_permit(unit),
+            &chunks.chunks,
+            |chunk| {
+                let index = chunks
+                    .chunks
+                    .iter()
+                    .position(|candidate| Arc::ptr_eq(candidate, chunk))
+                    .expect("chunk index");
+                if index == late {
+                    panic!("later unit");
+                }
+                if index == early {
+                    return Err(ChunkingFailureV1::GenerationMismatch);
+                }
+                Ok(())
+            },
+        );
+        assert_eq!(
+            kept,
+            Err(ChunkingFailureV1::GenerationMismatch),
+            "the earlier typed failure must survive a later panic"
+        );
+
+        let panicked = try_for_each_chunk_ordered(
+            |unit| crate::parallelism::with_background_cpu_permit(unit),
+            &chunks.chunks,
+            |chunk| {
+                let index = chunks
+                    .chunks
+                    .iter()
+                    .position(|candidate| Arc::ptr_eq(candidate, chunk))
+                    .expect("chunk index");
+                if index == early {
+                    panic!("earliest unit");
+                }
+                if index == late {
+                    return Err(ChunkingFailureV1::GenerationMismatch);
+                }
+                Ok(())
+            },
+        )
+        .expect_err("the earliest panic must be a typed failure, not an unwind");
+        let rendered = panicked.to_string();
+        assert!(
+            rendered.contains(&early.to_string()),
+            "the panicked unit index must be named, got {rendered}"
+        );
+        assert!(
+            rendered.contains("panicked"),
+            "the earliest failure must say the unit panicked, got {rendered}"
+        );
+        assert!(
+            !matches!(panicked, ChunkingFailureV1::GenerationMismatch),
+            "a later typed failure must not replace the earlier panic"
+        );
+    }
+
     #[test]
     fn five_grains_cover_every_eligible_byte() {
         let result = chunk_source(RUST_SOURCE);
