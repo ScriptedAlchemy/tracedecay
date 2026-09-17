@@ -595,34 +595,8 @@ async fn insert_seeded_active_released_v3_refresh_receipts(
     restore_schema_triggers(db_path, &triggers).await;
 }
 
-async fn projection_receipt_progress_counts(db_path: &Path) -> Vec<(i64, i64, i64, i64)> {
-    let raw_db = TestConnection::open(db_path);
-    let conn = (*raw_db).clone();
-    let mut rows = conn
-        .query(
-            "SELECT batch_ordinal, batch_item_count, committed_item_count,
-                    committed_copy_count
-             FROM session_temporal_projection_receipts
-             WHERE session_id = 'released-v3' AND generation = 2
-             ORDER BY batch_ordinal",
-            (),
-        )
-        .await
-        .unwrap();
-    let mut counts = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        counts.push((
-            row.get(0).unwrap(),
-            row.get(1).unwrap(),
-            row.get(2).unwrap(),
-            row.get(3).unwrap(),
-        ));
-    }
-    counts
-}
-
 #[tokio::test]
-async fn released_v3_temporal_receipts_migrate_to_v4_with_exact_progress_counts() {
+async fn released_v3_temporal_receipts_are_refused_without_conversion() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
     let db = open_global_db(&db_path)
@@ -631,41 +605,46 @@ async fn released_v3_temporal_receipts_migrate_to_v4_with_exact_progress_counts(
     drop(db);
     convert_final_temporal_schema_to_released_v3(&db_path).await;
     insert_seeded_active_released_v3_refresh_receipts(&db_path, (8, 2, 2)).await;
+    let before_sql =
+        schema_object_sql(&db_path, "table", "session_temporal_projection_receipts").await;
 
-    let reopened = open_global_db(&db_path)
-        .await
-        .expect("the exact published v3 temporal shape should migrate atomically");
-    drop(reopened);
-
-    assert_eq!(temporal_schema_version(&db_path).await, 4);
+    let error = match open_global_db(&db_path).await {
+        Ok(_) => panic!("the published v3 temporal shape must not be converted"),
+        Err(error) => error,
+    };
+    let (authority, reason) = error
+        .reset_required_context()
+        .expect("published v3 must return typed reset-required");
+    assert_eq!(authority, "session temporal");
+    assert!(
+        reason.contains("no sanctioned conversion"),
+        "unexpected reason: {reason}"
+    );
+    assert!(
+        reason.contains("published v3"),
+        "unexpected reason: {reason}"
+    );
+    assert_eq!(temporal_schema_version(&db_path).await, 3);
     assert_eq!(
-        projection_receipt_progress_counts(&db_path).await,
-        [(0, 4, 9, 1), (1, 3, 12, 2)]
+        schema_object_sql(&db_path, "table", "session_temporal_projection_receipts").await,
+        before_sql,
+        "typed refusal must not add v4 batch-count columns"
     );
     assert!(
-        normalized_trigger_sql(&db_path, "session_refresh_progress_insert_guard_v1")
+        !persisted_column_names(&db_path, "session_temporal_projection_receipts")
             .await
-            .contains("new.committed_records=receipt.committed_item_count"),
-        "migration must install the v4 refresh accounting guard before commit"
-    );
-    assert!(
-        schema_object_exists(
-            &db_path,
-            "trigger",
-            "session_temporal_projection_receipts_immutable_update_v1"
-        )
-        .await,
-        "migration must restore projection receipt immutability before commit"
+            .iter()
+            .any(|column| column == "batch_item_count")
     );
 }
 
 /// A profile written by a released v3 binary carries the authority triggers
-/// that release published, not the bodies the tip contracts. Triggers are
-/// derived objects holding no data, so admission must classify the store as the
-/// shipped v3 shape and the migration must replace them — a reset would destroy
-/// the operator's sessions over a trigger body.
+/// that release published, not the bodies the tip contracts. That shape is not
+/// the final contract, so admission returns `ResetRequired` before rewriting
+/// triggers or session rows. The operator resets explicitly; bytes stay for
+/// inspection.
 #[tokio::test]
-async fn published_v3_authority_triggers_migrate_and_retain_every_session() {
+async fn published_v3_authority_triggers_are_refused_without_rewriting_sessions() {
     let tmp = TempDir::new().unwrap();
     let fresh_path = tmp.path().join(".tracedecay").join("fresh.db");
     let db = open_global_db(&fresh_path)
@@ -703,61 +682,53 @@ async fn published_v3_authority_triggers_migrate_and_retain_every_session() {
         "the fixture must present the published bodies, not the current contract"
     );
 
-    let reopened = open_global_db(&db_path)
-        .await
-        .expect("a store carrying the published v3 triggers must migrate, not reset");
-    drop(reopened);
-
-    // Admission's own `authority_invariant_triggers_intact` gate runs inside
-    // the migration transaction, so a successful open already proves all
-    // eighty-one triggers converged; these read back the three that drifted.
-    assert_eq!(temporal_schema_version(&db_path).await, 4);
-    for (trigger, current) in RELEASED_V3_DRIFTED_TRIGGERS.iter().zip(&current_drifted) {
+    let before_catalog = temporal_schema_object_catalog(&db_path).await;
+    let error = match open_global_db(&db_path).await {
+        Ok(_) => panic!("a store carrying the published v3 triggers must reset, not migrate"),
+        Err(error) => error,
+    };
+    let (authority, reason) = error
+        .reset_required_context()
+        .expect("published v3 triggers must return typed reset-required");
+    assert_eq!(authority, "session temporal");
+    assert!(
+        reason.contains("no sanctioned conversion"),
+        "unexpected reason: {reason}"
+    );
+    assert_eq!(temporal_schema_version(&db_path).await, 3);
+    for (trigger, published) in RELEASED_V3_DRIFTED_TRIGGERS.iter().zip(&published_drifted) {
         assert_eq!(
             &normalized_trigger_sql(&db_path, trigger).await,
-            current,
-            "the migration must leave '{trigger}' at the current contract"
+            published,
+            "refusal must leave '{trigger}' at the published body"
         );
     }
+    assert!(
+        published_drifted
+            .iter()
+            .zip(&current_drifted)
+            .all(|(published, current)| published != current),
+        "refusal must not rewrite published trigger bodies onto the current contract"
+    );
     assert_eq!(
         temporal_schema_object_catalog(&db_path).await,
-        fresh_catalog,
-        "a migrated store must carry exactly the fresh store's temporal objects"
+        before_catalog,
+        "typed refusal must not rewrite the published temporal catalog"
     );
     assert_eq!(
         retained_sessions_and_messages(&db_path).await,
         retained,
         "every retained session and message row must survive byte-exact"
     );
-    assert_eq!(
-        projection_receipt_progress_counts(&db_path).await,
-        [(0, 4, 9, 1), (1, 3, 12, 2)]
-    );
-
-    let restart_path = tmp.path().join(".tracedecay").join("restart.db");
-    copy_database_for_temporal_restart(&db_path, &restart_path).await;
-    let reopened = open_global_db(&restart_path)
-        .await
-        .expect("a migrated store must reopen as exactly current");
-    drop(reopened);
-    assert_eq!(temporal_schema_version(&restart_path).await, 4);
-    assert_eq!(
-        temporal_schema_object_catalog(&restart_path).await,
+    assert_ne!(
+        temporal_schema_object_catalog(&db_path).await,
         fresh_catalog,
-        "the second open must be a no-op on the schema"
-    );
-    assert_eq!(
-        retained_sessions_and_messages(&restart_path).await,
-        retained
-    );
-    assert_eq!(
-        projection_receipt_progress_counts(&restart_path).await,
-        [(0, 4, 9, 1), (1, 3, 12, 2)]
+        "refusing v3 must not install the fresh temporal catalog"
     );
 }
 
 #[tokio::test]
-async fn v4_receipts_without_recovery_columns_migrate_in_place_and_reopen() {
+async fn v4_receipts_without_recovery_columns_are_refused_without_conversion() {
     let tmp = TempDir::new().unwrap();
     let fresh_path = tmp.path().join(".tracedecay").join("fresh.db");
     let db = open_global_db(&fresh_path)
@@ -776,34 +747,37 @@ async fn v4_receipts_without_recovery_columns_migrate_in_place_and_reopen() {
     );
     assert_eq!(temporal_schema_version(&db_path).await, 4);
 
-    let reopened = open_global_db(&db_path)
-        .await
-        .expect("the exact pre-recovery v4 receipt shape should migrate in place");
-    drop(reopened);
-
+    let before_catalog = temporal_schema_object_catalog(&db_path).await;
+    let error = match open_global_db(&db_path).await {
+        Ok(_) => panic!("the unreleased pre-recovery v4 receipt shape must not be converted"),
+        Err(error) => error,
+    };
+    let (authority, reason) = error
+        .reset_required_context()
+        .expect("pre-recovery v4 must return typed reset-required");
+    assert_eq!(authority, "session temporal");
+    assert!(
+        reason.contains("no sanctioned conversion"),
+        "unexpected reason: {reason}"
+    );
+    assert!(
+        reason.contains("pre-recovery"),
+        "unexpected reason: {reason}"
+    );
     assert_eq!(temporal_schema_version(&db_path).await, 4);
     assert_eq!(
         persisted_column_names(&db_path, "session_relation_receipts").await,
-        [
-            "session_id",
-            "generation",
-            "scope_kind",
-            "scope_id",
-            "expected_graph_watermark",
-            "state",
-            "graph_watermark",
-            "created_at",
-            "applied_at",
-            "recovery_state",
-            "recovery_failure_code",
-            "recovery_failure_count",
-            "recovery_next_attempt_at",
-        ]
+        SESSION_RELATION_RECEIPT_COLUMNS_WITHOUT_RECOVERY
+    );
+    assert_ne!(
+        temporal_schema_object_catalog(&db_path).await,
+        fresh_catalog,
+        "refusing the pre-recovery shape must not install recovery columns"
     );
     assert_eq!(
         temporal_schema_object_catalog(&db_path).await,
-        fresh_catalog,
-        "a migrated store must carry exactly the fresh store's temporal objects"
+        before_catalog,
+        "typed refusal must leave the pre-recovery catalog unchanged"
     );
     assert_eq!(
         retained_relation_receipts(&db_path).await,
@@ -813,55 +787,14 @@ async fn v4_receipts_without_recovery_columns_migrate_in_place_and_reopen() {
         row_count(&db_path, "session_relation_effect_journal").await,
         1
     );
-
-    let raw_db = TestConnection::open(&db_path);
-    let conn = (*raw_db).clone();
-    let mut rows = conn
-        .query(
-            "SELECT generation, recovery_state, recovery_failure_code,
-                    recovery_failure_count, recovery_next_attempt_at
-             FROM session_relation_receipts ORDER BY generation",
-            (),
+    assert!(
+        !schema_object_exists(
+            &db_path,
+            "index",
+            "idx_session_relation_receipts_recovery_due"
         )
-        .await
-        .unwrap();
-    let mut recovery = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        recovery.push((
-            row.get::<i64>(0).unwrap(),
-            row.get::<String>(1).unwrap(),
-            row.get::<Option<String>>(2).unwrap(),
-            row.get::<i64>(3).unwrap(),
-            row.get::<i64>(4).unwrap(),
-        ));
-    }
-    drop(rows);
-    drop(conn);
-    drop(raw_db);
-    assert_eq!(
-        recovery,
-        [
-            (1, "pending".to_string(), None, 0, 0),
-            (2, "pending".to_string(), None, 0, 0),
-        ],
-        "retained receipts must take the contract's recovery defaults"
-    );
-
-    let migrated_catalog = temporal_schema_object_catalog(&db_path).await;
-    let restart_path = tmp.path().join(".tracedecay").join("restart.db");
-    copy_database_for_temporal_restart(&db_path, &restart_path).await;
-    let reopened = open_global_db(&restart_path)
-        .await
-        .expect("a migrated store must reopen as exactly current");
-    drop(reopened);
-    assert_eq!(temporal_schema_version(&restart_path).await, 4);
-    assert_eq!(
-        temporal_schema_object_catalog(&restart_path).await,
-        migrated_catalog
-    );
-    assert_eq!(
-        retained_relation_receipts(&restart_path).await,
-        expected_retained_relation_receipts()
+        .await,
+        "refusal must not add the recovery index"
     );
 }
 
@@ -1126,7 +1059,10 @@ async fn valid_watermarks_unbound_released_v3_receipts_refuse_duplicate_batch_se
     };
     let (authority, reason) = error.reset_required_context().unwrap();
     assert_eq!(authority, "session temporal");
-    assert!(reason.contains("unbound or ambiguous"));
+    assert!(
+        reason.contains("no sanctioned conversion"),
+        "unexpected reason: {reason}"
+    );
     assert_eq!(temporal_schema_version(&db_path).await, 3);
     assert!(
         !persisted_column_names(&db_path, "session_temporal_projection_receipts")
@@ -1167,7 +1103,10 @@ async fn ambiguous_released_v3_refresh_progress_rolls_back_without_batch_counts(
     };
     let (authority, reason) = error.reset_required_context().unwrap();
     assert_eq!(authority, "session temporal");
-    assert!(reason.contains("unbound or ambiguous"));
+    assert!(
+        reason.contains("no sanctioned conversion"),
+        "unexpected reason: {reason}"
+    );
     assert_eq!(temporal_schema_version(&db_path).await, 3);
     assert!(
         !persisted_column_names(&db_path, "session_temporal_projection_receipts")
@@ -1197,7 +1136,7 @@ async fn non_monotonic_released_v3_receipts_roll_back_the_v4_migration() {
         .expect("invalid released-v3 progress must return typed reset-required");
     assert_eq!(authority, "session temporal");
     assert!(
-        reason.contains("non-monotonic"),
+        reason.contains("no sanctioned conversion"),
         "unexpected reason: {reason}"
     );
     assert_eq!(temporal_schema_version(&db_path).await, 3);

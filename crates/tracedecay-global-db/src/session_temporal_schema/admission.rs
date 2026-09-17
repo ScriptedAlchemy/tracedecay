@@ -150,18 +150,14 @@ const RELEASED_V3_TEMPORAL_TABLE_DIGESTS: &[(&str, &str)] = &[
 ];
 
 /// Read-only admission result for the final session-temporal schema.
+///
+/// Non-final shapes, including the published v3 marker and the unreleased
+/// pre-recovery v4 receipt table, are not variants: admission returns
+/// `ResetRequired` before any conversion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SessionTemporalSchemaAdmission {
     /// The persisted schema and its objects exactly match the final contract.
     Current,
-    /// The store carries the final marker and contract except that
-    /// `session_relation_receipts` still has the exact shape persisted before
-    /// receipt recovery added its columns and index.
-    WithoutReceiptRecovery,
-    /// The store carries the exact session-temporal schema every release that
-    /// persisted marker 3 published: v0.1.0-beta.25 through v0.1.0-beta.37 all
-    /// shipped one identical table and authority-trigger inventory.
-    ReleasedV3,
     /// The registered store is proven empty and may receive the final contract.
     Fresh,
 }
@@ -179,14 +175,22 @@ pub(crate) async fn require_admissible_session_temporal_schema(
         Some(SESSION_TEMPORAL_SCHEMA_VERSION) => {
             if session_relation_receipts_lack_recovery_columns(conn).await? {
                 validate_without_receipt_recovery_session_temporal_schema(conn).await?;
-                return Ok(SessionTemporalSchemaAdmission::WithoutReceiptRecovery);
+                return Err(session_temporal_reset_required(
+                    "session_relation_receipts carries the unreleased pre-recovery v4 shape; \
+                     that shape never shipped as its own version and there is no sanctioned \
+                     conversion, reset the session temporal authority to recreate the final schema",
+                ));
             }
             validate_current_session_temporal_schema(conn).await?;
             Ok(SessionTemporalSchemaAdmission::Current)
         }
         Some(RELEASED_SESSION_TEMPORAL_SCHEMA_VERSION) => {
             validate_released_v3_session_temporal_schema(conn).await?;
-            Ok(SessionTemporalSchemaAdmission::ReleasedV3)
+            Err(session_temporal_reset_required(
+                "persisted session temporal schema is the published v3 shape; the final shape \
+                 is required and there is no sanctioned conversion, reset the session temporal \
+                 authority",
+            ))
         }
         Some(version) => Err(session_temporal_reset_required(format!(
             "persisted schema version {version} does not match final version {SESSION_TEMPORAL_SCHEMA_VERSION}"
