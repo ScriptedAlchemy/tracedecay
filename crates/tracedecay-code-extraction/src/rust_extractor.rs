@@ -28,11 +28,11 @@ struct ShadowedCallNames {
 
 /// Receiver bindings whose type the function body states outright: typed
 /// parameters, typed `let`s, and `let`s initialised by a struct literal
-/// (`T { .. }`, possibly behind `?`, `.unwrap()`, or `.expect(..)`). A dotted
+/// (`T { .. }`, possibly behind `?`). A dotted
 /// call on such a binding also names the method by its type
 /// (`builder.build()` → `ignore::WalkBuilder::build`), which is the only form
-/// the resolver can bind across files. Constructor-like names (`new`,
-/// `with_*`, `from_*`, `default`) are never treated as return-type evidence —
+/// the resolver can bind across files. Method calls and constructor-like names
+/// (`new`, `with_*`, `from_*`, `default`) are never treated as return-type evidence —
 /// Rust does not require those associated functions to return their owning
 /// type. Bindings are function-scoped: a name bound more than once to
 /// different or unknown types is withheld rather than guessed.
@@ -675,14 +675,8 @@ impl RustExtractor {
             .filter(|parent| parent.kind() == "source_file")
             .and_then(|_| node.child_by_field_name("argument"));
         if let Some(argument) = top_level_argument {
-            // Any restricted `pub` still re-exports the binding to the paths
-            // that may name it; a path that compiles never crosses a
-            // visibility boundary, so the resolver can walk every re-export.
-            let reexports = matches!(
-                visibility,
-                Visibility::Pub | Visibility::PubCrate | Visibility::PubSuper
-            );
-            Self::extract_use_bindings(state, argument, None, reexports);
+            let (is_public, is_restricted_public) = Self::use_reexport_visibility(node, state);
+            Self::extract_use_bindings(state, argument, None, is_public, is_restricted_public);
         }
         let qualified_name = format!("{}::{}", state.qualified_prefix(), path);
         let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &path, node);
@@ -767,6 +761,7 @@ impl RustExtractor {
         node: TsNode<'_>,
         prefix: Option<&str>,
         is_public: bool,
+        is_restricted_public: bool,
     ) {
         match node.kind() {
             "scoped_use_list" => {
@@ -775,13 +770,25 @@ impl RustExtractor {
                     .map(|path| state.node_text(path));
                 let combined = Self::join_use_path(prefix, path);
                 if let Some(list) = node.child_by_field_name("list") {
-                    Self::extract_use_bindings(state, list, combined.as_deref(), is_public);
+                    Self::extract_use_bindings(
+                        state,
+                        list,
+                        combined.as_deref(),
+                        is_public,
+                        is_restricted_public,
+                    );
                 }
             }
             "use_list" => {
                 let mut cursor = node.walk();
                 for child in node.named_children(&mut cursor) {
-                    Self::extract_use_bindings(state, child, prefix, is_public);
+                    Self::extract_use_bindings(
+                        state,
+                        child,
+                        prefix,
+                        is_public,
+                        is_restricted_public,
+                    );
                 }
             }
             "use_as_clause" => {
@@ -799,6 +806,7 @@ impl RustExtractor {
                         state.node_text(alias),
                         node,
                         is_public,
+                        is_restricted_public,
                     );
                 }
             }
@@ -810,14 +818,21 @@ impl RustExtractor {
                     .or(prefix)
                     .or_else(|| text.strip_suffix("::*"));
                 if let Some(module) = module {
-                    Self::push_glob_binding(state, module, node, is_public);
+                    Self::push_glob_binding(state, module, node, is_public, is_restricted_public);
                 }
             }
             _ => {
                 let full_path = Self::join_use_path(prefix, Some(state.node_text(node)));
                 if let Some(full_path) = full_path {
                     let local_name = full_path.rsplit("::").next().unwrap_or(full_path.as_str());
-                    Self::push_use_binding(state, &full_path, local_name, node, is_public);
+                    Self::push_use_binding(
+                        state,
+                        &full_path,
+                        local_name,
+                        node,
+                        is_public,
+                        is_restricted_public,
+                    );
                 }
             }
         }
@@ -839,6 +854,7 @@ impl RustExtractor {
         local_name: &str,
         evidence_node: TsNode<'_>,
         is_public: bool,
+        is_restricted_public: bool,
     ) {
         let (module_specifier, imported_name) = match full_path.rsplit_once("::") {
             Some(parts) => parts,
@@ -855,6 +871,7 @@ impl RustExtractor {
             imported_name: Some(imported_name.to_owned()),
             local_name: Some(local_name.to_owned()),
             is_public,
+            is_restricted_public,
             is_glob: false,
             namespace: ImportNamespaceV1::Value,
             module_kind,
@@ -872,6 +889,7 @@ impl RustExtractor {
         module: &str,
         evidence_node: TsNode<'_>,
         is_public: bool,
+        is_restricted_public: bool,
     ) {
         let module_specifier = Self::canonical_rust_import_module(state, module);
         let Some(module_kind) = import_module_kind("rust", &module_specifier) else {
@@ -883,6 +901,7 @@ impl RustExtractor {
             imported_name: Some("*".to_owned()),
             local_name: None,
             is_public,
+            is_restricted_public,
             is_glob: true,
             namespace: ImportNamespaceV1::Value,
             module_kind,
@@ -1227,6 +1246,26 @@ impl RustExtractor {
     fn extract_impl_trait_name(state: &ExtractionState<'_>, node: TsNode<'_>) -> Option<String> {
         node.child_by_field_name("trait")
             .map(|n| state.node_text(n).to_string())
+    }
+
+    fn use_reexport_visibility(node: TsNode<'_>, state: &ExtractionState<'_>) -> (bool, bool) {
+        let mut cursor = node.walk();
+        if !cursor.goto_first_child() {
+            return (false, false);
+        }
+        loop {
+            let child = cursor.node();
+            if child.kind() == "visibility_modifier" {
+                return if state.node_text(child) == "pub" {
+                    (true, false)
+                } else {
+                    (false, true)
+                };
+            }
+            if !cursor.goto_next_sibling() {
+                return (false, false);
+            }
+        }
     }
 
     /// Extract visibility from a node.
@@ -1727,8 +1766,8 @@ impl RustExtractor {
     }
 
     /// The type a `let` initialiser states in syntax: a `T { .. }` literal,
-    /// optionally behind `?`, `.unwrap()`, or `.expect(..)`. Associated-function
-    /// names are never evidence — abstain rather than fabricate a receiver type.
+    /// optionally behind `?`. Method names are never return-type evidence —
+    /// abstain rather than fabricate a receiver type.
     fn stated_initializer_type_path(
         state: &ExtractionState<'_>,
         value: TsNode<'_>,
@@ -1740,17 +1779,6 @@ impl RustExtractor {
             "struct_expression" => value
                 .child_by_field_name("name")
                 .and_then(|name| Self::stated_type_path(state, name)),
-            "call_expression" => {
-                let function = value.child_by_field_name("function")?;
-                if function.kind() != "field_expression" {
-                    return None;
-                }
-                let field = function.child_by_field_name("field")?;
-                matches!(state.node_text(field), "unwrap" | "expect")
-                    .then(|| function.child_by_field_name("value"))
-                    .flatten()
-                    .and_then(|inner| Self::stated_initializer_type_path(state, inner))
-            }
             _ => None,
         }
     }

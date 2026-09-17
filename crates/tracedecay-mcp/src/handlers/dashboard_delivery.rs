@@ -200,7 +200,7 @@ impl DashboardDeliveryReadPortV1 for DashboardDeliveryReadAdapter {
 
 /// Folds the registered project's canonical feedback-proximity read into
 /// Delivery's join input. This is the production authority for
-/// overlapping_edit / confirmed_conflict / divergent_shared_implementation —
+/// `overlapping_edit` / `confirmed_conflict` / `divergent_shared_implementation` —
 /// the dashboard never re-joins `/api/feedback/proximity` client-side.
 pub struct DashboardProximityAttentionReadAdapter {
     service: DaemonInvocationService,
