@@ -72,7 +72,6 @@ pub struct CandidateWorkloadV1 {
     pub execution_contract: EvaluationExecutionContractV1,
     pub corpus: Vec<CorpusDocumentV1>,
     pub profile_matrix: Vec<ProfileSpecV1>,
-    pub decision_policy: DecisionPolicySliceV1,
     pub expected_query_fallback_digests: BTreeMap<String, String>,
     pub queries: Vec<WorkloadQueryV1>,
 }
@@ -154,22 +153,6 @@ pub struct ProfileSpecV1 {
     /// weighted at one million.
     pub lexical_weight_ppm: u32,
     pub graph_weight_ppm: u32,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct DecisionPolicySliceV1 {
-    pub required_cancellation: RequiredCancellationV1,
-    pub required_fallback_byte_stability: bool,
-}
-
-/// The cancellation discipline a candidate run must demonstrate. Closed: a run
-/// either bounded its cancellation through the typed path or it is not evidence.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RequiredCancellationV1 {
-    /// Every query settled through a bounded, typed cancellation.
-    BoundedTypedCancelled,
 }
 
 /// One need class a workload query belongs to.
@@ -382,7 +365,6 @@ pub struct ProductionCandidateOutputV1 {
     pub query_fallback_digest: String,
     pub expected_query_fallback_digest: String,
     pub query_fallback_matches_expected: bool,
-    pub cancellation: RequiredCancellationV1,
     pub resources: BTreeMap<String, ResourceSampleV1>,
     pub queries: Vec<QueryCandidateRowV1>,
 }
@@ -1125,18 +1107,20 @@ mod need_provenance_tests {
     }
 
     /// The held-out Student-t gate was deleted with the dense lane it governed,
-    /// and schema 1 cannot express a replacement: a workload declaring a
-    /// methodology, a practical-effect bound, or a policy freeze is refused
-    /// rather than trusted as activation authority.
+    /// and schema 1 cannot express a replacement. A workload declaring a
+    /// methodology, a practical-effect bound, a policy freeze, or the retired
+    /// single-variant decision-policy slice is refused rather than trusted as
+    /// activation authority.
     #[test]
     fn a_workload_declaring_a_qualification_methodology_is_refused() {
         for field in [
             "methodology_version",
             "practical_effect_ppm",
             "policy_freeze",
+            "decision_policy",
         ] {
             let mut json = serde_json::to_value(workload()).expect("serialize workload");
-            json["decision_policy"][field] = serde_json::json!("held_out_student_t_v1");
+            json[field] = serde_json::json!("held_out_student_t_v1");
             let error = serde_json::from_value::<CandidateWorkloadV1>(json)
                 .expect_err("schema 1 carries no qualification methodology")
                 .to_string();

@@ -94,7 +94,6 @@ pub struct DirectProfileEvaluationV1 {
     pub failed_queries: usize,
     pub fallback_stable: bool,
     pub fallback_matches_expected: bool,
-    pub cancellation_bounded: bool,
     pub resource_status: DirectEvaluationStatusV1,
     pub quality: DirectQualityMetricsV1,
     pub status: DirectEvaluationStatusV1,

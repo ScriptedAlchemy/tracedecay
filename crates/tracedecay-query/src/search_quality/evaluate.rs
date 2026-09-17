@@ -225,8 +225,6 @@ fn evaluate_profile(
     // different failure with a different operator remedy; `hard_invariants_pass`
     // below still requires both.
     let fallback_stable = output.fallback_digest == output.query_fallback_digest;
-    let cancellation_bounded =
-        output.cancellation == workload.decision_policy.required_cancellation;
     let resource_status = evaluate_resources(output);
     let failed_queries = results
         .iter()
@@ -236,7 +234,6 @@ fn evaluate_profile(
     let hard_invariants_pass = failed_queries == 0
         && fallback_stable
         && fallback_matches_expected
-        && cancellation_bounded
         && quality.protected_recall_at_10.denominator != 0
         && quality.protected_recall_at_10.numerator == quality.protected_recall_at_10.denominator
         && quality.duplicate_rate.numerator == 0
@@ -255,7 +252,6 @@ fn evaluate_profile(
         failed_queries,
         fallback_stable,
         fallback_matches_expected,
-        cancellation_bounded,
         resource_status,
         quality,
         status,

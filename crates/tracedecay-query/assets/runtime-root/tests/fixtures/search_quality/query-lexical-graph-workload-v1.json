@@ -134,10 +134,6 @@
       "scope": "cargo_slot"
     }
   ],
-  "decision_policy": {
-    "required_cancellation": "bounded_typed_cancelled",
-    "required_fallback_byte_stability": true
-  },
   "expected_query_fallback_digests": {
     "train": "sha256:9712f2369d36e63d61db3500e011365c9baf6d919d6fb1ebb8cc16056893e873",
     "validation": "sha256:af62a12c41cd6da521088cc1a9cbd5c771812872f1ade5aefe4adb25569b8083"

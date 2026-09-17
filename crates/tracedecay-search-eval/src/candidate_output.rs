@@ -5,8 +5,10 @@
 //! lexical, and graph production lanes.
 //!
 //! Outputs deterministic checked-in `train` / `validation` candidate records
-//! plus current/10x resource samples, cancellation, and fallback digests.
-//! Labels are ordinary reviewable fixture data, never a production authority.
+//! plus current/10x resource samples and fallback digests. Cancellation is
+//! proved fail-closed before those records are returned; it is not restamped
+//! as a policy field. Labels are ordinary reviewable fixture data, never a
+//! production authority.
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -70,11 +72,10 @@ use tracedecay_query::search_quality::candidate_output::{
     CandidateOutputError, CandidateWorkloadV1, CorpusDocumentV1, EVALUATION_CACHE_STATE,
     EVALUATION_SEED, GenerateCandidateOutputsResultV1, HistoricalQueryExecutionV1,
     PRODUCTION_BOUNDARY, ProductionCandidateOutputV1, ProfileSpecV1, QueryCandidateRowV1,
-    RankedCandidateRowV1, RequiredCancellationV1, ResourceSampleV1, WORKLOAD_RELATIVE,
-    WorkloadQueryV1, canonical_json_bytes, canonical_sha256, compute_corpus_digest,
-    compute_profile_material_digest, compute_workload_digest, evaluated_diversity_policy,
-    fusion_profile, load_candidate_workload, retrieval_budget, typed_id as id,
-    validate_workload_for_tuning,
+    RankedCandidateRowV1, ResourceSampleV1, WORKLOAD_RELATIVE, WorkloadQueryV1,
+    canonical_json_bytes, canonical_sha256, compute_corpus_digest, compute_profile_material_digest,
+    compute_workload_digest, evaluated_diversity_policy, fusion_profile, load_candidate_workload,
+    retrieval_budget, typed_id as id, validate_workload_for_tuning,
 };
 
 mod control;
@@ -644,7 +645,6 @@ fn generate_partition_output(
         query_fallback_digest: query_digest,
         expected_query_fallback_digest,
         query_fallback_matches_expected,
-        cancellation: RequiredCancellationV1::BoundedTypedCancelled,
         resources,
         queries: rows,
     })
@@ -1774,9 +1774,14 @@ pub(crate) mod tests {
             assert_eq!(output.schema_version, 2);
             assert!(output.partition == "train" || output.partition == "validation");
             assert_eq!(output.production_boundary, PRODUCTION_BOUNDARY);
-            assert_eq!(
-                output.cancellation,
-                RequiredCancellationV1::BoundedTypedCancelled
+            // Cancellation is proved by `generate_candidate_outputs` returning
+            // Ok (`prove_cancellation` is fail-closed). A single-variant stamp
+            // on the output added no evidence.
+            assert!(
+                serde_json::to_value(output)
+                    .expect("candidate output serializes")
+                    .get("cancellation")
+                    .is_none()
             );
             assert_eq!(output.fallback_digest, output.query_fallback_digest);
             assert_eq!(
