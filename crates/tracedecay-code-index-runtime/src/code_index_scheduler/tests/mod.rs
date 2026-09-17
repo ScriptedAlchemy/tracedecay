@@ -1509,7 +1509,25 @@ async fn wait_for_dashboard_ready(registry: &CodeIndexSchedulerRegistryV1, path:
                         && freshness.coverage == tracedecay_contracts::code_index_freshness::CodeIndexFreshnessCoverageV1::Complete
                 });
             if ready {
-                break;
+                // Fresh is projected whenever refresh_in_flight is briefly
+                // false between owner passes. Join the seating pass and
+                // re-sample so ready is not a trough before Verifying.
+                wait_for_quiescent_owner_pass(registry, path).await;
+                let still_ready = registry
+                    .dashboard_freshness(path)
+                    .await
+                    .is_some_and(|freshness| {
+                        freshness.staleness_state
+                            == Some(
+                                tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh,
+                            )
+                            && freshness.coverage
+                                == tracedecay_contracts::code_index_freshness::CodeIndexFreshnessCoverageV1::Complete
+                    });
+                if still_ready && !registry.reconcile_in_progress_for_test(path).await {
+                    break;
+                }
+                continue;
             }
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
