@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router';
 import type { ReactNode } from 'react';
 import { Waypoints } from 'lucide-react';
@@ -8,30 +8,46 @@ import { envelopePayload, useEnvelope } from '../../data/query/useEnvelope.ts';
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import type { DashboardEnvelopeV1 } from '../../contracts/generated.ts';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip';
-import {
-  Legend,
-  Panel,
-  Readout,
-  ReadoutBar,
-  WorkspaceHeader,
-} from '../../ui/instrument.tsx';
+import { Legend, Panel, ReadoutBar, WorkspaceHeader } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
 import { formatCount } from '../../ui/format.ts';
-import { kindColorVars } from '../../viz/graph/kindColor.ts';
 import { ProximityPanel } from '../../viz/proximity/index.ts';
-import { MARK_PITCH_PX, PLOT_WIDTH, WeaveCanvas } from './WeaveCanvas.tsx';
-import { ThreadChain } from './ThreadChain.tsx';
-import { useLoomProximity, type LoomProximityState } from './loomProximity.ts';
-import { formatDurationSeconds, formatMoment } from './tracks.ts';
+import { projectJourney } from '../../viz/temporal/journey.ts';
 import {
-  composeWeave,
-  extentOf,
-  threadsFrom,
-  type PlacedThread,
-} from './weave.ts';
+  DEFAULT_DENSE_LANE_THRESHOLD,
+  fittedWindowFor,
+  layoutTemporalScene,
+} from '../../viz/temporal/layout.ts';
+import { glyphLabel } from '../../viz/temporal/glyphs.tsx';
+import { TemporalScene } from '../../viz/temporal/TemporalScene.tsx';
+import type {
+  JourneyEventKind,
+  JourneyProjection,
+  SceneWindow,
+  TemporalSceneModel,
+} from '../../viz/temporal/types.ts';
+import { JOURNEY_EVENT_KINDS } from '../../viz/temporal/types.ts';
+import { useReducedMotion } from '../../viz/trace/reducedMotion.ts';
+import { BranchNavigator } from './BranchNavigator.tsx';
+import {
+  LOOM_PARAMS,
+  parseHiddenKinds,
+  parseLaneSet,
+  parseWindow,
+  parseZoom,
+  serializeHiddenKinds,
+  serializeLaneSet,
+  serializeWindow,
+  toggleInSet,
+} from './loomUrl.ts';
+import { useLoomProximity, type LoomProximityState } from './loomProximity.ts';
+import { ThreadChain } from './ThreadChain.tsx';
+import { clampWindow, formatDurationSeconds, formatMoment, isFitted } from './tracks.ts';
+import { useLoomPlayback } from './useLoomPlayback.ts';
 import {
   AnalyticsSubagentTreePayloadV1Schema,
   type AnalyticsSubagentTreePayloadV1,
+  LcmSessionPayloadV1Schema,
   LcmTimelinePayloadV1Schema,
   type LoomSourceStatusV1,
   type LoomTemporalPayloadV1,
@@ -39,24 +55,18 @@ import {
 } from '../../contracts/generated.ts';
 
 /**
- * Loom — time and causality.
+ * Loom — the temporal execution field.
  *
- * The plan asks this surface for "interactive temporal and causal traces
- * linking prompts, reasoning, tools, subagents, code changes, branches,
- * commits, PRs, and outcomes". The daemon serves the first half of that
- * sentence. The temporal read now serves its persisted causal half with
- * provider-qualified rows. The reasoning, in full, is in `weave.ts`:
+ * Time runs left to right. Hierarchy runs down: provider rail, root session,
+ * then subagents under their recorded parent. Every coordinate is produced by
+ * the pure layout in `viz/temporal`, so the same loaded page draws the same
+ * field on every reload and in every renderer; the scene only paints it.
  *
- *   - Threads are real. Every mark is one session at its real start time, as
- *     thick as its real message count, grouped by recorded parent identity.
- *   - Extent is honest per thread. A recorded end wins, then a last-message
- *     observation; otherwise the thread stays visibly open.
- *   - Commit, edited-file and branch/worktree relations come directly from
- *     their durable authorities and retain provider and coverage.
- *
- * Selecting a thread isolates it and pulls its chain — prompt, turns, tools —
- * from the LCM session endpoint into the main field, then appends the selected
- * session's persisted edits, commit attributions and branch/worktree spans.
+ * What is drawn is what an authority served: session extents from the store,
+ * parentage from the subagent tree, commits and branch spans from the durable
+ * relation rows, the selected session's turns from its loaded transcript page.
+ * Handoffs, results and rejoins have no session-bound authority in this read,
+ * so branches end at their recorded extent and the legend says so.
  */
 export function LoomPage() {
   const scope = useScope((state) => state.scope);
@@ -73,16 +83,19 @@ export function LoomPage() {
     '/api/plugins/hermes-lcm/timeline',
     LcmTimelinePayloadV1Schema,
   );
-  const hierarchy = useEnvelope(['loom', 'hierarchy'], '/api/plugins/analytics/subagent-tree', AnalyticsSubagentTreePayloadV1Schema);
+  const hierarchy = useEnvelope(
+    ['loom', 'hierarchy'],
+    '/api/plugins/analytics/subagent-tree',
+    AnalyticsSubagentTreePayloadV1Schema,
+  );
   const proximity = useLoomProximity();
   const [params, setParams] = useSearchParams();
-  const selectedId = params.get('loomSession');
+  const selectedId = params.get(LOOM_PARAMS.session);
   const setSelectedId = (id: string | null) => {
     const next = new URLSearchParams(params);
-    if (id == null) next.delete('loomSession');
-    else next.set('loomSession', id);
-    next.delete('loomEvent');
-    next.delete('loomWindow');
+    if (id == null) next.delete(LOOM_PARAMS.session);
+    else next.set(LOOM_PARAMS.session, id);
+    next.delete(LOOM_PARAMS.event);
     setParams(next);
   };
 
@@ -99,7 +112,7 @@ export function LoomPage() {
       <WorkspaceHeader
         path="loom"
         title="Loom"
-        note="sessions and durable causal relations on a measured time axis"
+        note="temporal execution field · time left to right, recorded hierarchy down"
       />
       <TemporalBoundary pending={temporal.isPending} result={temporal.data}>
         {(envelope) => (
@@ -123,11 +136,11 @@ export function LoomPage() {
   );
 }
 
-/**
- * The served-envelope body, as a component rather than inline in the boundary
- * render prop, so the weave composition can be memoized on the temporal
- * payload: selecting a thread repaints without re-packing 200 sessions.
- */
+const DEFAULT_WIDTH = 960;
+const LABEL_COLUMN = 200;
+const NARROW_LABEL_COLUMN = 28;
+const RIGHT_GUTTER = 28;
+
 function TemporalBody({
   envelope,
   hierarchy,
@@ -156,66 +169,168 @@ function TemporalBody({
   onSelectEncounter: (id: string | null) => void;
 }) {
   const [params, setParams] = useSearchParams();
-  const rawWindow = params.get('loomOverviewWindow')?.split(',').map(Number);
-  const overviewWindow = rawWindow?.length === 2 && rawWindow.every(Number.isFinite) && rawWindow[1]! > rawWindow[0]!
-    ? { start: rawWindow[0]!, end: rawWindow[1]! } : null;
+  const [width, setWidth] = useState(DEFAULT_WIDTH);
+  const { reduced } = useReducedMotion();
   const data = envelope.payload;
   const rows = data.sessions ?? [];
 
-  // Pack overlapping source spans against the horizontal viewport scale.
-  // Selection does not change this source-derived geometry.
-  const weave = useMemo(() => {
-    const reading = threadsFrom(data.sessions ?? []);
-    const extent = extentOf(reading.threads);
-    const minGap = extent
-      ? ((extent.end - extent.start) / PLOT_WIDTH) * MARK_PITCH_PX
-      : 0;
-    return composeWeave(reading, minGap);
-  }, [data.sessions]);
+  const selectedLane = useMemo(() => {
+    const row = rows.find(
+      (session) => JSON.stringify([session.provider || 'unknown', session.session_id]) === selectedId,
+    );
+    return row ? { id: selectedId!, sessionId: row.session_id } : null;
+  }, [rows, selectedId]);
 
-  const selected = useMemo(
-    () => weave.threads.find((thread) => thread.id === selectedId) ?? null,
-    [selectedId, weave.threads],
+  const chain = useEnvelope(
+    ['loom', 'chain', selectedLane?.id ?? 'none'],
+    `/api/plugins/hermes-lcm/session/${encodeURIComponent(selectedLane?.sessionId ?? '')}?limit=200`,
+    LcmSessionPayloadV1Schema,
+    { enabled: selectedLane != null },
   );
-  const selectedCommits = useMemo(
+  const chainPayload = envelopePayload(chain.data);
+  const chainMessages = chainPayload?.exists === false ? undefined : chainPayload?.messages;
+  const playback = useLoomPlayback(selectedLane?.id ?? null, chainMessages);
+
+  const hierarchyState: 'loading' | 'loaded' | 'unavailable' = hierarchyPending
+    ? 'loading'
+    : hierarchy?.available && !hierarchy.error
+      ? 'loaded'
+      : 'unavailable';
+
+  const projection = useMemo(
     () =>
-      selected
-        ? data.commits.filter(
-            (commit) =>
-              commit.provider === selected.host &&
-              commit.session_id === selected.sessionId,
-          )
-        : [],
-    [data.commits, selected],
+      projectJourney({
+        temporal: data,
+        hierarchy: hierarchy ?? null,
+        hierarchyState,
+        selected:
+          selectedLane && chainMessages
+            ? { laneId: selectedLane.id, messages: chainMessages }
+            : null,
+        encounters: proximityEncounters,
+      }),
+    [data, hierarchy, hierarchyState, selectedLane, chainMessages, proximityEncounters],
   );
-  const selectedFiles = useMemo(
+
+  const fullWindow = useMemo(() => fittedWindowFor(projection.extent), [projection.extent]);
+  const requestedWindow = parseWindow(params.get(LOOM_PARAMS.window));
+  const window: SceneWindow =
+    requestedWindow && projection.extent
+      ? clampWindow(requestedWindow, projection.extent)
+      : fullWindow;
+  const following = projection.extent ? isFitted(window, projection.extent) : true;
+  const collapsed = parseLaneSet(params.get(LOOM_PARAMS.collapsed));
+  const expanded = parseLaneSet(params.get(LOOM_PARAMS.expanded));
+  const hiddenKinds = parseHiddenKinds(params.get(LOOM_PARAMS.hidden));
+  const zoom = selectedLane ? 'event' : parseZoom(params.get(LOOM_PARAMS.zoom));
+
+  const model = useMemo(
     () =>
-      selected
-        ? data.edited_files.filter(
-            (file) =>
-              file.provider === selected.host && file.session_id === selected.sessionId,
-          )
-        : [],
-    [data.edited_files, selected],
+      layoutTemporalScene(projection, {
+        viewport: {
+          width,
+          left: width < 480 ? NARROW_LABEL_COLUMN : LABEL_COLUMN,
+          right: RIGHT_GUTTER,
+          window,
+        },
+        zoom,
+        branches: { collapsed, expanded },
+        selectedLaneId: selectedLane?.id ?? null,
+        selectedEventId: playback.active && !playback.state.followLive
+          ? `msg:${selectedLane?.id ?? ''}:${playback.active.id}`
+          : null,
+        reveal: playback.reveal,
+        hiddenKinds,
+        denseLaneThreshold: DEFAULT_DENSE_LANE_THRESHOLD,
+      }),
+    [projection, width, window, zoom, collapsed, expanded, selectedLane, playback.active, playback.state.followLive, playback.reveal, hiddenKinds],
   );
-  const selectedSpans = useMemo(
-    () =>
-      selected
-        ? data.branch_spans.filter(
-            (span) =>
-              span.provider === selected.host && span.session_id === selected.sessionId,
-          )
-        : [],
-    [data.branch_spans, selected],
-  );
+
+  const update = (mutate: (next: URLSearchParams) => void) => {
+    const next = new URLSearchParams(params);
+    mutate(next);
+    setParams(next, { replace: true });
+  };
+  const setWindow = (next: SceneWindow | null) =>
+    update((search) => {
+      if (next == null || (projection.extent && isFitted(next, projection.extent))) {
+        search.delete(LOOM_PARAMS.window);
+      } else {
+        search.set(LOOM_PARAMS.window, serializeWindow(next));
+      }
+    });
+  const toggleBranch = (laneId: string) =>
+    update((search) => {
+      const lane = model.lanes.find((candidate) => candidate.id === laneId);
+      const dense = model.denseDefault;
+      const isRoot = (projection.lanes.find((candidate) => candidate.id === laneId)?.depth ?? 0) === 0;
+      if (dense && isRoot) {
+        // On a dense page a root starts collapsed; the explicit sets record
+        // the reader's departure from that default in either direction.
+        const currentlyCollapsed = lane?.kind === 'bundle';
+        const nextExpanded = new Set(expanded);
+        const nextCollapsed = new Set(collapsed);
+        if (currentlyCollapsed) {
+          nextExpanded.add(laneId);
+          nextCollapsed.delete(laneId);
+        } else {
+          nextExpanded.delete(laneId);
+          nextCollapsed.add(laneId);
+        }
+        writeSet(search, LOOM_PARAMS.expanded, nextExpanded);
+        writeSet(search, LOOM_PARAMS.collapsed, nextCollapsed);
+        return;
+      }
+      writeSet(search, LOOM_PARAMS.collapsed, toggleInSet(collapsed, laneId));
+    });
+  const toggleKind = (kind: JourneyEventKind) =>
+    update((search) => {
+      const next = serializeHiddenKinds(toggleInSet(hiddenKinds, kind));
+      if (next == null) search.delete(LOOM_PARAMS.hidden);
+      else search.set(LOOM_PARAMS.hidden, next);
+    });
+  const setZoom = (next: 'workstream' | 'agent') =>
+    update((search) => {
+      if (next === 'agent') search.delete(LOOM_PARAMS.zoom);
+      else search.set(LOOM_PARAMS.zoom, next);
+    });
+  const selectEvent = (eventId: string) => {
+    const node = model.nodes.find((candidate) => candidate.id === eventId);
+    if (!node) return;
+    switch (node.kind) {
+      case 'message_user':
+      case 'message_assistant':
+      case 'message_other':
+      case 'tool_call': {
+        const index = playback.frames.findIndex((frame) => frame.id === node.ref);
+        if (index >= 0) {
+          playback.setState({ ...playback.state, cursor: index, playing: false, followLive: false });
+        }
+        return;
+      }
+      case 'spawn':
+        onSelect(node.ref);
+        return;
+      case 'session_start':
+      case 'session_end':
+      case 'commit':
+        if (node.laneId !== selectedLane?.id) onSelect(node.laneId);
+        return;
+      default: {
+        const exhaustive: never = node.kind;
+        return exhaustive;
+      }
+    }
+  };
+
   if (data.available === false) {
     return (
       <div className="flex min-h-0 flex-1 items-center justify-center p-8">
         <div className="flex max-w-sm flex-col items-center gap-3 text-center">
           <StateChip kind="unknown" detail="session store not readable" />
           <p className="text-xs leading-relaxed text-text-muted">
-            The daemon answered but reported its session store
-            unavailable, so there is no thread to place on the axis.{' '}
+            The daemon answered but reported its session store unavailable, so
+            there is no session to place on the axis.{' '}
             <span className="text-text-secondary">
               This is the store saying so, not an empty result.
             </span>
@@ -229,178 +344,314 @@ function TemporalBody({
     data.source_statuses.find((source) => source.id === 'session_commit') ?? null;
   const branchStatus =
     data.source_statuses.find((source) => source.id === 'branch_worktree') ?? null;
-  const measuredEnds = weave.threads.length - weave.openEndedCount;
-  const messages = weave.threads.reduce(
-    (sum, thread) => sum + thread.messages,
-    0,
-  );
+  const measuredEnds = projection.stats.lanes - projection.stats.openEnded;
+  const selectedJourneyLane = selectedLane
+    ? projection.lanes.find((lane) => lane.id === selectedLane.id) ?? null
+    : null;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {!selected && <ReadoutBar
-        label="Weave readings"
-        elevation="raised"
-        items={[
-          {
-            label: 'threads',
-            value: weave.threads.length.toLocaleString(),
-            note: data.total ? `of ${formatCount(data.total)} in store` : undefined,
-          },
-          { label: 'hosts', value: weave.hosts.length },
-          { label: 'messages', value: formatCount(messages) },
-          {
-            label: 'measured extent',
-            value: `${measuredEnds}/${weave.threads.length}`,
-            note: 'recorded end or last-message observation',
-            fraction:
-              weave.threads.length > 0
-                ? measuredEnds / weave.threads.length
-                : null,
-          },
-          {
-            label: 'window',
-            value: weave.extent
-              ? formatDurationSeconds(weave.extent.end - weave.extent.start)
-              : '—',
-            note: weave.extent ? formatMoment(weave.extent.end) : undefined,
-          },
-          {
-            label: 'busiest day',
-            value: busiestDay ? formatCount(busiestDay.count) : '—',
-            // A dash must say why: a timeline still loading, a refused
-            // read, and a served-but-empty timeline are three different
-            // facts, not one "unread".
-            note: busiestDay
-              ? busiestDay.bucket
-              : timelinePending
-                ? 'timeline loading'
-                : timelineServed
-                  ? 'no timeline activity recorded'
-                  : 'timeline read failed',
-          },
-        ]}
-      />}
+      {!selectedLane && (
+        <ReadoutBar
+          label="Field readings"
+          elevation="raised"
+          items={[
+            {
+              label: 'sessions',
+              value: projection.stats.lanes.toLocaleString(),
+              note: data.total ? `of ${formatCount(data.total)} in store` : undefined,
+            },
+            {
+              label: 'agents',
+              value: `${projection.stats.roots} + ${projection.stats.subagents}`,
+              note: 'roots + subagents, unique within this loaded page',
+            },
+            { label: 'messages', value: formatCount(projection.stats.messages) },
+            {
+              label: 'measured extent',
+              value: `${measuredEnds}/${projection.stats.lanes}`,
+              note: 'recorded end or last-message observation',
+              fraction: projection.stats.lanes > 0 ? measuredEnds / projection.stats.lanes : null,
+            },
+            {
+              label: 'window',
+              value: formatDurationSeconds(window.end - window.start),
+              note: following ? 'fitted to the loaded page' : `${formatMoment(window.start)} – ${formatMoment(window.end)}`,
+            },
+            {
+              label: 'busiest day',
+              value: busiestDay ? formatCount(busiestDay.count) : '—',
+              note: busiestDay
+                ? busiestDay.bucket
+                : timelinePending
+                  ? 'timeline loading'
+                  : timelineServed
+                    ? 'no timeline activity recorded'
+                    : 'timeline read failed',
+            },
+          ]}
+        />
+      )}
 
-      {/* The scrolling body takes a name and the tab stop: the weave
-        * canvas and tables can overflow it with nothing focusable in
-        * view (axe: scrollable-region-focusable). */}
       <div
         role="region"
         aria-label="Loom content"
         tabIndex={0}
-        className={cn("flex min-h-0 flex-1 flex-col gap-1 overflow-auto px-3 py-1 [scrollbar-gutter:stable]")}
+        className={cn('flex min-h-0 flex-1 flex-col gap-2 overflow-auto px-3 py-1 [scrollbar-gutter:stable]')}
       >
-        <div className="flex min-w-0 flex-1 flex-col gap-2">
-          {selectedId && !selected ? <StateChip kind="unavailable" detail="Selected session is outside this loaded page; choose a retained session." /> : null}
-          {selectedEncounterId !== null ? (
+        {selectedId && !selectedLane ? (
+          <StateChip
+            kind="unavailable"
+            detail="Selected session is outside this loaded page; choose a retained session."
+          />
+        ) : null}
+
+        {projection.lanes.length === 0 ? (
+          <EmptyField undated={projection.stats.undated} rows={rows.length} />
+        ) : (
+          <>
+            <FieldControls
+              following={following}
+              onReturnToTail={() => setWindow(null)}
+              zoom={zoom}
+              onZoom={setZoom}
+              projection={projection}
+              model={model}
+              hiddenKinds={hiddenKinds}
+              onToggleKind={toggleKind}
+              selected={selectedLane != null}
+            />
+            <TemporalScene
+              model={model}
+              ariaLabel={fieldDescription(projection, model)}
+              tailLabel="LOADED END"
+              fullWindow={fullWindow}
+              reducedMotion={reduced}
+              onMeasure={setWidth}
+              onWindowChange={setWindow}
+              onSelectLane={onSelect}
+              onSelectEvent={selectEvent}
+              onToggleBranch={toggleBranch}
+              onSelectEncounter={onSelectEncounter}
+            />
+            <p className="text-3xs text-text-muted">
+              Session hierarchy:{' '}
+              {hierarchyPending
+                ? 'loading'
+                : !hierarchy?.available || hierarchy.error
+                  ? 'unavailable'
+                  : `${hierarchy.truncated ? 'partial' : 'loaded'} · ${hierarchy.missing_parent_count} missing parents · ${hierarchy.cycle_count} cycles`}
+              . Spawn curves leave the parent at the child session&apos;s recorded start;
+              no handoff, result or rejoin is drawn because no session-bound authority
+              serves one in this read. Only this temporal page is drawn.
+            </p>
+
+            {selectedJourneyLane ? (
+              <ThreadChain
+                thread={selectedJourneyLane}
+                chainPending={chain.isPending}
+                chain={chain.data}
+                playback={playback}
+                summaryNodes={chainPayload?.exists === false ? [] : chainPayload?.summary_nodes ?? []}
+                totalMessages={chainPayload?.exists === false ? 0 : chainPayload?.counts.message_count ?? 0}
+                hasMoreMessages={
+                  chainPayload?.exists === false
+                    ? false
+                    : (chainPayload?.has_more_messages ?? false) || chainPayload?.next_cursor != null
+                }
+                hasMoreSummaryNodes={chainPayload?.exists === false ? false : chainPayload?.has_more_summary_nodes ?? false}
+                relations={{
+                  commits: data.commits.filter(
+                    (commit) => commit.provider === selectedJourneyLane.provider && commit.session_id === selectedJourneyLane.sessionId,
+                  ),
+                  editedFiles: data.edited_files.filter(
+                    (file) => file.provider === selectedJourneyLane.provider && file.session_id === selectedJourneyLane.sessionId,
+                  ),
+                  branchSpans: data.branch_spans.filter(
+                    (span) => span.provider === selectedJourneyLane.provider && span.session_id === selectedJourneyLane.sessionId,
+                  ),
+                  commitStatus,
+                  branchStatus,
+                }}
+                onReturn={() => onSelect(null)}
+              />
+            ) : null}
+
             <ProximityPanel
               result={proximity}
               selectedId={selectedEncounterId}
               onSelect={onSelectEncounter}
             />
-          ) : selected ? (
-            <>
-              <ThreadChain onReturn={() => onSelect(null)} thread={selected} relations={{ commits: selectedCommits, editedFiles: selectedFiles, branchSpans: selectedSpans, commitStatus, branchStatus }} />
-            </>
-          ) : weave.threads.length === 0 ? (
-            <EmptyWeave undated={weave.undated} rows={rows.length} />
-          ) : (
-            <>
-              <WeaveCanvas
-                weave={weave}
-                hierarchy={hierarchy}
-                initialWindow={overviewWindow}
-                onWindowChange={(window) => {
-                  const next = new URLSearchParams(params);
-                  if (window) next.set('loomOverviewWindow', `${window.start},${window.end}`);
-                  else next.delete('loomOverviewWindow');
-                  setParams(next, { replace: true });
-                }}
-                selectedId={selectedId}
-                onSelect={onSelect}
-                ariaLabel={weaveDescription(weave)}
-                proximityEncounters={proximityEncounters}
-              />
-              <ProximityPanel
-                result={proximity}
-                selectedId={selectedEncounterId}
-                onSelect={onSelectEncounter}
-              />
-              <p className="text-3xs text-text-muted">Session hierarchy: {hierarchyPending ? "loading" : !hierarchy?.available || hierarchy.error ? "unavailable" : `${hierarchy.truncated ? "partial" : "loaded"} · ${hierarchy.missing_parent_count} missing parents · ${hierarchy.cycle_count} cycles`}. Curved links express recorded parent identity between session bounds, not timed spawn or rejoin. Only this temporal page is drawn.</p>
-              <WeaveAxis weave={weave} />
-              <ThreadTable
-                threads={weave.threads}
-                selectedId={selectedId}
-                onSelect={onSelect}
-              />
-            </>
-          )}
-        </div>
+            <FieldCaption projection={projection} model={model} />
+            <BranchNavigator
+              projection={projection}
+              model={model}
+              selectedLaneId={selectedLane?.id ?? null}
+              onSelect={onSelect}
+              onToggle={toggleBranch}
+            />
+          </>
+        )}
 
-        <aside className={cn("flex w-full shrink-0 flex-col gap-3", "order-first")}>
+        <aside className={cn('flex w-full shrink-0 flex-col gap-3', 'order-first')}>
           <details>
-            {<summary className="min-h-6 cursor-pointer text-3xs leading-6 text-text-muted">
-              Source coverage · {envelope.freshness.state} · {data.source_statuses.map((source) => `${source.label}: ${source.state}`).join(' · ')}
-            </summary>}
-            <div className={cn("flex gap-3", "flex-wrap [&>*]:min-w-64 [&>*]:flex-1")}>
-          <Panel legend="Causal crossings">
-            <div className="flex flex-col gap-2">
-              <p className="text-2xs leading-relaxed text-text-muted">
-                Counts below are the persisted causal rows returned for
-                this exact session page. Provider, granularity and
-                coverage come from the temporal response.
-              </p>
-              {data.source_statuses.map((source) => (
-                <div key={source.id} className="flex flex-col gap-1">
-                  <span className="td-legend text-text-secondary">
-                    {source.label}
-                  </span>
-                  <StateChip
-                    kind={source.state}
-                    detail={sourceDetail(source)}
-                  />
-                  <span className="td-value truncate text-3xs text-text-muted">
-                    {source.granularity}
-                    {source.item_count == null ? '' : ` · ${source.item_count} rows`}
-                  </span>
+            <summary className="min-h-6 cursor-pointer text-3xs leading-6 text-text-muted">
+              Source coverage · {envelope.freshness.state} ·{' '}
+              {data.source_statuses.map((source) => `${source.label}: ${source.state}`).join(' · ')}
+            </summary>
+            <div className={cn('flex gap-3', 'flex-wrap [&>*]:min-w-64 [&>*]:flex-1')}>
+              <Panel legend="Causal crossings">
+                <div className="flex flex-col gap-2">
+                  <p className="text-2xs leading-relaxed text-text-muted">
+                    Counts below are the persisted causal rows returned for this
+                    exact session page. Provider, granularity and coverage come
+                    from the temporal response.
+                  </p>
+                  {data.source_statuses.map((source) => (
+                    <div key={source.id} className="flex flex-col gap-1">
+                      <span className="td-legend text-text-secondary">{source.label}</span>
+                      <StateChip kind={source.state} detail={sourceDetail(source)} />
+                      <span className="td-value truncate text-3xs text-text-muted">
+                        {source.granularity}
+                        {source.item_count == null ? '' : ` · ${source.item_count} rows`}
+                      </span>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-          </Panel>
+              </Panel>
 
-          <Panel legend="Read identity">
-            <div className="flex flex-col gap-2">
-              <StateChip
-                kind={freshnessKind(envelope.freshness.state)}
-                detail={
-                  envelope.freshness.observed_at_micros == null
-                    ? 'observation time unrecorded'
-                    : `observed ${formatMoment(envelope.freshness.observed_at_micros / 1_000_000)}`
-                }
-              />
-              <StateChip
-                kind={data.temporal_refresh.state}
-                detail={`${data.temporal_refresh.active_generations} active temporal generations · ${
-                  data.temporal_refresh.latest_activated_at_micros == null
-                    ? 'activation time unrecorded'
-                    : `latest activation ${formatMoment(data.temporal_refresh.latest_activated_at_micros / 1_000_000)}`
-                } · ${data.temporal_refresh.authority}`}
-              />
-              <p className="text-3xs leading-relaxed text-text-muted">
-                {coverageDetail(envelope)}
-              </p>
-              <p className="text-3xs leading-relaxed text-text-muted">
-                {envelope.source_watermark
-                  ? `${envelope.source_watermark.source} · ${envelope.source_watermark.watermark}`
-                  : 'No temporal source watermark was recorded.'}
-              </p>
-            </div>
-          </Panel>
-
+              <Panel legend="Read identity">
+                <div className="flex flex-col gap-2">
+                  <StateChip
+                    kind={freshnessKind(envelope.freshness.state)}
+                    detail={
+                      envelope.freshness.observed_at_micros == null
+                        ? 'observation time unrecorded'
+                        : `observed ${formatMoment(envelope.freshness.observed_at_micros / 1_000_000)}`
+                    }
+                  />
+                  <StateChip
+                    kind={data.temporal_refresh.state}
+                    detail={`${data.temporal_refresh.active_generations} active temporal generations · ${
+                      data.temporal_refresh.latest_activated_at_micros == null
+                        ? 'activation time unrecorded'
+                        : `latest activation ${formatMoment(data.temporal_refresh.latest_activated_at_micros / 1_000_000)}`
+                    } · ${data.temporal_refresh.authority}`}
+                  />
+                  <p className="text-3xs leading-relaxed text-text-muted">{coverageDetail(envelope)}</p>
+                  <p className="text-3xs leading-relaxed text-text-muted">
+                    {envelope.source_watermark
+                      ? `${envelope.source_watermark.source} · ${envelope.source_watermark.watermark}`
+                      : 'No temporal source watermark was recorded.'}
+                  </p>
+                </div>
+              </Panel>
             </div>
           </details>
         </aside>
       </div>
+    </div>
+  );
+}
+
+function writeSet(search: URLSearchParams, key: string, ids: ReadonlySet<string>) {
+  const serialized = serializeLaneSet(ids);
+  if (serialized == null) search.delete(key);
+  else search.set(key, serialized);
+}
+
+/**
+ * The DOM controls the field never owns: follow/return-to-tail, semantic
+ * zoom, and the event-kind filters. Filters change visibility, never source
+ * truth, and the counts beside them come from the layout so the words and the
+ * picture cannot drift.
+ */
+function FieldControls({
+  following,
+  onReturnToTail,
+  zoom,
+  onZoom,
+  projection,
+  model,
+  hiddenKinds,
+  onToggleKind,
+  selected,
+}: {
+  following: boolean;
+  onReturnToTail: () => void;
+  zoom: 'workstream' | 'agent' | 'event';
+  onZoom: (zoom: 'workstream' | 'agent') => void;
+  projection: JourneyProjection;
+  model: TemporalSceneModel;
+  hiddenKinds: ReadonlySet<JourneyEventKind>;
+  onToggleKind: (kind: JourneyEventKind) => void;
+  selected: boolean;
+}) {
+  const kindCounts = useMemo(() => {
+    const counts = new Map<JourneyEventKind, number>();
+    for (const event of projection.events) counts.set(event.kind, (counts.get(event.kind) ?? 0) + 1);
+    return counts;
+  }, [projection.events]);
+  const { counts } = model;
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border border-edge-subtle px-2 py-1 text-3xs">
+      <div className="flex items-center gap-2" role="group" aria-label="Loaded tail">
+        {following ? (
+          <span className="border border-accent/40 px-1.5 py-0.5 td-legend text-accent" data-follow="following">
+            following loaded tail
+          </span>
+        ) : (
+          <button
+            type="button"
+            className="td-hit border border-edge-subtle px-1.5 td-legend text-text-secondary"
+            onClick={onReturnToTail}
+            aria-label="Return field to loaded tail"
+          >
+            RETURN TO LOADED TAIL
+          </button>
+        )}
+        <span className="text-text-muted">LOADED END = newest record in this page · not a live stream</span>
+      </div>
+      <div className="flex items-center gap-1" role="group" aria-label="Semantic zoom">
+        <span className="td-legend">zoom</span>
+        {(['workstream', 'agent'] as const).map((level) => (
+          <button
+            key={level}
+            type="button"
+            aria-pressed={zoom === level}
+            disabled={selected}
+            onClick={() => onZoom(level)}
+            className={cn(
+              'td-hit border px-1.5 td-legend',
+              zoom === level ? 'border-accent/60 text-accent' : 'border-edge-subtle text-text-secondary',
+              selected && 'text-text-muted',
+            )}
+          >
+            {level}
+          </button>
+        ))}
+        <span className="text-text-muted">{selected ? 'event · selected session expanded, others compressed' : zoom === 'workstream' ? 'bundles per root session' : 'one lane per session'}</span>
+      </div>
+      <fieldset className="flex flex-wrap items-center gap-1" aria-label="Event filters">
+        <legend className="sr-only">Event filters</legend>
+        <span className="td-legend">events</span>
+        {JOURNEY_EVENT_KINDS.filter((kind) => (kindCounts.get(kind) ?? 0) > 0).map((kind) => (
+          <label key={kind} className="flex min-h-8 items-center gap-1 text-text-secondary">
+            <input
+              type="checkbox"
+              className="td-check"
+              checked={!hiddenKinds.has(kind)}
+              onChange={() => onToggleKind(kind)}
+              aria-label={`Show ${glyphLabel(kind)} events`}
+            />
+            <span>{glyphLabel(kind)}</span>
+            <span className="td-value text-text-muted" data-cell="numeric">{kindCounts.get(kind)}</span>
+          </label>
+        ))}
+      </fieldset>
+      <span className="td-value text-text-muted" data-scene-counts>
+        {counts.eventsDrawn} drawn · {counts.eventsFiltered} filtered · {counts.eventsWithheld} withheld · {counts.eventsCulled} outside window · {counts.eventsFolded} folded
+      </span>
     </div>
   );
 }
@@ -414,8 +665,6 @@ function TemporalBoundary({
   result: EnvelopeResult<LoomTemporalPayloadV1> | undefined;
   children: (envelope: DashboardEnvelopeV1<LoomTemporalPayloadV1>) => ReactNode;
 }) {
-  // The three ways this read produces no envelope differ only in the chip they
-  // carry; the plate they are centred on is one plate, written once.
   const plate = (kind: DomainStateKind, detail: string) => (
     <div className="flex min-h-0 flex-1 items-center justify-center p-8">
       <StateChip kind={kind} detail={detail} />
@@ -474,182 +723,72 @@ function freshnessKind(
   }
 }
 
-/** The axis, printed. A reader cannot infer from the picture that width is a
- * log of message count, or that a dashed tail is an absence rather than a
- * short session, so both are stated in the same words the code uses. */
-function WeaveAxis({ weave }: { weave: ReturnType<typeof composeWeave> }) {
-  const busiest = weave.hosts.reduce((max, host) => Math.max(max, host.count), 0);
+/** The field, printed. A reader cannot infer from the picture what each axis
+ * and line style encodes, so both are stated in the same words the layout
+ * uses — and the counts come from the same model, not a second tally. */
+function FieldCaption({
+  projection,
+  model,
+}: {
+  projection: JourneyProjection;
+  model: TemporalSceneModel;
+}) {
+  const { stats } = projection;
   return (
     <div className="flex flex-col gap-1.5">
-      <Legend>time left to right · session lanes · thickness = messages</Legend>
+      <Legend>time left to right · recorded hierarchy down · thickness = messages</Legend>
       <div className="flex flex-wrap border-y border-edge-subtle bg-surface-1">
-        {weave.hosts.map((host) => (
+        {stats.providers.map((provider) => (
           <div
-            key={host.id}
+            key={provider.id}
             className="min-w-0 flex-1 basis-28 border-l border-edge-subtle px-2.5 py-1.5 first:border-l-0"
           >
-            <Readout
-              label={host.label}
-              value={host.count}
-              unit={host.count === 1 ? 'thread' : 'threads'}
-              note={`${formatCount(host.messages)} messages`}
-              fraction={busiest > 0 ? host.count / busiest : null}
-              size="sm"
-            />
+            <span className="td-legend text-text-secondary">{provider.id}</span>
+            <div className="td-value text-xs text-text-primary">
+              {provider.lanes} {provider.lanes === 1 ? 'session' : 'sessions'}
+            </div>
+            <span className="text-3xs text-text-muted">{formatCount(provider.messages)} messages</span>
           </div>
         ))}
       </div>
-      <div
-        aria-label="Extent evidence legend"
-        className="flex flex-wrap gap-x-4 gap-y-1 text-3xs text-text-muted"
-      >
-        <span className="flex items-center gap-1.5">
-          <span aria-hidden className="h-0.5 w-3 bg-text-secondary" />
-          measured session end
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span aria-hidden className="h-0.5 w-3 border-t border-dashed border-text-secondary" />
-          last-message observation
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span
-            aria-hidden
-            className="h-0.5 w-3 border-t border-dashed border-text-muted"
-          />
-          extent unknown
-        </span>
-      </div>
       <p className="text-2xs leading-relaxed text-text-muted">
-        Each thread is one session: horizontal position = when it started (exact,
-        on the printed axis), each lane = one session in recorded parent order, thickness = its message
-        count on a log scale. A thread drawn solid to its right endpoint has a served
-        end time; a thread ending in a short dashed stub does not —{' '}
+        Each lane is one session: horizontal position is its recorded start on the
+        printed axis (exact); lanes sit under their provider rail, and a subagent
+        sits under its recorded parent in preorder. Thickness is the session&apos;s
+        message count on a log scale. A lane drawn solid to its right edge has a
+        served end; a lane ending in a dashed segment ends at its last message
+        observation; a lane ending in a dotted stub has no measured extent —{' '}
         <span className="text-text-secondary">
-          {weave.openEndedCount} of {weave.threads.length} sessions have no
-          recorded end or later message observation, so the stub marks
-          unmeasured extent and its length means nothing.
+          {stats.openEnded} of {stats.lanes} sessions have no recorded end or later
+          message observation.
         </span>{' '}
-        {weave.hollowCount > 0
-          ? `${weave.hollowCount} drawn hollow ${weave.hollowCount === 1 ? 'is a session the store reports' : 'are sessions the store reports'} at zero messages — a reading, not a gap. `
+        {stats.hollow > 0
+          ? `${stats.hollow} ${stats.hollow === 1 ? 'is a session the store reports' : 'are sessions the store reports'} at zero messages — a reading, not a gap. `
           : ''}
-        {weave.undated > 0
-          ? `${weave.undated} ${weave.undated === 1 ? 'row' : 'rows'} carried no usable start time and ${weave.undated === 1 ? 'is' : 'are'} not on the field at all. `
+        {stats.undated > 0
+          ? `${stats.undated} ${stats.undated === 1 ? 'row' : 'rows'} carried no usable start time and ${stats.undated === 1 ? 'is' : 'are'} not on the field at all. `
           : ''}
-        Lane spacing is presentation only. Curves express recorded parent identity,
-        not the time of a spawn, handoff or rejoin.
+        A spawn curve leaves a parent lane at the child&apos;s recorded start and is
+        drawn only for a recorded parent identity in this page; handoffs, results
+        and rejoins are unavailable in this read. {model.counts.lanesCollapsed > 0
+          ? `${model.counts.lanesCollapsed} ${model.counts.lanesCollapsed === 1 ? 'branch is' : 'branches are'} collapsed into bundles whose counts include every descendant session. `
+          : ''}
+        Lane spacing is presentation only.
       </p>
     </div>
   );
 }
 
-/** The canvas's accessible equivalent (plan 11a archetype 3): the same threads,
- * the same selection, as real rows in a real table. */
-function ThreadTable({
-  threads,
-  selectedId,
-  onSelect,
-}: {
-  threads: readonly PlacedThread[];
-  selectedId: string | null;
-  onSelect: (id: string | null) => void;
-}) {
-  return (
-    <section aria-label="Threads" className="flex min-w-0 flex-col">
-      <Legend>threads · earliest first</Legend>
-      <div
-        role="region"
-        aria-label="Threads table"
-        // Keyboard-operable on its own: with no thread selected the rows may
-        // be the only content, and they are not focusable elements.
-        tabIndex={0}
-        className="mt-1.5 max-h-72 overflow-auto border border-edge-subtle"
-      >
-        <table className="w-full border-collapse text-2xs">
-          <caption className="sr-only">
-            Every session drawn on the weave, in start order, with its host,
-            message count and whether the store served an end time.
-          </caption>
-          <thead className="sticky top-0 bg-surface-2">
-            <tr className="text-left text-text-secondary">
-              <th scope="col" className="px-2 py-1 font-medium">Session</th>
-              <th scope="col" className="px-2 py-1 font-medium">Host</th>
-              <th scope="col" className="px-2 py-1 text-right font-medium">Started</th>
-              <th scope="col" className="px-2 py-1 text-right font-medium">Messages</th>
-              <th scope="col" className="px-2 py-1 font-medium">Extent</th>
-            </tr>
-          </thead>
-          <tbody>
-            {threads.map((thread) => (
-              <tr
-                key={thread.id}
-                className={cn(
-                  'border-t border-edge-subtle',
-                  selectedId === thread.id && 'bg-accent/10',
-                )}
-              >
-                <td className="max-w-0 px-2 py-1">
-                  <button
-                    type="button"
-                    onClick={() => onSelect(selectedId === thread.id ? null : thread.id)}
-                    aria-pressed={selectedId === thread.id}
-                    // The table complements canvas picking with exact text and
-                    // a touch target that remains usable at narrow widths.
-                    // The row carries the touch minimum on its own
-                    // box, in BOTH axes. At 320 the session column is the one
-                    // the five-column table squeezes (38px), and the width half
-                    // of the minimum is what stops it: the column holds 44 and
-                    // the table scrolls inside its labelled region instead,
-                    // which is the trade Plan 11 licenses.
-                    className="flex min-h-[var(--touch-target-min)] w-full min-w-[var(--touch-target-min)] items-center gap-1.5 text-left"
-                  >
-                    <span
-                      aria-hidden
-                      style={kindColorVars(thread.host)}
-                      className="size-1.5 shrink-0 bg-[var(--kind-dark)] [[data-theme=light]_&]:bg-[var(--kind-light)]"
-                    />
-                    <span className="truncate text-text-primary">{thread.label}</span>
-                    {thread.isSubagent ? (
-                      <span className="td-legend shrink-0 text-text-muted">sub</span>
-                    ) : null}
-                  </button>
-                </td>
-                <td className="px-2 py-1 text-text-secondary">{thread.host}</td>
-                <td
-                  className="px-2 py-1 text-right text-text-muted tabular-nums"
-                  data-cell="numeric"
-                >
-                  {formatMoment(thread.start)}
-                </td>
-                <td
-                  className="px-2 py-1 text-right text-text-secondary tabular-nums"
-                  data-cell="numeric"
-                >
-                  {thread.messages.toLocaleString()}
-                </td>
-                <td className="px-2 py-1 text-text-muted">
-                  {thread.end != null
-                    ? formatDurationSeconds(thread.end - thread.start)
-                    : 'unrecorded'}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  );
-}
-
-function weaveDescription(weave: ReturnType<typeof composeWeave>): string {
-  const hosts = weave.hosts
-    .map((host) => `${host.count} on ${host.label}`)
+function fieldDescription(projection: JourneyProjection, model: TemporalSceneModel): string {
+  const providers = projection.stats.providers
+    .map((provider) => `${provider.lanes} on ${provider.id}`)
     .join(', ');
-  return `Weave: ${weave.threads.length} sessions as horizontal threads, time running left to right, one lane per session with recorded parent grouping; providers ${hosts || 'none'}. ${weave.openEndedCount} have no recorded extent and are drawn open. Only recorded parent identities are drawn between sessions; timed spawn and rejoin remain unavailable. Other provider-qualified causal rows are listed in the selected workspace. The thread table below is the accessible equivalent.`;
+  return `Temporal execution field: ${projection.stats.lanes} sessions as horizontal lanes, time running left to right, hierarchy down by provider rail and recorded parent; providers ${providers || 'none'}. ${projection.stats.openEnded} have no recorded extent and are drawn open. ${projection.relations.length} recorded spawn relations are drawn as curves at the child's start; handoff and rejoin remain unavailable. ${model.counts.lanesCollapsed} branches are collapsed into bundles. The branch navigator table below is the accessible equivalent.`;
 }
 
-/** Composed empty state: the frame stays, so an empty weave reads as an
+/** Composed empty state: the frame stays, so an empty field reads as an
  * answered question rather than a broken page. */
-function EmptyWeave({ undated, rows }: { undated: number; rows: number }) {
+function EmptyField({ undated, rows }: { undated: number; rows: number }) {
   return (
     <div className="flex min-h-0 flex-1 items-center justify-center p-8">
       <div className="flex max-w-sm flex-col items-center gap-3 text-center">
@@ -665,7 +804,7 @@ function EmptyWeave({ undated, rows }: { undated: number; rows: number }) {
             ? 'The session store answered and holds no sessions in this scope.'
             : `The store returned ${rows} ${rows === 1 ? 'session' : 'sessions'}, but ${undated} carried no usable start time — there is no honest position on the time axis for a session that never recorded when it began.`}{' '}
           <span className="text-text-secondary">
-            Threads appear as soon as the store records a start time.
+            Lanes appear as soon as the store records a start time.
           </span>
         </p>
       </div>

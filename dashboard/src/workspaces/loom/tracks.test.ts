@@ -1,36 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { axisTicks, bandScale, clampWindow, fittedWindow, isFitted, packTrack, tickStepFor, zoomWindow, type LoomSpan } from './tracks.ts';
+import { axisTicks, bandScale, clampWindow, fittedWindow, isFitted, tickStepFor, zoomWindow } from './tracks.ts';
 
 const HOUR = 3600;
 const DAY = 86_400;
-
-function span(id: string, start: number, end: number, weight = 10): LoomSpan {
-  return { id, start, end, label: id, weight };
-}
-
-describe('packTrack', () => {
-  it('keeps non-overlapping spans in a single lane', () => {
-    const lanes = packTrack([span('a', 0, 10), span('b', 20, 30), span('c', 40, 50)]);
-    expect(lanes).toHaveLength(1);
-    expect(lanes[0]).toHaveLength(3);
-  });
-
-  it('stacks overlapping spans into separate lanes instead of drawing mud', () => {
-    const lanes = packTrack([span('a', 0, 100), span('b', 10, 110), span('c', 20, 120)]);
-    expect(lanes).toHaveLength(3);
-  });
-
-  it('treats a pixel-sized gap as collision so touching marks stay separated', () => {
-    expect(packTrack([span('a', 0, 10), span('b', 12, 20)], 0)).toHaveLength(1);
-    expect(packTrack([span('a', 0, 10), span('b', 12, 20)], 5)).toHaveLength(2);
-  });
-
-  it('reuses a lane once its previous span has ended', () => {
-    const lanes = packTrack([span('a', 0, 100), span('b', 10, 20), span('c', 30, 40)]);
-    expect(lanes).toHaveLength(2);
-    expect(lanes[1]?.map((s) => s.id)).toEqual(['b', 'c']);
-  });
-});
 
 describe('bandScale', () => {
   it('walks hour -> day -> month as the window widens', () => {

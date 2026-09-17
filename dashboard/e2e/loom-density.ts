@@ -1,4 +1,4 @@
-/** Exercise the shipped Loom with bounded, explicitly synthetic wire data.
+/** Exercise the shipped Loom temporal field with bounded, explicitly synthetic wire data.
  * Run from dashboard: AXE_PORT=5357 npx tsx e2e/loom-density.ts [output-directory]
  * No daemon/profile writes. Timings include browser input and two paint frames.
  */
@@ -55,6 +55,13 @@ const pageFor = (sessionId: string) => LcmSessionPayloadV1Schema.parse({
     storage_kind: 'message', store_id: null, summary_node_ids: [], metadata_json: null,
   })),
 });
+const descendantsOf = (i: number) => hierarchy.nodes.find((node) => node.session_id === `fixture-session-${i}`)!.descendants;
+// Four roots in the loaded page: two recorded roots and two whose recorded
+// parent is outside the page. Above the dense threshold every root WITH
+// descendants starts as a bundle; agent 89 has none and stays a plain lane.
+const ROOTS = 4;
+const BUNDLES = 3;
+const transcriptNodes = (page: import('@playwright/test').Page) => page.locator('[data-event][data-kind^="message"], [data-event][data-kind="tool_call"]');
 
 const { baseURL, server } = startStaticServer();
 const browser = await chromium.launch({ headless: true });
@@ -91,7 +98,7 @@ try {
   };
   await measure('initialNavigation', async () => {
     await page.goto(`${baseURL}/loom?scope=tracedecay&scopeLabel=TraceDecay`);
-    await page.getByRole('button', { name: 'Collapse branch Fixture agent 0', exact: true }).waitFor();
+    await page.getByRole('button', { name: 'Expand branch Fixture agent 0', exact: true }).waitFor();
   });
   await page.evaluate(`(() => {
     const state = { samples: [], running: true };
@@ -104,40 +111,58 @@ try {
     }
     requestAnimationFrame(frame);
   })()`);
-  assert.equal(await page.locator('[data-thread]').count(), 100);
-  assert.equal(await page.locator('[data-parent-session]').count(), 96);
-  const stroke = await page.locator('[data-parent-session] path').first().evaluate((node) => getComputedStyle(node).stroke);
-  assert.notEqual(stroke, 'none');
-  const viewportBefore = await page.locator('[data-session-viewport]').getAttribute('y');
-  await measure('minimapLocate', async () => {
-    const minimap = page.getByRole('group', { name: 'Session hierarchy minimap' });
-    await minimap.click({ position: { x: 650, y: 65 } });
-    await page.waitForFunction((before) => document.querySelector('[data-session-viewport]')?.getAttribute('y') !== before, viewportBefore);
+  // Dense default: one lane per root, three of them bundles; every session still has an exact table row.
+  assert.equal(await page.locator('[data-lane-row]').count(), ROOTS);
+  assert.equal(await page.locator('[data-cluster]').count(), BUNDLES);
+  assert.equal(await page.locator('[data-navigator-lane]').count(), 100);
+  assert.equal(await page.locator('[data-scene-layer="canvas"]').count(), 1);
+  assert.equal(await page.locator('[data-event][data-kind="spawn"]').count(), 0);
+  const viewportBefore = await page.locator('[data-scene-viewport]').getAttribute('x');
+  await measure('expandBranch', async () => {
+    await page.getByRole('button', { name: 'Expand branch Fixture agent 0', exact: true }).click();
+    await page.getByRole('button', { name: 'Collapse branch Fixture agent 0', exact: true }).waitFor();
   });
+  const expandedLanes = ROOTS + descendantsOf(0);
+  assert.equal(await page.locator('[data-lane-row]').count(), expandedLanes);
+  assert.equal(await page.locator('[data-event][data-kind="spawn"]').count(), descendantsOf(0));
+  assert.equal(new URL(page.url()).searchParams.has('loomExpanded'), true);
+  const stroke = await page.locator('[data-event][data-kind="spawn"] circle').nth(1).evaluate((node) => getComputedStyle(node).stroke);
+  assert.notEqual(stroke, 'none');
+  await page.screenshot({ path: path.join(out, '100-sessions-expanded.png') });
+  await measure('minimapLocate', async () => {
+    const minimap = page.getByRole('group', { name: 'Temporal minimap' });
+    await page.getByRole('button', { name: 'Zoom in', exact: true }).click();
+    await minimap.click({ position: { x: 300, y: 30 } });
+    await page.waitForFunction((before) => document.querySelector('[data-scene-viewport]')?.getAttribute('x') !== before, viewportBefore);
+  });
+  assert.equal(new URL(page.url()).searchParams.has('loomWindow'), true);
   await page.screenshot({ path: path.join(out, '100-sessions-minimap.png') });
-  await measure('collapseBranch', () => page.getByRole('button', { name: 'Collapse branch Fixture agent 0', exact: true }).click());
-  const collapsedCount = 100 - hierarchy.nodes.find((node) => node.session_id === 'fixture-session-0')!.descendants;
-  assert.equal(await page.locator('[data-thread]').count(), collapsedCount);
-  assert.equal(await page.locator('[data-minimap-session]').count(), collapsedCount);
-  await measure('expandBranch', () => page.getByRole('button', { name: 'Expand branch Fixture agent 0', exact: true }).click());
-  await measure('zoomOverview', () => page.getByRole('button', { name: 'Zoom in', exact: true }).click());
-  const overviewWindow = new URL(page.url()).searchParams.get('loomOverviewWindow');
+  await measure('collapseBranch', async () => {
+    await page.getByRole('button', { name: 'Collapse branch Fixture agent 0', exact: true }).click();
+    await page.getByRole('button', { name: 'Expand branch Fixture agent 0', exact: true }).waitFor();
+  });
+  assert.equal(await page.locator('[data-lane-row]').count(), ROOTS);
+  await measure('fit', () => page.getByRole('button', { name: 'Return field to loaded tail' }).click());
+  assert.equal(new URL(page.url()).searchParams.has('loomWindow'), false);
   await measure('openSession', async () => {
     await page.getByRole('button', { name: 'Open session Fixture agent 50', exact: true }).click();
-    await page.getByRole('button', { name: 'Select stored event event-199', exact: true }).waitFor();
+    await page.locator('[data-event$=":event-199"]').waitFor();
   });
-  await measure('pickDenseEvent', () => page.getByRole('button', { name: 'Select stored event event-100', exact: true }).click());
+  assert.equal(await transcriptNodes(page).count(), 200);
+  await measure('pickDenseEvent', () => page.locator('[data-event$=":event-100"]').click());
   assert.equal(new URL(page.url()).searchParams.get('loomEvent'), 'event-100');
-  assert.equal(await page.locator('[data-event]').count(), 101);
-  assert.equal(await page.locator('[data-minimap-event]').count(), 101);
+  assert.equal(await transcriptNodes(page).count(), 101);
+  assert.equal(await page.locator('[data-cursor]').count(), 1);
   await measure('stepReplay', () => page.getByRole('button', { name: 'Step to next stored event' }).click());
   assert.equal(new URL(page.url()).searchParams.get('loomEvent'), 'event-101');
-  await measure('zoomReplay', () => page.getByRole('button', { name: 'Zoom into execution' }).click());
+  await measure('zoomReplay', () => page.getByRole('button', { name: 'Zoom in', exact: true }).click());
+  const replayWindow = new URL(page.url()).searchParams.get('loomWindow');
+  assert.ok(replayWindow);
   await page.screenshot({ path: path.join(out, '200-events-replay.png') });
   await measure('returnToOverview', () => page.getByRole('button', { name: '← All loaded sessions' }).click());
-  assert.equal(new URL(page.url()).searchParams.get('loomOverviewWindow'), overviewWindow);
-  await page.getByRole('button', { name: 'Fit the whole extent' }).click();
-  await page.screenshot({ path: path.join(out, '100-sessions-expanded.png') });
+  assert.equal(new URL(page.url()).searchParams.get('loomWindow'), replayWindow);
+  assert.equal(new URL(page.url()).searchParams.has('loomSession'), false);
+  await page.getByRole('button', { name: 'Return field to loaded tail' }).click();
   const frames = await page.evaluate(() => {
     const state = (window as unknown as { loomFrames: { samples: number[]; running: boolean } }).loomFrames;
     state.running = false;
@@ -147,9 +172,12 @@ try {
   previousLongTasks = await page.evaluate(() => (window as unknown as { loomLongTasks: number[] }).loomLongTasks);
   parentageAvailable = false;
   await measure('missingAuthority', async () => { await page.reload(); await page.getByText(/Session hierarchy: unavailable/).waitFor(); });
-  assert.equal(await page.locator('[data-thread]').count(), 100);
-  assert.equal(await page.locator('[data-parent-session]').count(), 0);
-  assert.equal(await page.locator('[data-minimap-parent]').count(), 0);
+  // Without parentage every session is its own root and none has descendants,
+  // so nothing bundles; the page-wide gap names the missing authority.
+  assert.equal(await page.locator('[data-lane-row]').count(), 100);
+  assert.equal(await page.locator('[data-event][data-kind="spawn"]').count(), 0);
+  assert.equal(await page.locator('[data-cluster]').count(), 0);
+  assert.match(await page.getByRole('list', { name: 'Evidence gaps' }).textContent() ?? '', /parentage unavailable/);
   await page.screenshot({ path: path.join(out, '100-sessions-parentage-unavailable.png') });
   const metrics = await page.evaluate(() => ({ domNodes: document.querySelectorAll('*').length, longTasks: (window as unknown as { loomLongTasks: number[] }).loomLongTasks }));
   const cdp = await page.context().newCDPSession(page);

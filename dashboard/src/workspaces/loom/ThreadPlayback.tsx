@@ -4,7 +4,7 @@ import type { LcmMessageV1, LcmSummaryNodeV1 } from '../../contracts/generated.t
 import { StateChip } from '../../ui/StateChip.tsx';
 import { Legend } from '../../ui/instrument.tsx';
 import { formatStamp } from '../../ui/format.ts';
-import { orderChainMessages } from './weave.ts';
+import { orderMessages } from '../../viz/temporal/journey.ts';
 import {
   LOOM_PLAYBACK_SPEEDS,
   returnToLive,
@@ -180,7 +180,7 @@ export function ThreadPlayback({
 }
 
 export function playbackFrames(messages: readonly LcmMessageV1[]): LoomPlaybackFrame[] {
-  return orderChainMessages(messages).map((message) => ({
+  return orderMessages(messages).map((message) => ({
     id: message.message_id,
     ordinal: message.ordinal,
     timestamp: message.timestamp,
