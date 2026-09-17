@@ -202,6 +202,21 @@ export function useSchedulerControl() {
  * a wire contract is what the daemon sends, and a surface that owned its own
  * copy of one would be the second authority on a shape it does not serve.
  */
+/** `JobDelivery` (jobs.rs) is `#[serde(tag = "mode")]` over `file` and
+ * `webhook`. The mode stays an open string so a delivery mode added to the
+ * daemon renders as its own word rather than failing the whole jobs read. */
+const JobDeliverySchema = z
+  .object({
+    mode: z.string(),
+    path: z.string().nullable().optional(),
+    url: z.string().nullable().optional(),
+  })
+  .passthrough();
+
+/** `AutomationJob` (jobs.rs). `schedule`, `interval_secs`, `cooldown_secs`,
+ * `skill_ids` and `pre_run_command` are `skip_serializing_if` on the struct,
+ * so their absence on the wire is the daemon saying "not set", not a
+ * truncated body. */
 const JobsPayloadSchema = z
   .object({
     jobs: z.array(
@@ -212,6 +227,12 @@ const JobsPayloadSchema = z
           schedule: z.string().nullable().optional(),
           enabled: z.boolean(),
           interval_secs: z.number().nullable().optional(),
+          cooldown_secs: z.number().nullable().optional(),
+          skill_ids: z.array(z.string()).optional(),
+          pre_run_command: z.string().nullable().optional(),
+          delivery: JobDeliverySchema.optional(),
+          created_at: z.number().optional(),
+          updated_at: z.number().optional(),
         })
         .passthrough(),
     ),
@@ -226,6 +247,17 @@ const JobsPayloadSchema = z
  * and the last of which printed an array index as if it were a skill. */
 const ManagedSkillStateSchema = z.enum(["active", "disabled", "archived"]);
 
+/** `ManagedSkillProvenance`: which authority wrote the skill. `source` is
+ * `automation_run`, `user`, or `import` today; kept open so a new source
+ * renders as its own word. */
+const ManagedSkillProvenanceSchema = z
+  .object({
+    source: z.string(),
+    actor: z.string(),
+    run_id: z.string().nullable().optional(),
+  })
+  .passthrough();
+
 const SkillsPayloadSchema = z
   .object({
     skills: z.array(
@@ -236,6 +268,11 @@ const SkillsPayloadSchema = z
               id: z.string(),
               title: z.string(),
               state: ManagedSkillStateSchema,
+              category: z.string().optional(),
+              targets: z.array(z.string()).optional(),
+              updated_at: z.number().optional(),
+              activated_at: z.number().nullable().optional(),
+              provenance: ManagedSkillProvenanceSchema.optional(),
             })
             .passthrough(),
         })
@@ -309,8 +346,10 @@ export function useAutomationFactReceipts() {
 
 /** `automation_run_api::run_list` (`/api/automation/runs`): the newest ledger
  * records, projected by `run_history_row`. Every payload key below is
- * unconditional; `model` and `error` are nullable because the writer emits
- * null when absent. */
+ * unconditional; `model`, `error`, `task_key`, `error_classification` and
+ * `error_retryable` are nullable because the writer emits null when the
+ * record never carried them. `task_key` is the exact per-job identity
+ * (`user_job:<id>`) and is the only field a user job may be joined on. */
 const RunsPayloadSchema = z
   .object({
     runs: z.array(
@@ -318,6 +357,7 @@ const RunsPayloadSchema = z
         .object({
           run_id: z.string(),
           task: z.string(),
+          task_key: z.string().nullable(),
           trigger: z.string(),
           backend: z.string(),
           model: z.string().nullable(),
@@ -327,6 +367,9 @@ const RunsPayloadSchema = z
           rejected_count: z.number(),
           skipped_count: z.number(),
           error: z.string().nullable(),
+          error_classification: z.string().nullable(),
+          error_retryable: z.boolean().nullable(),
+          backend_attempt_count: z.number().int().nonnegative(),
           started_at: z.string(),
           completed_at: z.string(),
           artifact_kinds: z.array(z.string()),
@@ -396,6 +439,24 @@ const RunArtifactPayloadSchema = z
 
 export type RunRow = z.infer<typeof RunsPayloadSchema>["runs"][number];
 export type RunsPayload = z.infer<typeof RunsPayloadSchema>;
+
+/** `AutomationTaskStatusV1.last_scheduler_run` is the most recent
+ * scheduler-triggered `AutomationRunLedgerRecord`, typed `unknown` in the
+ * generated contract because the record is the ledger's own shape rather than
+ * a dashboard DTO. This reads the identity and outcome the scheduler bay
+ * needs; the run's artifacts remain behind the run ledger and its routes. */
+export const SchedulerLastRunSchema = z
+  .object({
+    run_id: z.string(),
+    status: z.string(),
+    started_at: z.string(),
+    completed_at: z.string(),
+    error: z.string().nullable().optional(),
+    error_classification: z.string().nullable().optional(),
+    error_retryable: z.boolean().nullable().optional(),
+  })
+  .passthrough();
+export type SchedulerLastRun = z.infer<typeof SchedulerLastRunSchema>;
 export type RunArtifactsPayload = z.infer<typeof RunArtifactsPayloadSchema>;
 export type RunArtifactRow = RunArtifactsPayload["artifacts"][number];
 export type RunArtifactPayload = z.infer<typeof RunArtifactPayloadSchema>;

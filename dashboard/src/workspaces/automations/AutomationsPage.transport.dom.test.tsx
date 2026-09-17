@@ -13,13 +13,14 @@ import { AutomationsPage } from "./AutomationsPage.tsx";
  * HTTP fault injection for the Automations workspace.
  *
  * Automations is the subject for read isolation because it renders five
- * independent reads side by side, and because four of its five panels have an
+ * independent reads side by side, and because four of its five bays have an
  * empty state written in plain English — "no automation jobs defined", "no
- * managed skills", "no fact application outcomes are recorded", "no automation runs are
- * recorded". Those sentences are the exact
- * fabrication this project forbids: a queue nobody could read must never
- * present as a queue that was read and found empty. Every case below asserts
- * they are absent, not merely that some error appeared.
+ * managed skills", "no fact application outcomes are recorded", "no automation
+ * runs are recorded". Those sentences are the exact fabrication this project
+ * forbids: a queue nobody could read must never present as a queue that was
+ * read and found empty. Every case below asserts they are absent, not merely
+ * that some error appeared. The scheduler bay has no empty state; its
+ * fabrication would be a configuration reading surviving a failed read.
  */
 const server = fixtureServer();
 beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
@@ -68,10 +69,17 @@ describe("AutomationsPage under HTTP transport faults", () => {
       // Not one of the panels claims to have read an empty queue.
       for (const copy of EMPTY_COPY)
         expect(screen.queryByText(copy)).toBeNull();
-      // Scheduler receipts are not review counters; a failed read must not
-      // leave a revision/tick reading behind as if it were current.
+      // A failed scheduler read must not leave a configuration reading behind
+      // as if it were current, and the KPI bar must print dashes, not zeroes.
       expect(screen.queryByText("configuration revision")).toBeNull();
       expect(screen.queryByText("tick interval")).toBeNull();
+      expect(screen.queryByText("configured")).toBeNull();
+      const readouts = screen.getByLabelText("Ledger window tallies");
+      expect(within(readouts).getAllByText("—")).toHaveLength(6);
+      expect(within(readouts).queryByText("0")).toBeNull();
+      // The inspector stays honest too: nothing is selected and nothing is
+      // implied about the ledger.
+      expect(within(screen.getByTestId("run-inspector")).getByText("no selection")).toBeTruthy();
     },
   );
 
