@@ -205,6 +205,17 @@ export function DataRow({
 }: {
   selected?: boolean;
   onSelect?: () => void;
+  /**
+   * Hover inspects; click selects. A workspace whose inspector previews the
+   * row under the pointer (or under keyboard focus) wires it here, and the row
+   * fires it for both pointer movement over it and focus arriving so the
+   * keyboard path reaches exactly what the pointer does.
+   *
+   * Movement, not entry: a list that scrolls under a parked pointer — which is
+   * what the roving arrow keys do — synthesises enter events for whichever row
+   * slides beneath it, and those would steal inspection from the row the
+   * keyboard just focused. The browser fires no move for a scroll.
+   */
   onInspect?: () => void;
   children: ReactNode;
   className?: string;
@@ -224,7 +235,7 @@ export function DataRow({
     <button
       type="button"
       onClick={onSelect}
-      onPointerEnter={onInspect}
+      onPointerMove={onInspect}
       onFocus={onInspect}
       aria-pressed={selected ?? false}
       style={{ height: height != null ? `${height}px` : 'var(--row-height-data)' }}

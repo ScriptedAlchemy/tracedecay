@@ -12,14 +12,18 @@
  * off the screen.
  */
 import type { ReactNode } from 'react';
+import { RefreshCw } from 'lucide-react';
 
-import type {
-  DashboardEnvelopeV1,
-  MemoryReadStatusV1,
-} from '../../contracts/generated.ts';
+import type { DashboardEnvelopeV1, MemoryReadStatusV1 } from '../../contracts/generated.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
 import { cn } from '../../ui/cn';
-import { stateLampClass, type DomainStateKind } from '../../ui/StateChip.tsx';
+import {
+  authorizationState,
+  toStripCoverage,
+  toStripFreshness,
+} from '../../ui/EnvelopeTruth.tsx';
+import { EvidenceTruthStrip } from '../../ui/EvidenceTruthStrip.tsx';
+import { StateChip, stateLampClass, type DomainStateKind } from '../../ui/StateChip.tsx';
 import { knowledgeViewLabel, type KnowledgeViewKind } from './KnowledgeViews.tsx';
 
 export interface RegisterReading {
@@ -53,6 +57,9 @@ export function KnowledgeRegister({
   graph,
   status,
   camera,
+  envelope,
+  refreshing,
+  onRefresh,
 }: {
   memory: RegisterReading;
   facts: RegisterReading;
@@ -60,7 +67,17 @@ export function KnowledgeRegister({
   graph: RegisterReading;
   status: RegisterReading;
   camera: KnowledgeViewKind;
+  /** The memory overview envelope, when one was served: its coverage,
+   * freshness, authorization and refresh action ride the same row as the
+   * sub-read states, so the camera has one status word rather than two. */
+  envelope: DashboardEnvelopeV1<unknown> | null;
+  refreshing: boolean;
+  onRefresh: () => void;
 }) {
+  // The refresh control is drawn only when the server offered the action: a
+  // control the application did not offer is not a control.
+  const refresh = envelope?.legal_actions.find((action) => action.kind === 'refresh')?.operation;
+  const authorization = envelope ? authorizationState(envelope.authorization) : null;
   return (
     <div
       role="group"
@@ -73,7 +90,7 @@ export function KnowledgeRegister({
       <Cell code="03" label="Entities" reading={entities} />
       <Cell code="04" label="Graph" reading={graph} />
       <Cell code="05" label="Status" reading={status} />
-      <div className="flex min-w-0 shrink-0 items-center gap-2 border-r border-edge-subtle px-3">
+      <div className="flex min-w-0 items-center gap-2 border-r border-edge-subtle px-3">
         <span aria-hidden className="td-value text-3xs text-text-muted" data-cell="numeric">
           06
         </span>
@@ -82,7 +99,36 @@ export function KnowledgeRegister({
           {knowledgeViewLabel(camera)}
         </span>
       </div>
-      <span aria-hidden className="flex-1" />
+      {envelope ? (
+        // A full row of its own below `lg`, where wrapping it beside the cells
+        // stacked its three phrases into a narrow column; the trailing end of
+        // the same row from `lg`.
+        <div className="flex min-w-0 basis-full flex-wrap items-center gap-x-3 gap-y-1 border-t border-edge-subtle px-3 py-1 lg:flex-1 lg:basis-auto lg:justify-end lg:border-t-0">
+          {authorization ? <StateChip kind={authorization} detail="read authorization" /> : null}
+          <EvidenceTruthStrip
+            coverage={toStripCoverage(envelope.coverage)}
+            freshness={toStripFreshness(envelope.freshness)}
+            omissions={envelope.coverage.omitted ?? undefined}
+          />
+          {refresh ? (
+            <button
+              type="button"
+              className="td-hit group disabled:cursor-wait disabled:opacity-60"
+              onClick={onRefresh}
+              disabled={refreshing}
+              title={refresh}
+              data-operation={refresh}
+            >
+              <span className="inline-flex h-6 items-center gap-1.5 border border-edge-subtle bg-surface-2 px-2 text-2xs font-medium text-text-secondary group-hover:text-text-primary">
+                <RefreshCw aria-hidden size={11} className={refreshing ? 'animate-spin' : undefined} />
+                {refreshing ? 'Refreshing' : 'Refresh'}
+              </span>
+            </button>
+          ) : null}
+        </div>
+      ) : (
+        <span aria-hidden className="flex-1" />
+      )}
     </div>
   );
 }
@@ -99,7 +145,7 @@ function Cell({
   const word = reading.state.replaceAll('_', ' ');
   return (
     <div
-      className="flex min-w-0 shrink-0 items-center gap-2 border-r border-edge-subtle px-3"
+      className="flex min-w-0 max-w-full items-center gap-2 border-r border-edge-subtle px-3"
       data-register={label.toLowerCase()}
       data-register-state={reading.state}
     >
@@ -110,9 +156,12 @@ function Cell({
       <span className="flex min-w-0 items-center gap-1.5">
         <span aria-hidden className={cn('size-2 shrink-0', stateLampClass(reading.state))} />
         <Word>{word}</Word>
+        {/* The reason is withdrawn below `sm`, where a cell wide enough to
+          * hold it ran past the viewport; the state word stays, and the full
+          * reason remains on the coverage statements the camera prints. */}
         {reading.detail ? (
           <span
-            className="td-value max-w-48 truncate text-3xs normal-case text-text-muted"
+            className="td-value max-w-48 truncate text-3xs normal-case text-text-muted max-sm:hidden"
             title={reading.detail}
           >
             {reading.detail}
