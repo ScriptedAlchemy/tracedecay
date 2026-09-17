@@ -459,9 +459,11 @@ pub fn plan_chunk_increment(
 
 /// Plan an increment when unchanged file pages are Arc-shared from `prior`.
 ///
-/// Shared occurrences reuse by pointer identity (no digest clone on the match
-/// path). The reused seal is the parent full-replay attestation plus reused
-/// cardinality — parent publish already authenticated those bytes.
+/// A shared file occurrence is not a chunk proof. Each matched row is counted
+/// only after it is pointer-equal or digest-equal to the parent row. A
+/// divergent row is returned, naming that chunk id, before `reused_digest`
+/// is sealed. The seal itself stays the parent full-replay attestation plus
+/// reused cardinality.
 #[hotpath::measure(label = "code_index.build.plan_chunk_increment_arc_shared")]
 pub(crate) fn plan_chunk_increment_arc_shared(
     prior: &GenerationChunkManifestV1,
@@ -500,9 +502,18 @@ pub(crate) fn plan_chunk_increment_arc_shared(
         let matched = previous.next_if(|prior| prior.id == chunk.id);
         let shared = shared_files.contains(&chunk.anchor.file_occurrence_id);
         match matched {
+            // Shared-file membership is not the unit check. Stop at the first
+            // row whose bytes diverged so the seal is not computed on it.
+            Some(prior_chunk) if shared => {
+                if !Arc::ptr_eq(prior_chunk, chunk)
+                    && prior_chunk.content_digest != chunk.content_digest
+                {
+                    return Err(arc_share_chunk_diverged(&chunk.id));
+                }
+                reused_count = reused_count.saturating_add(1);
+            }
             Some(prior_chunk)
-                if shared
-                    || Arc::ptr_eq(prior_chunk, chunk)
+                if Arc::ptr_eq(prior_chunk, chunk)
                     || prior_chunk.content_digest == chunk.content_digest =>
             {
                 reused_count = reused_count.saturating_add(1);
@@ -563,6 +574,18 @@ pub(crate) fn plan_chunk_increment_arc_shared(
     Ok(changes)
 }
 
+fn arc_share_chunk_diverged(chunk_id: &CodeSearchChunkId) -> ChunkIncrementErrorV1 {
+    ChunkIncrementErrorV1::NonCanonical(
+        crate::noncanonical::NonCanonicalCauseV1::new(
+            crate::noncanonical::NonCanonicalReasonCodeV1::DigestMismatch,
+        )
+        .with(
+            crate::noncanonical::NonCanonicalDetailKeyV1::ChunkId,
+            chunk_id.to_string(),
+        ),
+    )
+}
+
 fn map_chunking_error(error: ChunkingFailureV1) -> ChunkIncrementErrorV1 {
     match error {
         ChunkingFailureV1::GenerationMismatch => ChunkIncrementErrorV1::MixedGeneration,
@@ -603,7 +626,9 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::Arc;
 
-    use super::{ChunkIncrementErrorV1, GenerationChunkManifestV1, plan_chunk_increment_arc_shared};
+    use super::{
+        ChunkIncrementErrorV1, GenerationChunkManifestV1, plan_chunk_increment_arc_shared,
+    };
     use crate::parallelism::{CodeIndexParallelismErrorV1, force_install_failure_for_test};
     use tracedecay_domain::{
         BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
