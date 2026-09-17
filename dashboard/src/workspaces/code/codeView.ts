@@ -14,7 +14,7 @@ export type CodeFocusState = 'absent' | 'loading' | 'available' | 'unavailable';
 export const CODE_VIEW_DEFINITIONS = {
   cortex: {
     label: 'Cortex',
-    note: 'the indexed graph as one semantic topology: hover inspects, click pins, Trace drills',
+    note: 'the indexed graph as one semantic topology · hover inspects · click pins',
     status: 'mounted',
   },
   trace: {
