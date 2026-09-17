@@ -74,12 +74,26 @@ describe('AgentsPage under HTTP transport faults', () => {
       const { container } = renderAgents();
 
       const chips = await findFaultChips(container);
-      // Every read boundary on the page reports the same wire fault; a plate
-      // rendering any other state would be inventing a reading.
+      // Every GET-fed read boundary on the page reports the same wire fault; a
+      // plate rendering any other state would be inventing a reading.
       for (const chip of chips) {
         expect(chip.getAttribute('data-state')).toBe(kind satisfies DomainStateKind);
         if (detail) expect(chip.textContent).toContain(detail);
       }
+
+      // The authority register keeps the two POST-fed authorities apart from
+      // the fault: the Work graph still answers from its fixture, and the token
+      // frontier was never asked because the failed tree named no session.
+      // Neither may borrow the GET fault, and neither may read as ready-by-
+      // default: one is the fixture's own answer, the other is `unknown`.
+      expect(authorityState('work')).not.toBe(kind);
+      // The fixture graph's runtime coverage is partial, and that is the
+      // fixture's own reading, not a fault.
+      expect(authorityState('work')).toMatch(/^(ready|complete_zero_findings|partial)$/);
+      expect(authorityState('tokens')).toBe('unknown');
+      expect(
+        container.querySelector('[data-agent-authority="tokens"]')?.textContent,
+      ).toMatch(/unasked · no session named/);
 
       // The state's own sentence (once per failed plate), and none of the
       // other failure sentences: an unreachable daemon must not read as a bad
@@ -169,14 +183,29 @@ function renderAgents() {
   );
 }
 
-/** Every plate's state chip once the fully failed page has settled: each read
- * boundary reports the fault on its own face, so there are several, and every
- * one of them is part of the page's answer. */
+/** Every GET-fed plate's state chip once the fully failed page has settled:
+ * each read boundary reports the fault on its own face, so there are several,
+ * and every one of them is part of the page's answer.
+ *
+ * The Work and token cells of the authority register are excluded on purpose:
+ * `allRoutesFail` faults GETs only, so those two POST-fed authorities are not
+ * under the fault and are asserted separately as independent readings. */
 async function findFaultChips(container: HTMLElement): Promise<Element[]> {
   await screen.findAllByText(/^(Error|Offline|Unauthorized|Denied|Unsupported schema)$/);
-  const chips = [...container.querySelectorAll('[data-state]')];
+  const chips = [...container.querySelectorAll('[data-state]')].filter(
+    (chip) => chip.closest('[data-agent-authority="work"], [data-agent-authority="tokens"]') === null,
+  );
   expect(chips.length).toBeGreaterThan(0);
   return chips;
+}
+
+/** The state the authority register reports for one authority. */
+function authorityState(id: string): string | null {
+  return (
+    document
+      .querySelector(`[data-agent-authority="${id}"]`)
+      ?.getAttribute('data-agent-authority-state') ?? null
+  );
 }
 
 /** The value printed under a readout's engraved legend, or null when that

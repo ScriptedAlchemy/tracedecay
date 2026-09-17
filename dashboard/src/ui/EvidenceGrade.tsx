@@ -157,18 +157,26 @@ export function EvidenceGrade({
   source,
   className,
 }: {
-  grade: EvidenceGradeKind;
+  grade: EvidenceGradeKind | EvidenceGrade;
   source?: string;
   className?: string;
 }) {
+  if (grade === grade.toUpperCase()) {
+    return <GradeTag grade={grade as EvidenceGrade} source={source} className={className} />;
+  }
+  const normalized = grade as EvidenceGradeKind;
   return (
     <span
-      className={cn('td-legend inline-flex flex-wrap items-center gap-1.5 whitespace-normal', INK[grade], className)}
+      className={cn(
+        'td-legend inline-flex flex-wrap items-center gap-1.5 whitespace-normal',
+        INK[normalized],
+        className,
+      )}
       data-evidence-grade={grade}
     >
-      <Glyph grade={grade} />
+      <Glyph grade={normalized} />
       {source ? <span>{source} / </span> : null}
-      <span>{LABEL[grade]}</span>
+      <span>{LABEL[normalized]}</span>
     </span>
   );
 }

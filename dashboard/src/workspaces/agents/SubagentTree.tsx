@@ -1,4 +1,5 @@
 import type { AnalyticsSubagentNodeV1, AnalyticsSubagentTreePayloadV1 } from '../../contracts/generated.ts';
+import { cn } from '../../ui/cn';
 import {
   groupSubagentTrees,
   subagentElapsedSeconds,
@@ -43,8 +44,22 @@ function LinkNote({ node }: { node: AnalyticsSubagentNodeV1 }) {
  * session omitted here would silently shrink the delegation the page is
  * reporting, and the three abnormal link kinds are exactly the ones a reader
  * needs to see, because they are where the store's picture is incomplete.
+ *
+ * With `onSelect` the tree is also the exact fallback for the topology field:
+ * every row becomes a button carrying the same selection the field shows, so a
+ * session folded out of the drawing is still one keystroke from the inspector.
  */
-export function SubagentTree({ payload }: { payload: AnalyticsSubagentTreePayloadV1 }) {
+export function SubagentTree({
+  payload,
+  selectedSessionId = null,
+  onSelect,
+}: {
+  payload: AnalyticsSubagentTreePayloadV1;
+  /** `provider:session_id` of the selected session, when the tree is
+   * synchronized with a selection. */
+  selectedSessionId?: string | null;
+  onSelect?: ((node: AnalyticsSubagentNodeV1) => void) | undefined;
+}) {
   const census = subagentTreeCensus(payload);
 
   if (census.nodes === 0) {
@@ -120,26 +135,55 @@ export function SubagentTree({ payload }: { payload: AnalyticsSubagentTreePayloa
             <ul className="flex min-w-0 flex-col gap-0.5">
               {group.nodes.map((node) => {
                 const elapsed = subagentElapsedSeconds(node);
+                const id = `${node.provider}:${node.session_id}`;
+                const selected = selectedSessionId === id;
+                const detail = (
+                  <span className="shrink-0 text-3xs text-text-muted">
+                    {node.provider}
+                    {node.descendants > 0
+                      ? ` · ${node.descendants.toLocaleString()} below`
+                      : ''}
+                    {elapsed != null ? ` · ${elapsed.toLocaleString()}s` : ' · span unrecorded'}
+                  </span>
+                );
                 return (
                   <li
-                    key={`${node.provider}:${node.session_id}`}
-                    className="flex min-w-0 flex-col"
+                    key={id}
+                    className={cn('flex min-w-0 flex-col', selected && 'bg-surface-2')}
                     style={{ paddingLeft: `${node.depth * INDENT_REM}rem` }}
                     data-subagent-node={node.session_id}
                     data-subagent-depth={node.depth}
+                    data-subagent-selected={selected ? 'true' : undefined}
                   >
-                    <span className="flex min-w-0 items-baseline gap-1.5">
-                      <span className="truncate text-2xs text-text-primary" title={node.session_id}>
-                        {subagentLabel(node)}
+                    {onSelect ? (
+                      <button
+                        type="button"
+                        onClick={() => onSelect(node)}
+                        aria-pressed={selected}
+                        className={cn(
+                          'relative flex min-h-[var(--touch-target-min)] min-w-0 items-baseline gap-1.5 pl-2 text-left hover:bg-surface-1',
+                        )}
+                      >
+                        <span
+                          aria-hidden
+                          className={cn(
+                            'absolute inset-y-0 left-0 w-[2px]',
+                            selected ? 'bg-accent' : 'bg-transparent',
+                          )}
+                        />
+                        <span className="truncate text-2xs text-text-primary" title={node.session_id}>
+                          {subagentLabel(node)}
+                        </span>
+                        {detail}
+                      </button>
+                    ) : (
+                      <span className="flex min-w-0 items-baseline gap-1.5">
+                        <span className="truncate text-2xs text-text-primary" title={node.session_id}>
+                          {subagentLabel(node)}
+                        </span>
+                        {detail}
                       </span>
-                      <span className="shrink-0 text-3xs text-text-muted">
-                        {node.provider}
-                        {node.descendants > 0
-                          ? ` · ${node.descendants.toLocaleString()} below`
-                          : ''}
-                        {elapsed != null ? ` · ${elapsed.toLocaleString()}s` : ' · span unrecorded'}
-                      </span>
-                    </span>
+                    )}
                     {node.parent_tool_use_id != null && node.link === 'linked' ? (
                       <span className="truncate text-3xs text-text-muted">
                         delegated by tool call {node.parent_tool_use_id}
