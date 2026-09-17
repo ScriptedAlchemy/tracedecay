@@ -1561,6 +1561,240 @@ function savingsPayload(): Record<string, unknown> {
   };
 }
 
+/* ==========================================================================
+ * /api/plugins/savings/models?range= (savings_api.rs::models). Consumed by
+ * CostsPage (SavingsModelsPayloadV1Schema) for provider spend attribution.
+ *
+ * The pricing classes are the point of this fixture. On a real profile the
+ * bundled table prices the Anthropic and OpenAI models exactly, leaves one
+ * Codex model slug it has never heard of unpriced, and cannot price Cursor
+ * usage at all — Cursor observations name no model. So the four providers
+ * below are one fully priced, one partially priced, one unpriced with null
+ * identity, and one priced provider that only appears in the long range,
+ * which is the combination every Costs plate has to keep apart.
+ * ========================================================================== */
+
+interface SavingsProviderSeed {
+  provider: string;
+  /** `[model, priced-per-event dollars or null, events per day]`. */
+  models: ReadonlyArray<readonly [string | null, number | null, number]>;
+  sessions: number;
+  /** First day (inclusive, counting back from today) this provider appears. */
+  firstDayBack: number;
+  /** Events with no native timestamp, attributed but not dated. */
+  undated: number;
+}
+
+const SAVINGS_PROVIDER_SEEDS: readonly SavingsProviderSeed[] = [
+  {
+    provider: 'claude',
+    models: [
+      ['claude-opus-4.6', 0.412, 148],
+      ['claude-sonnet-4.5', 0.061, 402],
+      ['claude-haiku-4.5', 0.004, 96],
+    ],
+    sessions: 1_842,
+    firstDayBack: 120,
+    undated: 0,
+  },
+  {
+    provider: 'codex',
+    models: [
+      ['gpt-5.4', 0.187, 121],
+      ['gpt-5.3-codex-high', null, 88],
+    ],
+    sessions: 731,
+    firstDayBack: 120,
+    undated: 14,
+  },
+  {
+    provider: 'cursor',
+    models: [[null, null, 260]],
+    sessions: 3_119,
+    firstDayBack: 120,
+    undated: 3_119,
+  },
+  {
+    provider: 'gemini',
+    models: [['gemini-2.5-pro', 0.094, 33]],
+    sessions: 88,
+    firstDayBack: 120,
+    undated: 0,
+  },
+];
+
+const SAVINGS_RANGE_DAYS: Readonly<Record<string, number>> = {
+  today: 1,
+  '7d': 7,
+  '30d': 30,
+  month: 30,
+  all: 120,
+};
+
+function tokenActual(events: number, seed: number) {
+  return {
+    input_tokens: events * (18_400 + seed * 37),
+    output_tokens: events * (2_150 + seed * 11),
+    cache_read_tokens: events * (91_000 + seed * 101),
+    cache_write_tokens: events * (1_200 + seed * 3),
+  };
+}
+
+/** Day-to-day variation that is deterministic in the day index. */
+function dailyWeight(dayBack: number, provider: number): number {
+  return 0.55 + ((dayBack * 7 + provider * 13) % 10) / 10;
+}
+
+function savingsModelsPayload(range: string): Record<string, unknown> {
+  const days = SAVINGS_RANGE_DAYS[range] ?? SAVINGS_RANGE_DAYS['all']!;
+  const todayStart = nowSecs - (nowSecs % DAY);
+  const since = range === 'all' ? 0 : todayStart - (days - 1) * DAY;
+  const byModel: Record<string, unknown>[] = [];
+  const byProvider: Record<string, unknown>[] = [];
+  const byProviderDay: Record<string, unknown>[] = [];
+  const dayTotals = new Map<number, { events: number; cost: number; complete: boolean; tokens: number }>();
+  let undatedTotal = 0;
+
+  SAVINGS_PROVIDER_SEEDS.forEach((seed, providerIndex) => {
+    const activeDays = Math.min(days, seed.firstDayBack);
+    let providerEvents = 0;
+    let providerPriced = 0;
+    let providerUnpriced = 0;
+    let providerCost = 0;
+    let providerTokens = 0;
+    const actual = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 };
+    const undated = range === 'all' ? seed.undated : 0;
+
+    seed.models.forEach(([model, perEvent, perDay], modelIndex) => {
+      let events = 0;
+      let cost = 0;
+      for (let dayBack = 0; dayBack < activeDays; dayBack += 1) {
+        const dayEvents = Math.round(perDay * dailyWeight(dayBack, providerIndex));
+        events += dayEvents;
+        if (perEvent !== null) cost += dayEvents * perEvent;
+      }
+      // Undated events land on the null-identity or first model row.
+      if (modelIndex === 0) events += undated;
+      const tokens = tokenActual(events, providerIndex * 4 + modelIndex);
+      actual.input_tokens += tokens.input_tokens;
+      actual.output_tokens += tokens.output_tokens;
+      actual.cache_read_tokens += tokens.cache_read_tokens;
+      actual.cache_write_tokens += tokens.cache_write_tokens;
+      providerEvents += events;
+      providerTokens += tokens.input_tokens + tokens.output_tokens;
+      if (perEvent === null) providerUnpriced += events;
+      else {
+        providerPriced += events;
+        providerCost += cost;
+      }
+      byModel.push({
+        provider: seed.provider,
+        model,
+        usage_events: events,
+        cost_usd: perEvent === null ? null : cost,
+        total_tokens: tokens.input_tokens + tokens.output_tokens,
+        cost_basis: perEvent === null ? 'provider_reported_unpriced' : 'provider_reported_priced',
+        provider_actual: tokens,
+      });
+    });
+
+    for (let dayBack = 0; dayBack < activeDays; dayBack += 1) {
+      const day = todayStart - dayBack * DAY;
+      let dayEvents = 0;
+      let dayPriced = 0;
+      let dayUnpriced = 0;
+      let dayCost = 0;
+      seed.models.forEach(([, perEvent, perDay]) => {
+        const events = Math.round(perDay * dailyWeight(dayBack, providerIndex));
+        dayEvents += events;
+        if (perEvent === null) dayUnpriced += events;
+        else {
+          dayPriced += events;
+          dayCost += events * perEvent;
+        }
+      });
+      const dayTokens = dayEvents * 20_500;
+      byProviderDay.push({
+        day,
+        provider: seed.provider,
+        usage_events: dayEvents,
+        priced_events: dayPriced,
+        unpriced_events: dayUnpriced,
+        priced_cost_usd: dayPriced > 0 ? dayCost : null,
+        total_cost_usd: dayUnpriced === 0 && dayPriced > 0 ? dayCost : null,
+        total_tokens: dayTokens,
+      });
+      const total = dayTotals.get(day) ?? { events: 0, cost: 0, complete: true, tokens: 0 };
+      total.events += dayEvents;
+      total.cost += dayCost;
+      total.tokens += dayTokens;
+      if (dayUnpriced > 0) total.complete = false;
+      dayTotals.set(day, total);
+    }
+
+    undatedTotal += undated;
+    const pricing =
+      providerUnpriced === 0 && providerEvents > 0
+        ? 'priced'
+        : providerPriced > 0
+          ? 'partial'
+          : 'unpriced';
+    byProvider.push({
+      provider: seed.provider,
+      pricing,
+      usage_events: providerEvents,
+      priced_events: providerPriced,
+      unpriced_events: providerUnpriced,
+      unknown_model_events: seed.models.some(([model]) => model === null) ? providerEvents : 0,
+      undated_events: undated,
+      models: seed.models.length,
+      priced_models: seed.models.filter(([, perEvent]) => perEvent !== null).length,
+      unpriced_models: seed.models.filter(([, perEvent]) => perEvent === null).length,
+      sessions: seed.sessions,
+      priced_cost_usd: providerPriced > 0 ? providerCost : null,
+      total_cost_usd: pricing === 'priced' ? providerCost : null,
+      total_tokens: providerTokens,
+      provider_actual: actual,
+    });
+  });
+
+  byProviderDay.sort((a, b) =>
+    (a['day'] as number) - (b['day'] as number) ||
+    String(a['provider']).localeCompare(String(b['provider'])),
+  );
+
+  return {
+    available: true,
+    status: null,
+    error: null,
+    range,
+    since,
+    // The content-side aggregates are the Sessions workspace's concern; the
+    // Costs plates read the provider-usage block, so the fixture keeps these
+    // present and shaped but does not elaborate them.
+    models: [],
+    daily: [],
+    provider_usage_coverage: 'complete',
+    provider_usage: {
+      available: true,
+      pricing_revision: 'sha256:fixture-pricing',
+      undated_events: undatedTotal,
+      by_model: byModel,
+      by_day: [...dayTotals.entries()]
+        .sort(([a], [b]) => a - b)
+        .map(([day, total]) => ({
+          day,
+          usage_events: total.events,
+          cost_usd: total.complete ? total.cost : null,
+          total_tokens: total.tokens,
+          provider_actual: null,
+        })),
+      by_provider: byProvider,
+      by_provider_day: byProviderDay,
+    },
+  };
+}
+
 /** The canonical Costs projection embedded by `savings_api::overview`.
  * Savings and exact project provider usage come from separate retained stores;
  * the composite read reuses one provider aggregate for every sibling panel. */
@@ -3476,6 +3710,9 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   // Savings. `sessions` is the Loom weave's thread source, not a costs route.
   '/api/plugins/savings/overview': envelope(savingsPayload()),
   '/api/plugins/savings/sessions': loomSessionsPayload(),
+  // The bare-path entry is the parse gate's; `resolveFixture` answers the
+  // route itself range-by-range above.
+  '/api/plugins/savings/models': savingsModelsPayload('all'),
   // Canonical memory status (memory_api.rs::status) — the scoped Brain's fact and
   // entity readouts. Distinct from the overview payload above.
   '/api/plugins/holographic/status': envelope(memoryStatusPayload()),
@@ -4682,6 +4919,11 @@ export function resolveFixture(pathname: string, search = ''): unknown {
   if (pathname === '/api/plugins/graph/subgraph') {
     const nodeId = new URLSearchParams(search).get('node_id');
     return envelope(subgraphPayload(nodeId));
+  }
+  // Range-keyed: the daemon attributes the requested window, so the fixture
+  // does too, or the range control would appear to do nothing.
+  if (pathname === '/api/plugins/savings/models') {
+    return savingsModelsPayload(new URLSearchParams(search).get('range') ?? 'all');
   }
   // Must also precede the prefix sweep: the family read is keyed by match class
   // and cursor, and each class is a separate digest group on the wire.

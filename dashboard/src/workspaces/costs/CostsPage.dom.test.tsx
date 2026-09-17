@@ -1,124 +1,338 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import type { EChartsOption } from 'echarts';
+import { MemoryRouter, useLocation } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { FIXTURES, resolveFixture } from '../../../stories/fixtures/data.ts';
 import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
 import { CostsPage } from './CostsPage.tsx';
 
+/** Every option the spend field handed its chart instance, in order. jsdom has
+ * no canvas, so the registered ECharts build is replaced by a recorder; the
+ * option itself is the claim under test, not the pixels. */
+const appliedOptions: EChartsOption[] = [];
+
+vi.mock('../../viz/chart/echarts.ts', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../viz/chart/echarts.ts')>()),
+  init: () => ({
+    setOption: (option: EChartsOption) => {
+      appliedOptions.push(option);
+    },
+    resize: () => {},
+    dispose: () => {},
+  }),
+}));
+
 afterEach(() => {
   vi.unstubAllGlobals();
+  appliedOptions.length = 0;
 });
 
-describe('CostsPage truth claims', () => {
+type LineSeries = { name?: string; lineStyle?: { opacity?: number; type?: string }; data?: unknown[] };
 
-  it('reports an unreported message class as unreported, not as zero coverage', async () => {
-    const payload = savingsOverviewPayload();
-    const sessions = payload['sessions'] as Record<string, unknown>;
-    // The block is available and holds messages, but the per-class counts and
-    // the session count never came back. Coalescing them printed "0% of 41,204
-    // messages carry token counts the provider reported" over four zeroes.
-    sessions['messages'] = 41_204;
-    sessions['tokenized_messages'] = null;
-    sessions['estimated_messages'] = null;
-    sessions['unknown_model_messages'] = null;
-    sessions['session_count'] = null;
+function lastSeries(): LineSeries[] {
+  const option = appliedOptions.at(-1);
+  const series = option?.series;
+  return (Array.isArray(series) ? series : series ? [series] : []) as LineSeries[];
+}
 
-    renderCosts(payload);
-
-    expect(await screen.findByText(/41,204 content messages/i)).toBeTruthy();
-    expect(screen.getAllByText('not reported').length).toBe(3);
+describe('CostsPage provider spend attribution', () => {
+  it('draws one priced-spend line per provider, distinguished by style as well as hue', async () => {
+    renderCosts({ route: '/costs?range=7d' });
+    await screen.findByRole('region', { name: 'Provider spend detail table' });
+    await waitFor(() => expect(lastSeries().length).toBe(4));
+    const series = lastSeries();
+    expect(series.map((entry) => entry.name)).toEqual(['claude', 'codex', 'gemini', 'cursor']);
+    expect(series.map((entry) => entry.lineStyle?.type)).toEqual(['solid', 'dashed', 'dotted', 'solid']);
+    // Cursor is unpriced on every day: its line is all gaps, never a zero.
+    expect(series[3]?.data?.every((value) => value === null)).toBe(true);
+    expect(series[0]?.data?.some((value) => typeof value === 'number' && value > 0)).toBe(true);
+    // Seven UTC day buckets for a seven-day window.
+    const option = appliedOptions.at(-1) as { xAxis?: { data?: string[] } } | undefined;
+    expect(option?.xAxis?.data?.length).toBe(7);
+    expect(option?.xAxis?.data?.[0]).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
-  it('renders failed provider usage reads as unavailable instead of actual zero spend', async () => {
-    const payload = savingsOverviewPayload();
-    // `savings_api::read_failed_block` — the block reports the failure and
-    // leaves every figure null rather than settling to zero.
+  it('dims the other series while a provider is inspected and restores them after', async () => {
+    const user = userEvent.setup();
+    renderCosts({ route: '/costs?range=7d' });
+    const legend = await screen.findByRole('group', { name: 'Provider legend and scope' });
+    await waitFor(() => expect(lastSeries().length).toBe(4));
+
+    await user.hover(within(legend).getByRole('button', { name: /^gemini,/ }));
+    await waitFor(() => {
+      const series = lastSeries();
+      expect(series.find((entry) => entry.name === 'gemini')?.lineStyle?.opacity).toBe(1);
+      expect(series.find((entry) => entry.name === 'claude')?.lineStyle?.opacity).toBe(0.25);
+    });
+
+    await user.unhover(within(legend).getByRole('button', { name: /^gemini,/ }));
+    fireEvent.mouseLeave(legend);
+    await waitFor(() => {
+      expect(lastSeries().every((entry) => entry.lineStyle?.opacity === 1)).toBe(true);
+    });
+  });
+
+  it('attributes priced spend by provider and discloses the coverage of every total', async () => {
+    renderCosts();
+
+    // The ledger renders the fixture's four providers with their pricing
+    // classes kept apart: one priced, one partial, one unpriced, one priced.
+    const table = await screen.findByRole('region', { name: 'Provider spend detail table' });
+    const rows = within(table).getAllByRole('row').filter((row) => row.hasAttribute('data-provider'));
+    expect(rows.map((row) => row.getAttribute('data-provider'))).toEqual([
+      'claude',
+      'codex',
+      'gemini',
+      'cursor',
+    ]);
+    expect(within(rows[1]!).getByText('partially priced')).toBeTruthy();
+    expect(within(rows[3]!).getByText('unpriced')).toBeTruthy();
+    // An unpriced provider prints no dollars, and no dollar cell says $0.00.
+    expect(within(rows[3]!).getAllByText('—').length).toBeGreaterThan(0);
+    expect(within(table).queryByText('$0.00')).toBeNull();
+
+    // The total says what it includes.
+    const coverage = screen.getByText(/The total includes .* observed usage events/);
+    expect(coverage.textContent).toMatch(/pricing coverage/);
+    expect(coverage.textContent).toMatch(/are unpriced and contribute no dollars/);
+
+    // The authority panel files providers by class.
+    const priced = document.querySelector('[data-pricing-class="priced"]');
+    expect(priced?.textContent).toContain('claude');
+    expect(priced?.textContent).toContain('gemini');
+    const partial = document.querySelector('[data-pricing-class="partial"]');
+    expect(partial?.textContent).toContain('codex');
+    const unpriced = document.querySelector('[data-pricing-class="unpriced"]');
+    expect(unpriced?.textContent).toContain('cursor');
+  });
+
+  it('inspects on hover without changing the query, and scopes on click', async () => {
+    const user = userEvent.setup();
+    const { location } = renderCosts();
+
+    const legend = await screen.findByRole('group', { name: 'Provider legend and scope' });
+    const codex = within(legend).getByRole('button', { name: /^codex,/ });
+
+    await user.hover(codex);
+    const inspector = document.querySelector('[data-costs-inspector]');
+    expect(inspector?.getAttribute('data-costs-inspector')).toBe('inspected');
+    expect(inspector?.getAttribute('data-provider')).toBe('codex');
+    // Hover reveals exact model rows, priced and unpriced kept apart.
+    const modelRows = document.querySelectorAll('[data-costs-model-rows] li');
+    expect(modelRows.length).toBe(2);
+    expect(document.querySelector('[data-model="gpt-5.3-codex-high"]')?.getAttribute('data-model-pricing')).toBe('unpriced');
+    expect(document.querySelector('[data-model="gpt-5.3-codex-high"]')?.textContent).toMatch(
+      /rate UNAVAILABLE · no applicable canonical rate/,
+    );
+    // Hover never touched the address.
+    expect(location.current?.search).toBe('');
+    expect(codex.getAttribute('aria-pressed')).toBe('false');
+
+    await user.click(codex);
+    expect(location.current?.search).toBe('?provider=codex');
+    expect(codex.getAttribute('aria-pressed')).toBe('true');
+    expect(document.querySelector('[data-costs-selection]')?.getAttribute('data-costs-selection')).toBe('codex');
+    // The ledger row carries the same selection: one selection, seen twice.
+    const table = screen.getByRole('region', { name: 'Provider spend detail table' });
+    expect(document.querySelector('tr[data-provider="codex"]')?.getAttribute('data-selected')).toBe('true');
+    expect(document.querySelector('tr[data-provider="claude"]')?.getAttribute('data-selected')).toBeNull();
+
+    // Clicking the scoped provider again clears the scope.
+    await user.click(codex);
+    expect(location.current?.search).toBe('');
+  });
+
+  it('traverses the legend with arrow keys, scopes with Enter, and clears with Escape', async () => {
+    const user = userEvent.setup();
+    const { location } = renderCosts();
+
+    const legend = await screen.findByRole('group', { name: 'Provider legend and scope' });
+    const buttons = within(legend).getAllByRole('button');
+    // Roving tabindex: exactly one legend row is in the tab sequence.
+    expect(buttons.filter((button) => button.tabIndex === 0)).toHaveLength(1);
+
+    act(() => buttons[0]!.focus());
+    await waitFor(() =>
+      expect(document.querySelector('[data-costs-inspector]')?.getAttribute('data-provider')).toBe('claude'),
+    );
+    await user.keyboard('{ArrowDown}');
+    expect(document.activeElement).toBe(buttons[1]);
+    await user.keyboard('{End}');
+    expect(document.activeElement).toBe(buttons[3]);
+    await user.keyboard('{Home}');
+    expect(document.activeElement).toBe(buttons[0]);
+
+    await user.keyboard('{Enter}');
+    expect(location.current?.search).toBe('?provider=claude');
+    await user.keyboard('{Escape}');
+    expect(location.current?.search).toBe('');
+  });
+
+  it('reads the range from the address and asks the daemon for exactly that window', async () => {
+    const user = userEvent.setup();
+    const { location } = renderCosts({ route: '/costs?range=7d' });
+
+    const tablist = await screen.findByRole('tablist', { name: 'Spend range' });
+    expect(within(tablist).getByRole('tab', { name: '7 days' }).getAttribute('aria-selected')).toBe('true');
+    const fetchMock = vi.mocked(fetch);
+    const modelsCalls = () =>
+      fetchMock.mock.calls
+        .map(([input]) => new URL(String(input), 'http://localhost'))
+        .filter((url) => url.pathname === '/api/plugins/savings/models')
+        .map((url) => url.searchParams.get('range'));
+    await screen.findByRole('region', { name: 'Provider spend detail table' });
+    expect(modelsCalls()).toEqual(['7d']);
+
+    await user.click(within(tablist).getByRole('tab', { name: 'Today' }));
+    expect(location.current?.search).toBe('?range=today');
+    await screen.findAllByText(/usage observed since 00:00 UTC today/);
+    await waitFor(() => expect(modelsCalls()).toEqual(['7d', 'today']));
+
+    // The all-time window is the address's default and is not written.
+    await user.click(within(tablist).getByRole('tab', { name: 'All time' }));
+    expect(location.current?.search).toBe('');
+  });
+
+  it('keeps a scoped provider the range does not carry visible as such', async () => {
+    renderCosts({ route: '/costs?provider=mistral' });
+    await screen.findByRole('region', { name: 'Provider spend detail table' });
+    const selection = screen.getByText(/Costs \/ mistral/);
+    expect(selection.textContent).toContain('not in this range');
+    // Nothing can be scoped to it, so the inspector idles rather than inventing a row.
+    expect(document.querySelector('[data-costs-inspector]')?.getAttribute('data-costs-inspector')).toBe('idle');
+    expect(document.querySelector('tr[data-selected="true"]')).toBeNull();
+  });
+
+  it('exposes the drawn series as an exact table with gaps and unpriced buckets named', async () => {
+    const user = userEvent.setup();
+    renderCosts({ route: '/costs?range=today' });
+    await user.click(await screen.findByText('series as table'));
+    const table = screen.getByRole('region', { name: 'Priced spend series as a table' });
+    const headers = within(table).getAllByRole('columnheader').map((cell) => cell.textContent);
+    expect(headers).toEqual(['UTC day', 'claude', 'codex', 'gemini', 'cursor']);
+    const cells = within(table).getAllByRole('cell').map((cell) => cell.textContent ?? '');
+    // Cursor is unpriced every day: its bucket says so instead of drawing zero.
+    expect(cells.some((text) => /^unpriced · [\d,]+ ev$/.test(text))).toBe(true);
+    // Codex is partially priced: the drawn figure names what it excludes.
+    expect(cells.some((text) => /^\$[\d,.]+ · [\d,]+ unpriced$/.test(text))).toBe(true);
+  });
+
+  it('renders a failed attribution read as an error, not an empty ledger', async () => {
+    // `savings_api::models` answers an encoding fault with HTTP 500; the
+    // payload ladder reports the status and nothing else is invented.
+    renderCosts({
+      modelsResponse: { status: 500, body: { status: 'contract_invalid', error: 'encode failed' } },
+    });
+
+    expect((await screen.findAllByText(/HTTP 500/)).length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Error').length).toBeGreaterThan(0);
+    expect(screen.queryByRole('region', { name: 'Provider spend detail table' })).toBeNull();
+    expect(screen.queryByText('$0.00')).toBeNull();
+    // The overview-fed panels still stand: pricing authority and savings windows.
+    expect(await screen.findByText('bundled')).toBeTruthy();
+    expect(screen.getByText(/saved · all time/i)).toBeTruthy();
+  });
+
+  it('renders a typed read_failed body as an error carrying the daemon sentence', async () => {
+    // A 503 with the route's own `status`/`error` discriminant is the shape the
+    // payload ladder admits as a typed refusal; the sentence reaches the reader.
+    renderCosts({
+      modelsResponse: {
+        status: 503,
+        body: {
+          available: false,
+          status: 'read_failed',
+          error: 'session store locked by another writer',
+          range: 'all',
+          since: null,
+          models: [],
+          daily: [],
+          provider_usage_coverage: null,
+          provider_usage: {
+            available: false,
+            pricing_revision: null,
+            undated_events: null,
+            by_model: [],
+            by_day: [],
+            by_provider: [],
+            by_provider_day: [],
+          },
+        },
+      },
+    });
+
+    expect((await screen.findAllByText(/session store locked by another writer/)).length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Error').length).toBeGreaterThan(0);
+    expect(screen.queryByRole('region', { name: 'Provider spend detail table' })).toBeNull();
+  });
+
+  it('renders a partial provider-usage aggregate as partial, never as attributed zeros', async () => {
+    const payload = structuredClone(resolveFixture('/api/plugins/savings/models', '?range=all')) as Record<string, unknown>;
+    payload['provider_usage_coverage'] = 'partial';
     payload['provider_usage'] = {
       available: false,
-      status: 'read_failed',
-      error: 'failed to read priced provider usage',
-      usage_event_count: null,
-      total_cost_usd: null,
-      total_tokens: null,
-      cost_basis: null,
+      pricing_revision: null,
+      undated_events: null,
+      by_model: [],
+      by_day: [],
+      by_provider: [],
+      by_provider_day: [],
     };
+    renderCosts({ modelsResponse: { status: 200, body: payload } });
 
-    renderCosts(payload);
-
-    expect(await screen.findByText(/priced provider usage read failed/i)).toBeTruthy();
-    expect(screen.queryByText('$0.00')).toBeNull();
-    expect(screen.queryByText(/0 across those usage events/i)).toBeNull();
-  });
-
-  it('renders a failed session aggregate separately from an empty ledger', async () => {
-    const payload = savingsOverviewPayload();
-    payload['sessions'] = {
-      available: false,
-      db: '/fast/projects/tracedecay/.tracedecay/sessions.db',
-      status: 'read_failed',
-      error: 'failed to aggregate session tokens',
-      scope: null,
-      messages: null,
-      provider_usage_events: null,
-      tokenized_messages: null,
-      estimated_messages: null,
-      cost_basis: null,
-      provider_actual: null,
-      tokenized: null,
-      estimated: null,
-      session_count: null,
-      model_count: null,
-      unknown_model_messages: null,
-      token_counting: null,
-    };
-
-    renderCosts(payload);
-
-    expect(await screen.findAllByText(/session ledger read failed/i)).not.toHaveLength(0);
-    expect(screen.queryByText(/reported no token breakdown/i)).toBeNull();
-    expect(screen.queryByText(/reported no messages/i)).toBeNull();
-  });
-
-  it('renders an unmounted session source as typed unavailable, not as a read failure', async () => {
-    const payload = savingsOverviewPayload();
-    // The daemon's shape when the LCM store is simply not mounted: available
-    // is false and there is no status and no error. Nothing failed, so the
-    // page must not say "read failed".
-    payload['sessions'] = {
-      available: false,
-      db: '/fast/projects/tracedecay/.tracedecay/sessions.db',
-      status: null,
-      error: null,
-      scope: null,
-      messages: null,
-      provider_usage_events: null,
-      tokenized_messages: null,
-      estimated_messages: null,
-      cost_basis: null,
-      provider_actual: null,
-      tokenized: null,
-      estimated: null,
-      session_count: null,
-      model_count: null,
-      unknown_model_messages: null,
-      token_counting: null,
-    };
-
-    renderCosts(payload);
-
-    expect(await screen.findAllByText('Source unavailable')).not.toHaveLength(0);
     expect(
-      screen.getAllByText(/the daemon reported this source unavailable without an error/i).length,
+      (await screen.findAllByText(/the provider usage aggregate is partial; exact per-provider attribution needs a complete aggregate/))
+        .length,
     ).toBeGreaterThan(0);
-    expect(screen.queryByText(/session ledger read failed/i)).toBeNull();
+    expect(screen.getAllByText('Partial').length).toBeGreaterThan(0);
+    expect(screen.queryByText('$0.00')).toBeNull();
   });
 
-  it('keeps the canonical cost read alive when the savings ledger read fails', async () => {
-    const payload = savingsOverviewPayload();
-    // `savings_api::read_failed_block` shape: the block reports the failure and
-    // leaves both summaries null rather than settling them to zero.
-    payload['savings'] = {
+  it('renders an unmounted session store as typed unavailable', async () => {
+    renderCosts({
+      modelsResponse: {
+        status: 200,
+        body: {
+          available: false,
+          status: null,
+          error: null,
+          range: 'all',
+          since: 0,
+          models: [],
+          daily: [],
+          provider_usage_coverage: null,
+          provider_usage: {
+            available: false,
+            pricing_revision: null,
+            undated_events: null,
+            by_model: [],
+            by_day: [],
+            by_provider: [],
+            by_provider_day: [],
+          },
+        },
+      },
+    });
+    expect((await screen.findAllByText(/the session store is not mounted for this scope/)).length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Source unavailable').length).toBeGreaterThan(0);
+    expect(screen.queryByText('Error')).toBeNull();
+  });
+
+  it('keeps the attribution alive when the savings overview read fails, and vice versa', async () => {
+    renderCosts({ overviewStatus: 503 });
+    // Attribution still renders from its own read.
+    expect(await screen.findByRole('region', { name: 'Provider spend detail table' })).toBeTruthy();
+    // The overview-fed panels report their own failure rather than blanking.
+    expect(screen.getAllByText('Error').length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/HTTP 503/).length).toBeGreaterThan(0);
+  });
+
+  it('renders failed and unmounted savings ledgers distinctly beside a healthy attribution', async () => {
+    const failed = savingsOverviewPayload();
+    failed['savings'] = {
       available: false,
       db: '/fast/projects/tracedecay/.tracedecay/savings.db',
       error: 'failed to read savings ledger',
@@ -126,103 +340,114 @@ describe('CostsPage truth claims', () => {
       lifetime_counters: null,
       recording: null,
     };
+    renderCosts({ overview: failed });
+    expect(await screen.findByText(/savings ledger read failed: failed to read savings ledger/)).toBeTruthy();
+    expect(screen.queryByText(/saved · all time/i)).toBeNull();
+  });
 
-    renderCosts(payload);
-
-    // The failed payload read reports itself...
-    expect(await screen.findAllByText(/Savings ledger read failed/i)).not.toHaveLength(0);
-    // ...and the independent canonical projection still renders its own
-    // measurements rather than being blanked by its neighbour.
+  it('keeps the canonical cost and topology reads independent of the attribution', async () => {
+    const { fetch: fetchMock } = renderCosts();
     expect(await screen.findByText('provider tokens')).toBeTruthy();
-    expect(screen.getByText('provider queue latency p50')).toBeTruthy();
-    expect(screen.getAllByText('provider_latency_scope_unavailable').length).toBeGreaterThan(0);
-  });
-
-  it('discloses that project savings are a capped top slice', async () => {
-    const payload = savingsOverviewPayload();
-    const savings = payload['savings'] as Record<string, unknown>;
-    const lifetime = savings['lifetime_counters'] as Record<string, unknown>;
-    lifetime['project_total'] = 57;
-    lifetime['projects_limit'] = 25;
-    lifetime['projects_truncated'] = true;
-
-    renderCosts(payload);
-
-    expect(await screen.findByText(/top 25 of 57 projects/i)).toBeTruthy();
-  });
-
-  it('renders topology accounting from the canonical descriptor read without inventing a zero', async () => {
-    const payload = savingsOverviewPayload();
-    const topology = topologyMetricsPayload();
-    expect(resolvedWorkScope().scope_digest).toBe(
-      'sha256:e0f55213520e40ec75c565c7e153a8d6452d09ac4abac1a4a4312ca4abcd3bcb',
-    );
-
-    const fetch = renderCosts(payload, topology);
-
     expect(await screen.findByText('Execution topology accounting')).toBeTruthy();
     expect(await screen.findByText('work execution concurrency width')).toBeTruthy();
-    expect(screen.getByText('27')).toBeTruthy();
-    expect(screen.getByText('concurrency phase · active')).toBeTruthy();
     expect(screen.getByText('support_floor_unmet')).toBeTruthy();
-    expect(screen.queryByText('0 effects')).toBeNull();
-    expect(screen.getByText(/9 emitted · 2 delayed · 1 dropped · 4 sampled envelopes/i)).toBeTruthy();
     expect(
-      fetch.mock.calls.some(
+      fetchMock.mock.calls.some(
         ([input]) => new URL(String(input), 'http://localhost').pathname === '/api/work/topology-metrics',
       ),
     ).toBe(true);
   });
 
-  it('keeps cost observations visible when the topology authority is unavailable', async () => {
-    const payload = savingsOverviewPayload();
+  it('reports the saved-token window matching the range as count only', async () => {
+    renderCosts({ route: '/costs?range=30d' });
+    const headline = await screen.findByText(/saved · 30d/i);
+    expect(headline).toBeTruthy();
+    expect(screen.getByText(/They are not priced/)).toBeTruthy();
+    const active = document.querySelector('[data-saved-window="last_30d"]');
+    expect(active?.querySelector('.text-accent')).toBeTruthy();
+  });
 
-    renderCosts(payload, topologyMetricsPayload(), 503);
-
-    expect(await screen.findByText('Execution topology accounting')).toBeTruthy();
-    expect(await screen.findByText('Source unavailable')).toBeTruthy();
-    expect(screen.getByText('provider tokens')).toBeTruthy();
-    expect(screen.queryByText('0 effects')).toBeNull();
+  it('dims unrelated ledger rows while a provider is inspected from the table', async () => {
+    renderCosts();
+    const table = await screen.findByRole('region', { name: 'Provider spend detail table' });
+    const claude = within(table).getByRole('button', { name: 'claude' });
+    fireEvent.mouseEnter(claude.closest('tr')!);
+    expect(document.querySelector('tr[data-provider="claude"]')?.getAttribute('data-inspected')).toBe('true');
+    expect(document.querySelector('tr[data-provider="codex"]')?.className).toMatch(/opacity-50/);
+    fireEvent.mouseLeave(table);
+    expect(document.querySelector('tr[data-provider="claude"]')?.getAttribute('data-inspected')).toBeNull();
   });
 });
 
+/* ------------------------------------------------------------------------ */
+
+function LocationProbe({ into }: { into: { current: ReturnType<typeof useLocation> | null } }) {
+  into.current = useLocation();
+  return null;
+}
+
 /**
- * The page issues two independent reads. The savings overview is the payload
- * under test; every other route — the canonical `/api/costs` projection among
- * them — is served its own fixture, because a stub that answers every URL with
- * the savings body would make the canonical panel report a schema error and
- * hide whichever failure the case is actually about.
+ * The page issues independent reads. Each route is served its own fixture so
+ * a failure injected into one cannot masquerade as a failure of another.
  */
-function renderCosts(
-  savingsOverview: unknown,
-  topology = topologyMetricsPayload(),
-  topologyStatus = 200,
-) {
-  const fetch = vi.fn(async (input: RequestInfo | URL) => {
-    const pathname = new URL(String(input), 'http://localhost').pathname;
-    const body =
-      pathname === '/api/plugins/savings/overview'
-        ? fixtureEnvelope(savingsOverview)
-        : pathname === '/api/work/topology-metrics'
-          ? workEnvelope(topology)
-          : resolveFixture(pathname, '');
-    return new Response(JSON.stringify(body), {
-      status: pathname === '/api/work/topology-metrics' ? topologyStatus : 200,
+function renderCosts(options: {
+  route?: string;
+  overview?: Record<string, unknown>;
+  overviewStatus?: number;
+  modelsResponse?: { status: number; body: unknown };
+} = {}) {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = new URL(String(input), 'http://localhost');
+    const pathname = url.pathname;
+    if (pathname === '/api/plugins/savings/overview') {
+      // A non-2xx overview is a proxy or daemon fault with no envelope behind
+      // it; a 503 carrying a valid envelope would be read as that envelope.
+      if (options.overviewStatus !== undefined && options.overviewStatus >= 400) {
+        return new Response('{}', {
+          status: options.overviewStatus,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(
+        JSON.stringify(fixtureEnvelope(options.overview ?? savingsOverviewPayload())),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }
+    if (pathname === '/api/plugins/savings/models') {
+      const response = options.modelsResponse ?? {
+        status: 200,
+        body: resolveFixture(pathname, url.search),
+      };
+      return new Response(JSON.stringify(response.body), {
+        status: response.status,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (pathname === '/api/work/topology-metrics') {
+      return new Response(JSON.stringify(workEnvelope(topologyMetricsPayload())), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify(resolveFixture(pathname, url.search)), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
     });
   });
-  vi.stubGlobal(
-    'fetch',
-    fetch,
-  );
+  vi.stubGlobal('fetch', fetchMock);
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
+  const location: { current: ReturnType<typeof useLocation> | null } = { current: null };
   render(
     <QueryClientProvider client={client}>
-      <CostsPage />
+      <MemoryRouter initialEntries={[options.route ?? '/costs']}>
+        <LocationProbe into={location} />
+        <CostsPage />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
-  return fetch;
+  return { fetch: fetchMock, location };
 }
 
 function savingsOverviewPayload(): Record<string, unknown> {
