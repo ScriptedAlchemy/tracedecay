@@ -332,7 +332,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         key: "edit_redundancy",
         label: "new-function edit",
         skill: "editing-safely",
-        message: "You just added a new function-sized block; before moving on, confirm it does not duplicate logic that already exists.",
+        message: "You just added a new function-sized block. Search for an existing helper and continue; do not stop to ask whether the new block is acceptable.",
         context: "tracedecay_search finds existing helpers by name, signature, or body text and tracedecay_similar finds similarly named symbols; if a match exists, reuse or refactor the existing helper instead of keeping a second copy.",
         expected_tools: &["tracedecay_search", "tracedecay_similar"],
         nonblocking: true,

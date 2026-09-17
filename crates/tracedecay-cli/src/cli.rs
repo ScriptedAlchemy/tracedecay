@@ -342,6 +342,11 @@ pub enum Commands {
         /// (only used with --agent codex).
         #[arg(long)]
         automation: bool,
+        /// Install the global git post-commit hook that runs `tracedecay sync`.
+        /// Explicit because setting `core.hooksPath` can redirect every
+        /// repository away from `.git/hooks`. Never prompts.
+        #[arg(long)]
+        git_hook: bool,
     },
     /// Refresh settings for all already-installed agents
     #[command(long_about = REINSTALL_LONG_ABOUT, after_help = REINSTALL_AFTER_HELP)]
