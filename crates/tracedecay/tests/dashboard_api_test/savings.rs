@@ -627,7 +627,42 @@ fn daily_model_series_limits_days_not_model_rows() {
             "row limit included an older day outside the 366-day window: {daily:?}"
         );
 
+        // No observation projection checkpoint exists, so the attribution
+        // block is typed unavailable: every grouping is present and empty,
+        // and nothing is priced or counted in its place.
         assert_eq!(models["provider_usage"]["available"], false);
+        assert_eq!(
+            models["provider_usage"]["by_provider"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            models["provider_usage"]["by_provider_day"],
+            serde_json::json!([])
+        );
+        assert!(models["provider_usage"]["pricing_revision"].is_null());
+        assert!(models["provider_usage"]["undated_events"].is_null());
+
+        // A window this route does not serve is a request fault with the
+        // typed empty body, never a ledger of zeros.
+        let (status, refused) = get_json(
+            &http_agent(),
+            &format!(
+                "{}/api/plugins/savings/models?range=fortnight",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 400);
+        assert_eq!(refused["available"], false);
+        assert_eq!(refused["status"], "read_failed");
+        assert_eq!(refused["range"], "fortnight");
+        assert_eq!(refused["models"], serde_json::json!([]));
+        assert_eq!(refused["provider_usage"]["available"], false);
+        assert!(
+            refused["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("fortnight")),
+            "refusal names the rejected range: {refused}"
+        );
     });
 }
 
