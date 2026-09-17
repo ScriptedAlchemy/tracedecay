@@ -1262,6 +1262,7 @@ fn symbol_page<T: Serialize>(
         && let Ok(envelope) = &mut result
         && let ApplicationOutcome::Evidence(packet) = &mut envelope.outcome
     {
+        // Unsupported coverage is one capability omission, not an estimate of missing symbols.
         packet.omissions.push(Omission {
             domain,
             count: 1,

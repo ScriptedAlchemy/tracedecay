@@ -217,6 +217,27 @@ fn catalog_without_receiver_coverage_is_refused() {
 }
 
 #[test]
+fn catalog_with_reversed_receiver_span_is_refused() {
+    let mut artifact: serde_json::Value =
+        serde_json::from_slice(&encoded_fixture_artifact()).unwrap();
+    let source = artifact["symbols"][0]["occurrence"].clone();
+    artifact["symbols"][0]["unresolved_calls"] = serde_json::json!([{
+        "from_occurrence": source,
+        "reference_name": "receiver.run",
+        "kind": "calls",
+        "evidence_span": { "start_byte": 5, "end_byte": 1 }
+    }]);
+    let store = store_for(production_manifest());
+    assert!(matches!(
+        store.install_interactive_catalog_artifact(
+            &serde_json::to_vec(&artifact).unwrap(),
+            request()
+        ),
+        Err(CodeGraphProjectionError::Corrupt(_)),
+    ));
+}
+
+#[test]
 fn artifact_for_a_foreign_generation_is_a_typed_mismatch() {
     let bytes = encoded_fixture_artifact();
     let foreign = code_graph_generation_id(

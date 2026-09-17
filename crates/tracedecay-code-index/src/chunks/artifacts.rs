@@ -159,6 +159,11 @@ pub struct CodeIndexUnresolvedReferenceV1 {
 
 impl CodeIndexUnresolvedReferenceV1 {
     pub(crate) fn validate(&self) -> Result<(), ChunkingFailureV1> {
+        self.evidence_span.validate().map_err(|error| {
+            ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(
+                error,
+            ))
+        })?;
         self.from_occurrence.validate().map_err(|error| {
             ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(
                 error,

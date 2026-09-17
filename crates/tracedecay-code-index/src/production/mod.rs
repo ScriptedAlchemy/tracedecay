@@ -110,8 +110,8 @@ pub use sealed_codec::{
 /// semantic evaluation fixtures. Historical revisions remain decodable but
 /// must never be emitted as current activation evidence.
 ///
-/// `v5` retains unresolved Rust receiver-call sites and binds typed receiver
-/// reference spans to the observed method token.
+/// `v5` retains unresolved Rust receiver-call sites and binds receiver
+/// reference names and spans to the parser-observed member token.
 pub const DAEMON_CODE_INDEX_CHUNKER_REVISION: &str = "chunker.daemon.v5";
 
 /// Immutable configuration retained by one production index owner.

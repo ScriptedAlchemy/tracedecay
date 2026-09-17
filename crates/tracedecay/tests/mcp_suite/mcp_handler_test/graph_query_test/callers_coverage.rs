@@ -16,6 +16,9 @@ async fn callers_report_unsupported_temporary_receivers_without_inventing_edges(
             "pub struct WalkBuilder;\nimpl WalkBuilder {\n\
              pub fn build(&self) {}\n\
              pub fn finish(&self) {}\n\
+             pub fn spaced(&self) {}\n\
+             pub fn commented(&self) {}\n\
+             pub fn receiver_only(&self) {}\n\
              pub fn bound(&self) {}\n\
              pub fn read(&self) {}\n\
              pub fn shadowed(&self) {}\n\
@@ -32,6 +35,9 @@ async fn callers_report_unsupported_temporary_receivers_without_inventing_edges(
              pub fn second(args: &Args) -> Result<(), ()> { args.walk_builder()?.build(); Ok(()) }\n\
              pub fn third(args: &Args) -> Result<(), ()> { args.walk_builder()?.build(); Ok(()) }\n\
              pub fn unbound(args: &Args) -> Result<(), ()> { args.walk_builder()?.finish(); Ok(()) }\n\
+             pub fn spaced(args: &Args) -> Result<(), ()> { args.walk_builder()?.\n spaced(); Ok(()) }\n\
+             pub fn commented(args: &Args) -> Result<(), ()> { args.walk_builder()?. /* comment */ commented(); Ok(()) }\n\
+             pub fn collision(receiver_only: &Args) -> Result<(), ()> { receiver_only.walk_builder()?. /* decoy.unused */ spaced(); Ok(()) }\n\
              pub fn nested(builder: &WalkBuilder) { builder.repeat().repeat(); }\n\
              pub fn shadowed() {}\n\
              pub fn unproven(args: &Args) -> Result<(), ()> { args.walk_builder()?.shadowed(); Ok(()) }\n\
@@ -43,6 +49,9 @@ async fn callers_report_unsupported_temporary_receivers_without_inventing_edges(
 
     for (method, expected_completeness, expected_names) in [
         ("unused", "complete", Vec::new()),
+        ("receiver_only", "complete", Vec::new()),
+        ("spaced", "partial", Vec::new()),
+        ("commented", "partial", Vec::new()),
         ("read", "complete", vec!["known"]),
         ("bound", "partial", vec!["known"]),
         ("repeat", "partial", vec!["nested"]),
@@ -134,11 +143,16 @@ async fn callers_report_unsupported_temporary_receivers_without_inventing_edges(
         );
         let omissions = evidence["omissions"].as_array().unwrap();
         if expected_completeness == "partial" {
-            assert!(
-                omissions.iter().any(|omission| {
-                    omission["reason"] == "unsupported" && omission["count"] == 1
-                }),
-                "unsupported method resolution must be disclosed: {payload:#}"
+            // Three build sites still describe one unsupported capability,
+            // not a claim about the number of missing caller symbols.
+            assert_eq!(
+                omissions
+                    .iter()
+                    .filter(|omission| omission["reason"] == "unsupported")
+                    .map(|omission| omission["count"].as_u64().unwrap())
+                    .collect::<Vec<_>>(),
+                vec![1],
+                "unsupported resolution capability must be disclosed once: {payload:#}"
             );
         } else {
             assert!(

@@ -2156,6 +2156,25 @@ fn reference_evidence_span(
     let line_start = offsets.get(reference.line as usize).copied()?;
     let site_start = usize::try_from(line_start.checked_add(u64::from(reference.column))?).ok()?;
     let source_at_site = source.get(site_start..)?;
+    // Typed receiver references name `Type::method`, while the source spells
+    // `receiver.method`. Both forms must identify the parser-observed method
+    // token so a sealed edge can discharge the same site's limitation.
+    let rust_call =
+        reference.reference_kind == EdgeKind::Calls && reference.file_path.ends_with(".rs");
+    let reference_name = if rust_call
+        && (reference.reference_name.contains('.')
+            || !source_at_site.starts_with(&reference.reference_name))
+    {
+        reference.reference_name.rsplit(['.', ':']).next()?
+    } else {
+        &reference.reference_name
+    };
+    if rust_call && source_at_site.starts_with(reference_name) {
+        return Some(SourceSpan {
+            start_byte: u64::try_from(site_start).ok()?,
+            end_byte: u64::try_from(site_start.checked_add(reference_name.len())?).ok()?,
+        });
+    }
     references_by_site
         .get(&(
             reference.from_node_id.as_str(),
@@ -4515,6 +4534,31 @@ pub fn real_symbol() {}
             assert_eq!(
                 &source[span.start_byte as usize..span.end_byte as usize],
                 "repeat"
+            );
+        }
+    }
+
+    #[test]
+    fn rust_receiver_member_identity_survives_trivia() {
+        for source in [
+            "fn caller(args: &Args) { args.walk_builder()?.\n build(); }\n",
+            "fn caller(args: &Args) { args.walk_builder()?. /* comment */ build(); }\n",
+            "fn caller(args: &Args) { args.walk_builder()?. /* decoy.unused */ build::<u8>(); }\n",
+        ] {
+            let file = validated_file("src/lib.rs", source.as_bytes());
+            let batch = batch_for(&file, ParseOutcomeV1::Complete);
+            let artifacts = chunker()
+                .index_file(&file, &batch, &rust_descriptor(), &NeverCancelled)
+                .expect("real Rust extraction");
+            let member = artifacts
+                .unresolved_references
+                .iter()
+                .find(|reference| reference.reference_name.ends_with(".build"))
+                .expect("parser-observed member identity");
+            assert_eq!(
+                &source[member.evidence_span.start_byte as usize
+                    ..member.evidence_span.end_byte as usize],
+                "build"
             );
         }
     }
