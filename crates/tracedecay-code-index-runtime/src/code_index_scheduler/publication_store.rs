@@ -9,7 +9,6 @@ use std::{
         Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
-    time::SystemTime,
 };
 
 use same_file::Handle;
@@ -418,10 +417,11 @@ impl HeldActiveDecodeV1 {
     }
 }
 
-/// Last validated publication pointer, reused when the on-disk file is unchanged.
+/// Last validated publication pointer, reused when the on-disk bytes are the
+/// same. Content digest is the identity: a same-size rewrite inside one
+/// timestamp tick is a different pointer, and treating mtime as unchanged
+/// would refuse a rebuild of the pointer the caller actually observed.
 struct PublicationPointerMemoV1 {
-    mtime: Option<SystemTime>,
-    size: u64,
     digest: String,
     pointer: DurablePublicationPointerV1,
 }
@@ -1084,33 +1084,16 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "durable code-generation index exceeds its byte bound",
             ));
         }
-        let mtime = metadata.modified().ok();
-        let size = metadata.len();
+        let bytes = std::fs::read(&self.active_path).map_err(Self::unavailable)?;
+        let digest = Self::state_digest(&bytes);
         {
             let memo = self
                 .pointer_memo
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             if let Some(memo) = memo.as_ref()
-                && memo.size == size
-                && memo.mtime.is_some()
-                && memo.mtime == mtime
-            {
-                return Ok(Some(memo.pointer.clone()));
-            }
-        }
-        let bytes = std::fs::read(&self.active_path).map_err(Self::unavailable)?;
-        let digest = Self::state_digest(&bytes);
-        {
-            let mut memo = self
-                .pointer_memo
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            if let Some(memo) = memo.as_mut()
                 && memo.digest == digest
             {
-                memo.mtime = mtime;
-                memo.size = size;
                 return Ok(Some(memo.pointer.clone()));
             }
         }
@@ -1231,8 +1214,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .pointer_memo
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(PublicationPointerMemoV1 {
-            mtime,
-            size,
             digest,
             pointer: pointer.clone(),
         });
@@ -1240,22 +1221,17 @@ impl DaemonCodeIndexPublicationStoreV1 {
     }
 
     fn remember_publication_pointer(&self, pointer: &DurablePublicationPointerV1, bytes: &[u8]) {
-        let metadata = match std::fs::metadata(&self.active_path) {
-            Ok(metadata) => metadata,
-            Err(_) => {
-                *self
-                    .pointer_memo
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner) = None;
-                return;
-            }
-        };
+        if std::fs::metadata(&self.active_path).is_err() {
+            *self
+                .pointer_memo
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = None;
+            return;
+        }
         *self
             .pointer_memo
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(PublicationPointerMemoV1 {
-            mtime: metadata.modified().ok(),
-            size: metadata.len(),
             digest: Self::state_digest(bytes),
             pointer: pointer.clone(),
         });
