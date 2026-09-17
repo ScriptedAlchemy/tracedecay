@@ -602,7 +602,7 @@ export function GraphCanvas({
  * atmospheric graph field: the aperture treatment is what a rendered field
  * looks like, and lending it to a failure is exactly the kind of beautiful
  * smoothing-over that would make a failure look like data. */
-function GraphUnavailable({ children }: { children: ReactNode }) {
+export function GraphUnavailable({ children }: { children: ReactNode }) {
   return (
     <div
       data-state="unavailable"

@@ -215,15 +215,17 @@ export function columnIndexFor(lastSeenAt: number, nowSeconds: number): number {
  * line, which is comfortably less than half the gap, so a body can never be
  * mistaken for a member of the column next door. */
 const COLUMN_HALF_WIDTH = 0.42;
-const MASS_AXIS_HEIGHT = 2.9;
+/** Exported with `bodyRadius` because the scene model draws the mass axis and
+ * the body crowns in these same units; a second copy of either would drift. */
+export const MASS_AXIS_HEIGHT = 2.9;
 /** Step size for the sideways nudges that keep bodies off each other. */
 const NUDGE = 0.06;
 /** A body's drawn radius in field units, so the clearance test knows how much
- * room each one actually takes. The canvas sizes bodies by the square root of
+ * room each one actually takes. The scene sizes bodies by the square root of
  * mass, and this mirrors that curve — otherwise the two heaviest projects in a
- * column, which are also the two largest discs, are the pair most likely to be
+ * column, which are also the two largest crowns, are the pair most likely to be
  * left overlapping by a clearance tuned for the small ones. */
-function bodyRadius(mass: number, ceiling: number): number {
+export function bodyRadius(mass: number, ceiling: number): number {
   return 0.09 + 0.15 * Math.sqrt(mass / Math.max(ceiling, 1));
 }
 
