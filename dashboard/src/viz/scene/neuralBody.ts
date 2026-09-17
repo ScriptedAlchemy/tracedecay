@@ -26,7 +26,7 @@ export interface NeuralBodySpec {
 export interface NeuralBodyGeometry {
   /** Dust particle count. */
   readonly count: number;
-  /** xyz per dust particle, body-local. */
+  /** xyz per dust particle, body-local; z is always 0 (depth is softening). */
   readonly positions: Float32Array;
   /** Resting alpha per dust particle, 0..1. */
   readonly alphas: Float32Array;
@@ -116,8 +116,7 @@ export function buildNeuralBody(spec: NeuralBodySpec): NeuralBodyGeometry {
     if (cursor >= count) return;
     positions[cursor * 3] = x;
     positions[cursor * 3 + 1] = y;
-    // A hair of z jitter so additive overlap never z-fights into banding.
-    positions[cursor * 3 + 2] = (random() - 0.5) * 0.002;
+    positions[cursor * 3 + 2] = 0;
     alphas[cursor] = Math.min(1, alpha * depthAlpha);
     sizes[cursor] = size * depthSize;
     cursor += 1;

@@ -32,6 +32,7 @@ import {
   OrthographicCamera,
   Points,
   RGBAFormat,
+  SRGBColorSpace,
   Scene,
   ShaderMaterial,
   UnsignedByteType,
@@ -61,10 +62,12 @@ import {
   clampZoom,
   fitBounds,
   panBy,
+  unproject,
   zoomAbout,
   type CameraState,
   type Viewport,
 } from './sceneCamera.ts';
+import { bodyState, channelByte, wantsNextFrame } from './sceneState.ts';
 
 export interface SceneView {
   readonly camera: CameraState;
@@ -109,7 +112,6 @@ export interface RegistryRuntime {
   dispose(): void;
 }
 
-const DEPTH_Z = [0, -0.4, -0.8] as const;
 const CAMERA_PAD_PX = 34;
 const HOP_PULSE_PERIOD_MS = 1100;
 
@@ -376,8 +378,11 @@ export function createRegistryRuntime(options: RegistryRuntimeOptions): Registry
       ? unit(colors.label)
       : unit(cssColorToRgb(kindColor(body.hueKey, colors.light)));
 
+  // Depth is carried by the body geometry (thinner, softer dust one layer
+  // back), not by z: the scene is additive with depth testing off, so z would
+  // change nothing.
+  const z = 0;
   bodies.forEach((body, position) => {
-    const z = DEPTH_Z[Math.max(0, Math.min(2, body.depth))]!;
     const hue = hueOf(body);
     const center: readonly [number, number] = [body.x, body.y];
     const dustStart = dustBatch.bodies.length;
@@ -386,7 +391,7 @@ export function createRegistryRuntime(options: RegistryRuntimeOptions): Registry
     if (body.kind === 'repository') {
       // A hub is an identity mark, never a holding: a bright core, a soft
       // halo and a thin ring at a fixed categorical size.
-      glowBatch.push(position, center, 0, 0, z + 0.02, hue, 0.95, body.radius * 1.5);
+      glowBatch.push(position, center, 0, 0, z, hue, 0.95, body.radius * 1.5);
       glowBatch.push(position, center, 0, 0, z, hue, 0.26, body.radius * 7);
       const ring = 40;
       const ringRadius = body.radius * 2.1;
@@ -404,7 +409,7 @@ export function createRegistryRuntime(options: RegistryRuntimeOptions): Registry
           center,
           geometry.positions[particle * 3]!,
           geometry.positions[particle * 3 + 1]!,
-          z + geometry.positions[particle * 3 + 2]!,
+          z,
           hue,
           geometry.alphas[particle]!,
           geometry.sizes[particle]!,
@@ -416,7 +421,7 @@ export function createRegistryRuntime(options: RegistryRuntimeOptions): Registry
           center,
           geometry.glows[anchor * 4]!,
           geometry.glows[anchor * 4 + 1]!,
-          z - 0.01,
+          z,
           hue,
           geometry.glows[anchor * 4 + 3]!,
           geometry.glows[anchor * 4 + 2]!,
@@ -424,8 +429,8 @@ export function createRegistryRuntime(options: RegistryRuntimeOptions): Registry
       }
       // Two flare sprites, dark at rest: a tight one over the crown and a
       // wide, faint one that reads in peripheral vision.
-      glowBatch.push(position, center, 0, body.radius * 0.18, z + 0.03, hue, 0.9, body.radius * 1.6, 1);
-      glowBatch.push(position, center, 0, body.radius * 0.18, z + 0.03, hue, 0.35, body.radius * 3.6, 1);
+      glowBatch.push(position, center, 0, body.radius * 0.18, z, hue, 0.9, body.radius * 1.6, 1);
+      glowBatch.push(position, center, 0, body.radius * 0.18, z, hue, 0.35, body.radius * 3.6, 1);
       for (let segment = 0; segment < geometry.filamentSegments; segment += 1) {
         lineBatch.push(position, center, geometry.filaments[segment * 4]!, geometry.filaments[segment * 4 + 1]!, z, hue, 0.2);
         lineBatch.push(position, center, geometry.filaments[segment * 4 + 2]!, geometry.filaments[segment * 4 + 3]!, z, hue, 0.2);
@@ -475,8 +480,8 @@ export function createRegistryRuntime(options: RegistryRuntimeOptions): Registry
       for (let step = 0; step < points.length - 1; step += 1) {
         const a = points[step]!;
         const b = points[step + 1]!;
-        attribute.setXYZ(vertex, a[0], a[1], -0.05);
-        attribute.setXYZ(vertex + 1, b[0], b[1], -0.05);
+        attribute.setXYZ(vertex, a[0], a[1], 0);
+        attribute.setXYZ(vertex + 1, b[0], b[1], 0);
         vertex += 2;
       }
     }
@@ -488,9 +493,9 @@ export function createRegistryRuntime(options: RegistryRuntimeOptions): Registry
   const pulseCount = Math.max(1, model.paths.length);
   const pulseBatch = new Batch();
   for (const path of model.paths) {
-    pulseBatch.push(index.get(path.from) ?? 0, [0, 0], 0, 0, 0.08, unit(colors.alert), 0, 0.05);
+    pulseBatch.push(index.get(path.from) ?? 0, [0, 0], 0, 0, 0, unit(colors.alert), 0, 0.05);
   }
-  if (model.paths.length === 0) pulseBatch.push(0, [0, 0], 0, 0, 0.08, unit(colors.alert), 0, 0.05);
+  if (model.paths.length === 0) pulseBatch.push(0, [0, 0], 0, 0, 0, unit(colors.alert), 0, 0.05);
   const pulseGeometry = pulseBatch.geometry(true);
   const pulses = new Points(pulseGeometry, dustMaterial);
   pulses.frustumCulled = false;
@@ -553,17 +558,18 @@ export function createRegistryRuntime(options: RegistryRuntimeOptions): Registry
   const writeState = (): void => {
     const shown = focus.shown;
     bodies.forEach((body, position) => {
-      const heat = Math.min(1, field.heatOf(body.id));
-      const inFocus = shown === null || focusNeighborhood?.has(body.id) === true;
-      // Only enough to establish focus; unrelated bodies stay legible.
-      const focusDim = inFocus ? 0 : focus.t * 0.62;
-      const emphasisDim = emphasis !== null && !emphasis.has(body.id) ? 0.78 : 0;
-      const dim = Math.min(1, Math.max(focusDim, emphasisDim));
-      const raise = body.id === shown ? focus.t : 0;
-      state.data[position * 4] = Math.round(heat * 255);
-      state.data[position * 4 + 1] = Math.round(dim * 255);
-      state.data[position * 4 + 2] = Math.round(raise * 255);
-      state.data[position * 4 + 3] = Math.round(Math.max(0, Math.min(1, body.vitality)) * 255);
+      const channels = bodyState({
+        heat: field.heatOf(body.id),
+        vitality: body.vitality,
+        inFocusNeighborhood: shown === null ? null : focusNeighborhood?.has(body.id) === true,
+        focusT: focus.t,
+        shown: body.id === shown,
+        outsideEmphasis: emphasis === null ? null : !emphasis.has(body.id),
+      });
+      state.data[position * 4] = channelByte(channels.heat);
+      state.data[position * 4 + 1] = channelByte(channels.dim);
+      state.data[position * 4 + 2] = channelByte(channels.raise);
+      state.data[position * 4 + 3] = channelByte(channels.vitality);
     });
     state.texture.needsUpdate = true;
   };
@@ -577,11 +583,13 @@ export function createRegistryRuntime(options: RegistryRuntimeOptions): Registry
     }
     halo.visible = true;
     const radius = body.kind === 'repository' ? body.radius * 3 : body.radius * 1.12;
-    halo.position.set(body.x * spread, body.y - (body.kind === 'repository' ? 0 : body.radius * 0.05), 0.1);
+    halo.position.set(body.x * spread, body.y - (body.kind === 'repository' ? 0 : body.radius * 0.05), 0);
     halo.scale.set(radius, radius * 0.92, 1);
     haloMaterial.opacity = 0.85 * focus.t;
     const [hr, hg, hb] = unit(colors.hot);
-    haloMaterial.color.setRGB(hr, hg, hb);
+    // The shader uniforms are raw sRGB; say so here too, or three would treat
+    // the ring as linear and output-encode it lighter than the dust it rings.
+    haloMaterial.color.setRGB(hr, hg, hb, SRGBColorSpace);
   };
 
   const writePulses = (now: number): void => {
@@ -606,7 +614,7 @@ export function createRegistryRuntime(options: RegistryRuntimeOptions): Registry
       const local = walked - span;
       const a = points[span]!;
       const b = points[span + 1]!;
-      position.setXYZ(at, a[0] + (b[0] - a[0]) * local, a[1] + (b[1] - a[1]) * local, 0.08);
+      position.setXYZ(at, a[0] + (b[0] - a[0]) * local, a[1] + (b[1] - a[1]) * local, 0);
       alpha.setX(at, 0.95 * Math.min(1, travel * 2));
       size.setX(at, 0.05 + 0.07 * travel);
     });
@@ -660,9 +668,11 @@ export function createRegistryRuntime(options: RegistryRuntimeOptions): Registry
       publish();
     }
     compose(now);
-    const keepGoing = alive && (warm || !focusSettled || cameraMoving);
-    if (keepGoing && !isReduced()) raf = requestAnimationFrame(step);
-    else lastFrame = 0;
+    if (alive && wantsNextFrame({ warm, focusSettled, cameraMoving, reduced: isReduced() })) {
+      raf = requestAnimationFrame(step);
+    } else {
+      lastFrame = 0;
+    }
   };
 
   const settle = (): void => {
@@ -764,10 +774,11 @@ export function createRegistryRuntime(options: RegistryRuntimeOptions): Registry
         layoutPaths(spread);
       }
       const nextFit = fitBounds(worldExtent, viewport, CAMERA_PAD_PX);
-      // A resize while the reader was looking at the whole field keeps
-      // showing the whole field; a zoomed camera holds its world centre.
+      // A resize while the reader was looking at a fitted view (the whole
+      // field, or a focused repository) keeps that view fitted; a camera the
+      // reader zoomed or panned holds its world centre.
       fit = nextFit;
-      if (atFit || emphasis !== null) {
+      if (atFit) {
         cam = emphasis === null ? nextFit : emphasisCamera(emphasis) ?? nextFit;
         cameraTarget = null;
       } else {
@@ -791,12 +802,12 @@ export function createRegistryRuntime(options: RegistryRuntimeOptions): Registry
     emphasize: (ids) => {
       if (!alive) return;
       emphasis = ids;
+      // Either view starts fitted: the whole field, or the focused members.
+      atFit = true;
       if (ids === null) {
-        atFit = true;
         moveCamera(fit, true);
         return;
       }
-      atFit = false;
       const target = emphasisCamera(ids);
       if (target) moveCamera(target, true);
       else wake();
@@ -823,10 +834,7 @@ export function createRegistryRuntime(options: RegistryRuntimeOptions): Registry
     },
     view: currentView,
     pick: (px, py) => {
-      const halfW = (viewport.width * cam.scale) / 2;
-      const halfH = (viewport.height * cam.scale) / 2;
-      const x = cam.cx - halfW + px * cam.scale;
-      const y = cam.cy + halfH - py * cam.scale;
+      const { x, y } = unproject(cam, viewport, px, py);
       return pickBody(model, x, y, spread);
     },
     wake,
@@ -851,6 +859,11 @@ export function createRegistryRuntime(options: RegistryRuntimeOptions): Registry
       for (const material of [dustMaterial, lineMaterial, pathMaterial, haloMaterial]) material.dispose();
       state.texture.dispose();
       renderer.dispose();
+      // `dispose` frees GPU objects but keeps the context alive on a canvas
+      // nobody will draw to again; browsers evict the oldest live contexts by
+      // firing `webglcontextlost` on them, which would read as a real loss on
+      // whichever field is current. Release it deliberately instead.
+      renderer.forceContextLoss();
       canvas.remove();
     },
   };
