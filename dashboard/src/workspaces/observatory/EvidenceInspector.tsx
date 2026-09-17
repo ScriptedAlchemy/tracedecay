@@ -82,6 +82,7 @@ export function EvidenceInspector({
   refreshing,
   onRefresh,
   onClearFinding,
+  className,
 }: {
   summary: EvidenceSummary | null;
   mode: InspectorMode;
@@ -90,6 +91,7 @@ export function EvidenceInspector({
   refreshing: boolean;
   onRefresh: () => void;
   onClearFinding: () => void;
+  className?: string;
 }) {
   return (
     <aside
@@ -97,7 +99,7 @@ export function EvidenceInspector({
       aria-label="Evidence inspector"
       data-inspector-mode={mode}
       data-inspector-source={summary?.id ?? 'none'}
-      className="relative flex min-h-0 flex-col border border-edge-subtle bg-surface-1"
+      className={cn('relative flex min-h-0 flex-col border border-edge-subtle bg-surface-1', className)}
     >
       <Corners tone={mode === 'selected' ? 'signal' : 'edge'} />
       <header className="flex h-8 shrink-0 items-center gap-2 border-b border-edge-subtle px-2.5">

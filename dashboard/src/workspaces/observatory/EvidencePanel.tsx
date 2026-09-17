@@ -167,16 +167,15 @@ export function EvidencePanel({
         </button>
         <span aria-hidden className="td-rule" />
         <EvidenceChip state={summary.state} />
-        <span className="td-legend shrink-0 max-sm:hidden" data-evidence-coverage>
-          {coverageLegend(summary)}
-        </span>
       </header>
       <div className="relative min-w-0 flex-1 p-2.5">{children}</div>
       <footer className="flex shrink-0 items-center justify-between gap-2 border-t border-edge-subtle px-2.5 py-1">
         <span className="td-legend truncate" data-evidence-as-of>
           {asOfLegend(summary)}
         </span>
-        <span className="td-legend truncate max-sm:hidden">{summary.route}</span>
+        <span className="td-legend shrink-0" data-evidence-coverage>
+          {coverageLegend(summary)}
+        </span>
       </footer>
     </section>
   );

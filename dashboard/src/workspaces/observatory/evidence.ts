@@ -203,13 +203,13 @@ export const SOURCE_IDENTITY: Record<EvidenceSourceId, SourceIdentity> = {
   },
   hooks: {
     id: 'hooks',
-    title: 'Hook hints / rejected arguments',
+    title: 'Hook hints · rejections',
     route: '/api/plugins/analytics/hints',
     authority: 'typed hint summary over durable analytics events; rejected arguments from the canonical read model',
   },
   budgets: {
     id: 'budgets',
-    title: 'Performance budgets / comparisons',
+    title: 'Performance budgets',
     route: '/api/observatory',
     authority: 'canonical performance budgets and the comparison disposition',
   },
@@ -404,10 +404,7 @@ function envelopeSummary<T>(
   const fromEnvelope: EvidenceSummary = {
     ...base,
     state: grade,
-    stateDetail:
-      evidenceStateLabel(grade) === envelope.domain_state.replaceAll('_', ' ')
-        ? null
-        : envelope.domain_state.replaceAll('_', ' '),
+    stateDetail: gradeDetail(grade, envelope.domain_state),
     coverage: {
       completeness: envelope.coverage.completeness,
       examined: envelope.coverage.examined,
@@ -441,7 +438,27 @@ function envelopeSummary<T>(
   return { ...fromEnvelope, ...refine(envelope.payload, envelope) };
 }
 
-const NEVER_REFINE = () => ({});
+/** The daemon's word rides beside the grade only where the grade is coarser
+ * than the wire — a served grade already says everything its wire state does,
+ * while a refusal or absence has several causes worth naming. */
+function gradeDetail(grade: EvidenceState, wire: DashboardDomainStateV1): string | null {
+  switch (grade) {
+    case 'measured':
+    case 'empty':
+    case 'partial':
+    case 'stale':
+    case 'loading':
+    case 'building':
+      return null;
+    case 'restricted':
+    case 'denied':
+    case 'failed':
+    case 'unavailable':
+      return wire.replaceAll('_', ' ');
+    default:
+      return assertNever(grade);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Per-source summaries
@@ -766,14 +783,25 @@ export interface TimelineMark {
   title: string;
   state: EvidenceState;
   observedAtMicros: number;
-  /** 0–1 along the rail; `null` when the rail has no extent to place it on. */
-  position: number | null;
-  /** Rows a mark is pushed down to when another mark sits on the same pixel. */
-  lane: number;
+  /** 0–1 along the rail. */
+  position: number;
+}
+
+/** Marks too close on the rail to be told apart by a pointer. A cluster is
+ * drawn once, states its exact count, and opens into its members; it never
+ * summarises their states into one. */
+export interface TimelineCluster {
+  key: string;
+  /** 0–1 along the rail: the position of the cluster's newest member. */
+  position: number;
+  marks: readonly TimelineMark[];
+  oldestMicros: number;
+  newestMicros: number;
 }
 
 export interface TimelineModel {
   marks: readonly TimelineMark[];
+  clusters: readonly TimelineCluster[];
   /** Sources whose authority published no observation time. Typed absence,
    * not a mark at zero. */
   unplaced: readonly { id: EvidenceSourceId; title: string; state: EvidenceState }[];
@@ -785,12 +813,18 @@ export interface TimelineModel {
  * Where each authority's observation lands on one shared time rail. The rail
  * runs from the oldest published observation to the newest; there is no
  * clock in this model, so `NOW` on the rail means "newest read", never wall
- * time. Marks within `laneEpsilon` of each other stack into lanes so a
- * dozen reads taken in the same second stay individually selectable.
+ * time.
+ *
+ * Most authorities stamp their observation at request time, so a page's reads
+ * usually land within milliseconds of one another — one pixel on a rail that
+ * spans hours. Marks closer than `clusterEpsilon` (a fraction of the rail,
+ * chosen by the caller from the rail's measured width and the minimum hit
+ * target) therefore fold into one cluster that opens into its members, so
+ * every read stays individually selectable without hit areas overlapping.
  */
 export function timelineModel(
   summaries: readonly EvidenceSummary[],
-  laneEpsilon = 0.02,
+  clusterEpsilon = 0.04,
 ): TimelineModel {
   const placed = summaries.filter(
     (summary): summary is EvidenceSummary & { observedAtMicros: number } =>
@@ -799,27 +833,41 @@ export function timelineModel(
   const unplaced = summaries
     .filter((summary) => summary.observedAtMicros == null)
     .map((summary) => ({ id: summary.id, title: summary.title, state: summary.state }));
-  if (placed.length === 0) return { marks: [], unplaced, extent: null };
+  if (placed.length === 0) return { marks: [], clusters: [], unplaced, extent: null };
   const oldest = Math.min(...placed.map((summary) => summary.observedAtMicros));
   const newest = Math.max(...placed.map((summary) => summary.observedAtMicros));
   const span = newest - oldest;
-  const sorted = [...placed].sort((left, right) => left.observedAtMicros - right.observedAtMicros);
-  const marks: TimelineMark[] = [];
-  for (const summary of sorted) {
-    const position = span === 0 ? 1 : (summary.observedAtMicros - oldest) / span;
-    const crowded = marks.filter(
-      (mark) => mark.position != null && Math.abs(mark.position - position) < laneEpsilon,
-    );
-    marks.push({
+  const marks: TimelineMark[] = [...placed]
+    .sort((left, right) => left.observedAtMicros - right.observedAtMicros)
+    .map((summary) => ({
       id: summary.id,
       title: summary.title,
       state: summary.state,
       observedAtMicros: summary.observedAtMicros,
-      position,
-      lane: crowded.length,
-    });
+      position: span === 0 ? 1 : (summary.observedAtMicros - oldest) / span,
+    }));
+  const clusters: TimelineCluster[] = [];
+  for (const mark of marks) {
+    const open = clusters.at(-1);
+    const first = open?.marks[0];
+    if (open && first && mark.position - first.position < clusterEpsilon) {
+      clusters[clusters.length - 1] = {
+        ...open,
+        position: mark.position,
+        marks: [...open.marks, mark],
+        newestMicros: mark.observedAtMicros,
+      };
+    } else {
+      clusters.push({
+        key: mark.id,
+        position: mark.position,
+        marks: [mark],
+        oldestMicros: mark.observedAtMicros,
+        newestMicros: mark.observedAtMicros,
+      });
+    }
   }
-  return { marks, unplaced, extent: { oldestMicros: oldest, newestMicros: newest } };
+  return { marks, clusters, unplaced, extent: { oldestMicros: oldest, newestMicros: newest } };
 }
 
 /** A relative label for a tick, measured back from the newest read. */

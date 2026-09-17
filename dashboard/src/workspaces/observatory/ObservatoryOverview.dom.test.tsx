@@ -77,8 +77,15 @@ describe('Observatory system evidence overview', () => {
 
     // Four authorities answered with an observation time — the unavailable
     // hint source included, since its envelope still says when the daemon
-    // looked — and each is a mark in its own state. The failed reads have no
-    // time and are listed as absences instead of being placed.
+    // looked. jsdom gives the rail no width, so all four fold into one cluster
+    // that states its count; opening it lists each read in its own state. The
+    // failed reads have no time and are listed as absences instead of placed.
+    const timeline = screen.getByLabelText('Canonical observations timeline');
+    expect(timeline.getAttribute('data-timeline-marks')).toBe('4');
+    const cluster = timeline.querySelector<HTMLElement>('[data-timeline-cluster]');
+    expect(cluster?.getAttribute('data-timeline-cluster-size')).toBe('4');
+    expect(cluster?.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(cluster!);
     const marks = Array.from(document.querySelectorAll('[data-timeline-mark]'));
     expect(marks.map((mark) => mark.getAttribute('data-timeline-mark')).sort()).toEqual(
       ['findings', 'hooks', 'pipeline', 'telemetry'],
@@ -188,8 +195,9 @@ describe('Observatory system evidence overview', () => {
   it('selects a source from its timeline mark', async () => {
     stubRoutes(mixedRoutes());
     renderObservatory('/observatory');
-    await waitFor(() => expect(document.querySelector('[data-timeline-mark="pipeline"]')).toBeTruthy());
+    await waitFor(() => expect(document.querySelector('[data-timeline-cluster]')).toBeTruthy());
 
+    fireEvent.click(document.querySelector('[data-timeline-cluster]')!);
     fireEvent.click(document.querySelector('[data-timeline-mark="pipeline"]')!);
     expect(location()).toContain('inspect=pipeline');
     expect(await screen.findByLabelText('Exact evidence · Code-index pipeline')).toBeTruthy();
