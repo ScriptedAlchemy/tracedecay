@@ -14,28 +14,36 @@ pub(super) fn parse_git_read_surface_request(
     operation: ApplicationSurfaceOperation,
     value: Value,
 ) -> Result<GitReadSurfaceRequest, ApplicationSurfaceAdapterError> {
-    let object = value
-        .as_object()
-        .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
+    let object = value.as_object().ok_or_else(|| {
+        ApplicationSurfaceAdapterError::invalid_request("request must be an object")
+    })?;
     let bounded_u64 = |name: &str, default: u64, maximum: u64| match object.get(name) {
         None => Ok(default),
         Some(value) => value
             .as_u64()
             .filter(|value| (1..=maximum).contains(value))
-            .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+            .ok_or_else(|| {
+                ApplicationSurfaceAdapterError::invalid_request(format!(
+                    "`{name}` must be an integer between 1 and {maximum}"
+                ))
+            }),
     };
     let boolean = |name: &str, default: bool| match object.get(name) {
         None => Ok(default),
-        Some(value) => value
-            .as_bool()
-            .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        Some(value) => value.as_bool().ok_or_else(|| {
+            ApplicationSurfaceAdapterError::invalid_request(format!("`{name}` must be a boolean"))
+        }),
     };
     let optional_string = |name: &str| match object.get(name) {
         None => Ok(None),
         Some(value) => value
             .as_str()
             .map(|value| Some(value.to_owned()))
-            .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+            .ok_or_else(|| {
+                ApplicationSurfaceAdapterError::invalid_request(format!(
+                    "`{name}` must be a string"
+                ))
+            }),
     };
     let max_entries = bounded_u64(
         "max_entries",
@@ -53,13 +61,17 @@ pub(super) fn parse_git_read_surface_request(
             .and_then(Value::as_str)
             .filter(|value| !value.is_empty() && value.trim() == *value)
             .map(str::to_owned)
-            .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+            .ok_or_else(|| {
+                ApplicationSurfaceAdapterError::invalid_request(format!(
+                    "`{name}` is required and must be a non-empty trimmed string"
+                ))
+            })
     };
     let scope_name = match object.get("scope") {
         None => "working_tree",
-        Some(value) => value
-            .as_str()
-            .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?,
+        Some(value) => value.as_str().ok_or_else(|| {
+            ApplicationSurfaceAdapterError::invalid_request("`scope` must be a string")
+        })?,
     };
     let scope = |allow_commit_range: bool| match scope_name {
         "working_tree" if !object.contains_key("base") && !object.contains_key("head") => {
@@ -70,11 +82,13 @@ pub(super) fn parse_git_read_surface_request(
         }
         "commit_range" if allow_commit_range => Ok(GitDiffScopeV1::CommitRange {
             base: GitOidV1::new(string("base")?)
-                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?,
+                .map_err(ApplicationSurfaceAdapterError::invalid_request)?,
             head: GitOidV1::new(string("head")?)
-                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?,
+                .map_err(ApplicationSurfaceAdapterError::invalid_request)?,
         }),
-        _ => Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        _ => Err(ApplicationSurfaceAdapterError::invalid_request(format!(
+            "`scope` `{scope_name}` is not one of working_tree, staged, or commit_range for this operation, or carries base/head outside commit_range"
+        ))),
     };
     let request = match operation {
         ApplicationSurfaceOperation::GitStatus => GitReadRequestV1::Status,
@@ -95,7 +109,11 @@ pub(super) fn parse_git_read_surface_request(
             scope: scope(false)?,
             daemon_binding: None,
         },
-        _ => return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        _ => {
+            return Err(ApplicationSurfaceAdapterError::invalid_request(
+                "operation is not a Git read",
+            ));
+        }
     };
     let allowed = match operation {
         ApplicationSurfaceOperation::GitStatus => &["max_entries", "max_bytes"][..],
@@ -116,8 +134,10 @@ pub(super) fn parse_git_read_surface_request(
         ApplicationSurfaceOperation::GitHunks => &["scope", "max_entries", "max_bytes"][..],
         _ => &[],
     };
-    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
-        return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest);
+    if let Some(unknown) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Err(ApplicationSurfaceAdapterError::invalid_request(format!(
+            "unknown field `{unknown}`"
+        )));
     }
     Ok(GitReadSurfaceRequest {
         request,

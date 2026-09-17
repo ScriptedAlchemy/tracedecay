@@ -63,11 +63,11 @@ pub(super) fn configuration_binding_has_schema(
 pub(super) fn configuration_invocation_payload(
     request: &tracedecay_contracts::ConfigurationWireRequestV1,
 ) -> Result<Value, ApplicationSurfaceAdapterError> {
-    let mut wire = serde_json::to_value(request)
-        .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
-    wire.get_mut("request")
-        .map(Value::take)
-        .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+    let mut wire =
+        serde_json::to_value(request).map_err(ApplicationSurfaceAdapterError::invalid_request)?;
+    wire.get_mut("request").map(Value::take).ok_or_else(|| {
+        ApplicationSurfaceAdapterError::invalid_request("configuration wire request has no body")
+    })
 }
 
 fn payload_decodes<T: DeserializeOwned>(payload: Option<&Value>) -> bool {

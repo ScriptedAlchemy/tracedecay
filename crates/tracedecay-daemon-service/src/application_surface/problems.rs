@@ -53,6 +53,17 @@ pub(super) fn application_contract_error_response(error: ApplicationContractErro
     StatusCode::INTERNAL_SERVER_ERROR.into_response()
 }
 
+fn invalid_surface_request_problem(message: String) -> ApplicationProblem {
+    ApplicationProblem::InvalidRequest {
+        diagnostic: SafeDiagnostic {
+            code: "application.surface.invalid_request".to_owned(),
+            message,
+        },
+        retry: RetryDirective::Never,
+        legal_actions: Vec::new(),
+    }
+}
+
 pub(super) fn http_adapter_problem(
     contract: ResultContractRef,
     request_id: RequestId,
@@ -62,16 +73,11 @@ pub(super) fn http_adapter_problem(
         ApplicationSurfaceAdapterError::UnknownOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
-        ApplicationSurfaceAdapterError::InvalidRequestHandle
-        | ApplicationSurfaceAdapterError::InvalidSurfaceRequest => {
-            ApplicationProblem::InvalidRequest {
-                diagnostic: SafeDiagnostic {
-                    code: "application.surface.invalid_request".to_owned(),
-                    message: "The application request is invalid".to_owned(),
-                },
-                retry: RetryDirective::Never,
-                legal_actions: Vec::new(),
-            }
+        ApplicationSurfaceAdapterError::InvalidRequestHandle => {
+            invalid_surface_request_problem("The application request is invalid".to_owned())
+        }
+        ApplicationSurfaceAdapterError::InvalidSurfaceRequest { detail } => {
+            invalid_surface_request_problem(format!("The application request is invalid: {detail}"))
         }
         // Catalog composition is derived from `const` application specs, so
         // these failures are deterministic for the lifetime of the process.
@@ -139,7 +145,7 @@ pub fn mcp_project_open_reset_refusal(
 
 pub(crate) fn current_micros() -> Result<UtcMicros, ApplicationSurfaceAdapterError> {
     tracedecay_contracts::clock::try_now_micros()
-        .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        .map_err(ApplicationSurfaceAdapterError::invalid_request)
 }
 
 pub(super) fn invocation_problem(

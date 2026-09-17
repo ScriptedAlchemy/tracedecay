@@ -1646,7 +1646,7 @@ fn application_surface_rejects_invalid_output_formats() {
         .expect_err("format outside the schema must fail");
         assert!(matches!(
             error,
-            ApplicationSurfaceAdapterError::InvalidSurfaceRequest
+            ApplicationSurfaceAdapterError::InvalidSurfaceRequest { .. }
         ));
     }
 }
