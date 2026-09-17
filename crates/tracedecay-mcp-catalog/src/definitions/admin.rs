@@ -9,14 +9,30 @@ pub(super) fn def_status() -> ToolDefinition {
     def_always_load(
         "tracedecay_status",
         "Graph Status",
-        "Return aggregate statistics about the code graph (node/edge/file counts, DB size, etc.).",
+        "Return a compact summary of the code graph (counts and freshness). Full branch diagnostics are opt-in.",
         json!({
             "type": "object",
             "additionalProperties": false,
             "properties": {
                 "include_branch_diagnostics": {
                     "type": "boolean",
-                    "description": "Include the full tracked-branch diagnostic list (default: true). Disable for compact status consumers."
+                    "default": false,
+                    "description": "Full tracked-branch diagnostic list. Default false."
+                },
+                "include_storage_health": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Storage-health snapshot. Default false."
+                },
+                "include_session_ingest": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Session-ingest health. Default false."
+                },
+                "include_staleness": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Git staleness object. Default false."
                 }
             }
         }),

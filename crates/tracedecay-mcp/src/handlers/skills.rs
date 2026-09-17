@@ -62,6 +62,19 @@ fn parse_state(args: &Value) -> Result<Option<ManagedSkillState>> {
     }
 }
 
+fn support_file_summaries(skill: &ManagedSkill) -> Vec<Value> {
+    skill
+        .support_files
+        .iter()
+        .map(|file| {
+            json!({
+                "path": file.path.display().to_string(),
+                "byte_len": file.bytes.len(),
+            })
+        })
+        .collect()
+}
+
 fn skill_summary(skill: &ManagedSkill, include_body: bool, usage_summary: &Value) -> Value {
     let mut summary = json!({
         "metadata": skill.metadata,
@@ -163,7 +176,10 @@ pub async fn handle_skill_view(
 ) -> Result<ToolResult> {
     let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
     sync_project_skill_analytics(cg, &profile_root, analytics_db).await?;
-    let include_support_files = optional_bool(&args, "include_support_files", true);
+    // Path summaries stay in the response either way. Byte payloads are a
+    // separate read the caller opts into, so a view does not inline unused
+    // support files into the context window.
+    let include_support_files = optional_bool(&args, "include_support_files", false);
     let mut skill = hotpath::future!(
         load_managed_skill(&profile_root, required_str(&args, "id")?),
         label = "mcp.automation.skill_view.load"
@@ -212,6 +228,7 @@ pub async fn handle_skill_view(
         skill_improvement_recommendations(std::slice::from_ref(&usage_summary))
             .into_iter()
             .next();
+    let support_file_summaries = support_file_summaries(&skill);
     if !include_support_files {
         skill.support_files.clear();
     }
@@ -223,6 +240,7 @@ pub async fn handle_skill_view(
         "stale_recommendation": stale_recommendation,
         "improvement_recommendation": improvement_recommendation,
         "support_files_included": include_support_files,
+        "support_file_summaries": support_file_summaries,
     });
     Ok(tool_json_with_md(
         Some(cg.project_root()),

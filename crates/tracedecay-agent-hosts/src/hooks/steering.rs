@@ -36,7 +36,10 @@ pub fn build_cursor_session_context(
     staleness_hint: Option<&str>,
     tokens_saved: Option<u64>,
 ) -> String {
-    let mut s = index_status_line(initialized, staleness_hint);
+    let mut s = index_status_line(
+        initialized,
+        staleness_hint.map(bounded_staleness_hint).as_deref(),
+    );
     if initialized {
         s.reserve(CURSOR_SESSION_CONTEXT_BUDGET.saturating_sub(s.len()));
         append_tracedecay_bootstrap_context(&mut s);
@@ -49,7 +52,7 @@ pub fn build_cursor_session_context(
             s.push_str(".\n");
         }
     }
-    s
+    enforce_context_budget(s, CURSOR_SESSION_CONTEXT_BUDGET)
 }
 
 /// One-line index freshness signal.
@@ -124,14 +127,16 @@ pub fn build_codex_session_context_for_workspace(
             s.push('\n');
             append_codex_recall_and_registry_guidance(&mut s);
             match status {
-                HookWorkspaceStatus::Initialized => match staleness_hint {
-                    Some(hint) => {
-                        s.push_str("Index status: ");
-                        s.push_str(hint);
-                        s.push_str(".\n");
+                HookWorkspaceStatus::Initialized => {
+                    match staleness_hint.map(bounded_staleness_hint) {
+                        Some(hint) => {
+                            s.push_str("Index status: ");
+                            s.push_str(&hint);
+                            s.push_str(".\n");
+                        }
+                        None => s.push_str("Index status: initialized.\n"),
                     }
-                    None => s.push_str("Index status: initialized.\n"),
-                },
+                }
                 HookWorkspaceStatus::UnindexedProject => s.push_str(
                     "Index status: no project index found in this code workspace — \
                      run `tracedecay init` to enable tracedecay code-graph tools.\n",
@@ -155,7 +160,7 @@ pub fn build_codex_session_context_for_workspace(
         "Continue authorized work through the requested outcome and relevant verification; \
          pause for a missing decision or an external or destructive action outside that authority.\n",
     );
-    s
+    enforce_context_budget(s, CODEX_SESSION_CONTEXT_BUDGET)
 }
 
 fn append_codex_recall_and_registry_guidance(s: &mut String) {
@@ -167,6 +172,54 @@ fn append_codex_recall_and_registry_guidance(s: &mut String) {
          or recurring pitfalls with tracedecay_fact_store_add. Do not store secrets, \
          credentials, transient failures, task progress, or soon-stale outcomes.\n",
     );
+}
+
+/// Freshness text is caller-supplied. Keep one short line so a diagnostic dump
+/// cannot expand the session-start payload past its budget.
+const MAX_STALENESS_HINT_CHARS: usize = 80;
+
+fn bounded_staleness_hint(hint: &str) -> String {
+    let line = hint.lines().next().unwrap_or("").trim();
+    let mut chars = line.chars();
+    let bounded: String = chars.by_ref().take(MAX_STALENESS_HINT_CHARS).collect();
+    if chars.next().is_some() {
+        let mut shorter: String = line.chars().take(MAX_STALENESS_HINT_CHARS - 1).collect();
+        shorter.push('…');
+        shorter
+    } else {
+        bounded
+    }
+}
+
+/// Drop trailing lines, then a byte tail, until `text` fits `budget`.
+///
+/// The documented session budgets are production contracts. A caller-supplied
+/// hint or a future prose addition must not overflow the injected context.
+fn enforce_context_budget(mut text: String, budget: usize) -> String {
+    if text.len() <= budget {
+        return text;
+    }
+    while text.len() > budget {
+        let Some(idx) = text.rfind('\n') else {
+            break;
+        };
+        if idx == 0 {
+            break;
+        }
+        text.truncate(idx);
+    }
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    if text.len() <= budget {
+        return text;
+    }
+    let mut end = budget.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text
 }
 
 /// Formats a short relative-age staleness hint from a sync age in seconds.
@@ -224,5 +277,30 @@ mod tests {
                 "generic (non-code-workspace) surface should omit {agent}"
             );
         }
+    }
+
+    #[test]
+    fn session_context_bounds_an_unbounded_staleness_hint() {
+        let dump = "x".repeat(8_000);
+        let cursor = build_cursor_session_context(true, Some(&dump), Some(12_345));
+        assert!(
+            cursor.len() <= CURSOR_SESSION_CONTEXT_BUDGET,
+            "{}",
+            cursor.len()
+        );
+        assert!(cursor.contains("TraceDecay project hint:"));
+        assert!(!cursor.contains(&dump));
+
+        let codex = build_codex_session_context_for_workspace(
+            HookWorkspaceStatus::Initialized,
+            Some(&dump),
+        );
+        assert!(
+            codex.len() <= CODEX_SESSION_CONTEXT_BUDGET,
+            "{}",
+            codex.len()
+        );
+        assert!(codex.contains("TraceDecay project hint:"));
+        assert!(!codex.contains(&dump));
     }
 }

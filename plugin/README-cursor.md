@@ -299,8 +299,9 @@ Notes:
   (cargo/tsc/pyright) and `tracedecay_dashboard` starts a localhost server.
   Both are non-destructive, but remove those lines if you want a prompt first.
 - `tracedecay_retrieve` only dereferences the required `handle` from a
-  project-local truncated MCP response. Use it when omitted details are needed;
-  it restores that exact cached response and does not re-run the source tool.
+  project-local truncated MCP response. Use it for one omitted span; do not
+  reassemble the stored body into the conversation. It does not re-run the
+  source tool.
 - Do **not** use `tracedecay:*` — it would auto-approve the editing tools too.
 - Entries from per-user and per-repo files are concatenated; allowlists are a
   convenience, not a security boundary.

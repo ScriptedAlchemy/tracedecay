@@ -272,7 +272,6 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
             "tracedecay_skill_view",
             json!({
                 "id": "active-skill",
-                "include_support_files": false,
                 "__mcp_request_id": "req-active-view",
                 "format": "json",
             }),
@@ -309,6 +308,14 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
         0
     );
     assert_eq!(payload["support_files_included"], false);
+    let summary = &payload["support_file_summaries"][0];
+    assert_eq!(summary["path"], "references/checklist.md");
+    assert!(summary["byte_len"].as_u64().unwrap() > 0);
+    let encoded = payload.to_string();
+    assert!(
+        !encoded.contains("inspect context"),
+        "default skill view must not inline support-file bytes: {encoded}"
+    );
     let usage_record = load_skill_usage_record(&profile_root, "active-skill")
         .await
         .unwrap()

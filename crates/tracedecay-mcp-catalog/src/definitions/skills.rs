@@ -35,7 +35,7 @@ pub(super) fn def_skill_view() -> ToolDefinition {
     def(
         "tracedecay_skill_view",
         "Skill View",
-        "Read one agent-managed skill package from the active TraceDecay profile. Returns full metadata, body text, usage summary, stale/archive and improvement recommendation evidence, and support files by default.",
+        "Read one agent-managed skill package from the active TraceDecay profile. Returns metadata, body text, usage summary, and support-file path summaries. Support-file bytes are omitted unless include_support_files is true.",
         json!({
             "type": "object",
             "properties": {
@@ -45,7 +45,8 @@ pub(super) fn def_skill_view() -> ToolDefinition {
                 },
                 "include_support_files": {
                     "type": "boolean",
-                    "description": "If false, omit support file byte payloads from the response (default: true)."
+                    "default": false,
+                    "description": "Include support-file byte payloads. Default false; the response still lists each path and byte length."
                 }
             },
             "required": ["id"]

@@ -242,10 +242,14 @@ pub async fn handle_status(
         ));
     }
 
-    let include_branch_diagnostics = status_arg_flag(&args, "include_branch_diagnostics", true);
-    let include_storage_health = status_arg_flag(&args, "include_storage_health", true);
-    let include_session_ingest = status_arg_flag(&args, "include_session_ingest", true);
-    let include_staleness = status_arg_flag(&args, "include_staleness", true);
+    // Compact by default. The CLI already skips these sections because they
+    // commonly push status over the response-frame budget, and the truncated
+    // body is not something the caller should reassemble into context. Opt in
+    // when the full diagnostic section is the thing being asked for.
+    let include_branch_diagnostics = status_arg_flag(&args, "include_branch_diagnostics", false);
+    let include_storage_health = status_arg_flag(&args, "include_storage_health", false);
+    let include_session_ingest = status_arg_flag(&args, "include_session_ingest", false);
+    let include_staleness = status_arg_flag(&args, "include_staleness", false);
 
     let graph_statistics = graph_statistics_value(ctx.generation_census())?;
     let mut output = json!({

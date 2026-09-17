@@ -170,7 +170,7 @@ pub(super) fn def_retrieve() -> ToolDefinition {
     def(
         "tracedecay_retrieve",
         "Retrieve Truncated Response",
-        "Use `tracedecay_retrieve` with required argument `handle` to retrieve one bounded page of the exact cached original text for a local response handle emitted by a truncated MCP response. Start with offset 0, then pass each returned next_offset until has_more is false; concatenating content in offset order reconstructs the original byte-exactly. max_chars is clamped to the response-frame budget. This does not re-run the source tool or read a file/session/node again; handles are scoped to the active project store, expire automatically, and never reference remote storage. If the original truncated response used project_selector.project_id, pass the same selector here. Only call it when the missing details are needed to answer the user's request.",
+        "Use `tracedecay_retrieve` with required argument `handle` to read one bounded page of a truncated MCP response's locally cached text. Pass offset and max_chars for the omitted span you need. Do not walk next_offset until has_more is false or concatenate pages back into the conversation: the stored body already exceeded the response budget. max_chars is clamped to the response-frame budget. This does not re-run the source tool or read a file/session/node again; handles are scoped to the active project store, expire automatically, and never reference remote storage. If the original truncated response used project_selector.project_id, pass the same selector here. Only call it when the missing details are needed to answer the user's request.",
         json!({
             "type": "object",
             "properties": with_project_selector_properties(json!({
