@@ -1239,6 +1239,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(dashboard)* rebuild the Code workspace's default lens as the lookbook V2
+  semantic cortex: a seven-cell graph register, a full-bleed field with HUD
+  legends, an exact ledger, and a workspace-owned inspector that reads the
+  pinned symbol against the graph, neighbours, strata, index-freshness and
+  diagnostics authorities, each in its own typed state. Hover inspects
+  without a read; click pins the URL identity. The shell status strip now
+  carries workspace-published registers (Code posts Graph / Index /
+  Selection). Published `view=topology` links resolve to `cortex`.
+
 ### Fixed
 
 - *(store)* classify Windows `ERROR_LOCK_VIOLATION` (33) as typed lock
