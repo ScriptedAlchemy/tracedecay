@@ -347,6 +347,9 @@ export function layoutTemporalScene(
     (pendingByLane.get(laneId) ?? []).filter((node) => node.xBasis === 'sequence').length;
 
   // --- rows ------------------------------------------------------------------
+  // A dated cursor is a wall: no thread, body or span is drawn past it, and a
+  // lane whose recorded start lies beyond it is not drawn at all.
+  const revealX = reveal !== null && reveal.time !== null ? x(reveal.time) : null;
   const rawExtentOf = (lane: JourneyLane): readonly [number, number] => {
     const x0 = x(lane.start);
     const x1 = lane.end !== null ? x(lane.end) : x0 + OPEN_TAIL_PX;
@@ -372,6 +375,8 @@ export function layoutTemporalScene(
       rawX0 = Math.min(rawX0, memberX0);
       rawX1 = Math.max(rawX1, memberX1);
     }
+    const revealed = revealX === null || rawX0 <= revealX;
+    if (revealX !== null) rawX1 = Math.min(rawX1, revealX);
     const sceneLane: SceneLane = {
       id: lane.id,
       kind: bundle ? 'bundle' : 'session',
@@ -381,11 +386,12 @@ export function layoutTemporalScene(
       y,
       height,
       x0: clampX(rawX0),
-      x1: clampX(rawX1),
+      x1: clampX(Math.max(rawX0, rawX1)),
       endSource: lane.endSource,
       focus: focusFor(lane.id),
       expanded,
       offscreen: rawX1 < left || rawX0 > axisRight,
+      revealed,
       collapsedDescendants: descendants.length,
       row,
     };
@@ -471,6 +477,7 @@ export function layoutTemporalScene(
   const maxMessages = lanes.reduce((max, lane) => Math.max(max, lane.messages), 0);
   const ceilingLog = Math.log1p(Math.max(maxMessages, 1));
   for (const sceneLane of sceneLanes) {
+    if (!sceneLane.revealed) continue;
     const lane = laneById.get(sceneLane.id);
     const messages = lane?.messages ?? 0;
     paths.push({
@@ -543,7 +550,7 @@ export function layoutTemporalScene(
   // --- clusters --------------------------------------------------------------
   const clusters: SceneCluster[] = [];
   for (const sceneLane of sceneLanes) {
-    if (sceneLane.kind !== 'bundle') continue;
+    if (sceneLane.kind !== 'bundle' || !sceneLane.revealed) continue;
     const members = descendantsOf(sceneLane.id);
     const memberIds = new Set(members.map((member) => member.id));
     const grades: Partial<Record<EvidenceGrade, number>> = {};
@@ -569,12 +576,14 @@ export function layoutTemporalScene(
     for (const event of projection.events) {
       if (event.kind === 'commit' && memberIds.has(event.laneId)) commits += 1;
     }
+    const bodyX0 = clampX(Number.isFinite(x0) ? x0 : sceneLane.x0);
+    const bodyX1 = clampX(Number.isFinite(x1) ? x1 : sceneLane.x1);
     clusters.push({
       id: `cluster:${sceneLane.id}`,
       laneId: sceneLane.id,
       memberLaneIds: members.map((member) => member.id),
-      x0: clampX(Number.isFinite(x0) ? x0 : sceneLane.x0),
-      x1: clampX(Number.isFinite(x1) ? x1 : sceneLane.x1),
+      x0: bodyX0,
+      x1: revealX === null ? bodyX1 : Math.max(bodyX0, Math.min(bodyX1, clampX(revealX))),
       y: sceneLane.y,
       height: sceneLane.height,
       counts: { sessions: members.length, subagents, messages, commits, openEnded },
@@ -587,10 +596,11 @@ export function layoutTemporalScene(
   const intervals: SceneInterval[] = [];
   for (const interval of projection.intervals) {
     const sceneLane = sceneLaneById.get(interval.laneId);
-    if (!sceneLane) continue;
+    if (!sceneLane || !sceneLane.revealed) continue;
     const start = Math.min(interval.start, interval.end);
     const end = Math.max(interval.start, interval.end);
     if (end < viewport.window.start || start > viewport.window.end) continue;
+    if (reveal !== null && reveal.time !== null && start > reveal.time) continue;
     let y: number;
     switch (interval.kind) {
       case 'git_span':
@@ -604,12 +614,13 @@ export function layoutTemporalScene(
         return unhandled;
       }
     }
+    const intervalX0 = clampX(x(start));
     intervals.push({
       id: interval.id,
       laneId: interval.laneId,
       kind: interval.kind,
-      x0: clampX(x(start)),
-      x1: clampX(x(end)),
+      x0: intervalX0,
+      x1: revealX === null ? clampX(x(end)) : Math.max(intervalX0, Math.min(clampX(x(end)), clampX(revealX))),
       y,
       label: interval.label,
       grade: interval.grade,

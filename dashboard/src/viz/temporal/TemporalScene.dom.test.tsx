@@ -41,9 +41,9 @@ function fixture(): TemporalSceneModel {
     zoom: 'event',
     height: 240,
     lanes: [
-      { id: ROOT, kind: 'session', label: ROOT_LABEL, provider: 'cursor', depth: 0, y: 80, height: 48, x0: 200, x1: 810, endSource: 'session_end', focus: 'neutral', expanded: true, offscreen: false, collapsedDescendants: 0, row: 0 },
-      { id: CHILD, kind: 'session', label: 'child agent', provider: 'cursor', depth: 1, y: 130, height: 48, x0: 444, x1: 688, endSource: null, focus: 'neutral', expanded: true, offscreen: false, collapsedDescendants: 0, row: 1 },
-      { id: BUNDLE, kind: 'bundle', label: BUNDLE_LABEL, provider: 'codex', depth: 0, y: 190, height: 48, x0: 300, x1: 700, endSource: 'last_message', focus: 'neutral', expanded: false, offscreen: false, collapsedDescendants: 3, row: 2 },
+      { id: ROOT, kind: 'session', label: ROOT_LABEL, provider: 'cursor', depth: 0, y: 80, height: 48, x0: 200, x1: 810, endSource: 'session_end', focus: 'neutral', expanded: true, offscreen: false, revealed: true, collapsedDescendants: 0, row: 0 },
+      { id: CHILD, kind: 'session', label: 'child agent', provider: 'cursor', depth: 1, y: 130, height: 48, x0: 444, x1: 688, endSource: null, focus: 'neutral', expanded: true, offscreen: false, revealed: true, collapsedDescendants: 0, row: 1 },
+      { id: BUNDLE, kind: 'bundle', label: BUNDLE_LABEL, provider: 'codex', depth: 0, y: 190, height: 48, x0: 300, x1: 700, endSource: 'last_message', focus: 'neutral', expanded: false, offscreen: false, revealed: true, collapsedDescendants: 3, row: 2 },
     ],
     nodes: [
       node({ id: 'n-start', kind: 'session_start', x: 200, source: 'session', label: ROOT_LABEL, ref: 'root' }),

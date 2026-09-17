@@ -281,6 +281,9 @@ export interface SceneLane {
   /** True when the lane's own recorded extent lies entirely outside the
    * window; still emitted so the label column stays stable. */
   readonly offscreen: boolean;
+  /** False when a dated playback cursor precedes the lane's recorded start:
+   * the row keeps its place, but nothing of the lane is drawn yet. */
+  readonly revealed: boolean;
   /** Count of descendants hidden under this lane when collapsed. */
   readonly collapsedDescendants: number;
   /** Ordinal row from the top, for the exact table and minimap. */
