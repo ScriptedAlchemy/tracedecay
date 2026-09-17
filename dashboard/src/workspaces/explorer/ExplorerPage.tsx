@@ -160,7 +160,8 @@ export function ExplorerPage() {
             return (
               <FilterSelect
                 key={laneId}
-                label={`${spec.label} ${spec.facetLabel}`}
+                label={spec.facetLabel}
+                name={`${spec.label} ${spec.facetLabel}`}
                 value={explorer.facet?.lane === laneId ? explorer.facet.value : ''}
                 onChange={(value) =>
                   explorer.setFacet(value === '' ? null : { lane: laneId, value })
@@ -246,25 +247,34 @@ function asLaneId(value: string): LaneId | null {
 }
 
 /** A native select behind an engraved legend, so every filter is one control
- * with one accessible name and the platform's own keyboard behaviour. */
+ * with one accessible name and the platform's own keyboard behaviour.
+ *
+ * `name` widens the accessible name past the visible legend when the legend
+ * alone would be ambiguous (three lanes each have a facet); the visible text
+ * stays inside the name, so label-in-name holds. The select is capped rather
+ * than sized to its widest option, which at 320px pushed the whole register
+ * past the aperture's edge. */
 function FilterSelect({
   label,
+  name,
   value,
   onChange,
   options,
 }: {
   label: string;
+  name?: string;
   value: string;
   onChange: (value: string) => void;
   options: readonly { value: string; label: ReactNode }[];
 }) {
   return (
-    <label className="flex min-h-[var(--touch-target-min)] items-center gap-2 border border-edge-subtle bg-surface-0 pl-2 pr-1 focus-within:border-accent">
+    <label className="flex min-h-[var(--touch-target-min)] min-w-0 max-w-full items-center gap-2 border border-edge-subtle bg-surface-0 pl-2 pr-1 focus-within:border-accent">
       <span className="td-legend">{label}</span>
       <select
         value={value}
+        aria-label={name}
         onChange={(event) => onChange(event.target.value)}
-        className="min-h-[calc(var(--touch-target-min)-2px)] bg-transparent pr-1 text-xs text-text-primary outline-none"
+        className="min-h-[calc(var(--touch-target-min)-2px)] min-w-0 max-w-[10rem] bg-transparent pr-1 text-xs text-text-primary outline-none"
       >
         {options.map((option) => (
           <option key={option.value} value={option.value}>
