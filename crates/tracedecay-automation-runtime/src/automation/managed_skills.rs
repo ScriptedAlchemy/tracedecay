@@ -1252,9 +1252,10 @@ mod transaction_tests {
         let profile = temp.path();
         let original = skill("ledger-skill", "# Ledger");
         save_managed_skill(profile, &original).await.unwrap();
-        let ledger_path = super::super::skill_usage::skill_usage_ledger_path(profile);
-        std::fs::remove_file(&ledger_path).unwrap();
-        std::fs::create_dir(&ledger_path).unwrap();
+        let record_path =
+            super::super::skill_usage::skill_usage_record_path(profile, "ledger-skill");
+        std::fs::remove_file(&record_path).unwrap();
+        std::fs::create_dir(&record_path).unwrap();
 
         let pinned = set_managed_skill_pinned(profile, "ledger-skill", true)
             .await

@@ -8,7 +8,7 @@ use tracedecay_automation_runtime::automation::managed_skills::{
 use tracedecay_automation_runtime::automation::skill_usage::{
     AnalyticsEventRecord, SkillUsageAction, SkillUsageEvent, ingest_analytics_events,
     load_skill_usage_records, record_skill_usage, record_skill_usage_event,
-    skill_usage_ledger_path, summarize_skill_usage, summarize_skill_usage_for,
+    skill_usage_record_path, summarize_skill_usage, summarize_skill_usage_for,
 };
 
 fn draft() -> ManagedSkillDraft {
@@ -746,7 +746,10 @@ async fn managed_skill_usage_ledger_records_views_uses_and_patches() {
     .await
     .unwrap();
 
-    assert!(skill_usage_ledger_path(&profile_root).is_file());
+    assert!(
+        skill_usage_record_path(&profile_root, "repo-hygiene").is_file(),
+        "each skill owns its usage file; writers must not share skill_usage.json"
+    );
     let records = load_skill_usage_records(&profile_root, None).await.unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].skill_id, "repo-hygiene");
