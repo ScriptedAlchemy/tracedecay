@@ -211,11 +211,12 @@ transcribed, honest aggregation statements throughout).
   render, inside subgraph caps. Round two builds THIS as the live physics
   prototype (custom canvas + Verlet springs; channels are already rivers —
   they want to flow).
-- CORTEX is the right macro underlay: real contour interval (0.50 e/sym,
-  indexed 5th), √-area mass, aggregation stated (19 regions ⟵ 1206 symbols),
-  weather strip honestly project-level. Open question adopted: contours should
-  probably encode coupling ratio (internal÷external) rather than e/sym to
-  avoid double-counting with area — decide in round two.
+- CORTEX is the right macro underlay: real contour interval (0.50, indexed
+  5th), √-area mass, aggregation stated (19 regions ⟵ 1206 symbols), weather
+  strip honestly project-level. Contours encode coupling ratio
+  (internal÷boundary), not edges per file: area already carries file mass, so
+  a per-file rate would restate it. The compared sketches and the committed
+  encoding live in `dashboard/src/workspaces/code/cortexContours.ts`.
 - CORE SAMPLE answers "shape of the inside of a file, six files at once";
   the handlers.rs-vs-decision.rs comparison is instant and impossible in a
   tree view. Its (b) option — cores collapsing toward hairline fabric as count
@@ -262,9 +263,12 @@ symbol count is served (`overview.largest_files` is a top-N sample, so deriving
 one from it would understate every region outside the sample). The legend says
 "files and not symbols" on the surface.
 
-The round-two open question at `:218` — whether contours should encode coupling
-ratio rather than edges-per-symbol — is still open and is now a one-line change
-in `buildCortexModel`, where `density` is computed.
+The round-two open question — whether contours should encode coupling ratio
+rather than edges-per-symbol — is decided. Rings follow internal÷boundary.
+Edges per file remains a table reading and is not the ring channel. A region
+with internal edges and a measured-zero boundary is sealed: one heavy ring,
+not an invented finite ratio. `internal / (internal + boundary)` was not
+treated as a third option; it asks the same closure question.
 
 `viz/trace/render.ts` still carries its deliberate note that the dimmed cortex
 underlay is dropped "until the cortex endpoint exists". That remains accurate

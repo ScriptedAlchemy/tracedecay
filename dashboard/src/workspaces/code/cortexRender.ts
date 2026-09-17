@@ -7,8 +7,10 @@
  * every position, radius and ring count was computed in `cortexRelief.ts` from
  * one wire reading, plus a resolved palette, and it paints one frame. It never
  * reads a payload, never writes a caption, and never invents a mark: a region
- * with no relief is drawn hollow because the MODEL says its contour count is
- * zero, not because this file decided a hollow shape looked better there.
+ * with no relief is drawn hollow because the MODEL says its contour kind is
+ * `none`, not because this file decided a hollow shape looked better there.
+ * A finite ratio below one interval still has a body; a sealed region is one
+ * heavy ring, not a counted stack.
  *
  * Canvas2D cannot read CSS custom properties, so the composing component
  * samples the token block once at mount and once per theme flip and hands the
@@ -21,6 +23,7 @@ import {
   CONTOUR_INDEX_EVERY,
   MAX_DRAWN_CONTOURS,
   RELIEF_ASPECT,
+  reliefContourCaption,
   reliefFieldDirectory,
   type CortexModel,
   type CortexRegion,
@@ -242,7 +245,7 @@ export function createCortexRenderer(
     const hue = kindColor(region.directory, palette.light);
 
     ctx!.save();
-    if (region.contours === 0) {
+    if (region.contour === 'none') {
       // Measured zero internal edges. Drawn at true position and true area,
       // dashed and empty — absence as a mark, never as flat ground.
       tracePath(outline, region.x, region.y, 1);
@@ -261,15 +264,23 @@ export function createCortexRenderer(
       ctx!.lineWidth = 1.1 / scale;
       ctx!.stroke();
 
-      const rings = Math.min(region.contours, MAX_DRAWN_CONTOURS);
-      for (let ring = 1; ring <= rings; ring += 1) {
-        const shrink = 1 - (ring / (rings + 1)) * 0.86;
-        tracePath(outline, region.x, region.y, shrink);
-        const indexed = ring % CONTOUR_INDEX_EVERY === 0;
-        ctx!.strokeStyle = hue;
-        ctx!.globalAlpha = indexed ? 0.95 : 0.5;
-        ctx!.lineWidth = (indexed ? 1.4 : 0.7) / scale;
+      if (region.contour === 'sealed') {
+        // Unbounded ratio. One heavy ring, not a stack that implies a count.
+        tracePath(outline, region.x, region.y, 0.62);
+        ctx!.globalAlpha = 0.95;
+        ctx!.lineWidth = 1.4 / scale;
         ctx!.stroke();
+      } else {
+        const rings = Math.min(region.contours, MAX_DRAWN_CONTOURS);
+        for (let ring = 1; ring <= rings; ring += 1) {
+          const shrink = 1 - (ring / (rings + 1)) * 0.86;
+          tracePath(outline, region.x, region.y, shrink);
+          const indexed = ring % CONTOUR_INDEX_EVERY === 0;
+          ctx!.strokeStyle = hue;
+          ctx!.globalAlpha = indexed ? 0.95 : 0.5;
+          ctx!.lineWidth = (indexed ? 1.4 : 0.7) / scale;
+          ctx!.stroke();
+        }
       }
       ctx!.globalAlpha = 1;
     }
@@ -295,7 +306,7 @@ export function createCortexRenderer(
     ctx!.font = mono(11);
     ctx!.fillText(`${region.fileCount} files`, region.x, region.y + 18);
     ctx!.fillText(
-      region.contours === 0 ? 'no relief' : `${region.density.toFixed(2)} e/f`,
+      reliefContourCaption(region.fileCount, region.internalEdges, region.boundaryEdges),
       region.x,
       region.y + 30,
     );
