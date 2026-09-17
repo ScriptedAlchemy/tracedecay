@@ -13,11 +13,13 @@ import {
   type ProjectionSync,
 } from '../../data/sse/useEvents.tsx';
 import { cn } from '../../ui/cn';
+import { STATE_LAMP } from '../../ui/StateChip.tsx';
 import {
   cancelQueryActivity,
   useActiveQueryActivities,
   useQueryCancellation,
 } from '../../data/query/activity.ts';
+import { useStatusRegisters } from '../../data/shell/statusRegisters.ts';
 
 /**
  * What the transport is doing, and separately whether the data behind it has
@@ -118,8 +120,49 @@ export function StatusStrip({ queryActivity }: { queryActivity?: ReactNode } = {
         </span>
       </Cell>
       {queryActivity}
+      <WorkspaceRegisters />
       <span aria-hidden className="flex-1 border-r border-edge-subtle" />
     </footer>
+  );
+}
+
+/**
+ * The registers the mounted workspace publishes about the authorities it is
+ * reading — the Code workspace's graph read, index freshness and pinned
+ * selection, for instance. Numbered on from the shell's own four so the strip
+ * stays one status word, and gone the moment the workspace unmounts.
+ */
+function WorkspaceRegisters() {
+  const registers = useStatusRegisters();
+  return (
+    <>
+      {registers.map((register, index) => (
+        <Cell key={register.id} code={String(index + 5).padStart(2, '0')} label={register.label}>
+          <span
+            aria-hidden
+            className={cn(
+              'size-2 shrink-0',
+              register.state === 'identity'
+                ? 'bg-accent'
+                : (STATE_LAMP[register.state] ?? 'bg-state-unsupported-schema'),
+            )}
+          />
+          <span
+            role="status"
+            data-register={register.id}
+            data-state={register.state}
+            className="flex min-w-0 items-center gap-1.5"
+          >
+            <span className="td-value max-w-56 truncate text-2xs">{register.value}</span>
+            {register.detail ? (
+              <span className="td-value min-w-0 max-w-64 truncate text-3xs text-text-muted">
+                {register.detail}
+              </span>
+            ) : null}
+          </span>
+        </Cell>
+      ))}
+    </>
   );
 }
 
