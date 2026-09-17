@@ -2942,6 +2942,61 @@ mod tests {
         assert_eq!(authority.waiting_work_units(), 0);
     }
 
+    /// Structural pin for the nested-admission fix: the yield lives inside
+    /// `fan_out`, so it survives only while `fan_out` stays the sole pool
+    /// entry point in this file. A merge resolution that reintroduces a bare
+    /// `par_iter` elsewhere fails here even before it fails to compile.
+    #[test]
+    fn every_pool_fan_out_in_chunks_goes_through_the_yielding_helper() {
+        let source = include_str!("chunks.rs");
+        let module_start = source
+            .find("\nmod fan_out {\n")
+            .expect("chunks.rs declares `mod fan_out`");
+        let module_end = module_start
+            + source[module_start..]
+                .find("\n}\n")
+                .expect("`mod fan_out` closes at column zero");
+        let module = &source[module_start..=module_end];
+        assert!(
+            module.contains("with_yielded_background_cpu_permits("),
+            "`fan_out` must yield the caller's admitted units around the join"
+        );
+
+        // Built with `concat!` so this test's own source is not an occurrence.
+        let pool_tokens = [
+            concat!("ray", "on"),
+            concat!("par_", "iter("),
+            concat!("par_", "chunks"),
+            concat!("par_", "bridge"),
+        ];
+        let code_lines = |text: &str| {
+            text.lines()
+                .map(str::trim_start)
+                .filter(|line| !line.starts_with("//"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        let outside = code_lines(&source[..module_start])
+            .into_iter()
+            .chain(code_lines(&source[module_end + 1..]))
+            .collect::<Vec<_>>();
+        let inside = code_lines(module);
+        for token in pool_tokens {
+            let stray = outside
+                .iter()
+                .filter(|line| line.contains(token))
+                .collect::<Vec<_>>();
+            assert!(
+                stray.is_empty(),
+                "`{token}` reaches the pool outside `fan_out`, bypassing the yield: {stray:?}"
+            );
+        }
+        assert!(
+            inside.iter().any(|line| line.contains(pool_tokens[0])),
+            "`fan_out` is expected to be where the pool crate is imported"
+        );
+    }
+
     const RUST_SOURCE: &str = "//! Module documentation.\n\nuse std::collections::HashMap;\n\n/// Doc comment.\npub fn alpha(x: u32) -> u32 {\n    x + 1\n}\n\npub struct Holder {\n    map: HashMap<u32, u32>,\n}\n\nimpl Holder {\n    pub fn get(&self, key: u32) -> Option<u32> {\n        self.map.get(&key).copied()\n    }\n}\n\n// A trailing free-floating comment.\n";
 
     fn chunker() -> DeterministicCodeChunker {
