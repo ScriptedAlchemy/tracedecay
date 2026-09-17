@@ -2,7 +2,7 @@ import { useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'rea
 import { ChevronDown } from 'lucide-react';
 import { cn } from '../cn';
 import { WorkspaceHeader } from '../instrument.tsx';
-import { moveRovingFocus } from '../rovingFocus.ts';
+import { rovingRowsKeyDown } from '../rovingRows.ts';
 
 /** Left filter column, center result list, right inspector. Regions are
  * slots; workspaces own only read-model wiring.
@@ -45,12 +45,7 @@ export function ExplorerSplit({
   // sync; collapsed by default so narrow viewports keep their vertical budget.
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const mobileFiltersId = useId();
-  // Roving arrows over the result rows: rows are native buttons, so
-  // Enter/Space activate for free; arrows, Home, End and Page keys move
-  // focus without forcing a Tab-through of every row.
-  const onResultsKeyDown = (event: KeyboardEvent) => {
-    moveRovingFocus(resultsRef.current, event);
-  };
+  const onResultsKeyDown = (event: KeyboardEvent) => rovingRowsKeyDown(resultsRef.current, event);
   return (
     <div className={cn('flex h-full min-h-0 flex-col', className)}>
       {path && title ? <WorkspaceHeader path={path} title={title} note={note} /> : null}
@@ -201,7 +196,6 @@ export function BayLegend({ children }: { children: ReactNode }) {
 export function DataRow({
   selected,
   onSelect,
-  onInspect,
   children,
   className,
   height,
@@ -210,13 +204,6 @@ export function DataRow({
 }: {
   selected?: boolean;
   onSelect?: () => void;
-  /**
-   * Hover inspects; click selects. A workspace whose inspector previews the
-   * row under the pointer (or under keyboard focus) wires it here, and the row
-   * fires it for both the pointer entering and focus arriving so the keyboard
-   * path reaches exactly what the pointer does.
-   */
-  onInspect?: () => void;
   children: ReactNode;
   className?: string;
   /**
@@ -235,8 +222,6 @@ export function DataRow({
     <button
       type="button"
       onClick={onSelect}
-      onPointerEnter={onInspect}
-      onFocus={onInspect}
       aria-pressed={selected ?? false}
       style={{ height: height != null ? `${height}px` : 'var(--row-height-data)' }}
       className={cn(

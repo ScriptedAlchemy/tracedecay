@@ -106,6 +106,7 @@ export function Panel({
   children,
   className,
   bodyClassName,
+  headerClassName,
   tone = 'edge',
   elevation = 'face',
 }: {
@@ -115,6 +116,9 @@ export function Panel({
   children: ReactNode;
   className?: string;
   bodyClassName?: string;
+  /** For a header whose actions must wrap at a breakpoint instead of clipping;
+   * the default 32px single line is unchanged unless a caller opts in. */
+  headerClassName?: string;
   tone?: 'edge' | 'signal';
   /** Which plane of the chassis the panel body occupies. `well` recesses the
    * body so the region reads as something you look into — use it for lists,
@@ -130,7 +134,12 @@ export function Panel({
       )}
     >
       <Corners tone={tone} />
-      <header className="flex h-8 shrink-0 items-center gap-2.5 border-b border-edge-subtle px-2.5">
+      <header
+        className={cn(
+          'flex h-8 shrink-0 items-center gap-2.5 border-b border-edge-subtle px-2.5',
+          headerClassName,
+        )}
+      >
         <h2 className="td-title truncate">{legend}</h2>
         <span aria-hidden className="td-rule" />
         {actions}

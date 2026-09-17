@@ -171,3 +171,15 @@ export function EvidenceGrade({
     </span>
   );
 }
+
+export function EvidenceGradeTag({
+  grade,
+  sourceClass,
+  className,
+}: {
+  grade: EvidenceGrade;
+  sourceClass?: string;
+  className?: string;
+}) {
+  return <GradeTag grade={grade} source={sourceClass} className={className} />;
+}
