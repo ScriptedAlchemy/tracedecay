@@ -1071,7 +1071,6 @@ mod windows_tests {
         assert_eq!(align_of::<FileIdInfo>(), 8);
         assert_eq!(offset_of!(FileIdInfo, volume_serial_number), 0);
         assert_eq!(offset_of!(FileIdInfo, file_id), 8);
-        assert_eq!(FILE_ID_INFO_CLASS, 18);
     }
 
     #[test]
@@ -1115,7 +1114,7 @@ mod windows_tests {
         let identity = query_windows_file_identity_with(
             std::ptr::null_mut(),
             |_, information_class, information, buffer_size| {
-                assert_eq!(information_class, FILE_ID_INFO_CLASS);
+                assert_eq!(information_class, 18);
                 assert_eq!(buffer_size as usize, size_of::<FileIdInfo>());
                 // SAFETY: The seam supplies a writable `FileIdInfo` buffer.
                 unsafe {
@@ -1148,7 +1147,7 @@ mod windows_tests {
         let volume_only = query_windows_file_identity_with(
             std::ptr::null_mut(),
             |_, information_class, information, buffer_size| {
-                assert_eq!(information_class, FILE_ID_INFO_CLASS);
+                assert_eq!(information_class, 18);
                 assert_eq!(buffer_size as usize, size_of::<FileIdInfo>());
                 // SAFETY: The seam supplies a writable `FileIdInfo` buffer.
                 unsafe {
@@ -1167,7 +1166,7 @@ mod windows_tests {
             std::ptr::null_mut(),
             |_, information_class, _, buffer_size| {
                 calls.set(calls.get() + 1);
-                assert_eq!(information_class, FILE_ID_INFO_CLASS);
+                assert_eq!(information_class, 18);
                 assert_eq!(buffer_size as usize, size_of::<FileIdInfo>());
                 0
             },

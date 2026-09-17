@@ -9,8 +9,8 @@ use tracedecay_domain::code_intelligence::{CodeGenerationId, ContentDigest};
 use tracedecay_domain::configuration::UserProfileId;
 use tracedecay_domain::feedback::{FeedbackCycleId, GitHubReviewIdV1, ProximityWarningIdV1};
 use tracedecay_domain::observation::CanonicalObservationIdV1;
-use tracedecay_domain::research::{EntityId, canonical_sha256};
-use tracedecay_domain::retrieval::PrincipalId;
+use tracedecay_domain::research::{DomainError, EntityId, canonical_sha256};
+use tracedecay_domain::retrieval::{PrincipalId, RetrievalContractError};
 use tracedecay_domain::session::{MessageOccurrenceIdV1, ProjectionOutputOrdinalV1};
 
 /// Every family serializes as the bare string, with no wrapper object.
@@ -111,18 +111,87 @@ fn derived_identities_match_their_independent_pre_image() {
 #[test]
 fn identity_families_reject_the_same_values() {
     for bad in ["", " lead", "trail ", "in\tner", "\u{7f}"] {
-        assert!(EntityId::new(bad).is_err(), "accepted {bad:?}");
-        assert!(CodeGenerationId::new(bad).is_err(), "accepted {bad:?}");
-        assert!(PrincipalId::new(bad).is_err(), "accepted {bad:?}");
-        assert!(UserProfileId::new(bad).is_err(), "accepted {bad:?}");
-        assert!(FeedbackCycleId::new(bad).is_err(), "accepted {bad:?}");
-        assert!(ProximityWarningIdV1::new(bad).is_err(), "accepted {bad:?}");
-        assert!(GitHubReviewIdV1::new(bad).is_err(), "accepted {bad:?}");
+        let empty = bad.is_empty();
+        let domain = |field: &'static str| {
+            if empty {
+                DomainError::Empty { field }
+            } else {
+                DomainError::NonCanonical { field }
+            }
+        };
+        assert_eq!(
+            EntityId::new(bad).unwrap_err(),
+            domain("EntityId"),
+            "{bad:?}"
+        );
+        assert_eq!(
+            CodeGenerationId::new(bad).unwrap_err(),
+            DomainError::NonCanonical {
+                field: "CodeGenerationId"
+            },
+            "{bad:?}"
+        );
+        assert_eq!(
+            PrincipalId::new(bad).unwrap_err(),
+            RetrievalContractError::InvalidIdentity {
+                field: "PrincipalId"
+            },
+            "{bad:?}"
+        );
+        assert_eq!(
+            UserProfileId::new(bad).unwrap_err(),
+            domain("user profile id"),
+            "{bad:?}"
+        );
+        assert_eq!(
+            FeedbackCycleId::new(bad).unwrap_err(),
+            domain("feedback cycle id"),
+            "{bad:?}"
+        );
+        assert_eq!(
+            ProximityWarningIdV1::new(bad).unwrap_err(),
+            domain("proximity warning id"),
+            "{bad:?}"
+        );
+        assert_eq!(
+            GitHubReviewIdV1::new(bad).unwrap_err(),
+            domain("github review id"),
+            "{bad:?}"
+        );
     }
-    assert!(EntityId::new("x".repeat(512)).is_ok());
-    assert!(EntityId::new("x".repeat(513)).is_err());
-    assert!(UserProfileId::new("x".repeat(512)).is_ok());
-    assert!(UserProfileId::new("x".repeat(513)).is_err());
-    assert!(PrincipalId::new("x".repeat(512)).is_ok());
-    assert!(PrincipalId::new("x".repeat(513)).is_err());
+    let accepted = "x".repeat(512);
+    assert_eq!(
+        EntityId::new(accepted.clone())
+            .expect("512-byte identity")
+            .as_str(),
+        accepted
+    );
+    assert_eq!(
+        EntityId::new("x".repeat(513)).unwrap_err(),
+        DomainError::NonCanonical { field: "EntityId" }
+    );
+    assert_eq!(
+        UserProfileId::new(accepted.clone())
+            .expect("512-byte profile id")
+            .as_str(),
+        accepted
+    );
+    assert_eq!(
+        UserProfileId::new("x".repeat(513)).unwrap_err(),
+        DomainError::NonCanonical {
+            field: "user profile id"
+        }
+    );
+    assert_eq!(
+        PrincipalId::new(accepted)
+            .expect("512-byte principal")
+            .as_str(),
+        "x".repeat(512)
+    );
+    assert_eq!(
+        PrincipalId::new("x".repeat(513)).unwrap_err(),
+        RetrievalContractError::InvalidIdentity {
+            field: "PrincipalId"
+        }
+    );
 }

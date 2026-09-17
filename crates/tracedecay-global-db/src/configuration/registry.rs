@@ -744,7 +744,6 @@ mod user_profile_settings_tests {
 
     #[test]
     fn code_index_workers_default_is_automatic_and_zero_exact_is_denied() {
-        assert_eq!(CONFIGURATION_REGISTRY_SCHEMA_REVISION, 7);
         let key = SettingKey::new(USER_CODE_INDEX_WORKERS_SETTING_KEY).expect("key");
         let project_registry = ConfigurationRegistry::core().expect("project registry");
         assert!(matches!(
@@ -757,6 +756,7 @@ mod user_profile_settings_tests {
         assert_eq!(registry.definitions().count(), 1);
         let definition = registry.definition(&key).expect("definition");
 
+        assert_eq!(definition.schema_revision, 7);
         assert_eq!(definition.scope, SettingScopeV1::UserProfile);
         assert_eq!(
             definition.value_kind,
@@ -772,15 +772,27 @@ mod user_profile_settings_tests {
             definition.restart_requirement,
             RestartRequirementV1::DaemonRestart
         );
-        assert!(
-            registry
-                .validate_value(
-                    &key,
-                    &ConfigurationValueV1::CodeIndexWorkerSelection(
-                        CodeIndexWorkerSelectionV1::Exact { workers: 0 },
-                    ),
-                )
-                .is_err()
-        );
+        assert!(matches!(
+            registry.validate_value(
+                &key,
+                &ConfigurationValueV1::CodeIndexWorkerSelection(
+                    CodeIndexWorkerSelectionV1::Exact { workers: 2 },
+                ),
+            ),
+            Ok(())
+        ));
+        assert!(matches!(
+            registry.validate_value(
+                &key,
+                &ConfigurationValueV1::CodeIndexWorkerSelection(
+                    CodeIndexWorkerSelectionV1::Exact { workers: 0 },
+                ),
+            ),
+            Err(ConfigurationRegistryError::InvalidDefinition(
+                tracedecay_domain::DomainError::NonCanonical {
+                    field: "code index worker count",
+                }
+            ))
+        ));
     }
 }

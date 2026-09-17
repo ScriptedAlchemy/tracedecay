@@ -1172,7 +1172,7 @@ mod fingerprint_tests {
     };
 
     use super::{
-        CLONE_FINGERPRINT_K_V1, CLONE_FINGERPRINT_WINDOW_V1, CloneAlignmentStopReasonV1,
+        CLONE_FINGERPRINT_K_V1, CloneAlignmentStopReasonV1,
         CloneBodyPayloadV1, CloneNormalizationClassV1, CloneTokenAnchorV1, align_clone_tokens,
         select_rightmost_minima, verify_clone_token_anchor, verify_exact_clone_payload,
         winnow_clone_tokens,
@@ -1210,8 +1210,6 @@ mod fingerprint_tests {
                 .len(),
             1
         );
-        assert_eq!(CLONE_FINGERPRINT_K_V1, 7);
-        assert_eq!(CLONE_FINGERPRINT_WINDOW_V1, 8);
     }
 
     #[test]

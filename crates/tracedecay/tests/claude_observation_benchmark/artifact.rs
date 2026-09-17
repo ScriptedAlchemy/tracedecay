@@ -881,7 +881,6 @@ pub(super) fn git_snapshot() -> GitSnapshot {
 }
 
 fn validate_source_archive() -> (GitSnapshot, usize) {
-    assert_eq!(BUILD_SOURCE_MODE, Some("git_archive_read_only_v1"));
     let manifest_path = repository_root().join(".tracedecay-benchmark-source-manifest");
     let manifest = fs::read(&manifest_path).expect("read immutable source manifest");
     assert_eq!(

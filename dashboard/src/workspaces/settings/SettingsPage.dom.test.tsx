@@ -866,6 +866,9 @@ describe('Settings section navigation', () => {
   });
 
   it('resolves nothing for an id no section carries, rather than the first one', () => {
+    expect(findConfigSection(sectionsFixture(AWKWARD), 'odd"group')?.dataset['section']).toBe(
+      'odd"group',
+    );
     expect(findConfigSection(sectionsFixture(AWKWARD), 'absent')).toBeUndefined();
     // Not a prefix or substring match either: `project` must not answer for
     // `project.sync`.

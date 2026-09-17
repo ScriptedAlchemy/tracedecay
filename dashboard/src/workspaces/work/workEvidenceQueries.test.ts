@@ -114,6 +114,12 @@ describe('TaskSession evidence requests', () => {
         workGraphTimeline([{ tasks: [{ taskId: 'task.alpha' }] }]),
       ),
     };
+    expect(workEvidenceRequest(current(), 'task.alpha', { kind: 'current' }, null, 123)?.task_id).toBe(
+      'task.alpha',
+    );
+    expect(
+      workEvidenceRequest(current(), 'task.alpha', { kind: 'current' }, null, 123)?.observed_at,
+    ).toBe(123);
     expect(
       workEvidenceRequest(timeline, 'task.alpha', { kind: 'current' }, null, 123),
     ).toBeUndefined();
