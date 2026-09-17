@@ -4718,6 +4718,54 @@ export const SavingsLifetimeProjectV1Schema = z.object({
 });
 export type SavingsLifetimeProjectV1 = z.infer<typeof SavingsLifetimeProjectV1Schema>;
 
+/** One UTC-day bucket of the per-model content aggregate. */
+export const SavingsModelDayRowV1Schema = z.object({
+  cost_basis: z.string(),
+  day: z.number().int().safe(),
+  estimated: z.lazy(() => TokenPairV1Schema),
+  estimated_messages: z.number().int().safe(),
+  messages: z.number().int().safe(),
+  model: z.string().nullable(),
+  provider_actual: z.union([z.lazy(() => TokenActualV1Schema), z.null()]),
+  provider_usage_events: z.number().int().safe(),
+  tokenized: z.lazy(() => TokenPairV1Schema),
+  tokenized_messages: z.number().int().safe(),
+});
+export type SavingsModelDayRowV1 = z.infer<typeof SavingsModelDayRowV1Schema>;
+
+/** One model-keyed content aggregate from the session store, joined to the
+exact provider usage recorded for that model. `model` is `None` for
+messages whose model was never recorded; that row keeps its token counts
+and is priced by nothing. */
+export const SavingsModelRowV1Schema = z.object({
+  cost_basis: z.string(),
+  estimated: z.lazy(() => TokenPairV1Schema),
+  estimated_messages: z.number().int().safe(),
+  messages: z.number().int().safe(),
+  model: z.string().nullable(),
+  provider_actual: z.union([z.lazy(() => TokenActualV1Schema), z.null()]),
+  provider_usage_events: z.number().int().safe(),
+  sessions: z.number().int().safe(),
+  tokenized: z.lazy(() => TokenPairV1Schema),
+  tokenized_messages: z.number().int().safe(),
+  tokenizer: z.unknown(),
+});
+export type SavingsModelRowV1 = z.infer<typeof SavingsModelRowV1Schema>;
+
+/** GET `/api/plugins/savings/models` response contract. */
+export const SavingsModelsPayloadV1Schema = z.object({
+  available: z.boolean(),
+  daily: z.array(z.lazy(() => SavingsModelDayRowV1Schema)),
+  error: z.string().nullable(),
+  models: z.array(z.lazy(() => SavingsModelRowV1Schema)),
+  provider_usage: z.lazy(() => SavingsProviderUsageAttributionV1Schema),
+  provider_usage_coverage: z.string().nullable(),
+  range: z.string(),
+  since: z.number().int().safe().nullable(),
+  status: z.string().nullable(),
+});
+export type SavingsModelsPayloadV1 = z.infer<typeof SavingsModelsPayloadV1Schema>;
+
 export const SavingsOverviewPayloadV1Schema = z.object({
   costs: z.lazy(() => CostsReadModelV1Schema),
   pricing: z.lazy(() => SavingsPricingSummaryV1Schema),
@@ -4727,6 +4775,12 @@ export const SavingsOverviewPayloadV1Schema = z.object({
 });
 export type SavingsOverviewPayloadV1 = z.infer<typeof SavingsOverviewPayloadV1Schema>;
 
+/** How much of one provider's observed usage the pricing authority could
+price. `priced` means every usage event priced; `partial` means some did
+and the dollar figure covers only those; `unpriced` means none did. */
+export const SavingsPricingClassV1Schema = z.enum(["partial", "priced", "unpriced"]);
+export type SavingsPricingClassV1 = z.infer<typeof SavingsPricingClassV1Schema>;
+
 export const SavingsPricingSummaryV1Schema = z.object({
   fetched_at: z.unknown(),
   model_count: z.unknown(),
@@ -4735,6 +4789,79 @@ export const SavingsPricingSummaryV1Schema = z.object({
   source: z.unknown(),
 });
 export type SavingsPricingSummaryV1 = z.infer<typeof SavingsPricingSummaryV1Schema>;
+
+/** One provider's canonical priced usage on one UTC day. */
+export const SavingsProviderDayPointV1Schema = z.object({
+  day: z.number().int().safe(),
+  priced_cost_usd: z.number().nullable(),
+  priced_events: z.number().int().safe(),
+  provider: z.string(),
+  total_cost_usd: z.number().nullable(),
+  total_tokens: z.number().int().safe().nullable(),
+  unpriced_events: z.number().int().safe(),
+  usage_events: z.number().int().safe(),
+});
+export type SavingsProviderDayPointV1 = z.infer<typeof SavingsProviderDayPointV1Schema>;
+
+/** Canonical priced usage for one UTC day across every provider. */
+export const SavingsProviderDaySpendV1Schema = z.object({
+  cost_usd: z.number().nullable(),
+  day: z.number().int().safe(),
+  provider_actual: z.union([z.lazy(() => TokenActualV1Schema), z.null()]),
+  total_tokens: z.number().int().safe().nullable(),
+  usage_events: z.number().int().safe(),
+});
+export type SavingsProviderDaySpendV1 = z.infer<typeof SavingsProviderDaySpendV1Schema>;
+
+/** Canonical priced usage for one exact provider/model pair. `cost_usd` is
+`None` whenever any usage event in the pair could not be priced: the
+projector never emits a partial dollar figure for a model. */
+export const SavingsProviderModelSpendV1Schema = z.object({
+  cost_basis: z.string(),
+  cost_usd: z.number().nullable(),
+  model: z.string().nullable(),
+  provider: z.string(),
+  provider_actual: z.union([z.lazy(() => TokenActualV1Schema), z.null()]),
+  total_tokens: z.number().int().safe().nullable(),
+  usage_events: z.number().int().safe(),
+});
+export type SavingsProviderModelSpendV1 = z.infer<typeof SavingsProviderModelSpendV1Schema>;
+
+/** Provider-level spend attribution over exact provider usage observations.
+
+`priced_cost_usd` sums only the model groups the canonical projector
+priced completely, and the event/model counts beside it say how much of
+the provider's usage that figure covers. `total_cost_usd` is the
+projector's own complete total and is `None` unless every event priced. */
+export const SavingsProviderSpendV1Schema = z.object({
+  models: z.number().int().safe(),
+  priced_cost_usd: z.number().nullable(),
+  priced_events: z.number().int().safe(),
+  priced_models: z.number().int().safe(),
+  pricing: z.lazy(() => SavingsPricingClassV1Schema),
+  provider: z.string(),
+  provider_actual: z.union([z.lazy(() => TokenActualV1Schema), z.null()]),
+  sessions: z.number().int().safe(),
+  total_cost_usd: z.number().nullable(),
+  total_tokens: z.number().int().safe().nullable(),
+  undated_events: z.number().int().safe(),
+  unknown_model_events: z.number().int().safe(),
+  unpriced_events: z.number().int().safe(),
+  unpriced_models: z.number().int().safe(),
+  usage_events: z.number().int().safe(),
+});
+export type SavingsProviderSpendV1 = z.infer<typeof SavingsProviderSpendV1Schema>;
+
+export const SavingsProviderUsageAttributionV1Schema = z.object({
+  available: z.boolean(),
+  by_day: z.array(z.lazy(() => SavingsProviderDaySpendV1Schema)),
+  by_model: z.array(z.lazy(() => SavingsProviderModelSpendV1Schema)),
+  by_provider: z.array(z.lazy(() => SavingsProviderSpendV1Schema)),
+  by_provider_day: z.array(z.lazy(() => SavingsProviderDayPointV1Schema)),
+  pricing_revision: z.string().nullable(),
+  undated_events: z.number().int().safe().nullable(),
+});
+export type SavingsProviderUsageAttributionV1 = z.infer<typeof SavingsProviderUsageAttributionV1Schema>;
 
 export const SavingsSessionModelV1Schema = z.object({
   cost_basis: z.string(),
