@@ -195,6 +195,39 @@ describe('layoutDelegationTopology', () => {
     expect(opened.bundledSessions).toBe(0);
     expect(opened.columns).toBe(3);
     expect(opened.edges.some((edge) => edge.to === 'codex:gc-0')).toBe(true);
+    // The parent remembers what was opened beneath it, so it can be folded.
+    const root = sessions(opened).find((mark) => mark.id === 'codex:root');
+    expect(root?.openedBundles).toEqual([
+      { id: 'bundle:codex:root:agent:Explorer', label: 'Explorer', sessions: 9 },
+    ]);
+    expect(opened.openedTopBundles).toEqual([]);
+  });
+
+  it('reports an opened top-level bundle on the model, since it has no parent mark', () => {
+    const tops = Array.from({ length: 9 }, (_, index) =>
+      node({ session_id: `top-${index}`, depth: 0, agent: 'Codex' }),
+    );
+    const folded = layoutDelegationTopology(payload(tops));
+    expect(folded.marks).toHaveLength(1);
+    const opened = layoutDelegationTopology(payload(tops), {
+      expanded: new Set(['bundle:source:agent:Codex']),
+    });
+    expect(opened.marks).toHaveLength(9);
+    expect(opened.openedTopBundles).toEqual([
+      { id: 'bundle:source:agent:Codex', label: 'Codex', sessions: 9 },
+    ]);
+  });
+
+  it('orders labels by code point, not by locale', () => {
+    const children = ['B', 'a', 'ä'].flatMap((label) =>
+      Array.from({ length: 3 }, (_, index) =>
+        node({ session_id: `${label}-${index}`, depth: 1, parent_session_id: 'root', agent: label }),
+      ),
+    );
+    const model = layoutDelegationTopology(
+      payload([node({ session_id: 'root', depth: 0, descendants: 9 }), ...children]),
+    );
+    expect(bundles(model).map((bundle) => bundle.label)).toEqual(['B', 'a', 'ä']);
   });
 
   it('folds surplus agent groups into one remainder bundle', () => {
@@ -279,6 +312,12 @@ describe('layoutDelegationTopology', () => {
     });
     expect(model.marks.some((mark) => mark.id === 'codex:grandchild')).toBe(true);
     expect(model.bundledSessions).toBe(0);
+    const childA = sessions(model).find((mark) => mark.id === 'codex:child-a');
+    expect(childA).toMatchObject({ depthOpened: true, foldedDescendants: 0 });
+    // A session drawn within the limit is not "opened" even if its id is in
+    // the set: nothing about it was the reader's act.
+    const root = sessions(model).find((mark) => mark.id === 'codex:root');
+    expect(root?.depthOpened).toBe(false);
   });
 
   it('counts folded sessions from the pre-order, not from a descendants claim', () => {

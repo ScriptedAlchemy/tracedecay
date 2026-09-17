@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentsPage } from './AgentsPage.tsx';
 import type {
@@ -310,6 +310,21 @@ describe('AgentsPage read coverage', () => {
     expect(
       document.querySelectorAll('[data-topology-control="session"][data-topology-id^="codex:child-"]'),
     ).toHaveLength(7);
+    // The pointer was over the bundle when it vanished; that stale inspection
+    // must isolate nothing rather than dim the whole field.
+    expect(document.querySelectorAll('[data-topology-control].opacity-40')).toHaveLength(0);
+    expect(inspector.getAttribute('data-agent-inspector')).toBe('session');
+
+    // The opened bundle can be folded again, from the strip and from the
+    // parent's inspector section.
+    const strip = screen.getByLabelText('Opened bundles and generations');
+    expect(strip.getAttribute('data-topology-opened')).toBe('1');
+    fireEvent.mouseEnter(document.querySelector('[data-topology-id="codex:root"]')!);
+    expect(inspector.querySelector('[data-agent-inspector-action="fold-bundle"]')).toBeTruthy();
+    fireEvent.click(within(strip).getByRole('button', { name: /Fold 7 × Explorer under Codex/ }));
+    await screen.findByText('11 sessions · 1 drawn · 10 folded · 2 generations');
+    expect(document.querySelectorAll('[data-topology-control="bundle"]')).toHaveLength(2);
+    expect(screen.queryByLabelText('Opened bundles and generations')).toBeNull();
   });
 
   it('keeps an unavailable subagent read distinct from zero delegations', async () => {

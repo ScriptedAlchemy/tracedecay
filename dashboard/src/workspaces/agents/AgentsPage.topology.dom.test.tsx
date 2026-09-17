@@ -64,7 +64,7 @@ describe('AgentsPage delegation topology', () => {
 
     // The default subject is the newest top, said so, with its token frontier read.
     expect(inspector().getAttribute('data-agent-inspector-id')).toBe('cursor:session.cursor.solo');
-    expect(within(inspector() as HTMLElement).getByText(/default · newest root/)).toBeTruthy();
+    expect(within(inspector() as HTMLElement).getByText(/default · newest top/)).toBeTruthy();
     await waitFor(() =>
       expect(inspector().querySelector('[data-agent-inspector-tokens]')?.getAttribute('data-agent-inspector-tokens')).toBe('2'),
     );
@@ -160,6 +160,42 @@ describe('AgentsPage delegation topology', () => {
     // Clearing the selection from the inspector returns to the default subject.
     fireEvent.click(screen.getByRole('button', { name: 'Clear selection' }));
     expect(document.querySelector('[data-topology-selected]')).toBeNull();
+    expect(inspector().getAttribute('data-agent-inspector-mode')).toBe('default');
+  });
+
+  it('captions a real click as selected even while the pointer still hovers the mark', async () => {
+    renderAgents();
+    await settled();
+    const child = mark('codex:session.codex.child');
+    // A pointer click is enter, focus, click — the mark stays inspected.
+    fireEvent.mouseEnter(child);
+    fireEvent.focus(child);
+    fireEvent.click(child);
+    expect(inspector().getAttribute('data-agent-inspector-mode')).toBe('selected');
+    expect(screen.getByRole('button', { name: 'Clear selection' })).toBeTruthy();
+    // Hovering a different mark inspects it; returning to the selected one
+    // reads as the selection again.
+    fireEvent.mouseEnter(mark('codex:session.codex.root'));
+    expect(inspector().getAttribute('data-agent-inspector-mode')).toBe('inspecting');
+    fireEvent.mouseEnter(child);
+    expect(inspector().getAttribute('data-agent-inspector-mode')).toBe('selected');
+  });
+
+  it('ends inspection when focus leaves the field, as the pointer does', async () => {
+    renderAgents();
+    await settled();
+    const root = mark('codex:session.codex.root');
+    root.focus();
+    fireEvent.focus(root);
+    expect(inspector().getAttribute('data-agent-inspector-mode')).toBe('inspecting');
+    // Focus moving to another mark keeps inspecting.
+    const child = mark('codex:session.codex.child');
+    fireEvent.blur(root, { relatedTarget: child });
+    fireEvent.focus(child);
+    expect(inspector().getAttribute('data-agent-inspector-id')).toBe('codex:session.codex.child');
+    // Focus leaving the field ends it.
+    const summary = screen.getByText(/exact tree · 5 sessions/i);
+    fireEvent.blur(child, { relatedTarget: summary });
     expect(inspector().getAttribute('data-agent-inspector-mode')).toBe('default');
   });
 

@@ -82,11 +82,14 @@ export function DelegationTopology({
   const geometry = columnPitchFor(apertureWidth, model.columns);
   const size = fieldSize(model, geometry);
   const hatchId = useId();
-  const keep = useMemo(
-    () => (inspectedId === null ? null : neighbourhood(model, inspectedId)),
-    [model, inspectedId],
-  );
   const byId = useMemo(() => new Map(model.marks.map((mark) => [mark.id, mark])), [model]);
+  // An inspected id the model no longer draws — a bundle the reader just
+  // opened, a session a refetch dropped — isolates nothing rather than
+  // dimming everything.
+  const keep = useMemo(
+    () => (inspectedId !== null && byId.has(inspectedId) ? neighbourhood(model, inspectedId) : null),
+    [model, byId, inspectedId],
+  );
   const isDim = (id: string) => keep !== null && !keep.has(id);
 
   return (
@@ -101,6 +104,14 @@ export function DelegationTopology({
         tabIndex={0}
         className="td-optic td-grain td-scanlines td-graticule relative max-h-[34rem] min-h-[16rem] overflow-auto"
         onMouseLeave={() => interaction.onInspect(null)}
+        // Keyboard parity with the pointer: focus leaving the field ends
+        // inspection the way the pointer leaving it does.
+        onBlur={(event) => {
+          const next = event.relatedTarget;
+          if (!(next instanceof Node) || !event.currentTarget.contains(next)) {
+            interaction.onInspect(null);
+          }
+        }}
       >
         <div
           className="relative"
@@ -243,7 +254,59 @@ export function DelegationTopology({
         </div>
       </div>
       <TopologyLegend model={model} fit={fit} />
+      <OpenedStrip model={model} onToggleExpanded={interaction.onToggleExpanded} />
     </div>
+  );
+}
+
+/**
+ * Everything the reader has opened, with a control to fold each one back.
+ * Lives beside the legend rather than only in the inspector because an opened
+ * bundle has no mark of its own any more, and the inspector's subject moves
+ * with the pointer; this strip is reachable whatever is being inspected.
+ */
+function OpenedStrip({
+  model,
+  onToggleExpanded,
+}: {
+  model: DelegationTopologyModel;
+  onToggleExpanded: (id: string) => void;
+}) {
+  const opened: { id: string; label: string }[] = model.openedTopBundles.map((bundle) => ({
+    id: bundle.id,
+    label: `${bundle.sessions} × ${bundle.label}`,
+  }));
+  for (const mark of model.marks) {
+    if (mark.kind !== 'session') continue;
+    for (const bundle of mark.openedBundles) {
+      opened.push({ id: bundle.id, label: `${bundle.sessions} × ${bundle.label} under ${mark.label}` });
+    }
+    if (mark.depthOpened) {
+      opened.push({ id: mark.id, label: `${mark.node.descendants} beneath ${mark.label}` });
+    }
+  }
+  if (opened.length === 0) return null;
+  return (
+    <ul
+      aria-label="Opened bundles and generations"
+      className="flex min-w-0 flex-wrap items-center gap-2 px-1"
+      data-topology-opened={opened.length}
+    >
+      <li className="td-legend">opened</li>
+      {opened.map((entry) => (
+        <li key={entry.id} className="flex items-center">
+          <button
+            type="button"
+            className="td-hit border border-edge-subtle bg-surface-2 px-2 text-2xs text-text-primary hover:border-accent"
+            onClick={() => onToggleExpanded(entry.id)}
+            aria-label={`Fold ${entry.label}`}
+            data-topology-fold={entry.id}
+          >
+            {entry.label} · fold
+          </button>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -461,7 +524,9 @@ function MarkControl({
   const labelOffset = Math.max(0, radius - HIT / 2) + 8;
 
   if (mark.kind === 'bundle') {
-    const expanded = interaction.expanded.has(mark.id);
+    // A drawn bundle is by construction a closed one: once opened, its
+    // members are drawn in its place and the fold control lives on the
+    // parent's inspector section.
     return (
       <button
         type="button"
@@ -470,8 +535,8 @@ function MarkControl({
           dim && 'opacity-40',
         )}
         style={{ ...commonStyle, color: 'var(--raw-graph-text)' }}
-        aria-expanded={expanded}
-        aria-label={`${bundleTitle(mark)}: ${mark.sessions} sessions in generation ${mark.generation}${mark.descendants > 0 ? `, ${mark.descendants} beneath them` : ''}. ${expanded ? 'Fold' : 'Open'} this bundle.`}
+        aria-expanded={false}
+        aria-label={`${bundleTitle(mark)}: ${mark.sessions} sessions in generation ${mark.generation}${mark.descendants > 0 ? `, ${mark.descendants} beneath them` : ''}. Open this bundle.`}
         onMouseEnter={inspect}
         onFocus={inspect}
         onClick={() => interaction.onToggleExpanded(mark.id)}
@@ -479,11 +544,13 @@ function MarkControl({
         data-topology-id={mark.id}
       >
         <span aria-hidden className="block shrink-0" style={{ width: HIT, height: HIT }} />
-        <span className="flex min-w-0 flex-col" style={{ marginLeft: labelOffset }}>
+        <span
+          className="flex min-w-0 flex-col"
+          style={{ marginLeft: labelOffset, maxWidth: geometry.columnPitch - HIT - 12 }}
+        >
           <span className="truncate font-mono text-2xs tabular-nums">{bundleTitle(mark)}</span>
           <span className="td-legend" style={{ color: 'var(--raw-graph-text)', opacity: 0.75 }}>
-            {mark.descendants > 0 ? `${mark.descendants} beneath · ` : ''}
-            {expanded ? 'fold' : 'open'}
+            {mark.descendants > 0 ? `${mark.descendants} beneath · ` : ''}open
           </span>
         </span>
       </button>
@@ -569,14 +636,15 @@ function bundleTitle(mark: TopologyBundleMark): string {
 /** The field's key and its population, reconciled: drawn plus folded equals
  * the reading, printed so the sum can be checked rather than trusted. */
 function TopologyLegend({ model, fit }: { model: DelegationTopologyModel; fit: FittedTopology }) {
-  const folded = fit.depthLimit !== Number.POSITIVE_INFINITY;
+  const hatchId = useId();
+  const foldedGenerations = fit.maxDepth + 1 - model.columns;
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1.5 px-1 text-3xs text-text-muted">
       <span className="td-legend whitespace-normal text-text-secondary" data-topology-population>
         {model.totalSessions.toLocaleString()} sessions · {model.drawnSessions.toLocaleString()} drawn
         {model.bundledSessions > 0 ? ` · ${model.bundledSessions.toLocaleString()} folded` : ''} ·{' '}
         {model.columns} {model.columns === 1 ? 'generation' : 'generations'}
-        {folded ? ` of ${fit.maxDepth + 1}` : ''}
+        {foldedGenerations > 0 ? ` of ${fit.maxDepth + 1}` : ''}
       </span>
       <Swatch label="linked delegation">
         <path d="M2 8 C10 8 10 8 18 8" stroke="var(--raw-graph-edge)" strokeWidth={1.4} fill="none" />
@@ -587,12 +655,25 @@ function TopologyLegend({ model, fit }: { model: DelegationTopologyModel; fit: F
         <circle cx={19} cy={8} r={3.5} fill="var(--raw-graph-alert)" />
       </Swatch>
       <Swatch label="parent cycle">
-        <circle cx={12} cy={9} r={4} fill="none" stroke="var(--raw-state-conflicting)" strokeWidth={1.4} strokeDasharray="2 1.5" />
-        <path d="M8 7 C6 1 18 1 16 7" fill="none" stroke="var(--raw-state-conflicting)" strokeWidth={1.2} />
+        <defs>
+          <pattern id={`${hatchId}-cycle`} width="3" height="3" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+            <line x1="0" y1="0" x2="0" y2="3" stroke="var(--raw-state-conflicting)" strokeWidth="1" />
+          </pattern>
+        </defs>
+        <circle cx={12} cy={10} r={4} fill={`url(#${hatchId}-cycle)`} stroke="var(--raw-state-conflicting)" strokeWidth={1} />
+        <path d="M8 8 C6 2 18 2 16 8" fill="none" stroke="var(--raw-state-conflicting)" strokeWidth={1.2} strokeDasharray="2 1.5" />
       </Swatch>
       <Swatch label="bundle · folded siblings">
-        <circle cx={12} cy={8} r={5} fill="none" stroke="var(--raw-graph-text)" strokeWidth={1.2} strokeDasharray="3 2" />
-        <path d="M9 5 L15 11 M9 11 L15 5" stroke="var(--raw-graph-text)" strokeWidth={0.8} />
+        <defs>
+          <pattern id={`${hatchId}-bundle`} width="3" height="3" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+            <line x1="0" y1="0" x2="0" y2="3" stroke="var(--raw-state-conflicting)" strokeWidth="1" />
+          </pattern>
+        </defs>
+        <circle cx={12} cy={8} r={5} fill={`url(#${hatchId}-bundle)`} stroke="var(--raw-graph-text)" strokeWidth={1.2} strokeDasharray="3 2" />
+      </Swatch>
+      <Swatch label="+N · folded beneath">
+        <line x1={4} x2={16} y1={8} y2={8} stroke="var(--raw-graph-edge)" strokeWidth={1.2} strokeDasharray="2 3" />
+        <line x1={16} x2={16} y1={4} y2={12} stroke="var(--raw-graph-edge)" strokeWidth={1.2} />
       </Swatch>
       <span>size = sessions beneath, log band</span>
       <span>hover inspects · click selects · Escape clears</span>

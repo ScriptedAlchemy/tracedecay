@@ -129,14 +129,12 @@ export function AgentInspector({
             </p>
           ) : null}
         </Section>
-        <button
-          type="button"
-          className="td-hit self-start border border-edge-subtle bg-surface-2 px-3 text-2xs text-text-primary hover:border-accent"
-          onClick={() => onToggleExpanded(mark.id)}
-          data-agent-inspector-action="open-bundle"
-        >
-          Open bundle
-        </button>
+        {/* No open control here: a bundle is only ever inspected, and this
+          * panel is gone the moment the pointer leaves the field for it. The
+          * bundle's own mark opens it, by click or Enter. */}
+        <p className="text-3xs leading-relaxed text-text-muted">
+          Click the bundle in the field, or press Enter on it, to draw its members.
+        </p>
       </div>
     );
   }
@@ -158,7 +156,7 @@ export function AgentInspector({
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="td-legend">
             gen {mark.generation} · {node.provider} ·{' '}
-            {mode === 'inspecting' ? 'inspecting' : mode === 'selected' ? 'selected' : 'default · newest root'}
+            {mode === 'inspecting' ? 'inspecting' : mode === 'selected' ? 'selected' : 'default · newest top'}
           </span>
           <h2 className="td-title truncate text-text-primary" title={node.session_id}>
             {mark.label}
@@ -238,16 +236,31 @@ export function AgentInspector({
                   {mark.foldedDescendants} {mark.foldedDescendants === 1 ? 'session' : 'sessions'}{' '}
                   beneath this one are folded by the depth limit.
                 </p>
-                <button
-                  type="button"
-                  className="td-hit shrink-0 border border-edge-subtle bg-surface-2 px-2 text-2xs text-text-primary hover:border-accent"
-                  onClick={() => onToggleExpanded(mark.id)}
-                  data-agent-inspector-action="open-fold"
-                >
+                <FoldButton onClick={() => onToggleExpanded(mark.id)} action="open-fold">
                   Open
-                </button>
+                </FoldButton>
               </div>
             ) : null}
+            {mark.depthOpened ? (
+              <div className="flex items-center gap-2">
+                <p className="text-2xs leading-relaxed text-text-muted">
+                  Drawn past the depth limit because you opened it.
+                </p>
+                <FoldButton onClick={() => onToggleExpanded(mark.id)} action="fold-depth">
+                  Fold
+                </FoldButton>
+              </div>
+            ) : null}
+            {mark.openedBundles.map((bundle) => (
+              <div key={bundle.id} className="flex items-center gap-2">
+                <p className="text-2xs leading-relaxed text-text-muted">
+                  {bundle.sessions} × {bundle.label} drawn individually because you opened the bundle.
+                </p>
+                <FoldButton onClick={() => onToggleExpanded(bundle.id)} action="fold-bundle">
+                  Fold
+                </FoldButton>
+              </div>
+            ))}
           </>
         )}
       </Section>
@@ -338,7 +351,7 @@ function TokenFrontier({
   switch (tokens.state) {
     case 'pending':
       return (
-        <Section legend="Token frontier" grade={<EvidenceGrade grade="EXACT" source="GRANT STORE" />}>
+        <Section legend="Token frontier">
           <StateChip kind="loading" detail="reading the token frontier" />
         </Section>
       );
@@ -430,7 +443,7 @@ function RecentHooks({
   switch (diagnostics.state) {
     case 'pending':
       return (
-        <Section legend="Recent hooks" grade={<EvidenceGrade grade="EXACT" source="OBSERVED" />}>
+        <Section legend="Recent hooks">
           <StateChip kind="loading" detail="reading analytics diagnostics" />
         </Section>
       );
@@ -496,13 +509,35 @@ function RecentHooks({
   }
 }
 
+function FoldButton({
+  onClick,
+  action,
+  children,
+}: {
+  onClick: () => void;
+  action: string;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      className="td-hit shrink-0 border border-edge-subtle bg-surface-2 px-2 text-2xs text-text-primary hover:border-accent"
+      onClick={onClick}
+      data-agent-inspector-action={action}
+    >
+      {children}
+    </button>
+  );
+}
+
 function Section({
   legend,
   grade,
   children,
 }: {
   legend: string;
-  grade: ReactNode;
+  /** Omitted while a read is still in flight: no claim, no grade. */
+  grade?: ReactNode;
   children: ReactNode;
 }) {
   return (
