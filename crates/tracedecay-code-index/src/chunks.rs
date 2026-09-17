@@ -13,7 +13,6 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_code_extraction::{ExtractedCloneBodyV1, ExtractionArtifactV1};
@@ -213,6 +212,33 @@ unsafe impl ExtractionAdmittedChunkV1 for ExtractionAdmittedCodeSearchChunkV1 {
 /// for the coarser per-file fan-out above this layer.
 const PARALLEL_CHUNK_THRESHOLD: usize = 16;
 
+/// The only route from this module to the rayon pool.
+///
+/// Every chunk fan-out runs on a worker that already holds one background-CPU
+/// unit (a `collect_bounded_ordered` leaf), and its stolen halves admit
+/// themselves one unit at a time. Holding the parent's unit across the join
+/// while a full-width request sits at the FIFO head wedges the process, so
+/// the yield is welded to the fan-out here rather than left at each call
+/// site, where a merge resolution once kept the `par_iter` and dropped the
+/// yield. `rayon` is imported nowhere else in `chunks`, so a bare `par_iter`
+/// outside this module does not compile.
+mod fan_out {
+    use rayon::prelude::*;
+
+    /// Map `items` across the pool and return the outputs in input order,
+    /// with the caller's admitted units yielded for the duration of the join.
+    pub(super) fn map_yielding<I, R>(items: I, map: impl Fn(I::Item) -> R + Send + Sync) -> Vec<R>
+    where
+        I: IntoParallelIterator,
+        I::Iter: IndexedParallelIterator,
+        R: Send,
+    {
+        crate::parallelism::with_yielded_background_cpu_permits(|| {
+            items.into_par_iter().map(map).collect()
+        })
+    }
+}
+
 /// Run `operation` over every chunk for its failure only, fanning out across
 /// the pool once the batch is large enough. The lowest-index failure is
 /// returned, matching the sequential sweep's short-circuit outcome.
@@ -229,23 +255,12 @@ where
     if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
         return chunks.iter().try_for_each(&operation);
     }
-    // Leaves are admitted one unit at a time on whichever worker runs them,
-    // so the caller's own unit must not be held across the join.
-    let failure = crate::parallelism::with_yielded_background_cpu_permits(|| {
-        chunks
-            .par_iter()
-            .enumerate()
-            .filter_map(|(index, chunk)| {
-                admit(&mut || operation(chunk))
-                    .err()
-                    .map(|error| (index, error))
-            })
-            .min_by_key(|(index, _)| *index)
-    });
-    match failure {
-        Some((_, error)) => Err(error),
-        None => Ok(()),
-    }
+    // Outputs come back in input order, so the first failure is the
+    // lowest-index one.
+    fan_out::map_yielding(chunks, |chunk| admit(&mut || operation(chunk)).err())
+        .into_iter()
+        .find_map(|failure| failure)
+        .map_or(Ok(()), Err)
 }
 
 impl ExactExtractionAuthorityV1 {
@@ -365,13 +380,11 @@ impl ExactExtractionAuthorityV1 {
         if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
             return chunks.into_iter().map(|chunk| self.admit(chunk)).collect();
         }
-        let admitted = crate::parallelism::with_yielded_background_cpu_permits(|| {
-            chunks
-                .into_par_iter()
-                .map(|chunk| crate::parallelism::with_background_cpu_permit(|| self.admit(chunk)))
-                .collect::<Vec<_>>()
-        });
-        admitted.into_iter().collect()
+        fan_out::map_yielding(chunks, |chunk| {
+            crate::parallelism::with_background_cpu_permit(|| self.admit(chunk))
+        })
+        .into_iter()
+        .collect()
     }
 
     /// Rebind an exact authority only after every prior parser-backed chunk
