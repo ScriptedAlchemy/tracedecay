@@ -178,6 +178,7 @@ describe('CortexRelief', () => {
     expect(readout).toContain('src/mod5');
     expect(readout).toContain('stratum');
     expect(readout).toContain('e/file');
+    expect(readout).toContain('i/b');
     expect(readout).toContain('contours');
     expect(readout).toContain('in /');
   });

@@ -84,7 +84,8 @@ function assertBandClear(
     readonly radius: number | null;
     readonly label: string;
     readonly fileCount: number;
-    readonly density: number;
+    readonly internalEdges: number;
+    readonly boundaryEdges: number;
   }>,
 ): void {
   expect(new Set(regions.map((region) => region.y)).size).toBe(1);
@@ -95,8 +96,8 @@ function assertBandClear(
     const bodyGap = reliefBodyRx(previous.radius!) + reliefBodyRx(current.radius!);
     const labelGap = reliefLabelHalfWidth(previous.label) + reliefLabelHalfWidth(current.label);
     const captionGap =
-      reliefCaptionHalfWidth(previous.fileCount, previous.density) +
-      reliefCaptionHalfWidth(current.fileCount, current.density);
+      reliefCaptionHalfWidth(previous.fileCount, previous.internalEdges, previous.boundaryEdges) +
+      reliefCaptionHalfWidth(current.fileCount, current.internalEdges, current.boundaryEdges);
     expect(current.x! - previous.x!).toBeGreaterThanOrEqual(
       Math.max(bodyGap, labelGap, captionGap) - 1e-6,
     );
@@ -221,7 +222,8 @@ describe('elevation', () => {
     );
     const captions = clusters.map((item) => ({
       fileCount: item.file_count,
-      density: item.internal_edges / item.file_count,
+      internalEdges: item.internal_edges,
+      boundaryEdges: item.boundary_edges,
     }));
     const capacity = maxRegionsWithoutOverlap(model.world.width - 104 - 44, labels, captions);
     expect(model.drawnRegions.length).toBe(capacity);
@@ -260,7 +262,8 @@ describe('elevation', () => {
       .map((item) => `${item.directory.slice(item.directory.lastIndexOf('/') + 1)}/`);
     const captions = clusters.slice(0, bedrockCount).map((item) => ({
       fileCount: item.file_count,
-      density: item.internal_edges / item.file_count,
+      internalEdges: item.internal_edges,
+      boundaryEdges: item.boundary_edges,
     }));
     const capacity = maxRegionsWithoutOverlap(model.world.width - 104 - 44, labels, captions);
     expect(bedrock.length).toBeGreaterThanOrEqual(1);
@@ -371,7 +374,8 @@ describe('elevation', () => {
     );
     const captions = clusters.map((item) => ({
       fileCount: item.file_count,
-      density: item.internal_edges / item.file_count,
+      internalEdges: item.internal_edges,
+      boundaryEdges: item.boundary_edges,
     }));
     const usable = model.world.width - 104 - 44;
     const labelOnly = maxRegionsWithoutOverlap(usable, labels);
@@ -407,16 +411,88 @@ describe('area', () => {
 });
 
 describe('contours', () => {
-  it('counts whole lines of a real interval of a real quantity', () => {
+  it('counts whole lines of coupling, and keeps edges-per-file as a separate reading', () => {
     const model = buildCortexModel(
       measurement(
-        [cluster('dense', { order: 0, file_count: 10, internal_edges: 32 })],
+        [cluster('dense', {
+          order: 0,
+          file_count: 10,
+          internal_edges: 32,
+          incoming_edges: 4,
+          outgoing_edges: 4,
+          boundary_edges: 8,
+        })],
         [file('dense/a.rs', 1)],
       ),
     );
     const region = model.regions[0]!;
     expect(region.density).toBeCloseTo(3.2, 6);
-    expect(region.contours).toBe(Math.floor(3.2 / CONTOUR_INTERVAL));
+    expect(region.coupling).toBeCloseTo(4, 6);
+    expect(region.contour).toBe('open');
+    expect(region.contours).toBe(Math.floor(4 / CONTOUR_INTERVAL));
+    expect(region.contours).not.toBe(Math.floor(region.density / CONTOUR_INTERVAL));
+  });
+
+  it('separates equal-mass regions that edges-per-file would paint the same', () => {
+    const shared = { file_count: 40, internal_edges: 80 };
+    const model = buildCortexModel(
+      measurement(
+        [
+          cluster('leaky', { order: 0, ...shared, incoming_edges: 40, outgoing_edges: 40, boundary_edges: 80 }),
+          cluster('closed', { order: 1, ...shared, incoming_edges: 4, outgoing_edges: 6, boundary_edges: 10 }),
+        ],
+        [file('leaky/a.rs', 1), file('closed/a.rs', 1)],
+      ),
+    );
+    const leaky = model.regions.find((region) => region.directory === 'leaky')!;
+    const closed = model.regions.find((region) => region.directory === 'closed')!;
+    expect(leaky.density).toBeCloseTo(closed.density, 6);
+    expect(leaky.fileCount).toBe(closed.fileCount);
+    expect(leaky.contours).not.toBe(closed.contours);
+    expect(closed.contours).toBeGreaterThan(leaky.contours);
+  });
+
+  it('does not restate a file-mass change on the rings when the edges are unchanged', () => {
+    const edges = { internal_edges: 20, incoming_edges: 4, outgoing_edges: 6, boundary_edges: 10 };
+    const model = buildCortexModel(
+      measurement(
+        [
+          cluster('small', { order: 0, file_count: 10, ...edges }),
+          cluster('large', { order: 1, file_count: 40, ...edges }),
+        ],
+        [file('small/a.rs', 1), file('large/a.rs', 1)],
+      ),
+    );
+    const small = model.regions.find((region) => region.directory === 'small')!;
+    const large = model.regions.find((region) => region.directory === 'large')!;
+    expect(large.radius).toBeGreaterThan(small.radius!);
+    expect(large.density).not.toBeCloseTo(small.density, 6);
+    expect(large.contours).toBe(small.contours);
+    expect(large.coupling).toBeCloseTo(small.coupling!, 6);
+  });
+
+  it('draws a sealed region as unbounded coupling, not as a finite ring count', () => {
+    const model = buildCortexModel(
+      measurement(
+        [cluster('shut', {
+          order: 0,
+          file_count: 4,
+          internal_edges: 8,
+          incoming_edges: 0,
+          outgoing_edges: 0,
+          boundary_edges: 0,
+        })],
+        [file('shut/a.rs', 1)],
+      ),
+    );
+    const region = model.regions[0]!;
+    expect(region.contour).toBe('sealed');
+    expect(region.coupling).toBeNull();
+    expect(region.contours).toBe(0);
+    expect(region.density).toBeCloseTo(2, 6);
+    expect(model.sealedRegions).toBe(1);
+    expect(model.relieflessRegions).toBe(0);
+    expect(cortexDescription(model)).toMatch(/drawn sealed/);
   });
 
   it('draws a measured zero as no relief rather than as flat ground', () => {

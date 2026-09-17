@@ -1,7 +1,7 @@
 /**
  * CORTEX — the macro end of the structure LENS: modules as relief terrain
- * (depth-strata placement, area = symbol mass, contour lines = measured
- * connectivity density). Far = CORTEX.
+ * (depth-strata placement, area = file mass, contour lines = coupling ratio).
+ * Far = CORTEX.
  *
  * This module is the honesty boundary the plan's "Rendering strategy" (`:196`)
  * demands: it turns ONE wire reading — `GET /api/plugins/graph/strata`,
@@ -22,8 +22,12 @@
  *              understate every region that is not in that sample. Files are
  *              what was measured, so files are what the area carries, and the
  *              legend says "files" rather than "symbols".
- *   contours   `clusters[].internal_edges ÷ file_count` — internal dependency
- *              edges per file, at a real interval, index contour every fifth.
+ *   contours   internal ÷ boundary (`incoming + outgoing`). Area already
+ *              carries file mass, so rings are coupling, not edges per file.
+ *              That rate stays in the table. A zero boundary with internal
+ *              edges is sealed — one heavy ring, not a fabricated ratio.
+ *              Compared in `cortexContours.ts`; edges-per-file and
+ *              boundary-per-file were the rejected sketches.
  *   x          `clusters[].order`, whose rule is the measurement's own
  *              `cluster_ordering` string. Ordinal, and captioned as ordinal.
  *
@@ -38,14 +42,17 @@
  * accessible table. A visual cap is never silent data loss.
  */
 import type { StrataClusterV1, StrataMeasurementV1 } from '../../contracts/generated.ts';
+import {
+  COMMITTED_CONTOUR_ENCODING,
+  CONTOUR_INTERVAL,
+  contourCaption,
+  sketchContour,
+} from './cortexContours.ts';
 
-/** One contour line per this many internal dependency edges per file. */
-export const CONTOUR_INTERVAL = 0.5;
+export { CONTOUR_INTERVAL, MAX_DRAWN_CONTOURS } from './cortexContours.ts';
+
 /** Every Nth contour is an index contour: heavier, and labelled with its value. */
 export const CONTOUR_INDEX_EVERY = 5;
-/** Rings a region can carry before the interior stops being readable. The exact
- * density is printed in the table either way, so this caps ink and not truth. */
-export const MAX_DRAWN_CONTOURS = 9;
 /** Plan `:175`. Dozens of aggregated bodies, never thousands of symbols. */
 export const MAX_DRAWN_REGIONS = 28;
 
@@ -74,10 +81,25 @@ export function reliefLabelHalfWidth(label: string): number {
   return (label.length * LABEL_EM_14) / 2;
 }
 
-export function reliefCaptionHalfWidth(fileCount: number, density: number): number {
+export function reliefContourCaption(
+  fileCount: number,
+  internalEdges: number,
+  boundaryEdges: number,
+): string {
+  return contourCaption(COMMITTED_CONTOUR_ENCODING, {
+    files: fileCount,
+    internalEdges,
+    boundaryEdges,
+  });
+}
+
+export function reliefCaptionHalfWidth(
+  fileCount: number,
+  internalEdges: number,
+  boundaryEdges: number,
+): number {
   const files = `${fileCount} files`;
-  const relief =
-    Math.floor(density / CONTOUR_INTERVAL) === 0 ? 'no relief' : `${density.toFixed(2)} e/f`;
+  const relief = reliefContourCaption(fileCount, internalEdges, boundaryEdges);
   return (Math.max(files.length, relief.length) * LABEL_EM_11) / 2;
 }
 
@@ -91,7 +113,11 @@ export function reliefFieldDirectory(directory: string, radius: number): string 
 export function maxRegionsWithoutOverlap(
   usableWidth: number,
   labels: readonly string[] = [],
-  captions: readonly { readonly fileCount: number; readonly density: number }[] = [],
+  captions: readonly {
+    readonly fileCount: number;
+    readonly internalEdges: number;
+    readonly boundaryEdges: number;
+  }[] = [],
 ): number {
   const bodyGap = 2 * reliefBodyRx(READABLE_RADIUS);
   const widestLabel = labels.reduce(
@@ -99,7 +125,16 @@ export function maxRegionsWithoutOverlap(
     0,
   );
   const widestCaption = captions.reduce(
-    (max, caption) => Math.max(max, 2 * reliefCaptionHalfWidth(caption.fileCount, caption.density)),
+    (max, caption) =>
+      Math.max(
+        max,
+        2 *
+          reliefCaptionHalfWidth(
+            caption.fileCount,
+            caption.internalEdges,
+            caption.boundaryEdges,
+          ),
+      ),
     0,
   );
   return Math.max(1, Math.floor(usableWidth / Math.max(bodyGap, widestLabel, widestCaption)));
@@ -124,10 +159,18 @@ export interface CortexRegion {
   readonly depthMax: number | null;
   /** Files of this region that carried a depth row. */
   readonly depthFiles: number;
-  /** Internal dependency edges per file. */
+  /** Internal dependency edges per file. Printed. Not the ring channel. */
   readonly density: number;
-  /** Whole contour lines at `CONTOUR_INTERVAL`. Zero means measured zero
-   * internal edges — drawn hollow and dashed, never drawn as flat ground. */
+  /** Internal ÷ boundary when the boundary is non-zero and internal edges
+   * exist. Null when the region is sealed or has no internal edges. */
+  readonly coupling: number | null;
+  /** `none` is measured-zero internal edges. `sealed` is internal edges with
+   * a measured-zero boundary — unbounded, not a line count. `open` is a
+   * finite ratio; `contours` may still be zero when the ratio is below one
+   * interval, and that is not absence. */
+  readonly contour: 'none' | 'sealed' | 'open';
+  /** Interior interval rings. Zero for absence, for a sealed region, and for
+   * an open ratio below one interval. */
   readonly contours: number;
   /** Whether the region is on the drawn field at all. */
   readonly drawn: boolean;
@@ -165,7 +208,9 @@ export interface CortexModel {
   /** Drawn regions with zero internal dependency edges. */
   readonly relieflessRegions: number;
   readonly widestFileCount: number;
-  readonly densestRegion: CortexRegion | null;
+  /** Highest finite coupling among drawn regions. Sealed regions are not a ratio. */
+  readonly tightestCoupling: { readonly label: string; readonly ratio: number } | null;
+  readonly sealedRegions: number;
   readonly capped: boolean;
   readonly scan: StrataMeasurementV1['scan'];
   readonly algorithm: string;
@@ -288,9 +333,8 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
         [labelOf(draft.cluster.directory)],
         [{
           fileCount: draft.cluster.file_count,
-          density: draft.cluster.file_count > 0
-            ? draft.cluster.internal_edges / draft.cluster.file_count
-            : 0,
+          internalEdges: draft.cluster.internal_edges,
+          boundaryEdges: boundaryEdgesOf(draft.cluster),
         }],
       ));
       if (retained.length + 1 > nextCapacity) break;
@@ -342,6 +386,15 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
   const regions: CortexRegion[] = drafts.map((draft) => {
     const { cluster } = draft;
     const density = cluster.file_count > 0 ? cluster.internal_edges / cluster.file_count : 0;
+    const boundaryEdges = boundaryEdgesOf(cluster);
+    const sketch = sketchContour(COMMITTED_CONTOUR_ENCODING, {
+      files: cluster.file_count,
+      internalEdges: cluster.internal_edges,
+      boundaryEdges,
+    });
+    const coupling = sketch.kind === 'lines' ? sketch.value : null;
+    const contour = sketch.kind === 'lines' ? 'open' : sketch.kind;
+    const contours = sketch.kind === 'lines' ? sketch.lines : 0;
     const spot = placed.get(cluster.directory) ?? null;
     const drawn = drawnKeys.has(cluster.directory) && spot !== null;
     return {
@@ -352,13 +405,15 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
       internalEdges: cluster.internal_edges,
       incomingEdges: cluster.incoming_edges,
       outgoingEdges: cluster.outgoing_edges,
-      boundaryEdges: boundaryEdgesOf(cluster),
+      boundaryEdges,
       depth: draft.depth,
       depthMin: draft.depths[0] ?? null,
       depthMax: draft.depths[draft.depths.length - 1] ?? null,
       depthFiles: draft.depths.length,
       density,
-      contours: Math.floor(density / CONTOUR_INTERVAL),
+      coupling,
+      contour,
+      contours,
       drawn,
       x: drawn && spot ? spot.x : null,
       y: drawn && spot ? spot.y : null,
@@ -369,10 +424,17 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
   const drawnRegions = regions.filter((region) => region.drawn);
   const drawnFiles = drawnRegions.reduce((total, region) => total + region.fileCount, 0);
   const totalFiles = regions.reduce((total, region) => total + region.fileCount, 0);
-  const densestRegion = drawnRegions.reduce<CortexRegion | null>(
-    (best, region) => (best === null || region.density > best.density ? region : best),
+  const tightestCoupling = drawnRegions.reduce<{ label: string; ratio: number } | null>(
+    (best, region) => {
+      if (region.coupling === null) return best;
+      if (best === null || region.coupling > best.ratio) {
+        return { label: region.label, ratio: region.coupling };
+      }
+      return best;
+    },
     null,
   );
+  const sealedRegions = regions.filter((region) => region.contour === 'sealed').length;
 
   const strata = [...byBand.keys()]
     .sort((a, b) => a - b)
@@ -398,9 +460,10 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
     readabilityFoldedRegions,
     capFoldedRegions,
     unplacedRegions: regions.filter((region) => region.depth === null).length,
-    relieflessRegions: drawnRegions.filter((region) => region.contours === 0).length,
+    relieflessRegions: drawnRegions.filter((region) => region.contour === 'none').length,
     widestFileCount,
-    densestRegion,
+    tightestCoupling,
+    sealedRegions,
     capped:
       measurement.scan.files_examined >= measurement.scan.max_files ||
       measurement.scan.dependency_edges_examined >= measurement.scan.max_dependency_edges,
@@ -440,10 +503,14 @@ export function cortexLegendPanels(model: CortexModel): readonly CortexPanel[] {
     },
     {
       label: 'contours',
-      reading: `${CONTOUR_INTERVAL.toFixed(2)} e / file`,
-      teach: `one line per ${CONTOUR_INTERVAL} internal dependency edges per file; every ${CONTOUR_INDEX_EVERY}th is an index contour, drawn heavier.${
-        model.densestRegion
-          ? ` ${model.densestRegion.label} is densest at ${model.densestRegion.density.toFixed(2)}.`
+      reading: `${CONTOUR_INTERVAL.toFixed(2)} i / boundary`,
+      teach: `one line per ${CONTOUR_INTERVAL} internal dependency edges per boundary edge. Area already carries file mass, so rings are coupling and not edges per file — that rate stays in the table. Every ${CONTOUR_INDEX_EVERY}th ring is an index contour.${
+        model.tightestCoupling
+          ? ` ${model.tightestCoupling.label} is most closed at ${model.tightestCoupling.ratio.toFixed(2)} i/b.`
+          : ''
+      }${
+        model.sealedRegions > 0
+          ? ` ${model.sealedRegions} sealed ${model.sealedRegions === 1 ? 'region has' : 'regions have'} internal edges and a measured-zero boundary; the ratio is unbounded and is drawn as one heavy ring, not as a fabricated count.`
           : ''
       }`,
     },
@@ -512,7 +579,10 @@ export function cortexDescription(model: CortexModel): string {
     `Relief terrain of ${model.drawnRegions.length} module regions aggregating ${model.drawnFiles.toLocaleString()} files,`,
     `placed by file-level dependency depth from 0 (bedrock) to ${model.maxDepth} (ridge).`,
     bands.length > 0 ? `By stratum: ${bands}.` : '',
-    `Area carries the file count; contour rings carry internal dependency edges per file at ${CONTOUR_INTERVAL} per line.`,
+    `Area carries the file count; contour rings carry internal edges per boundary edge at ${CONTOUR_INTERVAL} per line.`,
+    model.sealedRegions > 0
+      ? `${model.sealedRegions} regions have internal edges and a measured-zero boundary, so the ratio is unbounded and they are drawn sealed.`
+      : '',
     model.relieflessRegions > 0
       ? `${model.relieflessRegions} regions measured zero internal edges and are drawn hollow.`
       : '',

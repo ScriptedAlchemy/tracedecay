@@ -62,7 +62,7 @@ export function CortexRelief({ focusPath }: { focusPath?: string | null }) {
         <span aria-hidden className="td-rule" />
         <span className="td-legend normal-case tracking-normal text-text-muted">
           the indexed repository as continuous relief · elevation is dependency depth,
-          area is file mass, contour density is internal connectivity
+          area is file mass, contour rings are internal edges per boundary edge
         </span>
       </div>
       {strata.isPending ? (
@@ -160,7 +160,7 @@ function ReliefPlate({ model }: { model: CortexModel }) {
     {
       label: 'contour interval',
       value: '0.50',
-      unit: 'edges / file',
+      unit: 'i / boundary',
       note: 'index every 5th',
     },
     {
@@ -252,6 +252,36 @@ function ReliefAbsences({ model }: { model: CortexModel }) {
   );
 }
 
+function couplingReadout(region: CortexRegion): string {
+  switch (region.contour) {
+    case 'none':
+      return '—';
+    case 'sealed':
+      return 'sealed';
+    case 'open':
+      return region.coupling === null ? '—' : `${region.coupling.toFixed(2)} i/b`;
+    default: {
+      const unhandled: never = region.contour;
+      return unhandled;
+    }
+  }
+}
+
+function contourReadout(region: CortexRegion): string {
+  switch (region.contour) {
+    case 'none':
+      return 'no relief';
+    case 'sealed':
+      return 'sealed';
+    case 'open':
+      return String(region.contours);
+    default: {
+      const unhandled: never = region.contour;
+      return unhandled;
+    }
+  }
+}
+
 function SelectedRegion({ region }: { region: CortexRegion }) {
   return (
     <div
@@ -277,7 +307,8 @@ function SelectedRegion({ region }: { region: CortexRegion }) {
         · <span className="td-value text-text-secondary">{region.fileCount}</span> files ·{' '}
         <span className="td-value text-text-secondary">{region.internalEdges}</span> internal ·{' '}
         <span className="td-value text-text-secondary">{region.density.toFixed(2)}</span> e/file ·{' '}
-        <span className="td-value text-text-secondary">{region.contours}</span> contours ·{' '}
+        <span className="td-value text-text-secondary">{couplingReadout(region)}</span> ·{' '}
+        <span className="td-value text-text-secondary">{contourReadout(region)}</span> contours ·{' '}
         <span className="td-value text-text-secondary">{region.incomingEdges}</span> in /{' '}
         <span className="td-value text-text-secondary">{region.outgoingEdges}</span> out
       </span>
@@ -286,7 +317,7 @@ function SelectedRegion({ region }: { region: CortexRegion }) {
 }
 
 const REGION_ROW =
-  'grid grid-cols-[minmax(8rem,2fr)_repeat(8,minmax(3.5rem,1fr))] items-center text-left text-2xs';
+  'grid grid-cols-[minmax(8rem,2fr)_repeat(9,minmax(3.5rem,1fr))] items-center text-left text-2xs';
 
 /** The accessible equivalent of the relief: every region in the measurement,
  * drawn or folded, with the numbers the field encodes. Windowed through
@@ -334,6 +365,9 @@ function RegionTable({
               </span>
               <span role="columnheader" className="td-legend px-3 py-2">
                 e / file
+              </span>
+              <span role="columnheader" className="td-legend px-3 py-2">
+                coupling
               </span>
               <span role="columnheader" className="td-legend px-3 py-2">
                 contours
@@ -413,8 +447,13 @@ function RegionRow({
         {region.density.toFixed(2)}
       </div>
       <div role="cell" className="px-3 py-1.5 tabular-nums text-text-secondary">
-        {region.contours === 0 ? (
+        {couplingReadout(region)}
+      </div>
+      <div role="cell" className="px-3 py-1.5 tabular-nums text-text-secondary">
+        {region.contour === 'none' ? (
           <span className="text-state-unknown">no relief</span>
+        ) : region.contour === 'sealed' ? (
+          'sealed'
         ) : (
           region.contours
         )}
