@@ -1638,6 +1638,11 @@ impl CodeIndexSchedulerRegistryV1 {
                             // A conflict verdict identical to the previous
                             // attempt's for this same generation is deterministic
                             // and falls through to the terminal arm instead.
+                            //
+                            // The prepared text candidate stays. Wiping it to
+                            // `Ok((Err, None, None))` skipped the serving swap,
+                            // so search kept the predecessor while graph backoff
+                            // ran.
                             if error.is_retryable_activation() && !repeated_conflict {
                                 last_seat_conflict = error
                                     .activation_conflict_context()
@@ -1654,7 +1659,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                     retry_delay_micros = retry_delay.as_micros() as u64,
                                     error = %error,
                                     "graph activation failed retryably; the sealed generation \
-                                     stays unseated until the scheduled retry"
+                                     still seats and the next pass retries native graph"
                                 );
                                 hotpath::gauge!("daemon.code_index.graph_seat.retry_total")
                                     .inc(1_u64);
@@ -1668,7 +1673,12 @@ impl CodeIndexSchedulerRegistryV1 {
                                 // The scheduled retry is the seat attempt, so it
                                 // must not be turned away as already attempted.
                                 graph_seat_attempted = None;
-                                result = Ok((Err(error), None, None));
+                                if !super::activation_failure_keeps_serving_candidate(
+                                    error.is_retryable_activation(),
+                                    repeated_conflict,
+                                ) {
+                                    result = Ok((Err(error), None, None));
+                                }
                             } else {
                                 next_seat_attempt_at = None;
                                 seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
@@ -1699,6 +1709,18 @@ impl CodeIndexSchedulerRegistryV1 {
                 // and serving-swap boundary. Graph work above ran only when
                 // the outcome was ready.
                 if let Some(outcome) = published_text_projection_outcome.take() {
+                    // A clone-fingerprint successor is still `Unfinished` work
+                    // after exact and lexical owners are ready. That must not
+                    // clear the prepared generation the way a missing owner does.
+                    let owners_ready = exact_and_lexical_ready_for_graph(graph_text.as_ref());
+                    let outcome = match outcome {
+                        PublishedTextProjectionOutcomeV1::Unfinished
+                            if !super::text_projection_unfinished_withholds_seat(owners_ready) =>
+                        {
+                            PublishedTextProjectionOutcomeV1::Finished
+                        }
+                        other => other,
+                    };
                     match outcome {
                         PublishedTextProjectionOutcomeV1::Finished => {
                             // The seat needs only the ready exact/lexical

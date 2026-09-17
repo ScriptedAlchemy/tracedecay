@@ -56,6 +56,8 @@ mod query_authority;
 mod reconcile_failure_isolation_tests;
 mod scope_identity;
 #[cfg(test)]
+mod seat_swap_tests;
+#[cfg(test)]
 mod serving_readiness_tests;
 mod serving_reads;
 
@@ -350,6 +352,42 @@ impl ServingSwapOutcomeV1 {
     pub const fn installs(self) -> bool {
         matches!(self, Self::Seated | Self::SeatedStale)
     }
+}
+
+/// The prepared generation id after a graph-activation failure.
+///
+/// Retryable activation used to replace the prepared triple with
+/// `Ok((Err, None, None))`, so the swap never ran and search kept the
+/// predecessor for the whole backoff. Both retryable and terminal failures
+/// now leave the sealed text generation in place; only graph readiness
+/// retries or becomes unavailable.
+pub(super) fn serving_generation_after_activation_failure<'a>(
+    prepared_generation: Option<&'a str>,
+    retryable: bool,
+    repeated_conflict: bool,
+) -> Option<&'a str> {
+    if activation_failure_keeps_serving_candidate(retryable, repeated_conflict) {
+        prepared_generation
+    } else {
+        None
+    }
+}
+
+fn activation_failure_keeps_serving_candidate(retryable: bool, repeated_conflict: bool) -> bool {
+    // `retryable && !repeated_conflict` used to wipe the candidate. Terminal
+    // failures already kept it. Both now keep it; the flags stay so a later
+    // change cannot drop only the retryable arm without this predicate.
+    let _ = (retryable, repeated_conflict);
+    true
+}
+
+/// An unfinished text projection withholds the serving seat only when exact
+/// or lexical owners are still missing.
+///
+/// A clone-fingerprint successor keeps `text_projection_needs_work` after
+/// those owners are ready. That is not `published_text_owner_unfinished`.
+pub(super) fn text_projection_unfinished_withholds_seat(exact_and_lexical_ready: bool) -> bool {
+    !exact_and_lexical_ready
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
