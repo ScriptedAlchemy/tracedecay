@@ -313,7 +313,7 @@ function GenerationHeaders({
             <span className="td-legend" style={{ color: 'var(--raw-graph-text)' }}>
               {role}
             </span>
-            <span className="td-value truncate text-3xs opacity-80">{count}</span>
+            <span className="truncate font-mono text-3xs tabular-nums opacity-80">{count}</span>
           </li>
         );
       })}
@@ -480,7 +480,7 @@ function MarkControl({
       >
         <span aria-hidden className="block shrink-0" style={{ width: HIT, height: HIT }} />
         <span className="flex min-w-0 flex-col" style={{ marginLeft: labelOffset }}>
-          <span className="td-value truncate text-2xs">{bundleTitle(mark)}</span>
+          <span className="truncate font-mono text-2xs tabular-nums">{bundleTitle(mark)}</span>
           <span className="td-legend" style={{ color: 'var(--raw-graph-text)', opacity: 0.75 }}>
             {mark.descendants > 0 ? `${mark.descendants} beneath · ` : ''}
             {expanded ? 'fold' : 'open'}
@@ -531,10 +531,10 @@ function MarkControl({
           className="flex min-w-0 flex-col"
           style={{ marginLeft: labelOffset, maxWidth: geometry.columnPitch - HIT - 12 }}
         >
-          <span className="td-value truncate text-2xs" title={mark.node.session_id}>
+          <span className="truncate font-mono text-2xs tabular-nums" title={mark.node.session_id}>
             {mark.label}
           </span>
-          <span className="td-value truncate text-3xs opacity-75">{detail}</span>
+          <span className="truncate font-mono text-3xs tabular-nums opacity-75">{detail}</span>
         </span>
       </button>
       {mark.foldedDescendants > 0 ? (
