@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.41](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.40...v0.1.0-beta.41) (2026-09-17)
+
+
+### Bug Fixes
+
+* **configuration:** converge retired core settings out of old snapshots ([4d8c365](https://github.com/ScriptedAlchemy/tracedecay/commit/4d8c36597ddd8e0a30dc798f3aa438c878cee0b8))
+* **configuration:** converge retired core settings out of old snapshots ([475fb53](https://github.com/ScriptedAlchemy/tracedecay/commit/475fb53f734c38e55ea03caa14c8bdc1a5823161))
+
 ## [0.1.0-beta.40](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.39...v0.1.0-beta.40) (2026-09-17)
 
 
