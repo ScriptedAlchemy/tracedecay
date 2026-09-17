@@ -12,11 +12,14 @@ import {
   type RunArtifactsPayload,
   type RunRow,
 } from "../../data/query/automation.ts";
+import { artifactPayloadBelongsTo, missingArtifactKinds } from "./ledger.ts";
 
 /**
- * The run history the automation runtime already keeps: the newest ledger
- * records from `/api/automation/runs`, each expandable to its recorded
- * artifacts and the server-computed chain-integrity verdict.
+ * The compact disclosure list of the automation run ledger, embedded by the
+ * Knowledge curation console: the newest ledger records from
+ * `/api/automation/runs`, each expandable to its recorded artifacts and the
+ * server-computed chain-integrity verdict. The Automations channel itself
+ * renders the same read as `RunLedger` with the run inspector.
  *
  * Everything here is a reading of the ledger. The row prints the record's own
  * status word and canonical acceptance tallies; the artifact panel prints the handler's
@@ -162,9 +165,7 @@ function RunArtifacts({
 
 function ArtifactList({ data }: { data: RunArtifactsPayload }) {
   const chain = data.artifact_chain;
-  const missing = chain.expected_kinds.filter(
-    (kind) => !chain.present_kinds.includes(kind),
-  );
+  const missing = missingArtifactKinds(chain);
   return (
     <div className="flex flex-col gap-1 py-1">
       {/* The daemon's own verdict on whether the ledger's artifact list still
@@ -219,10 +220,7 @@ function ArtifactLine({
       {open ? (
         <PayloadBoundary title={`${artifact.kind} artifact`} pending={payload.isPending} result={payload.data}>
           {(data) =>
-            data.run_id === runId &&
-            data.artifact.kind === artifact.kind &&
-            data.artifact.path === artifact.path &&
-            data.artifact.sha256 === artifact.sha256 ? (
+            artifactPayloadBelongsTo(data, runId, artifact) ? (
               <pre
                 aria-label={`${artifact.kind} artifact payload`}
                 className="max-h-64 overflow-auto whitespace-pre-wrap break-words border border-edge-subtle bg-surface-1 p-2 font-mono text-3xs text-text-secondary"

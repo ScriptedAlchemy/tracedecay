@@ -221,6 +221,7 @@ function run(
   return {
     run_id: id,
     task: options.task,
+    task_key: options.task,
     trigger: "manual_cli",
     backend: "claude",
     model: null,
@@ -230,6 +231,9 @@ function run(
     rejected_count: 0,
     skipped_count: 0,
     error: options.error ?? null,
+    error_classification: null,
+    error_retryable: null,
+    backend_attempt_count: 1,
     started_at: "1754000000",
     completed_at: "1754000060",
     artifact_kinds: options.artifactKinds ?? [],

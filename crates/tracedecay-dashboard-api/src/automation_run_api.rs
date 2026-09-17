@@ -62,11 +62,15 @@ pub async fn run_list(
 }
 
 /// One ledger record as the run-history row: identity, outcome, review tallies,
-/// and which artifacts exist — every field measured from the record itself.
+/// typed failure class and backend attempt count, and which artifacts exist —
+/// every field measured from the record itself. `task_key` is the exact
+/// per-job identity (`user_job:<id>`) the ledger writer recorded; rows written
+/// before it existed carry `null` and cannot be joined to a job.
 fn run_history_row(record: &AutomationRunLedgerRecord) -> Value {
     json!({
         "run_id": record.run_id,
         "task": record.task,
+        "task_key": record.task_key,
         "trigger": record.trigger,
         "backend": record.backend,
         "model": record.model,
@@ -76,6 +80,9 @@ fn run_history_row(record: &AutomationRunLedgerRecord) -> Value {
         "rejected_count": record.rejected_count,
         "skipped_count": record.skipped_count,
         "error": record.error,
+        "error_classification": record.error_classification,
+        "error_retryable": record.error_retryable,
+        "backend_attempt_count": record.backend_attempt_count,
         "started_at": record.started_at,
         "completed_at": record.completed_at,
         "artifact_kinds": record
@@ -217,4 +224,64 @@ fn expected_artifact_chain_kinds() -> Vec<&'static str> {
         AutomationRunArtifactKind::OptimizerDiagnosis.as_str(),
         AutomationRunArtifactKind::CodexHandoff.as_str(),
     ]
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn record(value: Value) -> AutomationRunLedgerRecord {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn run_history_row_carries_job_identity_and_typed_failure_fields() {
+        let row = run_history_row(&record(json!({
+            "schema_version": 2,
+            "run_id": "dashboard_user_job_nightly_1",
+            "trigger": "scheduler",
+            "task": "user_job",
+            "task_key": "user_job:nightly",
+            "backend": "codex_app_server",
+            "status": "failed",
+            "accepted_count": 0,
+            "rejected_count": 0,
+            "error": "provider lease expired",
+            "error_classification": "retryable",
+            "error_retryable": true,
+            "backend_attempt_count": 2,
+            "started_at": "1754000000",
+            "completed_at": "1754000031",
+        })));
+
+        assert_eq!(row["task_key"], "user_job:nightly");
+        assert_eq!(row["error_classification"], "retryable");
+        assert_eq!(row["error_retryable"], true);
+        assert_eq!(row["backend_attempt_count"], 2);
+        assert_eq!(row["artifact_kinds"], json!([]));
+    }
+
+    #[test]
+    fn run_history_row_keeps_absent_identity_and_failure_fields_null() {
+        let row = run_history_row(&record(json!({
+            "schema_version": 2,
+            "run_id": "legacy_run",
+            "trigger": "manual_cli",
+            "task": "memory_curator",
+            "backend": "claude",
+            "status": "succeeded",
+            "accepted_count": 1,
+            "rejected_count": 0,
+            "started_at": "1754000000",
+            "completed_at": "1754000060",
+        })));
+
+        // A pre-`task_key` row must not be joined to any job, and an absent
+        // failure classification is an absence rather than a default class.
+        assert_eq!(row["task_key"], Value::Null);
+        assert_eq!(row["error_classification"], Value::Null);
+        assert_eq!(row["error_retryable"], Value::Null);
+        assert_eq!(row["backend_attempt_count"], 0);
+    }
 }
