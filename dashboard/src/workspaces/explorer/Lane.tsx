@@ -29,6 +29,12 @@ import type { Hit } from './model.ts';
 /** Fixed row height shared with the virtualizer: title, location, meta. */
 export const LANE_ROW_HEIGHT = 60;
 
+/** A code-graph generation watermark is a long dotted digest; the footer
+ * shows enough to tell two apart and carries the whole value as a title. */
+function clipWatermark(watermark: string): string {
+  return watermark.length <= 28 ? watermark : `${watermark.slice(0, 27)}…`;
+}
+
 /** Marks each lane's row region so the grid can traverse lanes with the
  * horizontal arrows without knowing how a lane lays itself out. */
 export const LANE_LIST_ATTR = 'data-lane-list';
@@ -154,9 +160,9 @@ export function Lane({
           {/* The source's own freshness word and watermark, so a served page
             * says how current it is rather than looking current by default. */}
           {answered ? (
-            <span data-lane-freshness={read.freshness}>
+            <span data-lane-freshness={read.freshness} title={read.watermark ?? undefined}>
               {` · ${read.freshness}`}
-              {read.watermark !== null ? ` @ ${read.watermark}` : ''}
+              {read.watermark !== null ? ` @ ${clipWatermark(read.watermark)}` : ''}
             </span>
           ) : null}
         </span>
