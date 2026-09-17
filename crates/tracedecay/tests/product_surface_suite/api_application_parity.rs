@@ -674,9 +674,18 @@ fn application_request(
         ApplicationSurfaceOperation::TestResults => {
             ApplicationSurfaceRequest::TestResults(TestResultsSurfaceRequestV1::default())
         }
-        // Cursor-carrying code operations decode straight from the golden's
-        // pinned request body, so the fixture proves the reviewed request
-        // schema still accepts it rather than restating it in Rust.
+        // Proximity and cursor-carrying code operations decode straight from
+        // the golden's pinned request body, so the fixture proves the reviewed
+        // request schema still accepts it rather than restating it in Rust.
+        ApplicationSurfaceOperation::FeedbackProximity => {
+            parse_application_surface_request(operation, expected["request"].clone())
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{} golden request body must parse: {error:?}",
+                        operation.as_str()
+                    )
+                })
+        }
         operation if CURSOR_CARRYING_CODE_OPERATIONS.contains(&operation) => {
             parse_application_surface_request(operation, expected["request"].clone())
                 .unwrap_or_else(|error| {

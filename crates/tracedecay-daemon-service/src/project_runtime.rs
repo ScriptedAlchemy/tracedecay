@@ -1223,7 +1223,11 @@ impl ProjectRuntimeRegistryV1 {
                         || *type_id == TypeId::of::<Arc<SwitchableFeedbackCycleRuntimeV1>>()
                 });
                 if !reserved {
-                    if runtime.advisory.is_some() || runtime.advisory_cycle.is_some() {
+                    // Full advisory is one-shot. An early proximity-only
+                    // `advisory_cycle` owner (mounted beside Delivery before a
+                    // sealed generation exists) is replaced here; a live full
+                    // advisory registration is not.
+                    if runtime.advisory.is_some() {
                         return Err(ProjectRuntimeRegistryError::AlreadyRegistered.into());
                     }
                     let router = runtime

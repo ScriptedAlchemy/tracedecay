@@ -216,8 +216,12 @@ async fn brokered_init(
         Ok(reconcile) => reconcile,
     };
     match admin_sync_status(&reconcile).as_deref() {
+        // Status `queued` means the daemon accepted the reconcile demand into
+        // its pre-mount queue. Init's user-facing confirmation names that
+        // request (`requested`), matching the brokered-init contract tests and
+        // dogfood journeys — not the internal queue noun.
         Some("queued") => eprintln!(
-            "initialized {}; daemon code-index reconciliation queued",
+            "initialized {}; daemon code-index reconciliation requested",
             project_path.display()
         ),
         Some("not_applicable") => eprintln!(
