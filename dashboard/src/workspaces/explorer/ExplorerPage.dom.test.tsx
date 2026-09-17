@@ -329,9 +329,10 @@ describe('ExplorerPage independent lane lifecycle', () => {
     expect(knowledge.queryByText('0')).toBeNull();
     expect(knowledge.getByText('UNAVAILABLE')).toBeTruthy();
 
-    // The ready lanes carry their own counts and grade, untouched.
+    // The ready lanes carry their own counts, grade and freshness, untouched.
     expect(within(lane('Code')).getByText('1')).toBeTruthy();
     expect(within(lane('Code')).getByText('EXACT')).toBeTruthy();
+    expect(lane('Code').querySelector('[data-lane-freshness="unknown"]')).toBeTruthy();
     expect(within(lane('Sessions')).getByText('2')).toBeTruthy();
 
     // The summary counts only lanes that answered.
