@@ -1502,17 +1502,17 @@ where
         return false;
     };
     let impl_file = files[target.index].as_ref();
-    if !rust_inherent_method_matches(
+    let Some(impl_owner) = rust_inherent_method_owner(
         exported_name,
         member,
         root_path,
         &impl_file.authority.logical_path,
         &target.symbol.qualified_name,
-    ) {
+    ) else {
         return false;
-    }
-    if target.index == scope_index {
-        return true;
+    };
+    if impl_owner.rsplit("::").next() != Some(exported_name) {
+        return false;
     }
     let shadowed = impl_file.artifacts.symbols.iter().any(|symbol| {
         symbol.simple_name == exported_name
@@ -1525,6 +1525,18 @@ where
         index: scope_index,
         symbol: scope_type,
     };
+    if impl_owner.contains("::") {
+        return rust_qualified_path_matches(
+            files,
+            rust,
+            target.index,
+            impl_owner,
+            type_target,
+        );
+    }
+    if target.index == scope_index {
+        return true;
+    }
     let impl_path = impl_file.authority.logical_path.as_str();
     if let Some(binding) = unique_named_import(impl_file, exported_name) {
         return binding.module_kind == ImportModuleKindV1::ProjectRelative
@@ -1571,54 +1583,57 @@ where
 /// holds the `impl`. Methods of an `impl` nested in an inline module are not
 /// matched: their `Type` is bound by that module's own imports, which file
 /// import rows do not attest.
-fn rust_inherent_method_matches(
+fn rust_inherent_method_owner<'a>(
     type_name: &str,
     member: &str,
     source_path: &str,
     target_path: &str,
-    target_qualified_name: &str,
-) -> bool {
+    target_qualified_name: &'a str,
+) -> Option<&'a str> {
     let Some(source_root) = rust_source_root(source_path) else {
-        return false;
+        return None;
     };
     if rust_source_root(target_path) != Some(source_root) {
-        return false;
+        return None;
     }
     let Some(relative_file) = target_path
         .strip_prefix(source_root)
         .and_then(|path| path.strip_prefix('/'))
     else {
-        return false;
+        return None;
     };
     let Some(source_file) = source_path
         .strip_prefix(source_root)
         .and_then(|path| path.strip_prefix('/'))
     else {
-        return false;
+        return None;
     };
     if source_file.starts_with("bin/") || relative_file.starts_with("bin/") {
-        return false;
+        return None;
     }
     if matches!(
         (source_file, relative_file),
         ("lib.rs", "main.rs") | ("main.rs", "lib.rs")
     ) {
-        return false;
+        return None;
     }
     let Some(symbol_path) = target_qualified_name
         .strip_prefix(target_path)
         .and_then(|path| path.strip_prefix("::"))
     else {
-        return false;
+        return None;
     };
     let Some((target_owner, target_member)) = symbol_path.rsplit_once("::") else {
-        return false;
+        return None;
     };
     let Some(member) = member.strip_prefix("::") else {
-        return false;
+        return None;
     };
-    target_member == member
-        && nominal_rust_impl_owner(target_owner).is_some_and(|owner| owner == type_name)
+    if target_member != member {
+        return None;
+    }
+    let owner = nominal_rust_impl_owner(target_owner)?;
+    (owner.rsplit("::").next() == Some(type_name)).then_some(owner)
 }
 
 fn nominal_rust_impl_owner(owner: &str) -> Option<&str> {

@@ -66,6 +66,9 @@ pub enum CodeIndexDemandAdmissionV1 {
     /// The watcher policy for this route refuses the daemon's own demand. An
     /// operator-named demand for the same route is still admitted.
     RefusedByPolicy,
+    /// The route is valid but has no repository identity, so code indexing
+    /// does not apply and no work was queued.
+    NotApplicable,
     /// The worktree is parked on a corrupt publication authority. Terminal:
     /// only an explicit index reset admits work again.
     Terminal(CodeIndexConvergenceParkedV1),
@@ -88,7 +91,9 @@ impl CodeIndexDemandAdmissionV1 {
             (Self::Unavailable(cause), _) | (_, Self::Unavailable(cause)) => {
                 Self::Unavailable(cause)
             }
-            (Self::Queued, Self::Queued) => Self::Queued,
+            (Self::Queued, Self::Queued | Self::NotApplicable)
+            | (Self::NotApplicable, Self::Queued) => Self::Queued,
+            (Self::NotApplicable, Self::NotApplicable) => Self::NotApplicable,
         }
     }
 }

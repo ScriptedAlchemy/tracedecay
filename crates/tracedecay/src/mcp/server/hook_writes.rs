@@ -29,6 +29,7 @@ pub(crate) struct BackgroundRefreshRequest {
 
 pub(crate) enum BackgroundRefreshOutcome {
     Admitted(Option<HashMap<String, u64>>),
+    NotApplicable,
     LinkedWorktreeDisabled,
 }
 
@@ -95,6 +96,7 @@ pub(crate) async fn execute_background_refresh_direct(
     };
     match accepted.await {
         CodeIndexDemandAdmissionV1::Queued => Ok(BackgroundRefreshOutcome::Admitted(None)),
+        CodeIndexDemandAdmissionV1::NotApplicable => Ok(BackgroundRefreshOutcome::NotApplicable),
         CodeIndexDemandAdmissionV1::RefusedByPolicy => {
             Ok(BackgroundRefreshOutcome::LinkedWorktreeDisabled)
         }

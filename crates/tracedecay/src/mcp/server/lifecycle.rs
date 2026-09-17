@@ -268,6 +268,9 @@ impl McpServer {
                 *crate::mcp::server::requests::recover_lock(&self.file_token_map) = fresh;
             }
             Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(None)) => {}
+            Ok(super::hook_writes::BackgroundRefreshOutcome::NotApplicable) => {
+                tracing::debug!("startup code-index catch-up does not apply without Git identity");
+            }
             Ok(super::hook_writes::BackgroundRefreshOutcome::LinkedWorktreeDisabled) => {
                 tracing::info!(
                     reason = "linked_worktree_disabled",
@@ -461,6 +464,11 @@ impl McpServer {
                     }
                 }
                 Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(None)) => {}
+                Ok(super::hook_writes::BackgroundRefreshOutcome::NotApplicable) => {
+                    tracing::debug!(
+                        "background code-index reconciliation does not apply without Git identity"
+                    );
+                }
                 Ok(super::hook_writes::BackgroundRefreshOutcome::LinkedWorktreeDisabled) => {
                     tracing::info!(
                         reason = "linked_worktree_disabled",

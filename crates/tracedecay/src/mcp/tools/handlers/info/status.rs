@@ -30,8 +30,9 @@ pub(crate) async fn handle_admin_sync(
         label = "mcp.info.admin_sync.reconcile"
     )
     .await;
-    match admission {
-        CodeIndexDemandAdmissionV1::Queued => {}
+    let status = match admission {
+        CodeIndexDemandAdmissionV1::Queued => "queued",
+        CodeIndexDemandAdmissionV1::NotApplicable => "not_applicable",
         CodeIndexDemandAdmissionV1::Terminal(parked) => {
             return Err(crate::mcp::server::code_index_publication_corrupt(parked));
         }
@@ -41,11 +42,11 @@ pub(crate) async fn handle_admin_sync(
         CodeIndexDemandAdmissionV1::Unavailable(cause) => {
             return Err(crate::mcp::server::code_index_unavailable_error(cause));
         }
-    }
+    };
     let output = json!({
         "requested_mode": if force { "force" } else { "refresh" },
         "reconcile_scope": "authoritative_project",
-        "status": "queued",
+        "status": status,
         "project_root": cg.project_root(),
     });
     let text = serde_json::to_string(&output)?;

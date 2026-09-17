@@ -363,11 +363,6 @@ impl CodeIndexActivationV1 {
         project_root: &Path,
         demand: CodeIndexDemandV1,
     ) -> CodeIndexDemandAdmissionV1 {
-        if demand.is_watcher_policy_governed()
-            && self.automatic_admission != CodeIndexAutomaticAdmissionV1::Admitted
-        {
-            return CodeIndexDemandAdmissionV1::RefusedByPolicy;
-        }
         if !self.route_is_live() {
             return CodeIndexDemandAdmissionV1::Unavailable(
                 CodeIndexDemandUnavailableV1::RouteRetired,
@@ -378,8 +373,13 @@ impl CodeIndexActivationV1 {
                 CodeIndexDemandUnavailableV1::ForeignRoot,
             );
         }
+        if demand.is_watcher_policy_governed()
+            && self.automatic_admission != CodeIndexAutomaticAdmissionV1::Admitted
+        {
+            return CodeIndexDemandAdmissionV1::RefusedByPolicy;
+        }
         if self.identity.is_none() {
-            return CodeIndexDemandAdmissionV1::Queued;
+            return CodeIndexDemandAdmissionV1::NotApplicable;
         }
         let overflow = !matches!(demand, CodeIndexDemandV1::HookPaths(_));
         let rel_paths = match demand {
@@ -597,7 +597,7 @@ mod tests {
             activation
                 .admit(project.path(), CodeIndexDemandV1::OperatorReconcile)
                 .await,
-            CodeIndexDemandAdmissionV1::Queued
+            CodeIndexDemandAdmissionV1::NotApplicable
         );
         assert_eq!(mount_attempts.load(Ordering::SeqCst), 0);
     }

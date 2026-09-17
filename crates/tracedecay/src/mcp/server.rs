@@ -210,6 +210,9 @@ pub(crate) fn code_index_host_outcome(
 ) -> HostAdmissionOutcome {
     match admission {
         CodeIndexDemandAdmissionV1::Queued => HostAdmissionOutcome::replay_completed(true, false),
+        CodeIndexDemandAdmissionV1::NotApplicable => {
+            HostAdmissionOutcome::replay_completed(false, false)
+        }
         CodeIndexDemandAdmissionV1::RefusedByPolicy => {
             HostAdmissionOutcome::degraded(CODE_INDEX_LINKED_WORKTREE_DISABLED)
         }
