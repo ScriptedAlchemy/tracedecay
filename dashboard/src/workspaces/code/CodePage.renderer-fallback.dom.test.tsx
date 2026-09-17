@@ -87,7 +87,7 @@ describe('a browser without a WebGL context', () => {
     );
 
     const inspector = await screen.findByRole('complementary', { name: 'Inspector' });
-    expect(await within(inspector).findByText('selection · pinned')).toBeTruthy();
+    expect(await within(inspector).findByText('pinned · url identity')).toBeTruthy();
     expect(within(inspector).getByRole('heading', { name: 'find_direct_child_by_kind' })).toBeTruthy();
     expect(
       within(inspector).getByRole('button', { name: /trace call topography/i }),

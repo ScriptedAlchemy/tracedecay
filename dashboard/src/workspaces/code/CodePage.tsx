@@ -19,7 +19,7 @@ import {
 } from './CodeViewSwitcher.tsx';
 import { CompareView } from './CompareView.tsx';
 import { CortexField } from './CortexField.tsx';
-import { CortexInspector, type InspectMode } from './CortexInspector.tsx';
+import { CortexInspector } from './CortexInspector.tsx';
 import { SymbolMatches, TopConnectedList, type RowHandlers } from './CortexLedger.tsx';
 import { CortexRegister } from './CortexRegister.tsx';
 import { IndexFreshness, useIndexFreshness } from './IndexFreshness.tsx';
@@ -236,23 +236,41 @@ export function CodePage() {
   const viewBlocker = codeViewBlocker(location.view, focusState);
   const compareSelection = readCompareSelection(searchParams);
 
-  // The inspector's subject: a preview when the pointer or focus is on a row
-  // that is not the pinned symbol, otherwise the pinned symbol itself. The
-  // preview resolves to a full row from whatever payload holds it.
-  const inspected = useMemo<{ node: TraceFocus; mode: InspectMode } | null>(() => {
-    if (inspection !== null && inspection.id !== resolvedFocus?.id) {
-      const node =
-        inspection.node ??
-        subgraphPayload?.nodes.find((candidate) => candidate.id === inspection.id) ??
-        envelopePayload(search.data)?.results.find((candidate) => candidate.id === inspection.id) ??
-        envelopePayload(overview.data)?.top_connected.find(
-          (candidate) => candidate.id === inspection.id,
-        ) ??
-        null;
-      if (node) return { node, mode: 'preview' };
-    }
-    return resolvedFocus ? { node: resolvedFocus, mode: 'pinned' } : null;
+  // The preview: the row the pointer or focus is on when it is not the pinned
+  // symbol, resolved to a full row from whatever payload holds it. The pinned
+  // symbol is the URL identity and is passed beside it; the inspector stacks
+  // the two rather than swapping one for the other.
+  const preview = useMemo<TraceFocus | null>(() => {
+    if (inspection === null || inspection.id === resolvedFocus?.id) return null;
+    return (
+      inspection.node ??
+      subgraphPayload?.nodes.find((candidate) => candidate.id === inspection.id) ??
+      envelopePayload(search.data)?.results.find((candidate) => candidate.id === inspection.id) ??
+      envelopePayload(overview.data)?.top_connected.find(
+        (candidate) => candidate.id === inspection.id,
+      ) ??
+      null
+    );
   }, [inspection, overview.data, resolvedFocus, search.data, subgraphPayload]);
+  // A row inside the inspector isolates its body on the field without opening
+  // a preview: a preview that replaced the list under the pointer would unmount
+  // the hovered row. Separate channel, same canvas focus.
+  const [highlight, setHighlight] = useState<string | null>(null);
+
+  // Escape drops a hover/focus preview and nothing else: selection is URL
+  // state and has its own close control. Bound on the window, because a
+  // pointer hover leaves focus on `body`, where a keydown never reaches this
+  // page's own subtree. A field that already handled the key (the search box
+  // clearing itself) keeps it.
+  useEffect(() => {
+    if (inspection === null) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      setInspection(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [inspection]);
 
   usePublishStatusRegisters('code', [
     graphRegister(overview.isPending, overview.data),
@@ -260,31 +278,24 @@ export function CodePage() {
     selectionRegister(resolvedFocus),
   ]);
 
-  const inspector = inspected ? (
-    <CortexInspector
-      node={inspected.node}
-      mode={inspected.mode}
-      pinned={resolvedFocus}
-      drawnEdges={subgraphPayload?.edges ?? []}
-      graphResult={subgraph.data}
-      tracing={location.view === 'trace'}
-      onInspect={inspectId}
-      onPin={(node) => pin(node)}
-      onTrace={(node) => navigateView('trace', node)}
-      onSharedCode={(node) => navigateView('shared-code', node)}
-      onClose={clearSelection}
-    />
-  ) : null;
+  const inspector =
+    resolvedFocus !== null || preview !== null ? (
+      <CortexInspector
+        pinned={resolvedFocus}
+        preview={preview}
+        drawnEdges={subgraphPayload?.edges ?? []}
+        graphResult={subgraph.data}
+        tracing={location.view === 'trace'}
+        onHighlight={setHighlight}
+        onPin={(node) => pin(node)}
+        onTrace={(node) => navigateView('trace', node)}
+        onSharedCode={(node) => navigateView('shared-code', node)}
+        onClose={clearSelection}
+      />
+    ) : null;
 
   return (
-    <div
-      className="flex flex-col lg:h-full lg:min-h-0"
-      onKeyDown={(event) => {
-        // Escape drops a hover/focus preview and nothing else: selection is
-        // URL state and has its own close control.
-        if (event.key === 'Escape' && inspection !== null) setInspection(null);
-      }}
-    >
+    <div className="flex flex-col lg:h-full lg:min-h-0">
       <WorkspaceHeader
         path="code"
         title="Code"
@@ -333,7 +344,7 @@ export function CodePage() {
                 nodes={canvasNodes}
                 edges={canvasEdges}
                 selectedId={resolvedFocus?.id ?? null}
-                inspectedId={inspection?.id ?? null}
+                inspectedId={inspection?.id ?? highlight}
                 onSelect={selectFromCanvas}
                 onInspect={inspectId}
                 activation={activation}
@@ -441,9 +452,12 @@ function CortexLens({
       <div className="flex min-w-0 flex-1 flex-col lg:min-h-0">
         {register}
         {field}
+        {/* The ledger yields height to the aperture first: from `lg` it holds
+          * a fixed share of a tall viewport and shrinks toward its floor on a
+          * short one, so the field never drops below a readable height. */}
         <section
           aria-label="Symbol ledger"
-          className="flex shrink-0 flex-col border-t border-edge-subtle lg:h-64 lg:min-h-0"
+          className="flex shrink-0 flex-col border-t border-edge-subtle lg:h-56 lg:min-h-32 lg:shrink"
         >
           <div
             role="tablist"
