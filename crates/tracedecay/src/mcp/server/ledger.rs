@@ -498,8 +498,25 @@ impl McpServer {
             // spawn git, so it runs on the blocking pool, off the
             // notification hot path.
             let derived = tokio::task::spawn_blocking(move || {
-                let worktree_raw = tracedecay_runtime_core::worktree::git_worktree_root(&cwd)
-                    .unwrap_or(project_root);
+                let deadline = tracedecay_runtime_core::cancellation::MonotonicDeadline::at(
+                    std::time::Instant::now() + std::time::Duration::from_secs(2),
+                );
+                let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
+                let worktree_raw = match tracedecay_runtime_core::git_discovery::discover_repository_identity_with_control(
+                    &cwd,
+                    deadline,
+                    &cancellation,
+                ) {
+                    tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Resolved(
+                        identity,
+                    ) => identity.worktree_root,
+                    tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::NotRepository => {
+                        project_root
+                    }
+                    tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Unknown(_) => {
+                        return None;
+                    }
+                };
                 let worktree_raw =
                     hook_events::authorize_add_branch_at_root(&worktree_raw, &active_project_root)
                         .ok()?;

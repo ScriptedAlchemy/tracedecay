@@ -618,11 +618,16 @@ async fn write_proxy_request_result(
         Ok(responses) => {
             let metadata =
                 proxy_initialize_metadata_for_request(request.parsed.as_ref(), &responses);
-            if let Some(warning) = daemon_version_skew_warning_for_request(
-                request.parsed.as_ref(),
-                &responses,
-                binary_version()?,
-            ) {
+            // Skew is a warning. A process with no registered product runtime
+            // has no version to compare, and that must not drop the response
+            // the daemon already produced.
+            if let Ok(version) = binary_version()
+                && let Some(warning) = daemon_version_skew_warning_for_request(
+                    request.parsed.as_ref(),
+                    &responses,
+                    version,
+                )
+            {
                 log_daemon_event("core_proxy_warning", &[("warning", warning)]);
             }
             for response in responses {
