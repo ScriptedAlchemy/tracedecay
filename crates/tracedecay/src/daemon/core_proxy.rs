@@ -987,6 +987,7 @@ mod tests {
                     "code": -32603,
                     "message": "daemon project open task capacity reached",
                     "data": {
+                        "reason_code": "project_open_task_capacity_reached",
                         "kind": "project_open_task_capacity_reached",
                         "retryable": true,
                         "capacity": 8
@@ -1000,6 +1001,7 @@ mod tests {
                     "code": -32603,
                     "message": "daemon project server capacity reached",
                     "data": {
+                        "reason_code": "project_server_capacity_reached",
                         "kind": "project_server_capacity_reached",
                         "retryable": true,
                         "capacity": 8
@@ -1026,6 +1028,23 @@ mod tests {
             }
         })
         .to_string()]));
+        assert!(
+            !responses_are_project_open_retryable(&[json!({
+                "jsonrpc": "2.0",
+                "id": 5,
+                "error": {
+                    "code": -32603,
+                    "message": "daemon project server capacity reached",
+                    "data": {
+                        "kind": "project_server_capacity_reached",
+                        "retryable": true,
+                        "capacity": 8
+                    }
+                }
+            })
+            .to_string()]),
+            "capacity prose and kind without reason_code must not decide proxy retry"
+        );
     }
 
     /// The post-disconnect drain must never cut short work the daemon is still

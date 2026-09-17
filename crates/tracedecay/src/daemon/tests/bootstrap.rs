@@ -1985,6 +1985,7 @@ async fn project_open_task_registry_caps_distinct_inflight_routes() {
         .expect("typed task capacity rejection")
         .data
         .expect("task capacity rejection data");
+    assert_eq!(data["reason_code"], "project_open_task_capacity_reached");
     assert_eq!(data["kind"], "project_open_task_capacity_reached");
     assert_eq!(data["retryable"], true);
     assert_eq!(
@@ -2484,16 +2485,15 @@ fn a_recorded_open_failure_replaces_only_the_warming_hint() {
         );
     }
 
-    let unrelated = "daemon project server capacity reached";
+    let capacity = super::super::project_server_capacity_error();
     let passed_through = prefer_recorded_open_failure::<()>(
-        Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: unrelated.to_owned(),
-        }),
+        Err(super::super::project_server_capacity_error()),
         &failed.1,
     )
     .expect_err("a refusal that is not the warming hint is the caller's answer");
-    assert!(
-        passed_through.to_string().contains(unrelated),
+    assert_eq!(
+        passed_through.to_string(),
+        capacity.to_string(),
         "only the warming hint may be replaced: {passed_through:?}"
     );
     prefer_recorded_open_failure(Ok("published owner"), &failed.1)

@@ -1305,11 +1305,7 @@ fn serve_broker_socket_client_inner(
                                 .await
                             }
                             Ok(None) => return Ok(()),
-                            Err(error) => JsonRpcResponse::error(
-                                request.id.clone(),
-                                ErrorCode::InternalError,
-                                error.to_string(),
-                            ),
+                            Err(error) => project_open_error_response(request.id.clone(), &error),
                         };
                         drop(setup_activity);
                         write_json_rpc_response(&mut transport, &response).await?;
@@ -1808,11 +1804,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
                 .await
             }
             Ok(None) => return Ok(()),
-            Err(error) => JsonRpcResponse::error(
-                request.id.clone(),
-                ErrorCode::InternalError,
-                error.to_string(),
-            ),
+            Err(error) => project_open_error_response(request.id.clone(), &error),
         };
         drop(setup_activity);
         write_json_rpc_response(&mut transport, &response).await?;

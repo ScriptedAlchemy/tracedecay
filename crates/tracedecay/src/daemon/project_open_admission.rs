@@ -230,6 +230,11 @@ pub(super) enum ProjectOpenTypedFailure {
         authority: String,
         reason: String,
     },
+    ProjectRoute {
+        reason_code: String,
+        retryable: bool,
+        detail: String,
+    },
 }
 
 pub(super) enum ProjectOpenTaskClaim {
@@ -429,28 +434,45 @@ impl ProjectOpenFailure {
                 None => ProjectOpenStatusReasonV1::Unavailable,
             },
         };
-        Self {
-            message: error.to_string(),
-            retry_at,
-            reason,
-            typed: match error {
-                TraceDecayError::ProfileResetRequired {
-                    component,
-                    found_version,
-                    required_version,
-                } => Some(ProjectOpenTypedFailure::ProfileResetRequired {
+        let (message, typed) = match error {
+            TraceDecayError::ProfileResetRequired {
+                component,
+                found_version,
+                required_version,
+            } => (
+                error.to_string(),
+                Some(ProjectOpenTypedFailure::ProfileResetRequired {
                     component,
                     found_version: *found_version,
                     required_version: *required_version,
                 }),
-                TraceDecayError::ResetRequired { authority, reason } => {
-                    Some(ProjectOpenTypedFailure::ResetRequired {
-                        authority: authority.clone(),
-                        reason: reason.clone(),
-                    })
-                }
-                _ => None,
-            },
+            ),
+            TraceDecayError::ResetRequired { authority, reason } => (
+                error.to_string(),
+                Some(ProjectOpenTypedFailure::ResetRequired {
+                    authority: authority.clone(),
+                    reason: reason.clone(),
+                }),
+            ),
+            TraceDecayError::ProjectRoute {
+                reason_code,
+                retryable,
+                detail,
+            } => (
+                detail.clone(),
+                Some(ProjectOpenTypedFailure::ProjectRoute {
+                    reason_code: reason_code.clone(),
+                    retryable: *retryable,
+                    detail: detail.clone(),
+                }),
+            ),
+            _ => (error.to_string(), None),
+        };
+        Self {
+            message,
+            retry_at,
+            reason,
+            typed,
             refused_store: None,
         }
     }
@@ -504,6 +526,17 @@ impl ProjectOpenFailure {
                     authority: authority.clone(),
                     reason: reason.clone(),
                 };
+            }
+            Some(ProjectOpenTypedFailure::ProjectRoute {
+                reason_code,
+                retryable,
+                detail,
+            }) => {
+                return TraceDecayError::project_route(
+                    reason_code.clone(),
+                    *retryable,
+                    detail.clone(),
+                );
             }
             None => {}
         }
@@ -1203,6 +1236,27 @@ mod typed_failure_tests {
                 ref reason,
             } if authority == "workflow" && reason == "partial workflow schema"
         ));
+    }
+
+    #[test]
+    fn cached_project_open_failure_preserves_capacity_reason() {
+        let error = super::super::project_server_capacity_error();
+        let failure = ProjectOpenFailure::from_error(&error);
+        let replayed = failure.to_error();
+
+        assert_eq!(
+            replayed
+                .project_route_context()
+                .map(|(reason, retryable, _)| (reason, retryable)),
+            error
+                .project_route_context()
+                .map(|(reason, retryable, _)| (reason, retryable)),
+        );
+        assert!(super::super::error_is_project_open_retryable(&replayed));
+        let Some((_, _, detail)) = error.project_route_context() else {
+            panic!("capacity refusal is a project route");
+        };
+        assert_eq!(failure.message, detail);
     }
 }
 
