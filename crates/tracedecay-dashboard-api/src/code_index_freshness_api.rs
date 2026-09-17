@@ -118,10 +118,10 @@ async fn project_code_index_freshness(
             } else {
                 format!(
                     "scheduler freshness state is {}; only fresh serves as current",
-                    worktree
-                        .staleness_state
-                        .map(|state| state.as_str())
-                        .unwrap_or("unreported")
+                    worktree.staleness_state.map_or(
+                        "unreported",
+                        CodeIndexStalenessStateV1::as_str,
+                    )
                 )
             };
             DashboardEnvelopeV1::new(

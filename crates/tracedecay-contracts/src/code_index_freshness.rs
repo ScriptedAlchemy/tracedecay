@@ -352,21 +352,16 @@ impl std::fmt::Display for CodeIndexStalenessStateV1 {
 ///
 /// `Unobserved` is only the constructed default. A projected read never emits
 /// it, so an absent observation cannot be mistaken for `complete`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CodeIndexFreshnessCoverageV1 {
+    #[default]
     Unobserved,
     Complete,
     PartialRefreshInProgress,
     PartialSourceVerification,
     PartialUnverifiedRestore,
     PartialHookHintOverflow,
-}
-
-impl Default for CodeIndexFreshnessCoverageV1 {
-    fn default() -> Self {
-        Self::Unobserved
-    }
 }
 
 impl CodeIndexFreshnessCoverageV1 {

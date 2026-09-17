@@ -665,7 +665,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
                     tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
                         worktree_root: worktree_root.display().to_string(),
                         latest_generation_id: latest_generation_id.clone(),
-                        staleness_state: staleness_state.clone(),
+                        staleness_state,
                         rebuild_in_flight,
                         ..Default::default()
                     };
