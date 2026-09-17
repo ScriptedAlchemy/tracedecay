@@ -207,6 +207,19 @@ mod tests {
 
     const ENDPOINT: &str = "https://api.github.com/repos/owner/repository/releases";
 
+    fn assert_accepted_delay(header: &str, delay_seconds: i64) {
+        let before = tracedecay_contracts::now_micros().0;
+        let accepted = retry_after_at(&headers_with("retry-after", header))
+            .unwrap_or_else(|| panic!("retry-after {header} must land {delay_seconds}s after now"));
+        let after = tracedecay_contracts::now_micros().0;
+        let delay_micros = delay_seconds * 1_000_000;
+        assert!(
+            (before + delay_micros..=after + delay_micros).contains(&accepted.0),
+            "retry-after {header} stamped {}, outside {before}+{delay_micros}..={after}+{delay_micros}",
+            accepted.0
+        );
+    }
+
     #[test]
     fn retry_after_rejects_negative_and_beyond_24h_delays() {
         assert!(retry_after_at(&headers_with("retry-after", "-1")).is_none());
@@ -214,10 +227,10 @@ mod tests {
         assert!(retry_after_at(&headers_with("retry-after", "86401")).is_none());
         assert!(retry_after_at(&headers_with("retry-after", "9999999999")).is_none());
         assert!(retry_after_at(&headers_with("retry-after", "not-a-number")).is_none());
-        assert!(retry_after_at(&headers_with("retry-after", "0")).is_some());
-        assert!(retry_after_at(&headers_with("retry-after", "60")).is_some());
-        assert!(retry_after_at(&headers_with("retry-after", "86400")).is_some());
         assert!(retry_after_at(&ureq::http::HeaderMap::new()).is_none());
+        assert_accepted_delay("0", 0);
+        assert_accepted_delay("60", 60);
+        assert_accepted_delay("86400", 86_400);
     }
 
     #[test]

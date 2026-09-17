@@ -10,8 +10,14 @@ test("OpenCode discovers one v1 server entrypoint per installed module", () => {
 })
 
 test("dispatch lets the hook child finish instead of killing before durable spool", async () => {
-  const startedAt = performance.now()
+  const guided = await dispatch(
+    "TraceDecay guidance",
+    { event: "file.edited" },
+    "/usr/bin/printf",
+  )
+  expect(guided).toBe("TraceDecay guidance")
 
+  const startedAt = performance.now()
   const guidance = await dispatch("0.05", { event: "file.edited" }, "/bin/sleep")
 
   expect(guidance).toBeUndefined()

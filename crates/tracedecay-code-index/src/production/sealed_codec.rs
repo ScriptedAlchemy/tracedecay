@@ -1287,18 +1287,16 @@ mod tests {
 
     #[test]
     fn format_gate_accepts_only_the_monolithic_and_partitioned_revisions() {
-        assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 12);
-        assert_eq!(MINIMUM_SEALED_GENERATION_FORMAT_REVISION, 9);
-        assert!(sealed_generation_format_revision_is_compatible(9));
-        assert!(sealed_generation_format_revision_is_compatible(12));
-        assert!(!sealed_generation_format_revision_is_compatible(8));
+        assert_eq!(sealed_generation_format_revision_is_compatible(9), true);
+        assert_eq!(sealed_generation_format_revision_is_compatible(12), true);
+        assert_eq!(sealed_generation_format_revision_is_compatible(8), false);
         // Revision 10 stored generation-bound symbol occurrence lists.
         // Revision 11 sealed generation-independent symbol identities but a
         // full-corpus `full_replay_digest`. Revision 12 seals that digest as
         // a parent-delta, so 11 is rebuilt rather than decoded as corruption.
-        assert!(!sealed_generation_format_revision_is_compatible(10));
-        assert!(!sealed_generation_format_revision_is_compatible(11));
-        assert!(!sealed_generation_format_revision_is_compatible(13));
+        assert_eq!(sealed_generation_format_revision_is_compatible(10), false);
+        assert_eq!(sealed_generation_format_revision_is_compatible(11), false);
+        assert_eq!(sealed_generation_format_revision_is_compatible(13), false);
     }
 
     struct LargestAllocationRecorderV1;

@@ -4,10 +4,10 @@ use std::sync::{Arc, Mutex};
 use schemars::schema_for;
 use tracedecay_contracts::{
     CancellationContext, CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestContext,
-    RequestId, ResolvedScope, TASK_HANDOFF_LIFETIME_MICROS, TaskHandoffAuthorityError,
-    TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome, TaskHandoffError, TaskHandoffGrant,
-    TaskHandoffIssueRequest, TaskHandoffRedeemRequest, TaskHandoffScope, TaskHandoffService,
-    TaskHandoffToken, WorkHandoffFrontierV1, WorkHandoffLineageV1, WorkflowCatalogAdmissionError,
+    RequestId, ResolvedScope, TaskHandoffAuthorityError, TaskHandoffAuthorityPort,
+    TaskHandoffConsumeOutcome, TaskHandoffError, TaskHandoffGrant, TaskHandoffIssueRequest,
+    TaskHandoffRedeemRequest, TaskHandoffScope, TaskHandoffService, TaskHandoffToken,
+    WorkHandoffFrontierV1, WorkHandoffLineageV1, WorkflowCatalogAdmissionError,
     WorkflowCoordinationError, WorkflowDefinitionAuthorityError, WorkflowDefinitionAuthorityPort,
     WorkflowDefinitionDisposition, WorkflowDefinitionLifecycleCommand,
     WorkflowDefinitionLifecycleState, WorkflowDefinitionService, WorkflowDefinitionTransitionEntry,
@@ -450,7 +450,6 @@ fn frontier() -> WorkHandoffFrontierV1 {
 
 #[test]
 fn handoff_enforces_authorization_scope_expiry_and_single_use_without_bearer_leakage() {
-    assert_eq!(TASK_HANDOFF_LIFETIME_MICROS, UtcMicros(60_000_000));
     let authority = FakeHandoffAuthority::default();
     let service = TaskHandoffService::new(authority);
     let scope = handoff_scope();

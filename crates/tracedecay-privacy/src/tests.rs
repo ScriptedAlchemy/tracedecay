@@ -13,13 +13,13 @@ use super::detect::{
     DetectionError, SanitizationDetectorOriginV1, SanitizationDetectorRevisionV1,
     SanitizationRemediationClassV1, SanitizationScanBoundaryV1, SanitizationScannedCoverageV1,
 };
-use super::sanitize::{CLAUDE_SANITIZER_VERSION_V1, OBSERVATION_SANITIZER_VERSION_V1};
+use super::sanitize::OBSERVATION_SANITIZER_VERSION_V1;
 use super::{
     CODE_SOURCE_SANITIZER_VERSION_V1, ClaudeRecordParseErrorV1, ClaudeRecordSanitizerV1,
     ClaudeSanitizationOutcomeV1, ClaudeSanitizerPolicyV1, CodeSourceShapeV1, DetectionConfidenceV1,
-    LcmSensitiveRedactionPolicyV1, MAX_OBSERVATION_RECORD_BYTES, MEMORY_FACT_SANITIZER_VERSION_V1,
-    MemoryFactSanitizationV1, PrivacyDetectorV1, PrivacySanitizerError, SanitizationActionV1,
-    SanitizationFindingV1, SanitizedPayloadVerificationError, parse_claude_record_v1,
+    LcmSensitiveRedactionPolicyV1, MEMORY_FACT_SANITIZER_VERSION_V1, MemoryFactSanitizationV1,
+    PrivacyDetectorV1, PrivacySanitizerError, SanitizationActionV1, SanitizationFindingV1,
+    SanitizedPayloadVerificationError, parse_claude_record_v1,
     parse_normalized_observation_record_v1, parse_observation_record_v1,
     redact_lcm_sensitive_payload, sanitize_code_source_bytes, sanitize_memory_fact_payload,
     sanitize_provider_metadata_json, verify_memory_fact_sanitization,
@@ -271,7 +271,21 @@ fn parsed_record_rejects_mismatched_range_and_canonical_oversize() {
         Some(ClaudeRecordParseErrorV1::RangeLengthMismatch)
     );
 
-    let oversized = vec![b' '; MAX_OBSERVATION_RECORD_BYTES + 1];
+    let at_limit = format!(
+        r#"{{"message":"{}"}}"#,
+        "a".repeat(1_048_576 - br#"{"message":""}"#.len())
+    );
+    assert_eq!(at_limit.len(), 1_048_576);
+    let at_limit_range =
+        ObservationSourceRangeV1::new(0, 1_048_576).expect("non-empty at-limit range");
+    let admitted = parse_claude_record_v1(at_limit.as_bytes(), at_limit_range)
+        .expect("a record at the one-mebibyte limit is admitted");
+    assert_eq!(
+        admitted.value()["message"].as_str().map(str::len),
+        Some(1_048_576 - br#"{"message":""}"#.len())
+    );
+
+    let oversized = vec![b' '; 1_048_577];
     let oversized_range = ObservationSourceRangeV1::new(0, oversized.len() as u64)
         .expect("non-empty oversized range");
     assert_eq!(
@@ -1329,12 +1343,10 @@ fn structure_bound_failures_are_quarantined_without_payloads() {
 
 #[test]
 fn receipt_ids_are_deterministic_and_use_the_fixed_sanitizer_version() {
-    assert_eq!(CLAUDE_SANITIZER_VERSION_V1, "privacy.claude-record.v1");
-    assert_eq!(MAX_OBSERVATION_RECORD_BYTES, 1_048_576);
     let sanitizer = ClaudeRecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer");
     assert_eq!(
         sanitizer.policy().version().as_str(),
-        CLAUDE_SANITIZER_VERSION_V1
+        "privacy.claude-record.v1"
     );
 
     let record = serde_json::to_vec(&json!({ "message": "ordinary deterministic fixture" }))
@@ -1349,7 +1361,7 @@ fn receipt_ids_are_deterministic_and_use_the_fixed_sanitizer_version() {
     );
     assert_eq!(
         first.receipt().receipt().sanitizer_version().as_str(),
-        CLAUDE_SANITIZER_VERSION_V1
+        "privacy.claude-record.v1"
     );
 
     let changed_record =
@@ -1472,12 +1484,16 @@ fn lcm_sensitive_redaction_rejects_duplicate_json_keys_before_materialization() 
 #[test]
 fn lcm_sensitive_redaction_rejects_payloads_above_the_canonical_raw_byte_limit() {
     let policy = LcmSensitiveRedactionPolicyV1::enabled(["api_key"]);
-    let raw = format!("{{{}", " ".repeat(MAX_OBSERVATION_RECORD_BYTES));
+    let admitted = redact_lcm_sensitive_payload(r#"{"safe":"kept"}"#, &policy)
+        .expect("a record inside the byte limit is redacted");
+    assert_eq!(admitted.text(), r#"{"safe":"kept"}"#);
+    assert_eq!(admitted.patterns(), &[] as &[String]);
 
-    assert!(matches!(
+    let raw = format!("{{{}", " ".repeat(1_048_576));
+    assert_eq!(
         redact_lcm_sensitive_payload(&raw, &policy),
         Err(DetectionError::ScanLimitExceeded)
-    ));
+    );
 }
 
 #[test]
