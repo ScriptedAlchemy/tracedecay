@@ -208,6 +208,33 @@ describe('composeConstellation', () => {
     );
   });
 
+  it('yields a label whose text would overprint an accepted label to the next candidate', () => {
+    // Forty equally trusted facts in one category sit on one ring, thirteen
+    // world units apart, all wired to one hub: every candidate collides with
+    // its neighbours, so the greedy pass has to space the seven it prints.
+    const nodes: MemoryGraphNodeV1[] = [];
+    const edges: MemoryGraphPayloadV1['edges'] = [];
+    nodes.push({ id: 'entity:hub', kind: 'entity', entity_id: 'hub', label: 'hub' });
+    for (let index = 0; index < 40; index += 1) {
+      nodes.push(factNode(`f${index.toString().padStart(2, '0')}`, { trust_score: 0.9 }));
+      edges.push({ kind: 'mentions', source: `fact:f${index.toString().padStart(2, '0')}`, target: 'entity:hub' });
+    }
+    const model = composeConstellation(graph(nodes, edges));
+    const labelled = model.nodes.filter((node) => node.labelled);
+    expect(labelled.length).toBeGreaterThan(0);
+    expect(labelled.length).toBeLessThanOrEqual(7);
+    for (const a of labelled) {
+      for (const b of labelled) {
+        if (a === b) continue;
+        const sameRow = Math.abs(a.y - b.y) < 13;
+        const sameSideOverlap = a.labelSide === b.labelSide && Math.abs(a.x - b.x) < 200;
+        expect(sameRow && sameSideOverlap).toBe(false);
+      }
+    }
+    // Determinism holds for the label pass as well as the coordinates.
+    expect(composeConstellation(graph(nodes, edges)).nodes.filter((node) => node.labelled)).toEqual(labelled);
+  });
+
   it('counts every trust band, zeroes included, and carries the daemon coverage verbatim', () => {
     const model = composeConstellation(
       graph(

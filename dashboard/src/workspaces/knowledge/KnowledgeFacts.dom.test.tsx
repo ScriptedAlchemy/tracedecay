@@ -270,7 +270,7 @@ describe('Facts camera: inspect, select, and the address', () => {
     renderPage();
     const row = await ledgerRow(/alpha fact content/);
 
-    fireEvent.pointerEnter(row);
+    fireEvent.pointerMove(row);
     expect(inspector().getAttribute('data-fact-id')).toBe('fact-alpha');
     expect(within(inspector()).getByText(/inspecting · hover or focus/)).toBeTruthy();
     expect(within(inspector()).getByText('alpha fact content')).toBeTruthy();
@@ -296,7 +296,7 @@ describe('Facts camera: inspect, select, and the address', () => {
     const body = container.querySelector('[data-node="fact:fact-beta"]');
     expect(body).not.toBeNull();
 
-    fireEvent.pointerEnter(body!);
+    fireEvent.pointerMove(body!);
     expect(inspector().getAttribute('data-fact-id')).toBe('fact-beta');
     expect(body!.getAttribute('data-inspected')).toBe('true');
     // Hover dims the material the body is not wired to: gamma is not drawn
@@ -317,7 +317,7 @@ describe('Facts camera: inspect, select, and the address', () => {
     await userEvent.click(await ledgerRow(/alpha fact content/));
     expect(await within(inspector()).findByText('selected fact')).toBeTruthy();
 
-    fireEvent.pointerEnter(await ledgerRow(/beta fact content/));
+    fireEvent.pointerMove(await ledgerRow(/beta fact content/));
     expect(inspector().getAttribute('data-fact-id')).toBe('fact-beta');
 
     await userEvent.keyboard('{Escape}');
@@ -456,7 +456,7 @@ describe('Facts camera: typed absences', () => {
     const coverage = screen.getByTestId('fact-constellation-coverage');
     expect(coverage.textContent).toMatch(/graph coverage unknown: fact_universe_bounded/);
     expect(coverage.textContent).toMatch(/2 of 4,128 facts in the store drawn/);
-    expect(coverage.textContent).toMatch(/2 of 2 relations drawn under a limit of 100/);
+    expect(coverage.textContent).toMatch(/2 of 2 relations drawn, limit 100/);
     const svg = screen.getByTestId('fact-constellation-svg');
     expect(svg.getAttribute('aria-label')).toMatch(/2 fact roots/);
     expect(svg.getAttribute('aria-label')).toMatch(/fact ledger beside this field is the exact accessible equivalent/);

@@ -407,9 +407,14 @@ function Provenance({
       <Term label="updated">{stamp(subject.updated_at)}</Term>
       <Term label="last recalled">{formatMicrosUtc(subject.last_recalled_at, { nullAs: 'never recalled' })}</Term>
       <Term label="projected as of">{stamp(subject.projected_as_of)}</Term>
-      <Term label="retrievals · accesses">
+      <Term label="retrievals">
         <span className="td-value" data-cell="numeric">
-          {subject.retrieval_count?.toLocaleString() ?? '—'} · {subject.access_count?.toLocaleString() ?? '—'}
+          {subject.retrieval_count?.toLocaleString() ?? '—'}
+        </span>
+      </Term>
+      <Term label="accesses">
+        <span className="td-value" data-cell="numeric">
+          {subject.access_count?.toLocaleString() ?? '—'}
         </span>
       </Term>
       <Term label="metadata">

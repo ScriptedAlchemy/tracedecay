@@ -12,7 +12,6 @@ import { ReadModelState, ReadSection, envelopeReadState } from '../../ui/ReadSec
 import { Corners, Meter, Readout } from '../../ui/instrument.tsx';
 import { SearchField } from '../../ui/search/SearchField.tsx';
 import { StateChip } from '../../ui/StateChip.tsx';
-import { EnvelopeTruth } from '../../ui/EnvelopeTruth.tsx';
 import { Chart } from '../../viz/chart/Chart.tsx';
 import { formatCount, splitCount } from '../../ui/format.ts';
 import { cn } from '../../ui/cn';
@@ -31,7 +30,7 @@ import { MemoryGeometry } from './MemoryGeometry.tsx';
 import { MemoryOplog } from './MemoryOplog.tsx';
 import { FactConstellation } from './FactConstellation.tsx';
 import { FactInspector } from './FactInspector.tsx';
-import { FactLedger, MemoryCoverageNotices } from './FactLedger.tsx';
+import { FactLedger, FactSortControl, MemoryCoverageNotices } from './FactLedger.tsx';
 import { composeConstellation } from './constellation.ts';
 import { useFactsAddress } from './factsAddress.ts';
 import { sortFacts } from './ledger.ts';
@@ -77,7 +76,13 @@ const BASE = '/api/plugins/holographic';
 export function KnowledgePage() {
   const [view, selectView] = useKnowledgeView();
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    // Below `lg` the Facts camera is a vertical stack and the column has to be
+    // allowed its natural height: pinned to the viewport it squeezed the
+    // aperture and the ledger to nothing and painted them through the summary
+    // bay beneath. The shell's `main` is the scroll container, so giving the
+    // stack its real height simply makes the page scroll; from `lg` the panes
+    // split the viewport and each owns its overflow again.
+    <div className="flex min-h-full flex-col lg:h-full lg:min-h-0">
       {/* `flex-wrap`, because the note under the camera is prose and the
        * switcher is four 44px targets: held on one row they laid the note
        * past the right edge at 320 CSS px and at 400% zoom. */}
@@ -219,14 +224,7 @@ function KnowledgeFacts({ onOpenGeometry }: { onOpenGeometry: () => void }) {
   });
 
   return (
-    <div className="flex h-full min-h-0 flex-col" data-testid="knowledge-facts">
-      {overviewEnvelope ? (
-        <EnvelopeTruth
-          envelope={overviewEnvelope}
-          refreshing={overview.isFetching}
-          onRefresh={() => void overview.refetch()}
-        />
-      ) : null}
+    <div className="flex flex-col lg:h-full lg:min-h-0" data-testid="knowledge-facts">
       <KnowledgeRegister
         memory={envelopeReading(overview.isPending, overview.data)}
         facts={holographic ? subReadReading(reads?.facts) : envelopeReading(overview.isPending, overview.data)}
@@ -234,9 +232,15 @@ function KnowledgeFacts({ onOpenGeometry }: { onOpenGeometry: () => void }) {
         graph={holographic ? subReadReading(reads?.graph) : envelopeReading(overview.isPending, overview.data)}
         status={envelopeReading(status.isPending, status.data)}
         camera="facts"
+        envelope={overviewEnvelope}
+        refreshing={overview.isFetching}
+        onRefresh={() => void overview.refetch()}
       />
-      <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-        <section aria-label="Facts camera" className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <div className="flex flex-col lg:min-h-0 lg:flex-1 lg:flex-row">
+        <section
+          aria-label="Facts camera"
+          className="flex min-w-0 flex-col lg:min-h-0 lg:flex-1"
+        >
           <ReadSection title="Memory" state={overviewState} chrome="centered">
             {(envelope) => {
               const data = envelope.payload.holographic;
@@ -299,6 +303,7 @@ function KnowledgeFacts({ onOpenGeometry }: { onOpenGeometry: () => void }) {
         <aside
           aria-label="Inspector"
           className="flex w-full shrink-0 flex-col border-t border-edge-subtle bg-surface-1 lg:min-h-0 lg:w-[24rem] lg:overflow-auto lg:border-l lg:border-t-0 xl:w-[26rem]"
+          data-testid="knowledge-inspector-bay"
         >
           {shownFactId ? (
             <FactInspector
@@ -365,7 +370,6 @@ function Aperture({
           onInspect={onInspect}
           onSelect={onSelect}
           graphRead={graphRead}
-          className="min-h-[300px] lg:min-h-[360px]"
         />
       ) : (
         <div className="td-optic relative flex min-h-[200px] flex-col items-center justify-center gap-3 p-6 text-center">
@@ -461,8 +465,6 @@ function LedgerBay({
         loaded={summarizeLoadedTrust(sorted)}
         distribution={trust}
         query={applied}
-        sort={sort}
-        onSort={onSort}
         storeFactCount={data.overview?.facts ?? null}
         factsCoverage={data.facts_coverage}
         selectedFactId={selectedFactId}
@@ -473,15 +475,22 @@ function LedgerBay({
     );
   }
   return (
+    // From `lg` the ledger takes whatever the aperture leaves and scrolls its
+    // rows inside; below `lg` the page scrolls, so the ledger takes a fixed,
+    // readable height of its own rather than a share of a viewport it is no
+    // longer pinned to.
     <section
       aria-label="Fact ledger"
-      className="flex min-h-[var(--pane-min-height)] min-w-0 flex-1 flex-col overflow-hidden"
+      className="flex min-w-0 flex-col overflow-hidden max-lg:h-[30rem] lg:min-h-[var(--pane-min-height)] lg:flex-1"
       onKeyDown={onLedgerKeyDown}
     >
-      <div className="flex h-8 shrink-0 items-center gap-2.5 border-b border-edge-subtle px-3">
+      <div className="flex min-h-[var(--touch-target-min)] shrink-0 flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-edge-subtle px-3">
         <span className="td-title">Fact ledger</span>
         <span aria-hidden className="td-rule" />
-        <span className="text-3xs text-text-muted">exact rows · hover inspects · click or Enter selects</span>
+        <span className="text-3xs text-text-muted max-md:hidden">
+          exact rows · hover inspects · click or Enter selects
+        </span>
+        <FactSortControl sort={sort} onSort={onSort} />
       </div>
       {/* Named, because internal scrolling is licensed for LABELLED regions
         * only, and this is the element that actually scrolls. Empty and refused
@@ -549,7 +558,7 @@ function StoreReadouts({
     <div className="flex flex-wrap items-end gap-4 border-l border-edge-subtle pl-4">
       <Readout
         label="facts"
-        size="lg"
+        size="md"
         value={factCount.value}
         unit={factCount.unit}
         note={summary?.facts != null ? `${summary.facts.toLocaleString()} recorded` : 'not reported'}
