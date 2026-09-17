@@ -25,7 +25,6 @@ use super::{
     ServingGenerationInstallationOutcomeV1, ServingGenerationRollbackOutcomeV1,
 };
 
-const CODE_INDEX_NOT_APPLICABLE: &str = "code_index_not_applicable";
 const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
 const CODE_INDEX_ACTIVATION_UNAVAILABLE: &str = "code_index_activation_unavailable";
 const CODE_INDEX_IDENTITY_MISMATCH: &str = "code_index_scheduler_identity_mismatch";
@@ -34,25 +33,17 @@ const BRANCH_TRACKING_FAILED: &str = "branch_tracking_failed";
 const BRANCH_GENERATION_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 const BRANCH_GENERATION_HARD_TIMEOUT: Duration = Duration::from_mins(30);
 
-/// Immediate refusal for a branch refresh that was not queued.
+/// Immediate refusal for the overflow wake after complete-generation demand.
 ///
-/// `None` means the caller may wait for a generation. `NotApplicable` must
-/// not fall through into that wait: nothing was queued, so an idle timeout
-/// would look like a slow scheduler instead of an observed non-admission.
+/// `request_complete_generation` has already admitted and woken the mounted
+/// worktree. The overflow hint is supplementary, so its `NotApplicable`
+/// disposition does not cancel that admitted generation request.
 pub(super) fn branch_refresh_admission_error(
     admission: &CodeIndexDemandAdmissionV1,
     canonical_worktree_root: &Path,
 ) -> Option<TraceDecayError> {
     match admission {
-        CodeIndexDemandAdmissionV1::Queued => None,
-        CodeIndexDemandAdmissionV1::NotApplicable => Some(TraceDecayError::project_route(
-            CODE_INDEX_NOT_APPLICABLE,
-            false,
-            format!(
-                "code indexing does not apply for branch worktree '{}'; no repository identity was admitted and no generation was queued",
-                canonical_worktree_root.display()
-            ),
-        )),
+        CodeIndexDemandAdmissionV1::Queued | CodeIndexDemandAdmissionV1::NotApplicable => None,
         CodeIndexDemandAdmissionV1::Terminal(parked) => Some(TraceDecayError::project_route(
             CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT,
             false,

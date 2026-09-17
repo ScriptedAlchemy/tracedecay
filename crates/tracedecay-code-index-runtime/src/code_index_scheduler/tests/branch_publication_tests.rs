@@ -47,21 +47,15 @@ fn branch_publication_requires_authoritative_project_identity() {
 }
 
 #[test]
-fn not_applicable_branch_refresh_is_observed_immediately() {
+fn admitted_generation_ignores_a_supplementary_not_applicable_overflow() {
     let root = std::path::Path::new("/tmp/not-a-repository");
-    let error = branch_refresh_admission_error(&CodeIndexDemandAdmissionV1::NotApplicable, root)
-        .expect("not-applicable must not wait for a generation");
-    assert_eq!(
-        error.project_route_context(),
-        Some((
-            "code_index_not_applicable",
-            false,
-            "code indexing does not apply for branch worktree '/tmp/not-a-repository'; no repository identity was admitted and no generation was queued",
-        ))
+    assert!(
+        branch_refresh_admission_error(&CodeIndexDemandAdmissionV1::NotApplicable, root).is_none(),
+        "the already-admitted complete-generation request owns the wake"
     );
     assert!(
         branch_refresh_admission_error(&CodeIndexDemandAdmissionV1::Queued, root).is_none(),
-        "a queued demand is the only admission that may wait"
+        "a queued overflow also permits the generation wait"
     );
     let unavailable = branch_refresh_admission_error(
         &CodeIndexDemandAdmissionV1::Unavailable(CodeIndexDemandUnavailableV1::SchedulerUnmounted),
