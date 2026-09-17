@@ -1,41 +1,45 @@
 import {
-  useLayoutEffect,
+  useCallback,
+  useEffect,
   useMemo,
-  useRef,
   useState,
+  type KeyboardEvent,
   type ReactNode,
-  type RefObject,
-} from "react";
-import type { EChartsOption } from "echarts";
+} from 'react';
+import type { EChartsOption } from 'echarts';
+
+import { ReadModelState, ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
+import { Corners, Meter, Readout } from '../../ui/instrument.tsx';
+import { SearchField } from '../../ui/search/SearchField.tsx';
+import { StateChip } from '../../ui/StateChip.tsx';
+import { EnvelopeTruth } from '../../ui/EnvelopeTruth.tsx';
+import { Chart } from '../../viz/chart/Chart.tsx';
+import { formatCount, splitCount } from '../../ui/format.ts';
+import { cn } from '../../ui/cn';
+import { envelopePayload, useEnvelope } from '../../data/query/useEnvelope.ts';
+import { scopeKey, useScope } from '../../data/scope/store.ts';
 import {
-  DataRow,
-  ExplorerSplit,
-  InspectorPanel,
-  KeyValueTree,
-} from "../../ui/archetypes/ExplorerSplit.tsx";
-import { ReadSection, envelopeReadState } from "../../ui/ReadSection.tsx";
-import { FigureRail, Meter, Readout } from "../../ui/instrument.tsx";
-import { SearchField } from "../../ui/search/SearchField.tsx";
-import { Chart } from "../../viz/chart/Chart.tsx";
-import { VirtualList } from "../../ui/VirtualList.tsx";
-import { formatCount, splitCount } from "../../ui/format.ts";
-import { cn } from "../../ui/cn";
-import { envelopePayload, useEnvelope } from "../../data/query/useEnvelope.ts";
-import { scopeKey, useScope } from "../../data/scope/store.ts";
-import {
-  type DashboardCoverageV1,
   type MemoryCategoryCountV1,
   MemoryFactDetailPayloadV1Schema,
-  type MemoryFactRowV1,
-  type MemoryFactsCoverageV1,
+  type MemoryHolographicPayloadV1,
   MemoryOverviewPayloadV1Schema,
-  type MemoryReadStatusV1,
+  type MemoryStatusV1,
   MemoryStatusPayloadV1Schema,
-} from "../../contracts/generated.ts";
-import { CurationConsole } from "./CurationConsole.tsx";
-import { FactTrustHistory } from "./FactTrustHistory.tsx";
-import { MemoryGeometry } from "./MemoryGeometry.tsx";
-import { MemoryOplog } from "./MemoryOplog.tsx";
+} from '../../contracts/generated.ts';
+import { CurationConsole } from './CurationConsole.tsx';
+import { MemoryGeometry } from './MemoryGeometry.tsx';
+import { MemoryOplog } from './MemoryOplog.tsx';
+import { FactConstellation } from './FactConstellation.tsx';
+import { FactInspector } from './FactInspector.tsx';
+import { FactLedger, MemoryCoverageNotices } from './FactLedger.tsx';
+import { composeConstellation } from './constellation.ts';
+import { useFactsAddress } from './factsAddress.ts';
+import { sortFacts } from './ledger.ts';
+import {
+  KnowledgeRegister,
+  envelopeReading,
+  subReadReading,
+} from './KnowledgeRegister.tsx';
 import {
   KNOWLEDGE_PANEL_ID,
   KnowledgeViewSwitcher,
@@ -43,29 +47,28 @@ import {
   knowledgeViewNote,
   useKnowledgeView,
   type KnowledgeViewKind,
-} from "./KnowledgeViews.tsx";
+} from './KnowledgeViews.tsx';
 import {
   composeTrustDistribution,
-  factsBelow,
   summarizeLoadedTrust,
   trustSourceNote,
-  type LoadedTrust,
   type TrustDistribution,
-} from "./trust.ts";
+} from './trust.ts';
 
-const BASE = "/api/plugins/holographic";
+const BASE = '/api/plugins/holographic';
 
 /**
  * Knowledge — channel seven.
  *
  * Four camera positions over one memory store, in the order a reader descends
  * through it: the facts explorer, the phase geometry those facts sit in, the
- * daemon's automatic curation outcomes, and the store's own record
- * of what changed. `KnowledgeViews.tsx` owns the camera; each view owns its reads,
- * so a position is paid for only when it is looked at.
+ * daemon's automatic curation outcomes, and the store's own record of what
+ * changed. `KnowledgeViews.tsx` owns the camera; each view owns its reads, so
+ * a position is paid for only when it is looked at, and one camera's answer
+ * can never stand in for another's.
  *
- * Everything the daemon mounts for holographic memory is now consumed here.
- * Three of those routes are contracted (`/`, `/status`, `/fact/{id}`) and read
+ * Everything the daemon mounts for holographic memory is consumed here. Three
+ * of those routes are contracted (`/`, `/status`, `/fact/{id}`) and read
  * through the generated schemas; the rest answer bare JSON and are read through
  * the house payload ladder with schemas written against their handlers — see
  * `data/query/memory.ts`, which explains why that split exists and what it
@@ -81,9 +84,7 @@ export function KnowledgePage() {
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-edge-subtle bg-surface-1 px-4 py-2">
         <h1 className="text-sm font-semibold tracking-tight">Knowledge</h1>
         <KnowledgeViewSwitcher active={view} onSelect={selectView} />
-        <p className="min-w-0 text-2xs text-text-muted">
-          {knowledgeViewNote(view)}
-        </p>
+        <p className="min-w-0 text-2xs text-text-muted">{knowledgeViewNote(view)}</p>
       </div>
       {/* The element `aria-controls` names, present for as long as the switcher
        * is — a reference to an element that was never drawn is an invalid one,
@@ -94,7 +95,7 @@ export function KnowledgePage() {
         aria-labelledby={knowledgeTabId(view)}
         className="flex min-h-0 flex-1 flex-col"
       >
-        <KnowledgeView kind={view} />
+        <KnowledgeView kind={view} onSelectView={selectView} />
       </div>
     </div>
   );
@@ -102,15 +103,21 @@ export function KnowledgePage() {
 
 /** The camera, applied. Exhaustive so a view added to the switcher cannot be
  * left without something to draw. */
-function KnowledgeView({ kind }: { kind: KnowledgeViewKind }) {
+function KnowledgeView({
+  kind,
+  onSelectView,
+}: {
+  kind: KnowledgeViewKind;
+  onSelectView: (kind: KnowledgeViewKind) => void;
+}) {
   switch (kind) {
-    case "facts":
-      return <KnowledgeFacts />;
-    case "geometry":
+    case 'facts':
+      return <KnowledgeFacts onOpenGeometry={() => onSelectView('geometry')} />;
+    case 'geometry':
       return <MemoryGeometry />;
-    case "curation":
+    case 'curation':
       return <CurationConsole />;
-    case "oplog":
+    case 'oplog':
       return <MemoryOplog />;
     default: {
       const unhandled: never = kind;
@@ -119,361 +126,509 @@ function KnowledgeView({ kind }: { kind: KnowledgeViewKind }) {
   }
 }
 
-/** The facts explorer: memory facts with trust as the primary visual axis,
- * entity summary, and fact drill-down. The semantic WebGL map is the phase-2
- * canvas per the visualization catalog. */
-function KnowledgeFacts() {
+/**
+ * The Facts camera: the constellation over the ledger, with the inspector
+ * beside them.
+ *
+ * Three verbs, kept apart. INSPECT is the fact under the pointer or under
+ * keyboard focus — on a constellation body or a ledger row — and it previews
+ * the bounded overview row without a fetch; it is sticky until Escape so a
+ * reader can move into the inspector. SELECT is a click or Enter, lives in
+ * the address, and reads the canonical detail and trust audit. SEARCH is the
+ * submitted query, also in the address, and re-asks the store for its bounded
+ * slice. None of them changes a measured value or fires activity.
+ */
+function KnowledgeFacts({ onOpenGeometry }: { onOpenGeometry: () => void }) {
   const scope = useScope((state) => state.scope);
   const currentScopeKey = scopeKey(scope);
-  const [query, setQuery] = useState("");
-  const [applied, setApplied] = useState("");
+  const { selectedFactId, selectFact, query: applied, applyQuery, sort, setSort } =
+    useFactsAddress();
+  const [query, setQuery] = useState(applied);
+  const [inspectedFactId, setInspectedFactId] = useState<string | null>(null);
+
   const overview = useEnvelope(
-    ["memory", "overview", applied],
-    `${BASE}/?limit=100${applied ? `&q=${encodeURIComponent(applied)}` : ""}`,
+    ['memory', 'overview', applied],
+    `${BASE}/?limit=100${applied ? `&q=${encodeURIComponent(applied)}` : ''}`,
     MemoryOverviewPayloadV1Schema,
   );
   // The overview histogram is the finest canonical store-wide distribution.
   // Status contributes the current four-band authority when the histogram is
   // empty, so an empty store stays distinct from a failed reading.
-  const status = useEnvelope(
-    ["memory", "status"],
-    `${BASE}/status`,
-    MemoryStatusPayloadV1Schema,
-  );
+  const status = useEnvelope(['memory', 'status'], `${BASE}/status`, MemoryStatusPayloadV1Schema);
   const statusMemory = envelopePayload(status.data)?.memory;
   const overviewData = envelopePayload(overview.data);
-  // One distribution for the two plates that draw it.
-  //
-  // The rail and the list are separate boundaries on purpose — a failed read
-  // has to be reported in both panes rather than leaving one a hollow shell —
-  // but they are the same read, and each was composing the distribution from
-  // the same three values written slightly differently. Two spellings of one
-  // computation is one place for them to drift apart, which on this plate would
-  // mean a rail and a list disagreeing about the trust of the same facts.
+  const holographic = overviewData?.holographic;
   const trust = useMemo(
     () =>
       composeTrustDistribution(
-        overviewData?.holographic.overview?.trust_histogram,
+        holographic?.overview?.trust_histogram,
         statusMemory,
-        overviewData?.holographic.facts,
+        holographic?.facts,
       ),
-    [overviewData, statusMemory],
+    [holographic, statusMemory],
   );
-  const [selection, setSelection] = useState<{
-    scopeKey: string;
-    fact: MemoryFactRowV1;
-  } | null>(null);
-  const selected =
-    selection?.scopeKey === currentScopeKey ? selection.fact : null;
+
+  const facts = holographic?.facts;
+  const sorted = useMemo(() => sortFacts(facts ?? [], sort), [facts, sort]);
+  const graph = holographic?.graph;
+  const constellation = useMemo(() => (graph ? composeConstellation(graph) : null), [graph]);
+
   const detail = useEnvelope(
-    ["memory", "fact", String(selected?.fact_id ?? "")],
-    `${BASE}/fact/${encodeURIComponent(String(selected?.fact_id ?? ""))}`,
+    ['memory', 'fact', String(selectedFactId ?? '')],
+    `${BASE}/fact/${encodeURIComponent(String(selectedFactId ?? ''))}`,
     MemoryFactDetailPayloadV1Schema,
-    { enabled: selected != null },
+    { enabled: selectedFactId != null },
   );
-  const selectedDetail = envelopePayload(detail.data)?.fact ?? selected;
+
+  // Inspection is transient and belongs to the slice it was made in.
+  useEffect(() => {
+    setInspectedFactId(null);
+  }, [currentScopeKey, applied]);
+
+  const select = useCallback(
+    (factId: string) => {
+      selectFact(factId);
+      setInspectedFactId(null);
+    },
+    [selectFact],
+  );
+  const dismiss = useCallback(() => {
+    if (inspectedFactId !== null) {
+      setInspectedFactId(null);
+      return;
+    }
+    if (selectedFactId !== null) selectFact(null);
+  }, [inspectedFactId, selectedFactId, selectFact]);
+
+  const shownFactId = inspectedFactId ?? selectedFactId;
+  const mode =
+    inspectedFactId !== null && inspectedFactId !== selectedFactId ? 'inspecting' : 'selected';
+  const shownRow = shownFactId ? facts?.find((fact) => fact.fact_id === shownFactId) : undefined;
+  const shownNodeId =
+    shownFactId && constellation ? constellation.nodeIdByFact.get(shownFactId) : undefined;
+  const shownRelations =
+    shownNodeId && constellation
+      ? (constellation.nodes.find((node) => node.id === shownNodeId)?.degree ?? null)
+      : null;
+
+  const reads = holographic?.reads;
+  const overviewEnvelope = overview.data?.outcome === 'envelope' ? overview.data.envelope : null;
+  const overviewState = envelopeReadState(overview.isPending, overview.data, {
+    loading: 'loading memory overview',
+    unknown: 'memory overview has not answered',
+  });
 
   return (
-    <ExplorerSplit
-      filters={
-        <>
-          <ReadSection
-            title="Memory"
-            state={envelopeReadState(overview.isPending, overview.data, {
-              loading: "loading memory overview",
-              unknown: "memory overview has not answered",
-            })}
-            chrome="centered"
-          >
+    <div className="flex h-full min-h-0 flex-col" data-testid="knowledge-facts">
+      {overviewEnvelope ? (
+        <EnvelopeTruth
+          envelope={overviewEnvelope}
+          refreshing={overview.isFetching}
+          onRefresh={() => void overview.refetch()}
+        />
+      ) : null}
+      <KnowledgeRegister
+        memory={envelopeReading(overview.isPending, overview.data)}
+        facts={holographic ? subReadReading(reads?.facts) : envelopeReading(overview.isPending, overview.data)}
+        entities={holographic ? subReadReading(reads?.entities) : envelopeReading(overview.isPending, overview.data)}
+        graph={holographic ? subReadReading(reads?.graph) : envelopeReading(overview.isPending, overview.data)}
+        status={envelopeReading(status.isPending, status.data)}
+        camera="facts"
+      />
+      <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
+        <section aria-label="Facts camera" className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <ReadSection title="Memory" state={overviewState} chrome="centered">
             {(envelope) => {
-              const data = envelope.payload;
-              const stats = data.holographic.overview;
-              // Ranked by count so the rail's length is a real ordering, not an
-              // accident of whatever order the producer emitted rows in.
-              const categories = [...(stats?.categories ?? [])].sort(
-                (a, b) => b.count - a.count,
-              );
-              const categoryCeiling = categories.reduce(
-                (max, row) => Math.max(max, row.count),
-                0,
-              );
-              const factCount = splitCount(stats?.facts);
-              const entityCount = splitCount(stats?.entities);
-              const growth = stats?.growth ?? [];
+              const data = envelope.payload.holographic;
+              if (data.error) {
+                return (
+                  <div className="flex flex-1 items-center justify-center p-6">
+                    <StateChip kind="unavailable" detail={`memory store unavailable: ${data.error}`} />
+                  </div>
+                );
+              }
               return (
-                <div className="flex flex-col gap-3">
-                  <SearchField
-                    value={query}
-                    onChange={setQuery}
-                    onSubmit={() => setApplied(query.trim())}
-                    onClear={() => {
-                      setQuery("");
-                      setApplied("");
-                    }}
-                    label="Search facts"
-                    placeholder="Search facts"
-                    hint="press / to focus, Esc to clear"
-                    submitted={applied}
-                  />
-                  {/* The rail used to be a 2×1 grid of equal tiles whose 26px
-                   * numerals overflowed their own cells — 41,204 facts rendered
-                   * as the string "41…". Facts is the quantity this workspace
-                   * exists to report, so it takes the display tier and the whole
-                   * rail width in the compact magnitude language; the supporting
-                   * counts sit under it on one shared bezel. */}
-                  <div className="flex flex-col">
-                    <div className="td-raised border border-edge-subtle px-3 py-3">
-                      <Readout
-                        label="facts"
-                        size="xl"
-                        value={factCount.value}
-                        unit={factCount.unit}
-                        note={
-                          stats?.facts != null
-                            ? `${stats.facts.toLocaleString()} recorded`
-                            : undefined
-                        }
+                <>
+                  {/* The composer and the headline counts sit inside the read
+                    * boundary on purpose: a search box over a store the browser
+                    * never reached would invite a reader to read its empty
+                    * answer as "no matches". */}
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-edge-subtle bg-surface-1 px-3 py-2">
+                    <div className="min-w-0 flex-1 basis-64">
+                      <SearchField
+                        value={query}
+                        onChange={setQuery}
+                        onSubmit={() => applyQuery(query)}
+                        onClear={() => {
+                          setQuery('');
+                          applyQuery('');
+                        }}
+                        label="Search facts"
+                        placeholder="Search facts"
+                        hint="press / to focus, Esc to clear · the store answers a bounded, trust-ranked slice"
+                        submitted={applied}
                       />
                     </div>
-                    <div className="flex border-x border-b border-edge-subtle bg-surface-1">
-                      <div className="min-w-0 flex-1 px-3 py-2">
-                        <Readout
-                          label="entities"
-                          size="sm"
-                          value={entityCount.value}
-                          unit={entityCount.unit}
-                        />
-                      </div>
-                    </div>
+                    <StoreReadouts summary={data.overview} statusMemory={statusMemory} />
                   </div>
-                  <TrustDistributionPlate distribution={trust} />
-                  {statusMemory ? (
-                    <figure className="flex flex-col gap-1.5">
-                      <figcaption className="td-legend">memory algebra</figcaption>
-                      <p className="text-2xs text-text-secondary">
-                        {statusMemory.algebra.name}
-                      </p>
-                      <p className="text-3xs text-text-muted">
-                        {statusMemory.algebra.hrr_dim.toLocaleString()} dimensions
-                        {" · "}
-                        estimated capacity {statusMemory.algebra.estimated_capacity.toLocaleString()}
-                      </p>
-                      <p className="text-3xs text-text-muted">
-                        {statusMemory.feedback_funnel.rated_fact_count.toLocaleString()} rated of{" "}
-                        {statusMemory.feedback_funnel.retrieved_fact_count.toLocaleString()} retrieved
-                        {" · "}
-                        {statusMemory.feedback_funnel.feedback_total.toLocaleString()} feedback events
-                      </p>
-                    </figure>
-                  ) : null}
-                  {categories.length > 0 ? (
-                    <figure className="flex flex-col gap-2">
-                      <figcaption className="td-legend">
-                        facts by category
-                      </figcaption>
-                      <div className="flex flex-col gap-2">
-                        {categories.map((row) => (
-                          <CategoryBar
-                            key={row.category}
-                            row={row}
-                            ceiling={categoryCeiling}
-                          />
-                        ))}
-                      </div>
-                    </figure>
-                  ) : null}
-                  {growth.length > 0 ? <GrowthChart growth={growth} /> : null}
-                </div>
+                  <Aperture
+                    data={data}
+                    constellation={constellation}
+                    inspectedFactId={inspectedFactId}
+                    selectedFactId={selectedFactId}
+                    onInspect={setInspectedFactId}
+                    onSelect={select}
+                  />
+                  <LedgerBay
+                    data={data}
+                    trust={trust}
+                    applied={applied}
+                    sorted={sorted}
+                    sort={sort}
+                    onSort={setSort}
+                    selectedFactId={selectedFactId}
+                    inspectedFactId={inspectedFactId}
+                    onInspect={setInspectedFactId}
+                    onSelect={select}
+                  />
+                </>
               );
             }}
           </ReadSection>
-        </>
-      }
-      list={
-        <ReadSection
-          title="Facts"
-          state={envelopeReadState(overview.isPending, overview.data, {
-            loading: "loading facts",
-            unknown: "memory facts have not answered",
-          })}
-          chrome="centered"
+        </section>
+        <aside
+          aria-label="Inspector"
+          className="flex w-full shrink-0 flex-col border-t border-edge-subtle bg-surface-1 lg:min-h-0 lg:w-[24rem] lg:overflow-auto lg:border-l lg:border-t-0 xl:w-[26rem]"
         >
-          {(envelope) => {
-            const data = envelope.payload;
-            const facts = data.holographic.facts ?? [];
-            const factsRead = data.holographic.reads?.facts;
-            const graphRead = data.holographic.reads?.graph;
-            const factsComplete =
-              data.holographic.facts_coverage.completeness === "complete" &&
-              (factsRead?.state === "ready" ||
-                factsRead?.state === "complete_zero_findings");
-            const coverageNotice = (
-              <MemoryCoverageNotices
-                factsCoverage={data.holographic.facts_coverage}
-                factsRead={factsRead}
-                graphCoverage={data.holographic.graph.coverage}
-                graphRead={graphRead}
-              />
-            );
-            if (data.holographic.error) {
-              return (
-                <p className="p-6 text-center text-sm text-text-muted">
-                  memory store unavailable: {data.holographic.error}
-                </p>
-              );
-            }
-            if (
-              factsRead &&
-              factsRead.state !== "ready" &&
-              factsRead.state !== "partial" &&
-              factsRead.state !== "complete_zero_findings"
-            ) {
-              return (
-                <p
-                  role="status"
-                  data-state={factsRead.state}
-                  className="p-6 text-center text-sm text-state-error"
-                >
-                  Fact list read is {factsRead.state.replaceAll("_", " ")}
-                  {factsRead.error ? `: ${factsRead.error}` : "."}
-                </p>
-              );
-            }
-            if (facts.length === 0) {
-              return (
-                <div className="flex flex-col">
-                  {coverageNotice}
-                  <p className="p-6 text-center text-sm text-text-muted">
-                    {applied
-                      ? `no loaded facts match “${applied}”`
-                      : factsComplete
-                        ? "no facts recorded"
-                        : "no facts were returned by this incomplete read"}
-                  </p>
-                </div>
-              );
-            }
-            // Recall counts have no absolute ceiling, so the rail is scaled to
-            // the busiest fact actually on screen. That makes the column a
-            // ranking of what is loaded — which is what it is — rather than an
-            // implied fraction of some total the daemon never reported.
-            const recallCeiling = facts.reduce(
-              (max, fact) => Math.max(max, fact.retrieval_count ?? 0),
-              0,
-            );
-            const loaded = summarizeLoadedTrust(facts);
-            return (
-              <FactList
-                facts={facts}
-                coverageNotice={coverageNotice}
-                recallCeiling={recallCeiling}
-                loaded={loaded}
-                distribution={trust}
-                query={applied}
-                selected={selected}
-                onSelect={(fact) =>
-                  setSelection({ scopeKey: currentScopeKey, fact })
-                }
-              />
-            );
-          }}
-        </ReadSection>
-      }
-      inspector={
-        selectedDetail ? (
-          <InspectorPanel title="Fact" onClose={() => setSelection(null)}>
-            <div className="flex flex-col gap-3">
-              {detail.isPending ? (
-                <p className="text-2xs text-text-muted">
-                  Loading canonical fact detail…
-                </p>
-              ) : detail.data?.outcome !== "envelope" ? (
-                <p className="text-2xs text-state-partial">
-                  Canonical detail is unavailable; this is the bounded overview
-                  row.
-                </p>
-              ) : null}
-              {selectedDetail.trust_score == null ? (
-                <p className="text-2xs text-text-muted">
-                  trust unavailable while payload access is {selectedDetail.payload_access}
-                </p>
-              ) : (
-                <TrustGauge score={selectedDetail.trust_score} />
-              )}
-              {selectedDetail.content ? (
-                <p className="whitespace-pre-wrap text-xs leading-relaxed">
-                  {selectedDetail.content}
-                </p>
-              ) : null}
-              <FeedbackSplit
-                helpful={selectedDetail.helpful_count ?? null}
-                unhelpful={selectedDetail.unhelpful_count ?? null}
-              />
-              <KeyValueTree
-                value={Object.fromEntries(
-                  Object.entries(selectedDetail).filter(
-                    ([k]) => k !== "content",
-                  ),
-                )}
-              />
-              {/* The gauge and the split above are terminal figures: where the
-               * score landed, not how. The audit says how, and it is the one
-               * reading on this inspector that can report its own
-               * incompleteness. */}
-              <FactTrustHistory factId={selectedDetail.fact_id ?? null} />
-            </div>
-          </InspectorPanel>
-        ) : undefined
-      }
-    />
+          {shownFactId ? (
+            <FactInspector
+              key={shownFactId}
+              factId={shownFactId}
+              mode={mode}
+              row={shownRow}
+              detail={mode === 'selected' ? detail.data : undefined}
+              detailPending={mode === 'selected' && detail.isPending}
+              relations={shownRelations}
+              graphRead={reads?.graph}
+              onSelect={select}
+              onDismiss={dismiss}
+              onOpenGeometry={onOpenGeometry}
+            />
+          ) : overviewState.kind === 'blocked' ? (
+            // The summary bay hangs off the same read as the field: it reports
+            // the same failure rather than a store with no distribution.
+            <ReadModelState kind={overviewState.state} detail={overviewState.detail} />
+          ) : (
+            <StoreSummary
+              summary={holographic?.overview ?? null}
+              statusMemory={statusMemory}
+              distribution={trust}
+            />
+          )}
+        </aside>
+      </div>
+    </div>
   );
 }
 
-function MemoryCoverageNotices({
-  factsCoverage,
-  factsRead,
-  graphCoverage,
-  graphRead,
+/** The constellation, or the typed reason the graph is not drawn. The graph is
+ * its own sub-read; a failed or refused graph must not render as an empty sky
+ * over a healthy ledger. */
+function Aperture({
+  data,
+  constellation,
+  inspectedFactId,
+  selectedFactId,
+  onInspect,
+  onSelect,
 }: {
-  factsCoverage: MemoryFactsCoverageV1;
-  factsRead: MemoryReadStatusV1 | undefined;
-  graphCoverage: DashboardCoverageV1;
-  graphRead: MemoryReadStatusV1 | undefined;
+  data: MemoryHolographicPayloadV1;
+  constellation: ReturnType<typeof composeConstellation> | null;
+  inspectedFactId: string | null;
+  selectedFactId: string | null;
+  onInspect: (factId: string) => void;
+  onSelect: (factId: string) => void;
 }) {
-  const factsIncomplete =
-    factsCoverage.completeness !== "complete" || factsRead?.state === "partial";
-  const graphReadComplete =
-    graphRead?.state === "ready" ||
-    graphRead?.state === "complete_zero_findings";
-  const graphIncomplete =
-    graphCoverage.completeness !== "complete" || !graphReadComplete;
-  if (!factsIncomplete && !graphIncomplete) return null;
-  const graphReset = graphRead?.code === "graph_reset_required";
+  const graphRead = data.reads?.graph;
+  const drawable =
+    graphRead === undefined ||
+    graphRead.state === 'ready' ||
+    graphRead.state === 'partial' ||
+    graphRead.state === 'complete_zero_findings';
   return (
-    <div className="flex flex-col gap-1 border-b border-edge-subtle px-3 py-2 text-2xs leading-relaxed">
-      {factsIncomplete ? (
-        <p role="status" data-state={factsRead?.state ?? "partial"} className="text-state-partial">
-          {factsRead?.state === "partial"
-            ? `Fact read is partial; reported fact coverage is ${factsCoverage.completeness}`
-            : `Fact coverage is ${factsCoverage.completeness}`}
-          ; this read was bounded to at most{" "}
-          {factsCoverage.limit.toLocaleString()} facts.
+    <div className="relative shrink-0 border-b border-edge-subtle p-3" data-testid="knowledge-aperture">
+      {drawable && constellation ? (
+        <FactConstellation
+          model={constellation}
+          inspectedFactId={inspectedFactId}
+          selectedFactId={selectedFactId}
+          onInspect={onInspect}
+          onSelect={onSelect}
+          graphRead={graphRead}
+          className="min-h-[300px] lg:min-h-[360px]"
+        />
+      ) : (
+        <div className="td-optic relative flex min-h-[200px] flex-col items-center justify-center gap-3 p-6 text-center">
+          <Corners tone="signal" />
+          <span className="td-title text-text-secondary">Fact constellation</span>
+          <StateChip
+            kind={graphRead?.state ?? 'unknown'}
+            detail={graphRead?.error ?? graphRead?.code ?? 'memory graph read'}
+          />
+          <p className="max-w-md text-xs leading-relaxed text-text-muted">
+            The memory graph sub-read did not serve a topology, so no constellation is drawn.
+            The ledger below is read separately and stands on its own.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The ledger bay: coverage statements, then the rows, or the typed reason
+ * there are none. */
+function LedgerBay({
+  data,
+  trust,
+  applied,
+  sorted,
+  sort,
+  onSort,
+  selectedFactId,
+  inspectedFactId,
+  onInspect,
+  onSelect,
+}: {
+  data: MemoryHolographicPayloadV1;
+  trust: TrustDistribution;
+  applied: string;
+  sorted: ReturnType<typeof sortFacts>;
+  sort: Parameters<typeof sortFacts>[1];
+  onSort: (sort: Parameters<typeof sortFacts>[1]) => void;
+  selectedFactId: string | null;
+  inspectedFactId: string | null;
+  onInspect: (factId: string) => void;
+  onSelect: (factId: string) => void;
+}) {
+  const factsRead = data.reads?.facts;
+  const graphRead = data.reads?.graph;
+  const factsComplete =
+    data.facts_coverage.completeness === 'complete' &&
+    (factsRead?.state === 'ready' || factsRead?.state === 'complete_zero_findings');
+  const coverageNotice = (
+    <MemoryCoverageNotices
+      factsCoverage={data.facts_coverage}
+      factsRead={factsRead}
+      graphCoverage={data.graph.coverage}
+      graphRead={graphRead}
+    />
+  );
+  let body: ReactNode;
+  if (
+    factsRead &&
+    factsRead.state !== 'ready' &&
+    factsRead.state !== 'partial' &&
+    factsRead.state !== 'complete_zero_findings'
+  ) {
+    body = (
+      <p
+        role="status"
+        data-state={factsRead.state}
+        className="p-6 text-center text-sm text-state-error"
+      >
+        Fact list read is {factsRead.state.replaceAll('_', ' ')}
+        {factsRead.error ? `: ${factsRead.error}` : '.'}
+      </p>
+    );
+  } else if (sorted.length === 0) {
+    body = (
+      <div className="flex flex-col">
+        {coverageNotice}
+        <p className="p-6 text-center text-sm text-text-muted">
+          {applied
+            ? `no loaded facts match “${applied}”`
+            : factsComplete
+              ? 'no facts recorded'
+              : 'no facts were returned by this incomplete read'}
         </p>
-      ) : null}
-      {graphReset ? (
-        <p role="status" data-state="error" className="text-state-error">
-          Memory graph reset required
-          {graphRead.error ? `: ${graphRead.error}` : "."}
+      </div>
+    );
+  } else {
+    body = (
+      <FactLedger
+        facts={sorted}
+        coverageNotice={coverageNotice}
+        loaded={summarizeLoadedTrust(sorted)}
+        distribution={trust}
+        query={applied}
+        sort={sort}
+        onSort={onSort}
+        storeFactCount={data.overview?.facts ?? null}
+        factsCoverage={data.facts_coverage}
+        selectedFactId={selectedFactId}
+        inspectedFactId={inspectedFactId}
+        onInspect={onInspect}
+        onSelect={onSelect}
+      />
+    );
+  }
+  return (
+    <section
+      aria-label="Fact ledger"
+      className="flex min-h-[var(--pane-min-height)] min-w-0 flex-1 flex-col overflow-hidden"
+      onKeyDown={onLedgerKeyDown}
+    >
+      <div className="flex h-8 shrink-0 items-center gap-2.5 border-b border-edge-subtle px-3">
+        <span className="td-title">Fact ledger</span>
+        <span aria-hidden className="td-rule" />
+        <span className="text-3xs text-text-muted">exact rows · hover inspects · click or Enter selects</span>
+      </div>
+      {/* Named, because internal scrolling is licensed for LABELLED regions
+        * only, and this is the element that actually scrolls. Empty and refused
+        * readings render no focusable rows, so it stays keyboard-operable. */}
+      <div role="region" aria-label="Fact rows" tabIndex={0} className="min-h-0 flex-1 overflow-auto">
+        {body}
+      </div>
+    </section>
+  );
+}
+
+/** Roving arrows over the ledger rows: rows are native buttons, so Enter and
+ * Space activate for free; arrows, Home, End and Page keys move focus — and
+ * with it inspection — without a Tab through every row. */
+function onLedgerKeyDown(event: KeyboardEvent<HTMLElement>) {
+  const container = event.currentTarget;
+  const rows = [...container.querySelectorAll<HTMLButtonElement>('button[aria-pressed]')];
+  if (rows.length === 0) return;
+  const active = document.activeElement;
+  const current = active instanceof HTMLButtonElement ? rows.indexOf(active) : -1;
+  const last = rows.length - 1;
+  const from = current < 0 ? 0 : current;
+  let next: number;
+  switch (event.key) {
+    case 'Home':
+      next = 0;
+      break;
+    case 'End':
+      next = last;
+      break;
+    case 'PageDown':
+      next = Math.min(from + 10, last);
+      break;
+    case 'PageUp':
+      next = Math.max(from - 10, 0);
+      break;
+    case 'ArrowDown':
+      next = Math.min(current + 1, last);
+      break;
+    case 'ArrowUp':
+      next = Math.max(current - 1, 0);
+      break;
+    default:
+      return;
+  }
+  event.preventDefault();
+  rows[next]?.focus();
+  rows[next]?.scrollIntoView({ block: 'nearest' });
+}
+
+/** The store's headline counts and its encoding algebra, beside the search
+ * field. Facts is the quantity this workspace exists to report, so it takes
+ * the display tier; the algebra is store-level context that stays on screen
+ * whichever fact is open. */
+function StoreReadouts({
+  summary,
+  statusMemory,
+}: {
+  summary: MemoryHolographicPayloadV1['overview'] | null;
+  statusMemory: MemoryStatusV1 | undefined;
+}) {
+  const factCount = splitCount(summary?.facts);
+  const entityCount = splitCount(summary?.entities);
+  return (
+    <div className="flex flex-wrap items-end gap-4 border-l border-edge-subtle pl-4">
+      <Readout
+        label="facts"
+        size="lg"
+        value={factCount.value}
+        unit={factCount.unit}
+        note={summary?.facts != null ? `${summary.facts.toLocaleString()} recorded` : 'not reported'}
+      />
+      <Readout label="entities" size="md" value={entityCount.value} unit={entityCount.unit} />
+      <Readout
+        label="categories"
+        size="md"
+        value={summary ? summary.categories.length.toLocaleString() : '—'}
+      />
+      <Readout
+        label="memory algebra"
+        size="sm"
+        value={statusMemory ? statusMemory.algebra.name : '—'}
+        note={
+          statusMemory
+            ? `${statusMemory.algebra.hrr_dim.toLocaleString()} dimensions · estimated capacity ${statusMemory.algebra.estimated_capacity.toLocaleString()}`
+            : 'status has not answered'
+        }
+        className="max-sm:hidden"
+      />
+    </div>
+  );
+}
+
+/** What the right bay shows when no fact is inspected: the store as a whole.
+ * The trust distribution and its denominator, the encoding algebra, the
+ * category census and the growth series — each from its own read, each
+ * printing what its counts cover. */
+function StoreSummary({
+  summary,
+  statusMemory,
+  distribution,
+}: {
+  summary: MemoryHolographicPayloadV1['overview'] | null;
+  statusMemory: MemoryStatusV1 | undefined;
+  distribution: TrustDistribution;
+}) {
+  const categories = [...(summary?.categories ?? [])].sort((a, b) => b.count - a.count);
+  const categoryCeiling = categories.reduce((max, row) => Math.max(max, row.count), 0);
+  const growth = summary?.growth ?? [];
+  return (
+    <div className="flex flex-col" data-testid="store-summary">
+      <header className="flex min-h-10 shrink-0 items-center gap-2.5 border-b border-edge-subtle px-2.5 py-2">
+        <span className="flex min-w-0 flex-col gap-0.5">
+          <span className="text-2xs uppercase tracking-[0.08em] text-text-muted">no fact inspected</span>
+          <h2 className="td-title truncate">Store summary</h2>
+        </span>
+        <span aria-hidden className="td-rule" />
+      </header>
+      <div role="region" aria-label="Store summary" tabIndex={0} className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-2.5">
+        <p className="text-2xs leading-relaxed text-text-muted">
+          Hover or focus a fact in the constellation or the ledger to inspect its bounded row;
+          click or press Enter to select it and read its canonical detail and trust audit.
         </p>
-      ) : null}
-      {graphIncomplete ? (
-        <p role="status" data-state={graphRead?.state ?? "unknown"} className="text-state-partial">
-          Memory graph coverage is {graphCoverage.completeness}
-          {graphCoverage.omission_reasons.length > 0
-            ? `; omissions: ${graphCoverage.omission_reasons.join(", ")}.`
-            : "."}
-        </p>
-      ) : null}
+        <TrustDistributionPlate distribution={distribution} />
+        {statusMemory ? (
+          <figure className="flex flex-col gap-1.5">
+            <figcaption className="td-legend">feedback funnel</figcaption>
+            <p className="text-3xs text-text-muted">
+              {statusMemory.feedback_funnel.rated_fact_count.toLocaleString()} rated of{' '}
+              {statusMemory.feedback_funnel.retrieved_fact_count.toLocaleString()} retrieved
+              {' · '}
+              {statusMemory.feedback_funnel.feedback_total.toLocaleString()} feedback events
+            </p>
+          </figure>
+        ) : null}
+        {categories.length > 0 ? (
+          <figure className="flex flex-col gap-2">
+            <figcaption className="td-legend">facts by category</figcaption>
+            <div className="flex flex-col gap-2">
+              {categories.map((row) => (
+                <CategoryBar key={row.category} row={row} ceiling={categoryCeiling} />
+              ))}
+            </div>
+          </figure>
+        ) : null}
+        {growth.length > 0 ? <GrowthChart growth={growth} /> : null}
+      </div>
     </div>
   );
 }
@@ -486,16 +641,16 @@ function GrowthChart({
   const option = useMemo<EChartsOption>(
     () => ({
       xAxis: {
-        type: "category",
+        type: 'category',
         data: growth.map((point) => point.date),
         axisLabel: { show: false },
         axisTick: { show: false },
       },
-      yAxis: { type: "value", axisLabel: { show: false } },
+      yAxis: { type: 'value', axisLabel: { show: false } },
       grid: { left: 2, right: 2, top: 6, bottom: 2, containLabel: true },
       series: [
         {
-          type: "line",
+          type: 'line',
           showSymbol: false,
           smooth: true,
           areaStyle: {},
@@ -511,28 +666,16 @@ function GrowthChart({
   return (
     <figure className="flex flex-col gap-1.5">
       <figcaption className="td-legend">growth</figcaption>
-      {/* Same axis-elision as trust distribution: twelve weekly dates at 9px in
-       * a 224px rail is unreadable debris, so the shape carries the trend and
-       * the two endpoints are printed directly underneath instead of a rotated,
-       * truncated axis. */}
+      {/* Twelve weekly dates at 9px in a narrow rail is unreadable debris, so
+       * the shape carries the trend and the two endpoints are printed directly
+       * underneath instead of a rotated, truncated axis. */}
       <Chart
         ariaLabel={`Cumulative facts recorded across ${growth.length} periods, from ${first.date} (${first.cumulative_facts.toLocaleString()} facts) to ${last.date} (${last.cumulative_facts.toLocaleString()} facts)`}
         height={70}
         option={option}
       />
-      {/* Date-over-value, the same shape as every other Readout on this page,
-       * rather than one cramped line — "MAY 8 · 3,200" beside its mirror at
-       * the opposite edge had nowhere to go in a 224px rail and truncated into
-       * the gap between them. */}
-      <div
-        aria-hidden
-        className="flex items-start justify-between gap-2 border-t border-edge-subtle pt-1.5"
-      >
-        <Readout
-          label={formatShortDate(first.date)}
-          value={formatCount(first.cumulative_facts)}
-          size="sm"
-        />
+      <div aria-hidden className="flex items-start justify-between gap-2 border-t border-edge-subtle pt-1.5">
+        <Readout label={formatShortDate(first.date)} value={formatCount(first.cumulative_facts)} size="sm" />
         <Readout
           label={formatShortDate(last.date)}
           value={formatCount(last.cumulative_facts)}
@@ -553,18 +696,14 @@ function GrowthChart({
  * one full bar beside nine empty ones is the same non-information in a more
  * confident costume.
  */
-function TrustDistributionPlate({
-  distribution,
-}: {
-  distribution: TrustDistribution;
-}) {
-  if (distribution.source === "none") {
+function TrustDistributionPlate({ distribution }: { distribution: TrustDistribution }) {
+  if (distribution.source === 'none') {
     return (
       <figure className="flex flex-col gap-1">
         <figcaption className="td-legend">trust distribution</figcaption>
         <p className="text-2xs leading-relaxed text-text-muted">
-          The store reported no trust distribution — not a distribution of zero,
-          but no reading at all.
+          The store reported no trust distribution — not a distribution of zero, but no reading
+          at all.
         </p>
       </figure>
     );
@@ -576,41 +715,33 @@ function TrustDistributionPlate({
       <figure className="flex flex-col gap-1">
         <figcaption className="td-legend">trust distribution</figcaption>
         <p className="text-2xs leading-relaxed text-text-secondary">
-          All {distribution.total.toLocaleString()} facts sit in one band,{" "}
-          <span className="td-value text-text-primary">{only.label}</span>.
-          There is no spread to draw.
+          All {distribution.total.toLocaleString()} facts sit in one band,{' '}
+          <span className="td-value text-text-primary">{only.label}</span>. There is no spread to
+          draw.
         </p>
-        <p className="text-3xs text-text-muted">
-          {trustSourceNote(distribution.source)}
-        </p>
+        <p className="text-3xs text-text-muted">{trustSourceNote(distribution.source)}</p>
       </figure>
     );
   }
-  const ceiling = distribution.bands.reduce(
-    (max, band) => Math.max(max, band.count),
-    0,
-  );
+  const ceiling = distribution.bands.reduce((max, band) => Math.max(max, band.count), 0);
   return (
     <figure className="flex flex-col gap-1.5">
       <figcaption className="td-legend">trust distribution</figcaption>
       <div className="flex flex-col gap-1">
         {distribution.bands.map((band) => (
           <div key={band.label} className="flex items-center gap-2">
-            <span
-              className="td-value w-16 shrink-0 text-3xs text-text-muted"
-              data-cell="numeric"
-            >
+            <span className="td-value w-16 shrink-0 text-3xs text-text-muted" data-cell="numeric">
               {band.label}
             </span>
             <Meter
               fraction={ceiling > 0 ? band.count / ceiling : null}
               className="min-w-0 flex-1"
-              tone={band.count === 0 ? "bg-transparent" : undefined}
+              tone={band.count === 0 ? 'bg-transparent' : undefined}
             />
             <span
               className={cn(
-                "td-value w-8 shrink-0 text-right text-3xs",
-                band.count === 0 ? "text-text-muted" : "text-text-secondary",
+                'td-value w-8 shrink-0 text-right text-3xs',
+                band.count === 0 ? 'text-text-muted' : 'text-text-secondary',
               )}
               data-cell="numeric"
             >
@@ -623,308 +754,22 @@ function TrustDistributionPlate({
        * band drawn as a missing row would read as a narrower scale than the
        * one actually measured. */}
       <figcaption className="text-3xs leading-relaxed text-text-muted">
-        {distribution.total.toLocaleString()} facts across{" "}
-        {distribution.bands.length} bands, {distribution.occupied} of them
-        occupied · {trustSourceNote(distribution.source)}
+        {distribution.total.toLocaleString()} facts across {distribution.bands.length} bands,{' '}
+        {distribution.occupied} of them occupied · {trustSourceNote(distribution.source)}
       </figcaption>
     </figure>
   );
 }
 
-/**
- * What the loaded slice of facts is, stated above the rows.
- *
- * The list is a top-100 slice ordered so the highest-trust facts fill it. A
- * reader scrolling ninety-six rows that all read 1.00 will conclude the store
- * has no low-trust facts; the store in fact holds twenty-one below 0.75 that
- * this slice never reaches. That is not a detail — it is the difference
- * between "feedback never moves a score" and "you are looking at the top of
- * the list".
- */
-function FactListHeader({
-  loaded,
-  distribution,
-  query,
-}: {
-  loaded: LoadedTrust;
-  distribution: TrustDistribution;
-  query: string;
-}) {
-  const measuredRange =
-    loaded.min != null && loaded.max != null
-      ? { min: loaded.min, max: loaded.max }
-      : null;
-  const unreached = measuredRange
-    ? factsBelow(distribution, measuredRange.min)
-    : null;
-  const sameEverywhere = measuredRange?.min === measuredRange?.max;
-  return (
-    <div className="flex flex-col gap-0.5 border-b border-edge-subtle px-3 py-2">
-      <p className="td-legend">
-        {loaded.total.toLocaleString()} facts loaded · {loaded.measured.toLocaleString()} with trust ·{" "}
-        {loaded.unavailable.toLocaleString()} unavailable
-        {query ? ` · matching “${query}”` : ""}
-      </p>
-      <p className="text-2xs leading-relaxed text-text-muted">
-        {measuredRange == null
-          ? "No loaded fact exposes a trust measurement."
-          : sameEverywhere
-            ? `Every measured fact is at trust ${measuredRange.max.toFixed(2)}.`
-            : `Trust ${measuredRange.min.toFixed(2)}–${measuredRange.max.toFixed(2)}, with ${loaded.atMax.toLocaleString()} at exactly ${measuredRange.max.toFixed(2)}.`}
-        {measuredRange && unreached != null && unreached > 0
-          ? ` The store holds ${unreached.toLocaleString()} further facts below ${measuredRange.min.toFixed(2)} that this slice does not reach.`
-          : ""}
-      </p>
-    </div>
-  );
-}
-
-/** Two lines of a fact's content, which is the height a 56px row can carry.
- * A row taller than this stops being a list; a row shorter than this shows a
- * ninety-character prefix of a nineteen-hundred-character fact. */
-export const FACT_ROW_HEIGHT = 56;
-
-const FACT_SUMMARY_CHARACTER_SAMPLE = "abcdefghijklmnopqrstuvwxyz";
-
-function FactList({
-  facts,
-  coverageNotice,
-  recallCeiling,
-  loaded,
-  distribution,
-  query,
-  selected,
-  onSelect,
-}: {
-  facts: MemoryFactRowV1[];
-  coverageNotice: ReactNode;
-  recallCeiling: number;
-  loaded: LoadedTrust | null;
-  distribution: TrustDistribution;
-  query: string;
-  selected: MemoryFactRowV1 | null;
-  onSelect: (fact: MemoryFactRowV1) => void;
-}) {
-  const listRootRef = useRef<HTMLDivElement>(null);
-  const summaryProbeRef = useRef<HTMLSpanElement>(null);
-  const characterProbeRef = useRef<HTMLSpanElement>(null);
-  const characterLimit = useFactSummaryCharacterLimit(
-    listRootRef,
-    summaryProbeRef,
-    characterProbeRef,
-  );
-  return (
-    <div ref={listRootRef} className="relative h-full">
-      <div
-        aria-hidden
-        className="pointer-events-none invisible absolute inset-x-0 flex gap-3 px-3 pt-2"
-      >
-        <span className="w-14 shrink-0" />
-        <span
-          ref={summaryProbeRef}
-          className="min-w-0 flex-1 text-xs leading-snug"
-        >
-          <span ref={characterProbeRef} className="whitespace-nowrap">
-            {FACT_SUMMARY_CHARACTER_SAMPLE}
-          </span>
-        </span>
-        <span className="hidden w-16 shrink-0 md:block" />
-        <span className="hidden w-20 shrink-0 md:block" />
-      </div>
-      <VirtualList
-        items={facts}
-        getKey={(fact) => String(fact.fact_id)}
-        estimateHeight={FACT_ROW_HEIGHT}
-        header={
-          coverageNotice || loaded ? (
-            <>
-              {coverageNotice}
-              {loaded ? (
-                <FactListHeader
-                  loaded={loaded}
-                  distribution={distribution}
-                  query={query}
-                />
-              ) : null}
-            </>
-          ) : null
-        }
-        renderItem={(fact) => (
-          <FactListRow
-            fact={fact}
-            recallCeiling={recallCeiling}
-            // A rail scaled 0-1 across a slice whose trust never leaves the top
-            // tenth is the same length on every row: not a ranking, just ink.
-            // The header states the slice's spread instead, and the printed
-            // figure keeps the precision.
-            showTrustRail={loaded ? !loaded.flat : true}
-            characterLimit={characterLimit}
-            selected={selected?.fact_id === fact.fact_id}
-            onSelect={() => onSelect(fact)}
-          />
-        )}
-      />
-    </div>
-  );
-}
-
-/** One fact, read as two ranked quantities and as much of the fact as fits.
- *
- * The row previously spent forty pixels on a hairline trust bar with no
- * number, then printed the recall count as plain grey text — so a column of
- * facts carried no visible ordering at all and the two measurements that
- * define this product (how much a memory is trusted, how often it is
- * reinforced) were the least legible things on the row. Both now get a printed
- * figure AND a length: the digits for precision, the rail for ranking.
- *
- * Two further problems the real store exposed. Facts here run to nearly two
- * thousand characters on ONE line, so a single-line row truncated every
- * interesting fact at its first clause and the reader had no way to tell a
- * clipped row from a short one. The summary now clamps to two lines, carries
- * the full text on `title`, and prints an explicit control on any row that is
- * still cut — the control opens the same inspector the row does, where the
- * content is shown in full. And the trust rail is suppressed when the loaded
- * slice has no spread: ninety-six rails all drawn at 90-100% of their track
- * are ninety-six copies of one length.
- */
-function FactListRow({
-  fact,
-  recallCeiling,
-  showTrustRail,
-  characterLimit,
-  selected,
-  onSelect,
-}: {
-  fact: MemoryFactRowV1;
-  recallCeiling: number;
-  showTrustRail: boolean;
-  characterLimit: number | null;
-  selected: boolean;
-  onSelect: () => void;
-}) {
-  const content = fact.content ?? String(fact.fact_id);
-  const summary = useMemo(() => content.split("\n")[0] ?? "", [content]);
-  const clipped = characterLimit !== null && content.length > characterLimit;
-  const trust =
-    typeof fact.trust_score === "number"
-      ? Math.max(0, Math.min(fact.trust_score, 1))
-      : null;
-  const recalls = fact.retrieval_count ?? 0;
-  return (
-    <DataRow
-      selected={selected}
-      onSelect={onSelect}
-      height={FACT_ROW_HEIGHT}
-      align="start"
-    >
-      <span className="flex w-14 shrink-0 flex-col gap-1">
-        <span
-          className={cn(
-            "td-value text-2xs leading-none",
-            trust == null
-              ? "text-text-muted"
-              : trust >= 0.7
-              ? "text-text-primary"
-              : trust >= 0.4
-                ? "text-text-secondary"
-                : "text-text-muted",
-          )}
-          data-cell="numeric"
-        >
-          {trust == null ? "—" : trust.toFixed(2)}
-        </span>
-        {showTrustRail && trust != null ? (
-          <Meter
-            fraction={trust}
-            height="row"
-            tone={
-              trust >= 0.7
-                ? "bg-accent"
-                : trust >= 0.4
-                  ? "bg-accent/60"
-                  : "bg-accent/30"
-            }
-          />
-        ) : null}
-      </span>
-      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span
-          className="line-clamp-2 leading-snug text-text-primary"
-          title={content}
-        >
-          {summary}
-        </span>
-        {clipped ? (
-          <span className="td-legend text-accent">
-            {content.length.toLocaleString()} chars · open for the rest
-          </span>
-        ) : null}
-      </span>
-      {/* Column priority under 768px: the fact itself and how far it can be
-       * trusted are the row. Category and recall count are what a narrow
-       * viewport gives up -- keeping all four columns crushed the summary to
-       * three glyphs, which is not density, just damage. */}
-      {fact.category ? (
-        <span className="td-legend shrink-0 border border-edge-subtle px-1.5 py-1 max-md:hidden">
-          {fact.category}
-        </span>
-      ) : null}
-      <FigureRail
-        value={recalls}
-        unit="rc"
-        fraction={recallCeiling > 0 ? recalls / recallCeiling : null}
-        tone="bg-text-muted"
-        className="max-md:hidden"
-      />
-    </DataRow>
-  );
-}
-
-/** One width calibration for the scroll region replaces per-row layout reads. */
-function useFactSummaryCharacterLimit(
-  listRootRef: RefObject<HTMLDivElement | null>,
-  summaryProbeRef: RefObject<HTMLSpanElement | null>,
-  characterProbeRef: RefObject<HTMLSpanElement | null>,
-): number | null {
-  const [characterLimit, setCharacterLimit] = useState<number | null>(null);
-  useLayoutEffect(() => {
-    const scrollContainer = listRootRef.current?.parentElement;
-    const summaryProbe = summaryProbeRef.current;
-    const characterProbe = characterProbeRef.current;
-    if (!scrollContainer || !summaryProbe || !characterProbe) return;
-    const measure = () => {
-      const characterWidth =
-        characterProbe.getBoundingClientRect().width /
-        FACT_SUMMARY_CHARACTER_SAMPLE.length;
-      const charactersPerLine =
-        characterWidth > 0
-          ? Math.floor(summaryProbe.clientWidth / characterWidth)
-          : 0;
-      const next = charactersPerLine > 0 ? charactersPerLine * 2 : null;
-      setCharacterLimit((previous) => (previous === next ? previous : next));
-    };
-    measure();
-    if (typeof ResizeObserver !== "function") return;
-    const observer = new ResizeObserver(measure);
-    observer.observe(scrollContainer);
-    return () => observer.disconnect();
-  }, [characterProbeRef, listRootRef, summaryProbeRef]);
-  return characterLimit;
-}
-
-/** "2026-05-08" -> "May 8". The growth caption prints a date beside a
- * facts count in a 224px rail; the full ISO stamp alone (10 chars) leaves no
- * room for the count next to it before the two end labels collide. The full
- * date stays in the chart's `ariaLabel` — this is a display-only compaction,
- * not a different value. */
+/** "2026-05-08" -> "May 8". The growth caption prints a date beside a facts
+ * count in a narrow rail; the full ISO stamp alone (10 chars) leaves no room
+ * for the count next to it before the two end labels collide. The full date
+ * stays in the chart's `ariaLabel` — this is a display-only compaction, not a
+ * different value. */
 function formatShortDate(iso: string): string {
   const date = new Date(`${iso}T00:00:00Z`);
   if (Number.isNaN(date.getTime())) return iso;
-  return date.toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    timeZone: "UTC",
-  });
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
 /** One category's share of the loaded fact set, read the same way the fact
@@ -932,81 +777,17 @@ function formatShortDate(iso: string): string {
  * category on screen for ranking. No fabricated denominator — the rail
  * measures against the largest category actually present, not an assumed
  * total. */
-function CategoryBar({
-  row,
-  ceiling,
-}: {
-  row: MemoryCategoryCountV1;
-  ceiling: number;
-}) {
+function CategoryBar({ row, ceiling }: { row: MemoryCategoryCountV1; ceiling: number }) {
   const fraction = ceiling > 0 ? row.count / ceiling : null;
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-baseline gap-2">
-        <span className="min-w-0 flex-1 truncate text-2xs text-text-secondary">
-          {row.category}
-        </span>
-        <span
-          className="td-value text-2xs text-text-primary"
-          data-cell="numeric"
-        >
+        <span className="min-w-0 flex-1 truncate text-2xs text-text-secondary">{row.category}</span>
+        <span className="td-value text-2xs text-text-primary" data-cell="numeric">
           {formatCount(row.count)}
         </span>
       </div>
-      <Meter
-        fraction={fraction}
-        ariaLabel={`${row.category}: ${row.count.toLocaleString()} facts`}
-      />
+      <Meter fraction={fraction} ariaLabel={`${row.category}: ${row.count.toLocaleString()} facts`} />
     </div>
-  );
-}
-
-/** Trust as what it is: one measured quantity on the 0–1 scale, printed and
- * given the same length every other readout in the product uses. */
-function TrustGauge({ score }: { score: number }) {
-  const clamped = Math.max(0, Math.min(score, 1));
-  return (
-    <Readout
-      label="trust"
-      size="lg"
-      value={clamped.toFixed(2)}
-      fraction={clamped}
-    />
-  );
-}
-
-/** Helpful vs unhelpful feedback as one proportional split bar. */
-export function FeedbackSplit({
-  helpful,
-  unhelpful,
-}: {
-  helpful: number | null;
-  unhelpful: number | null;
-}) {
-  if (helpful === null || unhelpful === null) {
-    return (
-      <p className="text-2xs text-text-muted">feedback counts not reported</p>
-    );
-  }
-  const total = helpful + unhelpful;
-  if (total === 0) {
-    return <p className="text-2xs text-text-muted">no feedback recorded</p>;
-  }
-  return (
-    <figure className="flex flex-col gap-1">
-      <div className="flex h-1.5 overflow-hidden rounded-full bg-surface-3">
-        <div
-          className="bg-accent"
-          style={{ width: `${(helpful / total) * 100}%` }}
-        />
-        <div
-          className="bg-state-stale"
-          style={{ width: `${(unhelpful / total) * 100}%` }}
-        />
-      </div>
-      <figcaption className="tabular text-2xs text-text-muted">
-        {helpful} helpful · {unhelpful} unhelpful
-      </figcaption>
-    </figure>
   );
 }
