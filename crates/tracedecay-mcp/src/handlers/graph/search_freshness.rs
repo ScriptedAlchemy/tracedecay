@@ -112,13 +112,12 @@ pub(super) fn search_freshness(
                 "state={} rebuild_in_flight={}",
                 state
                     .staleness_state
-                    .map(|state| state.as_str())
-                    .unwrap_or("unknown"),
+                    .map_or("unknown", CodeIndexStalenessStateV1::as_str),
                 state.rebuild_in_flight
             );
             (
                 state.latest_generation_id.clone(),
-                state.staleness_state.clone(),
+                state.staleness_state,
                 Some(state.rebuild_in_flight),
             )
         }
