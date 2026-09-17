@@ -42,6 +42,7 @@ import {
   LcmOverviewPayloadV1Schema,
   LcmTimelinePayloadV1Schema,
   LoomTemporalPayloadV1Schema,
+  MemoryFactDetailPayloadV1Schema,
   MemoryOverviewPayloadV1Schema,
   AutomationRunResultV1Schema,
   MemoryStatusPayloadV1Schema,
@@ -60,6 +61,7 @@ import {
   WorkGraphReadV1Schema,
 } from '../../src/contracts/generated.ts';
 import { workPayload } from '../../src/workspaces/work/workApi.ts';
+import { TrustHistoryPayloadSchema } from '../../src/data/query/memory.ts';
 
 /** Parse one resolved fixture, surfacing zod's issues on failure — the same
  * reporting shape `endpoint-fixtures.test.ts` uses, so a drift report reads the
@@ -187,6 +189,21 @@ const DYNAMIC: ReadonlyArray<{
     label: 'graph_api::neighbors',
     pathname: '/api/plugins/graph/node/sym-0/neighbors',
     schema: DashboardEnvelopeV1Schema(GraphNeighborsPayloadV1Schema),
+  },
+  {
+    label: 'memory_api::fact_detail held fact',
+    pathname: `/api/plugins/holographic/fact/${encodeURIComponent(`fact.${'a'.repeat(64)}.${'0'.repeat(64)}`)}`,
+    schema: DashboardEnvelopeV1Schema(MemoryFactDetailPayloadV1Schema),
+  },
+  {
+    label: 'memory_api::fact_detail unknown identity',
+    pathname: '/api/plugins/holographic/fact/fact.unknown',
+    schema: DashboardEnvelopeV1Schema(z.null()),
+  },
+  {
+    label: 'memory_api::fact_trust_history',
+    pathname: `/api/plugins/holographic/fact/${encodeURIComponent(`fact.${'a'.repeat(64)}.${'0'.repeat(64)}`)}/trust-history`,
+    schema: TrustHistoryPayloadSchema,
   },
   {
     label: 'graph_api::subgraph seeded',

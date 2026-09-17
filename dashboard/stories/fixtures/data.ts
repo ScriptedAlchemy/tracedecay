@@ -487,10 +487,18 @@ function memoryEntities(): Record<string, unknown>[] {
   }));
 }
 
-function memoryPayload(query = ''): Record<string, unknown> {
-  const facts = memoryFacts();
-  const entities = memoryEntities();
-  const graphNodes = facts.map((fact) => ({
+/**
+ * The verified memory topology the overview serves beside its fact rows
+ * (memory_service/graph.rs `graph_payload`): fact roots, the entity nodes
+ * they mention, and typed fact-to-fact relations. Wired deterministically off
+ * the fixture indices so the constellation draws the same picture every run:
+ * each fact mentions one entity (its index modulo the entity list), every
+ * third fact supports the next, one pair contradicts, one supersedes, and one
+ * edge names a root this bounded slice did not include — the dangling case
+ * the drawing must count rather than draw.
+ */
+function memoryGraph(facts: ReturnType<typeof memoryFacts>): Record<string, unknown> {
+  const factNodes = facts.map((fact) => ({
     id: `fact:${fact.fact_id}`,
     kind: 'fact',
     label: fact.content,
@@ -503,6 +511,59 @@ function memoryPayload(query = ''): Record<string, unknown> {
     retrieval_count: fact.retrieval_count,
     helpful_count: fact.helpful_count,
   }));
+  const entityNodes = ENTITY_NAMES.map(([name]) => ({
+    id: `entity:${name}`,
+    kind: 'entity',
+    entity_id: name,
+    label: name,
+  }));
+  const edges: Record<string, unknown>[] = [];
+  facts.forEach((fact, index) => {
+    const entity = ENTITY_NAMES[index % ENTITY_NAMES.length]![0];
+    edges.push({ kind: 'mentions', source: `fact:${fact.fact_id}`, target: `entity:${entity}` });
+    if (index % 3 === 0 && index + 1 < facts.length) {
+      edges.push({
+        kind: 'supports',
+        source: `fact:${fact.fact_id}`,
+        target: `fact:${facts[index + 1]!.fact_id}`,
+      });
+    }
+  });
+  edges.push({ kind: 'contradicts', source: `fact:${facts[6]!.fact_id}`, target: `fact:${facts[7]!.fact_id}` });
+  edges.push({ kind: 'supersedes', source: `fact:${facts[1]!.fact_id}`, target: `fact:${facts[12]!.fact_id}` });
+  edges.push({ kind: 'derived_from', source: `fact:${facts[4]!.fact_id}`, target: `fact:${facts[9]!.fact_id}` });
+  edges.push({
+    kind: 'mentions',
+    source: `fact:fact.${'a'.repeat(64)}.${'f'.repeat(64)}`,
+    target: `entity:${ENTITY_NAMES[0]![0]}`,
+  });
+  return {
+    nodes: [...factNodes, ...entityNodes],
+    edges,
+    coverage: {
+      completeness: 'unknown',
+      eligible: null,
+      examined: null,
+      matched: null,
+      excluded: null,
+      omitted: null,
+      unknown: null,
+      denominator: null,
+      unit: null,
+      omission_reasons: ['fact_universe_bounded'],
+    },
+    fact_universe_count: 4128,
+    fact_candidates_examined: facts.length,
+    unavailable_fact_candidates: 0,
+    root_count: facts.length,
+    relation_limit: 100,
+    relation_count: edges.length,
+  };
+}
+
+function memoryPayload(query = ''): Record<string, unknown> {
+  const facts = memoryFacts();
+  const entities = memoryEntities();
   return {
     providers: {
       memory_provider: 'tracedecay',
@@ -541,34 +602,15 @@ function memoryPayload(query = ''): Record<string, unknown> {
       },
       facts,
       entities,
-      graph: {
-        nodes: graphNodes,
-        edges: [],
-        coverage: {
-          completeness: 'unknown',
-          eligible: null,
-          examined: null,
-          matched: null,
-          excluded: null,
-          omitted: null,
-          unknown: null,
-          denominator: null,
-          unit: null,
-          omission_reasons: ['fact_universe_bounded'],
-        },
-        fact_universe_count: 4128,
-        fact_candidates_examined: facts.length,
-        unavailable_fact_candidates: 0,
-        root_count: facts.length,
-        relation_limit: 100,
-        relation_count: 0,
-      },
+      graph: memoryGraph(facts),
       // Per-read outcome, seeded `pending` and overwritten as each of the three
-      // reads lands (memory_api.rs::overview). All three succeeded here.
+      // reads lands (memory_api.rs::overview). Facts and entities landed
+      // whole; the graph landed bounded, which `graph_read_status` reports as
+      // `partial` with its code.
       reads: {
         facts: { state: 'ready' },
         entities: { state: 'ready' },
-        graph: { state: 'ready' },
+        graph: { state: 'partial', code: 'graph_coverage_incomplete' },
       },
       // The fixture carries only a bounded projection of the eligible facts,
       // so the current coverage contract reports that partial observation.
@@ -580,6 +622,90 @@ function memoryPayload(query = ''): Record<string, unknown> {
       },
       error: '',
     },
+  };
+}
+
+/**
+ * `GET /api/plugins/holographic/fact/{id}` (memory_api.rs `fact_detail`): the
+ * complete canonical row plus its linked entities, for a fact this fixture
+ * store holds; `complete_zero_findings` with a null payload for one it does
+ * not, which is the envelope the daemon answers for an unknown identity.
+ */
+function memoryFactDetailEnvelope(factId: string): Record<string, unknown> {
+  const facts = memoryFacts();
+  const index = facts.findIndex((fact) => fact.fact_id === factId);
+  const fact = facts[index];
+  if (fact === undefined) {
+    return {
+      ...envelope(null, 'complete_zero_findings', []),
+      coverage: {
+        completeness: 'complete',
+        eligible: 1,
+        examined: 1,
+        matched: 0,
+        excluded: 0,
+        omitted: 0,
+        unknown: 0,
+        denominator: 1,
+        unit: 'facts',
+        omission_reasons: [],
+      },
+    };
+  }
+  const [entityName, entityFacts] = ENTITY_NAMES[index % ENTITY_NAMES.length]!;
+  return envelope({
+    fact: {
+      ...fact,
+      // The list route truncates content to 200 characters; the detail route
+      // carries the whole row, which for this fixture is the same sentence
+      // plus the provenance the summary never attaches.
+      linked_entities: [{ entity_id: entityName, name: entityName, fact_count: entityFacts }],
+      metadata: { recorded_by: 'story-fixture', session: `sess-${index.toString(16).padStart(4, '0')}` },
+    },
+    error: '',
+  });
+}
+
+/**
+ * `GET /api/plugins/holographic/fact/{id}/trust-history` (memory_api.rs
+ * `fact_trust_history`): bare JSON, newest last. Enough events to draw a
+ * trace, with one detail withheld and one whose availability was never
+ * recorded, so both supplied-backend chip states are reachable in the audit.
+ */
+function memoryTrustHistoryPayload(factId: string): Record<string, unknown> {
+  const facts = memoryFacts();
+  const index = facts.findIndex((fact) => fact.fact_id === factId);
+  if (index < 0) {
+    return { fact_id: factId, trust_history: [], limit: 300, completeness: 'complete', next_after: null, error: '' };
+  }
+  const closing = facts[index]!.trust_score;
+  const steps = [0.12, -0.05, 0.09, 0.07, -0.03, 0.06];
+  const opening = Math.max(0.05, closing - steps.reduce((sum, step) => sum + step, 0));
+  let trust = opening;
+  const events = steps.map((step, position) => {
+    const oldTrust = trust;
+    trust = Math.max(0, Math.min(1, trust + step));
+    const availability = position === 2 ? 'redacted' : position === 4 ? 'unknown' : 'available';
+    return {
+      event_id: `event-${index}-${position}`,
+      timestamp: nowMicros - (steps.length - position) * 3 * DAY * 1_000_000,
+      action: step >= 0 ? 'helpful' : 'unhelpful',
+      old_trust: oldTrust,
+      new_trust: trust,
+      delta: trust - oldTrust,
+      details_availability: availability,
+      ...(availability === 'available'
+        ? { source: position % 2 === 0 ? 'codex' : 'claude-code', note: 'confirmed against the running daemon' }
+        : {}),
+    };
+  });
+  return {
+    fact_id: factId,
+    trust_history: events,
+    limit: 300,
+    completeness: 'complete',
+    next_after: null,
+    error: '',
   };
 }
 
@@ -4581,6 +4707,14 @@ export function resolveFixture(pathname: string, search = ''): unknown {
     const limit = Number.isFinite(raw) && raw > 0 ? Math.min(200, Math.trunc(raw)) : 50;
     return envelope(neighborsPayload(decodeURIComponent(neighbors[1]!), limit));
   }
+  // Dynamic memory reads, ahead of the `/api/plugins/holographic` prefix: the
+  // prefix serves the OVERVIEW envelope, which the detail and audit schemas
+  // reject, so without these the inspector would be audited against
+  // `unsupported_schema` for every selected fact.
+  const trustHistory = /^\/api\/plugins\/holographic\/fact\/([^/]+)\/trust-history$/.exec(pathname);
+  if (trustHistory) return memoryTrustHistoryPayload(decodeURIComponent(trustHistory[1]!));
+  const factDetail = /^\/api\/plugins\/holographic\/fact\/([^/]+)$/.exec(pathname);
+  if (factDetail) return memoryFactDetailEnvelope(decodeURIComponent(factDetail[1]!));
   if (pathname in FIXTURES) return FIXTURES[pathname];
   for (const [prefix, payload] of FIXTURE_PREFIXES) {
     if (pathname.startsWith(prefix)) return payload;
