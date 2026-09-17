@@ -57,6 +57,7 @@ import {
   StructureReadV12Schema,
   ListTaskHandoffsResultV1Schema,
   WorkflowDefinitionSchema,
+  WorkflowRunProjectionSchema,
   WorkGraphReadV1Schema,
 } from '../../src/contracts/generated.ts';
 import { workPayload } from '../../src/workspaces/work/workApi.ts';
@@ -154,6 +155,8 @@ const APPLICATION_ENVELOPE: Readonly<Record<string, ZodType<unknown>>> = {
   // A workflow read answers through the same application wrapper Work reads
   // use; the walked payload is the definitions array itself.
   '/api/application/workflow/list-definitions': z.array(WorkflowDefinitionSchema),
+  '/api/application/workflow/definition-history': z.array(WorkflowDefinitionSchema),
+  '/api/application/workflow/get-run': WorkflowRunProjectionSchema,
   '/api/application/handoff/list-task': ListTaskHandoffsResultV1Schema,
 };
 

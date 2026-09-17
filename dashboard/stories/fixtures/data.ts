@@ -3320,6 +3320,16 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   // The Workflows workspace's standing read (`operation.workflow.
   // list_definitions`), through the same application envelope walker.
   '/api/application/workflow/list-definitions': workEnvelope(workflowDefinitionsPayload()),
+  // The selected identity's version track (`operation.workflow.
+  // definition_history`). Fixtures resolve by path alone, so this answers the
+  // `workflow.review-sweep` track whichever identity the page asks for; the
+  // page marks rows naming another identity as ambiguous rather than folding
+  // them in.
+  '/api/application/workflow/definition-history': workEnvelope(workflowHistoryPayload()),
+  // One exact run (`operation.workflow.get_run`) pinned to review-sweep v3,
+  // mid-flight: the journal carries admission and the first two steps so the
+  // lookup renders an elapsed figure, never a duration.
+  '/api/application/workflow/get-run': workEnvelope(workflowRunPayload()),
   // Agents token frontier (`operation.handoff.list_task_handoffs`). Same
   // application envelope as Work/Workflow reads; payload is the generated
   // `ListTaskHandoffsResultV1`.
@@ -3395,6 +3405,117 @@ function workflowDefinitionsPayload(): Record<string, unknown>[] {
       ],
     },
   ];
+}
+
+/** The three immutable versions of `workflow.review-sweep`, ascending. v3 is
+ * the registry's copy; v1 and v2 differ from it in exactly the ways the
+ * version track columns report — v2 re-pinned the policy digest, v3 added the
+ * synthesize step — so the pin-delta cells exercise `first`, `same` and
+ * `changed` in one shot. */
+function workflowHistoryPayload(): Record<string, unknown>[] {
+  const [v3] = workflowDefinitionsPayload();
+  const digest = (label: string): string =>
+    `sha256:${label.padEnd(8, '0')}${'0'.repeat(56)}`.slice(0, 71);
+  const steps = v3!['steps'] as Record<string, unknown>[];
+  const v1 = {
+    ...v3,
+    definition_version: 1,
+    pinned_policy_digest: digest('policy0'),
+    steps: steps.slice(0, 2),
+  };
+  const v2 = { ...v3, definition_version: 2, steps: steps.slice(0, 2) };
+  return [v1, v2, v3!];
+}
+
+/** A `workflow.review-sweep` v3 run mid-flight. Timing is carried entirely by
+ * the journal — admitted, first step started and completed, second step
+ * started — because that is where the page reads it from. */
+function workflowRunPayload(): Record<string, unknown> {
+  const [pinned] = workflowDefinitionsPayload();
+  const digest = (label: string): string =>
+    `sha256:${label.padEnd(8, '0')}${'0'.repeat(56)}`.slice(0, 71);
+  const runId = 'run.review-sweep.2026-07-25T21:07:20Z';
+  const admittedAt = 1_753_477_640_000_000;
+  const placement = (stepId: string) => ({
+    backend: 'codex_cli',
+    configuration_digest: digest('config'),
+    model: 'gpt-5-codex',
+    placement_digest: digest(`place-${stepId}`),
+    provider_registry_digest: digest('provider'),
+    route: { provider_id: 'provider.codex', route_id: 'route.default' },
+    run_id: runId,
+    step_id: stepId,
+    topology_digest: digest('topology'),
+    worktree_placement: { kind: 'repository_local_root' },
+  });
+  const effect = (stepId: string) => ({
+    effect_digest: digest(`effect-${stepId}`),
+    outcome: 'completed',
+    output_set_digest: digest(`outputs-${stepId}`),
+    placement_digest: digest(`place-${stepId}`),
+    receipt_digest: digest(`receipt-${stepId}`),
+    run_id: runId,
+    step_id: stepId,
+  });
+  const event = (sequence: number, offsetMicros: number, kind: Record<string, unknown>) => ({
+    run_id: runId,
+    sequence,
+    command_id: `workflow-command:${sequence}`,
+    input_digest: digest(`input-${sequence}`),
+    occurred_at: admittedAt + offsetMicros,
+    event: kind,
+  });
+  return {
+    run_id: runId,
+    definition: pinned,
+    pinned_topology_digest: digest('topology'),
+    pinned_provider_registry_digest: digest('provider'),
+    status: 'running',
+    sequence: 4,
+    steps: {
+      'collect-diff': {
+        status: 'succeeded',
+        outputs: { diff: { output_name: 'diff', artifacts: [] } },
+        placement_receipt: placement('collect-diff'),
+        effect_receipt: effect('collect-diff'),
+      },
+      'review-fanout': {
+        status: 'running',
+        outputs: {},
+        placement_receipt: placement('review-fanout'),
+        effect_receipt: null,
+      },
+      synthesize: { status: 'blocked', outputs: {}, placement_receipt: null, effect_receipt: null },
+    },
+    fan_out_plans: {},
+    released_fan_out_attempts: [],
+    settled_fan_out_attempts: [],
+    history: [
+      event(1, 0, {
+        type: 'admitted',
+        definition: pinned,
+        pinned_topology_digest: digest('topology'),
+        pinned_provider_registry_digest: digest('provider'),
+        fan_out_plans: [],
+      }),
+      event(2, 12_000_000, {
+        type: 'step_started',
+        step_id: 'collect-diff',
+        placement: placement('collect-diff'),
+      }),
+      event(3, 41_000_000, {
+        type: 'step_completed',
+        step_id: 'collect-diff',
+        outputs: [],
+        effect_receipt: effect('collect-diff'),
+      }),
+      event(4, 47_000_000, {
+        type: 'step_started',
+        step_id: 'review-fanout',
+        placement: placement('review-fanout'),
+      }),
+    ],
+  };
 }
 
 /** Outstanding and dropped tokens for the newest tree session the Agents
