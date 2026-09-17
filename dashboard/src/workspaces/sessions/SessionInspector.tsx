@@ -1,100 +1,385 @@
 /**
- * SESSION DRILL-DOWN — `GET /api/plugins/hermes-lcm/session/{session_id}`.
+ * SESSION PROVENANCE INSPECTOR — what is durably known about one session, and
+ * from where, with every gap typed.
  *
- * The transcript itself, not a rollup of it. Loom's thread chain answers "what
- * shape did this session have"; this answers "what was actually said, in what
- * order, and where did the compactor cut".
+ * Three authorities meet here and stay separate:
  *
- * Three things this surface exists to keep separate, which a summary view
- * cannot:
+ *   index row      `GET /api/loom/temporal` — the retained session store's
+ *                  own row: provider-qualified identity, recorded model
+ *                  identities, start / end / last-message stamps, the message
+ *                  count the store holds. Read with the index page, so a
+ *                  session that is not on the loaded page has no row here and
+ *                  says so.
+ *   transcript     `GET /api/plugins/hermes-lcm/session/{id}` — the persisted
+ *                  turns one server page at a time, the compactor's summary
+ *                  nodes, the whole-session counts, and the opaque cursor that
+ *                  bounds the page. A message whose body the store does not
+ *                  hold is said outright, never rendered as an empty line.
+ *   Git relations  the same temporal read's commits, edited-file rollups and
+ *                  branch/worktree spans for this provider-qualified session,
+ *                  each under its own daemon source status.
  *
- *   raw messages       the stored turns, in the store's own order, with the
- *                      provider, tool, storage kind and content-token count
- *                      provenance available for each.
- *   summary nodes      the LCM compaction boundaries. Each one names the span
- *                      of source tokens it replaced and the token count it
- *                      replaced them with, so a compacted region is visible as
- *                      a boundary rather than silently absent from the
- *                      transcript.
- *   the page           `limit` and the server's opaque continuation cursor
- *                      bound one transcript page. What is on screen is never
- *                      presented as the whole session when another cursor is
- *                      available.
- *
- * A message whose `content` is null is not an empty message: the store holds
- * the turn but not its body (offloaded or dropped by retention). That is said
- * outright rather than rendered as a blank line.
+ * Private chain-of-thought is not a source class. Nothing here reconstructs
+ * reasoning; the inspector names that absence once rather than leaving a
+ * gap a reader might take for an omission.
  */
-import { useEffect, useRef, useState } from 'react';
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { Link, useSearchParams } from 'react-router';
+import { ChevronLeft, ChevronRight, Waypoints } from 'lucide-react';
 import {
+  assertNever,
   LcmSessionPayloadV1Schema,
+  type DashboardEnvelopeV1,
   type LcmMessageV1,
   type LcmSessionPayloadV1,
   type LcmSummaryNodeV1,
+  type LoomSessionRowV1,
+  type LoomSourceStatusV1,
+  type LoomTemporalPayloadV1,
 } from '../../contracts/generated.ts';
 import { useEnvelope } from '../../data/query/useEnvelope.ts';
 import { scopeKey, useScope } from '../../data/scope/store.ts';
-import { tokenCountLabel } from './tokenLabel.ts';
 import { InspectorPanel } from '../../ui/archetypes/ExplorerSplit.tsx';
-import { ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
-import { StateChip } from '../../ui/StateChip';
-import { Legend, Meter, Readout } from '../../ui/instrument.tsx';
+import { EvidenceGradeTag } from '../../ui/EvidenceGrade.tsx';
+import { ReadSection, envelopeReadState, type ReadState } from '../../ui/ReadSection.tsx';
+import { StateChip, type DomainStateKind } from '../../ui/StateChip';
+import { Fact, Legend, Meter, Readout } from '../../ui/instrument.tsx';
 import { formatStamp, splitCount } from '../../ui/format.ts';
+import { formatDurationSeconds } from '../loom/tracks.ts';
+import { tokenCountLabel } from './tokenLabel.ts';
+import {
+  commitEvidence,
+  joinIndexRow,
+  recordedModels,
+  relationsFor,
+  sessionExtent,
+  type SessionRelations,
+  type SessionSelection,
+} from './model.ts';
 
-/** One page of transcript. The plan's server-page default; the route caps at
- * 1000 and this stays well inside it so an inspector open never pulls a whole
- * corpus into the browser. */
+/** One page of transcript. The route caps at 500; this stays well inside it so
+ * an inspector open never pulls a whole corpus into the browser. */
 const PAGE_SIZE = 100;
 
-/** The pager's visible bezel. It stays 24px tall — it annotates a message
- * range rather than heading the panel — and `.td-hit` on the button around it
- * supplies the 44px target. */
 const PAGER_BEZEL =
   'inline-flex items-center gap-1 border border-edge-subtle bg-surface-2 px-2 py-1 text-3xs text-text-secondary group-hover:text-text-primary';
 
-export function SessionInspector({
-  sessionId,
-  onClose,
-}: {
-  sessionId: string;
+export interface SessionInspectorProps {
+  selection: SessionSelection;
+  /** The loaded index page: identity facts and Git relations are read from it. */
+  index: ReadState<DashboardEnvelopeV1<LoomTemporalPayloadV1>>;
+  indexPage: number;
+  /** Resolves an ambiguous selection by naming the provider the reader chose. */
+  onSelectProvider: (provider: string) => void;
   onClose: () => void;
-}) {
-  // The cache token comes from the authority, never a second construction of
-  // it here — `scopeKey` in `data/scope/store.ts` is what every scoped read
-  // keys by, and a local rewording of it is exactly the drift this re-key
-  // exists to track.
-  const scopeCacheKey = useScope((state) => scopeKey(state.scope));
+}
+
+export function SessionInspector({
+  selection,
+  index,
+  indexPage,
+  onSelectProvider,
+  onClose,
+}: SessionInspectorProps) {
+  const identity = resolveIdentity(index, selection, indexPage);
+  const provider = identity.kind === 'row' ? identity.row.provider : selection.provider;
   return (
-    <SessionInspectorPage
-      key={`${scopeCacheKey}:${sessionId}`}
-      sessionId={sessionId}
+    <InspectorPanel
+      title="Session provenance"
+      eyebrow={
+        <>
+          <span className="td-value normal-case tracking-normal">{provider ?? 'provider unknown'}</span>
+          <EvidenceGradeTag grade="EXACT" sourceClass="SESSION ID" />
+        </>
+      }
       onClose={onClose}
-    />
+    >
+      <div className="flex flex-col gap-4">
+        <p className="td-value break-all text-3xs text-text-primary" data-session-inspector-id>
+          {selection.sessionId}
+        </p>
+        <IdentitySection identity={identity} onSelectProvider={onSelectProvider} />
+        {provider != null ? (
+          <LoomPivot provider={provider} sessionId={selection.sessionId} />
+        ) : null}
+        <SessionTranscript sessionId={selection.sessionId} />
+        <RelationsSection identity={identity} />
+      </div>
+    </InspectorPanel>
   );
 }
 
-function SessionInspectorPage({
-  sessionId,
-  onClose,
+/* ------------------------------------------------------------------------ *
+ * Identity — the index row, or the typed reason there is none
+ * ------------------------------------------------------------------------ */
+
+type Identity =
+  | { kind: 'blocked'; state: DomainStateKind; detail: string | undefined }
+  | { kind: 'store_unavailable' }
+  | { kind: 'row'; row: LoomSessionRowV1; payload: LoomTemporalPayloadV1 }
+  | { kind: 'ambiguous'; rows: readonly LoomSessionRowV1[] }
+  | { kind: 'absent'; page: number; loaded: number; total: number };
+
+function resolveIdentity(
+  index: ReadState<DashboardEnvelopeV1<LoomTemporalPayloadV1>>,
+  selection: SessionSelection,
+  page: number,
+): Identity {
+  if (index.kind === 'blocked') {
+    return { kind: 'blocked', state: index.state, detail: index.detail };
+  }
+  const payload = index.value.payload;
+  if (payload.available === false) return { kind: 'store_unavailable' };
+  const join = joinIndexRow(payload.sessions, selection);
+  switch (join.kind) {
+    case 'exact':
+      return { kind: 'row', row: join.row, payload };
+    case 'ambiguous':
+      return { kind: 'ambiguous', rows: join.rows };
+    case 'absent':
+      return { kind: 'absent', page, loaded: payload.sessions.length, total: payload.total };
+    default:
+      return assertNever(join);
+  }
+}
+
+function IdentitySection({
+  identity,
+  onSelectProvider,
 }: {
-  sessionId: string;
-  onClose: () => void;
+  identity: Identity;
+  onSelectProvider: (provider: string) => void;
 }) {
+  return (
+    <section aria-label="Identity" className="flex flex-col gap-2">
+      <Legend trailing={<EvidenceGradeTag grade={identityGrade(identity)} sourceClass="SESSION STORE" />}>
+        identity
+      </Legend>
+      <IdentityBody identity={identity} onSelectProvider={onSelectProvider} />
+    </section>
+  );
+}
+
+function identityGrade(identity: Identity) {
+  switch (identity.kind) {
+    case 'row':
+      return 'EXACT';
+    case 'ambiguous':
+      return 'AMBIGUOUS';
+    case 'blocked':
+    case 'store_unavailable':
+    case 'absent':
+      return 'UNAVAILABLE';
+    default:
+      return assertNever(identity);
+  }
+}
+
+function IdentityBody({
+  identity,
+  onSelectProvider,
+}: {
+  identity: Identity;
+  onSelectProvider: (provider: string) => void;
+}) {
+  switch (identity.kind) {
+    case 'blocked':
+      return (
+        <div className="flex flex-col gap-1.5">
+          <StateChip kind={identity.state} detail={identity.detail} />
+          <p className="text-3xs leading-snug text-text-muted">
+            Identity facts and Git relations are read with the index page; until it answers, only
+            the transcript below can be read.
+          </p>
+        </div>
+      );
+    case 'store_unavailable':
+      return <StateChip kind="unknown" detail="session store not readable" />;
+    case 'ambiguous':
+      return (
+        <div className="flex flex-col gap-1.5" data-identity="ambiguous">
+          <p className="text-3xs leading-snug text-text-secondary">
+            {identity.rows.length} loaded rows answer to this id under different providers. The
+            store keys a session by provider and id together; choose which one to inspect.
+          </p>
+          <ul className="flex flex-col gap-1">
+            {identity.rows.map((row) => (
+              <li key={row.provider}>
+                <button
+                  type="button"
+                  className="td-hit group w-full justify-start"
+                  onClick={() => onSelectProvider(row.provider)}
+                >
+                  <span className={PAGER_BEZEL}>
+                    <span className="td-legend text-text-secondary">{row.provider}</span>
+                    <span className="td-value">
+                      {row.started_at != null ? formatStamp(row.started_at) : 'start unrecorded'} ·{' '}
+                      {row.messages} msg
+                    </span>
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      );
+    case 'absent':
+      return (
+        <div className="flex flex-col gap-1.5" data-identity="absent">
+          <StateChip
+            kind="unavailable"
+            detail={`not on loaded index page ${identity.page} (${identity.loaded.toLocaleString()} of ${identity.total.toLocaleString()} sessions)`}
+          />
+          <p className="text-3xs leading-snug text-text-muted">
+            Identity facts and Git relations are read with the index page. The transcript below is
+            read directly by id.
+          </p>
+        </div>
+      );
+    case 'row':
+      return <IdentityFacts row={identity.row} />;
+    default:
+      return assertNever(identity);
+  }
+}
+
+function IdentityFacts({ row }: { row: LoomSessionRowV1 }) {
+  const extent = sessionExtent(row);
+  const models = recordedModels(row);
+  return (
+    <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-2xs" data-identity="row">
+      <Fact label="provider" value={row.provider} />
+      <Fact label="kind" value={row.is_subagent ? 'subagent' : 'session'} />
+      <div className="col-span-2 flex min-w-0 flex-col gap-0.5">
+        <dt className="td-legend">title</dt>
+        <dd className={row.title ? 'text-3xs text-text-secondary' : 'text-3xs italic text-text-muted'}>
+          {row.title ?? 'untitled'}
+        </dd>
+      </div>
+      <div className="col-span-2 flex min-w-0 flex-col gap-0.5">
+        <dt className="td-legend">models</dt>
+        <dd className="flex flex-wrap gap-1">
+          {models.models.map((model) => (
+            <span
+              key={model}
+              className="td-value border border-edge-subtle px-1.5 py-0.5 text-3xs text-text-secondary"
+            >
+              {model}
+            </span>
+          ))}
+          {models.unrecorded > 0 || models.models.length === 0 ? (
+            <span className="text-3xs italic text-text-muted">
+              {models.models.length === 0
+                ? 'model unrecorded by the provider'
+                : `${models.unrecorded} message group${models.unrecorded === 1 ? '' : 's'} without a recorded model`}
+            </span>
+          ) : null}
+        </dd>
+      </div>
+      <ExtentFacts extent={extent} />
+      <Fact label="messages in store row" value={row.messages.toLocaleString()} />
+      <Fact
+        label="edited-files rollup"
+        value={row.edited_files_recorded ? 'recorded' : 'not recorded'}
+        muted={!row.edited_files_recorded}
+      />
+    </dl>
+  );
+}
+
+function ExtentFacts({ extent }: { extent: ReturnType<typeof sessionExtent> }) {
+  switch (extent.kind) {
+    case 'undated':
+      return (
+        <>
+          <Fact label="started" value="unrecorded" muted />
+          <Fact label="ended" value="unrecorded" muted />
+        </>
+      );
+    case 'ended':
+      return (
+        <>
+          <Fact label="started" value={formatStamp(extent.start)} />
+          <Fact label="ended" value={formatStamp(extent.end)} />
+          <Fact
+            label="extent · derived"
+            value={formatDurationSeconds(extent.end - extent.start)}
+            muted
+          />
+        </>
+      );
+    case 'open':
+      return (
+        <>
+          <Fact label="started" value={formatStamp(extent.start)} />
+          <Fact label="ended" value="no recorded end" muted />
+          <Fact label="last dated message" value={formatStamp(extent.last)} />
+          <Fact
+            label="observed span · derived"
+            value={formatDurationSeconds(extent.last - extent.start)}
+            muted
+          />
+        </>
+      );
+    case 'open_unobserved':
+      return (
+        <>
+          <Fact label="started" value={formatStamp(extent.start)} />
+          <Fact label="ended" value="no recorded end" muted />
+          <Fact label="last dated message" value="none after start" muted />
+        </>
+      );
+    default:
+      return assertNever(extent);
+  }
+}
+
+/** The one cross-workspace pivot the shipping product exposes: Loom selects a
+ * thread by its provider-qualified id. Global project scope rides along. */
+function LoomPivot({ provider, sessionId }: { provider: string; sessionId: string }) {
+  const [params] = useSearchParams();
+  const search = new URLSearchParams();
+  for (const key of ['scope', 'scopeLabel']) {
+    const value = params.get(key);
+    if (value !== null) search.set(key, value);
+  }
+  search.set('loomSession', JSON.stringify([provider, sessionId]));
+  return (
+    <Link
+      to={{ pathname: '/loom', search: `?${search.toString()}` }}
+      className="td-hit group self-start"
+      data-pivot="loom"
+    >
+      <span className={PAGER_BEZEL}>
+        <Waypoints aria-hidden size={11} />
+        Open in Loom
+      </span>
+    </Link>
+  );
+}
+
+/* ------------------------------------------------------------------------ *
+ * Transcript — one server page at a time
+ * ------------------------------------------------------------------------ */
+
+export function SessionTranscript({ sessionId }: { sessionId: string }) {
+  // The cache token comes from the authority, never a second construction of
+  // it here — `scopeKey` is what every scoped read keys by.
+  const scopeCacheKey = useScope((state) => scopeKey(state.scope));
+  return <SessionTranscriptPage key={`${scopeCacheKey}:${sessionId}`} sessionId={sessionId} />;
+}
+
+function SessionTranscriptPage({ sessionId }: { sessionId: string }) {
   /** The current cursor is the top entry; the rest lets Previous replay the
    * exact opaque cursor the server issued for the preceding page. */
   const [cursorStack, setCursorStack] = useState<string[]>([]);
   const cursor = cursorStack.at(-1) ?? null;
   /**
-   * The page a reader asked for, held until it arrives on screen.
-   *
-   * It lives up here because the transcript below does not survive the trip: a
-   * new cursor is a new query, so the read boundary swings to its
-   * loading state and unmounts the whole page of rows — including the control
-   * that was just activated. Focus goes to the document, and a keyboard user is
-   * returned to the top of the app with no indication that anything moved. A
-   * flag inside the unmounted subtree would be reinitialised by the remount and
-   * could not repair it.
+   * The page a reader asked for, held until it arrives on screen. It lives up
+   * here because a new cursor is a new query: the read boundary swings to its
+   * loading state and unmounts the whole page of rows, including the control
+   * that was just activated, and a flag inside that subtree would be
+   * reinitialised by the remount.
    */
   const [pageRequest, setPageRequest] = useState(0);
   const session = useEnvelope(
@@ -106,45 +391,45 @@ function SessionInspectorPage({
   );
 
   return (
-    <InspectorPanel title="Session transcript" onClose={onClose}>
-      <div className="flex flex-col gap-3">
-        <p className="td-value break-all text-3xs text-text-muted">{sessionId}</p>
-        <ReadSection
-          title="Transcript"
-          chrome="centered"
-          state={envelopeReadState(session.isPending, session.data, {
-            loading: 'reading transcript',
-            transport: 'transcript could not be read',
-          })}
-        >
-          {(envelope) => {
-            const payload = envelope.payload;
-            return (
-            payload.exists === false ? (
-              <StateChip
-                kind="unknown"
-                detail="the session store holds no transcript under this id"
-              />
-            ) : (
-              <SessionBody
-                payload={payload}
-                pageNumber={cursorStack.length + 1}
-                onPreviousPage={() => {
-                  setCursorStack((stack) => stack.slice(0, -1));
-                  setPageRequest((request) => request + 1);
-                }}
-                onNextPage={(nextCursor) => {
-                  setCursorStack((stack) => [...stack, nextCursor]);
-                  setPageRequest((request) => request + 1);
-                }}
-                pageRequest={pageRequest}
-              />
-            )
-            );
-          }}
-        </ReadSection>
-      </div>
-    </InspectorPanel>
+    <section aria-label="Transcript" className="flex flex-col gap-2">
+      <Legend trailing={<EvidenceGradeTag grade="EXACT" sourceClass="TRANSCRIPT" />}>
+        transcript
+      </Legend>
+      <p className="text-3xs leading-snug text-text-muted">
+        <span className="td-legend text-text-secondary">reasoning</span>{' '}
+        <EvidenceGradeTag grade="UNAVAILABLE" className="align-middle" /> private chain-of-thought
+        is not a persisted source class; only stored turns and retained summaries are shown.
+      </p>
+      <ReadSection
+        title="Transcript"
+        chrome="centered"
+        state={envelopeReadState(session.isPending, session.data, {
+          loading: 'reading transcript',
+          transport: 'transcript could not be read',
+        })}
+      >
+        {(envelope) => {
+          const payload = envelope.payload;
+          return payload.exists === false ? (
+            <StateChip kind="unknown" detail="the session store holds no transcript under this id" />
+          ) : (
+            <SessionBody
+              payload={payload}
+              pageNumber={cursorStack.length + 1}
+              onPreviousPage={() => {
+                setCursorStack((stack) => stack.slice(0, -1));
+                setPageRequest((request) => request + 1);
+              }}
+              onNextPage={(nextCursor) => {
+                setCursorStack((stack) => [...stack, nextCursor]);
+                setPageRequest((request) => request + 1);
+              }}
+              pageRequest={pageRequest}
+            />
+          );
+        }}
+      </ReadSection>
+    </section>
   );
 }
 
@@ -180,14 +465,14 @@ function SessionBody({
 }
 
 /**
- * The session's own totals, which are whole-session figures rather than
- * page figures — that distinction is stated, because the message list below
- * shows one page and the count above it does not.
+ * The session's own totals, which are whole-session figures rather than page
+ * figures — that distinction is stated, because the message list below shows
+ * one page and the count above it does not.
  *
  * The compaction ratio is the one derived number here and it is labelled as a
  * derivation of the two counts printed beside it. It is withheld entirely when
- * the source-token count is zero, because a ratio against a zero denominator is
- * not a small number, it is not a number.
+ * the source-token count is zero: a ratio against a zero denominator is not a
+ * number.
  */
 function SessionCounts({ payload }: { payload: LcmSessionPayloadV1 }) {
   const { counts } = payload;
@@ -244,16 +529,20 @@ function SessionCounts({ payload }: { payload: LcmSessionPayloadV1 }) {
 }
 
 /** The compactor's cuts. Each node states the depth it sits at, the category
- * and source type it was built from, and the exact token exchange it made. */
+ * and source type it was built from, and the exact token exchange it made. A
+ * summary is a persisted derived artifact — EXPLICIT — never the source text. */
 function CompactionBoundaries({ payload }: { payload: LcmSessionPayloadV1 }) {
   const nodes = payload.summary_nodes;
   return (
     <div className="flex flex-col gap-1.5">
       <Legend
         trailing={
-          <span className="shrink-0 text-3xs text-text-muted tabular">
-            {nodes.length} of {payload.counts.summary_node_count.toLocaleString()}
-          </span>
+          <>
+            <span className="shrink-0 text-3xs text-text-muted tabular">
+              {nodes.length} of {payload.counts.summary_node_count.toLocaleString()}
+            </span>
+            <EvidenceGradeTag grade="EXPLICIT" sourceClass="RETAINED SUMMARY" />
+          </>
         }
       >
         compaction boundaries
@@ -268,11 +557,8 @@ function CompactionBoundaries({ payload }: { payload: LcmSessionPayloadV1 }) {
           }
         />
       ) : (
-        // Scrollable regions need keyboard operation (WCAG 2.1.1). Every row
-        // here is read-out — there is nothing inside to tab to — so the list
-        // itself takes the tab stop, and it is named because a tab stop that
-        // announces nothing tells a keyboard user only that they have arrived
-        // somewhere.
+        // Scrollable regions need keyboard operation (WCAG 2.1.1); every row is
+        // read-out, so the list itself takes the tab stop and carries a name.
         <ol
           tabIndex={0}
           aria-label="Compaction boundaries"
@@ -313,21 +599,32 @@ function SummaryNodeRow({ node }: { node: LcmSummaryNodeV1 }) {
           {sourceTokens != null ? sourceTokens.toLocaleString() : 'unavailable'} tokens
         </span>
       </span>
-      {retained != null ? (
-        <Meter fraction={retained} height="row" className="w-full" />
-      ) : null}
-      <span className="line-clamp-3 text-3xs leading-snug text-text-secondary">
-        {node.summary}
-      </span>
+      {retained != null ? <Meter fraction={retained} height="row" className="w-full" /> : null}
+      <span className="line-clamp-3 text-3xs leading-snug text-text-secondary">{node.summary}</span>
       <span className="text-3xs text-text-muted">
         {node.source_type} · built {formatStamp(node.created_at)}
         {node.latest_at != null ? ` · latest ${formatStamp(node.latest_at)}` : ''}
       </span>
-      {/* The producer's own instruction for recovering what this node replaced.
-        * Rendered verbatim: the browser does not construct an expansion. */}
+      {/* The producer's own instruction for recovering what this node replaced,
+        * rendered verbatim: the browser does not construct an expansion. */}
       <span className="td-value break-all text-3xs text-text-muted">{node.expand_hint}</span>
     </li>
   );
+}
+
+/** Token provenance across the loaded page, tallied from each message's own
+ * provenance field — a page-level statement, never a session-level one. */
+function pageProvenance(messages: readonly LcmMessageV1[]) {
+  let counted = 0;
+  let unavailable = 0;
+  for (const message of messages) {
+    if (message.token_count != null && message.token_count_provenance === 'o200k_approximate') {
+      counted += 1;
+    } else {
+      unavailable += 1;
+    }
+  }
+  return { counted, unavailable };
 }
 
 /** The raw turns, one server page at a time. */
@@ -346,17 +643,14 @@ function RawMessages({
 }) {
   const { messages, limit } = payload;
   const range = useRef<HTMLParagraphElement>(null);
+  const provenance = pageProvenance(messages);
 
   /**
    * The requested page is on screen, so put focus back if paging lost it.
-   *
-   * Focus lands on the range line rather than the first row, because the range
-   * line is the answer to the question a reader who just paged is holding —
-   * which page am I on now — and it is the one element here that renders in
-   * every state, including a page that contains no turns.
-   *
-   * Only when focus was actually orphaned. A reader who paged with the mouse
-   * and is now looking somewhere else keeps what they had.
+   * Focus lands on the range line rather than the first row, because the
+   * range line is the answer a reader who just paged is holding — which page
+   * am I on now — and it renders in every state, including an empty page.
+   * Only when focus was actually orphaned.
    */
   useEffect(() => {
     if (pageRequest === 0) return;
@@ -368,22 +662,21 @@ function RawMessages({
       <Legend>raw messages</Legend>
 
       {/* Loaded page count, whole-session total, and whether another page
-        * exists — all three, because any one of them alone lets a page read as
-        * the transcript.
-        *
-        * A status region, so paging announces where the reader now is instead
-        * of silently replacing the rows under them; `tabIndex={-1}` so the
-        * focus repair above can land here without adding a tab stop. */}
-      <p
-        ref={range}
-        role="status"
-        tabIndex={-1}
-        className="text-3xs text-text-muted tabular"
-      >
+        * exists — all three, because any one alone lets a page read as the
+        * transcript. A status region so paging announces where the reader now
+        * is; `tabIndex={-1}` so the focus repair can land here without adding
+        * a tab stop. */}
+      <p ref={range} role="status" tabIndex={-1} className="text-3xs text-text-muted tabular">
         {messages.length} on this page · {payload.counts.message_count.toLocaleString()} in session ·
         page {pageNumber} · page size {limit}
         {payload.next_cursor != null ? ' · more pages follow' : ' · last page'}
       </p>
+      {messages.length > 0 ? (
+        <p className="text-3xs text-text-muted tabular" data-page-token-provenance>
+          token provenance on this page: {provenance.counted} counted (o200k approximate) ·{' '}
+          {provenance.unavailable} unavailable
+        </p>
+      ) : null}
 
       {messages.length === 0 ? (
         <StateChip
@@ -395,8 +688,6 @@ function RawMessages({
           }
         />
       ) : (
-        // Keyboard-operable for the same reason as the boundary list above: the
-        // rows are read-out, so the scroll container itself is the tab stop.
         <ol
           tabIndex={0}
           aria-label="Raw messages"
@@ -449,10 +740,7 @@ function MessageRow({ message }: { message: LcmMessageV1 }) {
     >
       <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
         {message.ordinal != null ? (
-          <span
-            className="td-value shrink-0 text-3xs text-text-muted"
-            data-cell="numeric"
-          >
+          <span className="td-value shrink-0 text-3xs text-text-muted" data-cell="numeric">
             #{message.ordinal}
           </span>
         ) : null}
@@ -481,10 +769,8 @@ function MessageRow({ message }: { message: LcmMessageV1 }) {
       )}
       <span className="flex flex-wrap gap-x-2 text-3xs text-text-muted">
         {message.source ? <span>{message.source}</span> : null}
-        {message.storage_kind && message.content != null ? (
-          <span>{message.storage_kind}</span>
-        ) : null}
-        {tokenLabel ? <span className="tabular">{tokenLabel}</span> : null}
+        {message.storage_kind && message.content != null ? <span>{message.storage_kind}</span> : null}
+        <span className="tabular">{tokenLabel ?? 'token count unavailable'}</span>
         {compacted > 0 ? (
           <span>
             in {compacted} {compacted === 1 ? 'summary' : 'summaries'}
@@ -493,5 +779,198 @@ function MessageRow({ message }: { message: LcmMessageV1 }) {
         {message.pinned ? <span>pinned</span> : null}
       </span>
     </li>
+  );
+}
+
+/* ------------------------------------------------------------------------ *
+ * Git relations — each under its own daemon source status
+ * ------------------------------------------------------------------------ */
+
+function RelationsSection({ identity }: { identity: Identity }) {
+  return (
+    <section aria-label="Git relations" className="flex flex-col gap-2">
+      <Legend>git relations</Legend>
+      <RelationsBody identity={identity} />
+    </section>
+  );
+}
+
+function RelationsBody({ identity }: { identity: Identity }) {
+  switch (identity.kind) {
+    case 'blocked':
+      return <StateChip kind={identity.state} detail="relations are read with the index page" />;
+    case 'store_unavailable':
+      return <StateChip kind="unknown" detail="session store not readable" />;
+    case 'ambiguous':
+      return (
+        <StateChip
+          kind="unavailable"
+          detail="relations are keyed by provider and id; choose a provider above"
+        />
+      );
+    case 'absent':
+      return (
+        <StateChip
+          kind="unavailable"
+          detail={`not loaded — relations are read with index page ${identity.page}`}
+        />
+      );
+    case 'row':
+      return (
+        <Relations
+          row={identity.row}
+          relations={relationsFor(identity.payload, identity.row.provider, identity.row.session_id)}
+        />
+      );
+    default:
+      return assertNever(identity);
+  }
+}
+
+function Relations({ row, relations }: { row: LoomSessionRowV1; relations: SessionRelations }) {
+  const { commits, editedFiles, branchSpans, commitStatus, fileStatus, branchStatus } = relations;
+  return (
+    <div className="flex flex-col gap-3">
+      <RelationGroup label="→ commits" status={commitStatus}>
+        {commits.length > 0 ? (
+          <ul className="flex flex-col gap-1.5">
+            {commits.map((commit) => {
+              const evidence = commitEvidence(commit);
+              return (
+                <li key={commit.commit_sha} className="flex flex-col gap-0.5" data-commit={commit.commit_sha}>
+                  <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                    <span className="td-value min-w-0 truncate text-3xs text-text-primary" title={commit.commit_sha}>
+                      {commit.commit_sha.slice(0, 12)}
+                    </span>
+                    {evidence ? (
+                      <EvidenceGradeTag grade={evidence.grade} sourceClass={evidence.sourceClass} />
+                    ) : (
+                      <span className="text-3xs text-text-muted">grade unmapped · {commit.evidence}</span>
+                    )}
+                  </span>
+                  <span className="text-3xs text-text-muted">
+                    {commit.relation} · {commit.evidence}
+                    {commit.span_overlap_kind ? ` · ${commit.span_overlap_kind}` : ''} ·{' '}
+                    {formatStamp(commit.committed_at)}
+                  </span>
+                  <span className="truncate text-3xs text-text-muted">
+                    {commit.branch ?? 'branch unrecorded'}
+                    {commit.worktree ? ` · ${commit.worktree}` : ''}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        ) : (
+          <SourceAbsence
+            status={commitStatus}
+            zero="no commit is attributed to this session"
+            fallback="commit attribution coverage is unavailable"
+          />
+        )}
+      </RelationGroup>
+
+      <RelationGroup label="→ edited files" status={fileStatus}>
+        {editedFiles.length > 0 ? (
+          <ul className="flex flex-col gap-1">
+            {editedFiles.map((file) => (
+              <li key={`${file.path}:${file.change_type ?? ''}`} className="flex gap-2">
+                <span className="min-w-0 flex-1 truncate text-3xs text-text-secondary" title={file.path}>
+                  {file.path}
+                </span>
+                <span className="td-value shrink-0 text-3xs text-text-muted">
+                  {file.change_type ?? 'change unrecorded'}
+                  {file.hunks != null ? ` · ${file.hunks} ${file.hunks === 1 ? 'hunk' : 'hunks'}` : ''}
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <StateChip
+            kind={row.edited_files_recorded ? 'complete_zero_findings' : 'unknown'}
+            detail={
+              row.edited_files_recorded
+                ? 'recorded edited-files rollup is empty'
+                : 'this session has no recorded edited-files rollup'
+            }
+          />
+        )}
+      </RelationGroup>
+
+      <RelationGroup label="→ branch & worktree spans" status={branchStatus}>
+        {branchSpans.length > 0 ? (
+          <ul className="flex flex-col gap-1">
+            {branchSpans.map((span) => (
+              <li key={`${span.worktree}:${span.first_at}`} className="flex flex-col">
+                <span className="flex flex-wrap items-baseline gap-x-2">
+                  <span className="truncate text-3xs text-text-secondary">
+                    {span.branch ?? 'branch unrecorded'} · {span.worktree}
+                  </span>
+                  <EvidenceGradeTag grade="EXACT" sourceClass={span.source.toUpperCase()} />
+                </span>
+                <span className="text-3xs text-text-muted">
+                  {formatStamp(span.first_at)} → {formatStamp(span.last_at)} ·{' '}
+                  {formatDurationSeconds(span.last_at - span.first_at)} · {span.event_count}{' '}
+                  {span.event_count === 1 ? 'event' : 'events'}
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <SourceAbsence
+            status={branchStatus}
+            zero="no branch or worktree span is recorded for this session"
+            fallback="branch/worktree span coverage is unavailable"
+          />
+        )}
+      </RelationGroup>
+    </div>
+  );
+}
+
+/** A typed empty relation: a ready source with nothing for this session is a
+ * measured zero; any other source state is that state, with its reason. */
+function SourceAbsence({
+  status,
+  zero,
+  fallback,
+}: {
+  status: LoomSourceStatusV1 | null;
+  zero: string;
+  fallback: string;
+}) {
+  if (status?.state === 'ready') return <StateChip kind="complete_zero_findings" detail={zero} />;
+  return (
+    <StateChip
+      kind={status?.state ?? 'unknown'}
+      detail={status?.reason ?? status?.coverage.reason ?? fallback}
+    />
+  );
+}
+
+function RelationGroup({
+  label,
+  status,
+  children,
+}: {
+  label: string;
+  status: LoomSourceStatusV1 | null;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex flex-col gap-1" data-relation-group={label}>
+      <span className="flex flex-wrap items-baseline gap-x-2">
+        <span className="td-legend text-text-secondary">{label}</span>
+        {status ? (
+          <span className="text-3xs text-text-muted">
+            {status.label} · {status.state}
+            {status.authority ? ` · ${status.authority}` : ''}
+          </span>
+        ) : (
+          <span className="text-3xs text-text-muted">source status not served</span>
+        )}
+      </span>
+      {children}
+    </div>
   );
 }
