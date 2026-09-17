@@ -159,10 +159,20 @@ export function AgentsPage() {
   ];
   const hierarchy = authorities[1]!;
 
+  // Three different reasons for having nothing to inspect, kept apart: a read
+  // still in flight, a store that answered and declared itself unavailable,
+  // and a transport that never delivered a reading.
   const subject =
     fit === null
-      ? ({ kind: 'none', detail: 'the delegation tree has not been read' } as const)
-      : resolveSubject(fit.model, inspectedId, selectedId, newestSession);
+      ? ({
+          kind: 'none',
+          detail: subagentTree.isPending
+            ? 'the delegation tree is still being read'
+            : treePayload !== null
+              ? `the session store declared itself unavailable${treePayload.error ? `: ${treePayload.error}` : ''}`
+              : 'the delegation tree could not be read',
+        } as const)
+      : resolveSubject(fit.model, inspectedId, selectedId, newestSession, selectedNode !== null);
   // The frontier reading belongs to exactly one session. Any other subject is
   // being inspected without a read having been asked for it, and says so.
   const tokensForSubject =
@@ -267,7 +277,7 @@ export function AgentsPage() {
                       <div className="pt-2">
                         <SubagentTree
                           payload={payload}
-                          selectedSessionId={selectedId}
+                          selectedId={selectedId}
                           onSelect={(node) => select(markId(node))}
                         />
                       </div>

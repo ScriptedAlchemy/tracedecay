@@ -30,18 +30,25 @@ export function resolveSubject(
   inspectedId: string | null,
   selectedId: string | null,
   defaultSessionId: string | null,
+  /** Whether the selected id names a session the reading still holds. A
+   * selection can outlive a refetch; the wording must not call that a fold. */
+  selectedInReading: boolean = true,
 ): InspectorSubject {
   const byId = new Map(model.marks.map((mark) => [mark.id, mark]));
   const inspected = inspectedId === null ? undefined : byId.get(inspectedId);
-  if (inspected) return subjectFor(inspected, 'inspecting');
+  // A click lands with the pointer still over the mark, so the selected mark
+  // is also the inspected one; the persistent act wins the caption.
+  if (inspected && inspected.id !== selectedId) return subjectFor(inspected, 'inspecting');
   const selected = selectedId === null ? undefined : byId.get(selectedId);
   if (selected && selected.kind === 'session') return { kind: 'session', mark: selected, mode: 'selected' };
   if (selectedId !== null && selected === undefined) {
-    // Selected, but no longer drawn: a bundle closed over it or the depth
-    // limit folded it. The selection is real; the drawing is not showing it.
+    // Selected, but not drawn. Either the reading still holds it and a bundle
+    // or the depth limit folded it, or a refetch dropped it altogether.
     return {
       kind: 'none',
-      detail: `the selected session is folded out of the field; open its bundle or generation to inspect it`,
+      detail: selectedInReading
+        ? 'the selected session is folded out of the field; open its bundle or generation to inspect it'
+        : 'the selected session is no longer in the reading; clear the selection or select a drawn session',
     };
   }
   const fallback =

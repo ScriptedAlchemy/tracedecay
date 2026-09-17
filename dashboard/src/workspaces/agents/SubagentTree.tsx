@@ -51,13 +51,13 @@ function LinkNote({ node }: { node: AnalyticsSubagentNodeV1 }) {
  */
 export function SubagentTree({
   payload,
-  selectedSessionId = null,
+  selectedId = null,
   onSelect,
 }: {
   payload: AnalyticsSubagentTreePayloadV1;
   /** `provider:session_id` of the selected session, when the tree is
    * synchronized with a selection. */
-  selectedSessionId?: string | null;
+  selectedId?: string | null;
   onSelect?: ((node: AnalyticsSubagentNodeV1) => void) | undefined;
 }) {
   const census = subagentTreeCensus(payload);
@@ -136,7 +136,7 @@ export function SubagentTree({
               {group.nodes.map((node) => {
                 const elapsed = subagentElapsedSeconds(node);
                 const id = `${node.provider}:${node.session_id}`;
-                const selected = selectedSessionId === id;
+                const selected = selectedId === id;
                 const detail = (
                   <span className="shrink-0 text-3xs text-text-muted">
                     {node.provider}

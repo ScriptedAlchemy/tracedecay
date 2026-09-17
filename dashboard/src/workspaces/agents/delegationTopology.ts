@@ -53,6 +53,18 @@ export interface TopologySessionMark {
   /** Sessions beneath this mark that the depth limit folded away. Zero when
    * the children are drawn; equal to `node.descendants` when they are not. */
   readonly foldedDescendants: number;
+  /** True when this mark's children are drawn only because the reader opened
+   * them past the depth limit — the act a fold control undoes. */
+  readonly depthOpened: boolean;
+  /** Bundles beneath this mark that the reader opened, so their members are
+   * drawn individually. Each is the fold control's target. */
+  readonly openedBundles: readonly OpenedBundle[];
+}
+
+export interface OpenedBundle {
+  readonly id: string;
+  readonly label: string;
+  readonly sessions: number;
 }
 
 /** Several sibling sessions folded into one mark. Their subtrees are counted,
@@ -120,6 +132,8 @@ export interface DelegationTopologyModel {
   readonly bundledSessions: number;
   /** The widest descendant count among drawn sessions, for scaling marks. */
   readonly maxDescendants: number;
+  /** Bundles of top sessions the reader opened; they hang off no parent mark. */
+  readonly openedTopBundles: readonly OpenedBundle[];
 }
 
 export function markId(node: AnalyticsSubagentNodeV1): string {
@@ -207,8 +221,14 @@ function groupSiblings(
     else groups.set(key, { key, label, basis, members: [position] });
   }
   return [...groups.values()].sort(
-    (a, b) => b.members.length - a.members.length || a.label.localeCompare(b.label),
+    (a, b) => b.members.length - a.members.length || compareText(a.label, b.label),
   );
+}
+
+/** Code-point order, so two readers in two locales lay the field out the
+ * same way; `localeCompare` would not. */
+function compareText(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 export interface TopologyOptions {
@@ -245,8 +265,12 @@ export function layoutDelegationTopology(
     maxDescendants = Math.max(maxDescendants, node.descendants);
     drawnSessions += 1;
     const own = children.get(position) ?? [];
-    const drawChildren = own.length > 0 && (generation < depthLimit || expanded.has(id));
-    const childMarks = drawChildren ? placeChildren(own, id, generation + 1) : [];
+    const depthOpened = own.length > 0 && generation >= depthLimit && expanded.has(id);
+    const drawChildren = own.length > 0 && (generation < depthLimit || depthOpened);
+    const placed = drawChildren
+      ? placeChildren(own, id, generation + 1)
+      : { marks: [], openedBundles: [] };
+    const childMarks = placed.marks;
     const foldedDescendants = drawChildren ? 0 : beneath[position]!;
     bundledSessions += foldedDescendants;
     const row =
@@ -263,6 +287,8 @@ export function layoutDelegationTopology(
       parentId,
       drawnChildren: childMarks.length,
       foldedDescendants,
+      depthOpened,
+      openedBundles: placed.openedBundles,
     };
     marks.push(mark);
     for (const child of childMarks) {
@@ -306,9 +332,13 @@ export function layoutDelegationTopology(
     positions: readonly number[],
     parentId: string | null,
     generation: number,
-  ): TopologyMark[] => {
+  ): { marks: TopologyMark[]; openedBundles: OpenedBundle[] } => {
+    const openedBundles: OpenedBundle[] = [];
     if (positions.length <= FANOUT_LIMIT) {
-      return positions.map((position) => placeSession(position, parentId));
+      return {
+        marks: positions.map((position) => placeSession(position, parentId)),
+        openedBundles,
+      };
     }
     const groups = groupSiblings(positions, nodes);
     const placed: TopologyMark[] = [];
@@ -317,6 +347,7 @@ export function layoutDelegationTopology(
     groups.forEach((group, index) => {
       const bundleId = `bundle:${parentId ?? 'source'}:${group.key}`;
       if (expanded.has(bundleId)) {
+        openedBundles.push({ id: bundleId, label: group.label, sessions: group.members.length });
         for (const position of group.members) placed.push(placeSession(position, parentId));
         return;
       }
@@ -335,27 +366,31 @@ export function layoutDelegationTopology(
     });
     if (remainderBasis && remainder.length > 0) {
       const remainderId = `bundle:${parentId ?? 'source'}:remainder`;
+      const label = `${remainder.length} more sessions`;
       if (expanded.has(remainderId)) {
+        openedBundles.push({ id: remainderId, label, sessions: remainder.length });
         for (const position of remainder) placed.push(placeSession(position, parentId));
       } else {
         placed.push(
           placeBundle(parentId, generation, {
             key: 'remainder',
-            label: `${remainder.length} more sessions`,
+            label,
             basis: 'remainder',
             members: remainder,
           }),
         );
       }
     }
-    return placed;
+    return { marks: placed, openedBundles };
   };
 
-  placeChildren(tops, null, 0);
+  // Bundles opened directly under the virtual source have no parent mark to
+  // carry them; they are reported on the model instead.
+  const { openedBundles: openedTopBundles } = placeChildren(tops, null, 0);
   // Column-major reading order: generation left to right, row top to bottom.
   // Placement pushes in post-order, which is right for computing rows and
   // wrong for a reader walking the field.
-  marks.sort((a, b) => a.generation - b.generation || a.row - b.row || a.id.localeCompare(b.id));
+  marks.sort((a, b) => a.generation - b.generation || a.row - b.row || compareText(a.id, b.id));
   const order = new Map(marks.map((mark, index) => [mark.id, index]));
   edges.sort(
     (a, b) =>
@@ -419,6 +454,7 @@ export function layoutDelegationTopology(
     drawnSessions,
     bundledSessions,
     maxDescendants,
+    openedTopBundles,
   };
 }
 
