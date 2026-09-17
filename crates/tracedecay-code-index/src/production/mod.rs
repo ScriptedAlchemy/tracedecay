@@ -2836,3 +2836,7 @@ where
 #[cfg(test)]
 #[path = "worker_tests.rs"]
 mod worker_tests;
+
+#[cfg(test)]
+#[path = "arc_share_sequence_tests.rs"]
+mod arc_share_sequence_tests;
