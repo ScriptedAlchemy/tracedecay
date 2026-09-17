@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
+
 use super::{
     AgentTaskKind, AutomationConfig, AutomationJob, AutomationRunLedgerPublication,
     AutomationTrigger, JobRunContext, Result, TraceDecayError, UserJobAutomationRun,
@@ -56,7 +58,9 @@ pub async fn evaluate_and_record_scheduler_skip(
     let lock_time = current_timestamp();
     let Some(_task_lock) = try_acquire_job_task_lock(dashboard_root, &job.id, lock_time).await?
     else {
-        crate::automation::scheduler_metrics::observe_skip_reason("scheduler_lock_active");
+        crate::automation::scheduler_metrics::observe_skip_reason(
+            AutomationSkipReasonV1::SchedulerLockActive,
+        );
         return record_scheduler_lock_skip(
             dashboard_root,
             config,
@@ -165,11 +169,11 @@ async fn record_scheduler_diagnostic(
     config: &AutomationConfig,
     job: &AutomationJob,
     occurrence_run_id: &str,
-    reason: &'static str,
+    reason: AutomationSkipReasonV1,
     started_at: &str,
     effectful_anchor_run_id: Option<&str>,
 ) -> Result<UserJobAutomationRun> {
-    let diagnostic_run_id = scheduler_skip_run_id(occurrence_run_id, reason)?;
+    let diagnostic_run_id = scheduler_skip_run_id(occurrence_run_id, reason.as_str())?;
     JobRunContext {
         dashboard_root,
         config,
@@ -199,7 +203,7 @@ pub(super) async fn record_scheduler_lock_skip(
         config,
         job,
         occurrence_run_id,
-        "scheduler_lock_active",
+        AutomationSkipReasonV1::SchedulerLockActive,
         started_at,
         effectful_anchor_run_id,
     )

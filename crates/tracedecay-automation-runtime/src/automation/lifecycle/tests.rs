@@ -14,6 +14,7 @@ use crate::automation::config::{
 use crate::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationTrigger, load_run_records,
 };
+use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 
 struct TestSessionsDb {
     db: RegisteredGlobalDbLeaseV1,
@@ -372,7 +373,7 @@ async fn concurrent_on_demand_runs_share_the_canonical_task_lock() {
     .expect("concurrent on-demand gate");
     assert!(matches!(
         concurrent,
-        SchedulerGate::Skip("scheduler_lock_active")
+        SchedulerGate::Skip(AutomationSkipReasonV1::SchedulerLockActive)
     ));
 
     drop(first_lock);
@@ -408,7 +409,10 @@ async fn scheduler_trigger_still_obeys_global_enablement() {
     )
     .await
     .expect("scheduler gate");
-    assert!(matches!(gate, SchedulerGate::Skip("automation_disabled")));
+    assert!(matches!(
+        gate,
+        SchedulerGate::Skip(AutomationSkipReasonV1::AutomationDisabled)
+    ));
 }
 
 #[tokio::test]
@@ -430,7 +434,10 @@ async fn on_demand_trigger_does_not_bypass_backend_or_host_admission() {
     )
     .await
     .expect("backend gate");
-    assert!(matches!(gate, SchedulerGate::Skip("backend_disabled")));
+    assert!(matches!(
+        gate,
+        SchedulerGate::Skip(AutomationSkipReasonV1::BackendDisabled)
+    ));
 
     let delegated = AutomationConfig {
         backend: AutomationBackend::CodexAppServer,
@@ -446,7 +453,10 @@ async fn on_demand_trigger_does_not_bypass_backend_or_host_admission() {
     )
     .await
     .expect("host gate");
-    assert!(matches!(gate, SchedulerGate::Skip("delegated_host_mode")));
+    assert!(matches!(
+        gate,
+        SchedulerGate::Skip(AutomationSkipReasonV1::DelegatedHostMode)
+    ));
 }
 
 /// The shortest valid interval schedule: a post-gate skip is a cadence
@@ -484,7 +494,10 @@ async fn post_gate_scheduler_skip(dashboard_root: &Path, run_id: &str, reason: &
             SchedulerGate::Skip(why) => why,
             SchedulerGate::Proceed(_) => unreachable!(),
         };
-        panic!("gate must proceed so the skip is decided post-gate: skipped {why}");
+        panic!(
+            "gate must proceed so the skip is decided post-gate: skipped {}",
+            why.as_str()
+        );
     };
     run.skipped_parts(None, reason, None)
         .await

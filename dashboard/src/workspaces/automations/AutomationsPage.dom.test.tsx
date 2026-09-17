@@ -118,7 +118,7 @@ function scheduler(overrides: { paused?: boolean; status?: string } = {}) {
       {
         task: "memory_curator",
         due: false,
-        skip_reason: "cooldown",
+        skip_reason: "scheduler_cooldown_active",
         last_scheduler_run: null,
       },
     ],

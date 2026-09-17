@@ -62,7 +62,11 @@ pub(super) fn log_scheduler_admission_conflict(
     );
 }
 
-fn log_scheduler_schedule_skip(project_path: &Path, task: AgentTaskKind, reason: &'static str) {
+fn log_scheduler_schedule_skip(
+    project_path: &Path,
+    task: AgentTaskKind,
+    reason: tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1,
+) {
     // Not-due/disabled tasks never reach durable admission; without this
     // counter a silent schedule skip is indistinguishable from a lost tick.
     hotpath::gauge!("daemon.effect_admission.deferred_total").inc(1_u64);
@@ -75,7 +79,7 @@ fn log_scheduler_schedule_skip(project_path: &Path, task: AgentTaskKind, reason:
                 tracedecay_automation_runtime::automation::backend::task_key(task).to_owned(),
             ),
             ("outcome", "skipped".to_owned()),
-            ("reason", reason.to_owned()),
+            ("reason", reason.as_str().to_owned()),
         ],
     );
 }
@@ -762,7 +766,12 @@ mod tests {
         .await
         .expect("disabled task decision");
 
-        assert_eq!(decision.skip_reason(), Some("automation_disabled"));
+        assert_eq!(
+            decision.skip_reason(),
+            Some(
+                tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1::AutomationDisabled
+            )
+        );
         assert!(
             !dashboard.path().join("automation_effects").exists(),
             "a skipped fixed task must not reserve or fsync an outer effect"

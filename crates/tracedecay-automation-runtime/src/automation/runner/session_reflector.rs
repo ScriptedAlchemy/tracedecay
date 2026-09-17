@@ -719,7 +719,7 @@ fn run_session_reflector_for_store_with_publication_inner<'a, A: ProjectMemoryFa
         let _run_lock = match run.gate().await? {
             SchedulerGate::Proceed(lock) => lock,
             SchedulerGate::Skip(reason) => {
-                return skipped_session_reflector_run(&run, reason, None)
+                return skipped_session_reflector_run(&run, reason.as_str(), None)
                     .await
                     .map_err(Into::into);
             }

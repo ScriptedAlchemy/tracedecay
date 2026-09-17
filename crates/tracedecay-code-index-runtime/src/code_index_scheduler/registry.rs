@@ -813,6 +813,15 @@ fn is_terminal_publication_authority_park(parked: &CodeIndexConvergenceParkedV1)
     parked.blocked_reason == Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt)
 }
 
+/// Terminal publication corruption is the typed park, not a worker-local bool.
+/// Admission, doctor, and the reconcile loop all read this slot.
+fn publication_authority_is_terminal(slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>) -> bool {
+    slot.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(is_terminal_publication_authority_park)
+}
+
 /// Record one observation of a deterministic contract violation on a mounted
 /// worktree's park slot.
 ///
@@ -920,6 +929,23 @@ mod terminal_publication_park_tests {
             observed_passes: 1,
             retries_on_wake: false,
         }
+    }
+
+    #[test]
+    fn publication_authority_terminal_is_the_typed_park() {
+        let empty = RwLock::new(None);
+        assert!(!publication_authority_is_terminal(&empty));
+        let slot = RwLock::new(Some(terminal_park("corrupt-authority")));
+        assert!(publication_authority_is_terminal(&slot));
+        let resident = RwLock::new(Some(CodeIndexConvergenceParkedV1 {
+            reason: "resident".to_owned(),
+            blocked_reason: Some(CodeIndexBuildBlockedReasonV1::ResidentMemory),
+            remediation: "free memory".to_owned(),
+            parked_at_micros: 1,
+            observed_passes: 1,
+            retries_on_wake: true,
+        }));
+        assert!(!publication_authority_is_terminal(&resident));
     }
 
     #[test]

@@ -13,6 +13,7 @@ use tracedecay_automation_runtime::automation::scheduler::{
     host_receipt_decision, load_scheduler_control, parse_schedule, save_scheduler_control,
     schedule_decision, scheduler_control_path,
 };
+use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 use tracedecay_domain::ProjectId;
 use tracedecay_sessions::admission::HostAdmissionScope;
 
@@ -126,7 +127,8 @@ fn host_receipt_bypasses_schedule_but_preserves_enablement_and_idle_gates() {
             SessionActivity::at(100),
             200,
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("scheduler_idle_window_active")
     );
     config.enabled = false;
@@ -138,7 +140,8 @@ fn host_receipt_bypasses_schedule_but_preserves_enablement_and_idle_gates() {
             SessionActivity::none(),
             200,
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("automation_disabled")
     );
 }
@@ -183,7 +186,8 @@ fn scheduler_skips_disabled_and_manual_only_tasks() {
             SessionActivity::none(),
             1_000
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("automation_disabled")
     );
 
@@ -196,7 +200,8 @@ fn scheduler_skips_disabled_and_manual_only_tasks() {
             SessionActivity::none(),
             1_000
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("scheduler_schedule_manual")
     );
 }
@@ -219,7 +224,8 @@ fn scheduler_uses_interval_and_latest_successful_ledger_record() {
             SessionActivity::none(),
             1_500
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("scheduler_interval_not_elapsed")
     );
     assert!(
@@ -263,7 +269,8 @@ fn scheduler_terminal_skips_advance_the_configured_interval() {
             SessionActivity::none(),
             1_250,
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("scheduler_interval_not_elapsed")
     );
     assert!(
@@ -326,7 +333,8 @@ fn fresh_session_activity_is_relative_to_the_latest_cadence_terminal() {
             SessionActivity::at(900),
             1_001,
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("scheduler_interval_not_elapsed")
     );
     assert!(
@@ -389,7 +397,8 @@ fn scheduler_respects_configured_interval_field() {
             SessionActivity::none(),
             1_100
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("scheduler_interval_not_elapsed")
     );
     assert!(
@@ -422,7 +431,8 @@ fn scheduler_retries_failures_after_cooldown_instead_of_full_interval() {
             SessionActivity::none(),
             1_100
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("scheduler_cooldown_active")
     );
     assert!(
@@ -459,7 +469,8 @@ fn scheduler_does_not_retry_explicit_non_retryable_failures() {
             SessionActivity::none(),
             1_400
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("scheduler_non_retryable_failure")
     );
 }
@@ -487,7 +498,8 @@ fn scheduler_retries_malformed_backend_output_after_cooldown() {
             SessionActivity::none(),
             1_100
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("scheduler_cooldown_active")
     );
     assert!(
@@ -528,7 +540,8 @@ fn scheduler_uses_latest_record_status_before_failure_cooldown() {
             SessionActivity::none(),
             1_500
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("scheduler_interval_not_elapsed")
     );
 }
@@ -563,7 +576,8 @@ fn scheduler_ranks_same_second_terminal_records_by_micros_then_run_id() {
             SessionActivity::none(),
             1_500,
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("scheduler_non_retryable_failure")
     );
 
@@ -576,7 +590,8 @@ fn scheduler_ranks_same_second_terminal_records_by_micros_then_run_id() {
             SessionActivity::none(),
             1_500,
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("scheduler_non_retryable_failure")
     );
 
@@ -591,7 +606,8 @@ fn scheduler_ranks_same_second_terminal_records_by_micros_then_run_id() {
             SessionActivity::none(),
             1_500,
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("scheduler_non_retryable_failure")
     );
     records.reverse();
@@ -603,7 +619,8 @@ fn scheduler_ranks_same_second_terminal_records_by_micros_then_run_id() {
             SessionActivity::none(),
             1_500,
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("scheduler_non_retryable_failure")
     );
 }
@@ -645,7 +662,8 @@ fn scheduler_ranks_legacy_fractional_completions_before_run_id() {
                 SessionActivity::none(),
                 1_500,
             )
-            .skip_reason(),
+            .skip_reason()
+            .map(AutomationSkipReasonV1::as_str),
             Some("scheduler_non_retryable_failure")
         );
         records.reverse();
@@ -681,7 +699,8 @@ fn scheduler_ranks_latest_success_by_canonical_completion() {
             SessionActivity::at(999),
             1_700,
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("no_new_session_activity")
     );
 
@@ -694,7 +713,8 @@ fn scheduler_ranks_latest_success_by_canonical_completion() {
             SessionActivity::at(999),
             1_700,
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("no_new_session_activity")
     );
 }
@@ -717,7 +737,8 @@ fn scheduler_fails_closed_on_invalid_completion_history() {
             SessionActivity::none(),
             1_500,
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("scheduler_history_invalid")
     );
 
@@ -736,7 +757,8 @@ fn scheduler_fails_closed_on_invalid_completion_history() {
             SessionActivity::none(),
             1_500,
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("scheduler_history_invalid")
     );
 
@@ -756,7 +778,8 @@ fn scheduler_fails_closed_on_invalid_completion_history() {
             SessionActivity::none(),
             1_500,
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("scheduler_history_invalid")
     );
 
@@ -774,7 +797,8 @@ fn scheduler_fails_closed_on_invalid_completion_history() {
             SessionActivity::none(),
             1_500,
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("scheduler_history_invalid")
     );
 }
@@ -798,7 +822,8 @@ fn scheduler_fails_closed_on_pre_epoch_session_start() {
             SessionActivity::at(0),
             1_500,
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("scheduler_history_invalid")
     );
 }
@@ -821,7 +846,8 @@ fn scheduler_parses_started_at_by_record_schema() {
             SessionActivity::at(1_001),
             1_500,
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("scheduler_history_invalid")
     );
 
@@ -874,7 +900,8 @@ fn scheduler_rejects_conflicting_duplicate_canonical_identity_in_either_order() 
                 SessionActivity::none(),
                 1_500,
             )
-            .skip_reason(),
+            .skip_reason()
+            .map(AutomationSkipReasonV1::as_str),
             Some("scheduler_history_invalid")
         );
     }
@@ -887,7 +914,8 @@ fn scheduler_rejects_conflicting_duplicate_canonical_identity_in_either_order() 
             SessionActivity::none(),
             1_500,
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("scheduler_interval_not_elapsed")
     );
 
@@ -909,7 +937,8 @@ fn scheduler_rejects_conflicting_duplicate_canonical_identity_in_either_order() 
                 SessionActivity::none(),
                 1_500,
             )
-            .skip_reason(),
+            .skip_reason()
+            .map(AutomationSkipReasonV1::as_str),
             Some("scheduler_interval_not_elapsed")
         );
     }
@@ -923,7 +952,9 @@ fn scheduler_idle_window_measures_time_since_session_activity() {
 
     // Activity landed 500s ago: still inside the 600s idle window.
     assert_eq!(
-        schedule_decision(&config, AgentTaskKind::SkillWriter, &[], activity, 1_500).skip_reason(),
+        schedule_decision(&config, AgentTaskKind::SkillWriter, &[], activity, 1_500)
+            .skip_reason()
+            .map(AutomationSkipReasonV1::as_str),
         Some("scheduler_idle_window_active")
     );
     // 600s of quiet have elapsed: the project is idle, the task is due.
@@ -938,7 +969,8 @@ fn scheduler_idle_window_measures_time_since_session_activity() {
             SessionActivity::none(),
             1_100
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("no_new_session_activity")
     );
 }
@@ -983,13 +1015,15 @@ fn scheduler_skips_session_evidence_tasks_without_new_activity() {
         // Interval elapsed but no session activity has ever been observed.
         assert_eq!(
             schedule_decision(&config, task, &records, SessionActivity::none(), 1_700)
-                .skip_reason(),
+                .skip_reason()
+                .map(AutomationSkipReasonV1::as_str),
             Some("no_new_session_activity")
         );
         // Interval elapsed but the newest activity predates the run.
         assert_eq!(
             schedule_decision(&config, task, &records, SessionActivity::at(900), 1_700)
-                .skip_reason(),
+                .skip_reason()
+                .map(AutomationSkipReasonV1::as_str),
             Some("no_new_session_activity")
         );
         // Activity landed after the run started: due on the next tick.
@@ -1033,7 +1067,8 @@ fn scheduler_retries_failed_session_evidence_runs_with_existing_activity() {
             SessionActivity::none(),
             1_400,
         )
-        .skip_reason(),
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("no_new_session_activity")
     );
 }

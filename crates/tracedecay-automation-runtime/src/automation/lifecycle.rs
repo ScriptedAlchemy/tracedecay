@@ -5,7 +5,7 @@ use std::{
 };
 
 use serde_json::{Value, json};
-use tracedecay_automation::run_labels::AUTOMATION_DISABLED;
+use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 
 use super::artifacts::{sha256_json, write_improvement_artifacts};
 use super::backend::{
@@ -22,8 +22,8 @@ use super::run_ledger::{
     AutomationTrigger, append_run_record, load_run_ledger_task_summary,
 };
 use super::scheduler::{
-    AutomationScheduleDecision, AutomationTaskLock, load_session_activity, schedule_decision,
-    stale_lock_secs,
+    AutomationTaskLock, load_session_activity, schedule_decision, stale_lock_secs,
+    task_disabled_skip,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
@@ -289,7 +289,7 @@ impl AutomationRunControl {
 
 pub(crate) enum SchedulerGate {
     Proceed(Option<AutomationTaskLock>),
-    Skip(&'static str),
+    Skip(AutomationSkipReasonV1),
 }
 
 pub(crate) enum BackendTaskRun {
@@ -465,12 +465,12 @@ impl<'a> AgentTaskRunContext<'a> {
 pub(crate) fn task_skip_reason(
     config: &AutomationConfig,
     _task: AgentTaskKind,
-) -> Option<&'static str> {
+) -> Option<AutomationSkipReasonV1> {
     if config.host_mode == AutomationHostMode::DelegatedHost {
-        return Some("delegated_host_mode");
+        return Some(AutomationSkipReasonV1::DelegatedHostMode);
     }
     if config.backend == AutomationBackend::Disabled {
-        return Some("backend_disabled");
+        return Some(AutomationSkipReasonV1::BackendDisabled);
     }
     None
 }
@@ -498,13 +498,16 @@ async fn scheduler_gate_with_lock_retention(
     )
     .await?
     else {
-        super::scheduler_metrics::observe_skip_reason("scheduler_lock_active");
+        super::scheduler_metrics::observe_skip_reason(AutomationSkipReasonV1::SchedulerLockActive);
         let summary = if scheduled {
             Some(load_run_ledger_task_summary(dashboard_root, task, task_key(task)).await?)
         } else {
             None
         };
-        return Ok((SchedulerGate::Skip("scheduler_lock_active"), summary));
+        return Ok((
+            SchedulerGate::Skip(AutomationSkipReasonV1::SchedulerLockActive),
+            summary,
+        ));
     };
     let lock = retain_task_lock(lock, retained_state)?;
     if !scheduled {
@@ -525,7 +528,7 @@ async fn scheduler_gate_with_lock_retention(
     } else {
         schedule_decision(config, task, summary.records(), activity, decision_now_secs)
     };
-    if let Some(reason) = scheduler_skip_reason(&decision, task) {
+    if let Some(reason) = decision.skip_reason() {
         super::scheduler_metrics::observe_skip_reason(reason);
         return Ok((SchedulerGate::Skip(reason), Some(summary)));
     }
@@ -588,9 +591,9 @@ async fn task_run_gate_with_lock_retention(
             let enablement_skip = if trigger.is_on_demand() {
                 None
             } else if !config.enabled {
-                Some(AUTOMATION_DISABLED)
+                Some(AutomationSkipReasonV1::AutomationDisabled)
             } else if task_disabled(config, task) {
-                Some(task_disabled_reason(task))
+                Some(task_disabled_skip(task))
             } else {
                 None
             };
@@ -1253,26 +1256,6 @@ fn task_disabled(config: &AutomationConfig, task: AgentTaskKind) -> bool {
         // User jobs carry their own enabled flag on the job record; the job
         // runner gates on it before reaching this config-level check.
         AgentTaskKind::UserJob => false,
-    }
-}
-
-fn task_disabled_reason(task: AgentTaskKind) -> &'static str {
-    match task {
-        AgentTaskKind::MemoryCurator => "memory_curator_disabled",
-        AgentTaskKind::SessionReflector => "session_reflector_disabled",
-        AgentTaskKind::SkillWriter => "skill_writer_disabled",
-        AgentTaskKind::CombinedReview => "combined_review_disabled",
-        AgentTaskKind::UserJob => "user_job_disabled",
-    }
-}
-
-fn scheduler_skip_reason(
-    decision: &AutomationScheduleDecision,
-    task: AgentTaskKind,
-) -> Option<&'static str> {
-    match decision.skip_reason() {
-        Some("task_disabled") => Some(task_disabled_reason(task)),
-        reason => reason,
     }
 }
 
