@@ -66,7 +66,7 @@ before deleting anything.
 
 ### A4. Historical docs, changelog entries, benchmark outputs, and old daemon cleanup docs
 
-Historical wording in `CHANGELOG.md`, `docs/TRACEDECAY-WHATSNEW.md`, old plans/specs,
+Historical wording in `CHANGELOG.md`, retained old plans/specs,
 benchmark reports, and daemon-removal instructions should remain unless it is
 factually wrong. These references should be labeled as historical when helpful, not
 mechanically rewritten.
@@ -293,7 +293,6 @@ Every audited surface maps to exactly one policy category below.
 | Homebrew/Scoop legacy package note | C | Keep as support warning while external packages lag; not canonical install path. |
 | Primary user docs mentioning fallback behavior | B | Keep aligned with runtime behavior; canonical examples use TraceDecay names. |
 | Design docs mentioning path/env/plugin fallback | B | Keep aligned with runtime behavior or mark as compatibility target. |
-| `docs/TRACEDECAY-WHATSNEW.md` historical narrative | A | Preserve as history. |
 | Historical plans/specs with TraceDecay names | A | Preserve as history unless factually wrong. |
 | Benchmark reports with TraceDecay tool/path names | A | Preserve measured historical names. |
 | Changelog historical TraceDecay references | A | Preserve history; summarize rename in current entries only. |

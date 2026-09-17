@@ -14,8 +14,7 @@ dashboard/app-dist from the primary checkout. Symlink root and
 dashboard/node_modules when the primary has them. Prints the unlock+remove
 one-liner for the owning lane and the recommended env
 (TRACEDECAY_SKIP_DASHBOARD_BUILD=1 plus the seeded bundle's
-TRACEDECAY_DASHBOARD_BUNDLE_SHA256 digest). Do not export
-CARGO_TARGET_DIR — cargo-conductor serializes the default target dir.
+TRACEDECAY_DASHBOARD_BUNDLE_SHA256 digest).
 EOF
 }
 

@@ -837,7 +837,7 @@ git commit -am "feat(graph-db): wire embedded graph journeys"
 - Delete: `crates/tracedecay-migrate/src/consolidate/sqlite.rs`
 - Modify: `crates/tracedecay-migrate/src/lib.rs`
 - Modify: `docs/plans/tracedecay-v2/*.md`
-- Modify: `docs/DESIGN-DOC.md`
+- Modify: `docs/V2-OPERATING-MODEL.md`
 - Modify: `docs/dashboard.md`
 
 **Interfaces:**

@@ -21,12 +21,20 @@ unauthorized external action after completing independent, authorized work.
 
 ## Working checkout authority
 
-- Always work in the primary checkout at `/fast/projects/tracedecay`.
-- Always work on `codex/tracedecay-total-redesign-plan-reopened`, the head branch
-  of PR #707. Merge outside work into this branch before continuing.
-- Do not create or use linked worktrees or work from another branch.
-- Multiple agents may work concurrently in the primary checkout; preserve peer
-  edits and stage only the paths owned by the current task.
+- Use the checkout supplied by the current task. Resolve its root with
+  `git rev-parse --show-toplevel`; never assume a machine-specific absolute path.
+- Inspect `git status --short`, `git branch --show-current`, and
+  `git worktree list` before changing branches or files. Honor an explicit task
+  branch; otherwise stay on the current branch. For a PR, resolve its head with
+  `gh pr view <number> --json headRefName,headRepositoryOwner,headRepository`.
+- Do not switch branches, merge other work, or create linked worktrees merely
+  because an old plan names them. If the requested checkout or branch is
+  unavailable, report the mismatch instead of substituting an unrelated tree.
+- Keep commands and maintained instructions repo-relative. Put machine-local
+  build caches and host settings in local configuration, not mandatory
+  repository guidance.
+- Multiple agents may work concurrently in a checkout; preserve peer edits and
+  stage only the paths owned by the current task.
 
 ## Layout
 
@@ -57,7 +65,8 @@ unauthorized external action after completing independent, authorized work.
 
 ## Build & test
 
-- Edition 2024, resolver 3.
+- Edition 2024, resolver 3. Use the toolchain pinned in `rust-toolchain.toml`.
+  Run `cargo <subcommand>` normally.
 - Dashboard: `npm run build` (rsbuild), `npm run typecheck` (`tsc --noEmit`),
   `npm test` (vitest) from `dashboard/`.
 - libtest `--exact` requires the full module path and exits 0 when a filter
@@ -80,7 +89,8 @@ unauthorized external action after completing independent, authorized work.
 
 ## Conventions
 
-- Commits: `<type>(<scope>): <subject>` (subject ≤ 72 chars) with one of
+- Commits: `<type>(<scope>): <subject>` (scope optional; full header ≤ 72 chars)
+  with one of
   `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`,
   `style`, `test`. Every non-merge commit message must pass commitlint
   (`npm run lint:commit`, configured in `commitlint.config.cjs`; the

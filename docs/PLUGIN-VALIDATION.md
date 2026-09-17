@@ -13,9 +13,8 @@ skills are validated, where each check runs, and how to extend the system
 without breaking the contracts.
 
 This document covers the bundled Cursor, Codex, and Claude integrations:
-skills, commands, hooks, rules, manifests, and MCP registrations. It is
-unrelated to the language-extractor plugin runtime described in
-[`PLUGINS-DESIGN.md`](PLUGINS-DESIGN.md).
+skills, commands, hooks, rules, manifests, and MCP registrations. Language
+extractors are compiled into their owning crate, not loaded by these host bundles.
 
 ---
 

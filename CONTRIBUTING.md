@@ -7,11 +7,17 @@ Thanks for your interest in contributing! This guide covers everything you need 
 ```bash
 git clone https://github.com/ScriptedAlchemy/tracedecay.git
 cd tracedecay
-cargo build
-cargo nextest run --workspace --all-features --no-fail-fast
+cargo build -p tracedecay-cli
+cargo test-ci
 ```
 
-Requires **Rust 1.85+** (edition 2024) and **Node.js 22+ with npm**.
+Use the Rust toolchain pinned in `rust-toolchain.toml` (edition 2024) and
+**Node.js 22+ with npm**. Install `cargo-nextest` to run the `test-ci` and
+`test-all` aliases defined in `.cargo/config.toml`. Commands below run from the
+repository root unless noted.
+
+Use your current checkout; no particular absolute path or historical PR branch
+is required. See [AGENTS.md](AGENTS.md) for checkout safety and shared-work rules.
 
 The dashboard bundle at `dashboard/app-dist/` is generated output and is
 git-ignored, so a fresh clone has none. The CLI build script
@@ -52,46 +58,52 @@ This tree map is for source orientation only. The
 precedence and acceptance.
 
 ```
-src/             Main tracedecay crate (daemon, MCP tools, sessions, application)
-crates/          Workspace members (code-extraction, graph-db, domain, hosts, …)
-dashboard/       Embedded React dashboard
-plugin/          Host bundles (Claude, Codex, Cursor, Kimi, OpenCode)
-tests/           Integration suites
-docs/            Design docs and the V2 roadmap
+crates/tracedecay/     Composition-root library and its integration suites
+crates/tracedecay-cli/ Shipped tracedecay binary and CLI integration suites
+crates/               Workspace members (code-extraction, graph-db, domain, hosts, …)
+dashboard/            Embedded React dashboard
+plugin/               Host bundles (Claude, Codex, Cursor, Kimi, OpenCode)
+tests/                Shared fixtures, distribution suites, and cross-crate gates
+docs/                 Design docs and the V2 roadmap
 ```
 
 ## Feature Flags
 
-tracedecay supports more than 50 languages. `Cargo.toml` is the source of truth
-for the exact feature membership:
+tracedecay supports more than 50 languages. The root `Cargo.toml` is a virtual
+workspace, not a package. `crates/tracedecay-cli/Cargo.toml` and
+`crates/tracedecay/Cargo.toml` expose the language tiers;
+`crates/tracedecay-code-extraction/Cargo.toml` owns grammar feature membership:
 
 | Feature | Coverage |
 |---------|----------|
 | `lite` | Core extractors such as Rust, Go, Java, TypeScript/JS, Python, C/C++, Kotlin, C#, and Swift |
 | `medium` | `lite` plus Dart, Pascal, PHP, Ruby, Bash, Protobuf, PowerShell, Nix, and VB.NET |
-| `full` (default) | `medium` plus all remaining `lang-*` features listed in `Cargo.toml` |
+| `full` (default) | `medium` plus the remaining grammars selected by the extractor crate's `full` feature |
 
 Build with fewer languages for faster compile times during development:
 
 ```bash
-cargo build --no-default-features --features lite
-cargo nextest run --no-default-features --features lite
+cargo build -p tracedecay-cli --no-default-features --features lite
+cargo nextest run -p tracedecay-code-extraction --no-default-features --features lite
 ```
 
 ## Making Changes
 
-1. **Fork and branch** from `master` for stable changes, `beta` for experimental features.
-2. **Write tests.** Every extraction change should have a corresponding test in `tests/`. Follow the existing pattern: create a fixture in `tests/fixtures/` and assert on extracted nodes/edges.
-3. **Run the full test suite** before submitting:
+1. **Use the task's branch**, or branch from `master` for a new contribution. Confirm the target before working on a release-channel branch.
+2. **Write tests in the owning crate.** Extraction changes belong with `crates/tracedecay-code-extraction/`; follow nearby inline tests or crate-local integration suites and assert on extracted nodes/edges.
+3. **Run focused tests** for the affected behavior, then broaden for unresolved risk. Documentation-only edits do not require application builds. For the hosted acceptance selection:
    ```bash
-   cargo nextest run --workspace --all-features --no-fail-fast
+   cargo test-ci
    ```
    Cargo-launched test processes are isolated from your real `~/.tracedecay`
    profile: `.cargo/config.toml` pins `TRACEDECAY_DATA_DIR` to
    `target/test-profile/.tracedecay` (enforced by
-   `tests/core_cli_suite/test_profile_isolation_test.rs`). Tests that need a private profile
+   `crates/tracedecay-cli/tests/core_cli_suite/test_profile_isolation_test.rs`). Tests that need a private profile
    should still override it per-test, e.g. via
    `common::TraceDecayStorageEnvGuard` or `common::apply_tracedecay_home_env`.
+   `cargo test-all` additionally enables every optional feature; it is broader
+   than the hosted selection. Check each suite's `required-features` before
+   selecting it and confirm that the run executed tests rather than matching zero.
 4. **Format your code** with the standard Rust toolchain:
    ```bash
    cargo fmt
@@ -115,8 +127,8 @@ cargo clippy --workspace --all-targets
 ```
 
 This check is blocking in CI: the workflow fails if `cargo clippy --workspace
---all-targets` exits non-zero. The crate-level lint policy in `src/lib.rs`
-currently denies `clippy::all`, `clippy::unwrap_used`, and
+--all-targets` exits non-zero. The composition-root lint policy in
+`crates/tracedecay/src/lib.rs` currently denies `clippy::all`, `clippy::unwrap_used`, and
 `clippy::expect_used`; new violations of those lints must be fixed or justified
 with the narrowest practical `#[allow(...)]` at the affected item. Do not add a
 broad allow or weaken the crate policy just to get CI green.
@@ -127,8 +139,8 @@ but they do not block CI unless a future policy change promotes a specific lint
 to `deny`.
 
 There is no separate Clippy baseline file today. If a policy change intentionally
-promotes additional advisory lints to blocking, update `src/lib.rs`, fix or
-narrowly allow the existing violations in the same change, and update this
+promotes additional advisory lints to blocking, update the owning crate's lint
+policy, fix or narrowly allow the existing violations in the same change, and update this
 section so the contributor command and blocking/advisory split still match CI.
 
 ## Adding a New Language Extractor
@@ -136,8 +148,13 @@ section so the contributor command and blocking/advisory split still match CI.
 1. Add a tree-sitter grammar dependency (or vendor it under `vendor/`).
 2. Create `crates/tracedecay-code-extraction/src/{lang}_extractor.rs` implementing the `LanguageExtractor` trait.
 3. Register it in `LanguageRegistry` with a feature flag (e.g., `lang-{name}`) in that crate's `lib.rs` and `Cargo.toml`.
-4. Add a test module `crates/tracedecay-code-extraction/tests/{lang}.rs` (inline source or a fixture under `crates/tracedecay-code-extraction/fixtures/`).
+4. Add a test module under `crates/tracedecay-code-extraction/tests/main/` and register it in that directory's `main.rs`; follow nearby source and fixture patterns.
 5. Update the feature flag tables in that crate's `Cargo.toml` and this document.
+
+When sharing traversal helpers, preserve child ordering, named versus anonymous
+node handling, and direct-child versus descendant semantics. Compare against
+`crates/tracedecay-code-extraction/src/traversal.rs` and keep language-specific
+behavior local; cover the consuming extractor before and after consolidation.
 
 ## Validating Plugins and Skills
 
@@ -148,7 +165,7 @@ schema-validation workflow. `plugin/skills/` is the shared source of truth for
 bundled skills — do not fork host-specific copies. Before submitting, run:
 
 ```bash
-cargo nextest run -E 'binary(=agent_suite)'
+cargo nextest run -p tracedecay --features test-helpers --test agent_suite
 ```
 
 See [`docs/PLUGIN-VALIDATION.md`](docs/PLUGIN-VALIDATION.md) for the full
@@ -160,9 +177,9 @@ ecosystem bundle correctly.
 `dashboard/src/contracts/generated.ts`, `dashboard/src/contracts/index.ts`, and
 `dashboard/codegen/schemas/dashboard-contracts.schema.json` are generated, not
 hand-written. The Rust `schemars` output is authoritative: the codegen CLI
-shells out to `cargo test --test dashboard_contract_schema_export -- --ignored
-writes_dashboard_contract_schema`, regenerates all three files, and compares
-them byte-for-byte with what is committed.
+exports the schema through the `tracedecay-dashboard-api` library's ignored
+`contract_schema::tests::writes_dashboard_contract_schema` test, regenerates all
+three files, and compares them byte-for-byte with what is committed.
 
 After changing any Rust type that crosses the dashboard API boundary:
 
@@ -184,14 +201,14 @@ contract change instead.
 ## Running Specific Tests
 
 ```bash
-# All extractor tests for a specific language (a module of the `main` test binary)
+# All extractor tests for a specific language
 cargo nextest run -p tracedecay-code-extraction --test main -E 'test(/^rust::/)'
 
 # A single test by name
-cargo nextest run test_find_stale_files
+cargo nextest run -p tracedecay-code-extraction --test main test_rust_file_node_is_root
 
 # Only sync-related tests
-cargo nextest run sync
+cargo nextest run -p tracedecay --features test-helpers sync
 ```
 
 ## Commit Messages
@@ -225,7 +242,8 @@ behavior.
 ## Pull Requests
 
 - Target `master` for bug fixes and stable features.
-- Target `beta` for experimental or breaking changes.
+- Confirm the target branch with the maintainer for release-channel work; do not
+  infer it from an archived plan or PR number.
 - Keep PRs focused — one logical change per PR.
 - Include test coverage for new behavior.
 - Do not hand-edit `CHANGELOG.md`; release automation generates it from
