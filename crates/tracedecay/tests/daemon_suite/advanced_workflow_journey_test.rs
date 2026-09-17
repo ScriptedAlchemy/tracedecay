@@ -481,9 +481,7 @@ fn feedback_proximity_http_is_mounted_in_an_isolated_project() {
     let (status, body) = loop {
         let (status, body) = dashboard.read_proximity(now());
         if !(status == 503
-            && body
-                .pointer("/value/problem/code")
-                .and_then(Value::as_str)
+            && body.pointer("/value/problem/code").and_then(Value::as_str)
                 == Some("feedback.proximity.unavailable"))
         {
             break (status, body);

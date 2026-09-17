@@ -386,15 +386,14 @@ pub async fn handle_status(
                 .await
                 {
                     Ok(ingest) => {
-                        output["session_ingest"] = serde_json::to_value(&ingest).unwrap_or_else(
-                            |error| {
+                        output["session_ingest"] =
+                            serde_json::to_value(&ingest).unwrap_or_else(|error| {
                                 json!({
                                     "status": "unavailable",
                                     "reason": "session_ingest_serialization_failed",
                                     "message": error.to_string(),
                                 })
-                            },
-                        );
+                            });
                         // `session_ingest` stays cursor-scoped so it keeps matching the
                         // doctor-owned signal. Historical catch-up is measured across
                         // providers and remains explicitly partial while the retained
