@@ -87,6 +87,11 @@ pub enum ChunkingFailureV1 {
     Cancelled,
     #[error("chunk identity inputs are not canonical: {0}")]
     NonCanonicalIdentity(crate::noncanonical::NonCanonicalCauseV1),
+    /// A per-chunk unit panicked. Contained here so a later panic cannot
+    /// unwind the join and drop an earlier typed failure, and so the panicked
+    /// unit is named instead of aborting the sweep.
+    #[error("chunk worker unit {index} panicked: {message}")]
+    WorkerPanic { index: usize, message: String },
 }
 
 /// The deterministic chunker contract (Plan 25: `src/code_index/chunks.rs`
@@ -206,23 +211,83 @@ unsafe impl ExtractionAdmittedChunkV1 for ExtractionAdmittedCodeSearchChunkV1 {
     }
 }
 
-/// Run `operation` over every chunk on the calling thread.
+/// Chunk counts below this stay on the calling thread. One canonical chunk
+/// digest costs single-digit microseconds, so small files are cheaper inline
+/// than split across the pool.
+const PARALLEL_CHUNK_THRESHOLD: usize = 16;
+
+/// Every chunk fan-out runs on a worker that already holds one background-CPU
+/// unit (a `collect_bounded_ordered` leaf), and its stolen halves admit
+/// themselves one unit at a time. Holding the parent's unit across the join
+/// while a full-width request sits at the FIFO head wedges the process, so
+/// the yield is welded to the fan-out here rather than left at each call
+/// site, where a merge resolution once kept the `par_iter` and dropped the
+/// yield. `rayon` is imported nowhere else in `chunks`, so a bare `par_iter`
+/// outside this module does not compile.
+mod fan_out {
+    use rayon::prelude::*;
+
+    /// Map `items` across the pool and return the outputs in input order,
+    /// with the caller's admitted units yielded for the duration of the join.
+    pub(super) fn map_yielding<I, R>(items: I, map: impl Fn(I::Item) -> R + Send + Sync) -> Vec<R>
+    where
+        I: IntoParallelIterator,
+        I::Iter: IndexedParallelIterator,
+        R: Send,
+    {
+        crate::parallelism::with_yielded_background_cpu_permits(|| {
+            items.into_par_iter().map(map).collect()
+        })
+    }
+}
+
+/// Run one chunk unit and turn a panic into that unit's typed failure.
 ///
-/// Chunk rows are not a pool actor. The file-level indexing worker already
-/// holds the background-CPU role for this file. Stolen leaves that re-admit
-/// through the FIFO are what wedged behind a full-width head waiter: each
-/// fix returned the parent's unit around the join, and the parent still held
-/// that role on every large batch. The ordered sweep stays on the caller, so
-/// no chunk is admitted on its own and the lowest-index failure is the first
-/// one.
-fn try_for_each_chunk_ordered<F>(
+/// The file fan-out already does this. A chunk panic that unwinds the join
+/// drops every earlier `Result` the sweep had collected.
+fn contain_chunk_unit<T>(
+    index: usize,
+    unit: impl FnOnce() -> Result<T, ChunkingFailureV1>,
+) -> Result<T, ChunkingFailureV1> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(unit)).unwrap_or_else(|payload| {
+        let message = match crate::parallelism::CodeIndexParallelismErrorV1::from_panic_payload(
+            index, &*payload,
+        ) {
+            crate::parallelism::CodeIndexParallelismErrorV1::WorkerPanic { message, .. }
+            | crate::parallelism::CodeIndexParallelismErrorV1::PoolBuild { message } => message,
+        };
+        Err(ChunkingFailureV1::WorkerPanic { index, message })
+    })
+}
+
+/// Run `operation` over every chunk for its failure only, fanning out across
+/// the pool once the batch is large enough. The lowest-index failure is
+/// returned, matching the sequential sweep's short-circuit outcome, including
+/// when a later unit panics.
+fn try_for_each_chunk_ordered<F, A>(
+    admit: A,
     chunks: &[Arc<CodeSearchChunkV1>],
     operation: F,
 ) -> Result<(), ChunkingFailureV1>
 where
-    F: Fn(&Arc<CodeSearchChunkV1>) -> Result<(), ChunkingFailureV1>,
+    F: Fn(&Arc<CodeSearchChunkV1>) -> Result<(), ChunkingFailureV1> + Send + Sync,
+    A: Fn(&mut dyn FnMut() -> Result<(), ChunkingFailureV1>) -> Result<(), ChunkingFailureV1>
+        + Sync,
 {
-    chunks.iter().try_for_each(operation)
+    if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
+        for (index, chunk) in chunks.iter().enumerate() {
+            contain_chunk_unit(index, || operation(chunk))?;
+        }
+        return Ok(());
+    }
+    // Outputs come back in input order, so the first failure is the
+    // lowest-index one, panic or not.
+    fan_out::map_yielding(0..chunks.len(), |index| {
+        contain_chunk_unit(index, || admit(&mut || operation(&chunks[index]))).err()
+    })
+    .into_iter()
+    .find_map(|failure| failure)
+    .map_or(Ok(()), Err)
 }
 
 impl ExactExtractionAuthorityV1 {
@@ -335,7 +400,22 @@ impl ExactExtractionAuthorityV1 {
         &self,
         chunks: Vec<Arc<CodeSearchChunkV1>>,
     ) -> Result<Vec<ExtractionAdmittedCodeSearchChunkV1>, ChunkingFailureV1> {
-        chunks.into_iter().map(|chunk| self.admit(chunk)).collect()
+        if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
+            return chunks
+                .into_iter()
+                .enumerate()
+                .map(|(index, chunk)| contain_chunk_unit(index, || self.admit(chunk)))
+                .collect();
+        }
+        fan_out::map_yielding(0..chunks.len(), |index| {
+            contain_chunk_unit(index, || {
+                crate::parallelism::with_background_cpu_permit(|| {
+                    self.admit(Arc::clone(&chunks[index]))
+                })
+            })
+        })
+        .into_iter()
+        .collect()
     }
 
     /// Rebind an exact authority only after every prior parser-backed chunk
