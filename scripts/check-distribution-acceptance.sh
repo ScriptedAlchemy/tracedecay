@@ -508,6 +508,12 @@ while IFS=$'\t' read -r name version; do
   [[ -f "$directory/Cargo.toml" ]] ||
     die "package archive did not contain $name-$version/Cargo.toml"
   package_dirs["$name"]=$directory
+  # Each extracted tree is its own Cargo root, so without a lockfile Cargo
+  # would re-resolve every registry dependency. Offline that refuses a
+  # version crates.io has yanked since the workspace locked it (bisync 0.3.0
+  # under gix-protocol did exactly this). The checked-in workspace lockfile is
+  # the release resolution; every packaged crate builds against it.
+  cp -- "$staged/Cargo.lock" "$directory/Cargo.lock"
   # Extracted archives are named `<name>-<version>`, but in the workspace every
   # crate sits at `crates/<name>`. Sources that reach a sibling crate by
   # relative `#[path]` — e.g. `tracedecay/src/daemon.rs` includes scheduler
