@@ -320,8 +320,9 @@ export function MeterRow({
    * something (a kind, a source) as well as named. */
   leading?: ReactNode;
   /** `wide` widens the figure column by half a rem, for values that carry a
-   * unit suffix and would otherwise wrap the row. */
-  figureWidth?: 'standard' | 'wide';
+   * unit suffix and would otherwise wrap the row; `byte` widens it to hold a
+   * four-figure byte size with its unit (`204.7 MiB`). */
+  figureWidth?: 'standard' | 'wide' | 'byte';
   className?: string;
 }) {
   return (
@@ -339,7 +340,7 @@ export function MeterRow({
       <span
         className={cn(
           'td-value shrink-0 text-right text-2xs text-text-secondary',
-          figureWidth === 'wide' ? 'w-14' : 'w-12',
+          figureWidth === 'byte' ? 'w-[4.75rem]' : figureWidth === 'wide' ? 'w-14' : 'w-12',
         )}
         data-cell="numeric"
       >

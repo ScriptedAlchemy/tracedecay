@@ -334,10 +334,31 @@ describe('timelineModel', () => {
     expect(model.unplaced).toEqual([{ id: 'doctor', title: 'Doctor inspection', state: 'measured' }]);
   });
 
-  it('stacks marks that share an instant into lanes instead of hiding one under another', () => {
+  it('folds marks closer than one hit target into a cluster that keeps every member', () => {
+    const model = timelineModel(
+      [
+        summary('telemetry', NOW),
+        summary('findings', NOW - 1_000),
+        summary('doctor', NOW - 3_600_000_000),
+      ],
+      0.04,
+    );
+    expect(model.marks).toHaveLength(3);
+    expect(model.clusters.map((cluster) => cluster.marks.map((mark) => mark.id))).toEqual([
+      ['doctor'],
+      ['findings', 'telemetry'],
+    ]);
+    const crowded = model.clusters[1]!;
+    expect(crowded.position).toBe(1);
+    expect(crowded.oldestMicros).toBe(NOW - 1_000);
+    expect(crowded.newestMicros).toBe(NOW);
+  });
+
+  it('places every mark at the rail end when all reads share one instant', () => {
     const model = timelineModel([summary('telemetry', NOW), summary('findings', NOW)]);
-    expect(model.marks.map((mark) => mark.lane)).toEqual([0, 1]);
     expect(model.marks.every((mark) => mark.position === 1)).toBe(true);
+    expect(model.clusters).toHaveLength(1);
+    expect(model.clusters[0]?.marks).toHaveLength(2);
   });
 
   it('has no extent when nothing published a time', () => {

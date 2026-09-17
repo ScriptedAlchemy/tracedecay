@@ -72,6 +72,7 @@ function Row({
   tone,
   title,
   attrs,
+  figureWidth = 'wide',
 }: {
   label: ReactNode;
   value: ReactNode;
@@ -79,10 +80,18 @@ function Row({
   tone?: string;
   title?: string;
   attrs?: Record<string, string>;
+  figureWidth?: 'standard' | 'wide' | 'byte';
 }) {
   return (
     <div role="listitem" {...attrs}>
-      <MeterRow label={label} value={value} fraction={fraction} tone={tone} title={title} figureWidth="wide" />
+      <MeterRow
+        label={label}
+        value={value}
+        fraction={fraction}
+        tone={tone}
+        title={title}
+        figureWidth={figureWidth}
+      />
     </div>
   );
 }
@@ -113,9 +122,14 @@ function dimensionRows(
         ? reading.metric.value
         : null;
     const value =
-      presentation.available && presentation.unit
-        ? `${presentation.figure} ${presentation.unit}`
-        : presentation.figure;
+      presentation.available && presentation.unit ? (
+        <>
+          {presentation.figure}
+          <span className="td-unit ml-1">{presentation.unit}</span>
+        </>
+      ) : (
+        presentation.figure
+      );
     return (
       <Row
         key={dimension.id}
@@ -124,6 +138,7 @@ function dimensionRows(
         fraction={fraction}
         title={presentation.reason ?? presentation.requirement}
         attrs={{ 'data-dimension': dimension.id, 'data-dimension-state': presentation.state }}
+        figureWidth="byte"
       />
     );
   });
@@ -315,6 +330,9 @@ export function DoctorBody({
   );
 }
 
+/** Rows shown on the overview; the rest are in the exact evidence. */
+const FINDING_ROW_LIMIT = 4;
+
 /** Finding rows are real controls above the panel's select overlay: choosing
  * one narrows the inspector to that finding without changing which panel is
  * selected. */
@@ -336,7 +354,7 @@ function FindingRows({
 }) {
   return (
     <ul className="relative z-[1] mt-2 flex flex-col gap-0.5" aria-label={label}>
-      {entries.slice(0, 6).map((entry) => {
+      {entries.slice(0, FINDING_ROW_LIMIT).map((entry) => {
         const presentation = doctorEvidencePresentation(entry.state);
         const isSelected = selected === entry.index;
         return (
@@ -364,9 +382,9 @@ function FindingRows({
           </li>
         );
       })}
-      {entries.length > 6 ? (
+      {entries.length > FINDING_ROW_LIMIT ? (
         <li className="td-legend px-2 pt-1">
-          {entries.length - 6} more in exact evidence
+          {entries.length - FINDING_ROW_LIMIT} more in exact evidence
         </li>
       ) : null}
     </ul>
@@ -723,6 +741,7 @@ export function TelemetryBody({
             tone={over ? 'bg-alert' : store.read.kind === 'observed_bytes' ? 'bg-state-partial' : undefined}
             title={store.path}
             attrs={{ 'data-store': store.store, 'data-store-read': store.read.kind }}
+            figureWidth="byte"
           />
         );
       })}

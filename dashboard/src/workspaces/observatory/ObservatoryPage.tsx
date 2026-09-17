@@ -162,6 +162,7 @@ export function ObservatoryPage() {
           ))}
         </div>
         <EvidenceInspector
+          className="xl:sticky xl:top-2 xl:max-h-[calc(100dvh-7rem)] xl:self-start"
           summary={shownSummary}
           mode={mode}
           finding={mode === 'selected' ? finding : null}
