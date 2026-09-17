@@ -159,6 +159,42 @@ fn quoted_string(value: &str) -> String {
     escaped
 }
 
+/// Claude slash commands and Cursor native commands are one catalog. Each
+/// `plugin/commands/<slug>.md` must have
+/// `plugin/overlays/cursor/commands/tracedecay-<slug>.md`, and the overlay
+/// directory must not contain anything else. The file lists themselves are
+/// emitted by [`append_plugin_files`]; this only owns the pairing.
+fn assert_command_overlay_pairs(plugin_root: &Path) {
+    let claude = collect_files_relative(&plugin_root.join("commands"));
+    let cursor = collect_files_relative(&plugin_root.join("overlays/cursor/commands"));
+    assert!(
+        !claude.is_empty(),
+        "plugin/commands is empty; slash commands would silently disappear"
+    );
+    for relative in &claude {
+        assert!(
+            relative.ends_with(".md") && !relative.contains('/'),
+            "plugin/commands/{relative} must be a top-level Markdown command"
+        );
+        let overlay = format!("tracedecay-{relative}");
+        assert!(
+            cursor.iter().any(|name| name == &overlay),
+            "plugin/commands/{relative} has no Cursor overlay overlays/cursor/commands/{overlay}"
+        );
+    }
+    for relative in &cursor {
+        let Some(slug) = relative.strip_prefix("tracedecay-") else {
+            panic!(
+                "overlays/cursor/commands/{relative} must be named tracedecay-<claude-command>.md"
+            );
+        };
+        assert!(
+            claude.iter().any(|name| name == slug),
+            "overlays/cursor/commands/{relative} has no plugin/commands/{slug}"
+        );
+    }
+}
+
 fn append_generated_plugin_files(
     code: &mut String,
     const_name: &str,
@@ -175,9 +211,11 @@ fn append_generated_plugin_files(
 }
 
 /// Generates `$OUT_DIR/plugin_bundle_generated.rs`: recursive manifests for
-/// shared skills and the canonical Claude agent catalog. Cursor markdown and
-/// Codex TOML adapters are derived from that catalog, so host metadata and
-/// instructions cannot drift between hand-maintained copies.
+/// shared skills, slash commands, and the canonical Claude agent catalog.
+/// Cursor markdown and Codex TOML adapters are derived from that catalog, so
+/// host metadata and instructions cannot drift between hand-maintained copies.
+/// Slash commands are every Markdown file in `plugin/commands/` plus the
+/// paired Cursor overlay; a slug on only one side fails the build.
 ///
 /// Each entry's deploy path equals its `plugin/`-relative source path
 /// (`skills/<skill>/<subpath>`), which is identical for every host, so a single
@@ -197,6 +235,21 @@ fn generate_plugin_bundle() {
         &plugin_root.join("skills"),
         "skills",
         "skills",
+    );
+    assert_command_overlay_pairs(&plugin_root);
+    append_plugin_files(
+        &mut code,
+        "CLAUDE_COMMAND_FILES",
+        &plugin_root.join("commands"),
+        "commands",
+        "commands",
+    );
+    append_plugin_files(
+        &mut code,
+        "CURSOR_COMMAND_FILES",
+        &plugin_root.join("overlays/cursor/commands"),
+        "overlays/cursor/commands",
+        "commands",
     );
     append_plugin_files(
         &mut code,

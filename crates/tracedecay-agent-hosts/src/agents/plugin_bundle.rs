@@ -16,7 +16,9 @@
 //!   These provide the explicit workflow dispatch (no dispatcher *skills*).
 //! - `plugin/agents/*.md` — canonical subagents. Claude deploys them verbatim;
 //!   build.rs derives Cursor markdown and Codex TOML adapters from them.
-//! - `plugin/commands/*.md` — Claude slash commands.
+//! - `plugin/commands/*.md` — Claude slash commands. `build.rs` embeds every
+//!   file in that directory and the paired Cursor overlay. Adding a command is
+//!   adding the two Markdown files; there is no second list in this module.
 //! - `plugin/rules/*.mdc` — Cursor rules.
 //! - `plugin/hooks/hooks-<host>.json` — per-host hook wiring; each deploys to
 //!   `hooks/hooks.json`.
@@ -173,85 +175,6 @@ fn cursor_skill_files() -> impl Iterator<Item = &'static PluginFile> {
         .iter()
         .filter(|file| !file.relative.starts_with(CURSOR_EXCLUDED_SKILL_PREFIX))
 }
-
-/// Cursor's native slash commands for the canonical workflow slugs.
-const CURSOR_COMMAND_FILES: &[PluginFile] = &[
-    plugin_file!(
-        "commands/tracedecay-audit-safety.md",
-        "overlays/cursor/commands/tracedecay-audit-safety.md"
-    ),
-    plugin_file!(
-        "commands/tracedecay-check-health.md",
-        "overlays/cursor/commands/tracedecay-check-health.md"
-    ),
-    plugin_file!(
-        "commands/tracedecay-clean-dead-code.md",
-        "overlays/cursor/commands/tracedecay-clean-dead-code.md"
-    ),
-    plugin_file!(
-        "commands/tracedecay-compare-branches.md",
-        "overlays/cursor/commands/tracedecay-compare-branches.md"
-    ),
-    plugin_file!(
-        "commands/tracedecay-curate-memory.md",
-        "overlays/cursor/commands/tracedecay-curate-memory.md"
-    ),
-    plugin_file!(
-        "commands/tracedecay-draft-commit.md",
-        "overlays/cursor/commands/tracedecay-draft-commit.md"
-    ),
-    plugin_file!(
-        "commands/tracedecay-find-impact.md",
-        "overlays/cursor/commands/tracedecay-find-impact.md"
-    ),
-    plugin_file!(
-        "commands/tracedecay-fix-build.md",
-        "overlays/cursor/commands/tracedecay-fix-build.md"
-    ),
-    plugin_file!(
-        "commands/tracedecay-map-architecture.md",
-        "overlays/cursor/commands/tracedecay-map-architecture.md"
-    ),
-    plugin_file!(
-        "commands/tracedecay-port-code.md",
-        "overlays/cursor/commands/tracedecay-port-code.md"
-    ),
-    plugin_file!(
-        "commands/tracedecay-recall-memory.md",
-        "overlays/cursor/commands/tracedecay-recall-memory.md"
-    ),
-    plugin_file!(
-        "commands/tracedecay-review-diff.md",
-        "overlays/cursor/commands/tracedecay-review-diff.md"
-    ),
-    plugin_file!(
-        "commands/tracedecay-test-changes.md",
-        "overlays/cursor/commands/tracedecay-test-changes.md"
-    ),
-];
-
-/// Claude slash commands.
-const CLAUDE_COMMAND_FILES: &[PluginFile] = &[
-    plugin_file!("commands/audit-safety.md", "commands/audit-safety.md"),
-    plugin_file!("commands/check-health.md", "commands/check-health.md"),
-    plugin_file!("commands/clean-dead-code.md", "commands/clean-dead-code.md"),
-    plugin_file!(
-        "commands/compare-branches.md",
-        "commands/compare-branches.md"
-    ),
-    plugin_file!("commands/curate-memory.md", "commands/curate-memory.md"),
-    plugin_file!("commands/draft-commit.md", "commands/draft-commit.md"),
-    plugin_file!("commands/find-impact.md", "commands/find-impact.md"),
-    plugin_file!("commands/fix-build.md", "commands/fix-build.md"),
-    plugin_file!(
-        "commands/map-architecture.md",
-        "commands/map-architecture.md"
-    ),
-    plugin_file!("commands/port-code.md", "commands/port-code.md"),
-    plugin_file!("commands/recall-memory.md", "commands/recall-memory.md"),
-    plugin_file!("commands/review-diff.md", "commands/review-diff.md"),
-    plugin_file!("commands/test-changes.md", "commands/test-changes.md"),
-];
 
 /// Cursor `.mdc` rules.
 const CURSOR_RULE_FILES: &[PluginFile] =
@@ -474,6 +397,62 @@ mod tests {
         assert_unique_relatives(&cursor_files(), "cursor");
         assert_unique_relatives(&codex_files(), "codex");
         assert_unique_relatives(&kimi_files(), "kimi");
+    }
+
+    /// Adding a slash command is adding the Markdown files. The bundle must
+    /// contain exactly those files, not a hand-maintained subset.
+    #[test]
+    fn slash_commands_match_the_command_directories() {
+        let plugin = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugin");
+        let claude_dir = plugin.join("commands");
+        let cursor_dir = plugin.join("overlays/cursor/commands");
+        let mut claude_slugs = std::fs::read_dir(&claude_dir)
+            .unwrap_or_else(|error| panic!("read {}: {error}", claude_dir.display()))
+            .map(|entry| entry.expect("command entry").file_name())
+            .collect::<Vec<_>>();
+        claude_slugs.sort();
+        assert!(
+            !claude_slugs.is_empty(),
+            "plugin/commands must not be empty"
+        );
+
+        let deployed = claude_files()
+            .into_iter()
+            .map(|(relative, _)| relative)
+            .filter(|relative| relative.starts_with("commands/"))
+            .collect::<BTreeSet<_>>();
+        let cursor = cursor_files()
+            .into_iter()
+            .map(|(relative, _)| relative)
+            .filter(|relative| relative.starts_with("commands/"))
+            .collect::<BTreeSet<_>>();
+        for name in &claude_slugs {
+            let name = name.to_str().expect("utf-8 command name");
+            assert!(
+                name.ends_with(".md"),
+                "plugin/commands/{name} must be Markdown"
+            );
+            let deploy = format!("commands/{name}");
+            assert!(
+                deployed.contains(deploy.as_str()),
+                "claude bundle is missing {deploy}"
+            );
+            let overlay = format!("commands/tracedecay-{name}");
+            assert!(
+                cursor.contains(overlay.as_str()),
+                "cursor bundle is missing {overlay}"
+            );
+            assert!(
+                cursor_dir.join(format!("tracedecay-{name}")).is_file(),
+                "missing Cursor overlay for {name}"
+            );
+        }
+        assert_eq!(
+            deployed.len(),
+            claude_slugs.len(),
+            "claude bundle has command files that are not in plugin/commands"
+        );
+        assert_eq!(cursor.len(), claude_slugs.len());
     }
 
     #[test]
