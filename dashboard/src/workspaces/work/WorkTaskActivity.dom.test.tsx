@@ -3,7 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LiveActivityPulse } from '../../data/sse/connect.ts';
 import type { SseConnectionState } from '../../data/sse/connect.ts';
 import { useScope } from '../../data/scope/store.ts';
-import { WorkTaskActivity, taskActivityReading, taskActivityWindow } from './WorkTaskActivity.tsx';
+import {
+  WorkActivityLedger,
+  WorkTaskActivity,
+  taskActivityReading,
+  taskActivityWindow,
+} from './WorkTaskActivity.tsx';
 
 /**
  * The Work row that reads a real stream.
@@ -165,5 +170,58 @@ describe('the Work task-activity window, by scope', () => {
     expect(container.textContent).toContain(
       'subscribed · none in live window · 1 unattributed',
     );
+  });
+});
+
+describe('the live task activity ledger', () => {
+  it('lists task frames newest first with the detail word each frame carried', () => {
+    link.state = 'live';
+    feed.pulses = [
+      { ...pulse('task_activity'), eventId: 'run:task:1', observationTime: '1800000000000000', detail: null },
+      { ...pulse('hook_activity'), eventId: 'run:hook:1', observationTime: '1800000001000000', detail: 'file_edit' },
+      { ...pulse('task_activity'), eventId: 'run:task:2', observationTime: '1800000002000000', detail: 'leased' },
+    ];
+
+    const { container } = render(<WorkActivityLedger />);
+
+    const rows = container.querySelectorAll('[data-work-activity-row]');
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.textContent).toContain('run:task:2');
+    expect(rows[0]?.textContent).toContain('leased');
+    expect(rows[0]?.textContent).toContain('2027-01-15T08:00:02.000Z');
+    // A frame that named no detail says so rather than inventing a kind, and
+    // no row claims a task identity the stream never carried.
+    expect(rows[1]?.textContent).toContain('kind not carried by the frame');
+    expect(container.querySelector('caption')?.textContent).toContain('no task identity');
+    expect(container.textContent).not.toContain('file_edit');
+  });
+
+  it('marks an unattributed frame under a selected project instead of claiming or dropping it', () => {
+    link.state = 'live';
+    useScope.getState().selectProject('project.alpha', 'Alpha', 'selected');
+    feed.pulses = [
+      { ...pulse('task_activity', null), eventId: 'run:task:none', detail: null },
+      { ...pulse('task_activity', 'project.beta'), eventId: 'run:task:beta', detail: null },
+      { ...pulse('task_activity', 'project.alpha'), eventId: 'run:task:alpha', detail: 'running' },
+    ];
+
+    const { container } = render(<WorkActivityLedger />);
+
+    expect(container.querySelectorAll('[data-work-activity-row="scoped"]')).toHaveLength(1);
+    expect(container.querySelectorAll('[data-work-activity-row="unattributed"]')).toHaveLength(1);
+    expect(container.textContent).not.toContain('run:task:beta');
+    expect(container.textContent).toContain('1 unattributed');
+  });
+
+  it('never draws an unreachable stream as a quiet ledger', () => {
+    link.state = 'offline';
+    feed.pulses = [];
+
+    const { container } = render(<WorkActivityLedger />);
+
+    const empty = container.querySelector('[data-work-activity-empty]');
+    expect(empty?.getAttribute('data-work-activity-empty')).toBe('offline');
+    expect(empty?.textContent).toContain('unreachable');
+    expect(empty?.textContent).not.toContain('No task frame');
   });
 });

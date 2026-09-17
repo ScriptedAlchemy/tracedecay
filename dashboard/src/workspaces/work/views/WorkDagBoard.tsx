@@ -255,9 +255,10 @@ export function WorkDagBoard({
       <div
         ref={field}
         role="group"
-        aria-label="Task dependency graph"
+        aria-label="Dependency graph field"
         aria-describedby={`${controlsId}-legend`}
         className="td-optic td-grain td-scanlines relative max-h-[62vh] min-h-48 overflow-auto"
+        data-work-dag-field
         data-work-dag-zoom={zoom.toFixed(2)}
         data-work-dag-inspected={inspected ?? undefined}
         onPointerLeave={() => setInspected(null)}
