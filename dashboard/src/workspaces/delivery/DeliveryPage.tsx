@@ -65,7 +65,7 @@ export function DeliveryPage() {
         title="Delivery"
         note={headerNote(location, selectedRow)}
         actions={
-          <div className="ml-auto flex flex-wrap items-center gap-2">
+          <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center gap-2 max-sm:w-full">
             <ModeTabs location={location} navigate={navigate} selected={selectedRow} />
             <ReadOnlyProviderBadge className="max-md:hidden" />
           </div>
@@ -126,7 +126,7 @@ function ModeTabs({
   selected: DeliveryInboxPullRequestV1 | null;
 }) {
   return (
-    <nav aria-label="Delivery modes" className="flex items-center border border-edge-subtle">
+    <nav aria-label="Delivery modes" className="flex max-w-full flex-wrap items-center border border-edge-subtle">
       {DELIVERY_MODES.map((mode) => {
         const requiresSelection = modeRequiresSelection(mode) && selected === null;
         const active = location.mode === mode;
