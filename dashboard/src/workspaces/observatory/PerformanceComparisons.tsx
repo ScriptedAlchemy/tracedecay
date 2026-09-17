@@ -1,11 +1,9 @@
 /** Performance comparison evidence and disposition from `GET /api/observatory`. */
 import type { ReactNode } from 'react';
-import {
-  ObservatoryReadModelV1Schema,
-  type ComparisonDispositionV1,
-  type ObservatoryReadModelV1,
+import type {
+  ComparisonDispositionV1,
+  ObservatoryReadModelV1,
 } from '../../contracts/generated.ts';
-import { useEnvelope } from '../../data/query/useEnvelope.ts';
 import { EnvelopeTruth, OmissionReasons } from '../../ui/EnvelopeTruth.tsx';
 import { EnvelopeSection } from '../../ui/ReadSection.tsx';
 import { Field } from '../../ui/instrument.tsx';
@@ -19,14 +17,10 @@ import {
   dispositionPresentation,
   performanceComparisonBands,
 } from './performanceComparisons.ts';
+import { useObservatoryReadModel } from './observatoryReadModel.ts';
 
 export function PerformanceComparisons() {
-  const read = useEnvelope(
-    ['observatory', 'performance-comparisons'],
-    '/api/observatory',
-    ObservatoryReadModelV1Schema,
-    { staleTime: 60_000 },
-  );
+  const read = useObservatoryReadModel();
 
   return (
     <EnvelopeSection

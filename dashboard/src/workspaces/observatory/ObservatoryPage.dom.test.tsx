@@ -3,6 +3,7 @@ import { act, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useScope } from '../../data/scope/store.ts';
+import type { EvidenceSourceId } from './evidence.ts';
 import { ObservatoryPage } from './ObservatoryPage.tsx';
 
 /**
@@ -36,7 +37,7 @@ describe('ObservatoryPage store telemetry', () => {
 
   it('renders every budget and growth state honestly, and merges shared-file roles', async () => {
     stubTelemetry(telemetryPayload());
-    renderObservatory();
+    renderObservatory('telemetry');
 
     // Shared store file: one card, both roles named.
     const shared = await screen.findByText('graph · memory (shared store file)');
@@ -107,7 +108,7 @@ describe('ObservatoryPage store telemetry', () => {
       if (url.startsWith('/api/projects/project.beta/')) return projectBeta;
       return [aggregate, unmounted][Math.min(aggregateResponse++, 1)]!;
     });
-    renderObservatory();
+    renderObservatory('pipeline');
 
     await advanceTimers(0);
     expect(screen.getByText('generation.scope.alpha')).toBeTruthy();
@@ -159,7 +160,7 @@ describe('ObservatoryPage store telemetry', () => {
       url.startsWith('/api/projects/project.alpha/') ? projectAlpha : projectBeta,
     );
     act(() => useScope.getState().selectProject('project.alpha', 'Project Alpha', 'active'));
-    renderObservatory();
+    renderObservatory('pipeline');
 
     await advanceTimers(0);
     expect(screen.getByText('generation.scope.alpha')).toBeTruthy();
@@ -172,7 +173,7 @@ describe('ObservatoryPage store telemetry', () => {
 
   it('renders table-growth unavailable states distinctly without zero measurements', async () => {
     stubTelemetry(telemetryPayload());
-    renderObservatory();
+    renderObservatory('telemetry');
 
     await screen.findByText('graph · memory (shared store file)');
     for (const [state, label] of [
@@ -190,7 +191,7 @@ describe('ObservatoryPage store telemetry', () => {
 
   it('renders an observed significant table row with its measured bytes and window', async () => {
     stubTelemetry(telemetryPayload());
-    renderObservatory();
+    renderObservatory('telemetry');
 
     await screen.findByText('graph · memory (shared store file)');
     const row = document.querySelector('[data-table-growth-sample="messages"]');
@@ -207,7 +208,7 @@ describe('ObservatoryPage store telemetry', () => {
 
   it('states table-growth coverage across all stores separately from each store', async () => {
     stubTelemetry(telemetryPayload());
-    renderObservatory();
+    renderObservatory('telemetry');
 
     const fleet = await screen.findByLabelText('Table growth coverage across all stores');
     expect(fleet.getAttribute('data-table-growth-coverage')).toBe('partial');
@@ -230,7 +231,7 @@ describe('ObservatoryPage store telemetry', () => {
 
   it('gives every per-store table-growth region a distinct accessible name', async () => {
     stubTelemetry(telemetryPayload());
-    renderObservatory();
+    renderObservatory('telemetry');
 
     await screen.findByText('graph · memory (shared store file)');
     const labels = Array.from(document.querySelectorAll('[data-table-growth-state]')).map(
@@ -243,10 +244,11 @@ describe('ObservatoryPage store telemetry', () => {
 
   it('gives a byte-only store its size and an unknown free-page reading', async () => {
     stubTelemetry({ ...telemetryPayload(), stores: [byteOnlyStore()] });
-    renderObservatory();
+    renderObservatory('telemetry');
 
-    // The size is a real measurement and is printed as one.
-    expect(await screen.findByText('40.0 MiB')).toBeTruthy();
+    // The size is a real measurement and is printed as one — on the overview
+    // row and again on the exact store card.
+    expect((await screen.findAllByText('40.0 MiB')).length).toBeGreaterThan(0);
     // The capacity bar is drawn for this store rather than withheld, and says
     // what it does not know instead of filling to 100% at "0.0% free pages".
     expect(screen.getByText('free pages unknown')).toBeTruthy();
@@ -260,7 +262,7 @@ describe('ObservatoryPage store telemetry', () => {
 
   it('renders every finding producer source state without treating partial as clean', async () => {
     stubTelemetry(telemetryPayload(), sourceStatusFindingsPayload());
-    renderObservatory();
+    renderObservatory('findings');
 
     expect(await screen.findByLabelText('Storage finding source status')).toBeTruthy();
     const statusFor = (kind: string) =>
@@ -320,7 +322,7 @@ describe('ObservatoryPage store telemetry', () => {
         ],
       },
     });
-    renderObservatory();
+    renderObservatory('pipeline');
 
     await screen.findByText('5 occurrences');
     const panel = await screen.findByLabelText('Clone index');
@@ -403,7 +405,7 @@ describe('ObservatoryPage store telemetry', () => {
         ],
       },
     });
-    renderObservatory();
+    renderObservatory('pipeline');
 
     await screen.findByText('positional fingerprint successor is missing');
     for (const state of ['partial', 'backfilling', 'stale', 'unavailable']) {
@@ -412,19 +414,20 @@ describe('ObservatoryPage store telemetry', () => {
     expect(screen.getByText('positional fingerprint successor is missing')).toBeTruthy();
     expect(screen.getByText('2 / 5 sealed pages')).toBeTruthy();
     expect(screen.getByText('the sealed lexical artifact is unreadable')).toBeTruthy();
-    expect(screen.getByText('unavailable · graph artifact unreadable')).toBeTruthy();
+    // Said on the overview rail and again in the exact readiness list.
+    expect(screen.getAllByText('unavailable · graph artifact unreadable').length).toBeGreaterThan(0);
   });
 });
 
-function renderObservatory() {
+/** Opens the page with one authority selected (`?inspect=`), so its exact
+ * read model is mounted beneath the grid — every assertion in this file is
+ * about that exact evidence, not the overview summary. */
+function renderObservatory(inspect: EvidenceSourceId) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  // The wing camera lives in the address (`?wing=`), so the page needs a
-  // router to read it. Every read this file asserts on sits on the default
-  // Diagnosis wing.
   return render(
-    <MemoryRouter initialEntries={['/observatory']}>
+    <MemoryRouter initialEntries={[`/observatory?inspect=${inspect}`]}>
       <QueryClientProvider client={client}>
         <ObservatoryPage />
       </QueryClientProvider>
@@ -470,6 +473,17 @@ function stubTelemetry(
             note: 'no admitted Doctor report source is available for this dashboard scope',
           }),
         );
+      }
+      // The other authorities the overview reads are not under test here.
+      // They answer as an unreachable source, which the page must render as a
+      // typed absence — never as a crash and never as an empty success.
+      if (
+        route === '/api/observatory' ||
+        route === '/api/plugins/analytics/diagnostics' ||
+        route === '/api/plugins/analytics/hints' ||
+        route.startsWith('/api/work/')
+      ) {
+        return new Response('{}', { status: 503, headers: { 'content-type': 'application/json' } });
       }
       throw new Error(`unexpected fetch ${url}`);
     }),
@@ -1064,7 +1078,7 @@ describe('ObservatoryPage duplicate finding identities', () => {
       entries: [repeated('first reading'), repeated('second reading')],
       note: 'storage retention and size authorities were consulted',
     });
-    renderObservatory();
+    renderObservatory('findings');
 
     // One card per entry, told apart by their coverage statements — the label
     // text alone also appears in the source-status strip.
