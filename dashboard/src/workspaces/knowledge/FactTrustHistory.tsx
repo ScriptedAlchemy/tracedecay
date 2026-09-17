@@ -24,11 +24,12 @@ import type { EChartsOption } from 'echarts';
 
 import { PayloadBoundary } from '../../ui/ReadSection.tsx';
 import { StateChip } from '../../ui/StateChip.tsx';
+import { formatMicrosUtc } from '../../ui/format.ts';
 import { Readout } from '../../ui/instrument.tsx';
 import { Chart } from '../../viz/chart/Chart.tsx';
 import type { PayloadResult } from '../../data/query/payload.ts';
 import type { TrustHistoryEvent, TrustHistoryPayload } from '../../data/query/memory.ts';
-import { formatUtcMicros, trustDetailState, trustHistoryReading } from './memoryModel.ts';
+import { trustDetailState, trustHistoryReading } from './memoryModel.ts';
 
 export function TrustHistorySection({
   pending,
@@ -159,7 +160,7 @@ function TrustTrace({ data }: { data: TrustHistoryPayload }) {
     () => ({
       xAxis: {
         type: 'category',
-        data: events.map((event) => formatUtcMicros(event.timestamp)),
+        data: events.map((event) => formatMicrosUtc(event.timestamp)),
         axisLabel: { show: false },
         axisTick: { show: false },
       },
@@ -183,17 +184,17 @@ function TrustTrace({ data }: { data: TrustHistoryPayload }) {
   return (
     <figure className="flex flex-col gap-1" data-testid="trust-trace">
       <Chart
-        ariaLabel={`Trust after each of ${events.length} feedback events, from ${first.new_trust.toFixed(3)} at ${formatUtcMicros(first.timestamp)} to ${last.new_trust.toFixed(3)} at ${formatUtcMicros(last.timestamp)}; the exact events are listed below.`}
+        ariaLabel={`Trust after each of ${events.length} feedback events, from ${first.new_trust.toFixed(3)} at ${formatMicrosUtc(first.timestamp)} to ${last.new_trust.toFixed(3)} at ${formatMicrosUtc(last.timestamp)}; the exact events are listed below.`}
         height={56}
         option={option}
       />
       <figcaption className="flex justify-between text-3xs text-text-muted">
         <span className="td-value" data-cell="numeric">
-          {formatUtcMicros(first.timestamp).slice(0, 10)}
+          {formatMicrosUtc(first.timestamp).slice(0, 10)}
         </span>
         <span>trust after each event · 0 to 1</span>
         <span className="td-value" data-cell="numeric">
-          {formatUtcMicros(last.timestamp).slice(0, 10)}
+          {formatMicrosUtc(last.timestamp).slice(0, 10)}
         </span>
       </figcaption>
     </figure>
@@ -207,7 +208,7 @@ function TrustEventRow({ event }: { event: TrustHistoryEvent }) {
     <li className="flex flex-col gap-0.5 border-l-2 border-edge-subtle pl-2">
       <p className="flex flex-wrap items-baseline gap-x-2 text-3xs text-text-muted">
         <span className="td-value" data-cell="numeric">
-          {formatUtcMicros(event.timestamp)}
+          {formatMicrosUtc(event.timestamp)}
         </span>
         <span className="text-text-secondary">{event.action}</span>
         <span className="td-value" data-cell="numeric">

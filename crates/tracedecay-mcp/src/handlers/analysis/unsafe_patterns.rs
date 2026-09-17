@@ -194,14 +194,13 @@ pub async fn handle_unsafe_patterns(
                 // masked copy; the original line is kept for the emitted snippet.
                 // Non-Rust files are scanned raw (the Rust grammar would
                 // mis-tokenise them).
-                let masked = if path_is_rust(file) {
+                let masked_owned = path_is_rust(file).then(|| {
                     tracedecay_code_extraction::source_mask::masked_rust_source_with(
                         &source,
                         tracedecay_code_extraction::source_mask::MaskOptions::CODE_SCAN,
                     )
-                } else {
-                    source.clone()
-                };
+                });
+                let masked = masked_owned.as_deref().unwrap_or(&source);
                 let test_lines = if path_is_rust(file) {
                     tracedecay_code_extraction::source_mask::rust_test_lines(&source).map_err(
                         |error| {

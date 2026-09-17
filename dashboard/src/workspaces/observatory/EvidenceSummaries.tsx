@@ -12,7 +12,7 @@ import type {
   StorageFindingsPayloadV1,
   StorageTelemetryPayloadV1,
 } from '../../contracts/generated.ts';
-import type { EnvelopeResult } from '../../data/query/envelope.ts';
+import { envelopePayload } from '../../data/query/useEnvelope.ts';
 import { cn } from '../../ui/cn.ts';
 import { MeterRow } from '../../ui/instrument.tsx';
 import { humanizeMetric } from '../../ui/metricModel.ts';
@@ -52,10 +52,6 @@ import { formatBytes, storageFindingLabel } from './storageModel.ts';
  * em dash and an empty track, never a bar at zero; a read that produced no
  * payload is the daemon's word, not a skeleton that looks like data.
  */
-
-function envelopePayload<T>(result: EnvelopeResult<T> | undefined): T | null {
-  return result?.outcome === 'envelope' ? result.envelope.payload : null;
-}
 
 function Rows({ children, label }: { children: ReactNode; label: string }) {
   return (

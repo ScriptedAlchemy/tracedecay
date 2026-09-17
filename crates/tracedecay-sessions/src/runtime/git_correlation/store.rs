@@ -5,7 +5,6 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use sha2::{Digest as _, Sha256};
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationId,
     GraphGenerationManifest, GraphGenerationRelation, GraphIdempotencyKey, GraphLabel,
@@ -25,8 +24,8 @@ use super::{
     GitCorrelationError, GitEvidenceProjectionV1, GitRefFilter, GitScopeFilter,
     SessionGitCorrelationHit, SessionGitSpan, SessionsForQuery, SpanObservation,
     canonical_provider_map, commit_hits, commit_identities_with_producer_fallback,
-    commit_record_matches_query, commit_record_order, scope_session_ids, sessions_for_limit,
-    span_hits, span_matches_query,
+    commit_record_matches_query, commit_record_order, digest_bytes, scope_session_ids,
+    sessions_for_limit, span_hits, span_matches_query,
 };
 
 const GRAPH_READ_PAGE_ITEMS: usize = 10_000;
@@ -102,11 +101,8 @@ pub fn git_evidence_generation_id(
         projection,
         projector_revision,
     ))?;
-    GraphGenerationId::new(format!(
-        "session-git-evidence:{}",
-        hex::encode(Sha256::digest(bytes))
-    ))
-    .map_err(Into::into)
+    GraphGenerationId::new(format!("session-git-evidence:{}", digest_bytes(&bytes)))
+        .map_err(Into::into)
 }
 
 /// Projects the complete evidence into one generation manifest.
@@ -1452,7 +1448,7 @@ fn stable_identity(kind: &str, material: &str) -> String {
 }
 
 fn stable_digest(material: &str) -> String {
-    hex::encode(Sha256::digest(material.as_bytes()))
+    digest_bytes(material.as_bytes())
 }
 
 struct AtomicGraphCancellation(Arc<AtomicBool>);

@@ -1460,10 +1460,6 @@ impl<M> ContextScoutDurableRuntimeV1<M> {
         }
     }
 
-    pub fn is_current(&self, work: ContextScoutWorkV1) -> bool {
-        self.coalescer.is_current(work)
-    }
-
     pub(crate) fn restore_startup(
         &mut self,
         startup: &ContextScoutDurableStartupOutcomeV1,
