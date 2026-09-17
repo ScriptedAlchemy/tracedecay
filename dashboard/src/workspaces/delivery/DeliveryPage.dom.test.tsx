@@ -1,17 +1,14 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, within } from '@testing-library/react';
+import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MemoryRouter, useLocation } from 'react-router';
-import type { DeliveryInboxV1, DeliveryOverviewV1 } from '../../contracts/generated.ts';
+import type { DeliveryInboxV1 } from '../../contracts/generated.ts';
 import {
   INBOX,
   INBOX_BRANCH_ONLY,
   OVERVIEW_ALPHA,
   OVERVIEW_LOCAL_ONLY,
 } from '../../test/deliveryFixtures.ts';
-import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
-import { DeliveryPage } from './DeliveryPage.tsx';
+import { PR_42, renderDelivery } from '../../test/renderDelivery.tsx';
 
 /** Inbox already joined by the server — overlapping_edit is Active with typed
  * proximity evidence (no client `/api/feedback/proximity` re-join). */
@@ -44,62 +41,6 @@ const INBOX_WITH_PROXIMITY_ATTENTION: DeliveryInboxV1 = {
   ],
 };
 
-function LocationProbe() {
-  return <output data-testid="location">{useLocation().search}</output>;
-}
-
-function serveRoutes(routes: Record<string, { status: number; body: unknown }>) {
-  return vi.fn(async (input: RequestInfo | URL) => {
-    const url = String(input);
-    const hit = Object.entries(routes).find(([path]) => url.includes(path));
-    const { status, body } = hit?.[1] ?? { status: 404, body: { status: 'not_found' } };
-    return {
-      ok: status >= 200 && status < 300,
-      status,
-      json: async () => body,
-    } as Response;
-  });
-}
-
-export function renderDelivery(
-  payload: DeliveryInboxV1,
-  options: {
-    domainState?: string;
-    route?: string;
-    overview?: DeliveryOverviewV1;
-    overviewStatus?: number;
-  } = {},
-) {
-  const fetchMock = serveRoutes({
-    '/api/delivery/inbox': {
-      status: 200,
-      body: fixtureEnvelope(payload, options.domainState ?? 'ready'),
-    },
-    ...(options.overview === undefined
-      ? {}
-      : {
-          '/delivery/overview': {
-            status: options.overviewStatus ?? 200,
-            body: fixtureEnvelope(options.overview, 'ready'),
-          },
-        }),
-  });
-  vi.stubGlobal('fetch', fetchMock);
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false, gcTime: 0 } },
-  });
-  const view = render(
-    <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={[options.route ?? '/delivery']}>
-        <DeliveryPage />
-        <LocationProbe />
-      </MemoryRouter>
-    </QueryClientProvider>,
-  );
-  return { ...view, fetchMock };
-}
-
-const PR_42 = 'project.alpha%3Agithub%3A42';
 
 afterEach(() => {
   vi.unstubAllGlobals();
