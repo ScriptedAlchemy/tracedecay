@@ -60,6 +60,9 @@ pub fn build_published_code_graph_manifest_checked(
     let mut site_candidates = BTreeMap::new();
     for (_, reference) in generation.unresolved_references() {
         check()?;
+        reference
+            .validate()
+            .map_err(|error| CodeGraphProjectionError::Corrupt(error.to_string()))?;
         if reference.kind == RelationEdgeKindV1::Calls && !reference.reference_name.contains('.') {
             site_candidates
                 .entry((&reference.from_occurrence, reference.evidence_span))
@@ -96,8 +99,7 @@ pub fn build_published_code_graph_manifest_checked(
                 .rsplit('.')
                 .next()
                 .is_some_and(|member| {
-                    reference.evidence_span.end_byte - reference.evidence_span.start_byte
-                        == member.len() as u64
+                    reference.evidence_span.len() == member.len() as u64
                         && resolved_sites
                             .get(&(&reference.from_occurrence, reference.evidence_span))
                             == Some(&member)
