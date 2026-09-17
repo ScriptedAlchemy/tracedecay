@@ -13,6 +13,7 @@
  * reorders what arrived and the header says what the slice cannot reach.
  */
 import {
+  useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -82,6 +83,30 @@ export function FactLedger({
     summaryProbeRef,
     characterProbeRef,
   );
+  // A selection made on the field or carried in by the address brings its
+  // exact row into view, so the two readings of the same fact stay in step.
+  // The loaded slice is bounded well under the virtualisation threshold, so
+  // the row is in the DOM to be found; a windowed list would need the
+  // virtualizer's own scroll-to-index instead.
+  useEffect(() => {
+    if (selectedFactId == null) return;
+    const root = listRootRef.current;
+    const scroller = root?.parentElement;
+    if (!root || !scroller) return;
+    const row = [...root.querySelectorAll<HTMLElement>('[data-row-id]')].find(
+      (candidate) => candidate.dataset['rowId'] === selectedFactId,
+    );
+    if (!row) return;
+    // Only the ledger's own scroller moves. `scrollIntoView` would also walk
+    // the page scroller and pull the workspace header off the top for a row
+    // that was merely below the ledger's fold.
+    const top = row.offsetTop;
+    const bottom = top + row.offsetHeight;
+    if (top < scroller.scrollTop) scroller.scrollTop = top;
+    else if (bottom > scroller.scrollTop + scroller.clientHeight) {
+      scroller.scrollTop = bottom - scroller.clientHeight;
+    }
+  }, [selectedFactId]);
   // Recall counts have no absolute ceiling, so the rail is scaled to the
   // busiest fact actually on screen. That makes the column a ranking of what
   // is loaded — which is what it is — rather than an implied fraction of some
@@ -300,6 +325,7 @@ function FactRow({
       selected={selected}
       onSelect={onSelect}
       onInspect={onInspect}
+      rowId={fact.fact_id}
       height={FACT_ROW_HEIGHT}
       align="start"
       className={cn(inspected && !selected && 'bg-surface-1')}

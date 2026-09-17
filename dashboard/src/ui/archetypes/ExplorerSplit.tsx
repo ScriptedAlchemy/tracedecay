@@ -235,6 +235,7 @@ export function DataRow({
   selected,
   onSelect,
   onInspect,
+  rowId,
   children,
   className,
   height,
@@ -255,6 +256,10 @@ export function DataRow({
    * keyboard just focused. The browser fires no move for a scroll.
    */
   onInspect?: () => void;
+  /** The row's stable identity, stamped as `data-row-id` so a list can find
+   * the row a selection made elsewhere (a scene, the address) refers to and
+   * bring it into view. */
+  rowId?: string;
   children: ReactNode;
   className?: string;
   /**
@@ -275,6 +280,7 @@ export function DataRow({
       onClick={onSelect}
       onPointerMove={onInspect}
       onFocus={onInspect}
+      data-row-id={rowId}
       aria-pressed={selected ?? false}
       style={{ height: height != null ? `${height}px` : 'var(--row-height-data)' }}
       className={cn(
