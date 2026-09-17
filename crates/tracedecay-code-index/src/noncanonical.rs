@@ -171,6 +171,7 @@ pub enum NonCanonicalDetailKeyV1 {
     RightBound,
     QualifiedName,
     Error,
+    ChunkId,
 }
 
 impl NonCanonicalDetailKeyV1 {
@@ -188,6 +189,7 @@ impl NonCanonicalDetailKeyV1 {
             Self::RightBound => "right_bound",
             Self::QualifiedName => "qualified_name",
             Self::Error => "error",
+            Self::ChunkId => "chunk_id",
         }
     }
 }
