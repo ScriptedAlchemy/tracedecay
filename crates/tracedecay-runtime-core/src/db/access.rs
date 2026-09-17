@@ -6,7 +6,6 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, LazyLock, Mutex};
 
 #[cfg(any(test, feature = "test-transport"))]
-use fs2::FileExt;
 
 /// Canonical daemon-authority state names live in [`crate::storage`]; the
 /// ambient-Test authority probe shares that single definition with the
@@ -531,7 +530,7 @@ pub fn is_isolated_test_path(path: &Path) -> bool {
 /// short and long names agree, so only the other two hosts ever saw it.
 ///
 /// Both sides resolve through their deepest existing ancestor, so a database
-/// file whose final component has not been created yet still compares — the
+/// file whose final component has not been created yet still compares, the
 /// same rule [`crate::path_safety::same_canonical_path`] applies to registry
 /// locators.
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
@@ -545,7 +544,7 @@ fn under_isolated_root(path: &Path, root: PathBuf) -> bool {
 
 /// Returns true when another process currently holds the profile's exclusive
 /// daemon-authority lock. Used to keep ambient Test opens from mutating a
-/// store while a live daemon owner is elected — its sole caller is the
+/// store while a live daemon owner is elected, its sole caller is the
 /// cfg-gated ambient-Test branch, so the probe carries the same gate.
 #[cfg(any(test, feature = "test-transport"))]
 fn foreign_daemon_authority_held(profile_root: &Path) -> bool {
@@ -562,9 +561,9 @@ fn foreign_daemon_authority_held(profile_root: &Path) -> bool {
     let Ok(file) = options.open(&lock_path) else {
         return false;
     };
-    match file.try_lock_exclusive() {
+    match file.try_lock().map_err(std::io::Error::from) {
         Ok(()) => {
-            let _ = FileExt::unlock(&file);
+            let _ = file.unlock();
             false
         }
         Err(error) if is_lock_contended(&error) => true,

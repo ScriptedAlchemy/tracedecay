@@ -9,7 +9,7 @@
 //!    verified generation.
 //! 2. Convergence interrupted before the relational compare-and-swap must leave
 //!    the prior verified snapshot serving and must replay to the identical
-//!    generation once the authority recovers — never half-visible.
+//!    generation once the authority recovers, never half-visible.
 //! 3. A foreign, non-final store shape must be typed `ResetRequired` on open,
 //!    and a fresh recreation must republish from the canonical manifest and
 //!    serve the new verified head.
@@ -506,7 +506,7 @@ fn marker_of(snapshot: &VerifiedGraphSnapshot, identity: &GraphProjectionIdentit
 }
 
 /// Writes a Grafeo store carrying a TraceDecay format marker whose schema is
-/// not the final native scalar schema — the foreign/non-final shape the open
+/// not the final native scalar schema, the foreign/non-final shape the open
 /// path must reject as `ResetRequired`.
 fn write_non_final_shape(path: &std::path::Path) {
     let raw = grafeo_engine::GrafeoDB::with_config(
@@ -558,7 +558,7 @@ fn quarantine_receipt(quarantine: &std::path::Path) -> serde_json::Value {
 }
 
 /// GitHub issue #763: a deterministic corruption verdict on the durable
-/// container was retried identically forever — every mount refaulted, every
+/// container was retried identically forever, every mount refaulted, every
 /// activation refused, and only manual surgery (move the store and WAL aside,
 /// restart) recovered the project. This pins the automatic form of exactly
 /// that recovery: the second identical verdict quarantines the container for
@@ -669,7 +669,7 @@ fn torn_durable_store_is_quarantined_and_rebuilt_from_the_replay_journal() {
     );
 
     // The fresh store refuses the recovered head with a typed mismatch until
-    // the replay journal re-projects it — never a silent empty success.
+    // the replay journal re-projects it, never a silent empty success.
     let pending = registered
         .registry
         .recover_verified_snapshot(
@@ -754,7 +754,7 @@ fn crc_faulted_store_is_quarantined_with_its_wal_sidecar_and_rebuilt() {
 
     // Child publishes g1, reaches the durable WAL phase, and exits without
     // a clean close. That is unclean process exit, not host power-loss. The
-    // abandoned image is copied only after the child is reaped — never while
+    // abandoned image is copied only after the child is reaped, never while
     // a live Windows handle still owns the store (issue #933).
     let crash = TempDir::new().unwrap();
     capture_unclean_crash_image(crash.path());
@@ -781,7 +781,7 @@ fn crc_faulted_store_is_quarantined_with_its_wal_sidecar_and_rebuilt() {
 
     // Flip authoritative leading bytes while keeping the length: the store
     // is still current-sized but its serialized sections no longer match
-    // their checksums. The physical midpoint is not a valid target — the
+    // their checksums. The physical midpoint is not a valid target, the
     // format may leave aligned padding there, outside every section
     // checksum (see verified_generation_contract/verify_once.rs).
     let mut bytes = std::fs::read(&crashed_container).unwrap();
@@ -851,13 +851,11 @@ fn crc_faulted_store_is_quarantined_with_its_wal_sidecar_and_rebuilt() {
 
 /// The compare-and-swap discipline for the quarantine decision itself: an
 /// authority that does not hold the decision lock must neither re-verify nor
-/// sweep the store — another incarnation may be mid-recovery. The refusal is
+/// sweep the store, another incarnation may be mid-recovery. The refusal is
 /// a retryable typed unavailable, not a retained terminal fault, so the next
 /// mount attempt (after the holder releases) completes the recovery.
 #[test]
 fn held_quarantine_decision_defers_the_mount_and_the_next_attempt_recovers() {
-    use fs2::FileExt;
-
     let temp = TempDir::new().unwrap();
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let (control, probe) = control_and_probe();
@@ -902,7 +900,10 @@ fn held_quarantine_decision_defers_the_mount_and_the_next_attempt_recovers() {
         .truncate(false)
         .open(&lock_path)
         .unwrap();
-    foreign_holder.try_lock_exclusive().unwrap();
+    foreign_holder
+        .try_lock()
+        .map_err(std::io::Error::from)
+        .unwrap();
 
     let deferred = registered.mount().unwrap_err();
     assert!(
@@ -919,7 +920,7 @@ fn held_quarantine_decision_defers_the_mount_and_the_next_attempt_recovers() {
 
     // Once the holder releases, the same mount request completes the
     // quarantine and rebuild instead of remaining faulted.
-    FileExt::unlock(&foreign_holder).unwrap();
+    foreign_holder.unlock().unwrap();
     registered.mount().unwrap();
     let quarantine = quarantine_directory(temp.path())
         .expect("the released decision lock lets the next mount quarantine");
@@ -1126,7 +1127,7 @@ fn reset_required_shape_is_recreated_fresh_and_republished_from_the_manifest() {
     assert_eq!(marker_of(&snapshot, &identity), "g1");
 }
 
-/// Highest sequence among non-empty `wal_<sequence>.log` segments — the same
+/// Highest sequence among non-empty `wal_<sequence>.log` segments, the same
 /// replay-debt signal the open-time collapse gates on.
 fn newest_wal_segment(sidecar: &std::path::Path) -> Option<u64> {
     let entries = std::fs::read_dir(sidecar).ok()?;

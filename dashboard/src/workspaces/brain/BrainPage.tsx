@@ -1,8 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useRef, useState, type ReactNode } from 'react';
 import { GitBranch, FolderGit2 } from 'lucide-react';
-import { useActivationField } from '../../viz/graph/useActivationField.ts';
-import { buildAdjacency, neighborsOf } from '../../viz/graph/adjacency.ts';
-import { buildRegistryScene, type SceneBody } from '../../viz/scene/registrySceneModel.ts';
 import { useEventStreamState, useLiveActivity } from '../../data/sse/useEvents.tsx';
 import { CenteredState, ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { Legend } from '../../ui/instrument.tsx';
@@ -24,7 +21,6 @@ import {
 } from './field.ts';
 import { ScopedBrain } from './ScopedBrain.tsx';
 import { ProjectInspector } from './ProjectInspector.tsx';
-import { RegistryScene } from './RegistryScene.tsx';
 import {
   type ProjectRegistryEntry,
   type ProjectRepoGroup,
@@ -34,9 +30,7 @@ import {
  * is selected.
  *
  * Unscoped, the question is "what does this daemon look after?" and the answer
- * is the registry, composed as a measured field (see `field.ts`) rather than a
- * force layout — several dozen unrelated repositories have no shape to
- * discover, so position is spent on measurement instead.
+ * is the project list, with recency and mass stated as text (see `field.ts`).
  *
  * Scoped, the question becomes "what does TraceDecay know about THIS project?",
  * which is a different surface entirely (see `ScopedBrain.tsx`). */
@@ -143,10 +137,7 @@ export function BrainPage() {
                 {summary.truncated ? ' · truncated' : ''}
               </span>
             </div>
-            {/* The brain is the surface, not a banner above a list: the canvas
-             * takes every pixel the viewport can spare, readouts sit on it as
-             * instrument HUD, and the registry becomes a dense side rail that
-             * remains the canvas's accessible equivalent. */}
+            {/* Readouts state the measurements. The rail is the registry. */}
             <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
               {/* Below `lg` this is a vertical stack, and the column has to be
                 * allowed its natural height. Pinned to a share of the viewport
@@ -161,7 +152,7 @@ export function BrainPage() {
                   <button type="button" className="td-hit underline" onClick={() => setRepositoryView(null)}>Registry overview</button>
                   <span aria-hidden> / </span><span>{viewedRepository.label} repository · {viewedRepository.projects.length} registered {viewedRepository.projects.length === 1 ? 'project' : 'projects'}</span>
                 </nav> : null}
-                <RegistryFieldView groups={groups} repository={viewedRepository} inspectedId={inspectedId} onInspect={setInspectedId} />
+                <RegistryFieldView groups={groups} repository={viewedRepository} onInspect={setInspectedId} />
               </div>
               <RegistryRail>
                 {/* Keep row coordinates stable between pointer-down and click:
@@ -176,7 +167,7 @@ export function BrainPage() {
                 <label className="text-2xs">Search project registry
                   <input type="search" value={registryFilter} onChange={(event) => setRegistryFilter(event.target.value)} className="mt-1 w-full border border-edge-subtle bg-surface-0 p-2 text-xs" />
                 </label>
-                {query ? <p className="text-2xs text-text-muted">{matchingGroups.reduce((count, group) => count + group.projects.length, 0)} matching projects · canvas retains the full registry</p> : null}
+                {query ? <p className="text-2xs text-text-muted">{matchingGroups.reduce((count, group) => count + group.projects.length, 0)} matching projects</p> : null}
                 {/* The counts that are the same on every row, said once. Every
                   * project in a real registry holds exactly one store and three
                   * to five artifacts, so "1 ST · 4 ART" printed forty-four times
@@ -205,7 +196,7 @@ export function BrainPage() {
 
 /** The registry side rail is a scroll container from `lg` and an ordinary
  * block below it, so its tab stop is measured from the rendered box (see
- * `useScrollTabStop`) instead of hard-coded — a literal `tabIndex={0}` gave
+ * `useScrollTabStop`) instead of hard-coded, a literal `tabIndex={0}` gave
  * every keyboard user on a narrow screen a dead stop in front of the cards. */
 function RegistryRail({ children }: { children: ReactNode }) {
   const railRef = useRef<HTMLElement>(null);
@@ -235,147 +226,34 @@ function toEnvelopeResult(
   return undefined;
 }
 
-/** The all-projects field. Position, size and brightness are all measurements
- * of the registry — recency across, indexed mass up — so the composition can be
- * read rather than merely looked at. The activation field fires on real SSE
- * beats and conducts exactly one hop along a drawn relation, which exists only
- * where several checkouts share a git directory. A repository view is a camera
- * movement over the same coordinates, never a different field. */
+/** Registry measurements beside the project list. Recency, mass, and
+ * shared-checkout counts stay as text; the list is the registry. */
 function RegistryFieldView({
   groups,
   repository,
-  inspectedId,
   onInspect,
 }: {
   groups: ProjectRepoGroup[];
   repository?: ProjectRepoGroup;
-  inspectedId: string | null;
   onInspect: (id: string | null) => void;
 }) {
-  const selectProject = useScope((s) => s.selectProject);
-  const activation = useActivationField(4200);
   const { state: sseState, lastEventAt } = useEventStreamState();
-  const { pulses, revision } = useLiveActivity();
-  // null until the first pass adopts the connection's current revision: the
-  // pulses already in the ring at mount are history, not activity to replay.
-  const drawnRevision = useRef<number | null>(null);
-
-  // `groups` is rebuilt (sorted into a fresh array) on every render of this
-  // page, and the page re-renders on every live pulse. Memoising on its
-  // identity would therefore hand GraphCanvas a new node/edge array per event
-  // and force a full renderer teardown plus layout each time. Key the memo on
-  // what the topology and the measurements actually ARE instead, so the canvas
-  // is rebuilt only when the registry really changed.
-  const groupsRef = useRef(groups);
-  groupsRef.current = groups;
-  const fieldSignature = groups
-    .map(
-      (group) =>
-        `${group.git_common_dir ?? group.label}|${group.projects
-          .map(
-            (project) =>
-              `${project.project_id}:${project.kind}:${indexedMass(project)}:${bucketStamp(project.last_seen_at)}`,
-          )
-          .join(',')}`,
-    )
-    .join(';');
-
-  const field: RegistryField = useMemo(
-    () => composeRegistryField(groupsRef.current),
-    [fieldSignature],
+  const { pulses } = useLiveActivity();
+  const field = composeRegistryField(groups);
+  const projectIds = new Set(
+    groups.flatMap((group) => group.projects.map((project) => project.project_id)),
   );
-  const sceneModel = useMemo(() => buildRegistryScene(field), [field]);
-  // Repository zoom is camera emphasis over stable coordinates: the members
-  // and their hub stay where the field measured them and everything else
-  // recedes to context. Keyed on the group's identity and the field (which
-  // changes only when the registry does) so a live pulse's re-render never
-  // hands the scene a fresh set, while a checkout added mid-view still joins.
-  const repositoryKey = repository?.git_common_dir ?? null;
-  const repositoryRef = useRef(repository);
-  repositoryRef.current = repository;
-  const emphasis = useMemo(() => {
-    if (repositoryKey === null) return null;
-    const ids = new Set(repositoryRef.current?.projects.map((project) => project.project_id));
-    ids.add(`repo:${repositoryKey}`);
-    return ids as ReadonlySet<string>;
-  }, [field, repositoryKey]);
-
-  // Propagation reads the drawn relation list, so activation can only ever
-  // travel where the viewer can see a path to travel along. On this field most
-  // projects have no drawn relation at all, which is correct: a beat in one
-  // repository has nothing to conduct into.
-  const adjacency = useMemo(() => buildAdjacency(field.edges), [field]);
-  const drawnIds = useMemo(() => new Set(field.nodes.map((node) => node.id)), [field]);
-
-  // The brain fires on real identities: each accepted event lights the neuron
-  // named by its own exact scope, at an intensity that reflects what actually
-  // happened. Only unseen pulses fire (the ring is a decay window, not a log).
-  // An unscoped event does not establish which project was touched.
-  useEffect(() => {
-    if (sseState !== 'live' || revision === drawnRevision.current) return;
-    if (drawnRevision.current === null) {
-      drawnRevision.current = revision;
-      return;
-    }
-    const unseen = Math.min(revision - drawnRevision.current, pulses.length);
-    drawnRevision.current = revision;
-    for (const pulse of pulses.slice(pulses.length - unseen)) {
-      const projectId = pulse.projectId;
-      // A scope naming something this field does not draw fires nothing: heat
-      // on an id with no body is heat nobody can see, and it would keep the
-      // render loop awake resolving an invisible decay.
-      if (!projectId || !drawnIds.has(projectId)) continue;
-      const energy = strikeIntensity(pulse.family);
-      activation.strike([projectId], energy);
-      // One synaptic hop along the field's own edges — which exist only where
-      // several checkouts share a git directory. It lands at a third the
-      // energy, so the conducting edge lights from the end where the event
-      // actually happened.
-      const hop = neighborsOf(adjacency, projectId);
-      if (hop.length > 0) activation.strike(hop, energy / 3);
-    }
-  }, [pulses, revision, sseState, adjacency, drawnIds, activation]);
-
-  // Stable across renders; the current registry is read through the ref at
-  // click time. The scene only ever hands over project bodies, and the
-  // `repo:` guard keeps that true even if a caller changes.
-  const handleSelect = useCallback(
-    (id: string) => {
-      if (id.startsWith('repo:')) return;
-      const project = groupsRef.current
-        .flatMap((group) => group.projects)
-        .find((candidate) => candidate.project_id === id);
-      if (project) selectProject(project.project_id, project.label);
-    },
-    [selectProject],
+  const totals = groups.flatMap((group) => group.projects).reduce(
+    (acc, project) => ({
+      stores: acc.stores + project.store_count,
+      artifacts: acc.artifacts + project.artifact_count,
+    }),
+    { stores: 0, artifacts: 0 },
   );
-  /** Secondary label lines are the registry's own counts, never a score. */
-  const bodyDetail = useCallback((body: SceneBody): readonly string[] => {
-    const project = groupsRef.current
-      .flatMap((group) => group.projects)
-      .find((candidate) => candidate.project_id === body.id);
-    if (!project) return [];
-    return [
-      `stores ${project.store_count.toLocaleString()}`,
-      `artifacts ${project.artifact_count.toLocaleString()}`,
-      `mass ${indexedMass(project).toLocaleString()}`,
-    ];
-  }, []);
-
-  const totals = groups
-    .flatMap((g) => g.projects)
-    .reduce(
-      (acc, p) => ({
-        stores: acc.stores + p.store_count,
-        artifacts: acc.artifacts + p.artifact_count,
-      }),
-      { stores: 0, artifacts: 0 },
-    );
 
   return (
     <>
-      {/* Readouts reserve space so no measured body is hidden behind chrome. */}
-      <div className="pointer-events-none mb-2 flex shrink-0 flex-wrap items-start gap-2">
+      <div className="mb-2 flex shrink-0 flex-wrap items-start gap-2">
         <InstrumentReadout
           items={[
             { label: 'repos', value: groups.length },
@@ -384,86 +262,54 @@ function RegistryFieldView({
             { label: 'artifacts', value: totals.artifacts },
           ]}
         />
-        <SignalPanel pulses={pulses} sseState={sseState} lastEventAt={lastEventAt} onInspectProject={(id) => onInspect(id !== null && drawnIds.has(id) ? id : null)} />
+        <SignalPanel
+          pulses={pulses}
+          sseState={sseState}
+          lastEventAt={lastEventAt}
+          onInspectProject={(id) => onInspect(id !== null && projectIds.has(id) ? id : null)}
+        />
       </div>
-      <RegistryScene
-        model={sceneModel}
-        activation={activation}
-        inspectedId={inspectedId}
-        // Keep the exact target available while the pointer moves into its
-        // interactive DOM inspector. Escape or Dismiss clears it explicitly.
-        onInspect={(id) => { if (id !== null) onInspect(id); }}
-        onSelect={handleSelect}
-        emphasis={emphasis}
-        detail={bodyDetail}
-        // The field has a fixed aspect (five columns across a mass axis) and
-        // the camera fits it whole, so a canvas far taller than it is wide
-        // shrinks the whole composition into a band with dead space above and
-        // below. On a phone the canvas is therefore sized in viewport WIDTHS,
-        // which keeps its shape near the field's own; from `md` up there is
-        // enough width that a generous height is the right trade again.
-        canvasClassName="min-h-[64vw] max-h-[84vw] md:max-h-none md:min-h-[55vh] lg:min-h-0"
-        ariaLabel={repository ? `${repository.label} repository: ${repository.projects.length} registered projects in camera focus. Exact repository relationships; original measured positions retained. Project registry is the accessible equivalent.` : fieldDescription(field)}
-        fallbackDescription="the Project registry beside this field remains available as a text alternative"
-        caption={repository ? <p>{repository.git_common_dir} · exact registry relation · project mass and recency retain the overview measurements · other projects recede to context</p> : <FieldAxis field={field} />}
-      />
+      {repository ? (
+        <p className="text-2xs leading-relaxed text-text-muted">
+          {repository.git_common_dir} · {repository.projects.length} registered{' '}
+          {repository.projects.length === 1 ? 'project' : 'projects'}
+        </p>
+      ) : (
+        <FieldAxis field={field} />
+      )}
     </>
   );
 }
 
-/** The field's reading, stated. The recency columns and their counts are
- * printed on the field itself (the scene's axis overlay), so the caption
- * carries what the picture cannot: the horizon brightness is relative to, the
- * shape of the mass axis, and whether any relation exists to be drawn. */
+/** Recency columns, mass shape, and whether any checkout relation exists. */
 function FieldAxis({ field }: { field: RegistryField }) {
   return (
     <div className="flex flex-col gap-1.5">
-      {/* Short enough to survive a 320px rail: the full sentence is the
-        * paragraph below, and a legend that truncates to "INDEXED M…" states
-        * nothing. */}
-      <Legend>recency across · mass up</Legend>
+      <Legend>recency · mass</Legend>
       <p className="td-value text-2xs text-text-secondary" data-cell="numeric">
         {field.columns.map((column) => `${column.label} ${column.count}`).join(' · ')}
       </p>
       <p className="text-2xs leading-relaxed text-text-muted">
-        Recency glow spans now to {formatHorizon(field.vitalityHorizonDays)}, the
-        age nine in ten projects here are younger than.{' '}
+        Recency runs from now to {formatHorizon(field.vitalityHorizonDays)}, the age nine in ten
+        projects here are younger than.{' '}
         {field.mass.total > 0 && field.mass.lowerHalfCount > field.mass.total / 2
-          ? `Mass is lopsided: ${field.mass.lowerHalfCount} of ${field.mass.total} projects hold ${field.mass.floor}–${field.mass.median} indexed units; the heaviest at ${field.mass.ceiling} sets the top.`
+          ? `Mass is lopsided: ${field.mass.lowerHalfCount} of ${field.mass.total} projects hold ${field.mass.floor}-${field.mass.median} indexed units; the heaviest at ${field.mass.ceiling} sets the top.`
           : ''}{' '}
         {field.sharedRepoCount > 0
           ? `${field.sharedRepoCount} shared ${field.sharedRepoCount === 1 ? 'repository is' : 'repositories are'} wired to their checkouts; all other projects stand alone.`
-          : 'No repository has multiple checkouts, so the wire returned no relation to draw.'}
+          : 'No repository has multiple checkouts, so there is no relation to list.'}
       </p>
     </div>
   );
 }
 
-/** The vitality horizon in the shortest form that keeps it readable. */
 function formatHorizon(days: number): string {
   if (days < 2) return `${Math.round(days * 24)} h`;
   if (days < 60) return `${days < 10 ? days.toFixed(1) : Math.round(days)} d`;
   return `${Math.round(days / 30)} mo`;
 }
 
-function fieldDescription(field: RegistryField): string {
-  const occupied = field.columns
-    .filter((column) => column.count > 0)
-    .map((column) => `${column.count} ${column.label}`)
-    .join(', ');
-  return `Registry field: projects placed by when they were last seen (${occupied || 'none'}) and by indexed mass, which runs from ${field.mass.floor} to ${field.mass.ceiling} across ${field.mass.total} projects. Brightness is recency, full now and out at ${formatHorizon(field.vitalityHorizonDays)}, the age nine in ten of them are younger than. The project registry list alongside is the accessible equivalent.`;
-}
-
-/** Which recency column a timestamp lands in, as a memo key. Keying the field
- * memo on the raw timestamp would recompose the layout on any clock tick; the
- * layout only actually changes when a project crosses a column boundary. */
-function bucketStamp(lastSeenAt: number): number {
-  return Math.floor((Date.now() / 1000 - lastSeenAt) / 3600);
-}
-
-/** Corner-bracketed instrument readout floating on the canvas: the counts that
- * used to occupy four tall tiles, rendered as one hairline strip so the brain
- * keeps the space. Pointer-transparent so it never steals a graph drag. */
+/** Counts that used to occupy four tall tiles, as one strip. */
 export function InstrumentReadout({
   items,
 }: {
@@ -498,20 +344,6 @@ export function InstrumentReadout({
   );
 }
 
-/** Firing intensity by event family: structural change reads brightest, a
- * heartbeat is only a breath. Unknown families fire at a middling default
- * rather than going dark — a new event family is still real activity. */
-function strikeIntensity(family: string): number {
-  if (family === 'heartbeat') return 0.22;
-  if (family === 'project_registry_changed') return 0.95;
-  if (family === 'storage_telemetry_invalidated') return 0.6;
-  if (family.startsWith('code_index')) return 0.8;
-  if (family === 'hook_activity') return 0.85;
-  if (family === 'tool_call_activity') return 0.7;
-  if (family === 'session_ingest_activity') return 0.65;
-  return 0.5;
-}
-
 function RepoGroupCard({
   group,
   holdings,
@@ -529,7 +361,7 @@ function RepoGroupCard({
         {/* Count and noun from the one array this header heads. `project_count`
           * is set from `projects.len()` in `project_registry.rs`, so preferring
           * it while pluralising from the array could only ever disagree by
-          * printing "3 project" over one row — a contract drift rendered as a
+          * printing "3 project" over one row, a contract drift rendered as a
           * typo. */}
         <span className="text-2xs text-text-muted">
           {group.projects.length} {group.projects.length === 1 ? 'project' : 'projects'}
@@ -614,7 +446,7 @@ function ProjectRow({
         ) : null}
         <span aria-hidden className="td-rule" />
         {/* The row carries the channel that actually varies across the
-          * registry — graph scopes span 0 to 242 here — plus any other channel
+          * registry, graph scopes span 0 to 242 here, plus any other channel
           * that departs from what the rail stated above it. A project holding
           * five artifacts where everything else holds four IS a reading, and
           * must not be swallowed by the summary. */}
