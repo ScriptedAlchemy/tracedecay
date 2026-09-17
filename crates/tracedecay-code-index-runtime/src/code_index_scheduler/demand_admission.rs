@@ -144,5 +144,15 @@ mod tests {
                 .strongest_refusal(CodeIndexDemandAdmissionV1::Queued),
             CodeIndexDemandAdmissionV1::Queued
         );
+        assert_eq!(
+            CodeIndexDemandAdmissionV1::NotApplicable
+                .strongest_refusal(CodeIndexDemandAdmissionV1::Queued),
+            CodeIndexDemandAdmissionV1::Queued
+        );
+        assert_eq!(
+            CodeIndexDemandAdmissionV1::NotApplicable
+                .strongest_refusal(CodeIndexDemandAdmissionV1::NotApplicable),
+            CodeIndexDemandAdmissionV1::NotApplicable
+        );
     }
 }

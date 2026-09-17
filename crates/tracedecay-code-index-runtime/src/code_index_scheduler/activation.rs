@@ -685,12 +685,14 @@ mod tests {
     #[tokio::test]
     async fn linked_worktree_disabled_admission_never_mounts() {
         let repository = repository();
+        let foreign = TempDir::new().expect("foreign root");
         let mount_attempts = Arc::new(AtomicUsize::new(0));
         let attempts = Arc::clone(&mount_attempts);
+        let cancellation = CancellationToken::new();
         let activation = CodeIndexActivationV1::new_with_admission(
             repository.path(),
             Arc::new(AtomicBool::new(true)),
-            CancellationToken::new(),
+            cancellation.clone(),
             CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled,
             Arc::new(move || {
                 let attempts = Arc::clone(&attempts);
@@ -705,6 +707,25 @@ mod tests {
         assert_eq!(
             activation.automatic_admission(),
             CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled
+        );
+        assert_eq!(
+            activation
+                .admit(foreign.path(), CodeIndexDemandV1::Reconcile)
+                .await,
+            CodeIndexDemandAdmissionV1::Unavailable(CodeIndexDemandUnavailableV1::ForeignRoot)
+        );
+        assert_eq!(
+            activation
+                .admit(repository.path(), CodeIndexDemandV1::Reconcile)
+                .await,
+            CodeIndexDemandAdmissionV1::RefusedByPolicy
+        );
+        cancellation.cancel();
+        assert_eq!(
+            activation
+                .admit(repository.path(), CodeIndexDemandV1::Reconcile)
+                .await,
+            CodeIndexDemandAdmissionV1::Unavailable(CodeIndexDemandUnavailableV1::RouteRetired)
         );
         assert!(!activation.activate());
         tokio::task::yield_now().await;
