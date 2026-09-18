@@ -21,6 +21,7 @@ mod dependency_hint_test;
 mod edit_test;
 #[cfg(feature = "test-transport")]
 mod expand_query_behavior;
+mod fact_store_remove_behavior_test;
 mod feedback_diagnostics_test;
 mod feedback_expand_test;
 mod god_class_test;
