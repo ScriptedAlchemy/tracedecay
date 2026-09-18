@@ -48,18 +48,9 @@ async fn diagnostics_read_names_a_missing_producer_and_rejects_a_bad_scope() {
     .await;
     assert_eq!(
         missing_path["error"],
-        json!({
-            "code": -32602,
-            "message": "tool project route failed: reason_code=application_surface_invalid_request retryable=false: application surface request does not match its reviewed schema: `path` is required when `scope` is file",
-            "data": {
-                "tool": "tracedecay_diagnostics",
-                "reason_code": "application_surface_invalid_request",
-                "retryable": false,
-                "detail": "application surface request does not match its reviewed schema: `path` is required when `scope` is file",
-                "kind": "invalid_request",
-                "code": "application_surface_invalid_request"
-            }
-        })
+        rejected_diagnostics_request(
+            "application surface request does not match its reviewed schema: `path` is required when `scope` is file",
+        )
     );
 
     let package_scope = handle_real_server_tool_call_raw(
@@ -70,21 +61,23 @@ async fn diagnostics_read_names_a_missing_producer_and_rejects_a_bad_scope() {
     .await;
     assert_eq!(
         package_scope["error"],
-        json!({
-            "code": -32602,
-            "message": "tool project route failed: reason_code=application_surface_invalid_request retryable=false: application surface request does not match its reviewed schema: `scope` package is not supported for diagnostics",
-            "data": {
-                "tool": "tracedecay_diagnostics",
-                "reason_code": "application_surface_invalid_request",
-                "retryable": false,
-                "detail": "application surface request does not match its reviewed schema: `scope` package is not supported for diagnostics",
-                "kind": "invalid_request",
-                "code": "application_surface_invalid_request"
-            }
-        })
+        rejected_diagnostics_request(
+            "application surface request does not match its reviewed schema: `scope` package is not supported for diagnostics",
+        )
     );
 
     fixture.harness.shutdown().await;
+}
+
+fn rejected_diagnostics_request(detail: &str) -> Value {
+    json!({
+        "code": -32603,
+        "message": format!("tool execution failed: config error: {detail}"),
+        "data": {
+            "cli_fallback": "This tool is also available from the shell: `tracedecay tool diagnostics ...` (`tracedecay tool diagnostics --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly.",
+            "tool": "tracedecay_diagnostics"
+        }
+    })
 }
 
 fn assert_absent_producer(result: &Value) {
@@ -108,6 +101,7 @@ fn assert_absent_producer_markdown(result: &Value) {
         format!(
             "\
 ## diagnostics\\_read
+
 - Operation: `diagnostics_read`
 - Binding: `binding.mcp.diagnostics_read.v1`
 - Status: `problem`
