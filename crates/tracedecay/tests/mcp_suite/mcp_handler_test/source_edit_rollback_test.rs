@@ -221,7 +221,6 @@ async fn source_edit_rollback_restores_move_preimages_and_replays_the_receipt() 
         ),
     )
     .await;
-    assert_eq!(restored_response["result"]["isError"], json!(false));
     let restored = tool_payload(&restored_response);
     assert_eq!(restored["success"], json!(true));
     assert_eq!(restored["reconciled"], json!(true));
@@ -269,19 +268,30 @@ async fn source_edit_rollback_restores_move_preimages_and_replays_the_receipt() 
         ),
     )
     .await;
-    assert_eq!(replay_response["result"]["isError"], json!(false));
     let replay = tool_payload(&replay_response);
     assert_eq!(replay["replayed"], json!(true));
     assert_eq!(replay["success"], json!(true));
-    assert_eq!(replay["reconciled"], json!(true));
-    assert_eq!(replay["durable_metadata_only"], json!(true));
+    assert_eq!(replay["failed"], json!(false));
     assert_eq!(replay["message"], "source edit reconciliation completed");
-    assert_eq!(replay["files"], json!([]));
+    assert_eq!(replay["expected_state"], moved.committed_state);
+    assert_eq!(replay["predicted_state"], moved.prior_expected_state);
     assert_eq!(replay["effect"]["effect_id"], rollback_effect_id);
     assert_eq!(
         replay["effect"]["idempotency_key"],
         "mcp-test.source-edit.rollback.anchor"
     );
+    assert_eq!(replay["effect"]["receipt"]["outcome"], "completed");
+    assert_eq!(
+        replay["effect"]["receipt"]["committed_state"],
+        moved.prior_expected_state
+    );
+    assert_eq!(
+        replay["effect"]["payload"]["durable_metadata_only"],
+        json!(true)
+    );
+    assert_eq!(replay["effect"]["payload"]["files"], json!([]));
+    assert_eq!(replay["effect"]["payload"]["reconciled"], json!(true));
+    assert_eq!(replay["effect"]["payload"]["success"], json!(true));
     assert_original_sources(&moved.project);
 
     let mismatched = call_tool(
@@ -385,9 +395,15 @@ async fn source_edit_rollback_keeps_foreign_bytes_and_replays_the_refusal() {
     assert_eq!(replay["replayed"], json!(true));
     assert_eq!(replay["success"], json!(false));
     assert_eq!(replay["failed"], json!(true));
-    assert_eq!(replay["durable_metadata_only"], json!(true));
     assert_eq!(replay["message"], "source edit failed before the effect");
     assert_eq!(replay["effect"]["effect_id"], refusal_effect_id);
+    assert_eq!(replay["effect"]["receipt"]["outcome"], "failed");
+    assert_eq!(
+        replay["effect"]["payload"]["durable_metadata_only"],
+        json!(true)
+    );
+    assert_eq!(replay["effect"]["payload"]["failed"], json!(true));
+    assert_eq!(replay["effect"]["payload"]["files"], json!([]));
     assert_eq!(
         read_project_file(&moved.project, "src/dest.rs"),
         FOREIGN_DEST
