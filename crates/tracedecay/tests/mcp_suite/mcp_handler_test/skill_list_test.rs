@@ -110,15 +110,7 @@ async fn skill_list_returns_stored_skills_for_the_requested_state() {
     assert_eq!(
         markdown,
         format!(
-            "## Managed Skills\n\
-             **status:** ok\n\
-             **count:** 1\n\
-             **profile_root:** {profile_root_text}\n\
-             \n\
-             ### Skills\n\
-             - **skill-active** - Active skill (active)\n  \
-             summary: Active skill summary.\n  \
-             category: maintenance; targets: cursor, codex; support_files: 1\n"
+            "## Managed Skills\n**status:** ok\n**count:** 1\n**profile_root:** {profile_root_text}\n\n### Skills\n- **skill-active** - Active skill (active)\n  summary: Active skill summary.\n  category: maintenance; targets: cursor, codex; support_files: 1\n"
         )
     );
 
