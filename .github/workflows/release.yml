@@ -162,12 +162,6 @@ jobs:
         with:
           ref: ${{ needs.validate-release.outputs.source_sha }}
 
-      - name: Checkout release automation
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.validate-release.outputs.source_sha }}
-          path: .release-automation
-
       - name: Download dashboard artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -175,7 +169,7 @@ jobs:
           path: dashboard/app-dist
 
       - name: Validate downloaded dashboard bundle
-        run: python3 .release-automation/scripts/check-dashboard-bundle.py dashboard/app-dist
+        run: python3 scripts/check-dashboard-bundle.py dashboard/app-dist
 
       # Skip-mode cargo builds require the expected digest of the validated
       # prebuilt bundle; the CLI build script refuses to skip without it.
@@ -183,39 +177,55 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          digest="$(python3 .release-automation/scripts/check-dashboard-bundle.py dashboard/app-dist --print-digest)"
+          digest="$(python3 scripts/check-dashboard-bundle.py dashboard/app-dist --print-digest)"
           echo "TRACEDECAY_DASHBOARD_BUNDLE_SHA256=${digest}" >> "$GITHUB_ENV"
 
       - name: Validate portable distribution harnesses
         run: |
-          python3 .release-automation/scripts/test-check-packaged-lsp-bridge.py
-          python3 .release-automation/scripts/test-build-mcpb.py
-          python3 .release-automation/scripts/test-resolve-installed-binary.py
-          python3 .release-automation/scripts/test-check-packaged-mcp-stdio.py
-          python3 .release-automation/scripts/test-check-distribution-feature-wiring.py
-          python3 .release-automation/scripts/test-resolve-release-source-profile.py
-          python3 .release-automation/scripts/test-package-release-archive.py
-          python3 .release-automation/scripts/test-plan-release-recovery.py
-          python3 .release-automation/scripts/test-check-release-artifacts.py
-          bash .release-automation/scripts/test-check-distribution-clean-source.sh
-          bash .release-automation/scripts/test-check-distribution-snapshot.sh
-          bash .release-automation/scripts/test-check-distribution-reuse.sh
+          python3 scripts/test-check-packaged-lsp-bridge.py
+          python3 scripts/test-build-mcpb.py
+          python3 scripts/test-resolve-installed-binary.py
+          python3 scripts/test-check-packaged-mcp-stdio.py
+          python3 scripts/test-check-distribution-feature-wiring.py
+          python3 scripts/test-resolve-release-source-profile.py
+          python3 scripts/test-package-release-archive.py
+          python3 scripts/test-plan-release-recovery.py
+          python3 scripts/test-check-release-artifacts.py
+          bash scripts/test-check-distribution-clean-source.sh
+          bash scripts/test-check-distribution-snapshot.sh
+          bash scripts/test-check-distribution-reuse.sh
 
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      # rust-toolchain.toml is the only compiler this job may install.
+      # Installing floating stable as well fragments rust-cache's environment
+      # key whenever stable moves (measured on Release Beta 35271070760).
+      - name: Resolve pinned toolchain
+        id: pin
+        shell: bash
+        run: |
+          python3 -c 'import pathlib, tomllib; print("toolchain=" + tomllib.loads(pathlib.Path("rust-toolchain.toml").read_text(encoding="utf-8"))["toolchain"]["channel"])' >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # 1.97.1 pin
         with:
+          toolchain: ${{ steps.pin.outputs.toolchain }}
           targets: ${{ matrix.target }}
 
+      # Restore before the first cargo invocation (`cargo tree` in the
+      # profile resolver). Tag runs can restore only same-ref or default-branch
+      # caches; keep this shared-key stable so a later master writer can seed
+      # them. cache-workspace-crates stays false so release blobs stay inside
+      # the 10 GB GitHub cache budget.
       - name: Cache Rust build
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: release-${{ matrix.target }}
+          cache-workspace-crates: "false"
           cache-on-failure: true
 
       - name: Resolve release source feature profile
         id: release-profile
         shell: bash
         run: |
-          python3 .release-automation/scripts/resolve-release-source-profile.py \
+          python3 scripts/resolve-release-source-profile.py \
             --source . \
             --target "${{ matrix.target }}" \
             --github-output "$GITHUB_OUTPUT"
@@ -283,13 +293,13 @@ jobs:
             binary="${binary}.exe"
           fi
           bundle="tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.mcpb"
-          python3 .release-automation/scripts/build-mcpb.py build \
+          python3 scripts/build-mcpb.py build \
             --binary "$binary" \
             --output "$bundle" \
             --version "${{ steps.version.outputs.version }}" \
             --platform "${{ matrix.name }}"
           test -s "$bundle"
-          python3 .release-automation/scripts/build-mcpb.py verify \
+          python3 scripts/build-mcpb.py verify \
             --bundle "$bundle" \
             --version "${{ steps.version.outputs.version }}" \
             --platform "${{ matrix.name }}"
@@ -325,7 +335,7 @@ jobs:
             binary="${binary}.exe"
             entry_name="${entry_name}.exe"
           fi
-          python3 .release-automation/scripts/package-release-archive.py \
+          python3 scripts/package-release-archive.py \
             --binary "$binary" \
             --output "tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }}" \
             --format "${{ matrix.archive }}" \

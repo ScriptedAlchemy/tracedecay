@@ -50,6 +50,14 @@ jobs:
           npm ci
           npm run build
 
+      - name: Export dashboard bundle digest for skip-mode builds
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest="$(python3 scripts/check-dashboard-bundle.py dashboard/app-dist --print-digest)"
+          echo "TRACEDECAY_SKIP_DASHBOARD_BUILD=1" >> "$GITHUB_ENV"
+          echo "TRACEDECAY_DASHBOARD_BUNDLE_SHA256=${digest}" >> "$GITHUB_ENV"
+
       - name: Validate portable distribution harnesses
         run: |
           python3 scripts/test-check-packaged-lsp-bridge.py
@@ -63,24 +71,31 @@ jobs:
           bash scripts/test-check-distribution-snapshot.sh
           bash scripts/test-check-distribution-reuse.sh
 
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      # rust-toolchain.toml is the only compiler this job may install. See
+      # release-beta.yml: floating stable fragments rust-cache's env key.
+      - name: Resolve pinned toolchain
+        id: pin
+        shell: bash
+        run: |
+          python3 -c 'import pathlib, tomllib; print("toolchain=" + tomllib.loads(pathlib.Path("rust-toolchain.toml").read_text(encoding="utf-8"))["toolchain"]["channel"])' >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # 1.97.1 pin
         with:
+          toolchain: ${{ steps.pin.outputs.toolchain }}
           targets: ${{ env.TARGET }}
 
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@acdba816b0980ba6b63f1109f89a046e15fc301a # nextest
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: release-beta-${{ env.TARGET }}
+          cache-workspace-crates: "false"
+          cache-on-failure: true
 
       - name: Install mold
         uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
         with:
           mold-version: 2.41.0
           make-default: true
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          shared-key: release-beta-${{ env.TARGET }}
-          cache-on-failure: true
 
       - name: Build release binary for packaging
         run: cargo build --package tracedecay-cli --bin tracedecay --release --target ${{ env.TARGET }} --no-default-features --features production --locked
