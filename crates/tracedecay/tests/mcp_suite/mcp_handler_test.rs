@@ -5,6 +5,8 @@
 
 mod admin_test;
 mod automation_runs_test;
+#[cfg(feature = "test-transport")]
+mod body_behavior_test;
 mod bounded_analysis_test;
 #[cfg(feature = "test-transport")]
 mod branch_sensitivity_test;
