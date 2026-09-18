@@ -682,6 +682,27 @@ fn proposal_arguments(
     })
 }
 
+fn work_tool_text(result: &Value) -> Value {
+    serde_json::from_str(extract_real_server_text(result))
+        .unwrap_or_else(|error| panic!("Work tool text is not JSON ({error}): {result}"))
+}
+
+/// The payload a host reads after a successful `tools/call`.
+///
+/// `isError` is absent on success; a problem rides in the text as
+/// `kind: problem`, not as a sibling of the MCP result.
+async fn generate_proposal_success(server: &tracedecay::mcp::McpServer, arguments: Value) -> Value {
+    let result =
+        handle_real_server_tool_call(server, "tracedecay_work_generate_proposal", arguments).await;
+    assert_ne!(result["isError"], json!(true), "{result}");
+    let envelope = work_tool_text(&result);
+    assert_eq!(envelope["kind"], "success", "{envelope}");
+    envelope
+        .pointer("/value/outcome/value/payload")
+        .cloned()
+        .unwrap_or_else(|| panic!("success envelope has no payload: {envelope}"))
+}
+
 /// `tracedecay_work_generate_proposal` is a read. A ready task with one
 /// configured route is allowed onto that route, without inventing a size or
 /// moving the graph. A task the graph does not contain is a typed refusal,
@@ -722,7 +743,17 @@ async fn generate_proposal_allows_a_ready_task_on_the_configured_route_and_refus
     )
     .await;
     assert_eq!(refused["isError"], true, "{refused}");
-    let mut problem = refused["problem"].clone();
+    let refused_text = work_tool_text(&refused);
+    assert_eq!(refused_text["kind"], "problem", "{refused_text}");
+    assert!(
+        refused_text["value"].get("binding_id").is_none(),
+        "a concealed refusal must not reveal the binding: {refused_text}"
+    );
+    assert!(
+        refused_text.pointer("/value/outcome").is_none(),
+        "a missing task must not return a proposal: {refused_text}"
+    );
+    let mut problem = refused_text["value"]["problem"].clone();
     let problem_fields = problem.as_object_mut().expect("refusal problem object");
     let request_id = problem_fields
         .remove("request_id")
@@ -750,26 +781,19 @@ async fn generate_proposal_allows_a_ready_task_on_the_configured_route_and_refus
             "legal_actions": [],
             "coverage": null
         }),
-        "{refused}"
+        "{refused_text}"
     );
     let request_id = request_id.as_str().expect("refusal request id");
-    assert!(!request_id.is_empty(), "{refused}");
-    assert_eq!(trace_id, json!(request_id), "{refused}");
-    let refused_text: Value = serde_json::from_str(extract_real_server_text(&refused))
-        .expect("missing-task refusal text is JSON");
+    assert!(!request_id.is_empty(), "{refused_text}");
+    assert_eq!(trace_id, json!(request_id), "{refused_text}");
     assert_eq!(
-        refused_text["problem"]["kind"], "not_found_or_not_authorized",
+        refused_text["value"]["request_id"],
+        json!(request_id),
         "{refused_text}"
     );
-    assert_eq!(
-        refused_text["problem"]["code"], "not_found_or_not_authorized",
-        "{refused_text}"
-    );
-    assert_eq!(refused_text["problem"]["retry"], "never", "{refused_text}");
 
-    let generated = call(
+    let generated = generate_proposal_success(
         &server,
-        "tracedecay_work_generate_proposal",
         proposal_arguments(
             &selection,
             "task.mcp-generate",
@@ -964,9 +988,8 @@ async fn generate_proposal_allows_a_ready_task_on_the_configured_route_and_refus
         "{generated}"
     );
 
-    let replayed = call(
+    let replayed = generate_proposal_success(
         &server,
-        "tracedecay_work_generate_proposal",
         proposal_arguments(
             &selection,
             "task.mcp-generate",
@@ -980,9 +1003,8 @@ async fn generate_proposal_allows_a_ready_task_on_the_configured_route_and_refus
         "the same request must return the same proposal"
     );
 
-    let other = call(
+    let other = generate_proposal_success(
         &server,
-        "tracedecay_work_generate_proposal",
         proposal_arguments(
             &selection,
             "task.mcp-generate",
