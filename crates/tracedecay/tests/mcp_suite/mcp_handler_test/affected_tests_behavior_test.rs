@@ -86,11 +86,10 @@ async fn call_tool(
     )
 }
 
-fn parse_tool_json(result: &ToolResult) -> Value {
+fn parse_tool_json(tool_name: &str, result: &ToolResult) -> Value {
     let text = extract_text(&result.value);
-    serde_json::from_str(text).unwrap_or_else(|error| {
-        panic!("tracedecay_run_affected_tests did not return JSON ({error}): {text}")
-    })
+    serde_json::from_str(text)
+        .unwrap_or_else(|error| panic!("{tool_name} did not return JSON ({error}): {text}"))
 }
 
 async fn run_affected(fixture: &ProductionCompositionFixture, arguments: Value) -> Value {
@@ -100,7 +99,10 @@ async fn run_affected(fixture: &ProductionCompositionFixture, arguments: Value) 
             .entry("format".to_owned())
             .or_insert_with(|| json!("json"));
     }
-    parse_tool_json(&call_tool(fixture, "tracedecay_run_affected_tests", arguments).await)
+    parse_tool_json(
+        "tracedecay_run_affected_tests",
+        &call_tool(fixture, "tracedecay_run_affected_tests", arguments).await,
+    )
 }
 
 async fn symbol_id(fixture: &ProductionCompositionFixture, name: &str, file: &str) -> String {
@@ -110,7 +112,7 @@ async fn symbol_id(fixture: &ProductionCompositionFixture, name: &str, file: &st
         json!({"name": name, "limit": 20, "format": "json"}),
     )
     .await;
-    let payload = parse_tool_json(&result);
+    let payload = parse_tool_json("tracedecay_find_exact_symbol", &result);
     payload["matches"]
         .as_array()
         .and_then(|matches| {
@@ -370,6 +372,12 @@ async fn run_affected_tests_reports_the_cargo_result_for_the_changed_manifest() 
             "covers_source_ids": [kept_id],
         }]),
         "truncated payload: {truncated}"
+    );
+    assert_stdout_line(&truncated, &format!("test {KEPT_TEST} ... ok"));
+    let truncated_stdout = truncated["stdout_tail"].as_str().unwrap_or("");
+    assert!(
+        !truncated_stdout.contains("zeta must not run"),
+        "max_tests must not execute the omitted test:\n{truncated_stdout}"
     );
 
     fixture.harness.shutdown().await;
