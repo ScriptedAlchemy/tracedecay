@@ -285,19 +285,16 @@ async fn publish_advisory_cycle(
 ) -> Value {
     let compiler_output = compiler_warning(project);
     let deadline = Instant::now() + Duration::from_secs(90);
-    let mut diagnosed = false;
     loop {
-        if !diagnosed {
-            match publish_compiler_warning(harness, project, &compiler_output).await {
-                CompilerPublication::Published => diagnosed = true,
-                CompilerPublication::StillSettling(detail) => {
-                    assert!(
-                        Instant::now() < deadline,
-                        "compiler diagnostics stayed unpublished: {detail}"
-                    );
-                    tokio::time::sleep(Duration::from_millis(250)).await;
-                    continue;
-                }
+        match publish_compiler_warning(harness, project, &compiler_output).await {
+            CompilerPublication::Published => {}
+            CompilerPublication::StillSettling(detail) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "compiler diagnostics stayed unpublished: {detail}"
+                );
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                continue;
             }
         }
 
@@ -345,7 +342,6 @@ async fn publish_advisory_cycle(
         );
         // The next attempt republishes against the generation the cycle is
         // about to read, so a generation move cannot strand the warning.
-        diagnosed = false;
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
