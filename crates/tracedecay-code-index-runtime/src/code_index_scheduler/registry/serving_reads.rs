@@ -277,6 +277,7 @@ impl CodeIndexSchedulerRegistryV1 {
             generation_recovery,
             build_progress,
             hints,
+            pending_wake,
             source_freshness,
             graph_activation_enabled,
         ) = {
@@ -294,6 +295,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.generation_recovery),
                 Arc::clone(&worktree.build_progress),
                 Arc::clone(&worktree.hints),
+                Arc::clone(&worktree.pending_wake),
                 worktree.source_freshness.clone(),
                 worktree.graph_activation.policy().is_enabled(),
             )
@@ -316,12 +318,13 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 progress
             });
-            // `Verifying` / `Refreshing` name an executing source proof or
-            // rebuild pass. A bare pending wake is only a scheduled follow-up;
-            // counting it here flipped Fresh→Verifying between consecutive
-            // status reads after a settled seat (registry publication feeds).
-            // The pass guard (`reconcile_in_progress`) is the durable signal.
-            let refresh_in_flight = reconcile_in_progress.load(Ordering::Acquire) != 0;
+            let refresh_in_flight = reconcile_in_progress.load(Ordering::Acquire) != 0
+                || pending_wake
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .micros
+                    != 0;
             let source_change_pending = source_freshness.source_change_pending();
             let parked = convergence_park
                 .read()
