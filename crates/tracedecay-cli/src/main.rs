@@ -18,12 +18,12 @@ static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocato
 // Opt-in allocator features (see Cargo.toml). Exactly one global allocator
 // may exist per binary, so overlapping selections resolve by fixed precedence
 // rather than a compile error: hotpath-alloc's counting allocator wins in
-// measurement builds, then jemalloc, then mimalloc. The default build keeps
-// the system allocator (glibc malloc on Linux). The installed service unit
-// must not cap glibc's arenas: `MALLOC_ARENA_MAX=2` once did, to bound
+// measurement builds, then jemalloc, then mimalloc. `production` selects
+// mimalloc (see Cargo.toml for the measurements); only a build that opts out
+// of it keeps the system allocator, and the installed service unit must not
+// cap glibc's arenas either way: `MALLOC_ARENA_MAX=2` once did, to bound
 // retained memory, and put 60% of a 20-worker daemon's CPU into two arena
-// locks (perf on beta.41: every wait was `__lll_lock_wait_private` under
-// ordinary Vec/String growth) while RSS still reached 15 GB.
+// locks while RSS still reached 15 GB.
 #[cfg(all(feature = "alloc-jemalloc", not(feature = "hotpath-alloc")))]
 #[global_allocator]
 static JEMALLOC_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
