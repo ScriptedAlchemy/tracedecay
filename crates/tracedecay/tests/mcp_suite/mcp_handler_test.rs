@@ -34,6 +34,8 @@ mod skills_automation_test;
 mod status_runtime_test;
 mod unsafe_patterns_test;
 #[cfg(feature = "test-transport")]
+mod work_resume_attempts_test;
+#[cfg(feature = "test-transport")]
 mod work_test;
 
 // Shared lock used by sibling transport suites.
