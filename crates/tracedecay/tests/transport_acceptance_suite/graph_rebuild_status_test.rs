@@ -25,6 +25,14 @@ use tracedecay_mcp::JsonRpcResponse;
 
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(90);
 
+/// Pause between status polls while the daemon reconciles.
+///
+/// Yielding instead spun the awaiting task against the very worker it waits
+/// for: the loop issued roughly 290 `tracedecay_status` calls a second, and on
+/// a four-core runner that is a whole core spent recomputing freshness rather
+/// than sealing the generation under it.
+const POLL_INTERVAL: Duration = Duration::from_millis(25);
+
 fn git(project: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(["-c", "core.hooksPath=.git/no-hooks"])
@@ -87,12 +95,52 @@ async fn tool(
     name: &str,
     arguments: Value,
 ) -> Value {
-    tool_payload(
+    let payload = tool_payload(
         &harness
             .call_tool(project, name, arguments)
             .await
             .unwrap_or_else(|error| panic!("{name} failed: {error}")),
-    )
+    );
+    let Some(handle) = payload["truncated"]
+        .as_bool()
+        .unwrap_or(false)
+        .then(|| payload["handle"].as_str())
+        .flatten()
+    else {
+        return payload;
+    };
+    // A response over the budget answers with a preview plus a retrieve
+    // handle, not with the payload. A generation-scale search page crosses
+    // that budget on its cursor and candidate provenance alone, so shrinking
+    // the page cannot keep it under; reassemble the stored response exactly as
+    // an agent does before reading the top-level fields.
+    let mut content = String::new();
+    let mut offset = 0_u64;
+    loop {
+        let page = tool_payload(
+            &harness
+                .call_tool(
+                    project,
+                    "tracedecay_retrieve",
+                    json!({ "handle": handle, "offset": offset, "format": "json" }),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("tracedecay_retrieve failed: {error}")),
+        );
+        content.push_str(
+            page["content"]
+                .as_str()
+                .unwrap_or_else(|| panic!("retrieved page without content: {page}")),
+        );
+        if page["has_more"] != Value::Bool(true) {
+            break;
+        }
+        offset = page["next_offset"]
+            .as_u64()
+            .expect("retrieved page next_offset");
+    }
+    serde_json::from_str(&content)
+        .unwrap_or_else(|error| panic!("{name} retrieved invalid JSON: {error}; text={content}"))
 }
 
 async fn status(harness: &ProductionProjectCompositionHarnessV1, project: &Path) -> Value {
@@ -116,9 +164,10 @@ async fn search(
     project: &Path,
     query: &str,
 ) -> Value {
-    // Keep the page tiny: a generation-scale refresh batch otherwise returns
-    // multi-dozen-KiB candidate bodies that MCP truncates into a handle, and
-    // the wait helpers never see top-level `results` / `code_generation`.
+    // Keep the page tiny so the common answer fits the response budget; a
+    // page that still crosses it is reassembled through its retrieve handle in
+    // `tool`, so the wait helpers always see top-level `results` and
+    // `code_generation`.
     tool(
         harness,
         project,
@@ -168,7 +217,7 @@ async fn wait_for_current_generation(
                     return current_generation;
                 }
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(POLL_INTERVAL).await;
         }
     })
     .await
@@ -219,17 +268,29 @@ async fn wait_for_background_refresh(
                 }
                 return;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(POLL_INTERVAL).await;
         }
     })
     .await
     .unwrap_or_else(|_| panic!("reopen omitted background-refresh status: {last_status}"));
 }
 
+/// Files in the batch whose arrival the background refresh has to work through.
+///
+/// The batch only has to keep one refresh observable across a few status polls.
+/// At 768 files it instead indexed 98,304 symbols into 455 million lexical
+/// units and 645 MB on disk, which on a four-core runner takes ~61s to commit
+/// and then pushes the reopen past the composition harness's own 20s publish
+/// gate: no `RECEIPT_TIMEOUT` can rescue that, the journey simply cannot finish.
+/// 96 files still take seconds, so `partial_refresh_in_progress` is sampled
+/// many times over at [`POLL_INTERVAL`], and every later open stays inside its
+/// gate.
+const REFRESH_BATCH_FILES: u32 = 96;
+
 fn install_background_batch(isolation_root: &Path, project: &Path) {
     let staging = isolation_root.join("refresh-batch-staging");
     fs::create_dir_all(&staging).expect("background batch staging directory");
-    for file_index in 0..768_u32 {
+    for file_index in 0..REFRESH_BATCH_FILES {
         let mut source = String::new();
         for symbol_index in 0..128_u32 {
             writeln!(
