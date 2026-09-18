@@ -21330,6 +21330,11 @@
         {
           "additionalProperties": false,
           "properties": {
+            "maximum_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
             "maximum_tokens": {
               "format": "uint32",
               "minimum": 0,
@@ -21342,7 +21347,8 @@
           },
           "required": [
             "status",
-            "maximum_tokens"
+            "maximum_tokens",
+            "maximum_bytes"
           ],
           "type": "object"
         },
