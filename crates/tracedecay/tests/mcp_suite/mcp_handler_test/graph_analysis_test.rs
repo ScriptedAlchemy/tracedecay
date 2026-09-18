@@ -3209,13 +3209,13 @@ async fn pr_context_reports_the_pinned_feature_summary() {
             {"path": "src/lib.rs", "status": "modified"},
             {"path": "tests/greet.rs", "status": "added"}
         ],
-        "commits": [{"hash": "bd4bc11", "subject": "say hello"}],
+        "commits": [{"hash": "bd4bc112c3374fbe23cb4ae2185cbf7945cb0e82", "subject": "say hello"}],
         "coverage_status": "complete",
         "error": null,
         "files_changed": 2,
         "head": "feature",
         "head_oid": "bd4bc112c3374fbe23cb4ae2185cbf7945cb0e82",
-        "impacted_modules": ["src"],
+        "impacted_modules": [],
         "merge_base": "bece36f8dada44933bc1bfa4c42faaccf77dcaab",
         "message": null,
         "next_cursor": null,
@@ -3346,7 +3346,20 @@ async fn pr_context_names_both_refs_when_a_branch_has_diverged() {
     );
     git_with_pinned_dates(project, &["switch", "main"], None);
 
-    let (host, _env) = init_test_project(project).await;
+    // The refusal is decided by the git comparison, before graph enrichment.
+    // Waiting for a code-graph publication never completes for this text-only
+    // history, and a caller does not wait for one before asking.
+    let isolation_root = project
+        .parent()
+        .expect("graph-analysis project must have an isolation parent");
+    let harness =
+        ProductionProjectCompositionHarnessV1::open(isolation_root, [project.to_path_buf()])
+            .await
+            .expect("production graph-analysis composition");
+    let host = MountedProductionProject {
+        harness,
+        project_root: project.to_path_buf(),
+    };
     let output = pr_context_json(
         &host,
         json!({"format": "json", "base_ref": "main", "head_ref": "HEAD"}),
