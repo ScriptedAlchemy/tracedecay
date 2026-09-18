@@ -1,15 +1,23 @@
-//! Observable behavior of `tracedecay_multi_str_replace` through the production
-//! MCP source-edit server. Each case sends the tool the arguments a caller
-//! sends and checks the text the caller reads plus the bytes left on disk.
+//! Observable behavior of `tracedecay_multi_str_replace` as an MCP client sees it.
+//!
+//! Each case sends `tools/call` through the production server connection and
+//! checks the JSON-RPC text the client reads plus the bytes left on disk.
 
 use crate::support::{
     ProductionSourceEditFixture, TestTempDir, close_production_source_edit_fixture,
-    expect_tool_error, extract_first_json_content, handle_production_source_edit_tool_call,
+    extract_first_json_content, handle_real_server_tool_call_raw,
     init_production_source_edit_project, test_temp_dir,
 };
 use serde_json::{Value, json};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
+use tracedecay::mcp::McpServer;
+
+const TOOL: &str = "tracedecay_multi_str_replace";
+const CLI_FALLBACK: &str = "This tool is also available from the shell: `tracedecay tool multi_str_replace ...` \
+(`tracedecay tool multi_str_replace --help` for parameters). If MCP calls keep failing or timing out, fall \
+back to that CLI instead of querying .tracedecay databases directly.";
 
 const STALE_STATE: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -33,30 +41,52 @@ fn read_file(dir: &TestTempDir, relative: &str) -> String {
     fs::read_to_string(project_file(dir, relative)).unwrap()
 }
 
-async fn call_tool(fixture: &ProductionSourceEditFixture, args: Value) -> Value {
-    let result = handle_production_source_edit_tool_call(
-        fixture,
-        "tracedecay_multi_str_replace",
-        args,
-        None,
-        None,
-    )
-    .await
-    .unwrap_or_else(|error| panic!("tracedecay_multi_str_replace returned {error}"));
-    extract_first_json_content(&result.value)
+fn server(fixture: &ProductionSourceEditFixture) -> Arc<McpServer> {
+    fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("mounted source-edit server")
 }
 
-async fn refuse_tool(fixture: &ProductionSourceEditFixture, args: Value) -> String {
-    expect_tool_error(
-        handle_production_source_edit_tool_call(
-            fixture,
-            "tracedecay_multi_str_replace",
-            args,
-            None,
-            None,
-        )
-        .await,
-    )
+fn json_arguments(mut args: Value) -> Value {
+    args.as_object_mut()
+        .expect("tool arguments are an object")
+        .entry("format".to_owned())
+        .or_insert_with(|| json!("json"));
+    args
+}
+
+async fn tools_call(server: &McpServer, args: Value) -> Value {
+    let response = handle_real_server_tool_call_raw(server, TOOL, json_arguments(args)).await;
+    assert_eq!(response["jsonrpc"], "2.0", "{response}");
+    response
+}
+
+async fn call_tool(fixture: &ProductionSourceEditFixture, args: Value) -> Value {
+    let response = tools_call(&server(fixture), args).await;
+    assert!(
+        response["error"].is_null(),
+        "tools/call returned a protocol error: {response}"
+    );
+    let result = &response["result"];
+    let payload = extract_first_json_content(result);
+    let failed = payload.get("success").and_then(Value::as_bool) == Some(false)
+        || payload.get("failed").and_then(Value::as_bool) == Some(true);
+    if failed {
+        assert_eq!(result["isError"], true, "{response}");
+    } else {
+        assert_ne!(result["isError"], true, "{response}");
+    }
+    payload
+}
+
+async fn protocol_error(fixture: &ProductionSourceEditFixture, args: Value) -> Value {
+    let response = tools_call(&server(fixture), args).await;
+    assert!(
+        response["result"].is_null(),
+        "a protocol refusal must not return a tool result: {response}"
+    );
+    response["error"].clone()
 }
 
 #[tokio::test]
@@ -217,7 +247,7 @@ async fn preview_apply_and_replay_replace_each_original_span() {
     );
     assert_eq!(read_file(&dir, "src/main.rs"), applied);
 
-    let conflict = refuse_tool(
+    let conflict = protocol_error(
         &fixture,
         json!({
             "path": "src/main.rs",
@@ -227,9 +257,21 @@ async fn preview_apply_and_replay_replace_each_original_span() {
         }),
     )
     .await;
+    assert_eq!(conflict["code"], -32603, "{conflict}");
     assert_eq!(
-        conflict,
-        "project route error (source_edit.idempotency_conflict): source edit idempotency key conflicts with a prior input"
+        conflict["message"],
+        "tool project route failed: reason_code=source_edit.idempotency_conflict retryable=true: source edit idempotency key conflicts with a prior input",
+        "{conflict}"
+    );
+    assert_eq!(
+        conflict["data"],
+        json!({
+            "tool": TOOL,
+            "reason_code": "source_edit.idempotency_conflict",
+            "retryable": true,
+            "detail": "source edit idempotency key conflicts with a prior input"
+        }),
+        "{conflict}"
     );
     assert_eq!(read_file(&dir, "src/main.rs"), applied);
 
@@ -378,7 +420,7 @@ async fn refused_batches_leave_every_file_byte_unchanged() {
     assert_eq!(fs::read_to_string(&outside).unwrap(), "secret\n");
     assert_eq!(read_file(&dir, "src/untouched.rs"), untouched);
 
-    let malformed = refuse_tool(
+    let malformed = protocol_error(
         &fixture,
         json!({
             "path": "src/untouched.rs",
@@ -387,13 +429,23 @@ async fn refused_batches_leave_every_file_byte_unchanged() {
         }),
     )
     .await;
+    assert_eq!(malformed["code"], -32603, "{malformed}");
     assert_eq!(
-        malformed,
-        "config error: each replacement must be an array of exactly 2 strings"
+        malformed["message"],
+        "tool execution failed: config error: each replacement must be an array of exactly 2 strings",
+        "{malformed}"
+    );
+    assert_eq!(
+        malformed["data"],
+        json!({
+            "tool": TOOL,
+            "cli_fallback": CLI_FALLBACK
+        }),
+        "{malformed}"
     );
     assert_eq!(read_file(&dir, "src/untouched.rs"), untouched);
 
-    let missing_path = refuse_tool(
+    let missing_path = protocol_error(
         &fixture,
         json!({
             "replacements": [["leave me", "changed"]],
@@ -401,30 +453,44 @@ async fn refused_batches_leave_every_file_byte_unchanged() {
         }),
     )
     .await;
+    assert_eq!(missing_path["code"], -32602, "{missing_path}");
     assert_eq!(
-        missing_path,
-        "config error: missing required parameter: path"
+        missing_path["message"], "missing required parameter: path",
+        "{missing_path}"
+    );
+    assert_eq!(
+        missing_path["data"],
+        json!({
+            "tool": TOOL,
+            "reason_code": "missing_required_parameter",
+            "retryable": false,
+            "detail": "missing required parameter: path"
+        }),
+        "{missing_path}"
     );
     assert_eq!(read_file(&dir, "src/untouched.rs"), untouched);
 
-    let server = fixture
-        .harness
-        .server(dir.path().join("project"))
-        .expect("mounted source-edit server");
-    let missing_apply_keys = expect_tool_error(
-        server
-            .call_tool_for_test(
-                "tracedecay_multi_str_replace",
-                json!({
-                    "path": "src/untouched.rs",
-                    "replacements": [["leave me", "changed"]]
-                }),
-            )
-            .await,
+    let missing_apply_keys = protocol_error(
+        &fixture,
+        json!({
+            "path": "src/untouched.rs",
+            "replacements": [["leave me", "changed"]]
+        }),
+    )
+    .await;
+    assert_eq!(missing_apply_keys["code"], -32603, "{missing_apply_keys}");
+    assert_eq!(
+        missing_apply_keys["message"],
+        "tool execution failed: config error: source edit apply requires a fresh idempotency_key and the expected_state returned by a preview",
+        "{missing_apply_keys}"
     );
     assert_eq!(
-        missing_apply_keys,
-        "config error: source edit apply requires a fresh idempotency_key and the expected_state returned by a preview"
+        missing_apply_keys["data"],
+        json!({
+            "tool": TOOL,
+            "cli_fallback": CLI_FALLBACK
+        }),
+        "{missing_apply_keys}"
     );
     assert_eq!(read_file(&dir, "src/untouched.rs"), untouched);
 
