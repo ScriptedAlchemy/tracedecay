@@ -41,6 +41,8 @@ mod test_map_test;
 mod unsafe_patterns_test;
 #[cfg(feature = "test-transport")]
 mod work_test;
+#[cfg(feature = "test-transport")]
+mod workflow_get_definition_test;
 
 // Shared lock used by sibling transport suites.
 #[cfg(feature = "test-transport")]
