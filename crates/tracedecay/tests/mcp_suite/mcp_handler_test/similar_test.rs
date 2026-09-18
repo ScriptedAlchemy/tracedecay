@@ -29,7 +29,7 @@ const RENAME_COPY_PATHS: [&str; 4] = [
 
 #[tokio::test]
 async fn tracedecay_similar_reports_verified_copy_paths_and_typed_denials() {
-    let mut fixture = production_composition_fixture_with_sources(|project| {
+    let fixture = production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
         fs::write(
             project.join("src/source.rs"),
@@ -271,6 +271,7 @@ async fn tracedecay_similar_reports_verified_copy_paths_and_typed_denials() {
     .await;
     assert_similar_denial(
         &unauthorized,
+        "tool project route failed: reason_code=similar-source-not-found retryable=false: the selected source is outside the authorized repository scope",
         "the selected source is outside the authorized repository scope",
     );
 
@@ -292,6 +293,7 @@ async fn tracedecay_similar_reports_verified_copy_paths_and_typed_denials() {
     .await;
     assert_similar_denial(
         &missing,
+        "tool project route failed: reason_code=similar-source-not-found retryable=false: the selected source has no body in the verified clone index",
         "the selected source has no body in the verified clone index",
     );
 
@@ -355,9 +357,9 @@ fn family_paths(family: &Value) -> Vec<&str> {
     paths
 }
 
-fn assert_similar_denial(response: &Value, detail: &str) {
+fn assert_similar_denial(response: &Value, message: &str, detail: &str) {
     assert_eq!(response["error"]["code"], -32602, "{response}");
-    assert_eq!(response["error"]["message"], detail, "{response}");
+    assert_eq!(response["error"]["message"], message, "{response}");
     assert_eq!(response["error"]["data"]["tool"], "tracedecay_similar");
     assert_eq!(
         response["error"]["data"]["reason_code"],
