@@ -49,6 +49,9 @@ jobs:
   #   both run on master after the merge.
   # * `run-hosts`: stock Hermes / Claude Code / OpenCode integrations.
   #   Pushes, or a pull request labelled `ci-hosts`.
+  # * `run-perf`: hotpath parity (two extra workspace builds). Pushes, or a
+  #   pull request labelled `perf`, the same label that opts into the
+  #   hotpath profile/coverage workflows.
   scope-gate:
     name: Scope gate
     runs-on: ubuntu-latest
@@ -60,6 +63,7 @@ jobs:
       run-heavy: ${{ steps.decide.outputs.run-heavy }}
       run-os: ${{ steps.decide.outputs.run-os }}
       run-hosts: ${{ steps.decide.outputs.run-hosts }}
+      run-perf: ${{ steps.decide.outputs.run-perf }}
       linux-partitions: ${{ steps.linux-partitions.outputs.matrix }}
       macos-groups: ${{ steps.macos-groups.outputs.matrix }}
     steps:
@@ -72,20 +76,22 @@ jobs:
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
         run: |
           has_label() { [[ " $LABELS " == *" $1 "* ]]; }
-          heavy=false; os=false; hosts=false
+          heavy=false; os=false; hosts=false; perf=false
           if [[ $EVENT != pull_request ]]; then
-            heavy=true; os=true; hosts=true
+            heavy=true; os=true; hosts=true; perf=true
           elif [[ $TRUSTED == true ]] && { [[ $DRAFT != true ]] || has_label ci-full; }; then
             heavy=true
             has_label ci-os && os=true
             has_label ci-hosts && hosts=true
+            has_label perf && perf=true
           fi
           {
             echo "run-heavy=$heavy"
             echo "run-os=$os"
             echo "run-hosts=$hosts"
+            echo "run-perf=$perf"
           } >>"$GITHUB_OUTPUT"
-          echo "run-heavy=$heavy run-os=$os run-hosts=$hosts (event=$EVENT draft=${DRAFT:-n/a} labels='$LABELS')"
+          echo "run-heavy=$heavy run-os=$os run-hosts=$hosts run-perf=$perf (event=$EVENT draft=${DRAFT:-n/a} labels='$LABELS')"
 
       # The Linux and macOS test matrices come from the same manifest the
       # partition jobs select their targets from, so a partition cannot exist
@@ -176,6 +182,17 @@ jobs:
           TRACEDECAY_DOGFOOD_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
           TRACEDECAY_DOGFOOD_HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
 
+      # The MCP conformance smoke used to build a second CLI on an x64 runner
+      # in plugin-validation just to point the inspector at it. The binary
+      # this job already holds is the same code.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run MCP conformance smoke
+        run: scripts/mcp-conformance-smoke.sh
+        env:
+          TRACEDECAY_BIN: target/debug/tracedecay
+
   # One dev-profile `tracedecay` binary for every job that only exercises the
   # built CLI (`pr-dogfood`, Hermes, Claude Code, OpenCode). Each of those
   # jobs used to compile the whole workspace itself behind its own cache key,
@@ -233,10 +250,14 @@ jobs:
         working-directory: benchmark_data/runtime
         run: python3 -m unittest discover -s tests -p 'test_*.py'
 
-  commit-messages:
-    name: Commit Messages
+  # The cheap repository gates in one job: commit lint, cache lineage, the
+  # release guards, and rustfmt. Each used to hold its own ubuntu-latest
+  # runner for a couple of minutes of work; on 20 free slots that is three
+  # queue entries per push doing what one does.
+  gates:
+    name: Repository gates
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:
@@ -261,6 +282,29 @@ jobs:
           python3 scripts/test-prune-superseded-actions-caches.py
           python3 scripts/test-rust-cache-lineage.py
           python3 scripts/check-rust-cache-lineage.py
+
+      # Release guards: drift, safety, installer, PR integrity, bundle check.
+      # Pull requests only; the release PR itself is exempt because it is
+      # the one change allowed to move the version authorities.
+      - name: Check the release guards
+        if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-please--')
+        run: |
+          bash tests/release_drift_check_test.sh
+          bash tests/release_safety_test.sh
+          bash tests/install_script_test.sh
+          bash tests/release_pr_integrity_test.sh
+          bash tests/dashboard_bundle_check_test.sh
+
+      # Judge formatting with the toolchain `rust-toolchain.toml` pins, not
+      # whatever `stable` is on the runner: rustfmt's output changes between
+      # releases (1.98.1 breaks a chain 1.97.1 keeps inline), and
+      # `dtolnay/rust-toolchain@stable` exports `RUSTUP_TOOLCHAIN`, which
+      # overrides the file. Installing through rustup with no override keeps
+      # the pin in one place.
+      - name: Install the repository's pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
       - name: Test and check dev skill host copies
         run: |
@@ -293,80 +337,6 @@ jobs:
           fi
           node scripts/lint-commit-range.mjs --repository "$PWD" "$base_sha" "$HEAD_SHA"
 
-  release-version-drift:
-    name: Release Version Drift
-    if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-please--')
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - name: Test release version drift guard
-        run: bash tests/release_drift_check_test.sh
-
-      # The workflow-contract pin scripts were replaced by the safety-guard
-      # assertions (f3b065545) and the dogfood surface was retired (b73a8a396);
-      # this job keeps the guards that protect the shipped release flow.
-      - name: Check release safety guards
-        run: bash tests/release_safety_test.sh
-
-      - name: Test GitHub release installer
-        run: bash tests/install_script_test.sh
-
-      # These two sat unwired: they are the tests for
-      # `scripts/check-release-pr-integrity.sh` and
-      # `scripts/check-dashboard-bundle.py`, both of which CI does run. So the
-      # guards were enforced while the tests proving the guards work were not,
-      # which is the shape that let a `test-transport` target rot until it
-      # stopped compiling. Three of the five `tests/*_test.sh` gates were wired;
-      # these are the other two.
-      - name: Test release PR integrity guard
-        run: bash tests/release_pr_integrity_test.sh
-
-      - name: Test dashboard bundle check
-        run: bash tests/dashboard_bundle_check_test.sh
-
-      - name: Check release version drift
-        run: scripts/check-release-drift.sh
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-
-  # macOS compiles and runs the suite as groups of the Linux partitions
-  # (`macos_groups` in .github/linux-test-partitions.json), one hosted 3-vCPU
-  # `macos-14` job per group, so the lane's wall time is the slowest group
-  # instead of the whole workspace. The single job this replaces built
-  # `--workspace --bins --tests` in 80.2 min and ran the suite in 19.9 min
-  # (run 34303181887; run 34309279328 built for 74.9 min and was cancelled in
-  # its tests at 85 min), about 80 min after every other lane had reported,
-  # so it was the critical path of every pull request run. rust-cache carries
-  # the dependency graph only; the workspace crates compile fresh every run,
-  # and on three cores with ld64 that build is the whole cost.
-  #
-  # A group runs each of its partitions in turn against one target directory
-  # with the selection `linux-test-partition` resolves for it, so
-  # `root-sessions` and `root-journeys`, which select the same packages with
-  # the same feature, compile the chain beneath the root crate once and the
-  # second adds only its own suites. The grouping balances the warm Linux
-  # measurements (run 34309279328, compile + tests in minutes): root-lib
-  # 14.7 + 7.5 alone, since its root chain, library test target and 1675
-  # tests are the floor no split lowers; root-sessions 15.3 + 3.1 with
-  # root-journeys, which adds 2.7 + 2.7 on the shared resolution; runtime
-  # 15.6 + 2.4 with core-storage 10.4 + 1.9; core-contracts 13.9 + 0.6 with
-  # root-dashboard-api 12.7 + 0.8. Every pairing that puts a second partition
-  # beside a root group is heavier than the heaviest of these, and no two of
-  # the other four share a feature resolution, so grouping them differently
-  # saves no compile. At the 3-vCPU floor (compile × 4/3, tests as measured)
-  # the groups come to 28, 31, 40 and 38 min; at the 2× the one macOS
-  # measurement showed (the chain beneath the root crate compiled in 19.0
-  # min against 9.3 on Arm in the runs above) to 38, 43, 57 and 56. The
-  # budgets in the manifest take the 2×, plus the cold-dependency allowance
-  # and headroom the Linux budgets carry, until a hosted run measures the
-  # groups. The account admits five concurrent macOS jobs; a run takes at
-  # most four (`MACOS_GROUP_CAP`) so another run's macOS jobs can start.
   macos-test-partition:
     name: Test macOS ${{ matrix.group }}
     needs: scope-gate
@@ -744,7 +714,7 @@ jobs:
   hotpath-parity:
     name: Hotpath parity
     needs: scope-gate
-    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    if: ${{ needs.scope-gate.outputs.run-perf == 'true' }}
     runs-on: ubuntu-24.04-arm
     # 19.5 min for the two builds (hosted, above) + ~1.5 cold registry the
     # chain does not hide + ~1.5 setup + 0.5 test target + 0.5 run ≈ 24 min,
@@ -806,7 +776,7 @@ jobs:
             echo "Linux partition result: ${{ needs.linux-test-partition.result }}"
             exit 1
           fi
-          if [ "${{ needs.hotpath-parity.result }}" != "success" ]; then
+          if [ "${{ needs.hotpath-parity.result }}" != "success" ] && [ "${{ needs.hotpath-parity.result }}" != "skipped" ]; then
             echo "Hotpath parity result: ${{ needs.hotpath-parity.result }}"
             exit 1
           fi
@@ -1169,27 +1139,6 @@ jobs:
         run: |
           cargo check --workspace --all-targets --features test-transport --locked
           cargo check --workspace --all-targets --features hotpath,hotpath-mcp --locked
-
-  fmt:
-    name: Format
-    needs: scope-gate
-    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      # Judge formatting with the toolchain `rust-toolchain.toml` pins, not
-      # whatever `stable` is on the runner. rustfmt's output changes between
-      # releases. 1.98.1 breaks a `.unwrap_or_else(|err| { ... })` chain that
-      # 1.97.1 keeps inline, so a `stable` rustfmt rejects a tree the pinned
-      # rustfmt developers run formats exactly, and every contributor sees a
-      # red lane they cannot reproduce. `dtolnay/rust-toolchain@stable` also
-      # exports `RUSTUP_TOOLCHAIN`, which overrides the toolchain file rather
-      # than deferring to it. Installing through rustup with no override keeps
-      # the pin in one place: the toolchain file, components included.
-      - name: Install the repository's pinned toolchain
-        run: rustup show active-toolchain || rustup toolchain install
-      - run: cargo fmt --all -- --check
 
   dashboard:
     name: Dashboard

@@ -257,16 +257,18 @@ integration branch waits behind, so a run spends only what its state earns:
 
 | State | Runs |
 |---|---|
-| Draft | Light gates only: scope gate, commit lint, release drift, benchmark-harness self-tests. |
-| Ready for review (or labelled `ci-full`) | The Linux lane: build, clippy, fmt, feature gates, dashboard, Linux test partitions, hotpath parity, PR dogfood. |
+| Draft | Light gates only: scope gate, repository gates (commit lint, release guards, rustfmt), benchmark-harness self-tests. |
+| Ready for review (or labelled `ci-full`) | The Linux lane: build, clippy, feature gates, dashboard, Linux test partitions, PR dogfood with the MCP conformance smoke. |
 | Labelled `ci-os` | Adds the macOS and Windows matrices. |
 | Labelled `ci-hosts` | Adds the stock Hermes / Claude Code / OpenCode integrations. |
-| Labelled `perf` | Runs the hotpath profile, coverage, and runtime-core workflows. |
+| Labelled `perf` | Adds hotpath parity and runs the hotpath profile, coverage, and runtime-core workflows. |
 | Push to `master` | Everything. |
 
 Marking a PR ready or adding a label starts the run; a newer push cancels
 the one in flight, on every branch including `master`. Closing or merging a
-PR cancels its remaining runs and drops its Actions caches.
+PR cancels its remaining runs and drops its Actions caches. Nothing runs on a
+timer: the packaged-crate distribution battery and the Hawk lint are
+`workflow_dispatch` only.
 
 ## Reporting Issues
 

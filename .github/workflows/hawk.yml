@@ -9,10 +9,9 @@
 # Unarchive retrigger: keep Hawk optional until -D warnings is clean.
 name: Hawk
 
+# On demand only; see distribution-acceptance.yml for why nothing runs on a
+# timer here.
 on:
-  schedule:
-    # Weekly Monday 06:00 UTC. Visibility only; not a merge gate.
-    - cron: "0 6 * * 1"
   workflow_dispatch:
 
 permissions:

@@ -98,10 +98,10 @@ or a release-PR path policy is not acceptance.
 
 `scripts/check-distribution-acceptance.sh` proves the unpublished crate
 graph (`cargo package`, extracted-crate rebuilds, nextest, MCP inspector).
-That is not required to stamp the binary assets. The battery runs daily on
-one free `ubuntu-latest` runner
-(`.github/workflows/distribution-acceptance.yml`) and on
-`workflow_dispatch`. It reuses the just-built production binary
+That is not required to stamp the binary assets. The battery runs on demand
+only, on one free `ubuntu-latest` runner:
+`gh workflow run distribution-acceptance.yml --ref master`. Nothing in this
+repository runs on a timer. It reuses the just-built production binary
 (`--reuse-release-binary`) so it does not compile a second workspace into
 implicit `target/release`.
 
