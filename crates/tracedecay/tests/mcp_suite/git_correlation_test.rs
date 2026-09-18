@@ -677,13 +677,13 @@ async fn sessions_for_names_the_sessions_that_touched_the_git_ref() {
     assert_schema_rejection(
         &server,
         json!({ "value": "main", "format": "json" }),
-        "application surface request does not match its reviewed schema: missing field `git_ref`",
+        "missing field `git_ref`",
     )
     .await;
     assert_schema_rejection(
         &server,
         json!({ "git_ref": "tag", "value": "main", "format": "json" }),
-        "application surface request does not match its reviewed schema: git_ref: unknown variant `tag`, expected one of `branch`, `worktree`, `commit`",
+        "git_ref: unknown variant `tag`, expected one of `branch`, `worktree`, `commit`",
     )
     .await;
 
@@ -833,25 +833,17 @@ fn assert_invalid_request(envelope: &Value) {
 
 async fn assert_schema_rejection(server: &McpServer, args: Value, detail: &str) {
     let host = host_call(server, args).await;
-    let error = &host.response["error"];
-    assert_eq!(error["code"], json!(-32602), "{}", host.response);
     assert_eq!(
-        error["message"],
-        json!(format!(
-            "tool project route failed: reason_code=application_surface_invalid_request retryable=false: {detail}"
-        )),
-        "{}",
-        host.response
-    );
-    assert_eq!(
-        error["data"],
+        host.response["error"],
         json!({
-            "tool": "tracedecay_sessions_for",
-            "reason_code": "application_surface_invalid_request",
-            "retryable": false,
-            "detail": detail,
-            "kind": "invalid_request",
-            "code": "application_surface_invalid_request"
+            "code": -32603,
+            "message": format!(
+                "tool execution failed: config error: invalid retained application request for tracedecay_sessions_for: {detail}"
+            ),
+            "data": {
+                "tool": "tracedecay_sessions_for",
+                "cli_fallback": "This tool is also available from the shell: `tracedecay tool sessions_for ...` (`tracedecay tool sessions_for --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly."
+            }
         }),
         "{}",
         host.response
