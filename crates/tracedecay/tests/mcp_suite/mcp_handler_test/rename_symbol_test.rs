@@ -56,6 +56,7 @@ pub fn tally(items: &[LineItem]) -> u64 {
 "#;
 
 /// Single-hunk preview the dry run must return for `PRICING_BEFORE` → `PRICING_AFTER`.
+/// The production server omits a trailing newline after the final context line.
 const PRICING_DIFF: &str = "\
 --- src/pricing.rs
 @@ -5,14 +5,14 @@
