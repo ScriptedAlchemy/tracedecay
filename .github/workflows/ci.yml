@@ -3,6 +3,11 @@ name: CI
 on:
   push:
     branches: [master, feature/holographic-memory]
+  # This head still validates through `ci-full`. `labeled` is the only
+  # pull-request event: `synchronize` would queue a run for every push
+  # before any job `if` can skip it. Re-apply the label after a new push.
+  pull_request:
+    types: [labeled]
   workflow_dispatch:
     inputs:
       run_os:
@@ -50,6 +55,7 @@ jobs:
   # push runs the Linux lane only so release jobs retain runner slots.
   scope-gate:
     name: Scope gate
+    if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'ci-full' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
