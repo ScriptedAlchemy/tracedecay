@@ -17,12 +17,12 @@ use tracedecay_contracts::{
     native_integration_surface_operation,
 };
 use tracedecay_domain::{
-    ActorId, CapabilityId, ManifestDigest, ProjectId, RefId, RepositoryId, ScopeSetId,
-    ScopeSetRevision, UseCaseId, UtcMicros, WorktreeId, WorktreeInventoryEpoch,
-    WorktreeInventorySnapshotId,
+    ActorId, ManifestDigest, ProjectId, RefId, RepositoryId, ScopeSetId, ScopeSetRevision,
+    UtcMicros, WorktreeId, WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
 };
 use tracedecay_mcp::McpTransport;
 use tracedecay_runtime_core::git::try_git_program;
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::daemon::ProductionProjectCompositionHarnessV1;
 use crate::mcp::McpServer;
@@ -279,7 +279,7 @@ async fn stack_snapshot_freezes_enrolled_refs_and_refuses_the_other_inputs() {
     .expect("project id");
     let enrolled_scope = resolved_scope_for_project(&repository_root, &project_id)
         .expect("enrolled repository scope");
-    let repository_id = enrolled_scope.repository_id().clone();
+    let repository_id = enrolled_scope.repository_id.clone();
     let source_scope = scope(
         &project_id,
         &repository_id,
@@ -289,7 +289,7 @@ async fn stack_snapshot_freezes_enrolled_refs_and_refuses_the_other_inputs() {
     let destination_scope = scope(
         &project_id,
         &repository_id,
-        enrolled_scope.worktree_id().clone(),
+        enrolled_scope.worktree_id.clone(),
         DESTINATION_REF,
     );
     let enrolled = authorized_scope_set(
@@ -307,7 +307,7 @@ async fn stack_snapshot_freezes_enrolled_refs_and_refuses_the_other_inputs() {
     let foreign_destination = scope(
         &foreign_project,
         &repository_id,
-        enrolled_scope.worktree_id().clone(),
+        enrolled_scope.worktree_id.clone(),
         DESTINATION_REF,
     );
     let foreign = authorized_scope_set(
