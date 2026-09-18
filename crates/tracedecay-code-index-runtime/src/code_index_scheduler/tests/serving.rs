@@ -913,6 +913,10 @@ fn clone_status_distinguishes_unavailable_backfill_partial_ready_and_stale() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "this await must observe the projection slot still held, and must not join it"
+)]
 async fn dashboard_freshness_does_not_join_a_clone_backfill_slice() {
     let fixture = GitFixture::new(&[(
         "src/lib.rs",
