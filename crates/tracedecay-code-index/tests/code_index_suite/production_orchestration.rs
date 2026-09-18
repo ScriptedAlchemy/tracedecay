@@ -3243,23 +3243,25 @@ fn partitioned_codec_fixture() -> (
     (second.as_ref().clone(), manifest, segments)
 }
 
+/// Fixture digest after the clone-body extractor revisions. Segment sizes
+/// stayed put; the sealed bytes inside them did not.
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:28f30287a415e81bf589922385146f921a539734ec0a3600bd39578ad3c8dcd3";
+    "sha256:7ffedbe112cd145ec3e7d8b47e77e6f98dd8f6e492837416a12e99cc8f4cdd0a";
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
-        "sha256:924c1f0b7b171b7bf5433a6eb04767eb244e7c9decc1f2343b06a657908f3a7b",
+        "sha256:e2139b905d3d53ee0a208b5ca65f541060fdff8520c2f789a8d66bff40e4580b",
         11_070,
     ),
     (
-        "sha256:1a6e240c8fcc1084d82cee42cbaa889bb479ff1df7a76432dcec2d51d66e1d1a",
+        "sha256:ac11ec33dde2804bf035bb07713e6eac859d6043f6a40b9edcef6d3dc328779c",
         5_170,
     ),
     (
-        "sha256:4461a4ce08e5f59299030959a2773bd48b2c2d48056c188e06867db99609847a",
+        "sha256:f0dab68448f2d6b35768533518d3add447cad5f57c68adb520e3ae9cda71824f",
         6_278,
     ),
     (
-        "sha256:4c54bba48f3fcf2fd0085ab5aecd8b35451a8cfc56381fa99605327165afbb15",
+        "sha256:165708a7eaa1d9f858e84fe98917469b55a1cfe3c8baee23b8b19bbb5ed71a53",
         6_837,
     ),
 ];
