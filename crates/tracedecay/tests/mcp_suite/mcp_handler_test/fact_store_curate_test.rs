@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 use crate::support::{extract_real_server_text, handle_real_server_tool_call_raw};
 
-const UNKNOWN_FIELD_MESSAGE: &str = "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_curate: unknown field `operations`, expected one of `fact_review_limit`, `min_confidence_millionths`";
+const UNKNOWN_FIELD_MESSAGE: &str = "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_curate: operations: unknown field `operations`, expected `fact_review_limit` or `min_confidence_millionths`";
 
 #[tokio::test]
 async fn empty_store_curate_skips_and_refuses_caller_authority() {
@@ -77,7 +77,9 @@ async fn empty_store_curate_skips_and_refuses_caller_authority() {
     assert_eq!(run["terminal"]["summary"]["reviewed_count"], 0);
     assert_eq!(run["terminal"]["summary"]["accepted_count"], 0);
     assert_eq!(run["terminal"]["summary"]["rejected_count"], 0);
-    assert_eq!(run["terminal"]["summary"]["skipped_count"], 0);
+    // A skip terminal counts the run itself. Reviewed, accepted, and rejected
+    // stay at zero because no fact was examined for a mutation.
+    assert_eq!(run["terminal"]["summary"]["skipped_count"], 1);
     assert_eq!(run["committed_receipts"], json!([]));
 
     let run_id = run["run_id"]
