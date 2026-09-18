@@ -316,10 +316,14 @@ jobs:
 
   publish:
     needs: [validate, build]
+    # A failed build matrix still publishes every target that did build. Six
+    # consecutive betas shipped zero assets because one target's failure
+    # withheld the other three; the recovery planner exists to rebuild only
+    # the missing ones. Only a cancelled build withholds publication.
     if: >-
       always() &&
       needs.validate.result == 'success' &&
-      (needs.build.result == 'success' || needs.build.result == 'skipped')
+      needs.build.result != 'cancelled'
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -378,6 +382,9 @@ jobs:
             fi
           done < retained-asset-names
           if [[ "${{ needs.validate.outputs.build_required }}" == "true" ]]; then
+            # A target whose build failed left no artifact; nullglob keeps the
+            # loop from copying the literal pattern.
+            shopt -s nullglob
             for artifact in new-binaries/tracedecay-beta-*; do
               destination="binaries/$(basename "$artifact")"
               [[ -e "$destination" ]] || cp "$artifact" "$destination"
@@ -386,13 +393,15 @@ jobs:
               destination="mcpbs/$(basename "$artifact")"
               [[ -e "$destination" ]] || cp "$artifact" "$destination"
             done
+            shopt -u nullglob
           fi
           python3 scripts/check-release-artifacts.py \
             --manifest .github/release-targets.json \
             --profile beta \
             --tag "$RELEASE_TAG" \
             --binaries binaries \
-            --mcpbs mcpbs
+            --mcpbs mcpbs \
+            --allow-missing-targets
           for bundle in mcpbs/*.mcpb; do
             platform="${bundle#mcpbs/tracedecay-beta-"${RELEASE_TAG}"-}"
             platform="${platform%.mcpb}"
@@ -402,14 +411,23 @@ jobs:
               --platform "$platform"
           done
 
+      - name: Count newly built artifacts
+        id: built
+        run: |
+          shopt -s nullglob
+          archives=(new-binaries/tracedecay-beta-*)
+          bundles=(new-mcpbs/*.mcpb)
+          echo "archives=${#archives[@]}" >>"$GITHUB_OUTPUT"
+          echo "bundles=${#bundles[@]}" >>"$GITHUB_OUTPUT"
+
       - name: Attest newly built prerelease archives
-        if: needs.validate.outputs.build_required == 'true'
+        if: steps.built.outputs.archives != '0'
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
         with:
           subject-path: new-binaries/tracedecay-beta-*
 
       - name: Attest newly built prerelease MCPBs
-        if: needs.validate.outputs.build_required == 'true'
+        if: steps.built.outputs.bundles != '0'
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
         with:
           subject-path: new-mcpbs/*.mcpb
@@ -438,32 +456,53 @@ jobs:
             name="$(basename "$release_asset")"
             if grep -Fxq "$name" remote-asset-names; then
               if [[ "$name" == "SHA256SUMS" ]]; then
+                # A recovery run adds targets, so the new manifest may be a
+                # superset of the published one. Every published line must
+                # survive unchanged (a retained asset's hash never moves);
+                # then the superset replaces it.
                 mkdir -p retained-metadata
                 gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" \
                   --pattern "$name" --dir retained-metadata
-                cmp -s "$release_asset" "retained-metadata/$name"
+                if ! cmp -s "$release_asset" "retained-metadata/$name"; then
+                  while IFS= read -r line; do
+                    [[ -z "$line" ]] && continue
+                    grep -Fxq -- "$line" "$release_asset" || {
+                      echo "::error::published SHA256SUMS line is not in the new manifest: $line"
+                      exit 1
+                    }
+                  done < "retained-metadata/$name"
+                  gh release upload "$RELEASE_TAG" "$release_asset" --clobber \
+                    --repo "${{ github.repository }}"
+                fi
               fi
             else
               gh release upload "$RELEASE_TAG" "$release_asset" \
                 --repo "${{ github.repository }}"
             fi
           done
+          # Verify by name, not by glob: a partial publish may have no .zip
+          # (Windows) or no .tar.gz yet, and `gh release download --pattern`
+          # fails on an empty match.
           mkdir verified-binaries verified-mcpbs
-          gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" \
-            --pattern "tracedecay-beta-${RELEASE_TAG}-*.tar.gz" \
-            --dir verified-binaries
-          gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" \
-            --pattern "tracedecay-beta-${RELEASE_TAG}-*.zip" \
-            --dir verified-binaries
-          gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" \
-            --pattern "tracedecay-beta-${RELEASE_TAG}-*.mcpb" \
-            --dir verified-mcpbs
+          gh api "repos/${{ github.repository }}/releases/tags/${RELEASE_TAG}" \
+            --jq '.assets[].name' > remote-asset-names
+          while IFS= read -r name; do
+            case "$name" in
+              tracedecay-beta-"${RELEASE_TAG}"-*.mcpb)
+                gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" \
+                  --pattern "$name" --dir verified-mcpbs ;;
+              tracedecay-beta-"${RELEASE_TAG}"-*.tar.gz | tracedecay-beta-"${RELEASE_TAG}"-*.zip)
+                gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" \
+                  --pattern "$name" --dir verified-binaries ;;
+            esac
+          done < remote-asset-names
           python3 scripts/check-release-artifacts.py \
             --manifest .github/release-targets.json \
             --profile beta \
             --tag "$RELEASE_TAG" \
             --binaries verified-binaries \
-            --mcpbs verified-mcpbs
+            --mcpbs verified-mcpbs \
+            --allow-missing-targets
           scripts/verify-retained-release-assets.sh \
             --tag "$RELEASE_TAG" \
             --repo "${{ github.repository }}" \

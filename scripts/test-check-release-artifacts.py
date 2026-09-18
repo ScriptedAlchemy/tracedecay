@@ -13,7 +13,13 @@ import tempfile
 SCRIPT = Path(__file__).with_name("check-release-artifacts.py")
 
 
-def run(root: Path, expect_success: bool, profile: str = "stable") -> None:
+def run(
+    root: Path,
+    expect_success: bool,
+    profile: str = "stable",
+    *,
+    allow_missing: bool = False,
+) -> None:
     command = [
         sys.executable,
         str(SCRIPT),
@@ -26,6 +32,8 @@ def run(root: Path, expect_success: bool, profile: str = "stable") -> None:
         "--binaries",
         str(root / "binaries"),
     ]
+    if allow_missing:
+        command.append("--allow-missing-targets")
     command.extend(
         [
             "--mcpbs",
@@ -96,6 +104,19 @@ def main() -> int:
         run(root, True, profile="beta")
         (root / "binaries" / "tracedecay-beta-v1.2.3-linux.tar.gz").unlink()
         run(root, False, profile="beta")
+
+        # Partial publish: a whole missing target is accepted, a half target
+        # (archive without MCPB) is not, a foreign file is not, and an empty
+        # set is not.
+        run(root, False, profile="beta", allow_missing=True)
+        (root / "mcpbs" / "tracedecay-beta-v1.2.3-linux.mcpb").unlink()
+        run(root, True, profile="beta", allow_missing=True)
+        (root / "binaries" / "stray.tar.gz").write_bytes(b"artifact")
+        run(root, False, profile="beta", allow_missing=True)
+        (root / "binaries" / "stray.tar.gz").unlink()
+        (root / "binaries" / "tracedecay-beta-v1.2.3-windows.zip").unlink()
+        (root / "mcpbs" / "tracedecay-beta-v1.2.3-windows.mcpb").unlink()
+        run(root, False, profile="beta", allow_missing=True)
     print("release artifact validator tests passed")
     return 0
 
