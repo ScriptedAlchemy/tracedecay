@@ -482,12 +482,13 @@ async fn cancel_of_an_unfinished_refresh_stores_a_cancelled_receipt() {
     let suffix = profile_id
         .strip_prefix("profile.")
         .expect("canonical profile identity prefix");
+    let store_id = format!("store.profile.{suffix}");
+    let root_id = format!("root.profile.{suffix}");
     let session_identity = tracedecay_session_memory::context::ResolvedSessionIdentity::for_profile(
         tracedecay_session_memory::context::ProfileId::new(profile_id).expect("profile id"),
-        tracedecay_session_memory::context::SessionStoreId::new(format!("store.profile.{suffix}"))
+        tracedecay_session_memory::context::SessionStoreId::new(store_id)
             .expect("profile store id"),
-        tracedecay_session_memory::context::SessionRootId::new(format!("root.profile.{suffix}"))
-            .expect("profile root id"),
+        tracedecay_session_memory::context::SessionRootId::new(root_id).expect("profile root id"),
     );
     let authority = tracedecay_session_runtime::retained::profile_retained_connection_authority(
         &profile_identity,
