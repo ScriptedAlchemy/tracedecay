@@ -852,6 +852,27 @@ fn systemd_unit_quotes_exec_start_paths_that_systemd_would_misparse() {
     );
 }
 
+/// The daemon indexes on a worker pool sized to the machine. Capping glibc's
+/// malloc arenas in the unit made every allocation on every worker contend
+/// for two locks (60% of daemon CPU in the arena futex on a 20-worker host)
+/// without bounding RSS, so the unit leaves the allocator alone.
+#[test]
+fn systemd_unit_does_not_cap_malloc_arenas() {
+    let spec = DaemonServiceSpec {
+        tracedecay_bin: PathBuf::from("/usr/local/bin/tracedecay"),
+        socket_path: PathBuf::from("/run/user/1000/tracedecay.sock"),
+        data_dir_override: None,
+        remote_tls: None,
+    };
+
+    let unit = spec.render_systemd_user_unit().expect("systemd unit");
+
+    assert!(
+        !unit.contains("MALLOC_ARENA_MAX"),
+        "the service unit must not serialize the index workers on a malloc arena cap, got:\n{unit}"
+    );
+}
+
 #[test]
 fn systemd_socket_read_back_returns_none_for_unterminated_exec_start_quote() {
     let unit = "[Service]\nExecStart=/usr/bin/tracedecay daemon run --socket \"/run/unterminated\n";
