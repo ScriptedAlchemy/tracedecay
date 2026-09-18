@@ -16,7 +16,8 @@ use serde_json::{Value, json};
 use url::Url;
 
 use crate::support::{
-    handle_real_server_tool_call_raw, production_composition_fixture, wait_for_current_graph,
+    handle_real_server_tool_call_raw, production_composition_fixture,
+    production_composition_fixture_with_sources, wait_for_current_graph,
 };
 
 const TOOL: &str = "tracedecay_feedback_diagnostics";
@@ -129,15 +130,97 @@ fn retryable_advisory_unavailable(response: &Value) -> bool {
         && problem["code"] == "feedback.advisory-cycle.unavailable"
 }
 
+fn write_warned_fixture_sources(project: &Path) {
+    crate::fixture::write_indexed_fixture_sources(project);
+    let path = project.join("src/utils.rs");
+    let source = std::fs::read_to_string(&path).expect("fixture utils source");
+    let updated = source.replacen(
+        "pub fn helper() -> String {\n    format_greeting(\"world\")\n}",
+        "pub fn helper() -> String {\n    let unused_anchor = 1;\n    format_greeting(\"world\")\n}",
+        1,
+    );
+    assert_ne!(
+        source, updated,
+        "fixture helper body was not the expected source"
+    );
+    std::fs::write(&path, updated).expect("write warned fixture source");
+}
+
+fn compiler_warning(project: &Path) -> String {
+    let out_dir = project.join("rustc-out");
+    std::fs::create_dir_all(&out_dir).expect("rustc out dir");
+    let compiled = Command::new("rustc")
+        .current_dir(project)
+        .args([
+            "--edition=2021",
+            "--crate-type=bin",
+            "--emit=metadata",
+            "--color=never",
+            "src/main.rs",
+            "--out-dir",
+        ])
+        .arg(&out_dir)
+        .output()
+        .expect("run rustc");
+    let stderr = String::from_utf8(compiled.stderr).expect("rustc stderr");
+    assert!(
+        compiled.status.success(),
+        "rustc failed\nstdout:\n{}\nstderr:\n{stderr}",
+        String::from_utf8_lossy(&compiled.stdout)
+    );
+    assert!(
+        stderr.contains("unused variable: `unused_anchor`"),
+        "rustc must warn on the fixture anchor: {stderr}"
+    );
+    stderr
+}
+
+/// Publish one real compiler warning into the same diagnostic store the
+/// feedback cycle reads. A fixture with no diagnostics never records a
+/// publication, so the daemon never mints a handle.
+async fn publish_compiler_warning(server: &tracedecay::mcp::McpServer, project: &Path) {
+    let response = call_tool(
+        server,
+        "tracedecay_diagnose",
+        json!({
+            "cargo_output": compiler_warning(project),
+            "include_callers": false,
+        }),
+    )
+    .await;
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert!(
+        response.get("error").is_none(),
+        "diagnose must publish, not refuse: {response}"
+    );
+    assert_ne!(response["result"]["isError"], true, "{response}");
+    let text = response["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("diagnose text: {response}"));
+    let body: Value = serde_json::from_str(text)
+        .unwrap_or_else(|error| panic!("diagnose JSON ({error}): {text}"));
+    assert_eq!(body["published"]["status"], "published", "{body}");
+    assert!(
+        body["published"]["inserted"]
+            .as_u64()
+            .is_some_and(|inserted| inserted > 0),
+        "the compiler warning must land in the diagnostic store: {body}"
+    );
+}
+
 /// The advisory cycle is the production mint of a diagnostics handle. This
-/// waits out the deferred owner registration, then returns that handle, the
-/// sibling list handle, and the cycle body the diagnostics read must return.
+/// waits out owner registration and a recorded publication, then returns
+/// that handle, the sibling list handle, and the cycle body the diagnostics
+/// read must return.
 async fn minted_diagnostics_cycle(
     server: &tracedecay::mcp::McpServer,
+    project: &Path,
     document_uri: &str,
 ) -> (String, String, Value) {
     wait_for_current_graph(server).await;
+    publish_compiler_warning(server, project).await;
     let deadline = Instant::now() + Duration::from_secs(90);
+    let mut last = Value::Null;
     loop {
         let response = call_tool(
             server,
@@ -159,26 +242,30 @@ async fn minted_diagnostics_cycle(
             "schema.application.feedback.advisory-cycle.result"
         );
         assert_eq!(envelope["contract"]["schema_revision"], 1);
-        let payload = &envelope["outcome"]["value"]["payload"];
-        let diagnostics_handle = payload["read_handles"]["diagnostics_handle"]
-            .as_str()
-            .unwrap_or_else(|| panic!("published cycle minted no diagnostics handle: {envelope}"))
-            .to_owned();
-        let list_handle = payload["read_handles"]["list_handle"]
-            .as_str()
-            .unwrap_or_else(|| panic!("published cycle minted no list handle: {envelope}"))
-            .to_owned();
-        assert_ne!(
-            diagnostics_handle, list_handle,
-            "diagnostics and list handles must be distinct: {payload}"
+        last = envelope["outcome"]["value"]["payload"].clone();
+        if let Some(minted) = split_minted_cycle(&last) {
+            return minted;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "advisory cycle never published a diagnostics handle: {last}"
         );
-        let mut cycle = payload["cycle"].clone();
-        cycle
-            .as_object_mut()
-            .expect("advisory cycle object")
-            .remove("published");
-        return (diagnostics_handle, list_handle, cycle);
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
+}
+
+fn split_minted_cycle(payload: &Value) -> Option<(String, String, Value)> {
+    let diagnostics_handle = payload["read_handles"]["diagnostics_handle"]
+        .as_str()?
+        .to_owned();
+    let list_handle = payload["read_handles"]["list_handle"].as_str()?.to_owned();
+    if diagnostics_handle.is_empty() || list_handle.is_empty() || diagnostics_handle == list_handle
+    {
+        return None;
+    }
+    let mut cycle = payload["cycle"].clone();
+    cycle.as_object_mut()?.remove("published");
+    Some((diagnostics_handle, list_handle, cycle))
 }
 
 fn assert_published_cycle(envelope: &Value, expected_cycle: &Value, branch: &str, head: &str) {
@@ -201,27 +288,37 @@ fn assert_published_cycle(envelope: &Value, expected_cycle: &Value, branch: &str
     assert_eq!(cycle["durability"], "durable");
     assert_eq!(cycle["scope"]["branch_ref"], format!("refs/heads/{branch}"));
     assert_eq!(cycle["scope"]["head_commit_id"], head);
-    let returned = cycle["returned_findings"].as_u64().expect("returned");
-    let omitted = cycle["omitted_findings"].as_u64().expect("omitted");
-    let total = cycle["total_findings"].as_u64().expect("total");
-    assert_eq!(total, returned + omitted);
+    // The read itself completed. The cycle it returns is incomplete because
+    // GitHub, CI, and proximity have nothing to contribute; the compiler
+    // warning is still the one finding.
+    assert_eq!(evidence["execution"]["termination"], "completed");
+    assert_eq!(cycle["termination"], "incomplete_coverage");
+    assert_eq!(cycle["advisory_only"], true);
+    assert_eq!(cycle["returned_findings"], 1);
+    assert_eq!(cycle["omitted_findings"], 0);
+    assert_eq!(cycle["total_findings"], 1);
     assert_eq!(
-        returned,
-        cycle["findings"].as_array().expect("findings").len() as u64
+        cycle["findings"].as_array().map(Vec::len),
+        Some(1),
+        "the compiler warning is the only finding: {cycle}"
     );
-    let expected_termination = match cycle["termination"].as_str() {
-        Some("clean" | "duplicate_noop") => "completed",
-        Some("budget_exceeded") => "timed_out",
-        Some("cancelled") => "cancelled",
-        Some("daemon_unavailable") => "unavailable",
-        Some("blocked" | "incomplete_coverage" | "stale_replan_required" | "user_stop") => {
-            "partial"
-        }
-        other => panic!("diagnostics cycle termination is not a closed state: {other:?}"),
-    };
+    let finding = &cycle["findings"][0];
+    assert_eq!(finding["classification"], "new");
+    assert_eq!(finding["lifecycle"], "active");
+    assert_eq!(finding["provider_state"], "supported_completed_complete");
     assert_eq!(
-        evidence["execution"]["termination"], expected_termination,
-        "execution termination must follow the cycle state: {cycle}"
+        finding["safe_bounded_preview"],
+        "unused variable: `unused_anchor`"
+    );
+    assert_eq!(
+        finding["diagnostic_projection"]["safe_bounded_message"],
+        "unused variable: `unused_anchor`"
+    );
+    assert_eq!(finding["diagnostic_projection"]["severity"], "warning");
+    assert_eq!(finding["diagnostic_projection"]["code"], "warning");
+    assert_eq!(
+        finding["diagnostic_projection"]["producer"],
+        "code_diagnostic"
     );
 }
 
@@ -319,7 +416,7 @@ async fn feedback_diagnostics_refuses_bad_arguments_and_denies_unknown_handles()
 
 #[tokio::test]
 async fn feedback_diagnostics_returns_the_published_cycle_for_its_minted_handle() {
-    let fixture = production_composition_fixture().await;
+    let fixture = production_composition_fixture_with_sources(write_warned_fixture_sources).await;
     let server = fixture
         .harness
         .server(&fixture.project_root)
@@ -329,7 +426,7 @@ async fn feedback_diagnostics_returns_the_published_cycle_for_its_minted_handle(
         .expect("fixture document URI")
         .to_string();
     let (diagnostics_handle, list_handle, expected_cycle) =
-        minted_diagnostics_cycle(&server, &document_uri).await;
+        minted_diagnostics_cycle(&server, &fixture.project_root, &document_uri).await;
 
     let first = successful_envelope(
         &call(&server, json!({ "request_handle": &diagnostics_handle })).await,
