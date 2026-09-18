@@ -17,12 +17,14 @@
 #   --repo OWNER/REPO
 #   --signer-workflow PATH     e.g. OWNER/REPO/.github/workflows/release.yml
 #   --source-digest SHA        commit the tag must attest to
+# Optional, repeatable:
+#   --signer-ref REF           accepted workflow run ref; defaults to refs/tags/TAG
 #
 # Requires an authenticated `gh` (GH_TOKEN or ambient credentials).
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --tag TAG --repo OWNER/REPO --signer-workflow PATH --source-digest SHA (--asset-names FILE --download-dir DIR | --files FILE...)" >&2
+  echo "usage: $0 --tag TAG --repo OWNER/REPO --signer-workflow PATH --source-digest SHA [--signer-ref REF]... (--asset-names FILE --download-dir DIR | --files FILE...)" >&2
   exit 2
 }
 
@@ -30,6 +32,7 @@ tag=""
 repo=""
 signer_workflow=""
 source_digest=""
+signer_refs=()
 asset_names=""
 download_dir=""
 files=()
@@ -40,6 +43,7 @@ while [[ $# -gt 0 ]]; do
     --repo) repo="$2"; shift 2 ;;
     --signer-workflow) signer_workflow="$2"; shift 2 ;;
     --source-digest) source_digest="$2"; shift 2 ;;
+    --signer-ref) signer_refs+=("$2"); shift 2 ;;
     --asset-names) asset_names="$2"; shift 2 ;;
     --download-dir) download_dir="$2"; shift 2 ;;
     --files) shift; files=("$@"); break ;;
@@ -48,14 +52,25 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$tag" && -n "$repo" && -n "$signer_workflow" && -n "$source_digest" ]] || usage
+if [[ ${#signer_refs[@]} -eq 0 ]]; then
+  signer_refs=("refs/tags/${tag}")
+fi
 
 verify_asset() {
-  gh attestation verify "$1" \
-    --repo "$repo" \
-    --signer-workflow "$signer_workflow" \
-    --source-ref "refs/tags/${tag}" \
-    --source-digest "$source_digest" \
-    --deny-self-hosted-runners >/dev/null
+  local asset="$1"
+  local source_ref
+  for source_ref in "${signer_refs[@]}"; do
+    if gh attestation verify "$asset" \
+      --repo "$repo" \
+      --signer-workflow "$signer_workflow" \
+      --source-ref "$source_ref" \
+      --source-digest "$source_digest" \
+      --deny-self-hosted-runners >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  echo "release asset attestation did not match an allowed signer ref: $asset" >&2
+  return 1
 }
 
 if [[ -n "$asset_names" ]]; then

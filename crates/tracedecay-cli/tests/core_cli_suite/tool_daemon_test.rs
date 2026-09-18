@@ -2065,11 +2065,11 @@ fn tool_waits_through_an_after_delay_unavailable_within_its_deadline() {
     );
 }
 
-/// The retry directive is honoured only inside the caller's budget: once the
-/// deadline cannot hold another delay, the daemon's typed state is the answer
-/// and the process fails typed instead of retrying past its budget.
+/// A completed typed unavailable is still an answer. After three identical
+/// results the CLI returns it even when the caller's deadline is much wider;
+/// otherwise a permanent diagnostic reconnects every 250 ms until 120 s.
 #[test]
-fn tool_fails_typed_when_an_after_delay_unavailable_outlives_its_deadline() {
+fn tool_caps_repeated_after_delay_results_before_the_deadline() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let socket_dir = TempDir::new().unwrap();
@@ -2085,7 +2085,7 @@ fn tool_fails_typed_when_an_after_delay_unavailable_outlives_its_deadline() {
     );
     let started = Instant::now();
     let output = run_command_with_timeout(
-        fact_store_add_command(&home_path, &project_path, &socket_path, "1500"),
+        fact_store_add_command(&home_path, &project_path, &socket_path, "10000"),
         CLI_CHILD_KILL_TIMEOUT,
     );
     let elapsed = started.elapsed();
@@ -2103,7 +2103,7 @@ fn tool_fails_typed_when_an_after_delay_unavailable_outlives_its_deadline() {
     assert_eq!(printed["isError"], true);
     assert_eq!(
         printed["problem"]["code"], "application.surface.unavailable",
-        "the daemon's typed state must be surfaced once the deadline is exhausted"
+        "the daemon's typed state must be surfaced after the result retry cap"
     );
     assert_eq!(printed["problem"]["retry"], "after_delay");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2112,13 +2112,10 @@ fn tool_fails_typed_when_an_after_delay_unavailable_outlives_its_deadline() {
         "the process must fail typed, got:\n{stderr}"
     );
     let attempts = std::iter::from_fn(|| daemon.requests.try_recv().ok()).count();
+    assert_eq!(attempts, 3, "completed results have one shared attempt cap");
     assert!(
-        attempts >= 2,
-        "the CLI must retry within its deadline before surfacing the state, made {attempts} attempt(s)"
-    );
-    assert!(
-        elapsed >= Duration::from_millis(1000) && elapsed < Duration::from_secs(10),
-        "retries must stop at the deadline, not before or long after it, took {elapsed:?}"
+        elapsed >= Duration::from_millis(500) && elapsed < Duration::from_secs(5),
+        "the CLI must honor two retry delays but return well before the 10s deadline, took {elapsed:?}"
     );
 }
 
