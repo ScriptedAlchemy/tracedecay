@@ -504,6 +504,9 @@ _Scanned {FILES_SCANNED} files._
             "tool execution failed: config error: invalid path_glob '[': error parsing glob '[': unclosed character class; missing ']'"
         )
     );
+
+    drop(server);
+    fixture.harness.shutdown().await;
 }
 
 fn json_text(response: &Value) -> Value {
