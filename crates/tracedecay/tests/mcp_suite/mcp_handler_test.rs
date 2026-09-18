@@ -37,6 +37,8 @@ mod shell_dead_code_test;
 mod skills_automation_test;
 mod status_runtime_test;
 #[cfg(feature = "test-transport")]
+mod str_replace_behavior_test;
+#[cfg(feature = "test-transport")]
 mod test_map_test;
 mod unsafe_patterns_test;
 #[cfg(feature = "test-transport")]
