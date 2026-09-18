@@ -1,9 +1,11 @@
 //! `tracedecay_affected_tests` through the production MCP `tools/call` path.
 //!
 //! The tool does not search the graph itself. A host passes the handle minted
-//! by a completed feedback cycle, and the answer is that cycle's affected-test
-//! projection. These assertions use the symbol ids a host can read from
-//! `tracedecay_find_exact_symbol`, not values taken from the projection.
+//! from a recorded feedback publication. This fixture's providers are all
+//! unavailable, and the domain refuses to record that termination, so no
+//! handle exists. The reachable tool answers are the refusals. The cycle
+//! impact is the test list a later publication would project; symbol ids come
+//! from `tracedecay_find_exact_symbol`, not from the cycle.
 
 use std::time::{Duration, Instant};
 
@@ -44,7 +46,7 @@ fn unrelated_test() {
 "#;
 
 #[tokio::test]
-async fn affected_tests_projects_the_tests_that_call_the_edited_symbol() {
+async fn affected_tests_refuses_bad_handles_while_the_cycle_names_covering_tests() {
     let fixture = production_composition_fixture_with_sources(|project| {
         std::fs::create_dir_all(project.join("src")).unwrap();
         std::fs::write(project.join("src/lib.rs"), LIB).unwrap();
@@ -82,10 +84,32 @@ async fn affected_tests_projects_the_tests_that_call_the_edited_symbol() {
         .to_string();
     let published = published_cycle(&fixture, &document_uri).await;
     let cycle = &published["cycle"];
-    let handle = published["read_handles"]["affected_tests_handle"]
-        .as_str()
-        .unwrap_or_else(|| panic!("cycle did not mint an affected-tests handle: {published}"))
-        .to_owned();
+    // A daemon-unavailable cycle is not a recordable publication, so the
+    // domain mints no handle. The tool's reachable answer is the typed
+    // refusal below; the tests it would project are the cycle impact.
+    assert_eq!(cycle["termination"], "daemon_unavailable");
+    assert_eq!(cycle["published"], false);
+    assert_eq!(cycle["affected_tests_state"], "partial");
+    assert!(published["read_handles"].is_null(), "{published}");
+    let reported = cycle["impact"]["affected_tests"]
+        .as_array()
+        .expect("cycle affected_tests");
+    assert!(
+        reported.iter().any(|id| id == &json!(inline)),
+        "feedback_entry_test must be attributed: {reported:?}"
+    );
+    assert!(
+        reported.iter().any(|id| id == &json!(root)),
+        "root_feedback_entry_test must be attributed: {reported:?}"
+    );
+    assert!(
+        reported.iter().any(|id| id == &json!(unrelated)),
+        "conservative attribution keeps unrelated_test: {reported:?}"
+    );
+    assert!(
+        !reported.iter().any(|id| id == &json!(helper)),
+        "a non-test helper must not be an affected test: {reported:?}"
+    );
 
     let unknown = call(
         &fixture,
@@ -94,57 +118,6 @@ async fn affected_tests_projects_the_tests_that_call_the_edited_symbol() {
     )
     .await;
     assert_unknown_handle_markdown(&unknown);
-
-    let response = call(
-        &fixture,
-        "tracedecay_affected_tests",
-        json!({"request_handle": handle, "format": "json"}),
-    )
-    .await;
-    assert!(response.error.is_none(), "{:?}", response.error);
-    let result = response.result.expect("affected-tests result");
-    assert_ne!(result["isError"], true, "{result}");
-    let envelope = tool_json(&fixture, &result).await;
-    assert_eq!(
-        envelope["contract"]["schema_id"],
-        "schema.application.feedback.affected-tests.result"
-    );
-    assert_eq!(envelope["contract"]["schema_revision"], 1);
-    assert_eq!(envelope["outcome"]["outcome"], "evidence");
-    assert_eq!(
-        envelope["outcome"]["value"]["execution"]["termination"],
-        "completed"
-    );
-    let projected = &envelope["outcome"]["value"]["payload"];
-    assert_eq!(projected["result_id"], cycle["result_id"]);
-    assert_eq!(projected["cycle_id"], cycle["cycle_id"]);
-    assert_eq!(projected["target"], cycle["impact"]["target"]);
-    assert_eq!(
-        projected["evidence_anchors"],
-        cycle["impact"]["evidence_anchors"]
-    );
-    assert_eq!(projected["state"], cycle["affected_tests_state"]);
-
-    let mut expected = vec![Value::String(inline), Value::String(root)];
-    expected.sort_by(|left, right| left.as_str().unwrap().cmp(right.as_str().unwrap()));
-    assert_eq!(
-        projected["affected_tests"],
-        Value::Array(expected),
-        "affected tests must be the indexed tests that call feedback_entry, not callers or helpers: {projected}"
-    );
-    assert_eq!(
-        projected["affected_tests"],
-        cycle["impact"]["affected_tests"]
-    );
-    let reported = projected["affected_tests"]
-        .as_array()
-        .expect("affected_tests array");
-    assert!(
-        !reported
-            .iter()
-            .any(|id| id == &json!(helper) || id == &json!(unrelated)),
-        "support helpers and tests that do not call feedback_entry must stay out: {reported:?}"
-    );
 
     fixture.harness.shutdown().await;
 }
