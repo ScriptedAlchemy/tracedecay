@@ -27,6 +27,7 @@ mod memory_facts_test;
 mod memory_feedback_test;
 #[cfg(feature = "test-transport")]
 mod move_symbol_test;
+mod remote_status_test;
 #[cfg(feature = "test-transport")]
 mod rename_symbol_test;
 mod retrieve_truncation_test;
