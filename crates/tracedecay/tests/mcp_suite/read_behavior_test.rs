@@ -44,34 +44,15 @@ const MAIN_LINES: &str = "fn main() {\n    let result = helper();\n    println!(
 const LATE_RS: &str = "late source line\n";
 const RENAMED_RS: &str = "fn renamed() {\n    let answer = 7;\n}\n";
 
-const MAIN_FULL_MARKDOWN: &str = r#"## src/main.rs (full)
-**tokens:** 27
-
-```rs
-
-use crate::utils::helper;
-mod utils;
-
-fn main() {
-    let result = helper();
-    println!("{}", result);
+fn main_full_markdown() -> String {
+    format!("## src/main.rs (full)\n**tokens:** 27\n\n```rs\n{MAIN_RS}```\n")
 }
-```
-"#;
 
-const MAIN_LINES_MARKDOWN: &str = r#"## src/main.rs (lines)
-**tokens:** 17
-
-### Context
-**symbols:** 1
-- function main 5-8: `fn main()`
-
-```rs
-fn main() {
-    let result = helper();
-    println!("{}", result);
-```
-"#;
+fn main_lines_markdown() -> String {
+    format!(
+        "## src/main.rs (lines)\n**tokens:** 17\n\n### Context\n**symbols:** 1\n- function main 5-8: `fn main()`\n\n```rs\n{MAIN_LINES}\n```\n"
+    )
+}
 
 const MAIN_LINES_UNCHANGED_MARKDOWN: &str = r#"## src/main.rs (lines)
 **unchanged:** true
@@ -91,7 +72,7 @@ const RENAMED_UNCHANGED_MARKDOWN: &str = r#"## src/main.rs (full)
 
 const LATE_MAP_BODY: &str =
     "{\n  \"file\": \"src/late.txt\",\n  \"symbol_count\": 0,\n  \"symbols\": []\n}";
-const LATE_SIGNATURES_BODY: &str = "{\n  \"file\": \"src/late.txt\",\n  \"symbol_count\": 0,\n  \"without_signature\": 0,\n  \"symbols\": []\n}";
+const LATE_SIGNATURES_BODY: &str = "{\n  \"file\": \"src/late.txt\",\n  \"symbol_count\": 0,\n  \"symbols\": [],\n  \"without_signature\": 0\n}";
 
 const EMPTY_DIGEST: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 const MAIN_DIGEST: &str = "a6db604d39bdea264080a5828f9267b39158b93e1688472d97c3c144a9357133";
@@ -103,34 +84,23 @@ const UTILS_DIGEST: &str = "c50fdd26497fbd62bbeac6d45afbdd2d6595e199569b03b1e79b
 const LATE_DIGEST: &str = "4b1076400731abd215698ae660171248eb227b7e88bcd15246d38161ae0b9333";
 const LATE_MAP_DIGEST: &str = "31095ff39d5dbfe1e6f2305660bd1ce1d361e24df5611828bafb78bdd7a68d89";
 const LATE_SIGNATURES_DIGEST: &str =
-    "d230ea79785c334adbdf7a38cdfc7c8515bc99fbc2f15e2ef5df7016744259c6";
+    "144ce3069ee1c09138d7bcb61e822179556c2edb53007206240bf91e61e6233d";
 const RENAMED_DIGEST: &str = "a5b7e2cd21e13410849a555fca6b3468e3046ef1d79df14f22e0daf0bbbb5a6c";
 
-fn main_symbols() -> Value {
-    json!([
-        {
-            "kind": "module",
-            "name": "utils",
-            "qualified_name": "src/main.rs::utils",
-            "visibility": "private",
-            "line": 3,
-            "end_line": 3,
-            "signature": "mod utils"
-        },
-        {
-            "kind": "function",
-            "name": "main",
-            "qualified_name": "src/main.rs::main",
-            "visibility": "private",
-            "line": 5,
-            "end_line": 8,
-            "signature": "fn main()"
-        }
-    ])
+fn utils_symbol() -> Value {
+    json!({
+        "kind": "module",
+        "name": "utils",
+        "qualified_name": "src/main.rs::utils",
+        "visibility": "private",
+        "line": 3,
+        "end_line": 3,
+        "signature": "mod utils"
+    })
 }
 
-fn main_function_symbol() -> Value {
-    json!([{
+fn main_symbol() -> Value {
+    json!({
         "kind": "function",
         "name": "main",
         "qualified_name": "src/main.rs::main",
@@ -138,7 +108,23 @@ fn main_function_symbol() -> Value {
         "line": 5,
         "end_line": 8,
         "signature": "fn main()"
-    }])
+    })
+}
+
+/// Symbol context is nearest-first, so `utils` (line 3) precedes `main`.
+fn main_context_symbols() -> Value {
+    json!([utils_symbol(), main_symbol()])
+}
+
+/// Map and signatures publish the projection page. That walk follows graph
+/// entity order, which is not stable across processes, so the caller-visible
+/// contract asserted here is the symbol records, not their sequence.
+fn main_page_symbols() -> Value {
+    json!([main_symbol(), utils_symbol()])
+}
+
+fn main_function_symbol() -> Value {
+    json!([main_symbol()])
 }
 
 fn helper_symbol() -> Value {
@@ -231,6 +217,21 @@ fn assert_symbols(actual: &Value, expected: Value) {
     );
 }
 
+fn symbol_key(symbol: &Value) -> String {
+    symbol["qualified_name"].as_str().unwrap_or("").to_owned()
+}
+
+fn assert_symbol_records(actual: &Value, expected: Value) {
+    let mut actual_symbols = symbol_facts(actual);
+    let mut expected_symbols = expected.as_array().expect("expected symbols").clone();
+    actual_symbols.sort_by_key(symbol_key);
+    expected_symbols.sort_by_key(symbol_key);
+    assert_eq!(
+        actual_symbols, expected_symbols,
+        "published symbol records: {actual}"
+    );
+}
+
 fn assert_source_payload(payload: &mut Value, file: &Path, expected: Value) {
     assert_eq!(drop_mtime(payload), file_mtime_ns(file), "{payload}");
     assert_eq!(payload, &expected, "{payload}");
@@ -243,7 +244,7 @@ async fn read_serves_source_symbols_and_a_cache_stub() {
     let utils_path = fixture.project_root.join("src/utils.rs");
 
     let full = call_read(&fixture, json!({"file": "src/main.rs"})).await;
-    assert_eq!(read_text(&full), MAIN_FULL_MARKDOWN);
+    assert_eq!(read_text(&full), main_full_markdown());
 
     let full_json = call_read(&fixture, json!({"file": "src/main.rs", "format": "json"})).await;
     let mut full_json = read_json(&full_json);
@@ -276,14 +277,14 @@ async fn read_serves_source_symbols_and_a_cache_stub() {
     assert_eq!(with_symbols["context"]["symbol_count"], 2);
     assert_eq!(with_symbols["context"]["range"], Value::Null);
     assert_eq!(with_symbols["context"]["truncated"], false);
-    assert_symbols(&with_symbols["context"]["symbols"], main_symbols());
+    assert_symbols(&with_symbols["context"]["symbols"], main_context_symbols());
 
     let lines = call_read(
         &fixture,
         json!({"file": "src/main.rs", "mode": "lines", "lines": "5-7"}),
     )
     .await;
-    assert_eq!(read_text(&lines), MAIN_LINES_MARKDOWN);
+    assert_eq!(read_text(&lines), main_lines_markdown());
 
     let lines_json = call_read(
         &fixture,
@@ -414,7 +415,7 @@ async fn read_serves_source_symbols_and_a_cache_stub() {
     let map_body: Value = serde_json::from_str(map_body).expect("map body json");
     assert_eq!(map_body["file"], "src/main.rs");
     assert_eq!(map_body["symbol_count"], 2);
-    assert_symbols(&map_body["symbols"], main_symbols());
+    assert_symbol_records(&map_body["symbols"], main_page_symbols());
 
     let signatures = call_read(
         &fixture,
@@ -429,7 +430,7 @@ async fn read_serves_source_symbols_and_a_cache_stub() {
     assert_eq!(signatures_body["file"], "src/main.rs");
     assert_eq!(signatures_body["symbol_count"], 2);
     assert_eq!(signatures_body["without_signature"], 0);
-    assert_symbols(&signatures_body["symbols"], main_symbols());
+    assert_symbol_records(&signatures_body["symbols"], main_page_symbols());
 
     let late_path = fixture.project_root.join("src/late.txt");
     fs::write(&late_path, LATE_RS).expect("write late file");
