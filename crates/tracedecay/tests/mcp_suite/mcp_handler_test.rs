@@ -57,6 +57,7 @@ mod move_symbol_behavior_test;
 #[cfg(feature = "test-transport")]
 mod move_symbol_test;
 #[cfg(feature = "test-transport")]
+mod multi_str_replace_behavior_test;
 mod mutate_graph_test;
 mod port_status_test;
 mod rank_behavior_test;
