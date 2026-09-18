@@ -522,7 +522,6 @@ impl DaemonServiceSpec {
              [Service]\n\
              Type=simple\n\
              Environment=\"PATH={}\"\n\
-             Environment=\"MALLOC_ARENA_MAX=2\"\n\
              ExecStart={} daemon run --socket {}{}\n\
              # Restart=always (not on-failure): come back after OOM SIGKILL,\n\
              # crash, or a clean-but-unexpected exit. A looping daemon is\n\

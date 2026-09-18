@@ -19,10 +19,11 @@ static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocato
 // may exist per binary, so overlapping selections resolve by fixed precedence
 // rather than a compile error: hotpath-alloc's counting allocator wins in
 // measurement builds, then jemalloc, then mimalloc. The default build keeps
-// the system allocator (glibc malloc on Linux), whose retained-arena behavior
-// the daemon compensates for with `malloc_trim` at maintenance boundaries and
-// `MALLOC_ARENA_MAX=2` in the installed service unit; neither compensation is
-// load-bearing under jemalloc or mimalloc.
+// the system allocator (glibc malloc on Linux). The installed service unit
+// must not cap glibc's arenas: `MALLOC_ARENA_MAX=2` once did, to bound
+// retained memory, and put 60% of a 20-worker daemon's CPU into two arena
+// locks (perf on beta.41: every wait was `__lll_lock_wait_private` under
+// ordinary Vec/String growth) while RSS still reached 15 GB.
 #[cfg(all(feature = "alloc-jemalloc", not(feature = "hotpath-alloc")))]
 #[global_allocator]
 static JEMALLOC_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
