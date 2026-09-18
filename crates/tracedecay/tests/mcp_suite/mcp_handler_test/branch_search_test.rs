@@ -74,7 +74,7 @@ async fn branch_search_reads_committed_symbols_and_reports_a_missing_branch() {
 
     let committed_hit = json!({
         "name": "committed_anchor",
-        "qualified_name": "::committed_anchor",
+        "qualified_name": "src/lib.rs::committed_anchor",
         "kind": "function",
         "path": "src/lib.rs",
         "branch": "main",
@@ -120,7 +120,7 @@ async fn branch_search_reads_committed_symbols_and_reports_a_missing_branch() {
         &tree,
         json!([{
             "name": "committed_anchor",
-            "qualified_name": "::committed_anchor",
+            "qualified_name": "src/lib.rs::committed_anchor",
             "kind": "function",
             "path": "src/lib.rs",
             "branch": "main",
