@@ -98,6 +98,8 @@ jobs:
             --repo "${{ github.repository }}" \
             --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \
             --source-digest "$source_sha" \
+            --signer-ref "refs/tags/${tag}" \
+            --signer-ref "refs/heads/master" \
             --asset-names retained-asset-names \
             --download-dir retained-assets
 
@@ -499,6 +501,8 @@ jobs:
             --repo "${{ github.repository }}" \
             --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \
             --source-digest "$SOURCE_SHA" \
+            --signer-ref "refs/tags/${TAG}" \
+            --signer-ref "refs/heads/master" \
             --asset-names retained-asset-names \
             --download-dir retained-assets
           while IFS= read -r asset; do
@@ -657,6 +661,8 @@ jobs:
             --repo "${{ github.repository }}" \
             --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \
             --source-digest "$SOURCE_SHA" \
+            --signer-ref "refs/tags/${TAG}" \
+            --signer-ref "refs/heads/master" \
             --files remote-assets/binaries/* remote-assets/mcpbs/*
 
       - name: Mark stable release as latest
