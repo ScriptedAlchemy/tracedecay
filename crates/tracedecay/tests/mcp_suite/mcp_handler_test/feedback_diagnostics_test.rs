@@ -220,7 +220,6 @@ async fn minted_diagnostics_cycle(
     wait_for_current_graph(server).await;
     publish_compiler_warning(server, project).await;
     let deadline = Instant::now() + Duration::from_secs(90);
-    let mut last = Value::Null;
     loop {
         let response = call_tool(
             server,
@@ -242,13 +241,13 @@ async fn minted_diagnostics_cycle(
             "schema.application.feedback.advisory-cycle.result"
         );
         assert_eq!(envelope["contract"]["schema_revision"], 1);
-        last = envelope["outcome"]["value"]["payload"].clone();
-        if let Some(minted) = split_minted_cycle(&last) {
+        let payload = &envelope["outcome"]["value"]["payload"];
+        if let Some(minted) = split_minted_cycle(payload) {
             return minted;
         }
         assert!(
             Instant::now() < deadline,
-            "advisory cycle never published a diagnostics handle: {last}"
+            "advisory cycle never published a diagnostics handle: {payload}"
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
