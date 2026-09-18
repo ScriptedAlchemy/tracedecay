@@ -986,6 +986,14 @@ async fn query_admission_serves_v14_while_clone_successor_is_pending() {
         let worktree = mounted
             .get(&fixture.path().canonicalize().expect("canonical root"))
             .expect("mounted worktree");
+        // The text owner and the serving seat must be the same seal. A
+        // second mount mints a different invalidation fingerprint, so
+        // grafting only the text handle leaves the query on the other
+        // generation and the pending clone is never the one that was queried.
+        *worktree
+            .serving_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
         *worktree
             .text_generation
             .write()
@@ -1060,6 +1068,10 @@ async fn expired_source_proof_reschedules_pending_clone_backfill() {
         let worktree = mounted
             .get(&fixture.path().canonicalize().expect("canonical root"))
             .expect("mounted worktree");
+        *worktree
+            .serving_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
         *worktree
             .text_generation
             .write()
@@ -2431,6 +2443,20 @@ fn text_build_budget_shrinks_to_available_headroom_without_dropping_below_its_fl
             ))
         ),
         "less than the builder's supported floor must remain a typed capacity refusal"
+    );
+
+    let held = limit - watermark_headroom - 64 * MIB;
+    assert_eq!(
+        super::super::text_artifact_admitted_build_budget(
+            minimum,
+            minimum,
+            limit,
+            held,
+            held,
+            watermark_headroom,
+        ),
+        Err(RetrievalPortError::BudgetExceeded),
+        "a reservation that leaves the host able to admit the floor is releasable pressure, not a dead authority"
     );
 }
 

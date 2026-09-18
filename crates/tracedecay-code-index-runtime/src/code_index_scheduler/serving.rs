@@ -1055,6 +1055,16 @@ pub(super) fn text_artifact_admitted_build_budget(
         .saturating_sub(watermark_headroom);
     let admitted_bytes = preferred_bytes.min(available_for_growth);
     if admitted_bytes < minimum_bytes {
+        // Reservations that fill the ledger are releasable pressure. The
+        // measured process being over the watermark is not. Collapsing them
+        // makes a transient competing reservation look like a dead authority
+        // and the successor never retries when that reservation drops.
+        let host_capacity = limit_bytes
+            .saturating_sub(unmodeled_live_bytes)
+            .saturating_sub(watermark_headroom);
+        if used_bytes > 0 && host_capacity >= minimum_bytes {
+            return Err(RetrievalPortError::BudgetExceeded);
+        }
         return Err(RetrievalPortError::AuthorityUnavailable(format!(
             "text-artifact build needs at least {minimum_bytes} bytes; \
              {available_for_growth} bytes are available below the resident-memory watermark"
