@@ -40,7 +40,8 @@ impl Widget {
 ";
 
 /// `src/nested/extra.rs` lines (1-indexed):
-/// 2 XXX, 3 lower-case todo, 4 TODO (same line also says FIXME);
+/// 1 the identifier `note` is a non-comment NOTE (any line, word boundary);
+/// 2 XXX, 3 lower-case todo, 4 TODO (same line also says FIXME, first kind wins);
 /// 8 WIP and 9 UNIMPLEMENTED sit outside `note`.
 const EXTRA_RS: &str = "\
 pub fn note() {
@@ -108,6 +109,13 @@ fn lib_markers() -> Vec<Value> {
 fn extra_markers() -> Vec<Value> {
     vec![
         marker(
+            "NOTE",
+            "src/nested/extra.rs",
+            1,
+            "pub fn note() {",
+            Some("src/nested/extra.rs::note"),
+        ),
+        marker(
             "XXX",
             "src/nested/extra.rs",
             2,
@@ -156,7 +164,7 @@ fn default_scan() -> Value {
         json!({
             "FIXME": 1,
             "HACK": 1,
-            "NOTE": 1,
+            "NOTE": 2,
             "TODO": 3,
             "UNIMPLEMENTED": 1,
             "WIP": 1,
@@ -167,12 +175,12 @@ fn default_scan() -> Value {
 }
 
 const DEFAULT_MARKDOWN: &str = "\
-**match_count:** 9
+**match_count:** 10
 
 ## by_kind
 **FIXME:** 1
 **HACK:** 1
-**NOTE:** 1
+**NOTE:** 2
 **TODO:** 3
 **UNIMPLEMENTED:** 1
 **WIP:** 1
@@ -198,6 +206,11 @@ const DEFAULT_MARKDOWN: &str = "\
   **line:** 19
   **enclosing:** src/lib.rs::Widget::draw
   **text:** // NOTE: keep the method
+- **src/nested/extra.rs**
+  **kind:** NOTE
+  **line:** 1
+  **enclosing:** src/nested/extra.rs::note
+  **text:** pub fn note() {
 - **src/nested/extra.rs**
   **kind:** XXX
   **line:** 2
@@ -341,6 +354,7 @@ async fn todos_reports_observed_marker_behavior() {
         nested,
         scan(
             json!({
+                "NOTE": 1,
                 "TODO": 2,
                 "UNIMPLEMENTED": 1,
                 "WIP": 1,
