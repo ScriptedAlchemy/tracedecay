@@ -6,13 +6,14 @@
 
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tracedecay_mcp::jsonrpc::JsonRpcResponse;
 
 use crate::support::{
     ProductionSourceEditFixture, TestTempDir, close_production_source_edit_fixture, extract_json,
-    init_production_source_edit_project, test_temp_dir,
+    extract_text, init_production_source_edit_project, test_temp_dir, warm_code_index_search,
 };
 
 const AFTER_SOURCE: &str = "\
@@ -145,16 +146,45 @@ async fn open_pair() -> (ProductionSourceEditFixture, TestTempDir) {
     (fixture, dir)
 }
 
-async fn call_insert(fixture: &ProductionSourceEditFixture, arguments: Value) -> JsonRpcResponse {
-    fixture
+async fn settle(fixture: &ProductionSourceEditFixture) {
+    let server = fixture
         .harness
-        .call_tool(
-            &fixture.project_root,
-            "tracedecay_insert_at_symbol",
-            arguments,
-        )
-        .await
-        .expect("tracedecay_insert_at_symbol production MCP call")
+        .server(&fixture.project_root)
+        .expect("production MCP server");
+    warm_code_index_search(&server, "total").await;
+}
+
+fn response_text(response: &JsonRpcResponse) -> String {
+    if let Some(result) = &response.result {
+        return extract_text(result).to_owned();
+    }
+    response
+        .error
+        .as_ref()
+        .map(|error| error.message.clone())
+        .unwrap_or_default()
+}
+
+/// Symbol edits refuse a seated generation while the first rebuild is in
+/// flight. The refusal is retryable; wait until the call is no longer that
+/// typed stale state before asserting the edit itself.
+async fn call_insert(fixture: &ProductionSourceEditFixture, arguments: Value) -> JsonRpcResponse {
+    for _ in 0..80 {
+        let response = fixture
+            .harness
+            .call_tool(
+                &fixture.project_root,
+                "tracedecay_insert_at_symbol",
+                arguments.clone(),
+            )
+            .await
+            .expect("tracedecay_insert_at_symbol production MCP call");
+        if !response_text(&response).contains("code-graph-stale") {
+            return response;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    panic!("code graph stayed stale for tracedecay_insert_at_symbol");
 }
 
 fn success_body(response: &JsonRpcResponse) -> Value {
@@ -192,7 +222,31 @@ fn failure_body(response: &JsonRpcResponse) -> Value {
     extract_json(result)
 }
 
-fn assert_rpc_error(response: &JsonRpcResponse, code: i32, message: &str, data: Value) {
+fn assert_pre_effect_refusal(response: &JsonRpcResponse, detail: &str) {
+    let body = failure_body(response);
+    assert_eq!(
+        body["message"],
+        format!("source edit failed before the effect: config error: {detail}")
+    );
+    assert_eq!(body["success"], false);
+    assert_eq!(body["failed"], true);
+    assert_eq!(body["replayed"], false);
+    assert_eq!(body["effect"]["receipt"]["outcome"], "failed");
+    assert_eq!(body["effect"]["payload"]["message"], STALE_MESSAGE);
+    assert_eq!(body["effect"]["payload"]["success"], false);
+    assert_eq!(body["effect"]["payload"]["failed"], true);
+    assert_eq!(body["effect"]["payload"]["files"], json!([]));
+    assert_eq!(body["effect"]["payload"]["operation"], INSERT_OPERATION);
+    let state = body["expected_state"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected_state missing from {body}"));
+    assert!(
+        state.starts_with("sha256:") && state.len() == "sha256:".len() + 64,
+        "refusal expected_state: {state}"
+    );
+}
+
+fn assert_rpc_error(response: &JsonRpcResponse, code: i32, message: impl AsRef<str>, data: Value) {
     assert_eq!(response.jsonrpc, "2.0");
     assert_eq!(response.id, json!(1));
     assert!(response.result.is_none(), "{response:?}");
@@ -201,7 +255,7 @@ fn assert_rpc_error(response: &JsonRpcResponse, code: i32, message: &str, data: 
         .as_ref()
         .expect("tracedecay_insert_at_symbol error");
     assert_eq!(error.code, code);
-    assert_eq!(error.message, message);
+    assert_eq!(error.message, message.as_ref());
     assert_eq!(error.data.as_ref(), Some(&data));
 }
 
@@ -291,6 +345,7 @@ fn read_file(project: &Path, relative: &str) -> String {
 #[tokio::test]
 async fn insert_at_symbol_places_literal_source_before_and_after_the_symbol() {
     let (fixture, _dir) = open_pair().await;
+    settle(&fixture).await;
     let project = fixture.project_root.clone();
 
     let after_preview = call_insert(
@@ -311,6 +366,7 @@ async fn insert_at_symbol_places_literal_source_before_and_after_the_symbol() {
             "file_path": "src/after.rs",
             "anchor_line": 5,
             "content": AVERAGE_FN,
+            "before": false,
             "dry_run": true,
             "diff": AFTER_DIFF,
             "message": AFTER_DRY_MESSAGE,
@@ -349,6 +405,7 @@ async fn insert_at_symbol_places_literal_source_before_and_after_the_symbol() {
             "file_path": "src/after.rs",
             "anchor_line": 5,
             "content": AVERAGE_FN,
+            "before": false,
             "message": AFTER_APPLY_MESSAGE,
             "replayed": false,
         }),
@@ -371,11 +428,15 @@ async fn insert_at_symbol_places_literal_source_before_and_after_the_symbol() {
     let replay = success_body(&replay);
     assert_eq!(replay["effect"]["effect_id"], after_effect_id);
     assert_completed_effect(&replay, after_key, &after_state, 5, false, "src/after.rs");
-    let _replay_state = assert_stable(replay, {
-        let mut body = durable_payload(5, false, "src/after.rs");
-        body["replayed"] = json!(true);
-        body
-    });
+    let _replay_state = assert_stable(
+        replay,
+        json!({
+            "success": true,
+            "failed": false,
+            "message": REPLAY_MESSAGE,
+            "replayed": true,
+        }),
+    );
     assert_eq!(read_file(&project, "src/after.rs"), AFTER_APPLIED);
 
     let before_preview = call_insert(
@@ -454,6 +515,7 @@ async fn insert_at_symbol_refuses_missing_ambiguous_invalid_and_stale_targets() 
     ])
     .await;
     let project = fixture.project_root.clone();
+    settle(&fixture).await;
     let unchanged_after = read_file(&project, "src/after.rs");
     let unchanged_before = read_file(&project, "src/before.rs");
 
@@ -467,17 +529,7 @@ async fn insert_at_symbol_refuses_missing_ambiguous_invalid_and_stale_targets() 
         }),
     )
     .await;
-    assert_rpc_error(
-        &missing,
-        -32602,
-        MISSING_SYMBOL,
-        json!({
-            "tool": "tracedecay_insert_at_symbol",
-            "reason_code": "not_found",
-            "retryable": false,
-            "detail": MISSING_SYMBOL,
-        }),
-    );
+    assert_pre_effect_refusal(&missing, MISSING_SYMBOL);
 
     let missing_content = call_insert(
         &fixture,
@@ -511,15 +563,7 @@ async fn insert_at_symbol_refuses_missing_ambiguous_invalid_and_stale_targets() 
         }),
     )
     .await;
-    assert_rpc_error(
-        &bad_position,
-        -32603,
-        format!("tool execution failed: config error: {BAD_POSITION}"),
-        json!({
-            "tool": "tracedecay_insert_at_symbol",
-            "cli_fallback": "This tool is also available from the shell: `tracedecay tool insert_at_symbol ...` (`tracedecay tool insert_at_symbol --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly.",
-        }),
-    );
+    assert_pre_effect_refusal(&bad_position, BAD_POSITION);
 
     let unpreviewed = call_insert(
         &fixture,
@@ -550,15 +594,7 @@ async fn insert_at_symbol_refuses_missing_ambiguous_invalid_and_stale_targets() 
         }),
     )
     .await;
-    assert_rpc_error(
-        &ambiguous,
-        -32603,
-        format!("tool execution failed: config error: {AMBIGUOUS_SHARED}"),
-        json!({
-            "tool": "tracedecay_insert_at_symbol",
-            "cli_fallback": "This tool is also available from the shell: `tracedecay tool insert_at_symbol ...` (`tracedecay tool insert_at_symbol --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly.",
-        }),
-    );
+    assert_pre_effect_refusal(&ambiguous, AMBIGUOUS_SHARED);
     assert_eq!(read_file(&project, "src/after.rs"), unchanged_after);
     assert_eq!(read_file(&project, "src/before.rs"), unchanged_before);
 
@@ -580,6 +616,7 @@ async fn insert_at_symbol_refuses_missing_ambiguous_invalid_and_stale_targets() 
             "file_path": "src/after.rs",
             "anchor_line": 6,
             "content": "// QUALIFIED_AFTER",
+            "before": false,
             "dry_run": true,
             "diff": SHARED_DIFF,
             "message": SHARED_DRY_MESSAGE,
@@ -616,6 +653,7 @@ async fn insert_at_symbol_refuses_missing_ambiguous_invalid_and_stale_targets() 
             "file_path": "src/after.rs",
             "anchor_line": 6,
             "content": "// QUALIFIED_AFTER",
+            "before": false,
             "message": SHARED_APPLY_MESSAGE,
             "replayed": false,
         }),
@@ -639,6 +677,7 @@ async fn insert_at_symbol_refuses_missing_ambiguous_invalid_and_stale_targets() 
         .expect("stale preview expected_state")
         .to_owned();
     fs::write(project.join("src/before.rs"), OTHER_SHARED_CONCURRENT).unwrap();
+    settle(&fixture).await;
     let stale_apply = call_insert(
         &fixture,
         json!({
