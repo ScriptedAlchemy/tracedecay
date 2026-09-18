@@ -595,7 +595,7 @@ async fn production_codex_hook_ingest_survives_message_search_reopen() {
                 break status["receipt"].clone();
             }
             assert_eq!(status["outcome"], "running", "{status}");
-            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     })
     .await
@@ -730,7 +730,9 @@ async fn completed_session_import_immediately_searches_canonical_message() {
                 matches!(payload["status"].as_str(), Some("accepted" | "joined")),
                 "session import did not remain active: {payload}"
             );
-            tokio::task::yield_now().await;
+            // A tight poll cancels the SQL snapshot worker that the import
+            // needs. Leave it a slice of the runtime between status reads.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     })
     .await

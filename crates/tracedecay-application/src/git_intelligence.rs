@@ -2946,8 +2946,17 @@ mod tests {
             .unwrap();
 
         let after = snapshot_tree(fixture.path());
+        // `git status` and `git blame` refresh the index stat cache. That is
+        // not a content write; lock files are asserted separately below.
+        let durable = |files: Vec<(String, Vec<u8>)>| {
+            files
+                .into_iter()
+                .filter(|(path, _)| path != ".git/index" && !path.starts_with(".git/logs/"))
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
-            before, after,
+            durable(before),
+            durable(after),
             "read-only intelligence mutated repository state"
         );
         assert!(
