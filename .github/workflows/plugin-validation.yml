@@ -15,15 +15,7 @@ on:
       - "crates/tracedecay/tests/agent_suite/*plugin*"
       - "crates/tracedecay/tests/agent_suite/*skill*"
       - ".github/workflows/plugin-validation.yml"
-  pull_request:
-    types: [labeled]
-    paths:
-      - "plugin/**"
-      - "plugin/cursor-native-extension/**"
-      - "tests/fixtures/cursor-schemas/**"
-      - "crates/tracedecay/tests/agent_suite/*plugin*"
-      - "crates/tracedecay/tests/agent_suite/*skill*"
-      - ".github/workflows/plugin-validation.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -34,7 +26,6 @@ concurrency:
 
 jobs:
   manifest-schema:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci-full'
     name: Manifest schema
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -75,7 +66,6 @@ jobs:
             done
 
   claude-native-validation:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci-full'
     name: Claude native plugin validation
     runs-on: ubuntu-latest
     timeout-minutes: 10

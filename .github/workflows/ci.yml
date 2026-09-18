@@ -3,13 +3,20 @@ name: CI
 on:
   push:
     branches: [master, feature/holographic-memory]
-  # Pull-request CI is deliberately on demand. `opened`/`synchronize` would
-  # create a queued workflow run even when every job's `if` skips it; 173
-  # concurrently opened PRs produced 80 such runs ahead of release publish.
-  # Add (or remove and re-add) `ci-full` to test the current head.
-  pull_request:
-    branches: ['**']
-    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      run_os:
+        description: "Also run macOS and Windows matrices"
+        type: boolean
+        default: false
+      run_hosts:
+        description: "Also run stock host integrations"
+        type: boolean
+        default: false
+      run_perf:
+        description: "Also run hotpath parity"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -35,34 +42,16 @@ env:
   AST_GREP_VERSION: "0.44.0"
 
 jobs:
-  # Single source of truth for what a run is allowed to spend. Guarded jobs
-  # `needs:`-check this job's outputs instead of each repeating the
-  # expressions, so the policy lives in one place:
-  #
-  # * `run-heavy`: the Linux build/test/lint lane. Pushes always; pull
-  #   requests only when trusted (this repository, or a fork targeting an
-  #   integration branch) and explicitly dispatched with `ci-full`.
-  # * `run-os`: the macOS and Windows matrices. Pushes, or a pull request
-  #   labelled `ci-os`. macOS has its own 5-slot cap and Windows shards take
-  #   7 jobs; both verify the same code the Linux lane already covers and
-  #   both run on master after the merge.
-  # * `run-hosts`: stock Hermes / Claude Code / OpenCode integrations.
-  #   Pushes, or a pull request labelled `ci-hosts`.
-  # * `run-perf`: hotpath parity (two extra workspace builds). Pushes, or a
-  #   pull request labelled `perf`, the same label that opts into the
-  #   hotpath profile/coverage workflows.
+  # Manual dispatch is the only PR-head entry point. GitHub queues a
+  # pull_request workflow before evaluating job conditions, and automation
+  # applied every opt-in label to 173 PRs; only removing the trigger prevents
+  # that volume from occupying the account FIFO. A dispatch runs the Linux
+  # lane and may add OS, host, or perf work through explicit inputs. A master
+  # push runs the Linux lane only so release jobs retain runner slots.
   scope-gate:
     name: Scope gate
-    # A draft runs nothing at all. A swarm opened 130 drafts in ten minutes
-    # and even three light gates apiece queued the release behind ~400 jobs;
-    # a job that is skipped here costs no runner, and every guarded job reads
-    # this job's outputs, so skipping it skips them. `ci-full` opts a draft in.
-    if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'ci-full' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions:
-      contents: read
-      actions: write
     outputs:
       run-heavy: ${{ steps.decide.outputs.run-heavy }}
       run-os: ${{ steps.decide.outputs.run-os }}
@@ -75,18 +64,18 @@ jobs:
         id: decide
         env:
           EVENT: ${{ github.event_name }}
-          TRUSTED: ${{ github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
-          LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+          RUN_OS: ${{ inputs.run_os || false }}
+          RUN_HOSTS: ${{ inputs.run_hosts || false }}
+          RUN_PERF: ${{ inputs.run_perf || false }}
         run: |
-          has_label() { [[ " $LABELS " == *" $1 "* ]]; }
-          heavy=false; os=false; hosts=false; perf=false
-          if [[ $EVENT != pull_request ]]; then
-            heavy=true; os=true; hosts=true; perf=true
-          elif [[ $TRUSTED == true ]] && has_label ci-full; then
-            heavy=true
-            has_label ci-os && os=true
-            has_label ci-hosts && hosts=true
-            has_label perf && perf=true
+          heavy=true
+          os=false
+          hosts=false
+          perf=false
+          if [[ $EVENT == workflow_dispatch ]]; then
+            [[ $RUN_OS == true ]] && os=true
+            [[ $RUN_HOSTS == true ]] && hosts=true
+            [[ $RUN_PERF == true ]] && perf=true
           fi
           {
             echo "run-heavy=$heavy"
@@ -94,44 +83,17 @@ jobs:
             echo "run-hosts=$hosts"
             echo "run-perf=$perf"
           } >>"$GITHUB_OUTPUT"
-          echo "run-heavy=$heavy run-os=$os run-hosts=$hosts run-perf=$perf (event=$EVENT labels='$LABELS')"
+          echo "run-heavy=$heavy run-os=$os run-hosts=$hosts run-perf=$perf (event=$EVENT)"
 
       # The Linux and macOS test matrices come from the same manifest the
       # partition jobs select their targets from, so a partition cannot exist
-      # without a job or a job without a partition. The cache prune below
-      # needs `scripts/` too; nothing else is checked out.
+      # without a job or a job without a partition.
       - uses: actions/checkout@v7
         with:
           sparse-checkout: |
             .github/linux-test-partitions.json
             scripts
           sparse-checkout-cone-mode: false
-
-      # Cache entries are restorable only from the ref that saved them, and
-      # the Rust lanes restore by key prefix (newest `v0-rust-<lane>-<env>-`),
-      # so everything a push supersedes on `refs/pull/N/merge` is dead weight
-      # against the 10 GB budget until LRU evicts something live instead
-      # (measured 2026-09-08: 9.6 GB saved per push, every lane rebuilding
-      # cold). This used to be its own workflow run per push; it rides here
-      # because this job already holds a runner for every push. Best effort:
-      # a prune failure must not withhold the run's verdict.
-      - name: Delete the pull request's superseded cache entries
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          MERGE_REF: refs/pull/${{ github.event.pull_request.number }}/merge
-        run: |
-          set -euo pipefail
-          superseded="$(gh api --paginate "repos/$REPO/actions/caches?ref=$MERGE_REF&per_page=100" \
-                          | python3 scripts/prune-superseded-actions-caches.py)"
-          deleted=0
-          for cache in $superseded; do
-            gh api -X DELETE "repos/$REPO/actions/caches/$cache" >/dev/null
-            deleted=$((deleted + 1))
-          done
-          echo "deleted $deleted superseded cache entry(ies) for $MERGE_REF"
 
       - name: Derive the Linux test matrix
         id: linux-partitions
@@ -141,70 +103,13 @@ jobs:
         id: macos-groups
         run: echo "matrix=$(python3 scripts/linux-test-partitions.py macos-matrix)" >> "$GITHUB_OUTPUT"
 
-  # Exercises the checked-out PR head through the CLI against an isolated
-  # daemon (scripts/ci-pr-dogfood-smoke.sh). The binary is the one `debug-cli`
-  # builds from the merge ref: the smoke only needs an executable `tracedecay`,
-  # and building a second one from the head cost a cold
-  # `cargo build -p tracedecay-cli` that never fit this job's budget (runs
-  # 34217290139 and 34231734416: the build was cancelled after 29 minutes
-  # while `debug-cli` finished the same build in 30-31 minutes and published
-  # it).
-  pr-dogfood:
-    name: PR checkout dogfood
-    needs: [scope-gate, debug-cli]
-    if: ${{ github.event_name == 'pull_request' && needs.scope-gate.outputs.run-heavy == 'true' }}
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha }}
-
-      - name: Fetch the debug CLI built once for this run
-        uses: actions/download-artifact@v4
-        with:
-          name: debug-tracedecay-cli
-          path: target/debug
-      - name: Restore the executable bit the artifact store drops
-        run: chmod +x target/debug/tracedecay
-
-      - name: Test dogfood harnesses
-        run: |
-          python3 scripts/test-check-pr-dogfood-output.py
-          python3 scripts/test-efficiency-scorecard.py
-          python3 scripts/test-pr-dogfood-portability.py
-
-      - name: Initialize checkout and exercise CLI tools
-        run: scripts/ci-pr-dogfood-smoke.sh
-        env:
-          TRACEDECAY_BIN: target/debug/tracedecay
-          TRACEDECAY_DOGFOOD_BASE_REF: ${{ github.event.pull_request.base.sha }}
-          TRACEDECAY_DOGFOOD_HEAD_REF: ${{ github.event.pull_request.head.sha }}
-          TRACEDECAY_DOGFOOD_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
-          TRACEDECAY_DOGFOOD_HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
-
-      # The MCP conformance smoke used to build a second CLI on an x64 runner
-      # in plugin-validation just to point the inspector at it. The binary
-      # this job already holds is the same code.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - name: Run MCP conformance smoke
-        run: scripts/mcp-conformance-smoke.sh
-        env:
-          TRACEDECAY_BIN: target/debug/tracedecay
-
-  # One dev-profile `tracedecay` binary for every job that only exercises the
-  # built CLI (`pr-dogfood`, Hermes, Claude Code, OpenCode). Each of those
-  # jobs used to compile the whole workspace itself behind its own cache key,
-  # so a cold cache cost the run several 30-minute builds instead of one and
-  # tripped their timeouts.
+  # One dev-profile `tracedecay` binary for the explicitly requested stock
+  # host integrations. Ordinary Linux validation needs no CLI artifact, so
+  # this build is absent unless `run_hosts=true`.
   debug-cli:
     name: Build debug CLI
     needs: scope-gate
-    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    if: ${{ needs.scope-gate.outputs.run-hosts == 'true' }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     steps:
@@ -242,7 +147,6 @@ jobs:
 
   benchmark-harness:
     name: Benchmark harness self-tests
-    if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'ci-full' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -260,7 +164,6 @@ jobs:
   # queue entries per push doing what one does.
   gates:
     name: Repository gates
-    if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'ci-full' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -292,7 +195,7 @@ jobs:
       # Pull requests only; the release PR itself is exempt because it is
       # the one change allowed to move the version authorities.
       - name: Check the release guards
-        if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-please--')
+        if: github.event_name == 'workflow_dispatch'
         run: |
           bash tests/release_drift_check_test.sh
           bash tests/release_safety_test.sh
@@ -315,13 +218,6 @@ jobs:
         run: |
           python3 scripts/test-check-dev-skill-mirrors.py
           python3 scripts/check-dev-skill-mirrors.py check
-
-      - name: Validate PR commit messages
-        if: github.event_name == 'pull_request'
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: node scripts/lint-commit-range.mjs --repository "$PWD" "$BASE_SHA" "$HEAD_SHA"
 
       - name: Validate pushed commit messages
         if: github.event_name == 'push'
@@ -1268,6 +1164,11 @@ jobs:
           npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "opencode-ai@${OPENCODE_VERSION}"
           claude --version
           opencode --version
+
+      - name: Run MCP conformance smoke
+        env:
+          TRACEDECAY_BIN: ${{ github.workspace }}/target/debug/tracedecay
+        run: scripts/mcp-conformance-smoke.sh
 
       - name: Run stock Claude Code integration checks
         env:
