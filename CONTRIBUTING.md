@@ -257,16 +257,17 @@ integration branch waits behind, so a run spends only what its state earns:
 
 | State | Runs |
 |---|---|
-| Draft | Nothing. Mark it ready or add `ci-full` to run CI. |
-| Ready for review (or labelled `ci-full`) | Repository gates (commit lint, release guards, rustfmt), benchmark-harness self-tests, and the Linux lane: build, clippy, feature gates, dashboard, Linux test partitions, PR dogfood with the MCP conformance smoke. |
-| Labelled `ci-os` | Adds the macOS and Windows matrices. |
-| Labelled `ci-hosts` | Adds the stock Hermes / Claude Code / OpenCode integrations. |
-| Labelled `perf` | Adds hotpath parity and runs the hotpath profile, coverage, and runtime-core workflows. |
+| Pull request without `ci-full` | Nothing. Opening, pushing, and marking ready do not create CI runs. |
+| Add `ci-full` | Repository gates, benchmark-harness self-tests, and the Linux lane: build, clippy, feature gates, dashboard, Linux test partitions, PR dogfood with the MCP conformance smoke. |
+| Also labelled `ci-os` | Adds the macOS and Windows matrices to that `ci-full` dispatch. |
+| Also labelled `ci-hosts` | Adds the stock Hermes / Claude Code / OpenCode integrations. |
+| Also labelled `perf` | Adds hotpath parity and runs the hotpath profile, coverage, and runtime-core workflows. |
 | Push to `master` | Everything. |
 
-Marking a PR ready or adding a label starts the run; a newer push cancels
-the one in flight, on every branch including `master`. Closing or merging a
-PR cancels its remaining runs and drops its Actions caches. Nothing runs on a
+Add `ci-full` to run CI for the PR's current head. If the head changes, remove
+and re-add `ci-full` to test the new commit; opening, pushing, and marking ready
+create no run at all. A newer master push cancels the one in flight. Closing or
+merging a PR cancels its remaining runs and drops its Actions caches. Nothing runs on a
 timer: the packaged-crate distribution battery and the Hawk lint are
 `workflow_dispatch` only.
 
