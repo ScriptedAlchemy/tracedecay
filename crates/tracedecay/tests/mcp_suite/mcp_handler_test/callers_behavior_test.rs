@@ -5,14 +5,14 @@
 //! ```text
 //! src/main.rs
 //!   mod worker;
-//!   use crate::worker::run;
+//!   use crate::worker::prepare_order;
 //!
 //!   fn main() {          // line 4
-//!       run();
+//!       prepare_order();
 //!   }
 //!
 //! src/worker.rs
-//!   pub fn run() {       // line 1
+//!   pub fn prepare_order() { // line 1
 //!       settle();
 //!   }
 //!
@@ -23,9 +23,11 @@
 //!   fn settle() {}       // line 9
 //! ```
 //!
-//! `settle` is called by `also` and `run`. `run` is called by `main`. `main`
-//! and an unknown occurrence have no callers. Call edges are ordered by
-//! caller occurrence identity, which is what the verified graph returns.
+//! `settle` is called by `also` and `prepare_order`. `prepare_order` is called
+//! by `main`. The callee is not named `run`: that bare name is withheld from
+//! cross-file binding, so a depth-2 walk would never reach `main`. `main` and
+//! an unknown occurrence have no callers. Call edges are ordered by caller
+//! occurrence identity, which is what the verified graph returns.
 
 #![cfg(feature = "test-transport")]
 
@@ -43,14 +45,14 @@ use crate::support::{
 
 const MAIN_RS: &str = "\
 mod worker;\n\
-use crate::worker::run;\n\
+use crate::worker::prepare_order;\n\
 \n\
 fn main() {\n\
-    run();\n\
+    prepare_order();\n\
 }\n";
 
 const WORKER_RS: &str = "\
-pub fn run() {\n\
+pub fn prepare_order() {\n\
     settle();\n\
 }\n\
 \n\
@@ -132,20 +134,20 @@ fn identity_order(left: &Value, right: &Value) -> Ordering {
         .cmp(right["node_id"].as_str().unwrap_or(""))
 }
 
-/// Direct callers of `settle`: `also` at line 5 and `run` at line 1, both in
-/// `src/worker.rs`, in occurrence-identity order.
-fn direct_settle_callers(also_id: &str, run_id: &str) -> Value {
+/// Direct callers of `settle`: `also` at line 5 and `prepare_order` at line 1,
+/// both in `src/worker.rs`, in occurrence-identity order.
+fn direct_settle_callers(also_id: &str, prepare_order_id: &str) -> Value {
     let mut callers = vec![
         caller_record(also_id, "also", "src/worker.rs", 5, 1),
-        caller_record(run_id, "run", "src/worker.rs", 1, 1),
+        caller_record(prepare_order_id, "prepare_order", "src/worker.rs", 1, 1),
     ];
     callers.sort_by(identity_order);
     Value::Array(callers)
 }
 
-/// Depth 2 continues from `run` to `main` on line 4 of `src/main.rs`.
-fn transitive_settle_callers(also_id: &str, run_id: &str, main_id: &str) -> Value {
-    let Value::Array(mut callers) = direct_settle_callers(also_id, run_id) else {
+/// Depth 2 continues from `prepare_order` to `main` on line 4 of `src/main.rs`.
+fn transitive_settle_callers(also_id: &str, prepare_order_id: &str, main_id: &str) -> Value {
+    let Value::Array(mut callers) = direct_settle_callers(also_id, prepare_order_id) else {
         unreachable!("direct callers are an array");
     };
     callers.push(caller_record(main_id, "main", "src/main.rs", 4, 2));
@@ -234,11 +236,11 @@ async fn tracedecay_callers_reports_literal_call_sites_and_typed_rejections() {
 
     let settle_id = function_id(&server, "settle").await;
     let also_id = function_id(&server, "also").await;
-    let run_id = function_id(&server, "run").await;
+    let prepare_order_id = function_id(&server, "prepare_order").await;
     let main_id = function_id(&server, "main").await;
-    let direct = direct_settle_callers(&also_id, &run_id);
-    let transitive = transitive_settle_callers(&also_id, &run_id, &main_id);
-    let run_caller = json!([caller_record(&main_id, "main", "src/main.rs", 4, 1)]);
+    let direct = direct_settle_callers(&also_id, &prepare_order_id);
+    let transitive = transitive_settle_callers(&also_id, &prepare_order_id, &main_id);
+    let prepare_order_caller = json!([caller_record(&main_id, "main", "src/main.rs", 4, 1)]);
 
     let depth_one = call_callers(
         &server,
@@ -261,7 +263,7 @@ async fn tracedecay_callers_reports_literal_call_sites_and_typed_rejections() {
         serde_json::from_str(tool_text(&depth_two)).expect("depth-2 callers JSON");
     assert_eq!(
         depth_two_payload, transitive,
-        "max_depth 2 must keep the direct callers and add main through run"
+        "max_depth 2 must keep the direct callers and add main through prepare_order"
     );
 
     let default_depth =
@@ -285,16 +287,16 @@ async fn tracedecay_callers_reports_literal_call_sites_and_typed_rejections() {
         "the id alias must address the same symbol as node_id"
     );
 
-    let run_callers = call_callers(
+    let prepare_order_callers = call_callers(
         &server,
-        json!({"node_id": run_id, "max_depth": 1, "format": "json"}),
+        json!({"node_id": prepare_order_id, "max_depth": 1, "format": "json"}),
     )
     .await;
-    let run_payload: Value =
-        serde_json::from_str(tool_text(&run_callers)).expect("run callers JSON");
+    let prepare_order_payload: Value = serde_json::from_str(tool_text(&prepare_order_callers))
+        .expect("prepare_order callers JSON");
     assert_eq!(
-        run_payload, run_caller,
-        "run's only caller is main at src/main.rs:4"
+        prepare_order_payload, prepare_order_caller,
+        "prepare_order's only caller is main at src/main.rs:4"
     );
 
     let no_callers = call_callers(
@@ -326,10 +328,14 @@ async fn tracedecay_callers_reports_literal_call_sites_and_typed_rejections() {
         "agents that omit format receive markdown of the same caller rows"
     );
 
-    let run_markdown = call_callers(&server, json!({"node_id": run_id, "max_depth": 1})).await;
+    let prepare_order_markdown = call_callers(
+        &server,
+        json!({"node_id": prepare_order_id, "max_depth": 1}),
+    )
+    .await;
     assert_eq!(
-        tool_text(&run_markdown),
-        single_caller_markdown(&run_caller[0]),
+        tool_text(&prepare_order_markdown),
+        single_caller_markdown(&prepare_order_caller[0]),
         "a single caller is rendered as one markdown record"
     );
 
