@@ -76,6 +76,8 @@ mod shell_dead_code_test;
 mod signature_behavior_test;
 mod signature_search_test;
 mod similar_test;
+#[cfg(feature = "test-transport")]
+mod skill_view_behavior_test;
 mod skills_automation_test;
 #[cfg(feature = "test-transport")]
 mod source_edit_reconcile_test;
