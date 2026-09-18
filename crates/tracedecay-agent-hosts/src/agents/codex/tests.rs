@@ -992,7 +992,28 @@ fn prepare_stages_the_source_and_returns_ready_for_cli_activation() {
     let outcome = CodexIntegration
         .prepare_non_interactive_install(&install_ctx(home.path()))
         .unwrap();
-    assert!(matches!(outcome, NonInteractiveInstallOutcome::Ready));
+    match outcome {
+        NonInteractiveInstallOutcome::Ready => {
+            assert!(
+                super::plugin_registry::require_codex_plugin_cli().is_ok(),
+                "prepare returns ready only when the Codex CLI can activate the staged package"
+            );
+        }
+        NonInteractiveInstallOutcome::DeferredUserAction(deferred) => {
+            assert!(
+                super::plugin_registry::require_codex_plugin_cli().is_err(),
+                "a missing Codex CLI is the only reason prepare defers"
+            );
+            assert!(
+                deferred
+                    .remediation
+                    .contains("codex plugin add tracedecay@"),
+                "deferred prepare must name the native activation command: {}",
+                deferred.remediation
+            );
+        }
+        other => panic!("prepare must be ready or a typed deferral, got {other:?}"),
+    }
     assert!(codex_plugin_manifest_path(home.path()).is_file());
     assert!(codex_personal_marketplace_path(home.path()).is_file());
     assert_eq!(
