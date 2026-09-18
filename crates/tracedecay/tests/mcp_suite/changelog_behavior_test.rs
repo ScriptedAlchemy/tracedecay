@@ -114,9 +114,10 @@ fn payload(result: &Value) -> Value {
     })
 }
 
-/// `(kind, qualified_name, name, file)` in the order a caller can sort
-/// without reading occurrence ids.
-fn observable_symbols(body: &Value, key: &str) -> Vec<(String, String, String, String)> {
+/// `(kind, qualified_name, name, file, content_digest)` in the order a caller
+/// can sort without reading occurrence ids. The digest is the body the index
+/// sealed for that symbol, so a modification is a different digest, not a rename.
+fn observable_symbols(body: &Value, key: &str) -> Vec<(String, String, String, String, String)> {
     let mut rows = body[key]
         .as_array()
         .unwrap_or_else(|| panic!("{key} must be an array in {body}"))
@@ -127,6 +128,7 @@ fn observable_symbols(body: &Value, key: &str) -> Vec<(String, String, String, S
                 symbol["qualified_name"].as_str().unwrap_or("").to_owned(),
                 symbol["name"].as_str().unwrap_or("").to_owned(),
                 symbol["file"].as_str().unwrap_or("").to_owned(),
+                symbol["content_digest"].as_str().unwrap_or("").to_owned(),
             )
         })
         .collect::<Vec<_>>();
@@ -181,7 +183,7 @@ async fn changelog_rejects_missing_and_non_object_arguments() {
     assert_eq!(not_object.code, -32603);
     assert_eq!(
         not_object.message,
-        "tool execution failed: invalid arguments: tracedecay_changelog expects a JSON object"
+        "tool execution failed: config error: invalid arguments: tracedecay_changelog expects a JSON object"
     );
     assert_eq!(
         not_object.data,
@@ -408,6 +410,7 @@ async fn changelog_between_local_branches_names_added_removed_and_modified_symbo
             "src/lib.rs::added_fn".to_owned(),
             "added_fn".to_owned(),
             "src/lib.rs".to_owned(),
+            "sha256:19b08a1214d48a2af703ce3ef9538939a8e5d08a55bd9a568e30263d2d8ae9a6".to_owned(),
         )],
         "{body}"
     );
@@ -418,25 +421,19 @@ async fn changelog_between_local_branches_names_added_removed_and_modified_symbo
             "src/lib.rs::removed_fn".to_owned(),
             "removed_fn".to_owned(),
             "src/lib.rs".to_owned(),
+            "sha256:d2609bdc15fd11af59b21c574e6c7a560b6ff1963e73c606b7df32e021a5a135".to_owned(),
         )],
         "{body}"
     );
     assert_eq!(
         observable_symbols(&body, "symbols_modified"),
-        vec![
-            (
-                "file".to_owned(),
-                "src/lib.rs".to_owned(),
-                "src/lib.rs".to_owned(),
-                "src/lib.rs".to_owned(),
-            ),
-            (
-                "function".to_owned(),
-                "src/lib.rs::changed_fn".to_owned(),
-                "changed_fn".to_owned(),
-                "src/lib.rs".to_owned(),
-            ),
-        ],
+        vec![(
+            "function".to_owned(),
+            "src/lib.rs::changed_fn".to_owned(),
+            "changed_fn".to_owned(),
+            "src/lib.rs".to_owned(),
+            "sha256:faa06ddf52ace2f77e20545f60cbf1af7ca9325f216d43cee9206803af884ff3".to_owned(),
+        )],
         "{body}"
     );
 }
