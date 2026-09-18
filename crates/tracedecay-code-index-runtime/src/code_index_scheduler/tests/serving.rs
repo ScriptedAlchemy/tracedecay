@@ -990,6 +990,16 @@ async fn query_admission_serves_v14_while_clone_successor_is_pending() {
         let worktree = mounted
             .get(&fixture.path().canonicalize().expect("canonical root"))
             .expect("mounted worktree");
+        // Generation identity binds the capture instant (`captured_at` is in
+        // the intake digest), so the crafted owner and the registry's own
+        // capture of the same checkout never share an id. Seat the crafted
+        // owner too: a text owner that is not the seated generation is a state
+        // the daemon never produces, and the worker's clone-backfill gate
+        // (`serving_matches_text`) refuses to drive it.
+        *worktree
+            .serving_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
         *worktree
             .text_generation
             .write()
@@ -1064,6 +1074,13 @@ async fn expired_source_proof_reschedules_pending_clone_backfill() {
         let worktree = mounted
             .get(&fixture.path().canonicalize().expect("canonical root"))
             .expect("mounted worktree");
+        // Seat the crafted owner alongside its text handle: the worker's
+        // clone-backfill gate only drives a text owner that is the seated
+        // generation, and a daemon never holds one that is not.
+        *worktree
+            .serving_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
         *worktree
             .text_generation
             .write()
