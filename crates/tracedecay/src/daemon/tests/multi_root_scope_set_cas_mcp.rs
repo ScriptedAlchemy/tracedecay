@@ -76,6 +76,13 @@ async fn run_scope_set_compare_and_swap() {
         client_instance_id: "mcp-scope-set-cas".to_owned(),
         ..test_handshake_defaults()
     };
+    // `initialize` is a one-shot bootstrap reply until a project owner is
+    // cached. Opening that owner first is what keeps the following
+    // `tools/call` frames on the production RMCP connection a host uses.
+    engine
+        .project_server(&handshake)
+        .await
+        .expect("open production project server");
 
     let (server_stream, client_stream) =
         tokio::net::UnixStream::pair().expect("scope-set socket pair");
