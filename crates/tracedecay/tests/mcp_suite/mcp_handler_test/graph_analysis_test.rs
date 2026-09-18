@@ -1,6 +1,7 @@
 #![cfg(feature = "test-transport")]
 
 mod graph_readiness;
+mod recursion_behavior;
 
 use crate::common::fixture::git_run;
 use crate::support::*;
@@ -1739,36 +1740,29 @@ async fn recursion_keeps_direct_recursion() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
         project.join("src/lib.rs"),
-        r#"
-pub fn recurse(n: u32) -> u32 {
-    if n == 0 { 0 } else { recurse(n - 1) }
-}
-
-pub fn nonrecursive() -> u32 { 42 }
-"#,
+        "pub fn recurse(n: u32) -> u32 {\n    if n == 0 { 0 } else { recurse(n - 1) }\n}\n\npub fn nonrecursive() -> u32 { 42 }\n",
     )
     .unwrap();
     let (cg, _env) = init_test_project(project).await;
     let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
         .await
         .unwrap();
-    let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
-    let cycles = output["cycles"].as_array().unwrap();
-    let has_recurse = cycles.iter().any(|cycle| {
-        cycle["chain"].as_array().is_some_and(|chain| {
-            chain
-                .iter()
-                .filter_map(|n| n["name"].as_str())
-                .filter(|name| *name == "recurse")
-                .count()
-                >= 2
-        })
-    });
-    assert!(
-        has_recurse,
-        "direct self-recursive function should be reported; got {cycles:?}"
+    let output = extract_json(&result.value);
+    assert_eq!(
+        recursion_behavior::public_recursion_report(&output),
+        json!({
+            "cycle_count": 1,
+            "cycles": [{
+                "length": 1,
+                "chain": [
+                    {"name": "recurse", "kind": "function", "file": "src/lib.rs", "line": 1},
+                    {"name": "recurse", "kind": "function", "file": "src/lib.rs", "line": 1}
+                ]
+            }]
+        }),
+        "direct recursion must be the only cycle, and `nonrecursive` must stay out: {output}"
     );
+    recursion_behavior::assert_reported_cycles_close(&output);
 }
 
 #[tokio::test]
@@ -1780,35 +1774,29 @@ async fn recursion_filters_self_edge_artifacts() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
         project.join("src/lib.rs"),
-        r#"
-pub struct Triplet {
-    rows: Vec<usize>,
-}
-
-impl Triplet {
-    pub fn push(&mut self, row: usize) {
-        self.rows.push(row);
-    }
-}
-"#,
+        "pub fn recurse(n: u32) -> u32 {\n    if n == 0 { 0 } else { recurse(n - 1) }\n}\n\npub struct Triplet {\n    rows: Vec<usize>,\n}\n\nimpl Triplet {\n    pub fn push(&mut self, row: usize) {\n        self.rows.push(row);\n    }\n}\n",
     )
     .unwrap();
     let (cg, _env) = init_test_project(project).await;
     let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
         .await
         .unwrap();
-    let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
-    let cycles = output["cycles"].as_array().unwrap();
-    let mentions_push = cycles.iter().any(|cycle| {
-        cycle["chain"]
-            .as_array()
-            .is_some_and(|chain| chain.iter().any(|n| n["name"].as_str() == Some("push")))
-    });
-    assert!(
-        !mentions_push,
-        "`self.rows.push(...)` should not be reported as recursive; got {cycles:?}"
+    let output = extract_json(&result.value);
+    assert_eq!(
+        recursion_behavior::public_recursion_report(&output),
+        json!({
+            "cycle_count": 1,
+            "cycles": [{
+                "length": 1,
+                "chain": [
+                    {"name": "recurse", "kind": "function", "file": "src/lib.rs", "line": 1},
+                    {"name": "recurse", "kind": "function", "file": "src/lib.rs", "line": 1}
+                ]
+            }]
+        }),
+        "`self.rows.push` must not become a cycle while `recurse` is reported: {output}"
     );
+    recursion_behavior::assert_reported_cycles_close(&output);
 }
 
 #[tokio::test]
