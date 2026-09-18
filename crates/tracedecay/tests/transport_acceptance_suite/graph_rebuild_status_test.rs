@@ -21,9 +21,19 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
-use tracedecay_mcp::JsonRpcResponse;
+
+use crate::common::mcp_response::tool_json;
 
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// How often the waits below re-ask the public MCP surface.
+///
+/// Each `tracedecay_status` call runs the generation census ready-probe, a
+/// scheduler freshness read, and branch diagnostics — Git opens and
+/// blocking-pool work on the runtime that is also running the reconcile these
+/// waits are waiting for. A `yield_now` spin re-entered that path thousands of
+/// times a second, so the observer competed with the publication it observes.
+const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 fn git(project: &Path, args: &[&str]) {
     let output = Command::new("git")
@@ -72,31 +82,8 @@ fn head(project: &Path) -> String {
         .to_owned()
 }
 
-fn tool_payload(response: &JsonRpcResponse) -> Value {
-    assert!(response.error.is_none(), "{response:?}");
-    let result = response.result.as_ref().expect("tool result");
-    assert_ne!(result["isError"], true, "tool effect failed: {result}");
-    let text = result["content"][0]["text"].as_str().expect("tool text");
-    serde_json::from_str(text)
-        .unwrap_or_else(|error| panic!("tool returned invalid JSON: {error}; text={text}"))
-}
-
-async fn tool(
-    harness: &ProductionProjectCompositionHarnessV1,
-    project: &Path,
-    name: &str,
-    arguments: Value,
-) -> Value {
-    tool_payload(
-        &harness
-            .call_tool(project, name, arguments)
-            .await
-            .unwrap_or_else(|error| panic!("{name} failed: {error}")),
-    )
-}
-
 async fn status(harness: &ProductionProjectCompositionHarnessV1, project: &Path) -> Value {
-    tool(
+    tool_json(
         harness,
         project,
         "tracedecay_status",
@@ -116,10 +103,7 @@ async fn search(
     project: &Path,
     query: &str,
 ) -> Value {
-    // Keep the page tiny: a generation-scale refresh batch otherwise returns
-    // multi-dozen-KiB candidate bodies that MCP truncates into a handle, and
-    // the wait helpers never see top-level `results` / `code_generation`.
-    tool(
+    tool_json(
         harness,
         project,
         "tracedecay_search",
@@ -168,7 +152,7 @@ async fn wait_for_current_generation(
                     return current_generation;
                 }
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(READINESS_POLL_INTERVAL).await;
         }
     })
     .await
@@ -219,7 +203,7 @@ async fn wait_for_background_refresh(
                 }
                 return;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(READINESS_POLL_INTERVAL).await;
         }
     })
     .await
@@ -272,7 +256,7 @@ async fn background_refresh_and_reopen_report_only_servable_generations_inner() 
     install_background_batch(isolation.path(), &project);
     commit_all(&project, "install background refresh batch");
     let refreshed_revision = head(&project);
-    let receipt = tool(
+    let receipt = tool_json(
         &harness,
         &project,
         "tracedecay_admin_sync",

@@ -269,7 +269,23 @@ fn refs_heads_signature(dir: &Path) -> Option<String> {
 /// Resolve the git-dir (worktree-local) and common-dir (repository-shared)
 /// paths, falling back to `<root>/.git` when gix cannot open the checkout so a
 /// non-repository path still yields a stable, if empty, fingerprint.
+///
+/// These two paths are structural, but the fingerprint above is sampled on
+/// every query admission, and re-deriving them through a fresh repository open
+/// was 97% of its cost — 73 µs of 75 µs per capture, against 2 µs for the
+/// retained topology this now asks first. A checkout that carries `<root>/.git`
+/// is one an open at exactly this root resolves through, which is also where a
+/// discovery started at this root stops, so the retained answer is the same
+/// answer. Anything else — a bare repository's control directory, a path that
+/// is not a checkout root — still opens directly, because discovery would walk
+/// past it to an ancestor whose git metadata does not describe this project.
 fn git_metadata_dirs(project_root: &Path) -> (PathBuf, PathBuf) {
+    if project_root.join(".git").exists()
+        && let Ok(topology) =
+            tracedecay_runtime_core::git_repository::repository_topology(project_root)
+    {
+        return (topology.git_dir.clone(), topology.common_dir.clone());
+    }
     if let Ok(repository) = gix::open(project_root) {
         let git_dir = repository.git_dir().to_path_buf();
         let common_dir = {
