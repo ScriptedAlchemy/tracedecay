@@ -16,6 +16,95 @@ use std::path::Path;
 use std::time::Duration;
 use tracedecay_mcp::ToolResult;
 
+const PRICING_BEFORE: &str = r#"//! pricing
+pub struct LineItem {
+    pub unit_price: u64,
+    pub quantity: u32,
+}
+
+/// Grand total in cents.
+pub fn compute_grand_total(items: &[LineItem]) -> u64 {
+    let mut total = 0u64;
+    for item in items {
+        total += item.unit_price * item.quantity as u64;
+    }
+    total
+}
+
+pub fn tally(items: &[LineItem]) -> u64 {
+    compute_grand_total(items)
+}
+"#;
+
+const PRICING_AFTER: &str = r#"//! pricing
+pub struct LineItem {
+    pub unit_price: u64,
+    pub quantity: u32,
+}
+
+/// Grand total in cents.
+pub fn calculate_total_cents(items: &[LineItem]) -> u64 {
+    let mut total = 0u64;
+    for item in items {
+        total += item.unit_price * item.quantity as u64;
+    }
+    total
+}
+
+pub fn tally(items: &[LineItem]) -> u64 {
+    calculate_total_cents(items)
+}
+"#;
+
+/// Single-hunk preview the dry run must return for `PRICING_BEFORE` → `PRICING_AFTER`.
+const PRICING_DIFF: &str = "\
+--- src/pricing.rs
+@@ -5,14 +5,14 @@
+ }
+ 
+ /// Grand total in cents.
+-pub fn compute_grand_total(items: &[LineItem]) -> u64 {
+-    let mut total = 0u64;
+-    for item in items {
+-        total += item.unit_price * item.quantity as u64;
+-    }
+-    total
+-}
+-
+-pub fn tally(items: &[LineItem]) -> u64 {
+-    compute_grand_total(items)
++pub fn calculate_total_cents(items: &[LineItem]) -> u64 {
++    let mut total = 0u64;
++    for item in items {
++        total += item.unit_price * item.quantity as u64;
++    }
++    total
++}
++
++pub fn tally(items: &[LineItem]) -> u64 {
++    calculate_total_cents(items)
+ }
+";
+
+const ORDERS_BEFORE: &str = r#"//! orders
+use crate::pricing::LineItem;
+
+pub fn quantity(items: &[LineItem]) -> usize {
+    items.len()
+}
+"#;
+
+const ORDERS_CROSS_MODULE: &str = r#"//! orders
+use crate::pricing::{LineItem, compute_grand_total};
+
+pub fn order_total(items: &[LineItem]) -> u64 {
+    compute_grand_total(items)
+}
+"#;
+
+const BLOCKED_MESSAGE: &str =
+    "rename blocked by stale, ambiguous, unsupported, or colliding evidence";
+
 /// A pricing crate whose caller shares the target's module, so both declaration
 /// and call are extraction-attested by the production graph. The nested module
 /// deliberately contains no target spelling; cross-module unresolved names are
@@ -33,32 +122,61 @@ async fn rename_fixture(project: &Path) {
     )
     .unwrap();
     fs::write(project.join("src/nested/mod.rs"), "pub mod orders;\n").unwrap();
-    fs::write(
-        project.join("src/pricing.rs"),
-        "//! pricing\n\
-         pub struct LineItem {\n    pub unit_price: u64,\n    pub quantity: u32,\n}\n\n\
-         /// Grand total in cents.\n\
-         pub fn compute_grand_total(items: &[LineItem]) -> u64 {\n\
-         \x20   let mut total = 0u64;\n\
-         \x20   for item in items {\n\
-         \x20       total += item.unit_price * item.quantity as u64;\n\
-         \x20   }\n\
-         \x20   total\n\
-         }\n\n\
-         pub fn tally(items: &[LineItem]) -> u64 {\n\
-         \x20   compute_grand_total(items)\n\
-         }\n",
-    )
-    .unwrap();
-    fs::write(
-        project.join("src/nested/orders.rs"),
-        "//! orders\n\
-         use crate::pricing::LineItem;\n\n\
-         pub fn quantity(items: &[LineItem]) -> usize {\n\
-         \x20   items.len()\n\
-         }\n",
-    )
-    .unwrap();
+    fs::write(project.join("src/pricing.rs"), PRICING_BEFORE).unwrap();
+    fs::write(project.join("src/nested/orders.rs"), ORDERS_BEFORE).unwrap();
+}
+
+fn assert_workspace_unchanged(project: &Path) {
+    assert_eq!(
+        fs::read_to_string(project.join("src/pricing.rs")).unwrap(),
+        PRICING_BEFORE
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("src/nested/orders.rs")).unwrap(),
+        ORDERS_BEFORE
+    );
+}
+
+/// Caller-visible site fields. Identity digests and byte offsets are omitted
+/// because they are addresses, not the rename the caller observes.
+fn visible_sites(payload: &Value) -> Vec<Value> {
+    payload["sites"]
+        .as_array()
+        .map(|sites| {
+            sites
+                .iter()
+                .map(|site| {
+                    json!({
+                        "kind": site["kind"],
+                        "disposition": site["disposition"],
+                        "file": site["file"],
+                        "line": site["line"],
+                        "expected_bytes": site["expected_bytes"],
+                        "replacement_bytes": site["replacement_bytes"],
+                        "reason": site["reason"],
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn visible_hazards(payload: &Value) -> Vec<Value> {
+    payload["hazards"]
+        .as_array()
+        .map(|hazards| {
+            hazards
+                .iter()
+                .map(|hazard| {
+                    json!({
+                        "kind": hazard["kind"],
+                        "blocking": hazard["blocking"],
+                        "message": hazard["message"],
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Runs `tracedecay_rename_preview` for `symbol` and returns the exact node
@@ -183,41 +301,78 @@ async fn test_rename_symbol_dry_run_default_reports_plan_and_writes_nothing() {
     rename_fixture(project).await;
     let (cg, _env) = init_test_project(project).await;
 
-    let before_pricing = fs::read_to_string(project.join("src/pricing.rs")).unwrap();
-    let before_orders = fs::read_to_string(project.join("src/nested/orders.rs")).unwrap();
-
     let node = preview_node(&cg, "compute_grand_total").await;
+    assert_eq!(node["name"], "compute_grand_total");
+    assert_eq!(node["kind"], "function");
+    assert_eq!(node["file"], "src/pricing.rs");
+    assert_eq!(
+        node["qualified_name"],
+        "src/pricing.rs::compute_grand_total"
+    );
+
     let p = preview_rename(&cg, &node, "calculate_total_cents").await;
     assert_eq!(p["success"], true, "payload: {p}");
     assert_eq!(p["dry_run"], true, "default must be a dry run: {p}");
     assert_eq!(
+        p["message"], "dry run. Nothing written; preview only (rename previewed)",
+        "payload: {p}"
+    );
+    assert_eq!(p["symbol"], "src/pricing.rs::compute_grand_total", "{p}");
+    assert_eq!(p["old_name"], "compute_grand_total");
+    assert_eq!(p["new_name"], "calculate_total_cents");
+    assert_eq!(
         p["preview_digest"], p["expected_state"],
         "the accepted preview must echo the exact candidate-state CAS digest: {p}"
     );
-    let files: Vec<&str> = p["files"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|f| f["file"].as_str().unwrap())
-        .collect();
-    assert!(files.contains(&"src/pricing.rs"), "files: {files:?}\n{p}");
-    assert_eq!(files.len(), 1, "only graph-bound files may be edited: {p}");
-    assert!(
-        p["reference_count"].as_u64().unwrap() >= 1,
-        "the caller must be graph-attested: {p}"
+    assert_eq!(
+        p["files"],
+        json!([{ "file": "src/pricing.rs", "replaced_count": 2 }]),
+        "{p}"
     );
-    let diff = p["diff"].as_str().unwrap();
-    assert!(diff.contains("calculate_total_cents"), "diff: {diff}");
+    assert_eq!(p["reference_count"], 1, "{p}");
+    assert_eq!(
+        p["dispositions"],
+        json!({ "changed": 2, "unchanged": 0, "skipped": 0, "blocked": 0 }),
+        "{p}"
+    );
+    assert_eq!(
+        visible_sites(&p),
+        json!([
+            {
+                "kind": "declaration",
+                "disposition": "changed",
+                "file": "src/pricing.rs",
+                "line": 8,
+                "expected_bytes": "compute_grand_total",
+                "replacement_bytes": "calculate_total_cents",
+                "reason": "exact graph-bound occurrence"
+            },
+            {
+                "kind": "resolved_call",
+                "disposition": "changed",
+                "file": "src/pricing.rs",
+                "line": 17,
+                "expected_bytes": "compute_grand_total",
+                "replacement_bytes": "calculate_total_cents",
+                "reason": "exact graph-bound occurrence"
+            }
+        ]),
+        "{p}"
+    );
+    assert_eq!(
+        p["impact"],
+        json!({
+            "callers": ["src/pricing.rs::tally"],
+            "reexports": [],
+            "affected_files": ["src/pricing.rs"],
+            "affected_tests": []
+        }),
+        "{p}"
+    );
+    assert_eq!(p["diff"], PRICING_DIFF, "diff: {}", p["diff"]);
+    assert_eq!(visible_hazards(&p), Vec::<Value>::new(), "{p}");
 
-    // The dry run wrote nothing.
-    assert_eq!(
-        fs::read_to_string(project.join("src/pricing.rs")).unwrap(),
-        before_pricing
-    );
-    assert_eq!(
-        fs::read_to_string(project.join("src/nested/orders.rs")).unwrap(),
-        before_orders
-    );
+    assert_workspace_unchanged(project);
 }
 
 #[tokio::test]
@@ -241,26 +396,23 @@ async fn test_rename_symbol_apply_rewrites_declaration_and_callers() {
         .unwrap();
     let p = rename_payload(&result);
     assert_eq!(p["success"], true, "payload: {p}");
-    assert_ne!(p["dry_run"], json!(true), "payload: {p}");
+    assert_eq!(p["replayed"], false, "payload: {p}");
     assert_eq!(p["message"], "rename applied", "payload: {p}");
+    assert_eq!(p["old_name"], "compute_grand_total");
+    assert_eq!(p["new_name"], "calculate_total_cents");
+    assert_eq!(
+        p["files"],
+        json!([{ "file": "src/pricing.rs", "replaced_count": 2 }]),
+        "{p}"
+    );
 
-    let pricing = fs::read_to_string(project.join("src/pricing.rs")).unwrap();
-    assert!(
-        pricing.contains("pub fn calculate_total_cents"),
-        "declaration renamed: {pricing}"
+    assert_eq!(
+        fs::read_to_string(project.join("src/pricing.rs")).unwrap(),
+        PRICING_AFTER
     );
-    assert!(
-        !pricing.contains("compute_grand_total"),
-        "old name gone from declaration: {pricing}"
-    );
-    let orders = fs::read_to_string(project.join("src/nested/orders.rs")).unwrap();
-    assert!(
-        pricing.contains("calculate_total_cents(items)"),
-        "caller renamed: {pricing}"
-    );
-    assert!(
-        !orders.contains("compute_grand_total"),
-        "unrelated module remains free of the old name: {orders}"
+    assert_eq!(
+        fs::read_to_string(project.join("src/nested/orders.rs")).unwrap(),
+        ORDERS_BEFORE
     );
 
     // An exact idempotent replay returns the durable receipt without attempting
@@ -271,6 +423,23 @@ async fn test_rename_symbol_apply_rewrites_declaration_and_callers() {
     let p2 = rename_payload(&result2);
     assert_eq!(p2["success"], true, "idempotent replay: {p2}");
     assert_eq!(p2["replayed"], true, "idempotent replay: {p2}");
+    assert_eq!(
+        p2["operation"], "use-case.application.source-edit.rename-symbol",
+        "{p2}"
+    );
+    assert_eq!(p2["files"], json!(["src/pricing.rs"]), "{p2}");
+    assert_eq!(p2["change_count"], 2, "{p2}");
+    assert_eq!(p2["finding_count"], 0, "{p2}");
+    assert_eq!(p2["durable_metadata_only"], true, "{p2}");
+    assert_eq!(
+        p2["message"], "source edit completed; detailed edit output was not retained",
+        "{p2}"
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("src/pricing.rs")).unwrap(),
+        PRICING_AFTER,
+        "replay must not rewrite the applied source"
+    );
 }
 
 #[tokio::test]
@@ -308,6 +477,21 @@ async fn test_rename_symbol_stale_tree_refuses_before_writing() {
     let p = rename_payload(&result);
     assert_eq!(p["success"], false, "stale evidence must refuse: {p}");
     assert_eq!(
+        p["message"], BLOCKED_MESSAGE,
+        "stale evidence must refuse: {p}"
+    );
+    assert_eq!(
+        visible_hazards(&p),
+        json!([
+            {
+                "kind": "stale_evidence",
+                "blocking": true,
+                "message": "src/pricing.rs no longer matches the admitted graph generation"
+            }
+        ]),
+        "{p}"
+    );
+    assert_eq!(
         p["effect"]["execution"]["termination"], "failed",
         "source drift must terminate before the effect: {p}"
     );
@@ -339,8 +523,6 @@ async fn test_rename_symbol_denies_invalid_and_colliding_names() {
     rename_fixture(project).await;
     let (cg, _env) = init_test_project(project).await;
 
-    let before_pricing = fs::read_to_string(project.join("src/pricing.rs")).unwrap();
-    let before_orders = fs::read_to_string(project.join("src/nested/orders.rs")).unwrap();
     let node = preview_node(&cg, "compute_grand_total").await;
 
     // A denied preview has no acceptance to apply.
@@ -350,13 +532,20 @@ async fn test_rename_symbol_denies_invalid_and_colliding_names() {
         .unwrap();
     let p = rename_payload(&result);
     assert_eq!(p["success"], false, "invalid name must be denied: {p}");
-    assert!(
-        p["hazards"]
-            .as_array()
-            .is_some_and(|hazards| hazards.iter().any(|hazard| {
-                hazard["kind"] == "invalid_identifier" && hazard["blocking"] == true
-            })),
-        "denial must retain the typed invalid-identifier hazard: {p}"
+    assert_eq!(p["dry_run"], true, "{p}");
+    assert_eq!(p["new_name"], "not an identifier");
+    assert_eq!(
+        p["message"], "rename requires valid old and new identifiers",
+        "{p}"
+    );
+    assert_eq!(
+        visible_hazards(&p),
+        json!([{
+            "kind": "invalid_identifier",
+            "blocking": true,
+            "message": "rename requires valid old and new identifiers"
+        }]),
+        "{p}"
     );
 
     // Identical to the old name.
@@ -366,32 +555,53 @@ async fn test_rename_symbol_denies_invalid_and_colliding_names() {
         .unwrap();
     let p = rename_payload(&result);
     assert_eq!(p["success"], false, "same-name rename must be denied: {p}");
+    assert_eq!(
+        p["message"], "new name is identical to the bound old name",
+        "{p}"
+    );
+    assert_eq!(
+        visible_hazards(&p),
+        json!([{
+            "kind": "invalid_identifier",
+            "blocking": true,
+            "message": "new name is identical to the bound old name"
+        }]),
+        "{p}"
+    );
 
     // Collides with an identifier already present in a touched file.
+    let collision_message = "`tally` already occurs in src/pricing.rs; collision, shadowing, or changed resolution is possible";
     let collision = rename_args(&node, "tally");
     let result = handle_tool_call(&cg, "tracedecay_rename_symbol", collision, None, None)
         .await
         .unwrap();
     let p = rename_payload(&result);
     assert_eq!(p["success"], false, "collision must be denied: {p}");
-    assert!(
-        p["hazards"]
-            .as_array()
-            .is_some_and(|hazards| hazards.iter().any(|hazard| {
-                hazard["kind"] == "namespace_collision" && hazard["blocking"] == true
-            })),
-        "denial must retain the typed namespace-collision hazard: {p}"
+    assert_eq!(p["message"], BLOCKED_MESSAGE, "{p}");
+    assert_eq!(p["new_name"], "tally");
+    assert_eq!(
+        visible_hazards(&p),
+        json!([
+            {
+                "kind": "namespace_collision",
+                "blocking": true,
+                "message": collision_message
+            },
+            {
+                "kind": "shadowing",
+                "blocking": true,
+                "message": collision_message
+            },
+            {
+                "kind": "changed_resolution",
+                "blocking": true,
+                "message": collision_message
+            }
+        ]),
+        "{p}"
     );
 
-    // Every denial wrote nothing.
-    assert_eq!(
-        fs::read_to_string(project.join("src/pricing.rs")).unwrap(),
-        before_pricing
-    );
-    assert_eq!(
-        fs::read_to_string(project.join("src/nested/orders.rs")).unwrap(),
-        before_orders
-    );
+    assert_workspace_unchanged(project);
 }
 
 #[tokio::test]
@@ -400,17 +610,7 @@ async fn test_rename_symbol_blocks_unresolved_cross_module_spelling() {
     let project_root = dir.path().join("project");
     let project = project_root.as_path();
     rename_fixture(project).await;
-    fs::write(
-        project.join("src/nested/orders.rs"),
-        "//! orders\n\
-         use crate::pricing::{LineItem, compute_grand_total};\n\n\
-         pub fn order_total(items: &[LineItem]) -> u64 {\n\
-         \x20   compute_grand_total(items)\n\
-         }\n",
-    )
-    .unwrap();
-    let before_pricing = fs::read_to_string(project.join("src/pricing.rs")).unwrap();
-    let before_orders = fs::read_to_string(project.join("src/nested/orders.rs")).unwrap();
+    fs::write(project.join("src/nested/orders.rs"), ORDERS_CROSS_MODULE).unwrap();
     let (cg, _env) = init_test_project(project).await;
 
     let node = preview_node(&cg, "compute_grand_total").await;
@@ -426,27 +626,61 @@ async fn test_rename_symbol_blocks_unresolved_cross_module_spelling() {
     let payload = rename_payload(&result);
 
     assert_eq!(payload["success"], false, "unresolved spelling: {payload}");
-    assert!(
-        payload["hazards"].as_array().is_some_and(|hazards| hazards
-            .iter()
-            .any(|hazard| { hazard["kind"] == "ambiguous_symbol" && hazard["blocking"] == true })),
-        "unresolved spelling must be a blocking graph hazard: {payload}"
+    assert_eq!(payload["dry_run"], true, "{payload}");
+    assert_eq!(payload["message"], BLOCKED_MESSAGE, "{payload}");
+    assert_eq!(
+        visible_sites(&payload)
+            .into_iter()
+            .filter(|site| site["file"] == "src/nested/orders.rs")
+            .collect::<Vec<_>>(),
+        json!([
+            {
+                "kind": "unresolved_text",
+                "disposition": "blocked",
+                "file": "src/nested/orders.rs",
+                "line": 2,
+                "expected_bytes": "compute_grand_total",
+                "replacement_bytes": "compute_grand_total",
+                "reason": "unresolved code spelling may bind this symbol"
+            },
+            {
+                "kind": "unresolved_text",
+                "disposition": "blocked",
+                "file": "src/nested/orders.rs",
+                "line": 5,
+                "expected_bytes": "compute_grand_total",
+                "replacement_bytes": "compute_grand_total",
+                "reason": "unresolved code spelling may bind this symbol"
+            }
+        ]),
+        "{payload}"
     );
-    assert!(
-        payload["sites"]
-            .as_array()
-            .is_some_and(|sites| sites.iter().any(|site| {
-                site["file"] == "src/nested/orders.rs" && site["kind"] == "unresolved_text"
-            })),
-        "hazard must identify the unresolved cross-module site: {payload}"
+    assert_eq!(
+        visible_hazards(&payload)
+            .into_iter()
+            .filter(|hazard| hazard["kind"] == "ambiguous_symbol")
+            .collect::<Vec<_>>(),
+        json!([
+            {
+                "kind": "ambiguous_symbol",
+                "blocking": true,
+                "message": "unresolved code spelling may bind this symbol"
+            },
+            {
+                "kind": "ambiguous_symbol",
+                "blocking": true,
+                "message": "unresolved code spelling may bind this symbol"
+            }
+        ]),
+        "{payload}"
     );
     assert_eq!(
         fs::read_to_string(project.join("src/pricing.rs")).unwrap(),
-        before_pricing
+        PRICING_BEFORE
     );
     assert_eq!(
         fs::read_to_string(project.join("src/nested/orders.rs")).unwrap(),
-        before_orders
+        ORDERS_CROSS_MODULE
     );
 }
 
@@ -463,8 +697,6 @@ async fn test_rename_symbol_publication_failure_preserves_preimage() {
     rename_fixture(project).await;
     let (cg, _env) = init_test_project(project).await;
 
-    let before_pricing = fs::read_to_string(project.join("src/pricing.rs")).unwrap();
-    let before_orders = fs::read_to_string(project.join("src/nested/orders.rs")).unwrap();
     let node = preview_node(&cg, "compute_grand_total").await;
     let preview = preview_rename(&cg, &node, "calculate_total_cents").await;
 
@@ -484,31 +716,19 @@ async fn test_rename_symbol_publication_failure_preserves_preimage() {
     // Restore permissions before asserting so the tempdir always cleans up.
     fs::set_permissions(&src_dir, writable).unwrap();
 
-    // The apply failed, either as a typed error or a failed durable effect,
-    // and never reported success.
-    match apply {
-        Ok(result) => {
-            let p = rename_payload(&result);
-            assert_ne!(p["success"], json!(true), "payload: {p}");
-        }
-        Err(error) => {
-            let message = error.to_string();
-            assert!(
-                message.contains("rename aborted") || message.contains("reconciliation"),
-                "unexpected failure shape: {message}"
-            );
-        }
-    }
+    // Publication refusal is a typed tool result, not a successful rename.
+    let result = apply.expect("publication failure must still return a tool result");
+    let p = rename_payload(&result);
+    assert_eq!(p["success"], false, "payload: {p}");
 
-    // The workspace is byte-identical to the preimage.
     assert_eq!(
         fs::read_to_string(project.join("src/pricing.rs")).unwrap(),
-        before_pricing,
+        PRICING_BEFORE,
         "declaration file must be untouched"
     );
     assert_eq!(
         fs::read_to_string(project.join("src/nested/orders.rs")).unwrap(),
-        before_orders,
+        ORDERS_BEFORE,
         "published caller must be rolled back to its preimage"
     );
 }
