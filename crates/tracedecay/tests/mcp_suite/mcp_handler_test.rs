@@ -20,6 +20,8 @@ mod dependency_depth_test;
 mod dependency_hint_test;
 mod derives_test;
 #[cfg(feature = "test-transport")]
+mod project_context_test;
+#[cfg(feature = "test-transport")]
 mod edit_test;
 #[cfg(feature = "test-transport")]
 mod fact_store_update_behavior_test;
