@@ -361,21 +361,20 @@ _1 matches across 1 files._ Results capped. Narrow with `path_glob` or `max_resu
         }),
     )
     .await;
-    let hard_cap = tool_payload(&hard_cap);
-    assert_eq!(hard_cap["match_count"], 200);
-    assert_eq!(hard_cap["files_scanned"], 1);
+    // 200 hits do not fit the 15_000-character response cap, so the client
+    // receives the truncation envelope. The preview still reports the cap.
+    let hard_cap: Value = serde_json::from_str(tool_text(&hard_cap))
+        .expect("hard-cap response should be the truncation envelope");
     assert_eq!(hard_cap["truncated"], true);
-    assert_eq!(
-        hard_cap["results"][199],
-        json!({
-            "file": "src/calls.rs",
-            "line": 201,
-            "column": 5,
-            "lang": "rust",
-            "match": "reserve_stock(199, 0)",
-            "line_text": "    reserve_stock(199, 0);"
-        })
-    );
+    assert_eq!(hard_cap["original_chars"], 26340);
+    assert_eq!(hard_cap["preview_chars"], 11928);
+    assert_eq!(hard_cap["retrieve_tool"], "tracedecay_retrieve");
+    assert_eq!(hard_cap["retrieve_ttl_seconds"], 86400);
+    let preview = hard_cap["preview"].as_str().expect("preview text");
+    let preview_head = "{\"files_scanned\":1,\"match_count\":200,\"results\":[{\"column\":5,\"file\":\"src/calls.rs\",\"lang\":\"rust\",\"line\":2,\"line_text\":\"    reserve_stock(0, 0);\",\"match\":\"reserve_stock(0, 0)\"},{\"column\":5,\"file\":\"src/calls.rs\",\"lang\":\"rust\",\"line\":3,\"line_text\":\"    reserve_stock(1, 0);\",\"match\":\"reserve_stock(1, 0)\"}";
+    assert_eq!(&preview[..preview_head.len()], preview_head);
+    let preview_tail = "line_text\":\"    res";
+    assert_eq!(&preview[preview.len() - preview_tail.len()..], preview_tail);
 
     let zero_is_one = call_ast_grep(
         &fixture,
