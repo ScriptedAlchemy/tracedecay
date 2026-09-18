@@ -22,6 +22,7 @@ name: hotpath-coverage
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
     # Only Rust inputs can change what these slice tests compile or measure;
     # dashboard, plugin, docs and script-only pull requests do not queue it.
     paths:
@@ -56,6 +57,10 @@ env:
 
 jobs:
   slice-tests:
+    # Opt-in per pull request: label `perf`. Each lane builds the workspace
+    # more than once, which no draft or routine PR should charge to the 20
+    # free runner slots by default. Dispatch runs unconditionally.
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'perf')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -97,6 +102,10 @@ jobs:
             tracedecay-rusqlite-runtime/hotpath,tracedecay-global-db/hotpath,tracedecay-global-db/test-helpers
 
   sessions-slice-tests:
+    # Opt-in per pull request: label `perf`. Each lane builds the workspace
+    # more than once, which no draft or routine PR should charge to the 20
+    # free runner slots by default. Dispatch runs unconditionally.
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'perf')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:

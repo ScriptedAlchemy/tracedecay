@@ -5,22 +5,25 @@ on:
     branches: [master, feature/holographic-memory]
   pull_request:
     branches: ['**']
+    # `ready_for_review` and `labeled` are what lift a pull request from the
+    # light gates into full CI, so they must start a run.
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
 
 permissions:
   contents: read
 
-# One run per pull request (or per pushed ref). A newer push to a pull
-# request supersedes the run in flight: its verdict is for a head nobody can
-# merge any more, and letting it finish only holds runners the current head is
-# waiting for. Keeping master-bound runs to completion did not buy a verdict
-# per tip either: GitHub holds one pending run per group, so while a 100-min
-# run finished, every intermediate push was queued and then cancelled by the
-# next (runs 34311300344, 34312118984, 34313237349 never scheduled a job) and
-# only the head at the moment the old run ended got a verdict, ~100 min late.
-# `push` runs are never cancelled.
+# One run per pull request (or per pushed ref), and a newer head always
+# supersedes the run in flight: its verdict is for a commit nobody can merge
+# or ship any more, and on 20 free runner slots every job it still holds is a
+# job the current head waits for. Master is not exempt. Keeping master runs
+# to completion never bought a verdict per tip: GitHub holds one pending run
+# per group, so intermediate pushes were queued and cancelled anyway (runs
+# 34311300344, 34312118984, 34313237349 never scheduled a job) and only the
+# head at the moment the old run ended got a verdict, ~100 min late. The tip
+# is what ships; it is the only master commit that needs a verdict.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -30,33 +33,96 @@ env:
   AST_GREP_VERSION: "0.44.0"
 
 jobs:
-  # Single source of truth for the fork/base-branch guard: heavy jobs run on
-  # pushes, on PRs from this repository, and on fork PRs that target an
-  # integration branch. Guarded jobs `needs:`-check this job's output instead
-  # of each repeating the expression, so the branch list lives in one place.
+  # Single source of truth for what a run is allowed to spend. Guarded jobs
+  # `needs:`-check this job's outputs instead of each repeating the
+  # expressions, so the policy lives in one place:
+  #
+  # * `run-heavy`: the Linux build/test/lint lane. Pushes always; pull
+  #   requests only when trusted (this repository, or a fork targeting an
+  #   integration branch) and either ready for review or labelled `ci-full`.
+  #   A draft gets the light gates (this job, commit lint, drift, harness)
+  #   and nothing else: with 20 free runner slots, a swarm of drafts each
+  #   spending ~30 jobs per push queued the integration branch for hours.
+  # * `run-os`: the macOS and Windows matrices. Pushes, or a pull request
+  #   labelled `ci-os`. macOS has its own 5-slot cap and Windows shards take
+  #   7 jobs; both verify the same code the Linux lane already covers and
+  #   both run on master after the merge.
+  # * `run-hosts`: stock Hermes / Claude Code / OpenCode integrations.
+  #   Pushes, or a pull request labelled `ci-hosts`.
   scope-gate:
     name: Scope gate
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
     outputs:
       run-heavy: ${{ steps.decide.outputs.run-heavy }}
+      run-os: ${{ steps.decide.outputs.run-os }}
+      run-hosts: ${{ steps.decide.outputs.run-hosts }}
       linux-partitions: ${{ steps.linux-partitions.outputs.matrix }}
       macos-groups: ${{ steps.macos-groups.outputs.matrix }}
     steps:
-      - name: Decide whether guarded jobs run
+      - name: Decide what this run may spend
         id: decide
-        run: echo "run-heavy=${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}" >> "$GITHUB_OUTPUT"
+        env:
+          EVENT: ${{ github.event_name }}
+          TRUSTED: ${{ github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+          DRAFT: ${{ github.event.pull_request.draft }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+        run: |
+          has_label() { [[ " $LABELS " == *" $1 "* ]]; }
+          heavy=false; os=false; hosts=false
+          if [[ $EVENT != pull_request ]]; then
+            heavy=true; os=true; hosts=true
+          elif [[ $TRUSTED == true ]] && { [[ $DRAFT != true ]] || has_label ci-full; }; then
+            heavy=true
+            has_label ci-os && os=true
+            has_label ci-hosts && hosts=true
+          fi
+          {
+            echo "run-heavy=$heavy"
+            echo "run-os=$os"
+            echo "run-hosts=$hosts"
+          } >>"$GITHUB_OUTPUT"
+          echo "run-heavy=$heavy run-os=$os run-hosts=$hosts (event=$EVENT draft=${DRAFT:-n/a} labels='$LABELS')"
 
       # The Linux and macOS test matrices come from the same manifest the
       # partition jobs select their targets from, so a partition cannot exist
-      # without a job or a job without a partition. This needs the checkout
-      # and nothing else.
+      # without a job or a job without a partition. The cache prune below
+      # needs `scripts/` too; nothing else is checked out.
       - uses: actions/checkout@v7
         with:
           sparse-checkout: |
             .github/linux-test-partitions.json
-            scripts/linux-test-partitions.py
+            scripts
           sparse-checkout-cone-mode: false
+
+      # Cache entries are restorable only from the ref that saved them, and
+      # the Rust lanes restore by key prefix (newest `v0-rust-<lane>-<env>-`),
+      # so everything a push supersedes on `refs/pull/N/merge` is dead weight
+      # against the 10 GB budget until LRU evicts something live instead
+      # (measured 2026-09-08: 9.6 GB saved per push, every lane rebuilding
+      # cold). This used to be its own workflow run per push; it rides here
+      # because this job already holds a runner for every push. Best effort:
+      # a prune failure must not withhold the run's verdict.
+      - name: Delete the pull request's superseded cache entries
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MERGE_REF: refs/pull/${{ github.event.pull_request.number }}/merge
+        run: |
+          set -euo pipefail
+          superseded="$(gh api --paginate "repos/$REPO/actions/caches?ref=$MERGE_REF&per_page=100" \
+                          | python3 scripts/prune-superseded-actions-caches.py)"
+          deleted=0
+          for cache in $superseded; do
+            gh api -X DELETE "repos/$REPO/actions/caches/$cache" >/dev/null
+            deleted=$((deleted + 1))
+          done
+          echo "deleted $deleted superseded cache entry(ies) for $MERGE_REF"
 
       - name: Derive the Linux test matrix
         id: linux-partitions
@@ -190,6 +256,12 @@ jobs:
       - name: Test bounded commit range linting
         run: python3 scripts/test-lint-commit-range.py
 
+      - name: Check Rust cache key lineage and the superseded-entry selection
+        run: |
+          python3 scripts/test-prune-superseded-actions-caches.py
+          python3 scripts/test-rust-cache-lineage.py
+          python3 scripts/check-rust-cache-lineage.py
+
       - name: Test and check dev skill host copies
         run: |
           python3 scripts/test-check-dev-skill-mirrors.py
@@ -298,7 +370,7 @@ jobs:
   macos-test-partition:
     name: Test macOS ${{ matrix.group }}
     needs: scope-gate
-    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    if: ${{ needs.scope-gate.outputs.run-os == 'true' }}
     runs-on: macos-14
     # Each group's budget is set in the manifest beside the group, with the
     # measurement it rests on.
@@ -434,7 +506,7 @@ jobs:
   # per group holding a junit.xml per partition.
   macos-test:
     name: Test macOS
-    if: ${{ !cancelled() && needs.scope-gate.outputs.run-heavy == 'true' }}
+    if: ${{ !cancelled() && needs.scope-gate.outputs.run-os == 'true' }}
     needs: [macos-test-partition, scope-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -743,7 +815,7 @@ jobs:
   windows-build:
     name: Build Windows tests
     needs: scope-gate
-    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    if: ${{ needs.scope-gate.outputs.run-os == 'true' }}
     runs-on: windows-latest
     # Build every Windows test once, then shard execution from the archive.
     # Keep a bounded guard around the hosted build; Cargo timings are retained
@@ -1016,7 +1088,7 @@ jobs:
 
   windows-test:
     name: Test Windows
-    if: ${{ !cancelled() && needs.scope-gate.outputs.run-heavy == 'true' }}
+    if: ${{ !cancelled() && needs.scope-gate.outputs.run-os == 'true' }}
     needs: [windows-test-shard, scope-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -1162,7 +1234,7 @@ jobs:
   hermes-integration:
     name: Hermes integration (stock)
     needs: [scope-gate, debug-cli]
-    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    if: ${{ needs.scope-gate.outputs.run-hosts == 'true' }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     env:
@@ -1216,7 +1288,7 @@ jobs:
   host-stock-integration:
     name: Claude Code + OpenCode integration (stock)
     needs: [scope-gate, debug-cli]
-    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    if: ${{ needs.scope-gate.outputs.run-hosts == 'true' }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     env:
