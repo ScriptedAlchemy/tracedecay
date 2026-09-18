@@ -4,6 +4,11 @@
 //! published advisory cycle projects that cycle's identity and impact, and
 //! nothing else. A handle that was never issued, or that was issued for a
 //! different feedback read, is the same concealed refusal.
+//!
+//! A cycle whose every diagnostic provider is unavailable terminates
+//! `daemon_unavailable` and mints no handle. The production way to move one
+//! provider off that state is a real compiler warning admitted by
+//! `tracedecay_diagnose`.
 
 use std::path::Path;
 use std::process::Command;
@@ -16,17 +21,15 @@ use crate::daemon::ProductionProjectCompositionHarnessV1;
 
 const IMPACT_TOOL: &str = "tracedecay_feedback_impact";
 const IMPACT_RESULT_SCHEMA: &str = "schema.application.feedback.impact.result";
+const PROBE_SOURCE: &str =
+    "pub fn feedback_impact_probe() -> i32 {\n    let unused_impact = 7;\n    0\n}\n";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn feedback_impact_projects_the_published_cycle_and_conceals_other_handles() {
     let temp = tempfile::TempDir::new().expect("temp dir");
     let project = temp.path().join("project");
     std::fs::create_dir_all(project.join("src")).expect("source dir");
-    std::fs::write(
-        project.join("src/lib.rs"),
-        "pub fn feedback_impact_probe() -> i32 { 7 }\n",
-    )
-    .expect("source file");
+    std::fs::write(project.join("src/lib.rs"), PROBE_SOURCE).expect("source file");
     commit_project(&project);
     let head = git_head(&project);
     let document_uri = url::Url::from_file_path(project.join("src/lib.rs"))
@@ -280,8 +283,24 @@ async fn publish_advisory_cycle(
     project: &Path,
     document_uri: &str,
 ) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let compiler_output = compiler_warning(project);
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let mut diagnosed = false;
     loop {
+        if !diagnosed {
+            match publish_compiler_warning(harness, project, &compiler_output).await {
+                CompilerPublication::Published => diagnosed = true,
+                CompilerPublication::StillSettling(detail) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "compiler diagnostics stayed unpublished: {detail}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    continue;
+                }
+            }
+        }
+
         let response = harness
             .call_tool(
                 project,
@@ -297,27 +316,139 @@ async fn publish_advisory_cycle(
                 .is_some_and(|result| result.get("isError") != Some(&json!(true)))
         {
             let payload = &successful_envelope(&response)["outcome"]["value"]["payload"];
+            if payload["cycle"]["published"] == json!(true)
+                && payload["read_handles"]["impact_handle"].is_string()
+            {
+                return payload.clone();
+            }
+            // The owner can answer before the compiler snapshot is the
+            // generation the cycle reads. An unpublished `daemon_unavailable`
+            // cycle is that window, not a successful impact proof.
             assert_eq!(
-                payload["cycle"]["published"],
-                json!(true),
-                "impact has nothing to project until the cycle publishes: {payload}"
+                payload["cycle"]["termination"],
+                json!("daemon_unavailable"),
+                "a settled cycle must publish the diagnostics handle: {payload}"
             );
-            return payload.clone();
+        } else {
+            let retryable = response.result.as_ref().is_some_and(|result| {
+                result["problem"]["code"] == "feedback.advisory-cycle.unavailable"
+                    && result["problem"]["retryable"] == true
+            });
+            assert!(
+                retryable,
+                "advisory cycle must publish or stay retryably unavailable: {response:?}"
+            );
         }
-        let retryable = response.result.as_ref().is_some_and(|result| {
-            result["problem"]["code"] == "feedback.advisory-cycle.unavailable"
-                && result["problem"]["retryable"] == true
-        });
-        assert!(
-            retryable,
-            "advisory cycle must publish or stay retryably unavailable: {response:?}"
-        );
         assert!(
             Instant::now() < deadline,
-            "advisory cycle stayed unavailable: {response:?}"
+            "advisory cycle stayed unpublished: {response:?}"
         );
+        // The next attempt republishes against the generation the cycle is
+        // about to read, so a generation move cannot strand the warning.
+        diagnosed = false;
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+}
+
+enum CompilerPublication {
+    Published,
+    StillSettling(String),
+}
+
+fn compiler_warning(project: &Path) -> String {
+    let output_dir = tempfile::TempDir::new().expect("compiler output dir");
+    let output = Command::new("rustc")
+        .current_dir(project)
+        .args([
+            "--crate-type=lib",
+            "--edition=2024",
+            "--emit=metadata",
+            "--color=never",
+            "src/lib.rs",
+            "--out-dir",
+        ])
+        .arg(output_dir.path())
+        .output()
+        .expect("run rustc");
+    let stderr = String::from_utf8(output.stderr).expect("rustc stderr utf-8");
+    assert!(
+        output.status.success(),
+        "rustc must compile the probe with a warning, not an error: {stderr}"
+    );
+    assert!(
+        stderr.contains("unused variable: `unused_impact`"),
+        "the probe must emit the unused-variable warning the diagnostic store admits: {stderr}"
+    );
+    stderr
+}
+
+async fn publish_compiler_warning(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    compiler_output: &str,
+) -> CompilerPublication {
+    let response = harness
+        .call_tool(
+            project,
+            "tracedecay_diagnose",
+            json!({
+                "cargo_output": compiler_output,
+                "include_callers": false,
+                "format": "json"
+            }),
+        )
+        .await
+        .expect("diagnose call");
+    if response.error.is_some()
+        || response
+            .result
+            .as_ref()
+            .is_some_and(|result| result["isError"] == json!(true))
+    {
+        return CompilerPublication::StillSettling(format!("{response:?}"));
+    }
+    let body = tool_json(&response);
+    let status = body["published"]["status"].as_str().unwrap_or("");
+    match status {
+        "published" => {
+            assert_eq!(
+                body["published"]["inserted"],
+                json!(1),
+                "one unused-variable warning must enter the diagnostic store: {body}"
+            );
+            let diagnostics = body["diagnostics"]
+                .as_array()
+                .expect("diagnose diagnostics");
+            assert!(
+                diagnostics.iter().any(|item| {
+                    item["severity"] == json!("warning")
+                        && item["message"] == json!("unused variable: `unused_impact`")
+                        && item["file"]
+                            .as_str()
+                            .is_some_and(|file| file.ends_with("src/lib.rs"))
+                }),
+                "diagnose must report the compiler warning on src/lib.rs: {body}"
+            );
+            CompilerPublication::Published
+        }
+        "skipped" | "failed" => CompilerPublication::StillSettling(body.to_string()),
+        _ => panic!("diagnose publication has no typed status: {body}"),
+    }
+}
+
+fn tool_json(response: &JsonRpcResponse) -> Value {
+    assert!(
+        response.error.is_none(),
+        "tool call must not be a JSON-RPC error: {response:?}"
+    );
+    let result = response.result.as_ref().expect("tool result");
+    assert_ne!(result["isError"], json!(true), "{result}");
+    serde_json::from_str(
+        result["content"][0]["text"]
+            .as_str()
+            .expect("tool result text"),
+    )
+    .expect("tool result json")
 }
 
 fn successful_envelope(response: &JsonRpcResponse) -> Value {
