@@ -933,7 +933,23 @@ async fn dashboard_freshness_does_not_join_a_clone_backfill_slice() {
         latest.advance_text_serving(1).expect("advance text build");
     }
 
-    let held_slot = latest.text_projection_build.lock_slot();
+    // Freshness must return while the clone slot is locked. The guard cannot
+    // live in this task across `.await` (`clippy::await_holding_lock` is
+    // denied), so a blocking thread holds it for the duration of the call.
+    let build = Arc::clone(&latest.text_projection_build);
+    let (held_tx, held_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let holder = thread::spawn(move || {
+        let _guard = build.lock_slot();
+        held_tx
+            .send(())
+            .expect("clone slot holder must report the lock");
+        let _ = release_rx.recv();
+    });
+    held_rx
+        .recv()
+        .expect("clone slot holder must lock before freshness is read");
+
     let freshness = tokio::time::timeout(
         Duration::from_millis(100),
         registry.dashboard_freshness(fixture.path()),
@@ -950,7 +966,8 @@ async fn dashboard_freshness_does_not_join_a_clone_backfill_slice() {
         ) if reason == "clone-index status is being updated"
     ));
 
-    drop(held_slot);
+    drop(release_tx);
+    holder.join().expect("clone slot holder");
     registry.shutdown().await;
 }
 
