@@ -159,7 +159,7 @@ async fn create_read_only_project_db(
 
     // Pin enrollment identity before init so the store lands under the exact
     // project id the caller named. Init (not a bare graph DB publish) is what
-    // admits a canonical configuration revision — open_read_only fails closed
+    // admits a canonical configuration revision, open_read_only fails closed
     // without one.
     pin_fixture_repository_identity(&project_root, project_id).unwrap();
     let open_options = TraceDecayOpenOptions {
@@ -643,7 +643,7 @@ async fn serve_started_during_daemon_restart_window_proxies_to_restarted_daemon(
     fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
 
     // An installed service unit claims the socket, but the socket file is
-    // missing — exactly the window between daemon shutdown and rebind.
+    // missing, exactly the window between daemon shutdown and rebind.
     let unit_dir = canonical_existing_path(home.path()).join(".config/systemd/user");
     fs::create_dir_all(&unit_dir).unwrap();
     fs::write(

@@ -350,7 +350,7 @@ fn param_shape_note(schema: &Value, ty: &str) -> Option<String> {
             .and_then(Value::as_object)
             .is_some()
         {
-            return Some("object — pass JSON via --args".to_string());
+            return Some("object, pass JSON via --args".to_string());
         }
         return None;
     }
@@ -360,8 +360,8 @@ fn param_shape_note(schema: &Value, ty: &str) -> Option<String> {
             .and_then(|items| items.get("type"))
             .and_then(Value::as_str)?;
         return Some(match items_type {
-            "array" => "array of arrays — pass JSON via --args".to_string(),
-            "object" => "array of objects — pass JSON via --args".to_string(),
+            "array" => "array of arrays, pass JSON via --args".to_string(),
+            "object" => "array of objects, pass JSON via --args".to_string(),
             other => format!("array of {other}s"),
         });
     }
@@ -375,8 +375,8 @@ const EXAMPLE_MAX_DEPTH: usize = 6;
 /// A mechanical `--args` example object: every required property plus the
 /// non-scalar optional ones, with placeholder values derived from the schema.
 ///
-/// Object-valued properties are expanded recursively. Emitting `{}` for them —
-/// as this did before — produced an example the daemon rejects outright
+/// Object-valued properties are expanded recursively. Emitting `{}` for them,
+/// as this did before, produced an example the daemon rejects outright
 /// whenever the nested schema has required keys of its own.
 fn example_args_object(
     root: &Value,

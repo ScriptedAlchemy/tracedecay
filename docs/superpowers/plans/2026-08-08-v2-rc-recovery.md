@@ -4,7 +4,7 @@
 > were never ticked here; its live remainder is carried by
 > `docs/plans/tracedecay-v2/NEXT.md` ("Remaining work by lane"), which has
 > been kept current through 2026-08-13. Do not treat the 55 unchecked boxes
-> below as independently open work — consult NEXT.md for what actually
+> below as independently open work, consult NEXT.md for what actually
 > remains.
 
 **Goal:** Convert the interrupted Claude checkout into a fully wired, truthfully typed V2 release-candidate branch with direct production-journey and aggregate test evidence.

@@ -5,8 +5,8 @@
 //! different crates: the [`WorkOperation`] descriptor that names its path, the
 //! executable catalog row that advertises its schemas, and the operation-id
 //! table the daemon resolves a capability and use case from. A row missing from
-//! any one of them fails differently — an unmounted path, an unadvertised
-//! binding, or a request refused as invalid before it reaches the authority —
+//! any one of them fails differently, an unmounted path, an unadvertised
+//! binding, or a request refused as invalid before it reaches the authority,
 //! so all three are checked against each other here rather than each against a
 //! handwritten expectation.
 //!

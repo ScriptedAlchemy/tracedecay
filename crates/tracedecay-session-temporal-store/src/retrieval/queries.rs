@@ -798,7 +798,7 @@ pub(super) const DERIVED_CANDIDATE_QUERY: &str = concat!(
 
 // The FTS match is the selective end of this join, so it drives. Probing the
 // root's evidence rows and testing each one for a matching member instead ran
-// the correlated FTS subquery once per evidence row in the whole root — and the
+// the correlated FTS subquery once per evidence row in the whole root, and the
 // keyset ORDER BY needs a temp b-tree, so LIMIT could not stop that scan early.
 // Fresh stores have no planner statistics, so CROSS JOIN pins the match as the
 // outer loop; GROUP BY collapses an evidence row several matching members reach.

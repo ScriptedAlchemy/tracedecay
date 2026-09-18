@@ -615,7 +615,7 @@ async fn state_shutdown_fences_a_queued_open_before_the_endpoint_expiry_sweep() 
     // The fence the open below must be queued behind is the closed admission
     // gate, so observe it directly: `begin_shutdown` closes the gate and then
     // parks on the endpoint registry this test holds. Yielding a fixed number
-    // of times is not an ordering — on a two-worker runtime under load the
+    // of times is not an ordering, on a two-worker runtime under load the
     // shutdown task can still be unscheduled after eight yields, and an open
     // that wins the gate first is a pre-shutdown admission the sweep retires,
     // not a queued one the fence refuses.

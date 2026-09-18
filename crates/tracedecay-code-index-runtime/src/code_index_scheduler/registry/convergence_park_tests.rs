@@ -5,14 +5,14 @@
 //! The pinned defect: a code-text-artifacts root that violates the
 //! owner-privacy contract (for example a 0775 directory created by an older
 //! binary) failed every text-projection pass with a background WARN and
-//! nothing else — `status` reported "warming"/"indexing" forever while the
+//! nothing else, `status` reported "warming"/"indexing" forever while the
 //! wake cadence silently retried a violation that can never fix itself. The
 //! socket-directory variant of the same contract refuses fast and typed at
 //! daemon bootstrap; background convergence must be just as truthful.
 //!
 //! Green means: an owned legacy mode self-heals (with the store converging to
 //! owner-private and serving), and an unhealable violation surfaces as a typed
-//! `parked` freshness state whose reason names the violation — while removing
+//! `parked` freshness state whose reason names the violation, while removing
 //! the violation lets the ordinary wake cadence resume without a remount.
 
 use std::fs;
@@ -41,7 +41,7 @@ struct Fixture {
     _root: TempDir,
     project: std::path::PathBuf,
     /// The exact durable text-artifacts root of the mounted worktree's scoped
-    /// store — the directory the owner-privacy contract governs.
+    /// store, the directory the owner-privacy contract governs.
     artifacts_root: std::path::PathBuf,
     registry: CodeIndexSchedulerRegistryV1,
 }
@@ -151,7 +151,7 @@ impl Fixture {
 
 /// An owned legacy artifacts root with a permissive mode is exactly the state
 /// older binaries left behind. Ownership is provable, so the worker heals it
-/// to owner-private in place and serving converges — no operator chmod, no
+/// to owner-private in place and serving converges, no operator chmod, no
 /// parked state, no indefinite warming.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_legacy_permissive_text_artifacts_root_self_heals_and_serves() {
@@ -198,8 +198,8 @@ async fn a_legacy_permissive_text_artifacts_root_self_heals_and_serves() {
     fixture.registry.shutdown().await;
 }
 
-/// A violation ownership cannot prove away — here a foreign regular file
-/// squatting on the artifacts-root path — must park typed: the freshness
+/// A violation ownership cannot prove away, here a foreign regular file
+/// squatting on the artifacts-root path, must park typed: the freshness
 /// projection names the exact violation and remediation instead of reporting
 /// "indexing" (surfaced as "warming") forever. Removing the violation lets
 /// the ordinary wake cadence resume without a remount, proving parked is
@@ -340,8 +340,8 @@ async fn fresh_graph_activation_waits_while_the_published_text_owner_is_parked()
     fixture.registry.shutdown().await;
 }
 
-/// The published pass waits for the owners the seat needs — exact and
-/// lexical — and nothing more. The clone-fingerprint successor that follows
+/// The published pass waits for the owners the seat needs, exact and
+/// lexical, and nothing more. The clone-fingerprint successor that follows
 /// the admission artifact re-decodes the whole sealed source into a second
 /// artifact; on the 772-file lifecycle fixture that pass alone held graph
 /// activation back by ~27 s (#1103). Fresh graph activation must start while

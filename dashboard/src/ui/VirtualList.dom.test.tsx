@@ -13,7 +13,7 @@ import { VirtualList } from './VirtualList.tsx';
  * virtualizer here.
  *
  * jsdom performs no layout: every element measures zero, and a virtualizer
- * given a zero-height viewport mounts nothing at all — which would satisfy any
+ * given a zero-height viewport mounts nothing at all, which would satisfy any
  * ceiling by drawing an empty list. So each windowed case installs a measured
  * viewport and also asserts a nonzero mount strictly below the item count.
  */
@@ -25,7 +25,7 @@ const MOUNT_CEILING = 250;
  * Give jsdom a viewport the virtualizer can measure.
  *
  * TanStack Virtual sizes the scroll element with `offsetWidth`/`offsetHeight`
- * (`getRect` in `@tanstack/virtual-core`), which jsdom always reports as zero —
+ * (`getRect` in `@tanstack/virtual-core`), which jsdom always reports as zero,
  * not `clientHeight` or `getBoundingClientRect`. It also needs a
  * `ResizeObserver` to exist on the window, which jsdom does not provide.
  */
@@ -121,7 +121,7 @@ describe('VirtualList row bounds', () => {
 
     rerender(<VirtualList items={items} getKey={(item) => item} renderItem={renderItem} />);
 
-    // Stable keys, so React reuses the node rather than remounting it — which
+    // Stable keys, so React reuses the node rather than remounting it, which
     // is what lets focus and selection survive a refetch.
     expect(container.querySelector('[data-row="row-0"]')).toBe(before);
   });

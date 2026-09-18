@@ -1,8 +1,8 @@
 /**
  * Reader for the graph-structure routes (plan 11b Surfaces 1–2).
  *
- * These five routes — `call-chain`, `strata`, and the three node-scoped reads
- * `node/{id}/facts|tests|sessions` — are the only endpoints in the dashboard
+ * These five routes, `call-chain`, `strata`, and the three node-scoped reads
+ * `node/{id}/facts|tests|sessions`, are the only endpoints in the dashboard
  * that ship a *measurement-grade* wire contract: every one returns
  * `DashboardEnvelopeV1<StructureReadV1<T>>`, where the inner union is
  *
@@ -12,14 +12,14 @@
  *
  * That union is the reason these routes are worth consuming carefully. Most of
  * this dashboard has to *infer* absence, which is why so many surfaces carry an
- * "unverified — the legacy response cannot distinguish zero from failure"
+ * "unverified, the legacy response cannot distinguish zero from failure"
  * caption. Here the wire says which one it is, so nothing has to be inferred
  * and nothing may be flattened: collapsing `unmeasured` into an empty
  * measurement would manufacture exactly the false zero those captions exist to
  * avoid.
  *
- * Transport sits *outside* that union — a route that never answered has no
- * `status` at all — so this module widens it to four cases rather than folding
+ * Transport sits *outside* that union, a route that never answered has no
+ * `status` at all, so this module widens it to four cases rather than folding
  * a network failure into `failed`, which would misreport an unreachable daemon
  * as a producer error.
  */
@@ -39,7 +39,7 @@ export type StructureResult<T> =
 
 /** The shape every `StructureReadV1<T>` alias in the generated barrel takes.
  * Declared structurally so this reader works for all five without naming the
- * generated aliases individually — they are `StructureReadV1`, `…V12`, `…V13`,
+ * generated aliases individually, they are `StructureReadV1`, `…V12`, `…V13`,
  * `…V14`, `…V15`, and that numbering is an artifact of schemars deduplication
  * rather than anything a caller should have to know. */
 type StructureReadWire<T> =
@@ -110,11 +110,11 @@ export function absenceReason<T>(result: StructureResult<T>): string | null {
     case 'measured':
       return null;
     case 'unmeasured':
-      return `${result.reason} — ${result.detail}`;
+      return `${result.reason}, ${result.detail}`;
     case 'failed':
-      return `${result.code} — ${result.detail}${result.retryable ? ' (retryable)' : ''}`;
+      return `${result.code}, ${result.detail}${result.retryable ? ' (retryable)' : ''}`;
     case 'transport':
-      return result.detail ? `${result.state} — ${result.detail}` : result.state;
+      return result.detail ? `${result.state}, ${result.detail}` : result.state;
     default: {
       const exhaustive: never = result;
       return exhaustive;

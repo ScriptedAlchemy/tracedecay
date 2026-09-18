@@ -1,7 +1,7 @@
 //! Writing and reading one fact.
 //!
 //! The executor owns the transaction shape; the siblings own the pieces it
-//! composes — [`assertion`] the assertion rows and their replay comparison,
+//! composes, [`assertion`] the assertion rows and their replay comparison,
 //! [`writes`] the fact/anchor/projection rows around them, and [`reads`] the
 //! two read operations.
 

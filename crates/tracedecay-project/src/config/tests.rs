@@ -1092,7 +1092,7 @@ mod runtime_configuration_cutover {
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
 
         // A freshly registered project has no pinned snapshot in this process's
-        // cache — exactly the state a daemon is in for a project it has not yet
+        // cache, exactly the state a daemon is in for a project it has not yet
         // opened, or for any project after a restart. The fail-closed hook-path
         // lookup rejects it.
         assert!(
@@ -1191,7 +1191,7 @@ mod runtime_configuration_cutover {
         }
 
         // Materialize the durable store schema without ever seeding a
-        // configuration revision — the state a consolidated destination store is
+        // configuration revision, the state a consolidated destination store is
         // left in after a repository move, when its configuration authority was
         // never migrated in.
         let runtime = HostAdmissionTestRuntimeV1::project(

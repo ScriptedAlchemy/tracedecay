@@ -228,13 +228,13 @@ export function App() {
 
   const title =
     view === "synapse"
-      ? "ACTIVITY BECOMES SYNAPSE — ADMITTED INGRESS ONLY"
+      ? "ACTIVITY BECOMES SYNAPSE, ADMITTED INGRESS ONLY"
       : view === "neuron-lab"
         ? labScope
-          ? `NEURON LAB — ${focused.name}`
-          : "NEURON LAB — TRACEDECAY CONCEPT"
+          ? `NEURON LAB, ${focused.name}`
+          : "NEURON LAB, TRACEDECAY CONCEPT"
         : view === "firing-tree"
-        ? "FIRING TREE — TRACEDECAY SESSION ARBOR"
+        ? "FIRING TREE, TRACEDECAY SESSION ARBOR"
         : view === "repo-zoom"
         ? "BRAIN / REPOSITORY NEIGHBORHOOD"
         : view === "scoped"

@@ -265,8 +265,8 @@ pub enum WorkHistoryCoverageV1 {
 /// resumes it. `selection_coverage` is about the *selection*: how much of the
 /// owner's journal lies inside the slice this read was authorized over at all.
 ///
-/// A page can be partial on both axes at once — a limited page of a covered
-/// prefix — which is precisely why the selection axis is carried as its own
+/// A page can be partial on both axes at once: a limited page of a covered
+/// prefix, which is precisely why the selection axis is carried as its own
 /// field rather than folded into the paging vocabulary. A `Complete` paging
 /// coverage means "no further page under this selection"; only
 /// `selection_coverage` can say whether events exist beyond the selection
@@ -347,7 +347,7 @@ where
         // The disclosure names where the selection stops covering the journal.
         // An event returned at or after that boundary would be an event this
         // selection never authorized, handed back under a disclosure claiming
-        // it was excluded — so the answer is checked against its own disclosure
+        // it was excluded, so the answer is checked against its own disclosure
         // instead of taken on trust.
         if let Some(first_excluded) = result.selection_coverage.first_excluded_sequence()
             && result

@@ -683,7 +683,7 @@ fn handoff_enforces_authorization_scope_expiry_and_single_use_without_bearer_lea
         .redeem(&redeem_context, &handoff, &scope, UtcMicros(60_000_009))
         .unwrap();
     // The redemption receipt is checkpoint evidence: exactly the recorded
-    // frontier, its digest, the scope, and when it was redeemed — no lease,
+    // frontier, its digest, the scope, and when it was redeemed, no lease,
     // fence, or acceptance authority travels with it.
     assert_eq!(receipt.scope, scope);
     assert_eq!(receipt.frontier, frontier());

@@ -41,7 +41,7 @@ describe('Session transcript drill-down', () => {
   /** The two governed refusals the LCM read routes actually serve
    * (`DashboardLcmReadStateV1::Locked` / `::Redacted` → the envelope's own
    * `domain_state` with a null payload). Each renders as its own chip with the
-   * daemon's reason — never as an empty transcript. */
+   * daemon's reason, never as an empty transcript. */
   it.each([
     { state: 'locked', label: 'Locked', reason: 'session_store_sync_lease_held' },
     { state: 'redacted', label: 'Redacted', reason: 'session_content_redacted_by_policy' },

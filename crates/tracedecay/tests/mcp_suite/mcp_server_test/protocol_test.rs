@@ -332,7 +332,7 @@ async fn test_tools_call_timings_can_be_disabled() {
     );
     assert!(
         resp["result"]["_meta"]["duration_us"].is_null(),
-        "duration_us must NOT be present when timings are disabled — got {}",
+        "duration_us must NOT be present when timings are disabled, got {}",
         resp["result"]["_meta"]
     );
 }
@@ -1763,7 +1763,7 @@ async fn test_run_returns_transport_read_errors() {
 // DB schema is ensured at most once per process: after the first write-path
 // call creates the store and runs the migrations, later write-path calls
 // (even from a fresh `McpServer` in the same process) take the
-// version-gate fast path and never re-run the LCM migrations — observable
+// version-gate fast path and never re-run the LCM migrations, observable
 // via the migration row's `applied_at`, which only a migration run rewrites.
 //
 // Pure-read tools (lcm_status) no longer create the store, so each session

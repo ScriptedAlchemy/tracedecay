@@ -198,7 +198,7 @@ fn control_stop_outcome(
 /// Retain the journal and report an unreconciled effect.
 ///
 /// The journal stays `Prepared` on purpose: the effect may have crossed its
-/// atomic rename boundary, so reconciliation — never an implicit retry — owns
+/// atomic rename boundary, so reconciliation, never an implicit retry, owns
 /// the outcome.
 fn persist_unknown(
     durability: &SourceEditDurability,

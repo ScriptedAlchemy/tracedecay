@@ -390,7 +390,7 @@ describe('searchLane', () => {
     expect(laneStateKind(sourceUnavailable)).toBe('unavailable');
     expect(laneStateKind(clientOffline)).not.toBe(laneStateKind(sourceUnavailable));
     // With the chip carrying the condition, the clause carries what the chip
-    // cannot — the reason the source reported — and never repeats the state.
+    // cannot, the reason the source reported, and never repeats the state.
     expect(laneStateDetail(clientOffline)).toBe('daemon unreachable');
     expect(laneStateDetail(sourceUnavailable)).toBe('graph_index_unavailable');
   });

@@ -5,7 +5,7 @@
 //! and the `rmcp` adapter, whose server callbacks are handed already-typed
 //! request DTOs. Before this envelope existed the `rmcp` edge re-encoded each
 //! typed DTO into a `serde_json::Value` and rebuilt a second, transport-neutral
-//! [`JsonRpcRequest`] purely to reach dispatch — one full JSON tree built per
+//! [`JsonRpcRequest`] purely to reach dispatch, one full JSON tree built per
 //! request, and for `tools/call` a second deep clone when the handler pulled
 //! `arguments` back out of it.
 //!
@@ -121,9 +121,9 @@ impl<'a> McpDispatchRequest<'a> {
 
     /// Params to resolve `initialize` client roots from.
     ///
-    /// `rmcp`'s `InitializeRequestParams` has no `roots` field — the roots a
+    /// `rmcp`'s `InitializeRequestParams` has no `roots` field, the roots a
     /// client advertises reach the daemon through its own routing, not through
-    /// this DTO — so a typed initialize has never contributed a root here.
+    /// this DTO, so a typed initialize has never contributed a root here.
     /// Returning `None` preserves that exactly, without building the JSON tree
     /// the previous bridge built only to find no `roots` key in it.
     pub fn initialize_roots_params(&self) -> Option<&Value> {

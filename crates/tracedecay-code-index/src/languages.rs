@@ -59,7 +59,7 @@ pub(crate) fn canonical_language_id(language_name: &str) -> String {
 ///
 /// Markdown qualifies: a heading owns its whole section, and nested headings
 /// are stable child spans. That is what keeps a chunk from splitting mid
-/// section — an oversized section splits at its sub-heading boundaries via
+/// section, an oversized section splits at its sub-heading boundaries via
 /// `structural_segments` instead of at an arbitrary byte window, and a section
 /// that fits the budget stays one chunk.
 fn has_stable_member_spans(language: &str) -> bool {

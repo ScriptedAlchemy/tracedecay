@@ -106,7 +106,7 @@ has the full map.
 
 A **payload** is the triple `(payload_ref, lcm_external_payloads row, payload file)`. The
 **canonical reference set** for a ref `R` is "every `lcm_raw_messages` row whose current
-state names `R`" — either `storage_kind='external' AND payload_ref=R`, or `R` appears as a
+state names `R`", either `storage_kind='external' AND payload_ref=R`, or `R` appears as a
 placeholder in any of `content`, `snippet_text`, `index_text`, `metadata_json` (parsed by
 `extract_payload_refs_from_text`, `payload.rs:73`).
 
@@ -129,13 +129,13 @@ references (whole-message `payload_ref` + the four placeholder-bearing text colu
 **Decision OM-2.** Because there is no FK between raw messages and payload metadata, liveness
 is derived, not enforced: a payload is **referenced** iff at least one raw message currently
 cites it (per §3). GC and diagnostics must compute referenced-ness from the union of the raw
-`payload_ref` column and placeholder extraction over the four text columns — exactly as
+`payload_ref` column and placeholder extraction over the four text columns, exactly as
 `ensure_current_raw_payload_ref` and the doctor diagnostics already do.
 
 **Decision OM-3.** Owner is `(provider, session_id, message_id, content_hash)`, embedded in the
 ref itself. A ref is therefore specific to one message's exact content; the same content in a
 different message gets a different ref. Compression-boundary carry-over reassigns owner rows
-(`reassign_session_payloads`) without moving files — refs are stable across session rotation.
+(`reassign_session_payloads`) without moving files, refs are stable across session rotation.
 
 Rationale: the current schema already encodes this and the read path already trusts it. Adding
 a raw→payload FK now would reject legitimate transient states (orphan files from a crashed
@@ -188,18 +188,18 @@ reaped. GC therefore re-checks referenced-ness at reap time, not at candidate-ma
 (`delete_external_payload(conn, storage_root, payload_ref)`) that removes the
 `lcm_external_payloads` row, the file, and rewrites any raw placeholders to
 tombstones, in the order below. Every explicit owner-authorized delete of a
-payload — and every new session/message delete API — MUST route through it or
+payload, and every new session/message delete API, MUST route through it or
 through GC. The deleter is the only code path permitted to call `remove_file` on
 a payload; Doctor never invokes it.
 
-**Decision D-2 (safe removal order — critical).** Remove in this order, never another:
+**Decision D-2 (safe removal order, critical).** Remove in this order, never another:
 
 1. Under a `BEGIN IMMEDIATE` transaction: delete the `lcm_external_payloads` row and (if
    applicable) clear/rewrite raw references. Commit.
 2. **After commit succeeds:** remove the payload file via `remove_file`.
 
 Rationale: deleting the file *before* the DB transaction commits would destroy body bytes the
-transaction might still roll back to need — unrecoverable data loss. Deleting the DB row first
+transaction might still roll back to need, unrecoverable data loss. Deleting the DB row first
 means a crash in the commit→file-remove window leaves an **orphan file** (safe; GC reaps it
 later) rather than a missing file behind a live reference (unsafe; expand would fail). This is
 the inverse of the ingest order (file before row) and is chosen for the same crash-safety
@@ -246,7 +246,7 @@ change in v1:
 
 - **Orphan files** (no metadata row): by file `mtime`/`ctime`. Reap only files older than the
   grace period. This bounds the ingest-crash and commit→remove windows automatically.
-- **Unreferenced metadata** (row present, no references): by the **two-scan rule** — GC marks a
+- **Unreferenced metadata** (row present, no references): by the **two-scan rule**. GC marks a
   ref as a candidate on pass N and reaps it on pass N+1 only if it is *still* unreferenced,
   with the two passes separated by ≥ the grace period. This needs no new column.
 
@@ -259,7 +259,7 @@ same either way.
 
 **Decision GP-4.** A separate, longer knob `reap_missing_metadata_after` (default 7 days)
 governs reaping a **missing** payload's metadata row (file gone but row+reference present). A
-missing payload is NOT reaped on the normal grace period — it is reported as an anomaly first,
+missing payload is NOT reaped on the normal grace period, it is reported as an anomaly first,
 because a missing file behind a live reference may indicate an FS problem the operator should
 investigate before the reference is tombstoned.
 
@@ -276,7 +276,7 @@ investigate before the reference is tombstoned.
 
 ## 8. Idempotency requirements
 
-- **Write** (`write_external_payload`): already idempotent — `create_new` + same-bytes accepted,
+- **Write** (`write_external_payload`): already idempotent, `create_new` + same-bytes accepted,
   different bytes → `PayloadIntegrityMismatch` (`payload.rs:405-437`). Re-ingest of identical
   content is a no-op file write. **Keep this invariant.**
 - **Upsert**: `upsert_payload_metadata` and `upsert_*_raw_message` are `ON CONFLICT … DO UPDATE`
@@ -287,7 +287,7 @@ investigate before the reference is tombstoned.
   file delete leaves an orphan file the next pass reaps; a crash between two tombstone rewrites
   leaves a partially-tombstoned message the next pass completes. Re-running GC after any crash
   must converge to a clean state.
-- **Expand**: deterministic per state — live returns bytes; tombstoned returns `PayloadGc'd`;
+- **Expand**: deterministic per state, live returns bytes; tombstoned returns `PayloadGc'd`;
   missing returns `PayloadMissing`; corrupted returns `PayloadIntegrityMismatch`. No expand
   call mutates state.
 
@@ -307,7 +307,7 @@ unexpectedly" (`PayloadMissing`) from "intentionally reaped" (`PayloadGc'd`). To
 through to `PayloadNotFound`/`PayloadMissing`; the tombstone prefix is already parsed by
 `is_external_payload_placeholder` (`payload.rs:104`), so only the error branch is new.
 
-## 10. GC reap — contract for the algorithm task (`t_bbd369f2`)
+## 10. GC reap, contract for the algorithm task (`t_bbd369f2`)
 
 The full algorithm is `t_bbd369f2`'s to design, but it MUST satisfy this contract:
 
@@ -315,7 +315,7 @@ The full algorithm is `t_bbd369f2`'s to design, but it MUST satisfy this contrac
    the canonical payload dir. Reject any other name, any symlink, any path whose canonical
    parent is not the canonical payload dir. Reuse `validate_payload_ref`
    (`payload.rs:56`), `canonical_storage_root` (`payload.rs:366`), and `ensure_contained`
-   (`payload.rs:396`) — do not invent new path logic.
+   (`payload.rs:396`), do not invent new path logic.
 2. **Never delete by caller-supplied path.** Refs only; resolve to a path under the canonical
    dir and re-validate containment immediately before `remove_file`.
 3. **Re-check referenced-ness at reap time under `BEGIN IMMEDIATE`.** A candidate marked on a
@@ -328,7 +328,7 @@ The full algorithm is `t_bbd369f2`'s to design, but it MUST satisfy this contrac
 6. **Dry-run/report mode is mandatory and default for owner maintenance.** Reap is opt-in
    (`apply=true`) only after explicit owner authorization; the report enumerates exactly what
    would be removed (refs + byte totals), never bodies. No body bytes appear in logs, reports,
-   or metrics — only refs, counts, sizes, and hashes already in the DB. Doctor is always
+   or metrics, only refs, counts, sizes, and hashes already in the DB. Doctor is always
    report-only.
 7. **Batching/locking:** reap inside bounded transactions; a single GC run holds `BEGIN
    IMMEDIATE` only across the per-ref decision+delete, not across filesystem I/O, to avoid
@@ -340,7 +340,7 @@ The full algorithm is `t_bbd369f2`'s to design, but it MUST satisfy this contrac
 
 - **Existing payloads are valid as-is.** Payloads created before this contract already have a
   metadata row + file + reference; they are `live`. No data migration is required to honor the
-  contract — it is enforced *forward* by routing deletes through the deleter (§6.1) and adding
+  contract, it is enforced *forward* by routing deletes through the deleter (§6.1) and adding
   GC.
 - **Existing orphans are the first GC candidates.** Files orphaned by past owner-maintenance runs,
   pre-contract crashes, or inline-conversions are simply collected on the first GC pass after
@@ -359,29 +359,29 @@ The full algorithm is `t_bbd369f2`'s to design, but it MUST satisfy this contrac
 
 ## 12. Edge cases
 
-- **Concurrent ingest during GC scan** — guarded by the grace period plus the reap-time
+- **Concurrent ingest during GC scan**, guarded by the grace period plus the reap-time
   referenced-ness re-check under `BEGIN IMMEDIATE` (§10.3). A payload written between scan and
   reap is `live` at reap time and is skipped.
-- **Crash mid-reap** (commit done, file not yet removed) — leaves an orphan file; next GC pass
+- **Crash mid-reap** (commit done, file not yet removed), leaves an orphan file; next GC pass
   reaps. (§8.)
-- **Crash mid-tombstone** (some placeholders rewritten, others not) — re-run completes it;
+- **Crash mid-tombstone** (some placeholders rewritten, others not), re-run completes it;
   tombstoning is idempotent. (§8.)
-- **Ref shared within one message via nested placeholders** — a message-delete reap must confirm
+- **Ref shared within one message via nested placeholders**, a message-delete reap must confirm
   the ref is cited by no surviving raw row before removing it; otherwise leave it referenced.
-- **Symlink/path-traversal in reap input** — rejected by `validate_payload_ref` + canonical-root
+- **Symlink/path-traversal in reap input**, rejected by `validate_payload_ref` + canonical-root
   + `ensure_contained`; reap never follows links and never deletes outside the canonical dir.
-- **File present but corrupted** (hash mismatch) — never auto-deleted; reported as integrity
+- **File present but corrupted** (hash mismatch), never auto-deleted; reported as integrity
   anomaly (§9, §6.1 D-4).
-- **Operator `rm` of a live file** — produces a `missing` payload (row + reference present, file
+- **Operator `rm` of a live file**, produces a `missing` payload (row + reference present, file
   gone); reported, not auto-tombstoned until `reap_missing_metadata_after` (GP-4).
-- **Two processes GC-ing the same store** — only one may hold the reap `BEGIN IMMEDIATE` at a
+- **Two processes GC-ing the same store**, only one may hold the reap `BEGIN IMMEDIATE` at a
   time; the loser observes the row already gone and no-ops (idempotent). The store's existing
   writer lock model applies.
 
 ## 13. Security invariants (non-negotiable)
 
 - **Never log, preview, report, or stream payload body bytes.** Reports carry refs, counts,
-  byte totals, and the hashes already stored in `lcm_external_payloads` — nothing more.
+  byte totals, and the hashes already stored in `lcm_external_payloads`, nothing more.
 - **Keep all existing path/ref safety:** `validate_payload_ref` (single normal component, no
   `.`/`..`/slashes), non-symlink storage root (`canonical_storage_root`), 0700 payload dir /
   0600 files, Linux `O_NOFOLLOW` (`payload.rs:456-483`). Reap must use the same primitives.
@@ -401,7 +401,7 @@ The full algorithm is `t_bbd369f2`'s to design, but it MUST satisfy this contrac
   consistent with memory fact deletion being hard-delete. The tombstone is informational only.
 - Cross-message / cross-owner payload deduplication. The owner-hash includes `message_id`; no
   dedup exists and this contract does not add it.
-- Reaping summary nodes, lifecycle state, or maintenance debt — those have their own
+- Reaping summary nodes, lifecycle state, or maintenance debt, those have their own
   daemon/authorized owner maintenance paths. This contract is strictly about payload
   files + `lcm_external_payloads`.
 

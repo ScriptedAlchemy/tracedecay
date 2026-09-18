@@ -11,8 +11,8 @@ import type {
  * Provider spend attribution, as pure readings over the canonical projection.
  *
  * Every dollar here arrived priced from the daemon; nothing in this module
- * multiplies a token by a rate. What it does is rank, share, bucket, and —
- * above all — keep the pricing classes apart: a provider whose usage the
+ * multiplies a token by a rate. What it does is rank, share, bucket, and , 
+ * above all, keep the pricing classes apart: a provider whose usage the
  * authority could price completely, one it priced in part, and one it could
  * not price at all are three readings, and a total that folds them together
  * must say which of them it includes.
@@ -96,7 +96,7 @@ function compareRows(a: Omit<ProviderRow, 'share'>, b: Omit<ProviderRow, 'share'
 
 /**
  * The provider ledger, or null when the attribution block itself was not
- * served — which is a different fact from a served block with no providers.
+ * served, which is a different fact from a served block with no providers.
  */
 export function summarizeProviderLedger(
   attribution: SavingsProviderUsageAttributionV1,
@@ -181,7 +181,7 @@ export interface SpendSeries {
 
 /**
  * The dated series behind the spend field, one line per provider in ledger
- * order. Buckets come from the daemon as UTC days and are drawn as given —
+ * order. Buckets come from the daemon as UTC days and are drawn as given , 
  * this never re-bins, interpolates, or carries a value across a gap.
  */
 export function buildSpendSeries(

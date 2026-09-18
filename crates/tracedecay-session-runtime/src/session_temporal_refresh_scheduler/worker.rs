@@ -74,8 +74,8 @@ enum LcmConvergencePage {
 /// history perpetually needs another pass would otherwise never repair a
 /// range persisted before the policy-anchor role filter. Every
 /// `HISTORY_PRIORITY_PASSES_BEFORE_RANGE_REWRITE`-th such pass therefore
-/// spends its admission — the same permit and bounded budget one history page
-/// takes — on the rewrite alone, which caps the rewrite's starvation at that
+/// spends its admission, the same permit and bounded budget one history page
+/// takes, on the rewrite alone, which caps the rewrite's starvation at that
 /// many passes per page while leaving history the other passes.
 fn lcm_convergence_admission(
     outcome: Option<SessionHistoricalIngestOutcome>,

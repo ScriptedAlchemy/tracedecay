@@ -22,8 +22,8 @@ import { checkStatusKind, compareHref, latestObservation } from './review.ts';
 /**
  * The PR journey: one deterministic horizontal projection over the sources
  * Delivery can really join today. Time is X; the lane is Y. Every episode
- * carries its source class, its evidence grade and — when the record has no
- * timestamp of its own — an honest place in the undated gutter rather than an
+ * carries its source class, its evidence grade and, when the record has no
+ * timestamp of its own, an honest place in the undated gutter rather than an
  * invented position on the axis. Observation time (when the daemon read the
  * provider) is labelled as such and never presented as event time.
  */

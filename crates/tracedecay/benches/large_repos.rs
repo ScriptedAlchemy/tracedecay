@@ -22,9 +22,9 @@
 //!     each prepared repo so mutations made by the write benches are reverted.
 //!
 //! Environment variables:
-//!   TRACEDECAY_BENCH_REPOS_DIR   required — root directory for cloned repos
-//!   TRACEDECAY_BENCH_REPOS       optional — comma-separated repo subset
-//!   TRACEDECAY_BENCH_SKIP_CLONE  optional — fail rather than clone
+//!   TRACEDECAY_BENCH_REPOS_DIR   required, root directory for cloned repos
+//!   TRACEDECAY_BENCH_REPOS       optional, comma-separated repo subset
+//!   TRACEDECAY_BENCH_SKIP_CLONE  optional, fail rather than clone
 
 #![allow(clippy::too_many_lines)]
 mod queries;
@@ -118,7 +118,7 @@ fn reset_scratch(project_root: &std::path::Path, scratch_path: &str, init_conten
 fn bench_all(c: &mut Criterion) {
     let Some(root) = repos_root() else {
         eprintln!(
-            "[bench] TRACEDECAY_BENCH_REPOS_DIR is unset — skipping large-repo benchmarks. \
+            "[bench] TRACEDECAY_BENCH_REPOS_DIR is unset, skipping large-repo benchmarks. \
              Set it to a writable directory to enable them."
         );
         return;

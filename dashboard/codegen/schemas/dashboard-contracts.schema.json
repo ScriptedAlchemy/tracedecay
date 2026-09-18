@@ -857,7 +857,7 @@
       "oneOf": [
         {
           "const": "root",
-          "description": "The session records no parent — a genuine top of a delegation tree.",
+          "description": "The session records no parent, a genuine top of a delegation tree.",
           "type": "string"
         },
         {
@@ -930,7 +930,7 @@
           "type": "string"
         },
         "started_at": {
-          "description": "Unix SECONDS, as the session store records them — capture parses\nprovider stamps with `parse_rfc3339_timestamp`, which yields seconds,\nand normalizes millisecond inputs down to seconds before storing. This\nis not the microsecond convention the Work contracts use, and reading\nit as micros would place every session in 1970.",
+          "description": "Unix SECONDS, as the session store records them, capture parses\nprovider stamps with `parse_rfc3339_timestamp`, which yields seconds,\nand normalizes millisecond inputs down to seconds before storing. This\nis not the microsecond convention the Work contracts use, and reading\nit as micros would place every session in 1970.",
           "format": "int64",
           "type": [
             "integer",
@@ -961,7 +961,7 @@
       "type": "object"
     },
     "AnalyticsSubagentTreePayloadV1": {
-      "description": "The subagent tree: parent/child session edges, not a per-agent rollup.\n\n`nodes` is a pre-order flattening — every node appears after its own parent\nand before that parent's later siblings — so a reader can draw the tree from\n`depth` alone without reassembling edges client-side.",
+      "description": "The subagent tree: parent/child session edges, not a per-agent rollup.\n\n`nodes` is a pre-order flattening, every node appears after its own parent\nand before that parent's later siblings, so a reader can draw the tree from\n`depth` alone without reassembling edges client-side.",
       "properties": {
         "available": {
           "type": "boolean"
@@ -3044,7 +3044,7 @@
       "type": "object"
     },
     "CodeIndexStalenessStateV1": {
-      "description": "Closed staleness ladder for one mounted worktree.\n\nThe scheduler publishes one of these tokens. MCP, the dashboard, and the\nCLI must match the variant — not a hand-copied string — so a new ladder\nstate cannot appear at one caller and be missed at the others.",
+      "description": "Closed staleness ladder for one mounted worktree.\n\nThe scheduler publishes one of these tokens. MCP, the dashboard, and the\nCLI must match the variant, not a hand-copied string, so a new ladder\nstate cannot appear at one caller and be missed at the others.",
       "enum": [
         "fresh",
         "stale",
@@ -3660,7 +3660,7 @@
       "type": "string"
     },
     "DashboardCoverageV1": {
-      "description": "Coverage statement. Counts are optional; an unknown denominator is `None`,\nnever a fabricated `0`/`100%`. The completeness axis is authoritative — the\nfrontend never derives `complete` from a `matched == eligible` coincidence.",
+      "description": "Coverage statement. Counts are optional; an unknown denominator is `None`,\nnever a fabricated `0`/`100%`. The completeness axis is authoritative, the\nfrontend never derives `complete` from a `matched == eligible` coincidence.",
       "properties": {
         "completeness": {
           "$ref": "#/$defs/DashboardCoverageCompletenessV1"
@@ -3750,7 +3750,7 @@
       "type": "object"
     },
     "DashboardDomainStateV1": {
-      "description": "The normative dashboard domain-state union.\n\nThe first sixteen variants are the plan's exact `DashboardDomainState`\ndiscriminated union. [`Self::Unsupported`] is the backend-gap binding\nstate: the read model's HTTP surface exists, but its live producer/source is\nnot yet wired server-side. It is never healthy or empty — the frontend\nrenders a distinct \"not yet available\" state — and it is deliberately\nseparate from [`Self::UnsupportedSchema`] (an undecodable schema/variant).",
+      "description": "The normative dashboard domain-state union.\n\nThe first sixteen variants are the plan's exact `DashboardDomainState`\ndiscriminated union. [`Self::Unsupported`] is the backend-gap binding\nstate: the read model's HTTP surface exists, but its live producer/source is\nnot yet wired server-side. It is never healthy or empty, the frontend\nrenders a distinct \"not yet available\" state, and it is deliberately\nseparate from [`Self::UnsupportedSchema`] (an undecodable schema/variant).",
       "oneOf": [
         {
           "enum": [
@@ -9458,7 +9458,7 @@
       "oneOf": [
         {
           "const": "advisory",
-          "description": "advisory/scout findings (GitHub review, CI localization,\nproximity, context scout) — `crate::advisory` / domain feedback.",
+          "description": "advisory/scout findings (GitHub review, CI localization,\nproximity, context scout): `crate::advisory` / domain feedback.",
           "type": "string"
         },
         {
@@ -14187,7 +14187,7 @@
     },
     "ListedTaskHandoffV1": {
       "additionalProperties": false,
-      "description": "One handoff token, projected for public reading.\n\nMirrors [`IssueTaskHandoffResultV1`]'s doctrine: the complete binding stays\ninside the daemon authority, and only these identifiers cross the wire. No\nbearer secret exists to leak here — the authority never stored one — and the\nissuer's grant identity and policy digests stay concealed.",
+      "description": "One handoff token, projected for public reading.\n\nMirrors [`IssueTaskHandoffResultV1`]'s doctrine: the complete binding stays\ninside the daemon authority, and only these identifiers cross the wire. No\nbearer secret exists to leak here. The authority never stored one, and the\nissuer's grant identity and policy digests stay concealed.",
       "properties": {
         "consumed_at": {
           "anyOf": [
@@ -20996,7 +20996,7 @@
     },
     "SessionRetrievalBudgetAccountingV1": {
       "additionalProperties": false,
-      "description": "The ceiling and count behind a budget refusal.\n\n`stage` names which budget refused; this is what tells an oversized request\napart from a read whose cost was mis-sized for it. The ceiling value also\ndistinguishes the resources inside one stage — a record read that stopped at\n1024 hit the item count, one that stopped at 16 MiB hit the byte total — so\nthe kernel's resource spelling stays in the kernel instead of becoming a\nsecond wire vocabulary to keep in step.",
+      "description": "The ceiling and count behind a budget refusal.\n\n`stage` names which budget refused; this is what tells an oversized request\napart from a read whose cost was mis-sized for it. The ceiling value also\ndistinguishes the resources inside one stage: a record read that stopped at\n1024 hit the item count, one that stopped at 16 MiB hit the byte total, so\nthe kernel's resource spelling stays in the kernel instead of becoming a\nsecond wire vocabulary to keep in step.",
       "properties": {
         "limit": {
           "format": "uint64",
@@ -21014,7 +21014,7 @@
       "type": "object"
     },
     "SessionRetrievalBudgetObservationV1": {
-      "description": "What a refusing budget boundary had counted.\n\nBoth variants are exact. A bounded read never counts the rows it declined to\nread, so an exhausted read reports what it consumed and that storage held\nmore — never a total it would have to run the refused scan to learn.",
+      "description": "What a refusing budget boundary had counted.\n\nBoth variants are exact. A bounded read never counts the rows it declined to\nread, so an exhausted read reports what it consumed and that storage held\nmore, never a total it would have to run the refused scan to learn.",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -22925,7 +22925,7 @@
       "oneOf": [
         {
           "const": "open",
-          "description": "Not yet redeemed, and not yet expired — the live frontier.",
+          "description": "Not yet redeemed, and not yet expired: the live frontier.",
           "type": "string"
         },
         {
@@ -26706,7 +26706,7 @@
       ]
     },
     "WorkGraphSelectionCoverageV1": {
-      "description": "How much of the owner's journal the read's selection actually covers.\n\nA selection names a slice of the owner's work, not the whole journal: an\nevent records the relation scopes it was admitted under, and a selection\nthat does not name them puts that event *outside* the slice. The events\noutside a selection do not poison the ones inside it, but they must never be\nconcealed either — a caller who is shown the covered slice with no way to\nlearn that more exists is reading a silently incomplete graph.\n\nSo the read answers over the covered slice and says so, in the same\n`Complete`/`Partial` vocabulary [`WorkGraphTimelineCoverageV1`] and\n[`WorkHistoryCoverageV1`](crate::WorkHistoryCoverageV1) already use.\n\nThe covered slice is always a *prefix* of the journal, and that is a\nproperty of folding rather than a simplification. A graph version is folded\nfrom every event up to its own sequence, so the first event a selection does\nnot cover ends the readable slice: every later version, whatever scopes its\nown event named, would have to be folded across that event to exist at all.\n`excluded_events` therefore counts every event from the first uncovered one\nonward.",
+      "description": "How much of the owner's journal the read's selection actually covers.\n\nA selection names a slice of the owner's work, not the whole journal: an\nevent records the relation scopes it was admitted under, and a selection\nthat does not name them puts that event *outside* the slice. The events\noutside a selection do not poison the ones inside it, but they must never be\nconcealed either, a caller who is shown the covered slice with no way to\nlearn that more exists is reading a silently incomplete graph.\n\nSo the read answers over the covered slice and says so, in the same\n`Complete`/`Partial` vocabulary [`WorkGraphTimelineCoverageV1`] and\n[`WorkHistoryCoverageV1`](crate::WorkHistoryCoverageV1) already use.\n\nThe covered slice is always a *prefix* of the journal, and that is a\nproperty of folding rather than a simplification. A graph version is folded\nfrom every event up to its own sequence, so the first event a selection does\nnot cover ends the readable slice: every later version, whatever scopes its\nown event named, would have to be folded across that event to exist at all.\n`excluded_events` therefore counts every event from the first uncovered one\nonward.",
       "oneOf": [
         {
           "description": "The selection covers the owner's whole journal. Nothing was withheld.",
@@ -29359,7 +29359,7 @@
     },
     "WorkRankedRouteV1": {
       "additionalProperties": false,
-      "description": "Ranked route. Dimensions stay SEPARATE — no scalar score field is permitted here.",
+      "description": "Ranked route. Dimensions stay SEPARATE. No scalar score field is permitted here.",
       "properties": {
         "autonomy": {
           "$ref": "#/$defs/WorkOrdinalBandV1",
@@ -30287,7 +30287,7 @@
               "type": "string"
             },
             "uncited": {
-              "description": "Sources preserved without citations — failures, unknowns, and\nartifact-less successes — in the caller's requested order.",
+              "description": "Sources preserved without citations: failures, unknowns, and\nartifact-less successes, in the caller's requested order.",
               "items": {
                 "$ref": "#/$defs/WorkAttemptIdentityV1"
               },
@@ -31344,7 +31344,7 @@
       "type": "string"
     },
     "WorkflowDefinitionLifecycleState": {
-      "description": "Durable lifecycle disposition of one immutable workflow definition version.\n\nPlan 32 (\"Typed workflow definitions\"): \"Lifecycle retains candidate,\nvalidate, activate, retire, reject, list, get, diff, and history operations\nthrough the same application surfaces.\" The definition payload itself stays\nimmutable — \"Editing creates a new version; admitted runs remain pinned\" —\nso the disposition is a separate revisioned aggregate keyed by the same\ndefinition identity.",
+      "description": "Durable lifecycle disposition of one immutable workflow definition version.\n\nPlan 32 (\"Typed workflow definitions\"): \"Lifecycle retains candidate,\nvalidate, activate, retire, reject, list, get, diff, and history operations\nthrough the same application surfaces.\" The definition payload itself stays\nimmutable, \"Editing creates a new version; admitted runs remain pinned\",\nso the disposition is a separate revisioned aggregate keyed by the same\ndefinition identity.",
       "enum": [
         "candidate",
         "validated",

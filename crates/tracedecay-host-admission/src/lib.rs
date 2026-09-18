@@ -1251,7 +1251,7 @@ fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {
         // A worker that stopped before finishing left the batch unapplied
         // without saying anything about the observations themselves, so this
         // is an availability failure the caller re-drives once a worker is
-        // back — not a rejection of the payload.
+        // back, not a rejection of the payload.
         ObservationApplicationError::PreparationWorkerStopped => admission_outcome(
             HostAdmissionStatus::Unavailable,
             true,

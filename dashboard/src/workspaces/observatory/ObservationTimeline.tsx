@@ -85,7 +85,7 @@ function useRailWidth(): [RefObject<HTMLDivElement | null>, number] {
  * labelled as such; a source that published no observation time is listed
  * beside the rail as a typed absence rather than placed at zero. No production
  * route accepts a time window, so the rail selects and previews but does not
- * filter — and says so. Reads that land within one touch target of each other
+ * filter, and says so. Reads that land within one touch target of each other
  * fold into a cluster that states its count and opens into its members.
  */
 export function ObservationTimeline({

@@ -74,7 +74,7 @@ pub struct BranchCompactionOutcome {
 /// Why a candidate was left untouched this tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BranchCompactionSkipReason {
-    /// The file could not be opened or locked briefly enough to sample —
+    /// The file could not be opened or locked briefly enough to sample,
     /// almost always a concurrent writer (branch add/sync/gc). Expected and
     /// transient; the next tick retries.
     Busy,
@@ -110,7 +110,7 @@ pub struct BranchCompactionReport {
 
 /// Selects every tracked branch database file other than `active_db_path`
 /// (the currently-mounted store, already compacted through the live daemon
-/// runtime — see module docs).
+/// runtime, see module docs).
 ///
 /// The active store is excluded by *resolved* path, not by string equality:
 /// `active_db_path` comes from a mounted handle while candidates are rebuilt
@@ -184,7 +184,7 @@ pub fn compact_branch_databases(
 }
 
 /// Turns the configured thresholds into a validated trigger policy once for
-/// the whole pass. `None` means the configuration itself is unusable — the
+/// the whole pass. `None` means the configuration itself is unusable, the
 /// caller reports that rather than silently treating every database as
 /// ineligible.
 ///
@@ -203,9 +203,9 @@ fn resolve_policy(config: &CompactionThresholdConfig) -> Option<CompactionTrigge
     Some(policy)
 }
 
-/// This one is read-*write* on purpose — `incremental_vacuum` has to write —
-/// so it cannot use the shared read-only probe, but it holds the same bounded
-/// busy timeout: a locked branch database is skipped, never waited on.
+/// This one is read-*write* on purpose because `incremental_vacuum` has to
+/// write, so it cannot use the shared read-only probe, but it holds the same
+/// bounded busy timeout: a locked branch database is skipped, never waited on.
 fn open_bounded(path: &Path) -> Result<Connection, BranchCompactionSkipReason> {
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .map_err(|_| BranchCompactionSkipReason::Busy)?;
@@ -388,7 +388,7 @@ mod tests {
 
     /// A *valid* threshold the database does not meet leaves it alone. The
     /// earlier version of this test used a threshold of `1.5`, which
-    /// `FreePageRatioV1::new` rejects outright — it passed because the policy
+    /// `FreePageRatioV1::new` rejects outright, it passed because the policy
     /// failed to build, not because the database was under threshold, and so
     /// asserted nothing about the policy at all.
     #[test]
@@ -429,7 +429,7 @@ mod tests {
     /// rejected by `CompactionTriggerPolicyV1::validate` (it would schedule
     /// every store on every pass). The inherited version of this module built
     /// the policy per file and swallowed that rejection into "not eligible",
-    /// so a zero threshold compacted nothing and looked like success — the
+    /// so a zero threshold compacted nothing and looked like success, the
     /// same bug that left this module's own headline test failing unnoticed.
     #[test]
     fn a_zero_threshold_is_reported_invalid_rather_than_compacting_nothing() {

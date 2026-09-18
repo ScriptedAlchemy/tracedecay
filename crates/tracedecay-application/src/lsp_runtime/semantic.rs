@@ -127,7 +127,7 @@ impl UpstreamCapabilityInitializationAuthority for CompositeUpstreamCapabilities
             let mut capabilities = UpstreamCapabilities::default();
             for initializer in initializers {
                 // An analyzer that will not start is absence, not failed
-                // admission — the same state a project with no analyzer at all
+                // admission. The same state a project with no analyzer at all
                 // resolves through `UnavailableUpstreamCapabilities`. Failing
                 // the composite instead made one unstartable analyzer a
                 // permanent gateway outage: `StdioLspSemanticAuthority` records

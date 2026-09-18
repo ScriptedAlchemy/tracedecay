@@ -19,14 +19,14 @@ function LinkNote({ node }: { node: AnalyticsSubagentNodeV1 }) {
     case 'missing_parent':
       return (
         <span className="text-3xs text-state-unavailable" data-subagent-link="missing_parent">
-          parent {node.parent_session_id} not in this reading — drawn at the margin, but it is a
+          parent {node.parent_session_id} not in this reading, drawn at the margin, but it is a
           cut edge and not a root
         </span>
       );
     case 'cycle':
       return (
         <span className="text-3xs text-state-conflicting" data-subagent-link="cycle">
-          its parent chain closes on itself, so no root reaches it — surfaced here rather than
+          its parent chain closes on itself, so no root reaches it, surfaced here rather than
           dropped from the count
         </span>
       );
@@ -79,7 +79,7 @@ export function SubagentTree({
         {census.flat ? (
           <>
             <span className="td-value">{census.sessionsRead.toLocaleString()}</span> sessions, and
-            not one parent/child edge among them. Every session here began on its own — this is a
+            not one parent/child edge among them. Every session here began on its own, this is a
             measured absence of delegation, not an unread tree.
           </>
         ) : (

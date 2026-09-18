@@ -135,7 +135,7 @@ pub async fn close_retained_for_shutdown(
     // have dropped the retained map-owner attachments and every owner-issued
     // graph client lease, and the reconciliation workers must already be
     // joined. A lease that survives the drain is a live consumer, so the
-    // typed Conflict below is the correct terminal answer — never retry here.
+    // typed Conflict below is the correct terminal answer, never retry here.
     tokio::task::spawn_blocking(move || {
         graph_registry.close_retained_for_shutdown(&binding, &verified_locator)
     })

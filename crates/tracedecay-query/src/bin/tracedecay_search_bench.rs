@@ -9,7 +9,7 @@
 //! 2. build and seal one clean generation through
 //!    [`CodeIndexProductionOwnerV1::build_and_publish`];
 //! 3. drain the sealed generation and ingest it into an isolated SQLite
-//!    lexical artifact, finalize, and reopen it content-addressed — the
+//!    lexical artifact, finalize, and reopen it content-addressed, the
 //!    exact reader shape `ProductionCodeIndexQueryOwnersV1` serves from;
 //! 4. compose the production `ExactLane`/`LexicalLane` over that reader and
 //!    run representative query classes (short token, high-cardinality term,

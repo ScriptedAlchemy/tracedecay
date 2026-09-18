@@ -670,7 +670,7 @@ fn defunct_checkout_capture_never_falls_back_to_an_ambient_parent_repository() {
 
     // The nested checkout's repository is gone, but its path still exists
     // inside the ambient parent worktree. The contract requires a safe typed
-    // state — never the ambient parent's HEAD.
+    // state, never the ambient parent's HEAD.
     fs::remove_dir_all(child.join(".git")).unwrap();
     fs::remove_file(child.join("tracked.txt")).unwrap();
     let after = capture_repository_provenance(&request);

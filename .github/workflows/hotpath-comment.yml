@@ -11,6 +11,12 @@ permissions:
   contents: read
   pull-requests: write
 
+# One comment per profiled pull request; a newer profile supersedes the
+# comment for the older head.
+concurrency:
+  group: hotpath-comment-${{ github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.head_sha }}
+  cancel-in-progress: true
+
 jobs:
   comment:
     runs-on: ubuntu-latest

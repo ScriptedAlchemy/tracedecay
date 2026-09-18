@@ -269,7 +269,7 @@ const fn canonical_stock_host_capabilities(host: HostKindV1) -> [HostCapabilityR
         // `gemini extensions install` adopts. It exposes no LSP registration
         // and no diagnostics API. Its extension format does admit hooks, but
         // no checked-in native Gemini event fixture proves that route, and the
-        // staged extension declares none — claiming Hooks here would report a
+        // staged extension declares none, claiming Hooks here would report a
         // capability this integration cannot drive.
         HostKindV1::Gemini => (
             Unavailable(HostRegistrationUnsupported),
@@ -284,8 +284,8 @@ const fn canonical_stock_host_capabilities(host: HostKindV1) -> [HostCapabilityR
         // `Mcp` and `Cli` are the only supported capabilities.
         //
         // `Hooks` is `HostApiAbsent`, not `CheckedInEvidenceMissing`: unlike
-        // Gemini — whose extension format admits hooks that no fixture yet
-        // proves — Copilot publishes no third-party event or hook registration
+        // Gemini, whose extension format admits hooks that no fixture yet
+        // proves. Copilot publishes no third-party event or hook registration
         // surface at all, in the CLI or in the VS Code extension. There is no
         // route to gather evidence for, so naming the gap "evidence missing"
         // would imply a capability that is one fixture away from working.

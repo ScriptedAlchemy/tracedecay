@@ -142,8 +142,8 @@ fn remove_fixed_profile_path(
 
 /// The exclusive maintenance window a destructive profile command runs in.
 ///
-/// The fast path is an uncontended lease. When the lease is busy — most often
-/// because the managed daemon retains a shared lease for its whole lifetime —
+/// The fast path is an uncontended lease. When the lease is busy, most often
+/// because the managed daemon retains a shared lease for its whole lifetime.
 /// the profile is taken offline by quiescing the installed service (bounded
 /// by the supervisor's stop timeout, which SIGKILLs a hung or wedged daemon),
 /// and [`Self::finish`] restores the captured service state afterward.
@@ -220,11 +220,11 @@ pub(crate) async fn try_admit_profile_registry(
 }
 
 /// Takes the whole profile offline for a destructive maintenance command,
-/// within a bound, or refuses typed — never "retry after it finishes".
+/// within a bound, or refuses typed, never "retry after it finishes".
 ///
 /// The managed daemon holds a shared lifecycle lease for its entire lifetime,
 /// and a daemon wedged in a terminal retry loop (issue #765's unseatable
-/// sealed generation) never exits, so a bare lease attempt refuses forever —
+/// sealed generation) never exits, so a bare lease attempt refuses forever.
 /// exactly when the operator most needs the escape hatch. On contention this
 /// stops the installed service (the supervisor bounds the stop and SIGKILLs a
 /// hung daemon), waits a bounded interval for the lease, and restores the
@@ -524,7 +524,7 @@ async fn wipe_under_profile_offline(
         global::print_flash_warning(all, &targets);
 
         if assume_yes {
-            eprintln!("\x1b[33m--yes supplied — proceeding without the interactive prompt.\x1b[0m");
+            eprintln!("\x1b[33m--yes supplied, proceeding without the interactive prompt.\x1b[0m");
         } else if wipe_must_not_wait_for_stdin(assume_yes, io::stdin().is_terminal()) {
             // Wipe deletes stores. A non-terminal caller must pass `--yes`.
             // Reading stdin here hangs an agent whose pipe stays open.
@@ -541,7 +541,7 @@ async fn wipe_under_profile_offline(
                 }
             })?;
             if answer.trim() != "go!" {
-                eprintln!("\x1b[33mAborted — nothing was wiped.\x1b[0m");
+                eprintln!("\x1b[33mAborted. Nothing was wiped.\x1b[0m");
                 return Ok(());
             }
         }

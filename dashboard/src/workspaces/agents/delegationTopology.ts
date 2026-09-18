@@ -39,7 +39,7 @@ export const FANOUT_LIMIT = 8;
 /** One session drawn at its own position. */
 export interface TopologySessionMark {
   readonly kind: 'session';
-  /** `provider:session_id` — the payload's own identity. */
+  /** `provider:session_id`, the payload's own identity. */
   readonly id: string;
   readonly label: string;
   readonly node: AnalyticsSubagentNodeV1;
@@ -54,7 +54,7 @@ export interface TopologySessionMark {
    * the children are drawn; equal to `node.descendants` when they are not. */
   readonly foldedDescendants: number;
   /** True when this mark's children are drawn only because the reader opened
-   * them past the depth limit — the act a fold control undoes. */
+   * them past the depth limit, the act a fold control undoes. */
   readonly depthOpened: boolean;
   /** Bundles beneath this mark that the reader opened, so their members are
    * drawn individually. Each is the fold control's target. */
@@ -77,7 +77,7 @@ export interface TopologyBundleMark {
   readonly row: number;
   readonly parentId: string | null;
   readonly members: readonly AnalyticsSubagentNodeV1[];
-  /** Direct sessions folded in — `members.length`. */
+  /** Direct sessions folded in, `members.length`. */
   readonly sessions: number;
   /** Sessions beneath those members, also folded in. */
   readonly descendants: number;
@@ -121,9 +121,9 @@ export interface DelegationTopologyModel {
   readonly edges: readonly TopologyEdge[];
   readonly stubs: readonly TopologyStub[];
   readonly generations: readonly TopologyGeneration[];
-  /** Leaf slots the layout occupies — the field's height in rows. */
+  /** Leaf slots the layout occupies, the field's height in rows. */
   readonly rows: number;
-  /** Columns the layout occupies — deepest drawn generation plus one. */
+  /** Columns the layout occupies, deepest drawn generation plus one. */
   readonly columns: number;
   readonly totalSessions: number;
   readonly drawnSessions: number;
@@ -595,7 +595,7 @@ export function edgePath(
 }
 
 /** The set of mark ids on the path from a mark to its top, plus the mark's
- * drawn children — the neighbourhood hover isolates. */
+ * drawn children, the neighbourhood hover isolates. */
 export function neighbourhood(
   model: DelegationTopologyModel,
   id: string,

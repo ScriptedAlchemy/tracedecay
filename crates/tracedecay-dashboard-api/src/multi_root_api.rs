@@ -2,9 +2,9 @@
 //!
 //! The dashboard resolves a named collection through the daemon application
 //! transport; selection precedence and read mapping are owned by the
-//! application resolver. No default collection is currently configurable —
+//! application resolver. No default collection is currently configurable,
 //! the retired `query.default_collection.v1` setting fails closed in old
-//! stores and no replacement setting exists — so an unnamed resolution
+//! stores and no replacement setting exists, so an unnamed resolution
 //! reports the typed no-collection state instead of guessing a scope set.
 
 use axum::Json;
@@ -27,7 +27,7 @@ pub struct CollectionQueryV1 {
     pub collection: Option<String>,
 }
 
-/// `GET /api/multi-root/collection` — resolve the selected named collection.
+/// `GET /api/multi-root/collection`, resolve the selected named collection.
 ///
 /// An explicit `collection` query parameter names the target; without one the
 /// selector falls through to the (currently absent) default collection and

@@ -451,7 +451,7 @@ fn doctor_report_healthy_only_under_genuinely_complete_coverage() {
 fn doctor_regression_unavailable_and_drift_families_are_distinct_states() {
     let ctx = context();
     // Executable absent, protocol drift, configuration drift, stuck runtime,
-    // unmounted index, denied storage — each a distinct visible state.
+    // unmounted index, denied storage, each a distinct visible state.
     let configuration = StaticConfiguration(ConfigurationAuthorityReadV1::Resolved {
         drift: ConfigurationDriftV1::Drifted,
         coverage: DoctorCoverageCompletenessV1::Complete,

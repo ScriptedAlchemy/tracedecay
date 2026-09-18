@@ -311,8 +311,9 @@ pub fn find_run_record_exact_bounded_blocking(
             .map_err(tracedecay_domain::errors::TraceDecayError::from)?;
         read_exact_run_record_bounded(&path, run_id)
     })();
-    let unlock =
-        fs2::FileExt::unlock(&lock).map_err(tracedecay_domain::errors::TraceDecayError::from);
+    let unlock = lock
+        .unlock()
+        .map_err(tracedecay_domain::errors::TraceDecayError::from);
     result.and_then(|record| unlock.map(|()| record))
 }
 

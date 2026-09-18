@@ -1,5 +1,5 @@
 /**
- * COMPARE — two exact local revisions in one identity-stable union layout.
+ * COMPARE. Two exact local revisions in one identity-stable union layout.
  *
  * `GET /api/plugins/graph/compare/union-layout` (code_read_api.rs) resolves two
  * local branch references against the revisions the reader expects them to
@@ -15,8 +15,8 @@
  * A reference that moved past its expected revision answers `stale` with
  * `selected_revision_changed`, and this view says exactly that instead of
  * comparing whatever the branch points at now. Filters are the route's own
- * `file` and `kind` parameters — `file` matches an exact logical path or a
- * path prefix (`code_index_branch_diff.rs`), never a substring — and the
+ * `file` and `kind` parameters, `file` matches an exact logical path or a
+ * path prefix (`code_index_branch_diff.rs`), never a substring, and the
  * counts printed are of the filtered union the daemon returned, not of the
  * repository.
  */
@@ -161,7 +161,7 @@ function SelectionGuidance({
     if (value.branch === '' && value.revision === '') return 'not named yet';
     if (value.branch === '' || value.revision === '') return 'needs both a branch and its exact commit';
     const exact = unique && value.branch === unique.branch && value.revision === unique.revision;
-    return `${value.branch} @ ${value.revision.slice(0, 12)}${exact ? ' — the indexed worktree' : ''}`;
+    return `${value.branch} @ ${value.revision.slice(0, 12)}${exact ? ', the indexed worktree' : ''}`;
   };
   return (
     <div
@@ -443,7 +443,7 @@ function ChangeLegend({ layout }: { layout: RevisionPairUnionLayoutV1 }) {
   );
 }
 
-/** The mark itself. `removed` is an outline with no fill — the former space —
+/** The mark itself. `removed` is an outline with no fill, the former space,
  * and `added` is filled; `changed` and `unchanged` differ by weight. Colour
  * never carries the class alone: every row also prints its label. */
 function ChangeMark({ change }: { change: RevisionPairChangeV1 }) {

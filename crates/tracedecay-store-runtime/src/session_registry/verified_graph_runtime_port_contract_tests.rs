@@ -297,8 +297,8 @@ fn snapshot_through_database(
 /// activated memory graph to the live session lease during mount and on late
 /// attachment, and daemon composition unconditionally binds the
 /// deferred-activation route. Whichever route arrives first wins the single
-/// binding cell, so every later rebind of the same runtime — resolved or
-/// deferred — must stay an idempotent no-op instead of a conflict, and the
+/// binding cell, so every later rebind of the same runtime, resolved or
+/// deferred, must stay an idempotent no-op instead of a conflict, and the
 /// installed route must actually resolve to the mounted runtime rather than
 /// merely exist.
 #[tokio::test]
@@ -634,7 +634,7 @@ async fn project_graph_publications_are_isolated_by_project_shard() {
         .expect("first project publication");
 
     // The second shard never published this projection, so it must observe
-    // the typed empty start — never the first shard's head.
+    // the typed empty start, never the first shard's head.
     assert!(matches!(
         snapshot_through_database(&second_database, &projection),
         Ok(None)
@@ -901,7 +901,7 @@ impl RuntimeRequestProbeV1 for NeverInterruptedProbe {
 
 /// A publish interrupted between the relational journal append and the
 /// verified-head CAS leaves an active replay with no head. The next publish of
-/// the same publication must resume it to a verified snapshot — answering
+/// the same publication must resume it to a verified snapshot, answering
 /// Conflict instead wedges the projection permanently (every later publish and
 /// read fails until the store is deleted).
 #[tokio::test]
@@ -991,8 +991,8 @@ async fn journaled_publication_without_a_head_resumes_to_a_verified_snapshot() {
     assert_eq!(snapshot.generation(), &initial_manifest.generation);
 }
 
-/// An orphaned pending replay — journaled by a publisher that died before its
-/// verified-head CAS and never retried under the same publication key — must
+/// An orphaned pending replay, journaled by a publisher that died before its
+/// verified-head CAS and never retried under the same publication key, must
 /// not block the projection forever. The relational journal is an ordered
 /// log, so a later publication of a NEWER generation completes the
 /// predecessor first and then lands its own head. This is the live wedge

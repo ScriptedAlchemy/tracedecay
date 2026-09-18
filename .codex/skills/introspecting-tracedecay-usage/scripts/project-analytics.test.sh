@@ -90,7 +90,7 @@ for scope in project all; do
       PATH="$FAKE_BIN:$PATH" SERVING_DB="$SERVING_DB" TD_EXPECT_SCOPE="$scope" "$helper" "${args[@]}"
     } 2>&1)"
 
-    assert_contains "$output" "TraceDecay usage & fact-store adoption — proj_current"
+    assert_contains "$output" "TraceDecay usage & fact-store adoption, proj_current"
     assert_contains "$output" "serving store: graph.db"
     assert_contains "$output" "total mcp_tool_call events: 3"
     assert_contains "$output" "facts stored:              2"

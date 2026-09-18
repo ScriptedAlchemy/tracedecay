@@ -23,7 +23,7 @@ use tracedecay_automation_runtime::automation::skill_materialization::{
 const INSTALL: &str = "install-test-a";
 const INSTALL_B: &str = "install-test-b";
 
-/// The production host I/O bundle materialization writes through — the same
+/// The production host I/O bundle materialization writes through the same
 /// value the composition root hands automation.
 fn host_io() -> tracedecay_automation_runtime::automation::host_io::HostIo {
     tracedecay_agent_hosts::host_io()
@@ -94,7 +94,7 @@ async fn materialize_on_activate_writes_global_scope_only_by_default() {
     assert_eq!(results.len(), 4, "expected 4 detected scopes");
 
     // ...but a default (global-scoped) skill materializes ONLY into the user's
-    // global host dirs — never into the project checkout (no repo pollution).
+    // global host dirs, never into the project checkout (no repo pollution).
     let global = [
         home.join(".claude/skills/code-slop-cleanup/SKILL.md"),
         home.join(".codex/skills/code-slop-cleanup/SKILL.md"),
@@ -504,7 +504,7 @@ async fn foreign_file_is_never_touched() {
     let profile_root = home.join(".tracedecay");
     install_fake_hosts(&home);
 
-    // A user (or repo-local dev skill) already owns this slug — no provenance.
+    // A user (or repo-local dev skill) already owns this slug, no provenance.
     let scope = MaterializationScope::global(MaterializationHost::Claude, home.clone());
     let dir = scope.skills_dir().join("code-slop-cleanup");
     std::fs::create_dir_all(&dir).unwrap();
@@ -791,7 +791,7 @@ async fn symlinked_scope_root_materializes_through_link() {
     let profile_root = home.join(".tracedecay");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&real_claude).unwrap();
-    // ~/.claude is a symlink into a dotfiles repo — a normal setup.
+    // ~/.claude is a symlink into a dotfiles repo, a normal setup.
     symlink(&real_claude, home.join(".claude")).unwrap();
 
     activate_skill(&profile_root, "code-slop-cleanup").await;

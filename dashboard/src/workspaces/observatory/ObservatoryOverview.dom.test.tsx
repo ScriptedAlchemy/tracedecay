@@ -75,7 +75,7 @@ describe('Observatory system evidence overview', () => {
     const findings = document.querySelector('[data-evidence-panel="findings"]');
     expect(findings?.querySelector('[data-evidence-coverage]')?.textContent).toBe('coverage 50%');
 
-    // Four authorities answered with an observation time — the unavailable
+    // Four authorities answered with an observation time, the unavailable
     // hint source included, since its envelope still says when the daemon
     // looked. jsdom gives the rail no width, so all four fold into one cluster
     // that states its count; opening it lists each read in its own state. The

@@ -18,7 +18,7 @@ where
     Publication: std::future::Future<Output = Result<Output>>,
 {
     // The bound is a plain deadline: a waiter resumed after it elapsed still
-    // needs one more await — `route_bound_project_server` — before its
+    // needs one more await, `route_bound_project_server`, before its
     // publication loop can read the route's terminal state, so an elapsed
     // deadline preempts a failure that was already recorded and the caller
     // would see warming for a route that is no longer opening. Callers repair
@@ -280,8 +280,8 @@ fn remote_deleted_project_route_error(identity: &str) -> TraceDecayError {
 /// That is exactly what strands a profile after an interrupted migration:
 /// recovery can bring the daemon up on a fresh registry while
 /// every project keeps its in-repo enrollment marker and its profile store, and
-/// the first daemon-brokered call — including the post-update startup-health
-/// probe, which cannot pass `allow_init` — was rejected as "not enrolled". The
+/// the first daemon-brokered call, including the post-update startup-health
+/// probe, which cannot pass `allow_init`, was rejected as "not enrolled". The
 /// existing store is required to be present on disk, so an ambient directory
 /// (a bare `$HOME`, a checkout whose store really is gone) is still rejected
 /// and no path-derived authority is minted here.

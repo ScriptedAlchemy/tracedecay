@@ -78,7 +78,7 @@ impl RegisteredWorkStore {
     }
 
     /// Starts a registered store over a file `seed` shaped before the current
-    /// Work schema is installed — the way a daemon opens a journal an earlier
+    /// Work schema is installed, the way a daemon opens a journal an earlier
     /// release wrote. Installation is idempotent, so a seed may install too.
     pub fn start_seeded(name: &str, seed: impl FnOnce(&Connection)) -> Self {
         let directory = TempDir::new().expect("work store directory");

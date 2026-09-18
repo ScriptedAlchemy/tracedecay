@@ -177,7 +177,7 @@ fn normalize_no_follow_error(error: io::Error) -> io::Error {
 /// The file is opened once, without following a final symlink, and the kind
 /// and length checks run on that opened handle's metadata, so a pathname that
 /// is swapped between check and read cannot substitute a different object
-/// (only a regular file that atomically replaced the path can be observed —
+/// (only a regular file that atomically replaced the path can be observed,
 /// in either its old or new state). Non-regular objects and symlinks fail
 /// with `InvalidInput`; an empty, oversized, or short-read file fails with
 /// `InvalidData`.

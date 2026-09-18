@@ -137,7 +137,7 @@ impl SharedAnalyzerClient {
             let _ = supervisor.apply(&root, AnalyzerEvent::Crashed);
         }
         // `Starting` belongs here too. Only one caller can be starting at a
-        // time — the client lock this runs under is what enforces that — so
+        // time, the client lock this runs under is what enforces that, so
         // reaching here in `Starting` means the caller that owned the previous
         // start was dropped mid-flight and released the lock without
         // concluding the transition. This caller takes the start over; it

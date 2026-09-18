@@ -2622,8 +2622,8 @@ MOUNT_RETRY_BUDGET_S = 60
 MOUNT_RETRY_DELAY_S = 0.5
 # The code-index branch-diff authority is the last to activate after project
 # open (~120s observed on a cold hermetic fixture, returning a typed
-# `authority_unavailable` until then), so its row alone carries a larger —
-# still bounded and falsifiable — mount budget.
+# `authority_unavailable` until then), so its row alone carries a larger,
+# still bounded and falsifiable, mount budget.
 MOUNT_RETRY_BUDGET_OVERRIDES_S = {"tracedecay_branch_diff": 180}
 
 

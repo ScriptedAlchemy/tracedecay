@@ -1,7 +1,7 @@
 /**
  * The Cortex aperture: the graph slice as one luminous field, with its HUD.
  *
- * The canvas is `GraphCanvas` — Sigma over Graphology, force-settled once —
+ * The canvas is `GraphCanvas`, Sigma over Graphology, force-settled once,
  * and everything drawn over it is a reading of the same slice: the scale and
  * the rule that chose it (top left), the symbol kinds on the field with their
  * counts (bottom left), and the relation kinds the wire served (bottom right).

@@ -1,5 +1,5 @@
 /**
- * Vocabulary for the TRACE surface — the drill-in that floods a selected
+ * Vocabulary for the TRACE surface, the drill-in that floods a selected
  * symbol's call topography.
  *
  * Three modules share these types and nothing else: `model.ts` turns the
@@ -14,7 +14,7 @@
  * has a plausible default.
  */
 
-/** Which side of the focus a drawn channel lies on. Drawing direction only —
+/** Which side of the focus a drawn channel lies on. Drawing direction only,
  * the simulation treats all four as the same undirected spring. */
 export type TraceChannelDirection =
   /** Caller side: a tributary flowing into the focus. */
@@ -31,12 +31,12 @@ export interface TraceNode {
   readonly id: string;
   /** Display name, already resolved from the payload's fallback chain. */
   readonly name: string;
-  /** Symbol kind, straight off the payload — feeds `kindColor`. */
+  /** Symbol kind, straight off the payload, feeds `kindColor`. */
   readonly kind: string;
   /**
    * Total (in + out) edge count, as the neighbors endpoint reports it in
    * `degree`. This is the node's MASS in the simulation and the width of its
-   * sill in the renderer. `null` when the payload omitted it — an unmeasured
+   * sill in the renderer. `null` when the payload omitted it, an unmeasured
    * degree is never coerced to zero.
    */
   readonly degree: number | null;
@@ -47,7 +47,7 @@ export interface TraceNode {
   /**
    * Signed hop ring: negative on the caller side, positive on the callee side,
    * 0 for the focus. This is the hop at which the symbol was FETCHED, which is
-   * exactly what the row position encodes — not elevation, not importance.
+   * exactly what the row position encodes, not elevation, not importance.
    */
   readonly ring: number;
   /** Layout anchor in world coordinates. The simulation holds the node here. */
@@ -74,7 +74,7 @@ export interface TraceChannel {
   /**
    * Call sites on this one edge: the number of `calls` rows the endpoint
    * returned for this ordered pair. This is the channel's WIDTH and its spring
-   * STIFFNESS — the felt channel and the drawn channel are the same number.
+   * STIFFNESS, the felt channel and the drawn channel are the same number.
    */
   readonly calls: number;
   readonly dir: TraceChannelDirection;
@@ -107,7 +107,7 @@ export interface TraceCoverage {
   readonly drawn: number;
   /**
    * Distinct symbols that the fetched neighbor lists named but that this frame
-   * does not draw. Counted from rows in hand — symbols beyond the fetched hops
+   * does not draw. Counted from rows in hand, symbols beyond the fetched hops
    * were never named to us and are deliberately NOT in this number.
    */
   readonly namedButNotDrawn: number;
@@ -127,7 +127,7 @@ export interface TraceCoverage {
   /**
    * Whether the payload carried `contains` edges at all. When false the
    * surface draws no membranes and the caption states that the wire did not
-   * carry them — it does not imply the code has no types.
+   * carry them, it does not imply the code has no types.
    */
   readonly membranesAvailable: boolean;
   /**
@@ -140,7 +140,7 @@ export interface TraceCoverage {
    * passthrough, so the day a producer starts sending a complexity or churn
    * field, that field appears in this array and the corresponding channel goes
    * live without a copy edit. Understating what the wire carries would be as
-   * false as overstating it, so neither is asserted — both are read.
+   * false as overstating it, so neither is asserted, both are read.
    */
   readonly rowFields: readonly string[];
 }
@@ -151,7 +151,7 @@ export type SensoryChannelState =
   | 'measured'
   /**
    * No field on this payload carries the measurement. Absence of a field is
-   * not absence of the property — this says the wire was silent, nothing more.
+   * not absence of the property, this says the wire was silent, nothing more.
    */
   | 'not-on-this-wire'
   /**

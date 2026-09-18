@@ -28,7 +28,7 @@ import { laneStateDetail, overviewReadState, ProjectionLedger } from './Projecti
 /**
  * The local-first Repositories wing: when the scoped project's provider cannot
  * serve pull requests, Delivery still shows the local Git evidence the daemon
- * did serve — working tree, commits, index freshness — and prints the provider
+ * did serve, working tree, commits, index freshness, and prints the provider
  * absence with the daemon's own reason. A horizontal band above the inbox, not
  * a page; the only control is the Settings link.
  *

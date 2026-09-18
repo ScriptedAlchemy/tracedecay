@@ -1,10 +1,10 @@
 /**
- * TRACE — the Code workspace's call-topography drill-in.
+ * TRACE. The Code workspace's call-topography drill-in.
  *
  * A selected symbol floods the field: its callers converge from above as
  * tributaries, its callees fan below as a delta, every channel as wide as the
  * call sites on that one edge, and the whole thing under real spring physics so
- * the structure can be FELT — hubs are slow and deep, leaves flick, and dragging
+ * the structure can be FELT, hubs are slow and deep, leaves flick, and dragging
  * a symbol deforms its neighbourhood in proportion to how tightly it is called.
  *
  * The division of labour is the plan's honesty boundary and is not negotiable:
@@ -15,9 +15,9 @@
  *                          there, computed from a stated measurement.
  *   `viz/trace/render.ts`  draws. Decides nothing.
  *
- * This file composes those three through the siblings that present them — the
+ * This file composes those three through the siblings that present them, the
  * plate, the field, the key, the felt channels, the motion control and the
- * ranked list — and is responsible for one thing of its own: saying out loud
+ * ranked list, and is responsible for one thing of its own: saying out loud
  * what the picture is and is not showing.
  *
  * DEPTH is not decided here. `traceNeighborhood.ts` is the only module that
@@ -27,8 +27,8 @@
  * ACCESSIBILITY. The canvas is one `role="img"` with a description that carries
  * the same claims as the caption, and `TraceList` is its exact equivalent:
  * every symbol on the field is in it, in call-site order, as keyboard-reachable
- * text. That pairing is a property of this composition and of nothing smaller —
- * neither component can assert it alone — which is why the two are always
+ * text. That pairing is a property of this composition and of nothing smaller,
+ * neither component can assert it alone, which is why the two are always
  * rendered together, from the one model, and never conditionally. Reduced
  * motion is a rendering MODE rather than a switched-off feature (see
  * `TraceCanvas`), and it can be pinned on or off from the surface regardless of
@@ -56,7 +56,7 @@ import { useTraceNeighborhood } from './traceNeighborhood.ts';
  * Not a wire shape. The three things that can set a focus hold three different
  * amounts: the search list and the hub field hold a whole `GraphNodeV1` off the
  * graph routes, while a click inside the trace field holds only what the
- * simulation carries — id, kind, name, file and line. A `GraphNodeV1` satisfies
+ * simulation carries, id, kind, name, file and line. A `GraphNodeV1` satisfies
  * this, so the richer sources pass straight through; the trace field states
  * what it actually knows instead of padding the rest of the wire shape with
  * nulls it never received.
@@ -244,7 +244,7 @@ function TraceField({
       {/* What is known about the focus beyond its call edges, and a route
        * through the neighbourhood the field can only show two hops of. Both
        * sit between the field and the ranked list because they are readings
-       * about the SAME symbol the plate above is measuring — the list below is
+       * about the SAME symbol the plate above is measuring, the list below is
        * about its neighbours. */}
       <NodeEvidence nodeId={focus.id} nodeName={displayName(focus)} />
       <CallChain model={model} focusId={focus.id} />

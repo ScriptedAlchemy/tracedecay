@@ -74,7 +74,7 @@ fn writable_handle_releases_readers_and_writer() {
 }
 
 /// A worker leased into a retained snapshot answers the release on its
-/// snapshot channel, interleaved between reads — a live snapshot must not
+/// snapshot channel, interleaved between reads, a live snapshot must not
 /// degrade the release into a no-op or a spurious "worker closed".
 #[test]
 fn memory_release_reaches_workers_inside_retained_snapshots() {

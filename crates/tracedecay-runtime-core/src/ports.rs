@@ -12,7 +12,7 @@
 /// `shard_runtime::registry` initialises a freshly created profile- or
 /// session-scoped shard by running the registered global-database schema
 /// against the attachment it just opened. That schema lives in
-/// `tracedecay-global-db`, which depends on this crate — so the kernel cannot
+/// `tracedecay-global-db`, which depends on this crate, so the kernel cannot
 /// name it without a Cargo cycle.
 ///
 /// This port **fails closed**: an uninitialised profile or session store is
@@ -277,7 +277,7 @@ pub mod registered_schema {
     /// This arm is compiled **only** for this crate's own test binary.
     /// Dependent crates build the kernel without `cfg(test)`, so they keep the
     /// fail-closed error until they register the real installer, and no
-    /// production or `--all-features` binary is affected — `test-helpers` and
+    /// production or `--all-features` binary is affected. `test-helpers` and
     /// `test-transport` deliberately do not reach it.
     #[cfg(test)]
     fn unregistered_outcome() -> Result<()> {

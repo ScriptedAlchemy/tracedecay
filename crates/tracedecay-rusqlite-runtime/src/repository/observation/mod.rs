@@ -1,7 +1,7 @@
 //! Writing, advancing, and reading one observation.
 //!
 //! The executor owns the transaction shape; the siblings own the pieces it
-//! composes — [`authority`] the anchor/provenance/receipt rows a write persists
+//! composes, [`authority`] the anchor/provenance/receipt rows a write persists
 //! and a replay verifies, and [`rows`] the single projection every read decodes
 //! through.
 

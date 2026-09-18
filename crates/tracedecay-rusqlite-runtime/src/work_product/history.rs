@@ -3,14 +3,14 @@
 //!
 //! History is the one Work product read that returns no projection at all. The
 //! events are the record, so this authority hands back the stored
-//! `WorkProductEventV1` rows unchanged — it does not summarise them, does not
+//! `WorkProductEventV1` rows unchanged, it does not summarise them, does not
 //! reorder them, and never synthesises an event that was not appended.
 //!
 //! Three bounds shape what a page contains.
 //!
 //! 1. **The selection bounds the journal to its covered prefix.** An event
 //!    records the relation scopes it was admitted under, and an event outside
-//!    the selection falls outside the slice the read was authorized over — it
+//!    the selection falls outside the slice the read was authorized over, it
 //!    does not poison the events inside it. So the page is served over the
 //!    covered prefix (see [`covered_prefix`](super::covered_prefix) for why the
 //!    covered slice is always a prefix) and carries a

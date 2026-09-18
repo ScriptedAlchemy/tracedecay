@@ -777,7 +777,7 @@ async fn selected_target_rmcp_flushes_response_and_disconnect_cancels_selector_o
     let executor = Arc::new(ControlledCancellationExecutor::new());
     // `tracedecay_fact_store_list` is a registered-project reader: the
     // connection server resolves the selector, then hops to the selected
-    // project's retained owner. Replace that owner in place — a second key
+    // project's retained owner. Replace that owner in place, a second key
     // for the same project_id makes the resolver report ambiguous, and a
     // replacement without profile identity is filtered out of the mount set.
     let graph = target_server.cg().await;

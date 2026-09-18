@@ -2,8 +2,8 @@
  * The renderer's geometry, tested where it can be tested without a canvas.
  *
  * `createCortexRenderer` needs a 2D context, but the three functions that
- * decide WHERE a mark lands — the outline, its extent, and the hit test that
- * has to agree with both — are pure, and they are the ones that can silently
+ * decide WHERE a mark lands, the outline, its extent, and the hit test that
+ * has to agree with both, are pure, and they are the ones that can silently
  * disagree with the model. A hit test that does not match the drawn shape is a
  * surface where clicking a region selects a different one.
  */

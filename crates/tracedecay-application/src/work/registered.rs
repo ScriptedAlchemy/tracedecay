@@ -82,7 +82,7 @@ pub struct RegisteredWorkApplicationServicesV1 {
 ///
 /// This is a second Work authority, not a view of the first. The task services
 /// above are scoped by `WorkAuthority`; this one is scoped by the registered
-/// profile owner, which is also where its owner identity comes from — the
+/// profile owner, which is also where its owner identity comes from, the
 /// store's own binding, never a value a request supplied.
 pub struct RegisteredWorkProductServicesV1 {
     reads: tracedecay_contracts::WorkProductReadServiceV1<

@@ -4,8 +4,8 @@
  * `EnvelopeResult` is keyed by domain state rather than by a transport outcome,
  * so the gateway's read-only refusal is reported in that vocabulary: `locked`,
  * the taxonomy's word for a surface that will not accept a change. The failure
- * this file guards against is that refusal arriving as `error` — a state whose
- * only implied next action is retry, which will be refused again — or as a
+ * this file guards against is that refusal arriving as `error`, a state whose
+ * only implied next action is retry, which will be refused again, or as a
  * decodable-but-absent envelope.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -102,9 +102,9 @@ describe('fetchEnvelope', () => {
   it('carries the daemon reason when an unavailable read returns no payload', async () => {
     // `DashboardEnvelopeV1::unavailable` is how every failed graph read reaches
     // the client: domain_state `unknown`, payload null, and the cause pushed
-    // onto `coverage.omission_reasons`. The state alone is not actionable —
+    // onto `coverage.omission_reasons`. The state alone is not actionable,
     // "unknown" does not tell a reader whether the index is still sealing or
-    // the generation is gone — so the reason has to survive the decode. Without
+    // the generation is gone, so the reason has to survive the decode. Without
     // this the Code workspace renders a blocked panel with no explanation,
     // which is indistinguishable from an empty project.
     const envelope = fixtureEnvelope(null, 'unknown');

@@ -242,7 +242,7 @@ const COMPACTION_INGEST_RETRY_DELAY: Duration = Duration::from_millis(400);
 /// `project_authority_unbound` is listed explicitly because the authority
 /// itself reports it as non-retryable: it means the project's write authority
 /// has not been bound *yet*, which the project-open sequence resolves. A
-/// mismatched authority is deliberately absent — that never converges by
+/// mismatched authority is deliberately absent, that never converges by
 /// waiting.
 const COMPACTION_INGEST_CONVERGING_REASONS: &[&str] = &[
     "cursor_conflict",

@@ -173,7 +173,7 @@ impl HaskellExtractor {
     }
 
     fn visit_bind(state: &mut ExtractionState, node: TsNode<'_>) {
-        // `bind` is a pattern binding — skip signatures, only emit function-shaped binds.
+        // `bind` is a pattern binding. Skip signatures, only emit function-shaped binds.
         let name = Self::extract_function_name(state, node);
         let Some(name) = name else { return };
 

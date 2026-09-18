@@ -8,12 +8,12 @@
 //! `NativeIntegrationPort` / `NativeIntegrationStackResolutionPort`, composed
 //! per project by the daemon native-integration registry at project open.
 //!
-//! A project without a mounted owner — a non-Git project, or a request
-//! arriving before project-open admission finished — answers with the typed
+//! A project without a mounted owner answers with the typed
 //! `authority_unmounted` result rather than a guess, a partial apply, or a
-//! local mutation fallback: an unavailable daemon or capability leaves the
-//! operation explicitly preview-only or unavailable, and no transport falls
-//! back to local mutation.
+//! local mutation fallback. That includes a non-Git project, or a request
+//! arriving before project-open admission finished. An unavailable daemon or
+//! capability leaves the operation explicitly preview-only or unavailable, and
+//! no transport falls back to local mutation.
 //!
 //! Apply resolves its preview and one-use approval from the durable store by
 //! exact identity and digest; a missing or mismatched fact is denied without
@@ -951,7 +951,7 @@ fn native_integration_authority(
     // the authorization port and the apply validator bind previews and
     // approvals to "the grant now in hand" by this digest across the
     // stack-snapshot -> preflight -> approval -> apply journey. Per-operation
-    // enforcement stays in the grant's capability/use-case set below — a
+    // enforcement stays in the grant's capability/use-case set below, a
     // preflight grant still can never satisfy apply.
     let grant_digest = tracedecay_domain::canonical_sha256(&(
         "tracedecay.daemon.native-integration-route-grant.v1",

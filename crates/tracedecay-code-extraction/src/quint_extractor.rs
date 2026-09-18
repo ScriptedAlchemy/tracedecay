@@ -261,7 +261,7 @@ impl QuintExtractor {
 
     /// Joins the collected dotted-path parts and emits a `Uses` edge from
     /// the current scope to a synthetic file node for the imported module.
-    /// `parts` may be empty (e.g. `import` with nothing after it) — in
+    /// `parts` may be empty (e.g. `import` with nothing after it). In
     /// that case nothing is emitted.
     fn commit_import(state: &mut ExtractionState, parts: &[String], line: u32) {
         if parts.is_empty() {

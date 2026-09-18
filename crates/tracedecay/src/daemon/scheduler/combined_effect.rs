@@ -800,7 +800,6 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use fs2::FileExt;
     use tempfile::TempDir;
     use tracedecay_application::observability::RegisteredObservabilityPortV1;
     use tracedecay_automation_runtime::automation::AutomationRunControl;
@@ -1327,7 +1326,7 @@ mod tests {
             ))
             .expect("open current skill journal lock");
         journal_lock
-            .lock_exclusive()
+            .lock()
             .expect("block current skill abandonment");
         let mut first_error = None;
         let mut effect = Box::pin(run_combined_scheduler_effect(
@@ -1383,7 +1382,9 @@ mod tests {
         assert_eq!(exact_spool_files(&fixture.dashboard_root), spool_before);
         assert_eq!(pending_journal_files(&fixture.dashboard_root).len(), 1);
 
-        FileExt::unlock(&journal_lock).expect("release current skill abandonment");
+        journal_lock
+            .unlock()
+            .expect("release current skill abandonment");
         assert_eq!((&mut effect).await, CombinedEffectOutcome::Handled);
         drop(effect);
         assert!(first_error.is_none());

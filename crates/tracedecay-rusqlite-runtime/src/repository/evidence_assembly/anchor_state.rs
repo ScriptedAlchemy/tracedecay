@@ -16,7 +16,7 @@ use super::super::support::{decode, encode, invalid};
 ///
 /// A drilldown page carries at most 256 occurrences, each contributing an
 /// occurrence anchor and a source anchor, so the deduplicated set never
-/// approaches SQLite's default variable ceiling — but chunking keeps the
+/// approaches SQLite's default variable ceiling, but chunking keeps the
 /// batched liveness load correct if a caller ever exceeds it.
 const ANCHOR_LIVENESS_BATCH: usize = 500;
 
@@ -110,7 +110,7 @@ struct AnchorRow {
 ///
 /// The cached checks reproduce [`evidence_anchor_is_current`] and
 /// [`require_source_anchor_current`] exactly, reading the same columns and
-/// returning the same `Ok`/`Err` outcomes — they only replace the individual
+/// returning the same `Ok`/`Err` outcomes, they only replace the individual
 /// `SELECT`s with two `anchor_id IN (...)` loads made up front.
 pub(super) struct AnchorLivenessCache {
     anchors: HashMap<String, AnchorRow>,

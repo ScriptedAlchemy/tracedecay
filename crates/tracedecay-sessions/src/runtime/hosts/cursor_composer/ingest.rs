@@ -736,7 +736,7 @@ impl CursorComposerSource {
             "sessions.hosts.cursor_composer.state_scope_blocking",
             run_blocking_transcript_section(|| context.scope_matcher())
         );
-        // Indexed prefix scan of keys + byte lengths only — never SELECT full
+        // Indexed prefix scan of keys + byte lengths only, never SELECT full
         // envelope text here. Point-fetch materializes only when the UTF-8 byte
         // length fits both ceilings. Keyset pagination over the `cursorDiskKV`
         // primary key reproduces the original index-ordered streaming scan

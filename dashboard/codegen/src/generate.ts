@@ -1,5 +1,5 @@
 /**
- * Contracts codegen — deterministic TypeScript + Zod generation from the
+ * Contracts codegen. Deterministic TypeScript + Zod generation from the
  * JSON Schema exported directly from Rust `JsonSchema` derives.
  *
  * Design goals (binding, per docs/plans/tracedecay-v2/11-dashboard-frontend.md
@@ -9,7 +9,7 @@
  *   - Internally-tagged `oneOf` variants remain exact discriminated unions;
  *     codegen never invents variants absent from Rust.
  *   - Generation is deterministic: stable (alphabetical) ordering, no
- *     timestamps, no host/env state — so diffs are reviewable.
+ *     timestamps, no host/env state, so diffs are reviewable.
  *
  * The generator implements the focused subset of JSON Schema that the exported
  * dashboard schemas use (objects, refs, string/number/bool/null scalars,

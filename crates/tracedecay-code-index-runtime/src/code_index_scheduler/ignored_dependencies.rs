@@ -79,10 +79,10 @@ pub struct CodeIndexIgnoredDependencyBuildV1 {
 impl CodeIndexWorktreeSchedulerV1 {
     /// Admit one verified ignored dependency entrypoint.
     ///
-    /// This is the admission boundary: every interruption observed inside it —
+    /// This is the admission boundary: every interruption observed inside it,
     /// including the shared source-read and snapshot-capture helpers, which
     /// report interruptions as reconcile interruptions because the ordinary
-    /// reconcile path owns them too — surfaces to the caller as the typed
+    /// reconcile path owns them too, surfaces to the caller as the typed
     /// ignored-dependency refusal.
     pub fn index_verified_ignored_dependency(
         &mut self,
@@ -173,7 +173,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         }))
     }
 
-    /// One wall span covers the whole entrypoint resolution — package-root
+    /// One wall span covers the whole entrypoint resolution, package-root
     /// containment, `package.json` read, bounded entrypoint read, sanitize,
     /// and the gix ignore proof. The per-file reads inside are never
     /// individually spanned.
@@ -376,8 +376,8 @@ impl CodeIndexWorktreeSchedulerV1 {
         .is_ok()
     }
 
-    /// One wall span covers the whole roster verification sweep — it re-reads
-    /// and re-captures every admitted dependency entrypoint — with an entries
+    /// One wall span covers the whole roster verification sweep, it re-reads
+    /// and re-captures every admitted dependency entrypoint, with an entries
     /// gauge for the roster size. Entries are never individually spanned.
     #[hotpath::measure(label = "daemon.code_index.ignored_dependency.roster_verify")]
     pub fn ignored_source_roster_matches_generation(
@@ -681,7 +681,7 @@ fn validate_admitted_source(
 ///
 /// Only bytes the sanitizer accepts verbatim are admitted. The caller returns
 /// the raw bytes it read, so a redaction decided here would be computed and
-/// then discarded — the redacted source would still reach the durable index.
+/// then discarded, the redacted source would still reach the durable index.
 fn admit_privacy_cleared_source(bytes: &[u8]) -> Result<(), CodeIndexSchedulerErrorV1> {
     let sanitized = sanitize_code_source_bytes(bytes, CodeSourceShapeV1::StructuredData)
         .map_err(|_| CodeIndexIgnoredDependencyRefusalV1::PrivacyRefused)?;

@@ -54,7 +54,7 @@ shim_tracedecay_bin() {
 
 # seed_throwaway_project DIR
 #
-# Turns DIR — into which the caller has already written its source files —
+# Turns DIR, into which the caller has already written its source files,
 # into a single-commit throwaway git project.
 seed_throwaway_project() {
     local project="$1"

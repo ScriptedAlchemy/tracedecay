@@ -124,7 +124,7 @@ export function JourneyOverview() {
       <LaneNav title="overview" extra="All PRs ⌄" />
       <section className="dl-pane">
         <h3>
-          08 DELIVERY — PR JOURNEY OVERVIEW <span>Semantic density · Level 3</span>
+          08 DELIVERY, PR JOURNEY OVERVIEW <span>Semantic density · Level 3</span>
         </h3>
         <TimeRuler />
         <JourneyWeave lanes={JOURNEY_LANES.filter((l) => l.id !== "human")} rails={CROSS_REPO_RAILS} />
@@ -191,7 +191,7 @@ export function JourneyOverview() {
 
 const REPLAY_HOURS = ["08:00:00", "09:11:46", "10:23:32", "11:35:18", "12:47:05"];
 
-/** Spawn cascade — the vertical trunk linking lane starts (recorded handoffs only). */
+/** Spawn cascade. The vertical trunk linking lane starts (recorded handoffs only). */
 const REPLAY_CONNECTORS: Connector[] = [
   { from: "r-human|spawn", to: "r-lynx|plan", color: "#60a5fa" },
   { from: "r-lynx|assign", to: "r-rsbuild|codegen", color: "#c084fc", sweep: -6 },
@@ -231,11 +231,11 @@ export function TemporalReplay() {
     <div className="dl-stage is-r">
       <section className="dl-pane">
         <h3>
-          08 DELIVERY — TEMPORAL REPLAY{" "}
-          <span>REPLAY MODE · PRESENTATION OVER RECORDED / LOADED EVIDENCE — CANNOT INVENT MISSING HISTORY</span>
+          08 DELIVERY, TEMPORAL REPLAY{" "}
+          <span>REPLAY MODE · PRESENTATION OVER RECORDED / LOADED EVIDENCE, CANNOT INVENT MISSING HISTORY</span>
         </h3>
         <div className="dl-replayhead">
-          <b>PR #18337 — Add bundle size guard to CI</b>
+          <b>PR #18337, Add bundle size guard to CI</b>
           <span className="chip">state: review</span>
           <span className="chip">replay: {playing ? "playing loaded page" : "paused"}</span>
           <span className="grow" />
@@ -278,7 +278,7 @@ export function TemporalReplay() {
           connectors={REPLAY_CONNECTORS}
         />
         <JourneyMinimap
-          title="MINIMAP — ADMITTED SOURCE EVENTS"
+          title="MINIMAP, ADMITTED SOURCE EVENTS"
           admittedThrough={cursor}
           lanes={admitted}
           window={[Math.max(0, cursor - 0.08), Math.min(1, cursor + 0.08)]}
@@ -636,7 +636,7 @@ export function AgentBranches() {
         </div>
         <EpisodeTable lanes={BRANCH_ALL_LANES} />
       </section>
-      <aside className="dl-pane" aria-label="Selected represented branch"><h3>SELECTED BRANCH / EVENT</h3><div className="dl-scroll dl-branch-inspector">{selectedLane && selectedEvent ? <><h2>{selectedLane.label}</h2><p>{selectedLane.role}</p><EpisodeDetails lane={selectedLane.id} ev={selectedEvent}/><h3>REPRESENTED BRANCH EVENTS</h3>{selectedLane.events.filter((event)=>event.kind!=="ghost").map((event,index)=><button className="dl-btn" key={index} aria-pressed={event===selectedEvent} onClick={()=>inspect(selectedLane,event)}>{event.label} · {event.time??"time not authored"}</button>)}<p>Task, session, worktree and source bodies are not attached to this event record. No other branch’s pictured artifacts are substituted.</p></> : <p>Select a named episode to inspect its represented branch and event. Task, worktree and exact source fields remain unavailable until selected metadata supplies them.</p>}</div></aside>
+      <aside className="dl-pane" aria-label="Selected represented branch"><h3>SELECTED BRANCH / EVENT</h3><div className="dl-scroll dl-branch-inspector">{selectedLane && selectedEvent ? <><h2>{selectedLane.label}</h2><p>{selectedLane.role}</p><EpisodeDetails lane={selectedLane.id} ev={selectedEvent}/><h3>REPRESENTED BRANCH EVENTS</h3>{selectedLane.events.filter((event)=>event.kind!=="ghost").map((event,index)=><button className="dl-btn" key={index} aria-pressed={event===selectedEvent} onClick={()=>inspect(selectedLane,event)}>{event.label} · {event.time??"time not authored"}</button>)}<p>Task, session, worktree and source bodies are not attached to this event record. No other branch's pictured artifacts are substituted.</p></> : <p>Select a named episode to inspect its represented branch and event. Task, worktree and exact source fields remain unavailable until selected metadata supplies them.</p>}</div></aside>
     </div>
   );
 }
@@ -657,7 +657,7 @@ const PARTIAL_PHASES = [
 
 const PARTIAL_HOURS = ["11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00", "21:00", "22:00"];
 
-/** Recorded handoffs and returns only — gaps stay absent, nothing is bridged. */
+/** Recorded handoffs and returns only, gaps stay absent, nothing is bridged. */
 const PARTIAL_CONNECTORS: Connector[] = [
   { from: "human-p|session", to: "gemini-p|spawn", color: "#f0b429", sweep: -6 },
   { from: "gemini-p|search codebase", to: "codegpt-p|spawn", color: "#9be15d", sweep: -8 },
@@ -675,7 +675,7 @@ export function HonestPartial() {
       <LaneNav title="partial" extra="#709 · 7 gaps" partial />
       <section className="dl-pane">
         <h3>
-          DELIVERY / PR #709 HONEST PARTIAL JOURNEY <span>PRIMARY TIMELINE · gaps retained — nothing invented</span>
+          DELIVERY / PR #709 HONEST PARTIAL JOURNEY <span>PRIMARY TIMELINE · gaps retained, nothing invented</span>
         </h3>
         <TimeRuler hours={PARTIAL_HOURS} chips />
         <JourneyCanvas lanes={gapsOnly ? PARTIAL_LANES.map((lane) => ({ ...lane, events: lane.events.filter((ev) => ev.kind === "gap"), burst: 0 })) : PARTIAL_LANES} phases={PARTIAL_PHASES} hideRuler showLabels tall link rings connectors={PARTIAL_CONNECTORS}

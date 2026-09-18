@@ -11,7 +11,7 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 /// This bound proves the daemon cannot pin a half-closed connection; it is not
 /// a latency budget. It used to be 2s, which the whole-suite run exceeded
 /// whenever several of these tests opened their own cold profile runtimes at
-/// once — a measured 500ms+ per `DaemonSessionRuntimeRegistryV1::open` under
+/// once, a measured 500ms+ per `DaemonSessionRuntimeRegistryV1::open` under
 /// six-way contention, on top of the route open each request still needs. That
 /// made an environment-speed reading look like a daemon hang. The portable
 /// broker tests use it too, so it is not gated on unix.

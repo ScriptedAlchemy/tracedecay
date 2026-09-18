@@ -1,4 +1,4 @@
-//! `tracedecay_hotspots` — churn-weighted complexity ranking.
+//! `tracedecay_hotspots`, churn-weighted complexity ranking.
 
 use super::*;
 

@@ -12,4 +12,4 @@ The image is an interaction reference, not a runtime receipt. All pictured value
 
 ## Implementation rule
 
-No aggregate “all systems nominal” state may hide a partial, stale, denied, or unavailable source. Recovery actions must invoke an authorized production route or be shown as unavailable.
+No aggregate "all systems nominal" state may hide a partial, stale, denied, or unavailable source. Recovery actions must invoke an authorized production route or be shown as unavailable.

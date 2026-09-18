@@ -29,7 +29,7 @@ historical iterations and are not the final product contract.
 | Admitted activity on exact identities | [final/05-admitted-activity-synapse.md](final/05-admitted-activity-synapse.md) | An admitted activity event supplies stable source and touched identities. |
 | Evidence-backed propagation and dark untouched siblings | [final/05-admitted-activity-synapse.md](final/05-admitted-activity-synapse.md) | Every rendered hop is supported and labelled by its owning authority. |
 
-“Depicted” means visible in a concept plate, not executed by the still. The
+"Depicted" means visible in a concept plate, not executed by the still. The
 brief beside each image owns the interaction and evidence contract.
 
 ## Historical provenance

@@ -13,8 +13,8 @@ offline, denied, and unavailable remain visibly distinct.
 
 Every state also applies the canonical evidence-grade ladder from
 `DESIGN-SYSTEM.md`: `EXACT`, `EXPLICIT`, `INFERRED`, `AMBIGUOUS`, `STALE`, or
-`UNAVAILABLE`. Source classes—including `RETAINED`, `OBSERVED`, `PR BODY`,
-`COMMIT`, `TRANSCRIPT`, and `CHECK RESULT`—identify provenance and do not
+`UNAVAILABLE`. Source classes, including `RETAINED`, `OBSERVED`, `PR BODY`,
+`COMMIT`, `TRANSCRIPT`, and `CHECK RESULT`, identify provenance and do not
 replace the grade. State sets must remain fully operable by keyboard, retain
 non-color encodings and exact text/table/transcript fallbacks, preserve meaning
 under reduced motion, and reflow or provide focus modes at 200% browser zoom.
@@ -31,7 +31,7 @@ under reduced motion, and reflow or provide focus modes at 200% browser zoom.
 3. Project narrow: click a project body or registry row to set scope. A
    repository hub does not narrow.
 4. Scoped project: replace the registry field with what TraceDecay knows about
-   that project—code graph plus graph, memory, analytics, identity, and checkout
+   that project, code graph plus graph, memory, analytics, identity, and checkout
    authorities.
 5. Return to all projects: explicit scope clear.
 6. Real activity: bloom exact `project_id`; conduct across at most one evidenced,
@@ -39,7 +39,7 @@ under reduced motion, and reflow or provide focus modes at 200% browser zoom.
 7. Honest states: registry loading, empty, partial, unavailable, inconsistent,
    or truncated; stream connecting/offline; graph empty/renderer unavailable.
 
-### Loom — accepted final target
+### Loom, accepted final target
 
 The [final manifest](03-loom/final/README.md) and its eight same-stem briefs own
 the horizontal execution-weave target:
@@ -67,7 +67,7 @@ the horizontal execution-weave target:
 Pan, zoom, fit, minimap, keyboard navigation, and exact event tables preserve
 the same temporal selection and source identities.
 
-### Loom — legacy implementation baseline
+### Loom, legacy implementation baseline
 
 The existing vertical host/session weave, loaded-page replay, selected thread
 chain, and typed partial states remain truthful production evidence and fallback

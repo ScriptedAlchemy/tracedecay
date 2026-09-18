@@ -224,7 +224,7 @@ impl EncodedProofChunk {
 ///
 /// Chunks are joined oldest-first, so frames enter the digest in exactly the
 /// serial order and the first error to surface is the earliest failing chunk
-/// — the same row a serial enumeration would have failed on. `check` runs
+///, the same row a serial enumeration would have failed on. `check` runs
 /// only on the calling thread (it is not required to be `Sync`); workers
 /// poll the shared abort flag between rows and inside long row encodes, so
 /// an observed failure stops in-flight encoding promptly.
@@ -396,8 +396,8 @@ fn decode_sorted_relation(
 /// (serial).
 ///
 /// Hub entities are endpoints of many relations; without the memo every
-/// incident relation re-loads the full endpoint node — all properties
-/// included — just to extract two identity strings. The memo stores
+/// incident relation re-loads the full endpoint node, all properties
+/// included, just to extract two identity strings. The memo stores
 /// identity-sized refs only, never entity rows, so the verification memory
 /// posture is preserved while each distinct endpoint is read at most once
 /// per memo scope.
@@ -557,8 +557,8 @@ mod tests {
         assert_eq!(format!("sha256:{streamed}"), expected.as_str());
     }
 
-    /// The parallel pipeline must reproduce the serial stream exactly —
-    /// digest and counted canonical bytes — across chunk sizes that split
+    /// The parallel pipeline must reproduce the serial stream exactly,
+    /// digest and counted canonical bytes, across chunk sizes that split
     /// entities and relations mid-slice and scatter the hub endpoints over
     /// many per-chunk memos.
     #[test]
@@ -630,7 +630,7 @@ mod tests {
     }
 
     /// Cancellation under the parallel pipeline still trips on the calling
-    /// thread's own check — the closure is never shared with workers — and
+    /// thread's own check, the closure is never shared with workers, and
     /// stops the run early with the typed error.
     #[test]
     fn parallel_digest_cancels_mid_stream() {

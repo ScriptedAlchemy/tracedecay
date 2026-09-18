@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { ActivationField, lerpRgbTuple, luma, restingNodeTint } from './activation.ts';
 
 describe('ActivationField subscription', () => {
-  it('stays silent when a strike carries no ids — nothing real happened', () => {
+  it('stays silent when a strike carries no ids, nothing real happened', () => {
     const field = new ActivationField();
     const listener = vi.fn();
     field.subscribe(listener);

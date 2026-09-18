@@ -5,7 +5,7 @@
 //!
 //! With `--features hotpath` the test wraps one writer/ledger/reader
 //! workload in a `HotpathGuard` that writes a JSON report to a temp file,
-//! then asserts the report carries the measure labels the workload crossed —
+//! then asserts the report carries the measure labels the workload crossed,
 //! proving the instrumentation fires rather than compiling to an empty
 //! report. With the feature off the identical workload runs with every
 //! macro expanded to a no-op.
@@ -106,7 +106,7 @@ fn measured_hot_paths_emit_a_hotpath_report() {
     // Guard construction binds a localhost metrics server unless disabled.
     // Tests must not open sockets, and parallel test processes would race on
     // the port. SAFETY: this binary holds exactly one test, so nothing else
-    // reads or writes the environment concurrently — the same ordering the
+    // reads or writes the environment concurrently, the same ordering the
     // `tracedecay-index-bench` entrypoint relies on.
     if std::env::var_os("HOTPATH_METRICS_SERVER_OFF").is_none() {
         unsafe {

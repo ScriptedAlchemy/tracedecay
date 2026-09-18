@@ -1,10 +1,9 @@
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 use super::{
     CommitSessionRecord, GitCorrelationError, GitCorrelationSessionStore, GitCorrelationWriteTxn,
-    SpanObservation,
+    SpanObservation, digest_bytes,
 };
 
 /// Maximum exact receipts replayed by one startup or host-admission pass.
@@ -62,7 +61,7 @@ pub async fn enqueue_git_evidence_publication(
     let receipt_material = serde_json::to_vec(&(publication_prefix, &payload))?;
     let receipt_id = format!(
         "git-evidence-publication:{}",
-        hex::encode(Sha256::digest(receipt_material))
+        digest_bytes(&receipt_material)
     );
     conn.execute(
         "INSERT OR IGNORE INTO git_evidence_publication_outbox (

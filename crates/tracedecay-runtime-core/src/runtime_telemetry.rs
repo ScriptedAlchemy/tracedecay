@@ -15,7 +15,7 @@
 //! The delta window is a real ~200 ms wall wait, so it never runs on the
 //! serving path: a process-global background sampler owns the window and
 //! the serving path reads the last completed sample from its cache. The
-//! wire state is typed — `sampled` is inside the refresh interval, `stale`
+//! wire state is typed. `sampled` is inside the refresh interval, `stale`
 //! preserves the last value with its age while a replacement sample is due,
 //! `not_yet_sampled` covers reads before the first sample completes, and
 //! `sample_failed` carries the sampling error instead of a fabricated zero
@@ -182,7 +182,7 @@ pub struct ProcessSnapshot {
     /// exceed 100 on multi-threaded workloads).
     pub cpu_percent: f32,
     pub uptime_secs: u64,
-    /// Number of CPUs the kernel reports — useful for interpreting
+    /// Number of CPUs the kernel reports, useful for interpreting
     /// `cpu_percent > 100`.
     pub system_cpu_count: usize,
     /// Total system memory in bytes (for ratio reporting).
@@ -217,7 +217,7 @@ pub struct DatabaseSnapshot {
     pub generation_census: GenerationCensusSnapshot,
     /// Live reader-pool occupancy for this store, when the pool is attached.
     ///
-    /// Reader saturation is the failure users actually hit — a query reports
+    /// Reader saturation is the failure users actually hit, a query reports
     /// `reader acquisition saturated` and there is otherwise nothing to look
     /// at. This is the after-the-fact evidence: where the workers went, and
     /// whether anyone is queued behind them.
@@ -813,7 +813,7 @@ fn sample_process_with_window(cpu_sample_window: Duration) -> Result<ProcessSnap
 
     // Refresh only *our own* process. The previous implementation passed
     // `.with_processes(..)` to `System::new_with_specifics`, which enumerates
-    // and samples every process on the host — by far the heaviest part of the
+    // and samples every process on the host, by far the heaviest part of the
     // reported Windows `tracedecay_runtime` crash (STATUS_STACK_OVERFLOW on a
     // host with a large process table). The primary fix for that crash is the
     // explicit-stack entrypoint in `main.rs` (`ASYNC_STACK_BYTES`: Windows

@@ -1106,8 +1106,8 @@ async fn lcm_large_json_response_stays_parseable_after_truncation() {
     let db = open_active_project_session_db(&cg).await;
     activate_test_temporal_generation(&db, "lcm-large-json", projections).await;
 
-    // This test asserts the raw wire contract — the truncation wrapper the
-    // server actually serves for an over-budget response — so it must read
+    // This test asserts the raw wire contract, the truncation wrapper the
+    // server actually serves for an over-budget response, so it must read
     // the response before any recovery through the retrieve handle.
     let server = real_mcp_server(cg).await;
     let response = handle_real_server_tool_call_raw(
@@ -2052,7 +2052,7 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
     let denied_payload: Value =
         serde_json::from_str(extract_real_server_text(&denied_payload)).unwrap();
     // A session that does not own the payload gets a typed refusal that is
-    // indistinguishable from the payload not existing — no existence oracle.
+    // indistinguishable from the payload not existing, no existence oracle.
     assert_eq!(
         denied_payload["problem"]["kind"], "not_found_or_not_authorized",
         "{denied_payload}"
@@ -2099,7 +2099,7 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
     let wrong_provider: Value =
         serde_json::from_str(extract_real_server_text(&wrong_provider_result)).unwrap();
     // A provider that does not own the payload gets the same typed refusal as
-    // an absent payload — no existence oracle across providers.
+    // an absent payload, no existence oracle across providers.
     assert_eq!(
         wrong_provider["problem"]["kind"], "not_found_or_not_authorized",
         "{wrong_provider}"
@@ -2398,8 +2398,8 @@ async fn lcm_status_all_provider_counts_payload_health_once() {
 // Repeated LCM tool calls in one process must reuse the per-process
 // The retained project runtime must not re-run the full DDL ensure for each
 // request. Observable via the version gate: after admission, a manually
-// downgraded version marker stays downgraded across calls on the same server
-// — reconstructing the server would correctly admit and migrate it again.
+// downgraded version marker stays downgraded across calls on the same server.
+// Reconstructing the server would correctly admit and migrate it again.
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
@@ -2454,7 +2454,7 @@ async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
     server.shutdown().await;
 }
 
-/// An invalid `scope` must be a hard error naming the valid values — never
+/// An invalid `scope` must be a hard error naming the valid values, never
 /// silently broadened to `all`.
 #[tokio::test]
 async fn lcm_grep_rejects_invalid_scope() {

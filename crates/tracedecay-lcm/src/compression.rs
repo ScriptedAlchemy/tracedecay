@@ -40,7 +40,7 @@ struct IngestedActiveMessages {
 enum PreparedActiveMessage {
     /// Message without a real role: never stored (a fabricated role would
     /// enter identity hashes) but still carried verbatim into the replay
-    /// output — dropping it would silently lose conversation content.
+    /// output, dropping it would silently lose conversation content.
     ReplayVerbatim { source_index: usize },
     Ingest {
         source_index: usize,
@@ -2319,8 +2319,8 @@ async fn message_ids_for_store_ids(
     Ok(message_ids)
 }
 
-/// Stored LCM rows require a real role. Missing or empty role is a typed skip
-/// — never a fabricated `"user"` that would persist and enter identity hashes.
+/// Stored LCM rows require a real role. Missing or empty role is a typed skip,
+/// never a fabricated `"user"` that would persist and enter identity hashes.
 fn active_message_role(message: &Value) -> Option<&str> {
     message
         .get("role")

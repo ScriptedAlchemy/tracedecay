@@ -118,9 +118,9 @@ pub fn strict_file_url(uri: &str) -> Option<Url> {
 ///
 /// URI identity and containment are protocol questions, so this deliberately
 /// stops short of [`Url::to_file_path`] the same way [`strict_file_url`] does.
-/// That conversion is platform-dependent in both directions — a drive-less
+/// That conversion is platform-dependent in both directions, a drive-less
 /// path such as `file:///root` converts on Unix and fails on Windows, while a
-/// UNC host converts only on Windows — so routing root equality or document
+/// UNC host converts only on Windows, so routing root equality or document
 /// containment through it makes the same LSP request admitted on one host and
 /// rejected on another. Segments are compared instead, which is identical on
 /// every platform. A real filesystem path is produced only where one is

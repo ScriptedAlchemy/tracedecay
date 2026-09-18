@@ -96,10 +96,10 @@ static SESSION_CAPTURE_TEST_RESIDENT_MEMORY: LazyLock<Arc<ProcessResidentMemoryV
 /// authority for injection. Production installs it during daemon worker-plan
 /// admission, which these fixtures never run; without it every observation
 /// capture is refused with `background_cpu_unavailable`. Going through
-/// `install_worker_plan` — the same authority production and the scheduler's
-/// test fallback use — keeps the background CPU width consistent with any
+/// `install_worker_plan` keeps the background CPU width consistent with any
 /// later worker-plan install in the same test process instead of poisoning
-/// it with an ad-hoc width.
+/// it with an ad-hoc width. Production and the scheduler's test fallback use
+/// the same authority.
 pub fn ensure_process_background_cpu_authority() -> Result<Arc<ProcessBackgroundCpuV1>> {
     let memory = SESSION_CAPTURE_TEST_RESIDENT_MEMORY.snapshot();
     let installed = install_worker_plan(
@@ -179,7 +179,7 @@ impl HostAdmissionTestRuntimeV1 {
     /// session registry, mirroring production multi-project composition: one
     /// daemon registry holds the single-writer profile authorities and many
     /// project mounts. A second independent runtime on the same profile
-    /// cannot exist — the profile session-relation graph has exactly one
+    /// cannot exist, the profile session-relation graph has exactly one
     /// writer.
     #[doc(hidden)]
     #[hotpath::skip]

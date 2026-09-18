@@ -54,7 +54,7 @@ export interface SceneRequest {
 }
 
 /** Build the scene for a field whose coordinates are the caller's own
- * measurement. Synchronous end to end — there is no layout to wait for. */
+ * measurement. Synchronous end to end, there is no layout to wait for. */
 export function buildMeasuredScene(request: SceneRequest): GraphScene {
   const { theme, prepared } = prepare(request);
   return compose(request, theme, prepared, frameMeasuredField(prepared, request.extent));
@@ -105,7 +105,7 @@ function compose(
   /**
    * One-way latch guarding every repaint below. Once the container has lost
    * its box there is no such thing as a correct frame, so the loop is not
-   * slowed or deferred — it stops, and `paint` becomes a no-op for whatever
+   * slowed or deferred, it stops, and `paint` becomes a no-op for whatever
    * is still holding a closure over this renderer.
    */
   let alive = true;

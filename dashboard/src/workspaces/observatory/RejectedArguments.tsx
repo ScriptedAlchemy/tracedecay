@@ -1,5 +1,5 @@
 /**
- * REJECTED ARGUMENTS — Plan 26 frequency view over dispatcher rejections.
+ * REJECTED ARGUMENTS. Plan 26 frequency view over dispatcher rejections.
  *
  * Counts come from `GET /api/observatory` (`rejected_arguments`). The card
  * never computes a rate in the browser: when the server withheld
@@ -22,7 +22,7 @@ export function RejectedArguments({ reads }: { reads: ObservatoryAccountingReads
   return (
     <EnvelopeSection
       title="Rejected arguments"
-      blurb="dispatcher argument rejections grouped by surface, operation, and error class — rates stay absent when the attempt denominator is unknown"
+      blurb="dispatcher argument rejections grouped by surface, operation, and error class, rates stay absent when the attempt denominator is unknown"
       result={read.result}
       pending={read.pending}
       loadingDetail="requesting rejected-argument measurements"
@@ -59,7 +59,7 @@ function RejectedArgumentReadModel({ model }: { model: RejectedArgumentAnalytics
       <div data-rejected-arguments="empty">
         <StateChip kind="ready" detail="no rejected-argument observations in this window" />
         <p className="text-2xs text-text-muted">
-          a measured empty window is not a fabricated rate — the attempt denominator is{' '}
+          a measured empty window is not a fabricated rate, the attempt denominator is{' '}
           {model.eligible_attempts == null
             ? 'unknown'
             : model.eligible_attempts.toLocaleString()}

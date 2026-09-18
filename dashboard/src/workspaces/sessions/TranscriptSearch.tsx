@@ -1,5 +1,5 @@
 /**
- * TRANSCRIPT SEARCH — `GET /api/plugins/hermes-lcm/search?q=…`.
+ * TRANSCRIPT SEARCH, `GET /api/plugins/hermes-lcm/search?q=…`.
  *
  * Full-text over the persisted transcripts and retained summaries. It is a
  * separate authority from the session index: a hit names a provider-qualified
@@ -34,7 +34,7 @@ export function TranscriptSearchResults({ read, submitted, selection, onSelect }
       bodyClassName="p-0"
       actions={
         <span className="td-value truncate text-3xs text-text-muted" title={submitted}>
-          “{submitted}”
+          "{submitted}"
         </span>
       }
     >
@@ -65,7 +65,7 @@ export function TranscriptSearchResults({ read, submitted, selection, onSelect }
                 <div className="p-3">
                   <StateChip
                     kind="complete_zero_findings"
-                    detail={`no transcript message matches “${submitted}”`}
+                    detail={`no transcript message matches "${submitted}"`}
                   />
                 </div>
               ) : (

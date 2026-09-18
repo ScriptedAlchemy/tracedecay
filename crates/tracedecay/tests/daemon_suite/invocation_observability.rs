@@ -458,8 +458,8 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
     drop(linked_recorder);
     // The store's canonical configuration advances while these roots stay
     // mounted, so a later root of the same store legitimately resolves a newer
-    // revision. It aliases the incumbent owners — one producer, one boot
-    // stream — and stamps its own configuration and policy provenance instead
+    // revision. It aliases the incumbent owners, one producer, one boot
+    // stream, and stamps its own configuration and policy provenance instead
     // of being refused for the life of the daemon.
     let advanced_configuration_revision = digest('9');
     let advanced_policy_revision = canonical_sha256(&(

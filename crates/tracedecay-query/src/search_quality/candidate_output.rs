@@ -157,9 +157,9 @@ pub struct ProfileSpecV1 {
 
 /// One need class a workload query belongs to.
 ///
-/// Closed vocabulary: a stratum decides how a query is judged — whether recall
-/// must be complete, and whether the query re-runs retrieval at a past commit —
-/// so an unrecognized name is refused instead of silently scored as ordinary.
+/// Closed vocabulary: a stratum decides how a query is judged, whether recall
+/// must be complete, and whether the query re-runs retrieval at a past commit.
+/// So an unrecognized name is refused instead of silently scored as ordinary.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryStratumV1 {
@@ -617,8 +617,8 @@ fn validate_source_bindings(
 ///
 /// This attests the fitness of measurement *inputs*: schema, execution
 /// contract, corpus identity, partitions, labels, and need provenance. It is
-/// not a qualification verdict — there is no held-out methodology in schema 1
-/// to qualify against — so a workload passing here still says nothing about
+/// not a qualification verdict, there is no held-out methodology in schema 1
+/// to qualify against, so a workload passing here still says nothing about
 /// whether any retrieval profile may be activated.
 pub fn validate_workload_for_tuning(
     workload: &CandidateWorkloadV1,
@@ -967,34 +967,8 @@ pub fn canonical_sha256<T: Serialize>(value: &T) -> Result<String, CandidateOutp
 }
 
 pub fn canonical_json_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, CandidateOutputError> {
-    let mut bytes = serde_json::to_vec(value)
-        .map_err(|error| CandidateOutputError::Contract(format!("serialize: {error}")))?;
-    // Stable formatting: re-parse and dump sorted keys via serde_json Value.
-    let value: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|error| CandidateOutputError::Contract(format!("reparse: {error}")))?;
-    bytes = serde_json::to_vec(&sort_value(value))
-        .map_err(|error| CandidateOutputError::Contract(format!("reserialize: {error}")))?;
-    Ok(bytes)
-}
-
-pub fn sort_value(value: serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Object(map) => {
-            let mut ordered = serde_json::Map::new();
-            let mut keys: Vec<_> = map.keys().cloned().collect();
-            keys.sort();
-            for key in keys {
-                if let Some(child) = map.get(&key) {
-                    ordered.insert(key, sort_value(child.clone()));
-                }
-            }
-            serde_json::Value::Object(ordered)
-        }
-        serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.into_iter().map(sort_value).collect())
-        }
-        other => other,
-    }
+    tracedecay_domain::canonical_json_bytes(value)
+        .map_err(|error| CandidateOutputError::Contract(format!("canonical json: {error}")))
 }
 
 #[cfg(test)]

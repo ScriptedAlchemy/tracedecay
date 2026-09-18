@@ -5,7 +5,7 @@
  * The problem this replaces. The registry is, in practice, several dozen
  * repositories with exactly one checkout each. Drawing a synthetic hub node per
  * repository turned each of those into an isolated two-node component, and the
- * renderer's constellation packer then arranged the components on a ring — so
+ * renderer's constellation packer then arranged the components on a ring, so
  * the whole surface read as one big circle of paired dots. Nothing about that
  * circle was true. The ring is a packing artifact; a reader looking at it sees
  * a cycle, an ordering, a centre and a periphery, and the registry has none of
@@ -15,20 +15,20 @@
  *
  * What replaces it. Every position on this field is a measurement:
  *
- *   x — time since TraceDecay last saw the project (`last_seen_at`), as ordered
+ *   x, time since TraceDecay last saw the project (`last_seen_at`), as ordered
  *       columns: today, this week, this month, this quarter, dormant. Columns
  *       rather than a continuous axis because the underlying quantity spans
  *       minutes to months, and because a column has a width to spread inside,
  *       which is what keeps bodies from fusing without ever moving one into a
- *       neighbouring column — an offset within a column costs nothing, an
+ *       neighbouring column, an offset within a column costs nothing, an
  *       offset across one would be a lie about when the project was last seen.
  *
- *   y — indexed mass: how much TraceDecay actually holds for the project
+ *   y, indexed mass: how much TraceDecay actually holds for the project
  *       (stores + graph scopes + artifacts), on a log scale because the
  *       registry spans one artifact to several hundred.
  *
- *   size — the same mass, so the heavy brains are also the big bodies.
- *   brightness — recency again (`vitality`), so the left-hand columns burn and
+ *   size, the same mass, so the heavy brains are also the big bodies.
+ *   brightness, recency again (`vitality`), so the left-hand columns burn and
  *       the dormant right-hand column sinks toward the substrate.
  *
  * A repository hub is materialised only when the repository genuinely has more
@@ -77,7 +77,7 @@ export interface MassSummary {
   floor: number;
   ceiling: number;
   median: number;
-  /** Projects sitting in the lower half of the LOG axis — the crowd. */
+  /** Projects sitting in the lower half of the LOG axis, the crowd. */
   lowerHalfCount: number;
   total: number;
 }
@@ -92,7 +92,7 @@ export interface RegistryField {
   /**
    * The age, in days, at which a body's brightness reaches zero on THIS field.
    * Relative to the registry rather than fixed, and stated in the caption
-   * because of it — see `recencyVitality`.
+   * because of it, see `recencyVitality`.
    */
   vitalityHorizonDays: number;
   /** Repositories that contributed a hub (more than one checkout). */
@@ -107,7 +107,7 @@ export interface RegistryField {
  *
  * Exported because the Delivery field asks a different question of the same
  * registry (branch composition rather than indexed mass) but has to place its
- * bodies on the SAME time ladder — two surfaces that both say "this week" have
+ * bodies on the SAME time ladder, two surfaces that both say "this week" have
  * to mean the same seven days. A second copy of these bounds would drift the
  * first time one of them was tuned. */
 export const RECENCY_COLUMNS: ReadonlyArray<{
@@ -148,7 +148,7 @@ const MIN_VITALITY_HORIZON_DAYS = 1;
  * The horizon is a parameter, and `composeRegistryField` sets it to the age of
  * the OLDEST project on the field rather than leaving it at a fixed quarter.
  * With the fixed 90-day horizon a registry whose projects span ten days
- * occupied only the top half of the scale — today read 1.00 and this-week read
+ * occupied only the top half of the scale, today read 1.00 and this-week read
  * 0.85, a luminance difference of fifteen percent that no eye separates on a
  * dark field. Anchored to the observed range the same registry uses the whole
  * scale: today burns, ten days ago is out.
@@ -179,7 +179,7 @@ const MAX_VITALITY_HORIZON_DAYS = 90;
  *
  * A HIGH QUANTILE of the observed ages rather than the maximum. One registry
  * entry last seen in 2019 would otherwise set the horizon at ninety-four years
- * and collapse every other project back to indistinguishable full brightness —
+ * and collapse every other project back to indistinguishable full brightness , 
  * which is the exact compression this parameter exists to remove, reintroduced
  * by a single outlier. At the ninetieth percentile the scale is set by the bulk
  * of the registry and the handful older than it simply rest at the floor,
@@ -222,7 +222,7 @@ export const MASS_AXIS_HEIGHT = 2.9;
 const NUDGE = 0.06;
 /** A body's drawn radius in field units, so the clearance test knows how much
  * room each one actually takes. The scene sizes bodies by the square root of
- * mass, and this mirrors that curve — otherwise the two heaviest projects in a
+ * mass, and this mirrors that curve, otherwise the two heaviest projects in a
  * column, which are also the two largest crowns, are the pair most likely to be
  * left overlapping by a clearance tuned for the small ones. */
 export function bodyRadius(mass: number, ceiling: number): number {
@@ -245,8 +245,8 @@ export function composeRegistryField(
   );
   // The axis runs between the lightest and heaviest projects actually present.
   // Anchoring the floor at zero instead would spend a quarter of the field on a
-  // mass no registered project can have — every project holds at least one
-  // store — and squash the range that carries the reading.
+  // mass no registered project can have, every project holds at least one
+  // store, and squash the range that carries the reading.
   const massFloor = projects.reduce(
     (min, project) => Math.min(min, indexedMass(project)),
     Infinity,
@@ -331,7 +331,7 @@ export function composeRegistryField(
       // A hub carries no mass of its own; it is sized by how many working
       // copies it actually binds together.
       degree: group.projects.length,
-      // Lit by its most recently seen checkout — the repository is exactly as
+      // Lit by its most recently seen checkout, the repository is exactly as
       // live as the liveliest copy of it.
       vitality: group.projects.reduce(
         (max, project) =>
@@ -353,7 +353,7 @@ export function composeRegistryField(
   // The vertical margins are DERIVED from the bodies that actually sit at the
   // two ends rather than being a flat allowance. A flat 0.55 spent a fifth of
   // the frame's height on clearance the largest body (radius 0.24) does not
-  // need and the smallest (0.09) needs far less of — which read as an axis
+  // need and the smallest (0.09) needs far less of, which read as an axis
   // that tops out empty. Horizontal margin stays fixed: it has to clear a
   // body's own radius AND its offset from its column's centre line, and both
   // ends of the x axis are column edges rather than data.
@@ -384,7 +384,7 @@ export function composeRegistryField(
  * honest scale, but on a real registry it is also a lopsided one: forty of
  * forty-four projects hold between four and thirteen units while one holds two
  * hundred and forty-seven, so the bodies bunch along the bottom and the upper
- * axis looks like a drawing error. It is not — it is the distribution, and
+ * axis looks like a drawing error. It is not, it is the distribution, and
  * the view states that rather than leaving the reader to conclude the frame
  * is broken.
  */
@@ -421,7 +421,7 @@ function summarizeMass(
  * offset within a column costs nothing, an offset across one would be a lie
  * about when the project was last seen.
  *
- * A real registry does exhaust that width — thirty-odd projects all seen in the
+ * A real registry does exhaust that width, thirty-odd projects all seen in the
  * same week, holding much the same amount, want the same point. When no offset
  * clears, the body takes the one that leaves the most room rather than the
  * centre line, so a crowded column reads as a dense band with structure in it
@@ -474,7 +474,7 @@ export interface HoldingsSummary {
   stores: HoldingChannel;
   artifacts: HoldingChannel;
   /** The channels that carry no information because every project agrees, as a
-   * sentence — or null when they all vary. */
+   * sentence, or null when they all vary. */
   uniformLine: string | null;
 }
 
@@ -498,7 +498,7 @@ function channel(label: string, values: readonly number[]): HoldingChannel {
  * is 3, 4 or 5. Forty-four repetitions of a constant is not density.
  *
  * So the constant channels are stated once for the whole rail and the rows
- * carry the channel that differs — plus, per row, any other channel that
+ * carry the channel that differs, plus, per row, any other channel that
  * departs from its mode, because a project holding five artifacts where
  * everything else holds four IS a reading and must not be swallowed by the
  * summary.

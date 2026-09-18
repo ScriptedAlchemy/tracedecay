@@ -593,7 +593,7 @@ pub(super) async fn execute_expand_query(
 }
 
 /// Requires non-blank text and clamps it to `max` characters, reporting
-/// whether it was truncated — the expand-query synthesis contract clamps
+/// whether it was truncated, the expand-query synthesis contract clamps
 /// oversized inputs with typed markers instead of refusing them.
 fn clamped_text(
     value: &str,

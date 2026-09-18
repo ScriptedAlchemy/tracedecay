@@ -156,7 +156,7 @@ fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
         let legacy_path = legacy_cline_mcp_settings_path(home);
         if settings_have_tracedecay(&legacy_path) {
             dc.warn(&format!(
-                "legacy Cline MCP registration found in {} — configure or remove it through Cline's supported flow",
+                "legacy Cline MCP registration found in {}, configure or remove it through Cline's supported flow",
                 legacy_path.display()
             ));
             return;

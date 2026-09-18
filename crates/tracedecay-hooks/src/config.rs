@@ -491,8 +491,8 @@ mod tests {
     /// runtime publishes with `revision = now`, so the worktree opened later
     /// always carries the higher revision. A publication authority keyed only
     /// by host would let that later worktree replace the earlier one's binding
-    /// in place, and every hook in the earlier worktree would then read — and
-    /// stamp its envelopes with — a foreign worktree identity.
+    /// in place, and every hook in the earlier worktree would then read, and
+    /// stamp its envelopes with, a foreign worktree identity.
     #[test]
     fn a_later_worktree_publication_does_not_replace_an_earlier_worktree_binding() {
         let data_root = TestDir::new();

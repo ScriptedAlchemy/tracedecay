@@ -167,7 +167,7 @@ where
                 // git-evidence publications, and the replay refuses any other
                 // scope by design. A user-scope (profile) transcript has no
                 // project to correlate against, so replaying there is not
-                // merely empty work — it turns every full profile-scoped batch
+                // merely empty work, it turns every full profile-scoped batch
                 // into a "git correlation requires registered ProjectSessions
                 // authority" failure after the rows are already committed.
                 if GitCorrelationSessionStore::require_project_sessions_authority(self.db())

@@ -3,8 +3,8 @@
 //! Deterministic admission refusals advance source coverage with a durable
 //! typed reason (`source_cursor_advances`) so ingestion converges instead of
 //! re-reporting the same records forever. Those refusals are terminal by
-//! design — re-admitting a deterministic refusal would deterministically fail
-//! again — so the plan-conformant recovery is truthful surfacing: this census
+//! design, re-admitting a deterministic refusal would deterministically fail
+//! again, so the plan-conformant recovery is truthful surfacing: this census
 //! counts the refused records per provider and reason for Doctor. Diagnosis is
 //! strictly read-only; it never re-admits, clears, or rewrites coverage.
 

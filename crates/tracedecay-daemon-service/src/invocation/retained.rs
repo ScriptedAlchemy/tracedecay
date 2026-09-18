@@ -6,8 +6,8 @@ use crate::project_runtime::ProjectRuntimePublicationStateV1;
 ///
 /// The retained runtime registers in the full server's owner phase, behind the
 /// core publication that already admits this route. Under a warming
-/// publication the missing runtime is that owner still mounting — the same
-/// retryable state the primitive and configuration owners answer — and under
+/// publication the missing runtime is that owner still mounting, the same
+/// retryable state the primitive and configuration owners answer, and under
 /// a failed publication it is the terminal owner failure. Only a settled
 /// publication without a retained owner (a read-only project database mounts
 /// none) is truthfully "no retained runtime is registered for this scope".

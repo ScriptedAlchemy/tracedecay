@@ -1,4 +1,4 @@
-# Hotpath Instrumentation Facilities
+# Hotpath instrumentation facilities
 
 - Synchronous function or bounded phase: `#[hotpath::measure]` or `hotpath::measure_block!("static.label", expression)`.
 - Bulk instrumentation of a suspect area: `#[hotpath::measure_all]` on an inline `mod` or `impl` block applies `measure` to every function inside; exclude trivial or noisy functions with `#[hotpath::skip]`. It cannot be a file-level inner attribute, and trait-impl methods get timing/allocation but not CPU-sample attribution. Use it to blanket one investigation target, not the codebase; trim it back per the instrumentation rules before merge.
@@ -12,5 +12,5 @@
 - Tokio: register the already-built runtime once with `hotpath::tokio_runtime!(runtime.handle())`.
 - Counts/current state: static `hotpath::gauge!` keys; use additive lifecycle guards for shared state and clean them up in `Drop`.
 - Debug values: avoid in production unless values are bounded and non-sensitive.
-- Direct rusqlite: manual phase/queue/transaction instrumentation; Hotpath 0.24 has no rusqlite adapter. Its `sql` report is fed only by third-party front-ends — `sqlx_tracing_layer()` / `toasty_tracing_layer()` are `tracing_subscriber` layers that harvest those ORMs' completed-query tracing events (emitter-measured elapsed, statements normalized into parameter-insensitive buckets, attributed to the innermost measured frame), and diesel hooks its own instrumentation trait. Use a tracing bridge only for a third-party emitter that already pays tracing's cost; first-party code keeps compile-out macros. Each bridge needs its cargo feature, and a global `EnvFilter` can suppress `sqlx::query` events for the whole stack — attach filters per layer.
+- Direct rusqlite: manual phase/queue/transaction instrumentation; Hotpath 0.24 has no rusqlite adapter. Its `sql` report is fed only by third-party front-ends, `sqlx_tracing_layer()` / `toasty_tracing_layer()` are `tracing_subscriber` layers that harvest those ORMs' completed-query tracing events (emitter-measured elapsed, statements normalized into parameter-insensitive buckets, attributed to the innermost measured frame), and diesel hooks its own instrumentation trait. Use a tracing bridge only for a third-party emitter that already pays tracing's cost; first-party code keeps compile-out macros. Each bridge needs its cargo feature, and a global `EnvFilter` can suppress `sqlx::query` events for the whole stack. Attach filters per layer.
 

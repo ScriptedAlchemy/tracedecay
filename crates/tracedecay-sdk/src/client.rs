@@ -26,8 +26,8 @@ const MAX_OPAQUE_BYTES: usize = 4_096;
 const MAX_REQUEST_ID_BYTES: usize = 512;
 /// Bound on one raw SSE line and on the event/id/data bytes retained for one
 /// frame before JSON decoding. Every canonical frame is a single JSON object of
-/// bounded metadata — request and operation identifiers (≤ 512 bytes), a
-/// sequence, a frontier with a 32-byte resume key, or a terminal receipt — so
+/// bounded metadata, request and operation identifiers (≤ 512 bytes), a
+/// sequence, a frontier with a 32-byte resume key, or a terminal receipt, so
 /// 64 KiB leaves wide headroom while capping what a peer can make the client
 /// retain.
 const MAX_SSE_FRAME_BYTES: usize = 64 * 1024;

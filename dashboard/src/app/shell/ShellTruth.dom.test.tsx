@@ -24,7 +24,7 @@ vi.mock('../../data/sse/useEvents.tsx', () => ({
   useEventStreamState: () => ({ state: eventState.state, lastEventAt: null }),
   useEventsConnection: () => null,
   // No connection is mounted here, so there is no projection to reconcile
-  // against — the same reading the real hook gives for a null connection.
+  // against, the same reading the real hook gives for a null connection.
   useProjectionSync: () => ({ kind: 'unmounted' }) as const,
 }));
 
@@ -65,8 +65,8 @@ describe('shared shell truthfulness', () => {
   /**
    * The bar used to substitute the string `resolving` for the label until the
    * registry answered, which kept an unverified name off screen but also hid a
-   * name the reader had just clicked in the palette — where the label came from
-   * the registry to begin with — and left the bar the only surface with a view
+   * name the reader had just clicked in the palette, where the label came from
+   * the registry to begin with, and left the bar the only surface with a view
    * on whether a name could be trusted, while the write-target prose used the
    * claim unqualified.
    *
@@ -94,7 +94,7 @@ describe('shared shell truthfulness', () => {
    * Reconciliation settles the label as well as the activation, so the write
    * target is named by the registry rather than by whatever put the scope
    * there. Before this, a deep link carrying a wrong label produced a
-   * correctly-enabled control that named the project wrongly — the bar showed
+   * correctly-enabled control that named the project wrongly, the bar showed
    * the canonical name while "Applies to …" showed the link's claim, which is
    * the same fact in two places disagreeing.
    */
@@ -110,14 +110,14 @@ describe('shared shell truthfulness', () => {
       state: 'writable',
       target: 'Canonical project',
     });
-    // Not merely outvoted — gone. The claim is not left anywhere on the bar.
+    // Not merely outvoted, gone. The claim is not left anywhere on the bar.
     expect(queryByText('fabricated label')).toBeNull();
   });
 
   /**
    * The one case where the URL's label is kept: the registry did not answer, so
    * there is nothing to correct it with. Discarding it here would replace a
-   * name that may well be right with an opaque id, on no evidence — the same
+   * name that may well be right with an opaque id, on no evidence, the same
    * mistake as the correction, pointed the other way.
    */
   it('keeps the selected label, unconfirmed, when the registry cannot be read', async () => {
@@ -147,7 +147,7 @@ describe('shared shell truthfulness', () => {
    * The truncation defect, at the surface.
    *
    * Reconciliation used to search `/api/projects`, which the daemon truncates to
-   * a page — 100 entries by default. A selected project past the end of that
+   * a page, 100 entries by default. A selected project past the end of that
    * page produced exactly what a nonexistent project produced, so the bar
    * renamed a real project to its raw id and announced "not in registry". This
    * asks the project's own route instead, which has no page, so a listing that
@@ -195,7 +195,7 @@ describe('shared shell truthfulness', () => {
    * non-2xx body: a dead link and a registry that could not be opened both
    * arrived as `HTTP 404`/`HTTP 503` with nothing to tell them apart, so the
    * only honest reading available was "unconfirmed" for both. That left a stale
-   * bookmark resolving forever — the reader was told the check was still
+   * bookmark resolving forever, the reader was told the check was still
    * pending long after it had come back with an answer.
    *
    * Now the body is carried, so each says what it is. What must not change is
@@ -302,9 +302,9 @@ describe('shared shell truthfulness', () => {
    * active-project switch left every write control in the product acting on the
    * pre-change answer for the rest of the session.
    *
-   * The invalidation key here is the one the SSE handler emits — see
+   * The invalidation key here is the one the SSE handler emits, see
    * `projectRegistry.test.ts`, which pins the handler's output to this same
-   * constant — so this covers the second half of the link: that the key reaches
+   * constant, so this covers the second half of the link: that the key reaches
    * this query and reconciliation runs again.
    */
   it('re-reconciles activation and label when a registry change is invalidated', async () => {
@@ -360,7 +360,7 @@ describe('shared shell truthfulness', () => {
   /**
    * A registry that could not be read establishes nothing about which project
    * is active. Resolving it to `selected` would be the same defect this project
-   * forbids everywhere else — an unread source rendering as a measurement —
+   * forbids everywhere else, an unread source rendering as a measurement,
    * and it would tell the reader their project is not the active one on no
    * evidence at all.
    */
@@ -409,7 +409,7 @@ describe('shared shell truthfulness', () => {
   });
 });
 
-/** The register's project name — the one field a raw id must never occupy. */
+/** The register's project name, the one field a raw id must never occupy. */
 function scopeLabelText(): string | null {
   return document.querySelector('[data-scope-label]')?.textContent ?? null;
 }
@@ -437,7 +437,7 @@ function projectRecord(projectId: string, label: string): PublicCodeProject {
  * A `GET /api/projects/{id}` body the daemon would actually send.
  *
  * Parsed through the generated schema rather than hand-shaped, so a body this
- * dashboard could not read cannot masquerade as a successful reading — the stub
+ * dashboard could not read cannot masquerade as a successful reading, the stub
  * that preceded these carried fields the contract rejects, and so only ever
  * exercised the parse-failure path while appearing to test the success one.
  */
@@ -466,7 +466,7 @@ function entryPayload({
  * Copied field for field from `src/dashboard/projects.rs`: both are complete
  * `ProjectContextPayloadV1` values carrying a non-`ok` status, not the bare
  * `{status}` stub they were once written as. The distinction is the whole
- * point of these cases — a hand-shortened body fails schema validation and
+ * point of these cases, a hand-shortened body fails schema validation and
  * arrives as a build mismatch, which is a different reading from the one the
  * daemon is actually reporting.
  */
@@ -485,7 +485,7 @@ function failurePayload(status: string, error: string | null = null): ProjectCon
  * A listing that is truncated and does not contain the selected project.
  *
  * The shape the daemon sends for a profile with more projects than the page
- * holds — `truncated: true`, `limit` entries, and any project past the end
+ * holds, `truncated: true`, `limit` entries, and any project past the end
  * simply missing. Reconciliation must not consult this at all, which the test
  * using it asserts directly by checking the route is never requested.
  */

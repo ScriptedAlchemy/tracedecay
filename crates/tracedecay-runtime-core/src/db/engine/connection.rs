@@ -103,7 +103,7 @@ impl Connection {
     /// Background maintenance that runs on a *write* connection needs this:
     /// [`Self::attach`] defaults to `Foreground`, so a bulk sweep driven from
     /// the writer would otherwise contend for the same reserved lane slice as
-    /// interactive queries — and, because reader leases are bounded, be the
+    /// interactive queries, and, because reader leases are bounded, be the
     /// first thing to fail once it has saturated that lane itself.
     #[must_use]
     pub fn background_reads(&self) -> Self {
@@ -237,7 +237,7 @@ impl Connection {
     /// Live reader-pool occupancy for the store behind this connection.
     ///
     /// Lock-free and lease-free, so it still answers while the pool is
-    /// saturated — which is the only moment the numbers matter.
+    /// saturated, which is the only moment the numbers matter.
     #[must_use]
     pub fn reader_pool_occupancy(&self) -> Option<ReaderPoolSnapshot> {
         self.runtime.reader_pool_occupancy()
@@ -306,7 +306,7 @@ impl Connection {
     /// Begins the authority-bound transaction whose lease renews on progress.
     ///
     /// Reserved for schema installation on a fresh or index-less store and for
-    /// full-index bulk replacement — writes that legitimately outlive one fixed
+    /// full-index bulk replacement, writes that legitimately outlive one fixed
     /// lease while continuously making progress. It steps no store forward from
     /// an older shape. Only its explicit authority-revalidated batch may bypass
     /// the ordinary per-statement deadline; all other operations retain

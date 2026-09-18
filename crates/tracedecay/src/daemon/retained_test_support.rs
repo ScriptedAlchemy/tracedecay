@@ -4,9 +4,9 @@
 //! execute through the daemon invocation transport in production. A direct
 //! test server has no daemon socket, so those tools would truthfully report
 //! `application.transport.unavailable`. This composition mounts the same
-//! retained owner the daemon registers at project open — the invocation
+//! retained owner the daemon registers at project open, the invocation
 //! service, the server's retained surface ports, and the project retained
-//! grant — behind an in-process executor, so retained recall behavior stays
+//! grant, behind an in-process executor, so retained recall behavior stays
 //! testable against the real owner rather than a stub.
 
 use std::path::PathBuf;

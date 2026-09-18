@@ -203,12 +203,12 @@ pub fn transcript_cwd(path: &Path) -> Option<PathBuf> {
 /// [`structured_marker_from_line`]. Two record families are deliberately dropped
 /// with no row at all, because they are pure bloat/redundancy:
 ///
-/// * **hook attachments** — records that inject a hook's `hookAdditionalContext`
+/// * **hook attachments**, records that inject a hook's `hookAdditionalContext`
 ///   / attachment payload into the transcript. The signal we care about (hook
 ///   errors / prevented continuation) is already captured as a compact
 ///   `hook_event` row; the attachment body just duplicates content that lives on
 ///   the owning turn.
-/// * **queue-operation records** — queued/removed user-turn bookkeeping. These
+/// * **queue-operation records**, queued/removed user-turn bookkeeping. These
 ///   are ephemeral UI state; the actual user turn is ingested when it is sent.
 pub(super) fn message_from_line(
     record: &Value,

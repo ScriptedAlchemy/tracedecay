@@ -3,7 +3,7 @@
 //! embeds.
 //!
 //! `build.rs` resolves source provenance (verified git worktree, release env,
-//! or `cargo package` VCS journal — a build with none fails) and validates the
+//! or `cargo package` VCS journal, a build with none fails) and validates the
 //! dashboard bundle into `$OUT_DIR/product_runtime_generated.rs`; this module
 //! is that file's only mount point and assembles the provider `main` registers
 //! into the composition library at process start.

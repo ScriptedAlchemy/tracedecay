@@ -13,7 +13,7 @@ use super::{
 
 /// Typed project identity recorded on a registered store layout.
 ///
-/// Absence or an invalid id is a configuration fault — registered code
+/// Absence or an invalid id is a configuration fault, registered code
 /// runtimes never invent a project id from the filesystem path.
 pub fn registered_project_id(store_layout: &StoreLayout) -> Result<ProjectId> {
     let project_id =
@@ -36,8 +36,8 @@ pub fn registered_project_id(store_layout: &StoreLayout) -> Result<ProjectId> {
 /// identity equal to it.
 ///
 /// This never creates or repairs a marker, so a caller that must not mount
-/// a store the profile has not enrolled — a cross-project memory reader,
-/// for one — can tell "not enrolled here" apart from "enrolled".
+/// a store the profile has not enrolled, a cross-project memory reader,
+/// for one, can tell "not enrolled here" apart from "enrolled".
 pub fn enrolled_project_roots(
     candidates: impl IntoIterator<Item = PathBuf>,
     project_id: &ProjectId,
@@ -81,8 +81,8 @@ fn project_id_for_identity_root(identity_root: &Path) -> String {
 /// repository it belongs to.
 ///
 /// Only discovery wants this. Discovery asks a narrower question than identity
-/// resolution — not "which repository owns this checkout" but "was a store
-/// ever minted for this exact directory" — and answering it with the
+/// resolution, not "which repository owns this checkout" but "was a store
+/// ever minted for this exact directory", and answering it with the
 /// repository id would report every linked worktree of an initialized
 /// repository as independently initialized.
 pub fn path_local_profile_project_id(project_root: &Path) -> String {
@@ -228,7 +228,7 @@ pub fn default_profile_root() -> Result<PathBuf> {
 /// This used to read only the enrollment marker and otherwise derive a project
 /// id from the checkout path, so it disagreed with the async registry resolver
 /// about the same directory and split one repository across shards. It now
-/// consults every authority available without awaiting — the same enrollment
+/// consults every authority available without awaiting, the same enrollment
 /// marker and repository identity marker via [`resolve_persisted_layout`].
 pub fn resolve_layout_for_current_profile(project_root: &Path) -> Result<StoreLayout> {
     let profile_root = default_profile_root()?;
@@ -241,8 +241,8 @@ pub fn resolve_layout_for_current_profile(project_root: &Path) -> Result<StoreLa
 /// Resolves this checkout's store only when an authority already names it, and
 /// reports `Ok(None)` when the answer would be a path-derived guess.
 ///
-/// Callers that merely want somewhere to put a file — hook analytics is the
-/// motivating one — must not enroll a directory as a side effect. Every
+/// Callers that merely want somewhere to put a file, hook analytics is the
+/// motivating one, must not enroll a directory as a side effect. Every
 /// directory this resolver declines is a store shard that never gets minted for
 /// a path that was never a project.
 pub fn resolve_enrolled_layout_for_current_profile(
@@ -269,7 +269,7 @@ pub fn resolve_project_session_db_path(project_root: &Path) -> Result<PathBuf> {
 /// an MCP server happens to run in gets the profile-wide root: a response
 /// handle is transient output, not evidence that the directory is a project,
 /// and resolving through the path-derived default layout used to mint a
-/// `projects/proj_<hash>/response-handles/` shard for every such directory —
+/// `projects/proj_<hash>/response-handles/` shard for every such directory,
 /// 286 of them on one profile, outnumbering the real stores.
 pub fn resolve_response_handle_root(project_root: &Path) -> Result<PathBuf> {
     let profile_root = default_profile_root()?;

@@ -49,7 +49,7 @@ const STEERING_SENTINELS: super::prompt_rules::OwnedBlockSentinels =
     };
 /// Heading markers shipped releases (through v0.1.0-beta.37) used as the
 /// block's identity. An existing install carries one of them, usually closed by
-/// the same end sentinel, so update and uninstall must recognize them —
+/// the same end sentinel, so update and uninstall must recognize them,
 /// otherwise a reinstall appends the new block and strands the old one, and
 /// uninstall never removes it.
 const HISTORICAL_STEERING_HEADINGS: [&str; 2] = [
@@ -84,7 +84,7 @@ const KIRO_MCP_SERVER_NAME: &str = "tracedecay";
 const MCP_SERVER_ARGS: &[&str] = &["serve"];
 
 /// A hook the managed Kiro agent registers. Kiro's documented hook entry
-/// schema is `command` plus an optional `matcher` — nothing else, so no
+/// schema is `command` plus an optional `matcher`, nothing else, so no
 /// timeout or other tuning field exists to carry here.
 struct KiroManagedHook {
     event: &'static str,
@@ -98,7 +98,7 @@ struct KiroManagedHook {
 ///
 /// No `stop`/session-end hook is registered. Kiro's documentation describes a
 /// Stop trigger, so the host-event catalog carries it
-/// (`fixtures/host_events/kiro.json`, identity `stop`) — but only at
+/// (`fixtures/host_events/kiro.json`, identity `stop`), but only at
 /// `support: documented_unverified`, because tracedecay has never captured a
 /// real Kiro stop event or verified Kiro's persisted session format. Until a
 /// capture verifies it the native decoder rejects the event (see `decode_kiro`
@@ -383,14 +383,14 @@ impl AgentIntegration for KiroIntegration {
         match kiro_doctor_installation_state(&ctx.home) {
             Ok(KiroDoctorInstallationState::HostAbsent) => {
                 dc.warn(&format!(
-                    "Kiro is not detected at {} — run `tracedecay install --agent kiro` if you use Kiro",
+                    "Kiro is not detected at {}, run `tracedecay install --agent kiro` if you use Kiro",
                     host_home.display()
                 ));
                 return;
             }
             Ok(KiroDoctorInstallationState::TraceDecayAbsent) => {
                 dc.warn(&format!(
-                    "Kiro is detected at {}, but TraceDecay is not installed — run `tracedecay install --agent kiro` if you use Kiro",
+                    "Kiro is detected at {}, but TraceDecay is not installed, run `tracedecay install --agent kiro` if you use Kiro",
                     host_home.display()
                 ));
                 // Retired leftovers can exist without an MCP entry (for example
@@ -578,7 +578,7 @@ fn require_kiro_cli() -> Result<PathBuf> {
 fn kiro_mcp_add_with(kiro_cli: &Path, home: &Path, tracedecay_bin: &str) -> Result<()> {
     // Make the global scope explicit. Kiro's CLI also supports a workspace
     // registry, but this lifecycle owns only the profile-global entry; the
-    // workspace (`--scope workspace`) form is deliberately not driven here —
+    // workspace (`--scope workspace`) form is deliberately not driven here,
     // see `activate_project_host_component_registration`.
     let mut args = vec![
         "mcp",
@@ -715,8 +715,8 @@ fn remove_kiro_managed_skill_index(home: &Path, index_path: &Path) -> Result<()>
     super::remove_managed_skill_prompt_index(home, index_path, SkillInstallTarget::Kiro)
 }
 
-/// Add or refresh tracedecay's steering resource. Every owned block — the
-/// current sentinel-delimited shape or a historical heading-marked one —
+/// Add or refresh tracedecay's steering resource. Every owned block, the
+/// current sentinel-delimited shape or a historical heading-marked one,
 /// converges onto exactly one copy of the current block in place; operator
 /// text around it is preserved.
 fn install_steering_rules(path: &Path) -> Result<()> {
@@ -894,7 +894,7 @@ fn owned_steering_ranges(contents: &str) -> Vec<Range<usize>> {
 /// Earliest owned block at or after `from`. A historical heading block runs to
 /// the shipped end sentinel when that sentinel closes it before any other
 /// boundary; otherwise it ends at the next heading, the managed skill index, a
-/// current start sentinel, or EOF — the shape the oldest installs wrote.
+/// current start sentinel, or EOF, the shape the oldest installs wrote.
 fn first_owned_steering_range(contents: &str, from: usize) -> Option<Range<usize>> {
     let current = STEERING_SENTINELS.block_range(contents, from);
     let historical = HISTORICAL_STEERING_HEADINGS
@@ -1089,7 +1089,7 @@ fn doctor_advise_retired_steering(dc: &mut DoctorCounters, home: &Path) {
     }
     dc.warn(&format!(
         "migration advisory: retired Kiro global steering still present at {} \
-         ({} owned block(s)); global install is MCP-only — remove with \
+         ({} owned block(s)); global install is MCP-only, remove with \
          `tracedecay uninstall --agent kiro` or delete the owned block(s)",
         path.display(),
         ranges.len()
@@ -1106,7 +1106,7 @@ fn doctor_advise_retired_managed_agent(dc: &mut DoctorCounters, home: &Path) {
     }
     dc.warn(&format!(
         "migration advisory: retired Kiro managed agent still present at {}; \
-         global install is MCP-only — remove with `tracedecay uninstall --agent kiro`",
+         global install is MCP-only, remove with `tracedecay uninstall --agent kiro`",
         path.display()
     ));
 }
@@ -1139,7 +1139,7 @@ fn doctor_advise_retired_default_agent(dc: &mut DoctorCounters, home: &Path) {
     }
     dc.warn(&format!(
         "migration advisory: retired Kiro chat.defaultAgent still points at `{KIRO_AGENT_NAME}` in {}; \
-         global install is MCP-only — clear or delete that setting manually \
+         global install is MCP-only, clear or delete that setting manually \
          (`tracedecay uninstall --agent kiro` does not rewrite cli.json)",
         path.display()
     ));

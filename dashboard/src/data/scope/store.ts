@@ -12,11 +12,11 @@ import { z } from 'zod';
  *
  * `unresolved` is the third state and it is load-bearing. A deep link carries
  * an opaque id and nothing else, so until the registry has been read the
- * dashboard does not know which of the other two this is — and must not guess,
+ * dashboard does not know which of the other two this is, and must not guess,
  * in either direction: guessing `active` offers a write that will be refused,
  * guessing `selected` withdraws one that would have worked.
  *
- * `absent` is the registry having answered that it holds no such project —
+ * `absent` is the registry having answered that it holds no such project,
  * `GET /api/projects/{id}` replying 404 `not_found`. It is separate from
  * `unresolved` because the two say opposite things about what is known: one is
  * a pending read, the other a completed one, and a stale deep link that
@@ -48,7 +48,7 @@ export type DashboardScope =
  * whether it exists, and treating it as absent replaced a perfectly good label
  * with a raw id and announced "not in registry" about a project that was in the
  * registry. Nothing here can express absence, so nothing can infer it from a
- * page — the reading is sourced from `GET /api/projects/{id}`, which answers
+ * page, the reading is sourced from `GET /api/projects/{id}`, which answers
  * about one project and is bounded no matter how many are registered.
  *
  * `unknown` is the registry declining to answer. Folding it into `measured`
@@ -56,15 +56,15 @@ export type DashboardScope =
  * which is the false negative this union exists to prevent.
  *
  * `absent` is the opposite risk, and needs its own state for the same reason:
- * the bounded lookup answering 404 `not_found` is a real measurement — this id
- * is not registered — and collapsing it into `unknown` would leave a dead deep
+ * the bounded lookup answering 404 `not_found` is a real measurement, this id
+ * is not registered, and collapsing it into `unknown` would leave a dead deep
  * link resolving forever.
  */
 export type RegistryReading =
   | {
       state: 'measured';
       /** The canonical label, or `null` when the answer carried no project
-       * record — unconfirmed, which is not the same as contradicted. */
+       * record, unconfirmed, which is not the same as contradicted. */
       label: string | null;
       /** Whether this is the active project, or `null` when the answer did not
        * say. The daemon computes it against the same `active_project_id` that
@@ -83,7 +83,7 @@ interface ScopeState {
   scope: DashboardScope;
   selectProject: (projectId: string, label: string, activation?: ProjectActivation) => void;
   selectAllProjects: () => void;
-  /** Reconcile the selected project — both its activation and its label —
+  /** Reconcile the selected project, both its activation and its label,
    * against the registry. A no-op unless a project is currently selected. */
   reconcileScope: (reading: RegistryReading) => void;
 }
@@ -114,11 +114,11 @@ export function activationFor(reading: RegistryReading): ProjectActivation {
  * before a rename, or simply be whatever text was pasted next to a real
  * project id. It is a display string that reaches prose about what a write
  * will affect, so once the registry has named the project, that name is the
- * label — anything else lets a URL choose what the dashboard calls a project it
+ * label, anything else lets a URL choose what the dashboard calls a project it
  * is about to write to.
  *
  * Short of a name from the registry, the claim stands. It is the only name
- * available, and substituting a raw id would be a correction in its own right —
+ * available, and substituting a raw id would be a correction in its own right,
  * asserted on no measurement, and (because corrections propagate to the address
  * bar) written back over a label that may well have been right.
  */
@@ -127,8 +127,8 @@ export function reconciledLabel(claimed: string, reading: RegistryReading): stri
     case 'measured':
       return reading.label ?? claimed;
     // The registry holds no project under this id, so it has no name to offer
-    // in place of the claim. The claim is left standing — it is the only thing
-    // that identifies the link its reader followed — and `absent` activation is
+    // in place of the claim. The claim is left standing, it is the only thing
+    // that identifies the link its reader followed, and `absent` activation is
     // what says the name belongs to nothing.
     case 'absent':
     case 'unknown':
@@ -157,8 +157,8 @@ export const useScope = create<ScopeState>((set) => ({
       };
       // Identity-stable when nothing moved. Every consumer selects the scope
       // object, and this runs on each registry read, so returning a fresh one
-      // each time would re-render the shell — and re-key nothing, since the
-      // cache token is the id — on a 30-second poll that changed no fact.
+      // each time would re-render the shell, and re-key nothing, since the
+      // cache token is the id, on a 30-second poll that changed no fact.
       return next.label === state.scope.label && next.activation === state.scope.activation
         ? state
         : { scope: next };
@@ -186,7 +186,7 @@ export function scopedWorkspacePath(scope: DashboardScope, path: string): string
  * scope and an active selected project both write to the active project, and
  * two selected projects differ from each other.
  *
- * `unknown` is never a disabled control with a shrug — it is a distinct
+ * `unknown` is never a disabled control with a shrug, it is a distinct
  * reading with its own sentence, so a control can stay disabled while saying
  * that the reason is a pending registry read rather than a refusal.
  *
@@ -228,7 +228,7 @@ export function scopeWritable(scope: DashboardScope): ScopeWritability {
         case 'absent':
           return {
             state: 'read_only',
-            reason: `The project registry holds no project with id ${scope.projectId}, so there is nothing here to write to. This scope came from a link that names a project that has been removed or never existed — switch to a registered project.`,
+            reason: `The project registry holds no project with id ${scope.projectId}, so there is nothing here to write to. This scope came from a link that names a project that has been removed or never existed. Switch to a registered project.`,
           };
         default: {
           const exhaustive: never = scope.activation;
@@ -246,8 +246,8 @@ export function scopeWritable(scope: DashboardScope): ScopeWritability {
  * The sentence a control carries about what this scope means for it.
  *
  * One exhaustive switch for all of them. The two refusing states are answered
- * with the authority's own `reason` — reworded per call site they would drift
- * apart, and the reason is the same fact everywhere — while `writable` is the
+ * with the authority's own `reason`, reworded per call site they would drift
+ * apart, and the reason is the same fact everywhere, while `writable` is the
  * only state whose wording is genuinely local, because what is being written
  * differs (a scheduler toggle or settings change) and the target has to be
  * named.
@@ -305,7 +305,7 @@ export interface ReadOnlyScopeRefusal {
  * Read a refusal out of a 405 body, or `null` if this is not one.
  *
  * Null is the important return. A 405 whose body does not match is still a
- * refused request, but not one this dashboard can explain — reporting it as a
+ * refused request, but not one this dashboard can explain, reporting it as a
  * read-only scope would attach a specific cause, and a specific remedy, to a
  * refusal that may have neither.
  */
@@ -322,7 +322,7 @@ const UNSCOPED_PREFIXES = ['/api/projects', '/api/dashboard'];
 /**
  * Is this route one the project gateway never rewrites?
  *
- * A property of the ROUTE, asked without reference to the current scope — the
+ * A property of the ROUTE, asked without reference to the current scope, the
  * registry is the thing that lists projects and the chrome sits above all of
  * them, so neither is ever served per project. Both `scopedUrl` and
  * `requestScopeKey` ask this one question, so the rewrite and the cache key
@@ -359,15 +359,15 @@ export const UNSCOPED_CACHE_KEY = 'unscoped';
  * Cache-key token for one REQUEST, which is not always the token for the scope
  * it was made under.
  *
- * `/api/projects` and `/api/dashboard` are never rewritten — the registry is
- * the thing that lists projects, and the chrome is above all of them — so the
+ * `/api/projects` and `/api/dashboard` are never rewritten, the registry is
+ * the thing that lists projects, and the chrome is above all of them, so the
  * same URL is fetched under every scope, and keying them by scope splits one
  * answer into an entry per project.
  *
  * The question is about the ROUTE, not about whether `scopedUrl` rewrote this
  * particular request: `scopedUrl` rewrites nothing under the all-projects
  * scope, so asking it collapses every route into the unscoped bucket there and
- * stops agreeing with `scopeKey` — which lets a writer put a fresh reading into
+ * stops agreeing with `scopeKey`, which lets a writer put a fresh reading into
  * a key no reader is watching. So a scoped route keys by scope in every scope,
  * including `all`, and only the genuinely unscoped routes share one entry.
  */

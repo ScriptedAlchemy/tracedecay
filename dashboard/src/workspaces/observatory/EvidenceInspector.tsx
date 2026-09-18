@@ -68,8 +68,8 @@ function Fact({
 
 /**
  * The workspace-owned inspector. It renders exactly what the selected (or
- * hovered) authority published about itself — source, observation time,
- * typed state, coverage, freshness, scope, declared actions — and states as
+ * hovered) authority published about itself, source, observation time,
+ * typed state, coverage, freshness, scope, declared actions, and states as
  * absences the things the contracts do not carry: severity, impact, and a
  * recovery route. A control appears only for an action the daemon declared
  * and this dashboard can submit, which today is `refresh`.

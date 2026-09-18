@@ -1,6 +1,6 @@
 /**
  * The provider owns the EventSource: a committed effect opens it and that
- * effect's cleanup closes it — never render. These cases pin the two failures
+ * effect's cleanup closes it, never render. These cases pin the two failures
  * a render-time connection has, at the provider boundary and with the real
  * render clock: a render discarded before commit leaks a source nothing will
  * close, and effect setup → cleanup → setup (StrictMode, a URL change) leaves
@@ -63,7 +63,7 @@ function deliver(source: FakeEventSource, revision: number) {
   });
 }
 
-/** Every source that is not open was closed exactly once — no double close,
+/** Every source that is not open was closed exactly once, no double close,
  * and no source left half-owned. */
 function expectClosedExactlyOnce(except: readonly FakeEventSource[] = []) {
   for (const source of FakeEventSource.instances) {

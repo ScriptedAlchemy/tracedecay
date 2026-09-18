@@ -1,4 +1,4 @@
-# 11b — Structure visualization: anatomy, transit, disagreement
+# 11b. Structure visualization: anatomy, transit, disagreement
 
 Status: active in-scope V2 delivery with work underway; the user has directed
 that these visualizations ship in full for V2. Agent concept/mockup
@@ -14,23 +14,23 @@ self-contained HTML pages, dark+light shots, per-concept notes).
 TraceDecay holds three graphs over the same code: the static call graph, the
 temporal graph (which sessions touched which files), and the semantic graph
 (facts/entities citing code by name). Conventional architecture diagrams draw
-only the first, which is why they are inert — they restate what the compiler
+only the first, which is why they are inert, they restate what the compiler
 already knows. Every surface below either composes the layers on one field or
 draws the *disagreement* between them.
 
 The user explicitly rejected "bland UML" as the structural idiom. The visual
-quality benchmark is cosmograph.app — visuals like it, not adoption of its
-library — and every structure surface must be beautiful, functional, and
+quality benchmark is cosmograph.app, visuals like it, not adoption of its
+library, and every structure surface must be beautiful, functional, and
 truthful rather than merely diagrammatically correct.
 
-## Wire truth (recon summary — design against this, not against hope)
+## Wire truth (recon summary, design against this, not against hope)
 
 | Relation | Granularity | Where | Status |
 | --- | --- | --- | --- |
 | callers/callees one hop | symbol | `graph_queries.rs` `caller_rows`/`callee_rows`, `/api/plugins/graph/node/{id}/neighbors` | servable today |
 | sessions that edited code | **file only**, Claude-provider rollup (`sessions.metadata_json.$.edited_files[]`); Codex per-message `$.files[]`, no rollup; other hosts none | `src/sessions/claude/record_metadata.rs:463`, `/api/plugins/graph/node/{id}/sessions` | generated contract and `NodeEvidence` consumer live; JSON-scan, unindexed |
 | "discussed" | free-text FTS on the name (`session_messages_fts`) | global db | noisy for common names; secondary arm only |
-| facts citing a symbol | **name match** (memory_entities.normalized_name, v2 payload FTS) — not symbol identity | `src/db/memory_v2/…`, `/api/plugins/graph/node/{id}/facts` | generated contract and `NodeEvidence` consumer live; same-name collision caveat |
+| facts citing a symbol | **name match** (memory_entities.normalized_name, v2 payload FTS), not symbol identity | `src/db/memory_v2/…`, `/api/plugins/graph/node/{id}/facts` | generated contract and `NodeEvidence` consumer live; same-name collision caveat |
 | covering tests | symbol (pure graph computation, callers depth-3 ∩ test files) | `handlers/health.rs:987` `handle_test_map`, `/api/plugins/graph/node/{id}/tests` | generated contract and `NodeEvidence` consumer live |
 | live activity | **project only** (`ActivityPulseV1` has no path/symbol) | `src/dashboard/activity_bus.rs:83` | per-symbol strike needs a wire-contract change (stability tests exist) |
 | call chain | symbol, directed, calls-only, single shortest path, depth ≤20 | `queries.rs:133` `get_call_chain`, `/api/plugins/graph/call-chain` | generated contract and Code `CallChain` consumer live |
@@ -40,9 +40,9 @@ truthful rather than merely diagrammatically correct.
 Note: the existing `/api/plugins/graph/path` route is UNDIRECTED and
 edge-kind-agnostic. It is not a call chain and must not be reused as one.
 
-## Surface 1 — Symbol Anatomy (build first)
+## Surface 1. Symbol anatomy (build first)
 
-Drill-in from the Code spine (click a hub) — not a new nav page. One composed
+Drill-in from the Code spine (click a hub), not a new nav page. One composed
 field: the symbol as a machined plate carrying only measured fields (`absent`
 printed, never blanked); callers left / callees right as bars on ONE shared
 call-site scale, kind hues from `kindColor.ts`; below it the non-code
@@ -50,14 +50,14 @@ afferents: sessions strip on a real time axis, facts with trust rails anchored
 at zero, covering tests with staleness, live strike state.
 
 Honesty deltas from the mockup (mandatory):
-- Strip title is "sessions that edited this FILE" — symbol-level linkage does
+- Strip title is "sessions that edited this FILE", symbol-level linkage does
   not exist. Caption declares provider coverage ("Claude sessions; Codex
   partial; other hosts unrecorded").
 - No per-symbol "last strike". Live section scopes to the project until
   `ActivityPulseV1` carries a path (separate wire-contract decision).
-- Facts section captioned "citing this name" — name match, not identity.
+- Facts section captioned "citing this name", name match, not identity.
 - Unrecorded message counts drawn hollow at zero height (mockup already does
-  this — keep it).
+  this, keep it).
 
 Endpoints: `/api/plugins/graph/node/{id}/sessions` (edited_files json_each +
 FTS arm), `/api/plugins/graph/node/{id}/facts`, `/api/plugins/graph/node/{id}/tests`
@@ -68,11 +68,11 @@ are implemented and registered. Their generated wire contracts, backend tests,
 typed frontend reader, and `NodeEvidence` consumer now exist. Surface 1 is
 routed through the Code workspace; it is no longer a backend-only gap.
 
-## Surface 2 — Call-chain transit map (historical standalone proposal)
+## Surface 2. Call-chain transit map (historical standalone proposal)
 
 Two symbols → the shortest directed calls-only route drawn as a transit line
 across horizontal strata bands ordered by measured file dependency depth.
-Stations = symbols (inherit their file's depth — caption says so), hatched
+Stations = symbols (inherit their file's depth, caption says so), hatched
 full-height "NO STATION" bands for crates the chain never enters (a chart that
 drops skipped layers cannot show a layer being skipped), foot ruler carrying
 per-hop depth delta, upward hops drawn at true steepness in the error hue with
@@ -80,7 +80,7 @@ the caption stating a climb is a boundary-crossing observation, not proof of a
 bug.
 
 Endpoints: `/api/plugins/graph/call-chain`, `/api/plugins/graph/strata`
-(dependency_depth + DSM ordering; budget the unpaginated adjacency scan —
+(dependency_depth + DSM ordering; budget the unpaginated adjacency scan,
 cache per graph generation). Chain selection rule: user-picked endpoints,
 shortest route, captioned as exactly that (single path; k-shortest is a later
 question).
@@ -91,13 +91,13 @@ instruction to register `get_call_chain` is complete. The shared typed reader
 now feeds `CallChain` and `Strata` components in the Code workspace. Surface 2
 is no longer a backend-only gap.
 
-## Surface 3 — Disagreement field (build last; premise gated)
+## Surface 3. Disagreement field (build last; premise gated)
 
 Call edges overlaid with co-change edges in three declared states: coupled-and-
 called (quiet), called-never-co-touched (dotted), co-changed-but-unlinked
 (loud, drawn on top, enumerated in full below the field, legend counts computed
 from the edge list so caption and picture cannot drift). Nodes with no session
-attribution drawn hollow — absence unmeasured, not zero.
+attribution drawn hollow, absence unmeasured, not zero.
 
 Gates before build:
 1. Reframe FILE-granular (mockup draws symbol pairs; only file pairs are
@@ -115,7 +115,7 @@ Gates before build:
    symbol list).
 2. Transit (two endpoints, machinery exists).
 3. Disagreement (after gates 1–3; consider a session→file indexed
-   materialization first — it also de-risks Anatomy's JSON-scan).
+   materialization first, it also de-risks Anatomy's JSON-scan).
 
 Open wire-contract question tracked separately: adding `path` to
 `ActivityPulseV1` + coalescing key so live strikes can reach file/symbol
@@ -125,23 +125,22 @@ move with it).
 ## User rejection and redirect (2026-07-25)
 
 The transit map read as service routing, which the user rejected: call chains
-must not look like service boxes. His stated intent is graph tools made visible
-— callers/callees traced over surrounding types, the structure of many files
-and many functions in a file, "the topography of the code base" — broader and
+must not look like service boxes. His stated intent is graph tools made visible, callers/callees traced over surrounding types, the structure of many files
+and many functions in a file, "the topography of the code base", broader and
 more futuristic than any two-point route. The agent-developed direction under
 exploration is one continuous, semantically zoomed space rather than pages:
 
-- CORTEX (macro): modules as relief terrain — depth-strata placement, area =
+- CORTEX (macro): modules as relief terrain, depth-strata placement, area =
   symbol mass, contour lines = measured connectivity density, churn heat,
   bundled cross-module call rivers.
-- TRACE (hero): a selected function floods the terrain — caller tributaries
+- TRACE (hero): a selected function floods the terrain, caller tributaries
   converging, callee delta fanning, flow width = call sites, impl/trait
   membranes as translucent enclosures the flow enters and exits.
 - CORE SAMPLE (micro): files as vertical strat columns in true line order
   (start_line/end_line), internal call arcs, external edges to sibling columns.
 
 Surfaces 1 and 3 of the original plan (Anatomy, Disagreement) are unaffected.
-The transit map demotes to "maybe, inside Trace" — its endpoint work
+The transit map demotes to "maybe, inside Trace", its endpoint work
 (registering directed get_call_chain, strata service) is still the right
 backend for Trace and proceeds unchanged.
 
@@ -159,14 +158,14 @@ once:
 | Feel | Measurement | Mechanics |
 | --- | --- | --- |
 | weight / inertia | connectedness (degree / mass) | hover-response latency, bloom depth, settle time scale with degree; leaves flick, hubs are slow and deep |
-| tension / deformation | coupling strength (call-site count) | edges as springs, stiffness = call sites; drag deforms the neighborhood proportionally — coupled code moves as flesh, loose code trails |
+| tension / deformation | coupling strength (call-site count) | edges as springs, stiffness = call sites; drag deforms the neighborhood proportionally, coupled code moves as flesh, loose code trails |
 | texture / grain | cyclomatic complexity | contour tightness, surface roughness |
 | warmth | churn recency | heat tint that decays over real time |
-| pulse | live activity (SSE strikes) | shipped — the existing strike/bloom machinery |
+| pulse | live activity (SSE strikes) | shipped, the existing strike/bloom machinery |
 
 Consequences:
 - Reduced-motion: every felt channel needs a static equivalent (weight → size
-  already; tension → edge thickness; pulse → pinned-lit) — the a11y story is a
+  already; tension → edge thickness; pulse → pinned-lit), the a11y story is a
   first-class rendering mode, not a degradation.
 - Static mockups settle the SPATIAL language only. Feel requires a live
   prototype: round two is an interactive page with real spring physics over a
@@ -177,27 +176,27 @@ Consequences:
 
 ## Rendering strategy (user permitted full custom, 2026-07-25)
 
-Library constraints must not cap the vision — custom rendering (D3-style
+Library constraints must not cap the vision, custom rendering (D3-style
 hand-rolled canvas/WebGL, game-engine techniques, physics engine) is approved
 where a library falls short.
 
 Decision frame:
-- Shipped core-dashboard surfaces stay on Sigma — they work, they're gated, no churn.
+- Shipped core-dashboard surfaces stay on Sigma, they work, they're gated, no churn.
 - The topography/trace surfaces target a CUSTOM renderer from the start:
   - Physics: hand-rolled Verlet/spring integrator first (≤250-node subgraph cap
     makes this trivial, zero deps, exact control of the weight/tension feel).
     Escalate to a wasm physics engine (e.g. Rapier) only if collision/joint
-    needs outgrow it — not for springs.
+    needs outgrow it, not for springs.
   - Drawing: Canvas2D first (terrain contours, membranes, bundled flows are
     path-heavy 2D work where Canvas2D + offscreen layering is simpler and
     theme-safe); WebGL (regl/pixi-class or hand-rolled) when node counts or
     glow/displacement effects demand it. Three.js only if we go literal 3D
-    relief — undecided, prototype will tell.
+    relief, undecided, prototype will tell.
 - Keep the honesty invariants renderer-independent: a pure layout/simulation
   module (like brain/field.ts) computes positions/forces from measurements;
   the renderer only draws. Tests hit the pure module.
 
-## Topography round one — coordinator verdict (2026-07-25)
+## Topography round one, coordinator verdict (2026-07-25)
 
 Four sheets on branch `worktree-agent-a3433e6e6f36a4201` under
 `mockups/code-topography/` (dark+light, notes, README; kindColor + tokens
@@ -205,11 +204,11 @@ transcribed, honest aggregation statements throughout).
 
 - TRACE is the hero and lands the ask: callers as tributaries, callees as
   delta, per-edge call-site widths, impl/trait membranes with ports, hop rings
-  not elevation (captioned — the call graph merely happens to run downhill),
+  not elevation (captioned, the call graph merely happens to run downhill),
   dashed mouths for edges leaving the graph, all over the dimmed cortex relief
   so shoreline crossings are cross-module calls. 26 nodes at ≤3 hops = direct
   render, inside subgraph caps. Round two builds THIS as the live physics
-  prototype (custom canvas + Verlet springs; channels are already rivers —
+  prototype (custom canvas + Verlet springs; channels are already rivers,
   they want to flow).
 - CORTEX is the right macro underlay: real contour interval (0.50, indexed
   5th), √-area mass, aggregation stated (19 regions ⟵ 1206 symbols), weather
@@ -219,19 +218,19 @@ transcribed, honest aggregation statements throughout).
   encoding live in `dashboard/src/workspaces/code/cortexContours.ts`.
 - CORE SAMPLE answers "shape of the inside of a file, six files at once";
   the handlers.rs-vs-decision.rs comparison is instant and impossible in a
-  tree view. Its (b) option — cores collapsing toward hairline fabric as count
-  grows — is the growth path.
+  tree view. Its (b) option, cores collapsing toward hairline fabric as count
+  grows, is the growth path.
 - LENS is adopted as the NAVIGATION MODEL, not necessarily a sheet: zoom is a
   position on an aggregation-ratio continuum, never a screen replacement; the
   subgraph cap becomes a readable position on the ruler. This is how
   Cortex→Trace→Core Sample connect in the product. Its self-critique (three
-  grammars on one sheet) is accepted — as a literal surface it is optional.
+  grammars on one sheet) is accepted, as a literal surface it is optional.
 
 Synthesis: ONE navigable space. Far = CORTEX. Touch a symbol = TRACE floods.
 Enter a file = CORE SAMPLE. LENS is the theory of motion between them. The
 sensory contract rides on top: channel = spring, mass = weight, churn = warmth.
 
-## Correction — CORTEX is shipped (2026-08-08)
+## Correction. CORTEX is shipped (2026-08-08)
 
 The synthesis above was PARTIAL: Anatomy, Transit (CallChain + Strata), TRACE,
 CORE SAMPLE and the LENS ruler were all in `dashboard/src/workspaces/code/`,
@@ -263,8 +262,8 @@ symbol count is served (`overview.largest_files` is a top-N sample, so deriving
 one from it would understate every region outside the sample). The legend says
 "files and not symbols" on the surface.
 
-The round-two open question — whether contours should encode coupling ratio
-rather than edges-per-symbol — is decided. Rings follow internal÷boundary.
+The round-two open question, whether contours should encode coupling ratio
+rather than edges-per-symbol, is decided. Rings follow internal÷boundary.
 Edges per file remains a table reading and is not the ring channel. A region
 with internal edges and a measured-zero boundary is sealed: one heavy ring,
 not an invented finite ratio. `internal / (internal + boundary)` was not
@@ -284,7 +283,7 @@ per-commit mockup/evaluation documents or git-hash-tied screenshot manifests.
 Current implementation must instead be reviewed in real Google Chrome at full
 viewport, with every relevant interaction state exercised and screenshotted;
 the embedded/in-IDE browser is rejected as too small for this review.
-Existing design-round artifacts are on mockup branches (kept off trunk — heavy
+Existing design-round artifacts are on mockup branches (kept off trunk, heavy
 PNGs). View an existing file without switching branches:
 `git show <branch>:<path>` (binary shots: `git show <branch>:<path> > /tmp/x.png`).
 
@@ -303,4 +302,4 @@ PNGs). View an existing file without switching branches:
 
 Design notes accompany each sheet in the same directory (`notes/` or
 sibling `.md`), stating per-channel encodings, backing data, and open
-questions — read the note before reusing a sheet as a spec.
+questions, read the note before reusing a sheet as a spec.

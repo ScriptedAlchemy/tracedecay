@@ -13,7 +13,7 @@ use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
 ///
 /// A fresh full tick runs bounded code-generation retention and then the
 /// independent compaction passes. A code-generation continuation runs only
-/// the bounded code-generation unit — draining a superseded backlog on the
+/// the bounded code-generation unit, draining a superseded backlog on the
 /// short cadence without re-running compaction.
 #[hotpath::measure(label = "daemon.maintenance.generation", future = true)]
 pub async fn run_project_generation_maintenance(
@@ -26,7 +26,7 @@ pub async fn run_project_generation_maintenance(
 ) -> MaintenanceTickOutcome {
     // Each ordered phase gets its own wall span: the outer generation span is
     // inclusive, so a slow tick is attributed to code generation retention or
-    // compaction — not guessed.
+    // compaction, not guessed.
     let code_generation = if cancellation.is_cancelled() {
         CodeGenerationRetentionOutcomeV1::Failed
     } else {

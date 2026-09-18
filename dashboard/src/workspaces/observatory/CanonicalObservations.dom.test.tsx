@@ -36,7 +36,7 @@ describe('Observatory canonical observations', () => {
       screen.getAllByText('per eligible observability events · 4,812').length,
     ).toBe(3);
 
-    // A measured zero is a real reading and prints as one — it is the ABSENT
+    // A measured zero is a real reading and prints as one, it is the ABSENT
     // measurements below that must never look like this.
     const drops = document.querySelector('[data-metric="telemetry_drops_lower_bound"]');
     expect(drops?.getAttribute('data-metric-available')).toBe('true');
@@ -99,7 +99,7 @@ describe('Observatory canonical observations', () => {
       '[data-metric-source="feedback_observations"]',
     );
     expect(envelopeSource?.textContent).toContain('2 of 2 measured');
-    // One metric, none of it measured — stated, rather than shown as a
+    // One metric, none of it measured, stated, rather than shown as a
     // section of zeroes.
     expect(feedbackSource?.textContent).toContain('0 of 1 measured');
     expect(envelopeSource?.textContent).not.toContain('feedback coverage');

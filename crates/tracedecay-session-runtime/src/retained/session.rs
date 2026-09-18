@@ -621,7 +621,7 @@ impl MessageSearchInput {
                 .with_semantic_filter(semantic_filter)
                 // Without this the query carries the multi-MiB
                 // `ExecutionLimits::default()`, which the admitted binding
-                // refuses terminally — every message search would answer
+                // refuses terminally, every message search would answer
                 // a structural budget refusal instead of searching.
                 .with_execution_limits(crate::session_retrieval::admitted_execution_limits(
                     self.limit,

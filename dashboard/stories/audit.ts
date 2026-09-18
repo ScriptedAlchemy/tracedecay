@@ -3,7 +3,7 @@
  *
  * `npm run visual:audit`
  *   Starts the dashboard (rsbuild dev) with every `/api` call served from the
- *   MSW-backed fixtures (`fixtures/route.ts`) — no daemon required — then walks
+ *   MSW-backed fixtures (`fixtures/route.ts`), no daemon required, then walks
  *   the code-driven story registry and captures each surface across
  *   light+dark themes and 320/768/1440 widths, writing PNGs and a machine
  *   `manifest.json` to `audit-gallery/`. A render check runs per
@@ -15,8 +15,8 @@
  *   pixel counts (and writing diff PNGs) in the manifest.
  *
  * WIDTHS ARE PINNED TO THE BASELINES, NOT TO PLAN 11. The plan's viewport,
- * zoom and media matrix has been retired along with the accessibility harness
- * — the two gates CI runs. This harness keeps 320/768/1440 at a height of 900
+ * zoom and media matrix has been retired along with the accessibility harness,
+ * the two gates CI runs. This harness keeps 320/768/1440 at a height of 900
  * because `audit-baselines/` holds seventy-five committed PNGs named and sized
  * for exactly that geometry: moving to 320x568 and 768x1024 would make every
  * one of them a `size-mismatch`, and a size-mismatch is not compared. The
@@ -26,8 +26,8 @@
  *
  * What this harness does carry from the plan, because it costs no pixels: the
  * two Plan 11 measurements. Its route coverage is the widest in the
- * repository — every registered story surface, not the handful of routes the
- * scenario gates visit — so it is where an undersized control on a workspace
+ * repository, every registered story surface, not the handful of routes the
+ * scenario gates visit, so it is where an undersized control on a workspace
  * nobody audits turns up.
  *
  * Env:
@@ -164,7 +164,7 @@ async function setTheme(page: Page, theme: Theme): Promise<void> {
     try {
       localStorage.setItem('td-theme', t);
     } catch {
-      /* private mode / storage disabled — dataset alone still themes */
+      /* private mode / storage disabled. Dataset alone still themes */
     }
     document.documentElement.dataset['theme'] = t;
   }, theme);
@@ -193,7 +193,7 @@ async function main(): Promise<void> {
   // The BUILT bundle, not `rsbuild dev`. Lazy route compilation under the dev
   // server emits runtime errors the release build does not have (esbuild's
   // `__name` helper reaching the page among them), and a route that throws
-  // still renders the router's accessible error boundary — which screenshots
+  // still renders the router's accessible error boundary, which screenshots
   // happily. `AUDIT_BASE_URL` still wins, for
   // auditing an already-running server on purpose.
   const preset = process.env['AUDIT_BASE_URL'];
@@ -235,7 +235,7 @@ async function main(): Promise<void> {
     // Passed as source text, not a function: tsx compiles callbacks with
     // esbuild's `keepNames`, whose `__name` helper does not exist in the page.
     // As a function this threw `__name is not defined` on every run, so the
-    // motion reset never applied and every capture was taken mid-animation —
+    // motion reset never applied and every capture was taken mid-animation.
     // silently, because nothing failed the run on a page error.
     await page.addInitScript({ content: STILLNESS_INIT });
 
@@ -387,12 +387,12 @@ async function main(): Promise<void> {
 
   // THE GATE. This used to fail only on shots that could not be rendered, so a
   // run could report accessibility violations in its own summary and still exit
-  // 0 — which is what every CI runner and every reviewer reads. Recording a
+  // 0, which is what every CI runner and every reviewer reads. Recording a
   // violation is not the same as failing on one.
   //
   // Pixel drift was left behind by that same fix: every baseline really is
   // compared with pixelmatch, the changed count really is printed, and then the
-  // exit code ignored it — so a visual regression was measured, reported, and
+  // exit code ignored it, so a visual regression was measured, reported, and
   // waved through. It counts now, which is what `11a-dashboard-design.md` has
   // been claiming all along.
   const failed = surfaces.flatMap((s) => s.shots).filter((sh) => sh.error);

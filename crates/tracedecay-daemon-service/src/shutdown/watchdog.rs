@@ -1,7 +1,7 @@
 //! Out-of-band enforcement of the daemon shutdown drain bound.
 //!
-//! Every deadline inside the graceful drain — the per-phase budgets, the
-//! coordinator's overall `timeout_at`, the receipt grace — is a tokio timer.
+//! Every deadline inside the graceful drain, the per-phase budgets, the
+//! coordinator's overall `timeout_at`, the receipt grace, is a tokio timer.
 //! Timers are driven by a parked runtime worker, so when every worker is
 //! wedged in synchronous work (a graph replay holding a store mutex that
 //! periodic tasks then block on, a saturated reader rendezvous, …) the drain
@@ -19,7 +19,7 @@
 //! and exits with [`DRAIN_BOUND_EXIT_CODE`] no later than the same absolute
 //! bound. Work abandoned this way tears recoverably (crash-atomic checkpoints),
 //! which is strictly better than the same tear at a supervisor-chosen SIGKILL
-//! instant — and the exit code plus receipt name the cause instead of a bare
+//! instant, and the exit code plus receipt name the cause instead of a bare
 //! `status=9/KILL`.
 //!
 //! This is not a raised limit: the graceful drain keeps its own deadlines

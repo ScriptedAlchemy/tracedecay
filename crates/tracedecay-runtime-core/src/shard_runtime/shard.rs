@@ -206,7 +206,7 @@ pub struct ShardRuntime {
     binding: StoreRuntimeBindingV1,
     /// Monotonic per-process instance number. Distinguishes a runtime that was
     /// closed and rebuilt from its predecessor even when the allocator reuses
-    /// the predecessor's address — pointer identity is ABA-prone the moment
+    /// the predecessor's address, pointer identity is ABA-prone the moment
     /// the old `Arc` is dropped.
     instance_id: u64,
     /// Every lease acquire and release, every queue-depth update, and every

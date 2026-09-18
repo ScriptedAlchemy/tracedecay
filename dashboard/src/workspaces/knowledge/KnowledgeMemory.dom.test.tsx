@@ -96,10 +96,10 @@ function memoryGraph(facts: readonly MemoryFactRowV1[]): MemoryGraphPayloadV1 {
 }
 
 /** `memory_api::overview` seeds the whole holographic block before it reads
- * anything, so `reads` and `facts_coverage` are always present — a body without
+ * anything, so `reads` and `facts_coverage` are always present, a body without
  * them is one the route cannot produce. */
 function overviewEnvelope(facts: readonly MemoryFactRowV1[] = []) {
-  // The envelope's own header — time, coverage, authorization, version — comes
+  // The envelope's own header, time, coverage, authorization, version, comes
   // from the fixture authority rather than being invented here, so these cases
   // cannot accidentally assert against a truth claim no route makes.
   return fixtureEnvelope({
@@ -441,7 +441,7 @@ describe("Knowledge view switcher", () => {
     const panelId = tab.getAttribute("aria-controls");
     expect(panelId).toBeTruthy();
     // `aria-controls` naming an element that was never drawn is an invalid
-    // reference, not a weaker one — the accessibility gate reads it as a
+    // reference, not a weaker one, the accessibility gate reads it as a
     // failure.
     expect(document.getElementById(panelId ?? "")).toBeTruthy();
   });

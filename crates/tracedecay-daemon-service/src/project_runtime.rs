@@ -114,9 +114,9 @@ impl<const SLOT: u8> Drop for RecordingComponent<SLOT> {
 /// `RegisteredWorkRuntime` mounts.
 ///
 /// It carries a real
-/// [`tracedecay_runtime_core::cancellation::CancellationToken`] — the same
+/// [`tracedecay_runtime_core::cancellation::CancellationToken`], the same
 /// handle the production
-/// recovery owners cancel through — so a test can observe the synchronous
+/// recovery owners cancel through, so a test can observe the synchronous
 /// shutdown sweep without assembling a whole Work runtime (a registered
 /// database lease, grant, topology policy, and routing authority) around it.
 #[cfg(test)]
@@ -1381,8 +1381,8 @@ impl ProjectRuntimeRegistryV1 {
     /// Register a component, or accept an incumbent the caller recognizes as
     /// the same authority.
     ///
-    /// `reconcile` sees the incumbent and either accepts it — returning `Ok`,
-    /// having refreshed whatever the caller renews — or refuses. An empty slot
+    /// `reconcile` sees the incumbent and either accepts it, returning `Ok`,
+    /// having refreshed whatever the caller renews, or refuses. An empty slot
     /// is reserved under the registry locks, then `build` runs after both
     /// locks are released. Registrations for the same typed slot join that
     /// reservation and receive its exact terminal outcome.

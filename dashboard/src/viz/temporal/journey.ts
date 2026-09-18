@@ -2,7 +2,7 @@
  * The journey projection: the Loom authorities joined into one renderer-
  * neutral reading of who ran when, under whom, and what each run recorded.
  *
- * Pure — no DOM, no clock. Every lane, event, relation, interval and gap here
+ * Pure, no DOM, no clock. Every lane, event, relation, interval and gap here
  * is backed by a wire record the caller handed in; nothing is defaulted into
  * existence. Sessions without a usable start are dropped and counted, undated
  * transcript turns keep only their recorded order, and a relation exists only

@@ -15,8 +15,8 @@ A tripped deadline, admission refusal, memory budget, or backoff ceiling is a
 measurement arriving through a policy surface. Never raise, remove, or
 env-override the limit as the fix. Use the lanes below to decompose where the
 time or memory actually goes, then compare against what the operation should
-cost for its inputs. Mis-sized work — an N+1 query storm, an unbatched writer,
-a serial phase that should use every core, an inlined mega-future — is the
+cost for its inputs. Mis-sized work, an N+1 query storm, an unbatched writer,
+a serial phase that should use every core, an inlined mega-future, is the
 defect; fix it and keep the limit. Change the budget only when the measured
 cost is genuinely irreducible, in its own commit, with the measurement
 attached. Overrides that keep an investigation moving are scaffolding: label
@@ -55,7 +55,7 @@ does not need the facility catalog.
 - Record failed/cancelled work too; success-only counters hide the waste being diagnosed.
 - Use RAII for active/queued/running gauges so cancellation, panic, abort, and shutdown cannot leak them.
 - Do not wrap tiny getters or inner-loop nodes without measured need. Enabled probes still have event/drain overhead even when timing is sampled out.
-- Keep the observability layers distinct. `tracing` events are the always-compiled operator log surface: they cost callsite checks even unsubscribed, are invisible in tests without a subscriber, and typed error mappings may collapse their messages. Hotpath macros are the compile-to-no-op measurement surface. A warn and a gauge on one path serve different consumers — neither replaces the other, and harvesting first-party logs into metrics couples placement decisions to log-field schemas. `eprintln!` is investigation scaffolding; it never merges.
+- Keep the observability layers distinct. `tracing` events are the always-compiled operator log surface: they cost callsite checks even unsubscribed, are invisible in tests without a subscriber, and typed error mappings may collapse their messages. Hotpath macros are the compile-to-no-op measurement surface. A warn and a gauge on one path serve different consumers. Neither replaces the other, and harvesting first-party logs into metrics couples placement decisions to log-field schemas. `eprintln!` is investigation scaffolding; it never merges.
 - Treat Hotpath 0.24 as flat aggregation: it has caller attribution for selected resources, but no parent call tree and no exclusive wall-time subtraction.
 - For parallel extraction/indexing, report one outer sweep wall span plus per-worker service demand, queue depth, effective worker count, memory reservation, and limiting reason.
 

@@ -179,9 +179,9 @@ fn test_include_records_explicit_override_even_when_excluded() {
 #[test]
 fn test_default_excludes_nested_node_modules() {
     let config = TraceDecayConfig::default();
-    // Top-level node_modules — should be excluded
+    // Top-level node_modules should be excluded
     assert!(is_excluded("node_modules/express/index.js", &config));
-    // Nested node_modules inside a sub-project — must also be excluded
+    // Nested node_modules inside a sub-project must also be excluded
     assert!(is_excluded(
         "projectA/node_modules/express/index.js",
         &config
@@ -503,7 +503,7 @@ fn generated_dir_segments_cover_the_union_all_call_sites_need() {
     assert!(GENERATED_DIR_SEGMENTS.contains(&"target"));
     // Worktree build directories are generated paths too.
     assert!(GENERATED_DIR_SEGMENTS.contains(&".worktrees"));
-    // `.git` is intentionally NOT part of the shared list — it stays a
+    // `.git` is intentionally NOT part of the shared list, it stays a
     // site-local addition in migrate::inventory::should_prune_dir (see its
     // doc comment) because it's VCS metadata, not generated/vendored code.
     assert!(!GENERATED_DIR_SEGMENTS.contains(&".git"));

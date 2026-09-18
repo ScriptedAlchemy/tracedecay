@@ -497,7 +497,7 @@ async fn search_forwards_lexical_routing_and_renders_route_evidence_case() {
     assert!(routing.prefer_symbol);
     let text = response_text(&result);
     assert!(
-        text.contains("**SparseLexicalWidget** (function, approximate) — rank 1 · utility 1 · via anchor:SparseLexicalWidget"),
+        text.contains("**SparseLexicalWidget** (function, approximate), rank 1 · utility 1 · via anchor:SparseLexicalWidget"),
         "each result names the routes that ranked it: {text}"
     );
     assert!(

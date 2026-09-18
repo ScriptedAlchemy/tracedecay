@@ -40,7 +40,7 @@ pub fn global_db_path_is_overridden() -> bool {
 /// surfaces this so an empty ledger can be explained honestly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccountingMode {
-    /// No env override — global accounting is on by default.
+    /// No env override, global accounting is on by default.
     Default,
     /// `TRACEDECAY_ENABLE_GLOBAL_DB` explicitly enabled it.
     EnabledByEnv,
@@ -65,7 +65,7 @@ impl AccountingMode {
 
 /// Canonical truthy-env-value test shared by every boolean env flag: trims,
 /// case-folds, and accepts `1`/`true`/`yes`/`on`. (Two parsers used to
-/// coexist with diverging semantics — e.g. `TRACEDECAY_DISABLE_GLOBAL_DB=on`
+/// coexist with diverging semantics, e.g. `TRACEDECAY_DISABLE_GLOBAL_DB=on`
 /// was silently ignored while the LCM doctor flag honored it.)
 pub fn env_value_truthy(value: &str) -> bool {
     matches!(
@@ -84,7 +84,7 @@ pub fn env_flag(name: &str) -> bool {
 ///
 /// Enabled **by default**: every other writer of the user-level `global.db`
 /// (CLI sync, hooks, `tracedecay cost`, the dashboard) is ungated, and the
-/// Savings dashboard reads the ledger — an opt-in gate here silently left
+/// Savings dashboard reads the ledger, an opt-in gate here silently left
 /// the ledger empty while lifetime counters kept growing. Precedence:
 ///
 /// 1. `TRACEDECAY_ENABLE_GLOBAL_DB` set → its truthiness decides.

@@ -534,8 +534,8 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
             expires_at,
         )
         // Every input here is either the caller's own request or state we just
-        // recaptured and matched, so a rejected construction — a commit intent
-        // the preview will not carry, most often — is a rejection of the
+        // recaptured and matched, so a rejected construction, a commit intent
+        // the preview will not carry, most often, is a rejection of the
         // request rather than evidence that it went stale.
         .map_err(|_| GitIndexTransactionPortError::NativeFailure)?;
         Ok(MaterializedGitIndexPreview {
@@ -2462,7 +2462,7 @@ mod tests {
 
     /// Portable stand-in for macOS `/tmp` → `/private/tmp`: capture through a
     /// symlink alias must mint the same snapshot the daemon recaptures from
-    /// the canonical root. Exact CAS stays strict — content drift still fails.
+    /// the canonical root. Exact CAS stays strict, content drift still fails.
     #[cfg(unix)]
     #[test]
     fn snapshot_capture_agrees_across_symlink_repository_root_aliases() {

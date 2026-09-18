@@ -828,9 +828,9 @@ async fn install_profile_worker_plan(
 const DAEMON_ACCEPT_ERROR_BACKOFF: tokio::time::Duration = tokio::time::Duration::from_millis(250);
 
 /// One failed accept must never end the daemon. `accept(2)` legitimately
-/// fails for per-connection reasons — a client that resets before accept
+/// fails for per-connection reasons, a client that resets before accept
 /// surfaces `ECONNABORTED` on macOS/BSD, and reachability probes connect and
-/// drop immediately — and for transient resource pressure (`EMFILE`).
+/// drop immediately, and for transient resource pressure (`EMFILE`).
 /// Returning the error exited the whole daemon, which a service supervisor
 /// then restarts: one aborted connection became a daemon flap.
 async fn log_accept_error_and_backoff(error: &TraceDecayError) {

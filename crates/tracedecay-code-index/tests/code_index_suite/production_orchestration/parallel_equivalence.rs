@@ -96,7 +96,7 @@ fn multi_file_request(file_count: usize, sealed_at: i64) -> CodeIndexBuildReques
 }
 
 /// Build the equivalence generation with the indexing pool forced to `width`,
-/// then read from it at that same width — encoding fans out too, so the width
+/// then read from it at that same width, encoding fans out too, so the width
 /// must still be in force when the caller takes what it wants to compare.
 fn at_width<R>(
     width: usize,
@@ -143,7 +143,7 @@ fn name_resolved_edges(generation: &CodeIndexPublishedGenerationV1) -> Vec<Strin
 /// Cross-file references only resolve at sealing, where every file's symbols
 /// finally exist together, and that resolution now fans out per file. A memo
 /// that leaked between files, or a concatenation that lost file order, would
-/// change which edges bind or where they sort — so the resolved edge vector
+/// change which edges bind or where they sort, so the resolved edge vector
 /// must be identical at width 1 and at full machine width. The count is pinned
 /// so a fixture that stopped producing cross-file references cannot make this
 /// pass by comparing two empty vectors.
@@ -225,7 +225,7 @@ fn decode_at_width(width: usize, sealed: &[u8]) -> (Vec<u8>, DecodedCensus) {
         snapshot_files: generation.snapshot().files.len(),
     };
     // Re-encoding is canonical, so identical re-encoded bytes prove the whole
-    // decoded state — every restored row, in order — is identical, not just
+    // decoded state, every restored row, in order, is identical, not just
     // the fields the census names.
     let reencoded = generation.encode_sealed().expect("sealed re-encoding");
     parallelism::clear_forced_indexing_workers_for_test();
@@ -235,7 +235,7 @@ fn decode_at_width(width: usize, sealed: &[u8]) -> (Vec<u8>, DecodedCensus) {
 /// Width is sizing policy on the way in as well as on the way out. Restoring
 /// each file's exact-extraction authority fans out across the indexing pool,
 /// so a generation decoded with that sweep running inline must restore exactly
-/// the state a full-width decode restores — same rows, same order, same bytes.
+/// the state a full-width decode restores, same rows, same order, same bytes.
 pub(super) fn assert_parallel_and_sequential_decodes_are_byte_identical() {
     const FILES: usize = 64;
 

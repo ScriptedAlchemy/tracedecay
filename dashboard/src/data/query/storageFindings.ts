@@ -3,7 +3,7 @@
  *
  * Two surfaces read `/api/storage/findings`: Observatory's findings section and
  * the nav rail's app-wide Doctor dot. Both spelled the same key and the same
- * URL by hand, and then disagreed about the poll — 30 seconds in Observatory,
+ * URL by hand, and then disagreed about the poll, 30 seconds in Observatory,
  * 60 in the rail.
  *
  * A shared key makes that disagreement worse than duplication. React Query
@@ -28,7 +28,7 @@ export const STORAGE_FINDINGS_URL = '/api/storage/findings';
 /**
  * How often the shared entry re-reads.
  *
- * Doctor findings are a retention sweep, not a live stream — no SSE family
+ * Doctor findings are a retention sweep, not a live stream, no SSE family
  * invalidates them, so this poll is the only thing that moves them. Thirty
  * seconds is the shorter of the two periods the callers used to ask for, and
  * therefore the one that was already in effect whenever both were mounted.

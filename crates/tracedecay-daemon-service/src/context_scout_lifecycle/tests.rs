@@ -116,7 +116,7 @@ fn durable_native_observation(project_id: &ProjectId) -> AnchoredObservationWrit
 /// runtime scope gate.
 ///
 /// This is only ever correct for staging state the store contract
-/// forbids — a row scoped to another project — so that the reader-side
+/// forbids, a row scoped to another project, so that the reader-side
 /// guards can be exercised against it. Everything else must go through
 /// [`ObservationStore::persist_observation`].
 async fn stage_foreign_scoped_observation(

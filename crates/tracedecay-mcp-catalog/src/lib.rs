@@ -6,8 +6,8 @@
 //! The catalog is data that two independent consumers read: the MCP server
 //! answers `tools/list` and admits dispatch from it, and the agent-host
 //! installers write permission allowlists and generated plugin schema files
-//! from it. Neither may reach the other — the server composition sits above
-//! the installers — so the catalog lives below both. Everything here is
+//! from it. Neither may reach the other. The server composition sits above
+//! the installers, so the catalog lives below both. Everything here is
 //! process-static: the application catalog snapshot and the `ast-grep` host
 //! probe are the only runtime inputs, and both are cached once per process.
 //!

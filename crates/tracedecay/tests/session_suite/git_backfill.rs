@@ -1,8 +1,8 @@
 //! Integration coverage for historical session↔git convergence
 //! (`tracedecay sessions git-sync`).
 //!
-//! Seeds a `sessions.db` with two sessions — one spanning a mid-session branch
-//! switch — against a real git repo carrying commits on both branches, runs
+//! Seeds a `sessions.db` with two sessions, one spanning a mid-session branch
+//! switch, against a real git repo carrying commits on both branches, runs
 //! the backfill core directly (no binary spawn), and asserts `sessions_for`
 //! returns the expected branch/commit attribution, including the branch-switch
 //! case. A fake [`GitReflogSource`] supplies the branch timeline so the switch
