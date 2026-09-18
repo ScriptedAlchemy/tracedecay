@@ -22,7 +22,6 @@ use crate::support::{
 };
 
 const TOOL: &str = "tracedecay_fact_store_search";
-const SCHEMA_PREFIX: &str = "application surface request does not match its reviewed schema: ";
 const HIGH: &str = "Quince ledger closes on the last Friday";
 const LOW: &str = "Quince rumor from the hallway";
 const MANGO: &str = "Mango routing prefers the west region";
@@ -62,10 +61,6 @@ impl SearchProject {
             .to_owned();
         Self { server, project_id }
     }
-}
-
-fn schema_detail(suffix: &str) -> String {
-    format!("{SCHEMA_PREFIX}{suffix}")
 }
 
 async fn store_fact(server: &McpServer, body: Value) -> String {
@@ -151,11 +146,12 @@ fn stable_hit(hit: &Value) -> Value {
         "helpful_count": fact["telemetry"]["helpful_count"],
         "unhelpful_count": fact["telemetry"]["unhelpful_count"],
         "last_feedback_at": fact["telemetry"]["last_feedback_at"],
-        "score_trust_millionths": hit["scores"]["trust_score_millionths"],
+        "scores": hit["scores"],
+        "why": hit["why"],
     })
 }
 
-fn assert_project_page(payload: &Value, project_id: &str, kind: &str, roots: u64) {
+fn assert_project_page(payload: &Value, project_id: &str, roots: u64, relations: u64) {
     assert_eq!(
         payload["owner"],
         json!({"kind": "project", "project_id": project_id}),
@@ -164,9 +160,9 @@ fn assert_project_page(payload: &Value, project_id: &str, kind: &str, roots: u64
     assert_eq!(
         payload["graph_coverage"],
         json!({
-            "kind": kind,
+            "kind": "complete",
             "root_count": roots,
-            "relation_count": 0,
+            "relation_count": relations,
             "expanded_fact_count": 0
         }),
         "{payload}"
@@ -186,9 +182,27 @@ fn assert_empty_miss(payload: &Value, project_id: &str) {
         json!({"kind": "project", "project_id": project_id}),
         "{payload}"
     );
+    assert_eq!(
+        payload["graph_coverage"],
+        json!({
+            "kind": "complete",
+            "root_count": 0,
+            "relation_count": 0,
+            "expanded_fact_count": 0
+        }),
+        "{payload}"
+    );
 }
 
-fn assert_schema_rejection(response: &Value, detail: &str) {
+const CLI_FALLBACK: &str = "This tool is also available from the shell: `tracedecay tool fact_store_search ...` (`tracedecay tool fact_store_search --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly.";
+
+fn decode_failure(detail: &str) -> String {
+    format!(
+        "tool execution failed: config error: invalid retained application request for {TOOL}: {detail}"
+    )
+}
+
+fn assert_schema_rejection(response: &Value, message: &str) {
     assert_eq!(response["jsonrpc"], "2.0", "{response}");
     assert_eq!(response["id"], 1, "{response}");
     assert!(
@@ -198,17 +212,11 @@ fn assert_schema_rejection(response: &Value, detail: &str) {
     assert_eq!(
         response["error"],
         json!({
-            "code": -32602,
-            "message": format!(
-                "tool project route failed: reason_code=application_surface_invalid_request retryable=false: {detail}"
-            ),
+            "code": -32603,
+            "message": message,
             "data": {
-                "tool": TOOL,
-                "reason_code": "application_surface_invalid_request",
-                "retryable": false,
-                "detail": detail,
-                "kind": "invalid_request",
-                "code": "application_surface_invalid_request"
+                "cli_fallback": CLI_FALLBACK,
+                "tool": TOOL
             }
         }),
         "{response}"
@@ -429,7 +437,7 @@ async fn fact_store_search_returns_the_stored_fact_and_pages_the_rest() {
         json!({"kind": "recorded", "fact_count": 1}),
         "{exact}"
     );
-    assert_project_page(&exact, &project.project_id, "complete", 1);
+    assert_project_page(&exact, &project.project_id, 1, 2);
     assert_eq!(
         stable_hit(&exact["hits"][0]),
         json!({
@@ -446,7 +454,14 @@ async fn fact_store_search_returns_the_stored_fact_and_pages_the_rest() {
             "helpful_count": 0,
             "unhelpful_count": 0,
             "last_feedback_at": null,
-            "score_trust_millionths": 1_000_000
+            "scores": {
+                "fts_score_millionths": 1_000_000,
+                "holographic_score_millionths": 621_363,
+                "jaccard_score_millionths": 111_111,
+                "score_millionths": 619_742,
+                "trust_score_millionths": 1_000_000
+            },
+            "why": "fts=1.000, coverage=1.000, jaccard=0.111, holographic=0.621, trust=1.000, temporal_decay=1.000, retrieval_count=0"
         }),
         "{exact}"
     );
@@ -546,35 +561,39 @@ async fn fact_store_search_rejects_blank_limit_and_unknown_fields() {
     let server = &project.server;
 
     for (arguments, detail) in [
-        (json!({}), schema_detail("missing field `query`")),
-        (json!({"limit": 1}), schema_detail("missing field `query`")),
+        (json!({}), decode_failure("missing field `query`")),
+        (
+            json!({"limit": 1}),
+            decode_failure("missing field `query`"),
+        ),
         (
             json!({"query": null}),
-            schema_detail("invalid type: null, expected a string"),
+            decode_failure("query: invalid type: null, expected a string"),
         ),
         (
             json!({"query": 12}),
-            schema_detail("invalid type: integer `12`, expected a string"),
+            decode_failure("query: invalid type: integer `12`, expected a string"),
         ),
         (
             json!({"query": "ledger", "action": "search"}),
-            schema_detail(
+            decode_failure(
                 "unknown field `action`, expected one of `query`, `memory_scope`, `category`, `min_trust`, `limit`, `project_selector`, `after`",
             ),
         ),
         (
             json!({"query": "ledger", "format": "yaml"}),
-            schema_detail("`format` must be markdown or json"),
+            "tool execution failed: config error: application surface request does not match its reviewed schema: `format` must be markdown or json"
+                .to_owned(),
         ),
         (
             json!({"query": "ledger", "category": "pitfall"}),
-            schema_detail(
-                "unknown variant `pitfall`, expected one of `general`, `user_pref`, `project`, `tool`, `decision`, `code_area`",
+            decode_failure(
+                "category: unknown variant `pitfall`, expected one of `general`, `user_pref`, `project`, `tool`, `decision`, `code_area`",
             ),
         ),
         (
             json!({"query": "ledger", "memory_scope": "global"}),
-            schema_detail("unknown variant `global`, expected `project` or `user`"),
+            decode_failure("memory_scope: unknown variant `global`, expected `project` or `user`"),
         ),
     ] {
         let response = call_raw(server, arguments).await;
