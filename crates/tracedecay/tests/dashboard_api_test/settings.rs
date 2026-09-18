@@ -206,7 +206,7 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         );
 
         // A patch that really changes configuration needs the absent control
-        // plane. It is a typed unavailable — never a fabricated success, and
+        // plane. It is a typed unavailable, never a fabricated success, and
         // never a write that quietly lands somewhere else.
         let (status, unavailable) = patch_json_body(
             &agent,

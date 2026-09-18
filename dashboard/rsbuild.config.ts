@@ -10,13 +10,13 @@ export default defineConfig({
   },
   html: {
     title: 'TraceDecay',
-    // axe: html-has-lang — the root element must declare its language, which
+    // axe: html-has-lang. The root element must declare its language, which
     // requires an explicit template; rsbuild's default omits `lang`.
     template: './src/app/index.html',
   },
   output: {
     // The CLI build script points this at a staging directory it owns, so a
-    // Rust build never writes to — or races `rsbuild dev` for — the
+    // Rust build never writes to, or races `rsbuild dev` for, the
     // checkout-global app-dist. Unset, every other producer keeps app-dist.
     distPath: { root: process.env['TRACEDECAY_DASHBOARD_DIST_PATH'] ?? 'app-dist' },
     cleanDistPath: true,

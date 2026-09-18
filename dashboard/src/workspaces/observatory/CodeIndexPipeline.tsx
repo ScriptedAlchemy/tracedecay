@@ -251,7 +251,7 @@ function sameCodeIndexProgressMap(
   return true;
 }
 
-function isCurrentOrNewerCodeIndexProgress(
+export function isCurrentOrNewerCodeIndexProgress(
   incoming: CodeIndexBuildProgressV1,
   rendered: CodeIndexBuildProgressV1,
 ): boolean {
@@ -291,7 +291,9 @@ export function codeIndexPhaseLabel(phase: CodeIndexBuildProgressV1['phase']): s
   }
 }
 
-function codeIndexBlockedReasonLabel(reason: CodeIndexBuildProgressV1['blocked_reason']): string {
+export function codeIndexBlockedReasonLabel(
+  reason: CodeIndexBuildProgressV1['blocked_reason'],
+): string {
   switch (reason) {
     case 'resident_memory':
       return 'resident memory';

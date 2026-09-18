@@ -44,7 +44,7 @@ export function mountGraph(host: HTMLElement, hooks: LabHooks = {}): { dispose: 
   const pipes = attributionPipes(bodies);
   // Empty hops → six disconnected nerves. No Kruskal, no invented tracedecay↔ZeroFS.
 
-  // No seeded x/y/z — planar layoutLabBodies coords collapse into a 2D arc.
+  // No seeded x/y/z, planar layoutLabBodies coords collapse into a 2D arc.
   // d3-force-3d phyllotaxis + charge fans the six PROJECTS nodes in 3D.
   const nodes: LabNode[] = PROJECTS.map((p) => ({
     id: p.id,
@@ -106,7 +106,7 @@ export function mountGraph(host: HTMLElement, hooks: LabHooks = {}): { dispose: 
     .linkDirectionalParticleColor(() => "#cdecff")
     .linkDirectionalParticleResolution(10)
     .onNodeHover((node) => {
-      // Hover inspect only — never a synapse fire.
+      // Hover inspect only, never a synapse fire.
       if (node) {
         inspect.textContent = `${node.name} · inspect`;
         hooks.onFocus?.(node.id);

@@ -19,7 +19,7 @@ import { WorkExecutionRecord } from './WorkExecutionRecord.tsx';
 import { ChannelAbsence, ChannelLedger, EmptyReading, ViewCaption } from './WorkViewChannel.tsx';
 
 /**
- * Timeline / attempts — the loom weave over the run/task incidence.
+ * Timeline / attempts, the loom weave over the run/task incidence.
  *
  * Warp threads are runs and landings are tasks, so a retry is exactly what it
  * is on a loom: the same thread crossing the same landing again. A thread wears
@@ -110,7 +110,7 @@ export function WorkTimelineView({
             mark is drawn hollow because an evidence reference is a point: no landing here
             has a start, an end, or a width. Repeated ticks on one mark are repeated
             crossings of the same landing, which looks like a retry and is not measured as
-            one — the measured retry chains are in the execution record below, read from the
+            one, the measured retry chains are in the execution record below, read from the
             attempt list rather than counted off this incidence.
           </p>
 
@@ -290,7 +290,7 @@ function Thread({
  * Terminal is carried by a printed word as well as by the border hue, so the
  * distinction survives a monochrome rendering. Selection is a lamp down the
  * leading edge rather than a fill, because filling the mark is the one thing
- * this view is not allowed to do — a solid mark would claim a measured extent.
+ * this view is not allowed to do, a solid mark would claim a measured extent.
  */
 function Landing({
   landing,
@@ -316,7 +316,7 @@ function Landing({
       onSelect={onSelect}
       variant="hollow"
       lamp
-      aria-label={`${landing.title} — task ${landing.taskId}, position ${ordinal} of ${total} in task-id order on run ${runId}, ${crossings}, ${landing.terminal ? 'terminal evidence' : 'no terminal evidence'}`}
+      aria-label={`${landing.title}, task ${landing.taskId}, position ${ordinal} of ${total} in task-id order on run ${runId}, ${crossings}, ${landing.terminal ? 'terminal evidence' : 'no terminal evidence'}`}
       className={cn(
         'max-w-[14rem] hover:border-edge-strong',
         selected ? undefined : landing.terminal ? 'border-state-ready' : 'border-edge-subtle',
@@ -360,7 +360,7 @@ function Tally({ count, runId }: { count: number; runId: string }) {
  * The four instants the work-product graph records per task.
  *
  * A calendar, and deliberately not an axis. Created, last changed, scheduled
- * for, due by — four points, none of which is the start of an attempt, so
+ * for, due by, four points, none of which is the start of an attempt, so
  * nothing here closes the wall-clock absence stated at the top of the weave.
  * They are drawn as a table of instants rather than laid on a time line for
  * exactly that reason: a line would invite reading the distance between two
@@ -510,7 +510,7 @@ function UnwovenBand({
                   onSelect={onSelect}
                   variant="hollow"
                   lamp
-                  aria-label={`${task.title} — task ${task.taskId}, unwoven: no run has landed on it`}
+                  aria-label={`${task.title}, task ${task.taskId}, unwoven: no run has landed on it`}
                   className={cn(
                     'max-w-[14rem] border-dashed hover:border-edge-strong',
                     selected === task.taskId ? undefined : 'border-edge-subtle',

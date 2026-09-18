@@ -4,7 +4,7 @@
 
 pub const CODE_CONTEXT_HEADING: &str = "## Code Context";
 pub const CONTEXT_MEMORY_MATCHES_HEADING: &str = "### Memory Matches";
-pub const CONTEXT_MEMORY_FEEDBACK_HINT: &str = "Rate what you use: call tracedecay_fact_feedback with a fact_id above — action=helpful if a fact steered you right, action=unhelpful if it was wrong or misleading. Flagging a bad fact matters as much as confirming a good one; trust is earned only from this feedback, so rate the ones you actually used.";
+pub const CONTEXT_MEMORY_FEEDBACK_HINT: &str = "Rate what you use: call tracedecay_fact_feedback with a fact_id above, action=helpful if a fact steered you right, action=unhelpful if it was wrong or misleading. Flagging a bad fact matters as much as confirming a good one; trust is earned only from this feedback, so rate the ones you actually used.";
 pub const CONTEXT_ENTRY_POINTS_HEADING: &str = "### Entry Points";
 pub const CONTEXT_RELATED_SYMBOLS_HEADING: &str = "### Related Symbols";
 pub const CONTEXT_CODE_HEADING: &str = "### Code";

@@ -67,7 +67,7 @@ pub(super) async fn open_project_for_handshake(
     // First-touch enrollment: persist the minted identity in the `.git/`
     // repository identity marker so a subsequent open resolves the same
     // identity before the registry row lands. A non-git root persists
-    // nothing — its identity is deterministic from the canonical path and
+    // nothing, its identity is deterministic from the canonical path and
     // the registry registration below is its durable home. TraceDecay never
     // creates files inside a project's working tree.
     if first_touch {

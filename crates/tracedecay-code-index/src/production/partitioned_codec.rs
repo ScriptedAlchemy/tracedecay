@@ -23,7 +23,7 @@
 //! 4. **`artifacts.symbols` is stably sorted by its `identity` member**, with
 //!    a missing or non-string member ordering first.
 //! 5. **`artifacts.edges` and `artifacts.unresolved_references` are sorted by
-//!    each element's own canonical encoding**, byte-wise — the shipped
+//!    each element's own canonical encoding**, byte-wise, the shipped
 //!    comparator was `sort_by_cached_key(Value::to_string)`.
 //! 6. Generation evidence is not rewritten. Its page boundaries do not alter
 //!    the typed JSON stream, and an aggregate digest authenticates the exact
@@ -106,8 +106,8 @@ struct PartitionedEvidencePageDescriptorV1 {
 /// The publication receipt is the bulk of the evidence: one row per chunk,
 /// and every row repeats the batch's projection key, request digest, and
 /// generation watermarks and restates the request's own chunk digests.
-/// `CompactReceipts` persists only what the request cannot reproduce — the
-/// projector's decision per chunk — and the reader rebuilds the full
+/// `CompactReceipts` persists only what the request cannot reproduce, the
+/// projector's decision per chunk, and the reader rebuilds the full
 /// receipt, whose publication digest then has to recompute exactly as it
 /// did when the batch was sealed. Manifests written before the tag existed
 /// carry the full receipt rows and decode as `Typed`.
@@ -884,7 +884,7 @@ struct PartitionedEvidencePageReaderV1<'a, R> {
     /// stream yields therefore arrives inside a page this reader already
     /// verified against that manifest, the page table's sizes must sum to the
     /// segment size, and [`Self::finish`] refuses unless every page was read
-    /// and drained — so re-hashing the concatenation attests nothing the page
+    /// and drained, so re-hashing the concatenation attests nothing the page
     /// digests have not already attested. A pre-paging segment has no page
     /// table, so there the aggregate identity is the only attestation and is
     /// still computed and compared.
@@ -922,7 +922,7 @@ where
 
     /// A pre-paging segment carries no page table, so it is read in the same
     /// bounded ranges a paged segment would have used. Only the aggregate
-    /// digest authenticates it — there are no per-page digests to check — and
+    /// digest authenticates it, there are no per-page digests to check, and
     /// `finish` still refuses a segment whose bytes do not hash to its
     /// manifest identity.
     fn load_next_legacy_chunk(&mut self) -> std::io::Result<bool> {
@@ -1098,8 +1098,8 @@ struct PartitionedSegmentEncoderV1 {
 ///
 /// A file's staging payload and canonical segment each grow to segment size
 /// from empty, so a fresh pair per file allocates a repository-sized stream of
-/// transient buffers. The pool holds only what encoding already keeps live —
-/// one window of segments plus one payload per worker — and hands the same
+/// transient buffers. The pool holds only what encoding already keeps live,
+/// one window of segments plus one payload per worker, and hands the same
 /// capacities back, so the growth is paid for the largest file rather than for
 /// every file. Buffers are cleared before reuse, so segment bytes and digests
 /// are the ones a fresh pair produced.
@@ -1490,7 +1490,7 @@ fn legacy_chunk_identity<'a>(
 ///
 /// The shipped restore read the whole evidence segment, parsed it into a
 /// `serde_json::Value`, substituted identities in that tree, then deserialized
-/// the tree into the typed payload — peak memory was the segment plus a DOM
+/// the tree into the typed payload, peak memory was the segment plus a DOM
 /// plus the payload, measured at 2.35x the on-disk generation and linear in
 /// corpus size. This module runs the identical substitution as a `serde`
 /// transcoder wrapped around the same bounded page reader the paged form uses,
@@ -2714,7 +2714,7 @@ fn read_segment_window(
 /// Reading is sequential and cheap (the store hands back bytes); verifying a
 /// segment against its manifest digest and re-materializing its JSON is the
 /// CPU-bound part, and doing it on the calling thread serialized ~4 ms per
-/// file ahead of the parallel page restore — 3.4 s of a 770-file build.
+/// file ahead of the parallel page restore, 3.4 s of a 770-file build.
 /// Files are independent, so the whole window is one ordered fan-out with the
 /// lowest-index failure reported, exactly as the sequential loop did.
 fn decode_segment_window(
@@ -2797,7 +2797,7 @@ impl CodeIndexPublishedGenerationV1 {
         // Segment reuse is an optimization over a readable parent, never a
         // precondition for publishing. A parent sealed in a shape this build
         // has retired therefore offers no reuse and the child re-encodes its
-        // own segments — refusing the publication instead would leave a store
+        // own segments, refusing the publication instead would leave a store
         // that holds a retired generation unable to replace it.
         let parent = match parent_manifest_bytes
             .map(parse_partitioned_manifest)
@@ -3134,7 +3134,7 @@ impl CodeIndexPublishedGenerationV1 {
     /// segments become sweepable while its manifest is still retained, so a
     /// retained retired manifest can outlive the segments it addresses. It is
     /// fail-safe only because every decoding reader refuses that manifest at
-    /// the revision gate before requesting one segment — nothing can observe
+    /// the revision gate before requesting one segment, nothing can observe
     /// the missing bytes. A future revision that decoded a retired manifest
     /// instead of refusing it would have to mark its segments live here first.
     pub fn partitioned_segment_identities_from_reader(
@@ -4231,9 +4231,9 @@ mod tests {
     /// The carrier's own envelope names a retired manifest revision, so the
     /// decoding readers refuse it (see
     /// [`tests::archival_carrier_revision_is_refused_for_rebuild`]). What the
-    /// fixture exists to prove lives one level below that envelope — the
+    /// fixture exists to prove lives one level below that envelope, the
     /// revision-1 and revision-2 *segment* bytes, which no manifest revision
-    /// rewrites — so the tests below read the descriptors addressing them
+    /// rewrites, so the tests below read the descriptors addressing them
     /// straight from the archival bytes instead of asking a current decoder
     /// to admit a shape this build no longer writes.
     #[derive(Deserialize)]

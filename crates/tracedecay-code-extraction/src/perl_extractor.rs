@@ -51,7 +51,7 @@ impl<'s> ExtractionState<'s> {
     ///
     /// The file root is pushed onto `node_stack` as the first frame when
     /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
+    /// path as the leading segment. Prepending `self.file_path` here was
     /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
         self.node_stack
@@ -216,7 +216,7 @@ impl PerlExtractor {
             |pn| state.node_text(pn).to_string(),
         );
 
-        // Skip `package main;` — it just returns to the top-level scope.
+        // Skip `package main;`. It just returns to the top-level scope.
         if name == "main" {
             // Pop any existing package scope.
             if state.class_depth > 0 {
@@ -299,8 +299,8 @@ impl PerlExtractor {
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
 
-        // We don't recurse into the package_statement node itself —
-        // the siblings (function_definition, etc.) will be visited by
+        // We don't recurse into the package_statement node itself.
+        // The siblings (function_definition, etc.) will be visited by
         // the parent visit_children call. They will see class_depth > 0.
     }
 

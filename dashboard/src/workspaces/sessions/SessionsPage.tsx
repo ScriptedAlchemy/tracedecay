@@ -1,17 +1,17 @@
 /**
- * SESSIONS — channel 04: complete message timeline and session index.
+ * SESSIONS, channel 04: complete message timeline and session index.
  *
  * Four typed authorities compose the surface and stay separately qualified:
  *
  *   timeline   `GET /api/plugins/hermes-lcm/timeline?bucket=day|hour&limit=N`
- *              — the hero aperture: message volume per UTC bucket with token
+ *             the hero aperture: message volume per UTC bucket with token
  *              provenance, over the most-recent N dated buckets.
- *   index      `GET /api/loom/temporal?limit=rows&offset=…` — the retained
+ *   index      `GET /api/loom/temporal?limit=rows&offset=…`, the retained
  *              session store's provider-qualified rows, one real page at a
  *              time, with the Git relations recorded against that page.
- *   overview   `GET /api/plugins/hermes-lcm/overview` — the LCM window's own
+ *   overview   `GET /api/plugins/hermes-lcm/overview`, the LCM window's own
  *              counts, providers, roles and compaction.
- *   search     `GET /api/plugins/hermes-lcm/search?q=…` — full text over the
+ *   search     `GET /api/plugins/hermes-lcm/search?q=…`, full text over the
  *              persisted transcripts; a hit selects a provider-qualified
  *              session like any index row.
  *

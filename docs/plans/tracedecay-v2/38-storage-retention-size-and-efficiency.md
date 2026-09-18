@@ -22,7 +22,7 @@ preservation, current-frontier preservation, authority-loss rollback, and
 trigger restoration.
 
 Corrected 2026-07-31: failure class 2 and the matching Delivery entry claimed
-code-index generation retention was not implemented. That claim was stale —
+code-index generation retention was not implemented. That claim was stale,
 retention has been implemented and converging since before this correction. Both
 sections are restated below; the residual gap is stranded scope roots and the
 byte-budget gates that made the retention findings unreachable, both addressed
@@ -56,7 +56,7 @@ evidence that motivated this plan. The current census of the same profile
 ≈ 13 GB, `code-index-v1/` ≈ 13 GB, `tracedecay.db` ≈ 7.1 GB, with 17 sealed
 generation files spread across 11 scope roots. The live tracedecay scope sits at
 generation `…00000082` with 4 superseded generations, 17 retention receipts
-dated Jul 27–29, and an empty quarantine — that is generation retention running
+dated Jul 27–29, and an empty quarantine, that is generation retention running
 and converging, not a store that has never collected.
 
 The historical measurement follows. The profile totalled 106 GB: `projects/` was
@@ -75,8 +75,8 @@ measurements, not inferred table sizes.
    lightweight.
 2. **Code-index storage is unreachable above the scope root** (restated
    2026-07-31; the original "generations have no retention" reading is
-   withdrawn). The 2026-07-23 observation — 28 immutable generation files,
-   22.2 GiB, one active generation, sequence equal to file count — was accurate
+   withdrawn). The 2026-07-23 observation, 28 immutable generation files,
+   22.2 GiB, one active generation, sequence equal to file count, was accurate
    for its date and is no longer the failure. Liveness-based generation
    retention is implemented and converging: mark-and-sweep over
    {active} ∪ vector-readable sources ∪ a newest-superseded rollback floor, an
@@ -89,7 +89,7 @@ measurements, not inferred table sizes.
    `code-index-v1/<sha256(canonical_project_root)>/`, and every caller derives
    exactly one scope from the project root it was handed, so nothing enumerated
    the siblings. One repository carried three scope directories under a single
-   repository discriminator — two stranded by deleted agent worktrees — holding
+   repository discriminator, two stranded by deleted agent worktrees, holding
    7.2 GiB that no retention pass could reach and no report counted. Scope-root
    reconciliation now closes this: it collects a stranded scope through the same
    journal/quarantine/receipt ordering, only under the maintenance writer lease,
@@ -111,13 +111,13 @@ measurements, not inferred table sizes.
    reads; only digest verification is expensive. Doctor now gates on entry count
    and censuses from metadata, and the report keeps its digest budget but
    degrades to a metadata-only entry instead of discarding a readable census.
-3. **Identity-drift orphan stores — ~41 GB.** A project-root path migration
+3. **Identity-drift orphan stores, ~41 GB.** A project-root path migration
    re-registered repositories under new project IDs; the old-identity stores
    remained silently, invisible to any surface. Registry GC exists but was
    not automatic and was blocked by a daemon configuration-authority bug.
    (Update 2026-08-07: the configuration-authority defect forcing a moved or
    renamed checkout to `reset_required` instead of republishing its source
-   binding now has code repairs at tip — `fix(config): rebind daemon source
+   binding now has code repairs at tip, `fix(config): rebind daemon source
    binding for moved checkouts` and `fix(global-db): keep moved project roots
    resolvable by former path`. Whether this closes the measured ~41 GB
    orphan-store backlog, or whether Registry GC still needs an operator-run
@@ -140,7 +140,7 @@ measurements, not inferred table sizes.
 6. **Free-page bloat.** Large DBs carry unreclaimed free pages; no
    compaction policy exists.
    Corrected 2026-08-08: this class is closed. A compaction policy now exists
-   and is engaged — see the dated Delivery amendment below. The sentence above
+   and is engaged, see the dated Delivery amendment below. The sentence above
    is retained as the original measured finding, not as current state.
 
 ## Product contract
@@ -150,7 +150,7 @@ measurements, not inferred table sizes.
    daemon sweep reconciles `branches/` against live git refs. `branch gc`
    remains the manual verb; the automatic path is the default.
 
-   **Dated amendment (2026-08-07, recorded decision — supersedes the
+   **Dated amendment (2026-08-07, recorded decision, supersedes the
    per-branch-DB model above).** Per-branch SQLite copies are retired as the
    write-side mechanism. Non-default-branch writes now land in the single
    project store's next branch-graph publication epoch, fenced by the sync
@@ -165,7 +165,7 @@ measurements, not inferred table sizes.
    deleting per-branch files. This structurally removes the "live branch
    stores scale as branches × full graph size" failure class described
    above (Measured failure classes, item 1) instead of mitigating it through
-   GC — there is no longer a per-branch database to accumulate or collect.
+   GC, there is no longer a per-branch database to accumulate or collect.
    Branch identity remains provenance-only; facts stay project-wide.
 
    **Residual defect closed 2026-08-07 (RC item G4).** The cutover left
@@ -174,26 +174,26 @@ measurements, not inferred table sizes.
    never fired, and the MCP freshness drift test failed. Ordinary opens
    (read-write, read-only, and init) now resolve branch provenance through
    `TraceDecay::resolve_branch_provenance`, which reads `resolve_db_for_branch`
-   for the serving branch and fallback warning only — never for a path, since
+   for the serving branch and fallback warning only, never for a path, since
    the canonical project database serves every branch. `serving_branch` is
    therefore `Some` exactly when the store publishes branch metadata, which is
    what the drift check reads as "there is a branch identity to drift from".
    The write gate follows the same epoch model: it now refuses only on drift
    from the open-time branch, and no longer refuses a write because the live
-   branch falls back to an ancestor's provenance — a fallback is no longer a
+   branch falls back to an ancestor's provenance, a fallback is no longer a
    wrong database to write into.
 2. **Registry orphan detection and collection.** The registry sweep detects
    stores whose project identity no longer resolves to a live repository
    root, reports them as a typed Doctor finding (with age and size), and
    collects them under an owner-visible retention window. Identity
    migrations must re-link or explicitly retire prior-identity stores in the
-   same operation — never orphan silently.
+   same operation, never orphan silently.
 3. **Session retention policy.** Raw transcript rows (`lcm_raw_messages`)
    are retained only until their LCM projection/summary lineage is durable,
    then payload-offloaded or dropped per a configurable retention window.
    Projected `session_messages` and their FTS indexes obey the same window.
    Append-only evidence stores (`observations`, anchors, provenance) gain
-   generation-scoped retention tied to anchor dispositions — superseded and
+   generation-scoped retention tied to anchor dispositions, superseded and
    deleted dispositions release their storage.
 4. **One content copy.** Raw and projected message content must not be
    duplicated at rest indefinitely. The projection either references raw
@@ -201,7 +201,7 @@ measurements, not inferred table sizes.
    both full copies is a defect, not a design.
 5. **Incident debris ownership.** Recovery/corruption artifacts are written
    into a single quarantined location with metadata, surfaced by Doctor,
-   and collected by the same retention machinery — never left as loose
+   and collected by the same retention machinery, never left as loose
    sibling files.
 6. **Compaction policy.** The daemon schedules incremental vacuum/compaction
    for stores whose free-page ratio crosses a threshold, off the hot path.
@@ -304,8 +304,8 @@ frontiers stored once, and a Doctor census of dead sealed artifacts. On the
 measured 16 GB `sessions.db` those remove roughly 7 GB.
 
 **Also landed 2026-09-12 (graph side):** a deferred retirement now deletes
-the retired generation's sealed artifact on its first pass — the directory
-needs no engine — and the Doctor `RetentionBacklog` finding reports the
+the retired generation's sealed artifact on its first pass, the directory
+needs no engine, and the Doctor `RetentionBacklog` finding reports the
 live container against its sealed heads with the deferred native
 retirement count. Plan 39's corrected amendment records why the container
 of an inactive project still needs a design.
@@ -313,7 +313,7 @@ of an inactive project still needs a design.
 **Also landed 2026-09-12:** `observation_repository_provenance` embedded the
 repository capture twice per row (`capture_json` and
 `availability_json.value`). Twenty-nine distinct captures stood behind
-187,002 rows — 495 MB, of which 396 MB was the repeated capture. The capture
+187,002 rows, 495 MB, of which 396 MB was the repeated capture. The capture
 now lives once in `observation_repository_captures`; rows keep a reference
 and every reader hydrates through one shared SQL projection. Measured on a
 copy of the live table: 494.6 MB → 98.6 MB.
@@ -325,7 +325,7 @@ Two residues remain, each blocked on a design decision outside retention:
    than it looks: `coverage` is one distinct value (154 B × 441k = 68 MB),
    `projection_watermark` one (17 B, 7 MB), and `authorization` has 249,889
    distinct values across 441k rows because it carries the per-observation
-   `canonical_request_digest` — interning it saves ~50 MB. A slim persisted
+   `canonical_request_digest`, interning it saves ~50 MB. A slim persisted
    shape therefore reclaims ~20 % while touching 126 `anchor_json` read
    sites across the temporal store and the foreign keys from
    `retrieval_anchor_aliases`, `retrieval_anchor_dispositions`, and the
@@ -334,7 +334,7 @@ Two residues remain, each blocked on a design decision outside retention:
    identifiers repeated in `anchor_id`, `source_observations`, the target,
    and the owner of every document. The real fix is a columnar anchor table
    (identifier columns, a small `target_kind`, and only the variable part
-   as JSON) — a `RetrievalAnchorRecordV3` persisted shape with the
+   as JSON), a `RetrievalAnchorRecordV3` persisted shape with the
    dependent foreign keys moving with it. `anchor_id` derives from owner and
    target only, so the identity is unaffected. Cardinality is the other
    lever: 187,002 `repository_capture` anchors name 29 captures because the

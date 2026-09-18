@@ -21,7 +21,7 @@
  * ZOOM IS A CSS VIEWPORT, NOT `deviceScaleFactor`. Playwright's
  * `deviceScaleFactor` raises rasterization density and leaves layout at the
  * unzoomed CSS size, so a page captured at `deviceScaleFactor: 4` reflows
- * exactly as it did at 1x — which is the one thing WCAG 1.4.10 is about. Real
+ * exactly as it did at 1x, which is the one thing WCAG 1.4.10 is about. Real
  * browser zoom shrinks the CSS viewport: 400% zoom of a 1280x720 window is a
  * 320x180 CSS viewport, and that is what is emulated here. It is also why the
  * 400% row and the 320px row test the same reflow width from opposite
@@ -42,7 +42,7 @@ export interface Viewport {
   /** Browser zoom this CSS viewport models, as a percentage. */
   readonly zoom: number;
   /**
-   * Where the plan forbids page-level horizontal scroll outright — "at 320
+   * Where the plan forbids page-level horizontal scroll outright. "at 320
    * pixels and 400% zoom". Elsewhere the measurement is still taken and
    * reported; only these two gate the run.
    */
@@ -68,7 +68,7 @@ function device(width: number, height: number, reflowGated = false): Viewport {
  * The three the full scenario sweep runs, in both themes.
  *
  * These are the plan's own sizes, not the harness's previous 320/768/1440 at a
- * uniform height of 900 — a 320-wide viewport 900 tall is a phone width with a
+ * uniform height of 900. A 320-wide viewport 900 tall is a phone width with a
  * tablet's vertical room, which hides exactly the "does the truth state fit"
  * question the narrow row exists to ask.
  */
@@ -149,7 +149,7 @@ export function combinationTag(c: Combination): string {
 export interface OverflowOffender {
   /**
    * `page-overflow` widens the document itself. `clipped` is content that runs
-   * past the viewport inside an ancestor that hides its horizontal overflow —
+   * past the viewport inside an ancestor that hides its horizontal overflow.
    * unreachable rather than merely off-screen, which is the plan's "clipped
    * truth state".
    */
@@ -161,7 +161,7 @@ export interface OverflowOffender {
 }
 
 /** A region that scrolls horizontally on its own, and whether it announces a
- * name — the plan permits "labeled code/table/graph regions" to do this. */
+ * name. The plan permits "labeled code/table/graph regions" to do this. */
 export interface InternalScroller {
   readonly selector: string;
   readonly label: string;
@@ -177,7 +177,7 @@ export interface InternalScroller {
  * above it still reports "4 loaded of 4 matching rows".
  *
  * This is the plan's "clipped truth state" in its unambiguous form, and unlike
- * the overflow heuristics it needs no judgement — a scroller holding text with
+ * the overflow heuristics it needs no judgement. A scroller holding text with
  * a zero-height viewport is never intentional.
  */
 export interface CollapsedScroller {
@@ -238,7 +238,7 @@ const PROBE_PRELUDE = `
  *
  * Decorative geometry is deliberately excluded. A glow layer or a gradient
  * that bleeds past the right edge carries no truth state, and listing those
- * would bury the rows, figures and controls that do — so an element is only an
+ * would bury the rows, figures and controls that do, so an element is only an
  * offender if it holds its own text or is something a person operates or
  * reads.
  */
@@ -329,7 +329,7 @@ export function reflowFailures(report: ReflowReport, tag: string): string[] {
     .slice(0, 4)
     .map((o) => `${o.selector} reaches ${o.right}px${o.text === '' ? '' : ` (${o.text})`}`);
   return [
-    `${tag}: the page scrolls horizontally — document scrollWidth ${report.scrollWidth} > ` +
+    `${tag}: the page scrolls horizontally. Document scrollWidth ${report.scrollWidth} > ` +
       `clientWidth ${report.clientWidth}. ` +
       (worst.length === 0
         ? 'No single content element reaches past the edge, so the width comes from a ' +
@@ -380,7 +380,7 @@ export interface ForcedColorsOptOut {
  *     backgrounds, and the captures are legible.
  *   - Axe nonetheless reports the AUTHORED foreground (`#ecedee`, the dark
  *     theme's text token) against the FORCED white background, so it scores
- *     143 serious contrast failures in dark and none in light — a verdict that
+ *     143 serious contrast failures in dark and none in light. A verdict that
  *     tracks which theme is selected rather than anything a user sees.
  *   - axe-core 4.12.1 contains no `forced-colors` or high-contrast handling of
  *     any kind, so this is not a detection it is opting out of; it simply does
@@ -389,7 +389,7 @@ export interface ForcedColorsOptOut {
  * So `color-contrast` is disabled in that one mode, and the real risk it was
  * standing in for is measured directly instead: forced colors can only fail a
  * reader where an element opts out with `forced-color-adjust: none`. Opting out
- * is legitimate where colour IS the information — a swatch, a chart series — so
+ * is legitimate where colour IS the information, a swatch, a chart series, so
  * this reports rather than gates, and the report is what makes an illegitimate
  * opt-out visible.
  */
@@ -443,7 +443,7 @@ export interface TouchTargetReport {
  *   - `tabindex="-1"` on a non-native control: programmatically focusable, not
  *     in the tab order and not a pointer target.
  *   - not rendered: `display: none`, `visibility: hidden`, or a zero box.
- *   - the visually-hidden idiom — a 1px box that is also clipped, which is how
+ *   - the visually-hidden idiom. A 1px box that is also clipped, which is how
  *     `sr-only` parks the skip link off-screen until it takes focus. It is not
  *     a pointer target at 1x1; it is a keyboard affordance that becomes
  *     full-size on focus. Both halves are required, so a genuinely tiny
@@ -461,8 +461,8 @@ export interface TouchTargetReport {
  *
  * Reading a failure: CSS pixels, not `rem`. `tailwind.css` sets
  * `html { font-size: 14px }`, and Tailwind's spacing scale is rem-based, so a
- * control written `min-h-11` or `size-11` — chosen because 11 x 4px reads as
- * 44 — lands at 38.5 CSS pixels. Several offenders were sized for this
+ * control written `min-h-11` or `size-11`, chosen because 11 x 4px reads as
+ * 44, lands at 38.5 CSS pixels. Several offenders were sized for this
  * threshold and still miss it for that reason, so check the computed box before
  * concluding a utility class is wrong.
  */
@@ -506,7 +506,7 @@ export const TOUCH_TARGET_PROBE = `(function () {${PROBE_PRELUDE}
 })()`;
 
 /**
- * A probe that examined nothing proved nothing — the same failure mode the
+ * A probe that examined nothing proved nothing. The same failure mode the
  * visibility sweep was rewritten to close. Every audited surface renders a nav
  * rail full of links, so zero operable targets means the probe did not run
  * against the page it was aimed at.
@@ -551,8 +551,8 @@ export interface HeaderOverflowChild {
 }
 
 export interface HeaderBoxReport {
-  /** Workspace headers on the page. Zero is legitimate — not every route
-   * renders one — which is why this is reported rather than asserted. */
+  /** Workspace headers on the page. Zero is legitimate, not every route
+   * renders one, which is why this is reported rather than asserted. */
   readonly headers: number;
   readonly examined: number;
   readonly offenders: readonly HeaderOverflowChild[];
@@ -564,7 +564,7 @@ export interface HeaderBoxReport {
  *
  * This exists because `document.scrollWidth` cannot see the defect it is named
  * for. The state chip on `/work` rendered 19 CSS pixels outside its header at
- * 320px and at 400% zoom — bezel sheared, label flush against the screen edge —
+ * 320px and at 400% zoom, bezel sheared, label flush against the screen edge,
  * through 78 clean scans, because the shell clips instead of scrolling, so the
  * document never widened and the reflow gate never fired. The two heuristics
  * either side of it missed it for reasons worth recording, since both are still
@@ -644,9 +644,9 @@ export const HEADER_BOX_PROBE = `(function () {${PROBE_PRELUDE}
  * hide the easier half.
  *
  * The chip-only exemption is gone with the bug that motivated it. It existed
- * because the 564-scan sweep found one pre-existing offender — a 494.8px
+ * because the 564-scan sweep found one pre-existing offender, a 494.8px
  * snapshot/revision strip in the `/settings` header rendering 356.9px outside
- * it, 276px of that off-screen — on a surface that change did not own, and
+ * it, 276px of that off-screen, on a surface that change did not own, and
  * gating it would have turned a hand-off into someone else's red build. That
  * strip now shrinks and wraps, the same sweep records no offender on any
  * surface, so the check can finally hold every header child to the invariant
@@ -663,7 +663,7 @@ export function headerBoxFailures(report: HeaderBoxReport, tag: string): string[
         o.pastBottom > 0 ? `${o.pastBottom}px below it` : '',
       ].filter((part) => part !== '');
       return (
-        `${tag}: ${o.selector} renders outside ${o.header} — ${past.join(', ')}. ` +
+        `${tag}: ${o.selector} renders outside ${o.header}. ${past.join(', ')}. ` +
         `The child is ${o.width}x${o.height} CSS px and the header offers ` +
         `${o.contentWidth}px of content box within ${o.headerWidth}px` +
         (o.viewportSlack < 0 ? `; ${round1(-o.viewportSlack)}px of it is off-screen` : '') +

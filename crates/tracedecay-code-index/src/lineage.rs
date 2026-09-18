@@ -6,7 +6,7 @@
 //! qualified structure (file identity, qualified name, kind). Tree-sitter
 //! object reuse, path, line, qualified-name similarity, or embedding
 //! similarity never proves lineage, so a current symbol with no exact
-//! evidence emits no candidate at all — lineage is never fabricated.
+//! evidence emits no candidate at all, lineage is never fabricated.
 //!
 //! Ambiguity abstains explicitly: when more than one prior symbol could be
 //! the ancestor, the resolver emits a candidate with
@@ -1387,7 +1387,7 @@ mod tests {
         }
 
         // Group sizes differ (two priors, one current): a possible split or
-        // merge. Digest evidence cannot prove which, so it abstains — split
+        // merge. Digest evidence cannot prove which, so it abstains, split
         // and merge kinds are never fabricated.
         let prior_split = index(
             generation(1),

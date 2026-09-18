@@ -230,7 +230,7 @@ async fn ensure_template() -> Option<PathBuf> {
             .truncate(false)
             .write(true)
             .open(&lock_path)?;
-        fs2::FileExt::lock_exclusive(&file)?;
+        file.lock()?;
         Ok(file)
     })
     .await
@@ -239,7 +239,7 @@ async fn ensure_template() -> Option<PathBuf> {
 
     // Another process may have finished the build while we waited.
     if shared.join("READY").is_file() {
-        let _ = fs2::FileExt::unlock(&lock_file);
+        let _ = lock_file.unlock();
         return Some(shared);
     }
 
@@ -265,7 +265,7 @@ async fn ensure_template() -> Option<PathBuf> {
             None
         }
     };
-    let _ = fs2::FileExt::unlock(&lock_file);
+    let _ = lock_file.unlock();
     result
 }
 

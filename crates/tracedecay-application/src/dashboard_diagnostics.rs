@@ -246,8 +246,8 @@ impl DashboardDiagnosticsAuthorityV1 {
     /// write.
     ///
     /// The read, the revision check, and the write all happen under the broker
-    /// lock. Splitting them — reading the settings, editing them, then writing
-    /// the result back — is what let a second writer land between the two and
+    /// lock. Splitting them, reading the settings, editing them, then writing
+    /// the result back, is what let a second writer land between the two and
     /// be overwritten while both callers were told they had succeeded.
     #[hotpath::measure(label = "usecases.diagnostics.settings.update", future = true)]
     pub async fn update_settings(
@@ -319,7 +319,7 @@ impl DashboardDiagnosticsAuthorityV1 {
         if !snapshot.settings.language_enabled(language) {
             // Reconcile the reported engine state, then refuse. `refresh_all`
             // filters disabled engines out before it gets here, so the only
-            // caller that reaches this is one that named this language — and
+            // caller that reaches this is one that named this language, and
             // answering it with a success snapshot it did nothing to earn
             // would report a refresh that never ran.
             self.inner

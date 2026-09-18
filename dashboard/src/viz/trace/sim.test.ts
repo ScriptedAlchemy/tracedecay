@@ -10,7 +10,7 @@
  * same assertions in one place.
  *
  * Tolerances are named and justified where they appear. Where a claim can be
- * exact — determinism, reduced-motion equivalence — it is asserted EXACTLY, by
+ * exact, determinism, reduced-motion equivalence, it is asserted EXACTLY, by
  * array comparison, because a tolerance there would be hiding drift.
  */
 import { describe, expect, it } from 'vitest';
@@ -61,7 +61,7 @@ function fieldSim(seed: number): Simulation {
 }
 
 /**
- * A single anchored body with no channels at all — the weight channel in
+ * A single anchored body with no channels at all, the weight channel in
  * isolation, so a mass claim cannot be contaminated by a neighbour's pull.
  */
 function loneBody(mass: number, params?: Partial<SimParams>): Simulation {
@@ -192,7 +192,7 @@ describe('TRACE simulation', () => {
       const sim = pair(calls);
       const start = sim.positionOf('b').x;
       // Hold 'a' displaced long enough for the neighbourhood to reach the
-      // deformed equilibrium — this measures coupling, not the transient.
+      // deformed equilibrium, this measures coupling, not the transient.
       for (let i = 0; i < 600; i += 1) {
         sim.applyDrag('a', -PULL, 0);
         sim.step(DT);
@@ -231,7 +231,7 @@ describe('TRACE simulation', () => {
     }
     const oneHop = byHop.get(1) ?? 0;
     const threeHop = byHop.get(3) ?? 0;
-    expect(oneHop, 'one-hop neighbours barely moved — coupling is not being felt').toBeGreaterThan(
+    expect(oneHop, 'one-hop neighbours barely moved, coupling is not being felt').toBeGreaterThan(
       12,
     );
     expect(threeHop).toBeLessThan(oneHop * 0.35);
@@ -266,7 +266,7 @@ describe('TRACE simulation', () => {
     expect(sim.isSettled(), 'the field never came to rest after release').toBe(true);
   });
 
-  it('RELEASE: the swing decays fast — one small overshoot, then nothing', () => {
+  it('RELEASE: the swing decays fast, one small overshoot, then nothing', () => {
     const PULL = 200;
     const sim = loneBody(63);
     const anchor = sim.anchorOf('a');
@@ -296,7 +296,7 @@ describe('TRACE simulation', () => {
     expect(swings[0]).toBeGreaterThanOrEqual(PULL * 0.9);
     expect(swings[1]!, 'overshoot is more than 12 % of the pull').toBeLessThan(PULL * 0.12);
     if (swings[2] !== undefined) {
-      expect(swings[2], 'second swing is still visible — this is ringing').toBeLessThan(
+      expect(swings[2], 'second swing is still visible, this is ringing').toBeLessThan(
         PULL * 0.02,
       );
     }
@@ -340,7 +340,7 @@ describe('TRACE simulation', () => {
   });
 
   it('REDUCED MOTION: settling in one shot lands on identical positions', () => {
-    // Reduced motion is not an approximation of the animated path — it is the
+    // Reduced motion is not an approximation of the animated path, it is the
     // same `step()` sequence with the paints removed. So the arrays must match
     // EXACTLY, and this catches any renderer-side shortcut that broke it.
     const animated = fieldSim(42);

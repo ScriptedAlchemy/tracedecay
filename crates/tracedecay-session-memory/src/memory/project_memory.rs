@@ -604,7 +604,7 @@ fn validate_project_memory_page(
 ) -> Result<(), MemoryApplicationError> {
     let facts = page.facts();
     // Resume is exclusive-start, so the canonical cursor for a full page is
-    // exactly its last fact id — mirroring the search-page cursor convention
+    // exactly its last fact id, mirroring the search-page cursor convention
     // below, and matching what the authority's list producer emits.
     let cursor_is_invalid = page.next_after_fact_id().is_some_and(|cursor| {
         cursor.validate_owner(owner).is_err()

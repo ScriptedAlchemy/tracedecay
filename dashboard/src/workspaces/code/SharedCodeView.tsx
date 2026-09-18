@@ -1,17 +1,17 @@
 /**
- * SHARED CODE — verified exact copies of one selected body.
+ * SHARED CODE. Verified exact copies of one selected body.
  *
  * Two reads per selected symbol occurrence, one per match class, against
  * `GET /api/plugins/graph/shared-code/family` (code_read_api.rs). Each family
  * is a digest group: the daemon verified every member's token bytes against
  * the representative payload before listing it, so a member here is a copy,
- * not a candidate. The route serves groups, never pairs — a thousand identical
+ * not a candidate. The route serves groups, never pairs, a thousand identical
  * generated functions arrive as one family with a thousand members and pages
  * through them by cursor.
  *
  * The view renders the daemon's own states and nothing inferred from them:
  *
- *   complete, no families      "no verified copies" — a measured zero
+ *   complete, no families      "no verified copies", a measured zero
  *   complete, families         the groups, with their stitch mark
  *   partial                    the groups listed plus the budget sentence
  *   excluded_*                 an exclusion, worded as one, never as zero

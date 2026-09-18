@@ -15,8 +15,8 @@
 //! Provenance comes from the registered product runtime
 //! ([`crate::product_runtime`]): the shipping binary crate resolves its own
 //! source identity at build time and registers it at process start. A build
-//! with no provenance no longer exists — the generating binary fails to build
-//! without it — so an unregistered process reads the typed
+//! with no provenance no longer exists, the generating binary fails to build
+//! without it, so an unregistered process reads the typed
 //! [`ProductRuntimeError::MissingProvider`] state instead of a fabricated
 //! bare version.
 

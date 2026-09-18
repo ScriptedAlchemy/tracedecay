@@ -2,8 +2,8 @@
 //!
 //! [`DashboardGitCorrelationReadAdapter`] recovers the verified
 //! session-git-evidence graph projection through the registered
-//! project-sessions authority's mounted graph runtime — the same store the
-//! `sessions_for` and correlation-health reads consult — and hands Loom's
+//! project-sessions authority's mounted graph runtime, the same store the
+//! `sessions_for` and correlation-health reads consult, and hands Loom's
 //! routes complete typed span and commit rows. A projection that has never
 //! published a verified head is the typed empty start, never an error, and a
 //! store without its graph runtime mount stays a typed failed read.

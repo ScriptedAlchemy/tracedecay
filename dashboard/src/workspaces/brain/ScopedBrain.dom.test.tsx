@@ -55,7 +55,7 @@ const CONTEXT = withEnvelopePayload(wirePayload('/api/projects/proj_x'));
 /** Wire-true unseeded slice, cut down to two nodes and the edge between them.
  * `graph_service.rs::subgraph_payload` writes `seed_id`, `mode`, `nodes`,
  * `edges` and `capped` on every one of its three return paths, and each node is
- * a full `GraphNodeV1` — a body carrying only `id`/`kind`/`name`/`degree` is
+ * a full `GraphNodeV1`, a body carrying only `id`/`kind`/`name`/`degree` is
  * one the daemon cannot produce, which is what this fixture used to be back
  * when Brain read the scoped gateway through its own all-optional copy of the
  * subgraph shape. */
@@ -227,7 +227,7 @@ describe('ScopedBrain', () => {
     );
     renderScoped();
 
-    // The boundary chip plus the HUD's per-source accounting lines — several
+    // The boundary chip plus the HUD's per-source accounting lines, several
     // sources say so, and each of them is telling the truth.
     await waitFor(() => expect(screen.getAllByText(/the read failed/i).length).toBeGreaterThan(0));
     expect(screen.queryByText(/graph field · not mounted/i)).toBeNull();
@@ -242,7 +242,7 @@ describe('ScopedBrain', () => {
    * `graph_response` maps every read failure to 500 `read_failed`, so a 200
    * carrying no nodes is the daemon reporting that the unseeded slice found
    * nothing to draw. The surface used to answer that with "the generic response
-   * cannot distinguish empty data from query failure" — a claim about the
+   * cannot distinguish empty data from query failure", a claim about the
    * contract that the contract contradicts, and one that left a genuinely
    * empty project looking like a broken read forever.
    */
@@ -273,7 +273,7 @@ describe('ScopedBrain', () => {
   /**
    * The other empty slice the same route can send, which is not the same fact.
    * A seeded request whose query matched nothing returns `seed_id: null` with
-   * `mode: "seeded"` — that says the search found no symbol, and says nothing
+   * `mode: "seeded"`, that says the search found no symbol, and says nothing
    * about whether the project is indexed. Reading `mode` is what keeps the two
    * apart; asserting the empty-graph sentence for both would be a fabrication.
    */
@@ -351,7 +351,7 @@ describe('ScopedBrain', () => {
    * The generated `available` and `exists` flags, honoured per source.
    *
    * Both payloads carry their counts as required non-nullable integers, so an
-   * absent store answers with zeros — `available: false` and `exists: false`
+   * absent store answers with zeros, `available: false` and `exists: false`
    * are the only fields that say those zeros are not measurements. Reading the
    * numbers without the flags turned "no session or event source is available"
    * and
@@ -398,7 +398,7 @@ describe('ScopedBrain', () => {
     expect(readout('entities')).toBe('—');
     expect(readout('events')).toBe('—');
     // And each dash is accounted for, in the source's own words where it sent
-    // any — a withheld figure the reader cannot explain reads as a bug.
+    // any, a withheld figure the reader cannot explain reads as a bug.
     expect(screen.getByText(/no memory store at \/store\/proj_x\/memory\.db/)).toBeTruthy();
     expect(screen.getByText(/no session or event source is available/i)).toBeTruthy();
   });
@@ -436,7 +436,7 @@ describe('ScopedBrain', () => {
    * nothing.
    *
    * `projects.rs::context` answers a typed envelope whose `status` is
-   * `registry_unavailable` and whose `stores`/`aliases` are empty — so a
+   * `registry_unavailable` and whose `stores`/`aliases` are empty, so a
    * rail that read those arrays without checking `status` drew the exact
    * picture an empty project draws. The reason it sent is the difference
    * between "this project has no stores" and "nothing could be read".

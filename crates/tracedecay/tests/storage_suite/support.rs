@@ -2,15 +2,13 @@
 //!
 //! Building a schema from scratch is a large fixed cost per test (especially
 //! on Windows), so the first test process to need a given fixture builds it
-//! once under the system temp dir and every other test — including tests in
-//! other processes, since nextest runs one process per test — copies the
+//! once under the system temp dir and every other test, including tests in
+//! other processes, since nextest runs one process per test, copies the
 //! finished file instead.
 
 use std::fs::{self, OpenOptions};
 use std::future::Future;
 use std::path::{Path, PathBuf};
-
-use fs2::FileExt;
 
 /// FNV-1a hash of everything that can change a template's contents: the
 /// schema-defining sources, the template name, and any builder-specific
@@ -54,8 +52,8 @@ fn template_cache_exists(path: &Path) -> bool {
 /// it first if this machine has no template for the current schema revision.
 ///
 /// `builder_fingerprint` must cover every input to `build` that lives
-/// outside the `tracedecay-runtime-core` `db` module — typically
-/// `include_bytes!` of the defining test file —
+/// outside the `tracedecay-runtime-core` `db` module, typically
+/// `include_bytes!` of the defining test file,
 /// so that editing the fixture-building code invalidates the cached
 /// template. Pass `&[]` when `build` depends only on the production schema
 /// code that `template_hash` already covers.
@@ -87,9 +85,7 @@ where
         .write(true)
         .open(&lock_path)
         .expect("failed to open template cache lock");
-    lock_file
-        .lock_exclusive()
-        .expect("failed to lock template cache");
+    lock_file.lock().expect("failed to lock template cache");
 
     if template_cache_exists(&template_path) {
         return template_path;
@@ -108,14 +104,14 @@ where
     template_path
 }
 
-/// Seeds `dest` with an empty latest-schema graph database — the exact file
-/// `Database::initialize` would produce — without paying schema creation.
+/// Seeds `dest` with an empty latest-schema graph database, the exact file
+/// `Database::initialize` would produce, without paying schema creation.
 pub async fn seed_latest_graph_db(dest: &Path) {
     let template = ensure_template_db("graph-empty", &[], |path| async move {
         // Initialise on a throwaway path, then snapshot the committed schema to
         // `path`. The registered runtime's `checkpoint` follows a bounded WAL
         // policy that no-ops below its soft threshold, so a freshly-created
-        // schema can still live entirely in the WAL — copying the bare `.db`
+        // schema can still live entirely in the WAL, copying the bare `.db`
         // file would then capture an empty (v0) database. `VACUUM INTO` writes
         // a transactionally consistent standalone copy of the closed fixture.
         let init_path = path.with_file_name("template-init.db");

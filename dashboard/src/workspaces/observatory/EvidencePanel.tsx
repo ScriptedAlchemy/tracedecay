@@ -56,11 +56,11 @@ export function coverageLegend(summary: EvidenceSummary): string {
   const percent = coveragePercent(summary.coverage);
   if (percent != null) return `coverage ${percent}%`;
   if (summary.coverage) return `coverage ${summary.coverage.completeness}`;
-  return 'coverage —';
+  return 'coverage absent';
 }
 
 export function asOfLegend(summary: EvidenceSummary): string {
-  if (summary.observedAtMicros == null) return 'observed — · no time published';
+  if (summary.observedAtMicros == null) return 'observed. No time published';
   return `as of ${formatMicrosUtc(summary.observedAtMicros)}`;
 }
 

@@ -328,9 +328,9 @@ feedback requires exact saved-content or clean-generation identity.
 ### Dashboard, Doctor, and observability
 
 Dashboard and Doctor call the same shipped feedback list/get/expand/status
-operations. Plan 26 records system-quality metrics—coverage, relevance,
+operations. Plan 26 records system-quality metrics, coverage, relevance,
 diversity, latency, omissions, denial, stale rate, revocation propagation, and
-stack transitions—never worker-performance metrics. The dashboard delivery does not become first
+stack transitions, never worker-performance metrics. The dashboard delivery does not become first
 availability of any advisory pillar.
 
 ### Multi-root feedback and stack signals

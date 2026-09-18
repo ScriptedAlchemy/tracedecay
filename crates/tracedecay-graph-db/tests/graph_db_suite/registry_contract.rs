@@ -1350,7 +1350,7 @@ fn reset_required_fault_is_retained_and_cannot_reopen() {
 /// full disk leaves behind. It is still never a silent reopen: the mount
 /// re-proves the deterministic verdict, quarantines the empty file with its
 /// receipt for forensics, and serves a fresh store that the canonical replay
-/// authorities re-project — instead of the pre-#763 terminal fault retried
+/// authorities re-project, instead of the pre-#763 terminal fault retried
 /// on every activation forever.
 #[test]
 fn preexisting_empty_graph_file_is_quarantined_and_remounted_fresh() {

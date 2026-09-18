@@ -18,7 +18,7 @@ import {
  * Inspection reveals; it never scopes. Every figure names its source class
  * and grade: provider and model identity are `EXACT` from the usage
  * observation, the rate is `EXACT` from the bundled pricing revision when it
- * applied, and a model with no applicable rate is `UNAVAILABLE` — a named
+ * applied, and a model with no applicable rate is `UNAVAILABLE`, a named
  * gap, not a zero.
  */
 export function CostsInspector({

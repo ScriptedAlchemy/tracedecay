@@ -758,7 +758,7 @@ fn wedge_repair_with_second_writer(
 }
 
 /// Defect: a second writer that left the deployed path holding the exact
-/// pre-transaction bytes used to make rollback unconvergeable forever —
+/// pre-transaction bytes used to make rollback unconvergeable forever,
 /// `remove_if_digest_matches` refused to touch a file that no longer
 /// matched the installed digest, so the journal stayed behind and wedged
 /// every later host transaction.
@@ -1183,8 +1183,8 @@ fn unchanged_companion_receipt_keeps_original_operation_provenance() {
     // still earns a fresh receipt. The change must keep the set's shared
     // configuration authority (`configuration_snapshot_id`,
     // `integration_manifest_digest`, `catalog_digest`) uniform across
-    // components — `validate_component_set_journal` rejects a set whose
-    // components disagree on it — so bump a per-component manifest field
+    // components. `validate_component_set_journal` rejects a set whose
+    // components disagree on it, so bump a per-component manifest field
     // (`effective_behavior_digest`) that shifts only the agent's canonical
     // digest and leaves the core component entirely unchanged.
     let mut metadata_only_change = core_only_change.clone();
@@ -1738,7 +1738,7 @@ fn receiptless_adoption_requires_provenance_or_explicit_authority() {
         HostBundleLifecycleOpV1::Repair,
     ] {
         // Custom or unowned bytes parked at the cataloged path: refused
-        // without adoption authority — the path proves nothing.
+        // without adoption authority, the path proves nothing.
         let refused = plan_artifact_action(
             operation,
             artifact,
@@ -2451,7 +2451,7 @@ fn never_activated_interactive_host_component_defers_instead_of_failing() {
 
 /// The deferral is scoped to components the host never materialised. Once
 /// any receipt-owned byte is on disk, an absent sibling is a file that went
-/// missing after activation — real drift, and still blocking.
+/// missing after activation, real drift, and still blocking.
 #[test]
 fn partially_materialised_interactive_host_component_still_fails() {
     let artifacts = tempfile::tempdir().unwrap();

@@ -331,9 +331,9 @@ impl CodeIndexGenerationScopeV1 {
     /// Repository and worktree are checkout identity: a generation sealed
     /// under either of them differing belongs to another checkout and may
     /// never be adopted or served for this one. `reference` is deliberately
-    /// excluded — it is the branch label HEAD happens to carry, and it moves
+    /// excluded, it is the branch label HEAD happens to carry, and it moves
     /// under a fixed worktree on every ordinary commit, branch switch, or
-    /// rebase — so serving gates that need only checkout identity keep
+    /// rebase, so serving gates that need only checkout identity keep
     /// admitting the checkout's own generations across a label move. Slot
     /// dispatch is stricter: [`CodeIndexProductionOwnerV1::active_generation`]
     /// demands the complete scope, label included, because branch and worktree
@@ -434,7 +434,7 @@ const MAX_PHYSICAL_CODE_ARTIFACTS: usize = 1_024;
 ///
 /// Failure semantics are the sequential ones: the returned error is always
 /// the lowest-index failure, independent of completion order. Unlike the
-/// batched form this does not abandon later files after a failure — the
+/// batched form this does not abandon later files after a failure, the
 /// tradeoff for having no barrier. Cancellation still short-circuits, because
 /// every per-file closure checkpoints the execution control first and
 /// returns immediately once the reconcile is cancelled.
@@ -836,7 +836,7 @@ impl CodeIndexPublishedGenerationV1 {
     /// The exact generation scope this generation was sealed under:
     /// repository, sealed branch label, and worktree.
     ///
-    /// This — never a filesystem path and never the generation id — is the
+    /// This, never a filesystem path and never the generation id, is the
     /// key that partitions active-generation slots and code shards, so a
     /// sealed generation can only ever be dispatched onto the scope whose
     /// snapshot sealed it.
@@ -1291,7 +1291,7 @@ impl CodeIndexPublishedGenerationV1 {
     /// The first call runs every canonical check; later calls are O(1). This is
     /// sound because a published generation is immutable: no field can change
     /// after construction, so re-validating identical bytes cannot change the
-    /// answer. It is fail-closed because only success is memoized — a
+    /// answer. It is fail-closed because only success is memoized, a
     /// generation that has never validated still runs the full check, and a
     /// generation that fails keeps failing on every subsequent call.
     pub(crate) fn validate(&self) -> Result<(), CodeIndexProductionErrorV1> {
@@ -1350,7 +1350,7 @@ impl CodeIndexPublishedGenerationV1 {
         }
         let shared_occurrences = parent
             .map(|parent| {
-                // O(files) pointer membership — not nested scans.
+                // O(files) pointer membership, not nested scans.
                 let current_by_ptr = self
                     .files
                     .iter()
@@ -1861,11 +1861,11 @@ where
     ///
     /// Reuse is full-scope exact: the loaded generation must have been sealed
     /// under the requested repository, reference, and worktree. A same-checkout
-    /// reference label move is a rebuild (`Ok(None)`), not reuse — the
+    /// reference label move is a rebuild (`Ok(None)`), not reuse, the
     /// worktree-scoped slot still holds the prior label's incumbent, which
     /// [`Self::build_and_publish`] keeps as the compare-and-swap expected
     /// token. A publication authority that answers a scope with a generation
-    /// sealed for a *foreign checkout* has broken its slot partition — or the
+    /// sealed for a *foreign checkout* has broken its slot partition, or the
     /// caller's checkout identity resolution regressed, e.g. a repository
     /// misclassified as not-a-git-path. That is the terminal
     /// [`CodeIndexPublicationStoreErrorV1::CorruptionResetRequired`] state:

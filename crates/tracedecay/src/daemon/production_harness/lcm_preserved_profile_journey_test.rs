@@ -689,7 +689,7 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
         // Positive in-flight evidence: repeat the admission batch until the
         // status shows background convergence advanced across one batch.
         // Every round is asserted admitted, so the round that observes the
-        // advance proves retrieval was served while convergence was running —
+        // advance proves retrieval was served while convergence was running,
         // without asserting convergence had *not* finished, which races the
         // background worker.
         let deadline = Instant::now() + CONVERGENCE_WAIT;

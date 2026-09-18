@@ -7,7 +7,7 @@ import { cn } from '../../../ui/cn.ts';
  *
  * One canonical selection, many synchronized projections. The switcher
  * moves the camera and never the
- * selection — it writes `?view`, and the selected task stays in `?task` where
+ * selection, it writes `?view`, and the selected task stays in `?task` where
  * `useSelectedTask` owns it. Switching projection therefore keeps the task you
  * were reading, and a link carrying both parameters reopens the exact position.
  *
@@ -17,7 +17,7 @@ import { cn } from '../../../ui/cn.ts';
  * The tabs implement the ARIA tabs pattern with a roving tabindex: one stop in
  * the page's tab order, arrows move between projections, Home and End jump to
  * the ends. Activation follows focus, which the pattern permits when switching
- * is immediate — every projection is derived from a snapshot already in hand,
+ * is immediate, every projection is derived from a snapshot already in hand,
  * so there is no fetch to make an arrow key expensive.
  */
 
@@ -134,7 +134,7 @@ export function tabId(kind: WorkProjectionKind): string {
  *
  * Whoever renders this switcher owes the page an element carrying this id, for
  * as long as the switcher is on screen. `aria-controls` is a reference, and a
- * reference to an element that was never drawn is not a weaker control — it is
+ * reference to an element that was never drawn is not a weaker control, it is
  * an invalid one, which is what the accessibility gate reads it as.
  */
 export const PROJECTION_PANEL_ID = 'work-projection-panel';

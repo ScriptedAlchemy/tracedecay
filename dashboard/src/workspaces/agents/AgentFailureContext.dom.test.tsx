@@ -59,7 +59,7 @@ describe('AgentFailureContext', () => {
   it('accounts for the window outcomes against the population they describe', () => {
     renderContext(readAttemptFailures(attempts()));
     // 800 of 10,000, and the denominator is the accounted set rather than the
-    // window's own count — which the fold measures separately.
+    // window's own count, which the fold measures separately.
     expect(screen.getByText(/800/)).toBeTruthy();
     expect(screen.getByText(/8\.00%/)).toBeTruthy();
     expect(

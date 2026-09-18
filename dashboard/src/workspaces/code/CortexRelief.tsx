@@ -8,8 +8,8 @@
  *                       Every figure printed here comes from there.
  *   `cortexRender.ts`   draws. Decides nothing.
  *   this file           composes the two, and is responsible for one thing of
- *                       its own: saying out loud what the picture is and — the
- *                       harder half — what it is NOT showing.
+ *                       its own: saying out loud what the picture is and, the
+ *                       harder half, what it is NOT showing.
  *
  * ACCESSIBILITY. The canvas is one `role="img"` with a description carrying the
  * same claims as the caption, and the region table is its exact equivalent:
@@ -130,7 +130,7 @@ function ReliefSheet({
       {focusedDirectory !== null ? (
         <p className="border-b border-edge-subtle px-3 py-1.5 text-3xs leading-relaxed text-text-muted">
           the symbol this workspace is focused on lives in{' '}
-          <span className="td-value text-text-secondary">{focusedDirectory}</span> —{' '}
+          <span className="td-value text-text-secondary">{focusedDirectory}</span>,{' '}
           {model.drawnRegions.some((region) => region.directory === focusedDirectory)
             ? 'that region is ringed on the relief above. Open Trace to inspect its call neighborhood.'
             : 'that directory is not one of the drawn regions, so nothing is ringed above; its row is in the table below if the scan reached it.'}
@@ -193,9 +193,9 @@ function ReliefPlate({ model }: { model: CortexModel }) {
       </dl>
       {model.capped ? (
         <p className="border-b border-edge-subtle px-3 py-1.5 text-3xs leading-relaxed text-state-unknown">
-          the scan stopped at its budget — {model.scan.max_files.toLocaleString()} files and{' '}
+          the scan stopped at its budget, {model.scan.max_files.toLocaleString()} files and{' '}
           {model.scan.max_dependency_edges.toLocaleString()} dependency edges in{' '}
-          {model.scan.budget_ms} ms — so this terrain is the part of the repository the scan
+          {model.scan.budget_ms} ms, so this terrain is the part of the repository the scan
           reached, and the strata above are a floor rather than a depth
         </p>
       ) : null}
@@ -242,7 +242,7 @@ function ReliefAbsences({ model }: { model: CortexModel }) {
         {cortexAbsences(model).map((panel) => (
           <div key={panel.label} className="flex min-w-0 flex-col">
             <dt className="td-legend whitespace-normal normal-case leading-snug tracking-normal text-text-muted">
-              {panel.label} — <span className="text-state-unknown">{panel.reading}</span>
+              {panel.label}, <span className="text-state-unknown">{panel.reading}</span>
             </dt>
             <dd className="text-3xs leading-snug text-text-muted">{panel.teach}</dd>
           </div>
@@ -332,7 +332,7 @@ function RegionTable({
   selected: string | null;
   onSelect: (directory: string | null) => void;
 }) {
-  const caption = `Every module region the strata scan clustered — ${model.totalRegions.toLocaleString()} directories over ${model.totalFiles.toLocaleString()} files — including the ${model.foldedRegions.toLocaleString()} folded out (${foldNote(model)}). Ordered by ${model.clusterOrdering}.`;
+  const caption = `Every module region the strata scan clustered, ${model.totalRegions.toLocaleString()} directories over ${model.totalFiles.toLocaleString()} files, including the ${model.foldedRegions.toLocaleString()} folded out (${foldNote(model)}). Ordered by ${model.clusterOrdering}.`;
   const windowed = model.regions.length > 200;
   return (
     <div
@@ -408,7 +408,7 @@ function RegionRow({
       className={cn(REGION_ROW, 'border-b border-edge-subtle', active && 'bg-surface-2')}
     >
       <div role="cell" className="max-w-72 px-3 py-1.5">
-        {/* The row's only control, so it carries the touch minimum itself —
+        {/* The row's only control, so it carries the touch minimum itself,
           * the cell's text metrics left it 16.5px tall. */}
         <button
           type="button"

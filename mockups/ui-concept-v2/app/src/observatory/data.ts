@@ -1,5 +1,5 @@
 /**
- * Observatory system-evidence overview — CONCEPT / PROFILE SNAPSHOT.
+ * Observatory system-evidence overview, CONCEPT / PROFILE SNAPSHOT.
  *
  * Every displayed value is derived from the bundled profile pack
  * (src/data/pack-index.json, hook-census.json, branch-census.json) or is a
@@ -10,9 +10,9 @@
  * series, and no orphan-segment census, so none of those pictured metrics are
  * reported here. The code index is never claimed sealed and SERVE stays
  * unavailable because the pack has no serve. Chart geometry (bar tracks,
- * spark rails, dot matrices, the topology silhouette) is always drawn — an
+ * spark rails, dot matrices, the topology silhouette) is always drawn, an
  * absent authority renders its instrument at zero/unlit, never as a bare
- * one-line void — but no absent value is ever painted as a lit reading.
+ * one-line void, but no absent value is ever painted as a lit reading.
  */
 import { PACK, PROFILE } from "../data/pack";
 import hookRaw from "./hook-census.json";

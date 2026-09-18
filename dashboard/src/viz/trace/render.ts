@@ -5,7 +5,7 @@
  * neighbors endpoint can actually feed. This module draws and does nothing
  * else: it is handed positions, per-channel stretch, per-node bloom and a
  * resolved palette, and it paints one frame. It never integrates, never decides
- * how a body responds to a gesture, and never reads the clock — if a mark
+ * how a body responds to a gesture, and never reads the clock, if a mark
  * moves, it is because the simulation moved it.
  *
  * Dropped from the prototype, deliberately: the dimmed cortex relief underlay.
@@ -37,7 +37,7 @@ export function channelWidth(calls: number): number {
 /** Node sill width in px: the symbol's degree, straight off the payload. */
 export function sillWidth(degree: number | null): number {
   // An unmeasured degree gets the floor width and a hollow sill (see
-  // `drawNodes`) — absence is drawn, never rendered as a measured zero.
+  // `drawNodes`), absence is drawn, never rendered as a measured zero.
   return 16 + Math.max(0, degree ?? 0) * 0.62;
 }
 
@@ -47,7 +47,7 @@ export function sillWidth(degree: number | null): number {
  * The approved sheet tapers 0.78 → 1.0 and calls it hydrological; at that
  * depth, over a run this short, the two edges are within a pixel of parallel
  * and the ribbon reads as a machined bar with a hue on it. Direction is
- * supposed to be said twice — by hue and by taper — and only one of them was
+ * supposed to be said twice, by hue and by taper, and only one of them was
  * audible. 0.55 makes the second one legible without letting the head fall
  * under the 2.2 px floor `channelWidth` sets for a single call site.
  */
@@ -60,15 +60,15 @@ export const CHANNEL_HEAD_FRACTION = 0.55;
  * A straight line between two widths is a wedge, and a wedge is a machined
  * shape. Water is not: a watercourse gains width as the square root of the
  * flow it has accumulated, which is the standing exponent in hydraulic
- * geometry, and it is also — not coincidentally — the same square root
+ * geometry, and it is also, not coincidentally, the same square root
  * `channelWidth` above already puts between a call-site count and a width, and
  * that `markDiameter` puts between a symbol count and a mark on the Code
  * spine. So the taper is not a new law invented for this curve. It is the law
  * the field already uses for magnitude, applied along the run instead of
  * across it: accumulate flow linearly down the channel, then take its root.
  *
- * The consequence is a slightly convex edge — fuller at mid-run than a line
- * would be, easing as it nears the mouth — which is the profile of a
+ * The consequence is a slightly convex edge, fuller at mid-run than a line
+ * would be, easing as it nears the mouth, which is the profile of a
  * watercourse rather than a funnel.
  *
  * Both endpoints stay exact: `t = 0` returns `headFraction` and `t = 1`
@@ -78,7 +78,7 @@ export const CHANNEL_HEAD_FRACTION = 0.55;
 export function taperAt(t: number, headFraction: number = CHANNEL_HEAD_FRACTION): number {
   const clamped = t < 0 ? 0 : t > 1 ? 1 : t;
   // Flow at the head, back-derived so that √(flow) lands exactly on the head
-  // fraction — the inverse of the width law, so the two cannot disagree.
+  // fraction, the inverse of the width law, so the two cannot disagree.
   const headFlow = headFraction * headFraction;
   return Math.sqrt(headFlow + (1 - headFlow) * clamped);
 }
@@ -366,7 +366,7 @@ export function createRenderer(
    *
    * Without this the world scale silently shrank every label with the picture:
    * at the widths this drill-in actually gets, a 9 px world label rendered at
-   * roughly 4.5 device pixels, which is not small type — it is no type. The
+   * roughly 4.5 device pixels, which is not small type, it is no type. The
    * compensation is capped so a very narrow column blows the labels up until
    * they swamp the marks instead.
    */
@@ -388,7 +388,7 @@ export function createRenderer(
       const track = tracking * typeScale();
       const glyphs = [...body];
       // One measurement per glyph, reused for both the alignment total and the
-      // cursor advance — this runs per label per frame, and `measureText` is
+      // cursor advance, this runs per label per frame, and `measureText` is
       // the expensive call in it. Widths live in renderer scratch so the map
       // and reduce do not allocate a fresh array every tracked label.
       while (labelWidths.length < glyphs.length) labelWidths.push(0);
@@ -438,7 +438,7 @@ export function createRenderer(
       ctx.setLineDash([]);
       // Set flush left and ABOVE its own rule. Right-aligning these into the
       // margin clipped every one of them the moment the labels started
-      // compensating for the world scale — the margin is a fixed number of
+      // compensating for the world scale, the margin is a fixed number of
       // world units and the type no longer is.
       label(ringLabel(ring), 6, y - 5 * t, {
         align: 'left',
@@ -448,7 +448,7 @@ export function createRenderer(
       });
     }
     ctx.restore();
-    label('hop ring — distance from the focus, not elevation', 6, 24 * t, {
+    label('hop ring, distance from the focus, not elevation', 6, 24 * t, {
       align: 'left',
       tracking: 1.1,
       upper: true,
@@ -496,8 +496,8 @@ export function createRenderer(
       ctx.globalAlpha = 0.7;
       ctx.stroke();
       ctx.restore();
-      // Enclosures nest and overlap freely — two types can each hold symbols on
-      // the same ring — so their names are stacked rather than all set on the
+      // Enclosures nest and overlap freely, two types can each hold symbols on
+      // the same ring, so their names are stacked rather than all set on the
       // box's own top edge, where they overprinted each other into mush.
       label(membrane.label, x0 + 10, y0 - (7 + (m % 3) * 15) * t, {
         color: pal.textMuted,
@@ -532,7 +532,7 @@ export function createRenderer(
     switch (dir) {
       case 'in':
         // A call that entered a type and moves between its methods before
-        // leaving. Drawn, not implied — it is the sheet's whole argument.
+        // leaving. Drawn, not implied, it is the sheet's whole argument.
         setPoint(channelPathIn[0]!, ax, ay);
         setPoint(channelPathIn[1]!, (ax + bx) / 2, Math.min(ay, by) - 46);
         setPoint(channelPathIn[2]!, bx, by);
@@ -581,7 +581,7 @@ export function createRenderer(
       const upstream = channel.dir === 'up' || channel.dir === 'in';
       const hue = upstream ? pal.upstream : pal.downstream;
       // A channel that leaves the graph keeps FULL width to its dashed mouth.
-      // The design note's absence beat is "full width, then it stops" — the
+      // The design note's absence beat is "full width, then it stops", the
       // flow it carried was measured, and narrowing it toward the end would
       // draw the lost traffic as dwindling when what is unknown is only where
       // it went.
@@ -599,7 +599,7 @@ export function createRenderer(
       ctx.fillStyle = hue;
       // Base fill is deliberately low: a dense neighbourhood stacks dozens of
       // translucent ribbons, and at 0.42 they accumulated into one solid slab
-      // in which no individual channel — and therefore no call-site width —
+      // in which no individual channel, and therefore no call-site width,
       // could be read at all.
       ctx.globalAlpha = 0.26 + load * 0.34;
       ctx.fill();

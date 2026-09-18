@@ -10,7 +10,7 @@
 //!   opens a file beneath a project worktree.
 //!
 //! The canonicalization callers deliberately differ in what they do with the
-//! result — see [`collapse_relative_components`] — so only the algorithm is
+//! result, see [`collapse_relative_components`], so only the algorithm is
 //! shared, never the policy.
 
 use std::io;
@@ -80,9 +80,9 @@ pub fn same_canonical_path(left: &Path, right: &Path) -> bool {
 /// [`same_canonical_path`] answers "are these one directory"; this answers
 /// "what is that directory called", which is what a caller needs when it has
 /// to `strip_prefix` a root off a descendant or hand the root to a serializer.
-/// Both sides of such a pair routinely arrive spelled differently — a macOS
+/// Both sides of such a pair routinely arrive spelled differently, a macOS
 /// `/var` alias against a `/private/var` root, a native `C:\` document against
-/// a `\\?\C:\` root — and a raw `strip_prefix` reports the descendant as
+/// a `\\?\C:\` root, and a raw `strip_prefix` reports the descendant as
 /// outside its own root.
 ///
 /// Existing ancestors are resolved so those aliases collapse to one name, and
@@ -101,9 +101,9 @@ pub fn canonical_root_identity(path: &Path) -> PathBuf {
 /// [`std::fs::canonicalize`] returns the verbatim form for every Windows path,
 /// so every path this runtime resolves reads `\\?\D:\repo\.git` rather than
 /// `D:\repo\.git`. Git for Windows normalizes the paths it is given and
-/// rejects that spelling — most visibly through
+/// rejects that spelling, most visibly through
 /// `GIT_ALTERNATE_OBJECT_DIRECTORIES`, where a verbatim entry makes every
-/// object-writing command fail — so a resolved path must be spelled plainly
+/// object-writing command fail, so a resolved path must be spelled plainly
 /// before it crosses into a child process.
 ///
 /// Only a verbatim disk path is shortened. `\\?\UNC\server\share` and device
@@ -144,14 +144,14 @@ pub fn plain_host_path(path: &Path) -> PathBuf {
 
 /// Spells every `git` argument plainly (see [`plain_host_path`]).
 ///
-/// Arguments that are not verbatim disk paths — flags, refs, relative paths,
-/// every Unix argument — are returned unchanged, so a command builder can
+/// Arguments that are not verbatim disk paths, flags, refs, relative paths,
+/// every Unix argument, are returned unchanged, so a command builder can
 /// apply this to its whole argument list instead of guessing which positions
 /// carry a resolved path (`git worktree add <path>` refuses a `\\?\` root
 /// with "could not create leading directories ... Invalid argument").
 ///
 /// No argument this returns is a verbatim *disk* path, whatever the caller
-/// passed in. The remaining verbatim spellings — UNC and device namespace —
+/// passed in. The remaining verbatim spellings, UNC and device namespace,
 /// are handed on unchanged for the reason [`plain_host_path`] gives, so a
 /// caller building a `file://` URL out of one of them must encode or refuse it
 /// there.
@@ -163,8 +163,8 @@ pub fn plain_git_args<'a>(args: &'a [&str]) -> impl Iterator<Item = PathBuf> + '
 ///
 /// This is a separate step rather than part of canonicalization because the
 /// callers genuinely disagree about it: the daemon authority applies it to the
-/// identity paths it writes, while the profile-identity migration must not —
-/// collapsing there would rewrite identity strings already on disk.
+/// identity paths it writes, while the profile-identity migration must not.
+/// Collapsing there would rewrite identity strings already on disk.
 #[must_use]
 pub fn collapse_relative_components(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
@@ -184,8 +184,8 @@ pub fn collapse_relative_components(path: &Path) -> PathBuf {
 /// beneath its authorized worktree.
 ///
 /// `.` components are dropped; anything that could escape or re-root the
-/// worktree — an absolute path, a prefix or root component, `..`, or a path
-/// that normalizes away to nothing — is rejected rather than repaired.
+/// worktree, an absolute path, a prefix or root component, `..`, or a path
+/// that normalizes away to nothing, is rejected rather than repaired.
 pub fn normalize_source_edit_relative_path(path: &Path) -> Result<PathBuf> {
     if path.as_os_str().is_empty() || path.is_absolute() {
         return Err(source_edit_unsafe_path());

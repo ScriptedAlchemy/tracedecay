@@ -305,7 +305,7 @@ fn render_result_parts(
         // Keep the typed problem machine-readable in every presentation
         // format: markdown rendering alone would strand it in prose that
         // clients cannot classify. The whole record travels, not a
-        // kind/code summary — the parts a caller must *act* on are the
+        // kind/code summary, the parts a caller must *act* on are the
         // legal actions, the retry directive, and, for an admitted partial
         // effect, the committed receipt. Publishing only kind/code left the
         // one instruction that matters ("reconcile this committed effect")

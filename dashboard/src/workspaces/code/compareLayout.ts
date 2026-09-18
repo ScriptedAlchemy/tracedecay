@@ -6,7 +6,7 @@ import type {
 } from '../../contracts/generated.ts';
 
 /**
- * COMPARE — two explicit local revisions in one union layout, served by
+ * COMPARE. Two explicit local revisions in one union layout, served by
  * `GET /api/plugins/graph/compare/union-layout` (code_read_api.rs).
  *
  * The selection is four exact values: a base branch with the commit it is

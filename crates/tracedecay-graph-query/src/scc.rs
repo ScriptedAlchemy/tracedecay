@@ -4,11 +4,11 @@
 //! `tracedecay_port_order` (intra-cycle visibility). Both tools were
 //! emitting either every walk through an SCC (`circular`'s 73-cycle
 //! tail-overlap explosion) or a single flat blob of every cycle node
-//! (`port_order`'s 200+ symbol mega-cycle). SCCs replace both with the
-//! correct primitive: one component per mutually-recursive group.
+//! (`port_order`'s 200+ symbol mega-cycle). SCCs replace both with one
+//! component per mutually-recursive group.
 //!
 //! The implementation is iterative (no recursion) so deep graphs don't
-//! blow the stack. SCCs are returned in reverse-topological order —
+//! blow the stack. SCCs are returned in reverse-topological order,
 //! "leaves" (components with no outgoing inter-component edges) come
 //! first, which is exactly the order needed for port ranking.
 
@@ -118,7 +118,7 @@ where
 
         while let Some(&(node, position)) = state.work.last() {
             let Some(&next) = edges[node].get(position) else {
-                // Finished this node — pop frame, update parent's lowlink,
+                // Finished this node, pop frame, update parent's lowlink,
                 // and emit an SCC if this node is a Tarjan root.
                 state.work.pop();
                 if state.lowlink[node] == state.index[node] {

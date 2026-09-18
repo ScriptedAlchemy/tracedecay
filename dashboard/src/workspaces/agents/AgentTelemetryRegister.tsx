@@ -59,7 +59,7 @@ export function AgentTelemetryRegister({
           // A dash in the diagnostics figures is three different facts: a read
           // still in flight, a read that failed, and a source that answered and
           // declared itself unavailable. Only the last one may be called
-          // "unavailable" — the strip used to label all three that way.
+          // "unavailable", the strip used to label all three that way.
           const diagnosticsAbsence = diagnostics.isPending
             ? 'diagnostics still loading'
             : diag == null
@@ -90,7 +90,7 @@ export function AgentTelemetryRegister({
               </div>
 
               {/* The window itself. Every count below is taken inside it, and
-                * the endpoint refuses to count past `ANALYTICS_EVENT_LIMIT` —
+                * the endpoint refuses to count past `ANALYTICS_EVENT_LIMIT`, 
                 * so the cap, the span and the rate are the frame the rest of
                 * the register hangs in, not a footnote. */}
               <ReadoutBar
@@ -275,7 +275,7 @@ export function AgentTelemetryRegister({
  *
  * The leader is not drawn at all: a bar at 100% of the band beside eleven
  * slivers is a picture of nothing. It is stated, in words, with its share. The
- * remainder then gets the band to itself on a LOG scale — which is captioned
+ * remainder then gets the band to itself on a LOG scale, which is captioned
  * as logarithmic, because a length the reader cannot compare linearly must say
  * so or it is worse than no length at all.
  */
@@ -284,7 +284,7 @@ function CategoryComposition({
   counted,
 }: {
   dominance: ReturnType<typeof summarizeDominance>;
-  /** The window's total event count, or null when the endpoint served none —
+  /** The window's total event count, or null when the endpoint served none , 
    * in which case how much of the window these categories cover is unknown. */
   counted: number | null;
 }) {
@@ -301,7 +301,7 @@ function CategoryComposition({
       <p className="text-xs leading-relaxed text-text-primary">
         <span className="td-value">{leader.category}</span> is{' '}
         <span className="td-value">{share != null ? `${share}%` : '—'}</span> of all
-        categorized events — {leader.events.toLocaleString()} of{' '}
+        categorized events, {leader.events.toLocaleString()} of{' '}
         {total.toLocaleString()}
         {spread != null && spread >= 10 && smallest
           ? `, and ${Math.round(spread).toLocaleString()}× the smallest (${smallest.category}, ${smallest.events.toLocaleString()}).`
@@ -310,7 +310,7 @@ function CategoryComposition({
       {counted == null ? (
         <p className="text-2xs leading-relaxed text-text-muted">
           The window's own event count was not reported, so how many of its events
-          carry no tool or skill to categorize is unknown — these{' '}
+          carry no tool or skill to categorize is unknown, these{' '}
           {total.toLocaleString()} categorized events are not known to be all of
           them.
         </p>
@@ -318,7 +318,7 @@ function CategoryComposition({
         <p className="text-2xs leading-relaxed text-text-muted">
           {uncategorized.toLocaleString()} of the {counted.toLocaleString()} events in
           the window carry no tool or skill to categorize (hook routing), so they are
-          absent from this plate rather than folded into an “other”.
+          absent from this plate rather than folded into an "other".
         </p>
       ) : null}
       {rest.length > 0 ? (
@@ -391,7 +391,7 @@ function ToolRanking({ rows }: { rows: ReadonlyArray<Record<string, unknown>> })
 
 /** The time dimension, honestly bounded: the endpoint serves twenty events
  * with real timestamps and nothing between them, so this is a tape of the
- * latest few — not a series, and it does not pretend to be one.
+ * latest few, not a series, and it does not pretend to be one.
  *
  * The rows carry a clock time only. Twenty repetitions of the same calendar
  * date down a strip that spans four minutes is twenty copies of one fact; the
@@ -474,7 +474,7 @@ function formatDay(epochSeconds: number): string {
 }
 
 /** A served count printed in full, or an em dash when the read has not landed.
- * These are provenance figures — the point of them is the exact number. */
+ * These are provenance figures, the point of them is the exact number. */
 function exact(value: number | null | undefined): string {
   return value != null && Number.isFinite(value) ? value.toLocaleString() : '—';
 }
@@ -512,7 +512,7 @@ function WindowComposition({
   );
 }
 
-/** A small set of parts of one known whole. Linear is correct here — these
+/** A small set of parts of one known whole. Linear is correct here, these
  * shares are of the same denominator and none of them is a sliver.
  *
  * When the denominator was not served the counts are still real, so they are
@@ -549,7 +549,7 @@ function ShareRows({
  * The families plate, made actionable.
  *
  * It used to print four snake_case identifiers with no counts, no meaning and
- * no verdict — a list of words. Each row now says what the family covers, what
+ * no verdict, a list of words. Each row now says what the family covers, what
  * would count as reaching for a substitute instead, and where this window
  * actually landed. Two of the four have no substitute detector at all, which
  * means they are pinned at "not under-used" by construction; that is stated

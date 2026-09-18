@@ -845,7 +845,7 @@ fn cursor_after_shell_hook_is_typed_unsupported_without_spool_record() {
 
     // Shell events have no native capture family for Cursor (ToolLifecycle
     // is typed Unavailable), so the outcome is Unsupported: fail-open exit 0
-    // and no spool artifact — command text can never enter the spool.
+    // and no spool artifact, command text can never enter the spool.
     assert_capture_transport_response("afterShellExecution unsupported", &output, 0);
     assert_eq!(
         native_capture_pending_records(&data_root, host),

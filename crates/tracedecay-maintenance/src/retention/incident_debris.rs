@@ -946,7 +946,7 @@ mod tests {
     /// container family into a `.corrupt-<micros>` directory beside the
     /// fresh store. Doctor must surface that directory as one typed Corrupt
     /// debris artifact sized by its retained forensic payload, and the sweep
-    /// must leave it in place — it is already quarantined evidence, never
+    /// must leave it in place, it is already quarantined evidence, never
     /// loose debris to relocate or collect.
     #[test]
     fn scan_surfaces_a_graph_store_quarantine_directory_and_sweep_retains_it() {

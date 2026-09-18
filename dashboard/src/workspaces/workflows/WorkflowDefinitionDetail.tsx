@@ -99,7 +99,7 @@ export function SelectedDefinitionPanel({
             {shape.unresolvedReferences.length} reference
             {shape.unresolvedReferences.length === 1 ? '' : 's'} name steps this version does not
             declare: {shape.unresolvedReferences.join(', ')}. Whether that blocks activation is the
-            daemon’s validation to decide.
+            daemon's validation to decide.
           </span>
         </div>
       ) : null}
@@ -168,7 +168,7 @@ export function VersionTrackPanel({
       }
     >
       {pending ? (
-        <StateChip kind="loading" detail="reading the definition’s version history" />
+        <StateChip kind="loading" detail="reading the definition's version history" />
       ) : result === undefined ? (
         <StateChip kind="unknown" detail="the history read returned no result" />
       ) : result.outcome === 'refused' ? (
@@ -273,8 +273,8 @@ export function VersionTrackPanel({
             </tbody>
           </table>
           <p className="mt-1.5 text-3xs text-text-muted">
-            Pin columns compare each version’s digest with the previous version’s. Which steps
-            changed is the daemon’s diff (`operation.workflow.diff_definition`), not declared on this
+            Pin columns compare each version's digest with the previous version's. Which steps
+            changed is the daemon's diff (`operation.workflow.diff_definition`), not declared on this
             surface. Created, activated, and retired instants are not carried by the definition
             contract.
           </p>

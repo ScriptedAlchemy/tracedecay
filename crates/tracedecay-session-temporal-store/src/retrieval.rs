@@ -1064,7 +1064,7 @@ impl<'a> SessionTemporalReadPort<'a> {
     ///
     /// `session_temporal_generations` is keyed by `(session_id, generation)` and
     /// `sessions` by `(provider, session_id)`, so the inner join yields at most one
-    /// row per `(session_id, generation, provider)` — the same row the replaced
+    /// row per `(session_id, generation, provider)`, the same row the replaced
     /// per-participant `LIMIT 2` probe would have returned. Rows are still kept in
     /// a vector per key so a schema that ever admitted a duplicate raises the same
     /// "not unique" error the probe did.

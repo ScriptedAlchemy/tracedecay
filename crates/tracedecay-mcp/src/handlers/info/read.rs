@@ -1,4 +1,4 @@
-//! `tracedecay_read` — mode-aware file read with cross-session cache.
+//! `tracedecay_read`, mode-aware file read with cross-session cache.
 
 use crate::ToolResult;
 use crate::rendered_tool_result;

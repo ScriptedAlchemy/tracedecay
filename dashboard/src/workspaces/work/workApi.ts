@@ -7,7 +7,7 @@ import type { DomainStateKind } from '../../ui/StateChip.tsx';
  *
  * Every request body and every response payload on this surface is a generated
  * contract; nothing here declares a payload shape of its own. What this module
- * does own is the step between them — the daemon's application envelope, which
+ * does own is the step between them, the daemon's application envelope, which
  * the dashboard's own codegen does not emit.
  *
  * That gap is the one thing to understand before reading further. Every other
@@ -15,7 +15,7 @@ import type { DomainStateKind } from '../../ui/StateChip.tsx';
  * generated type decoded by `data/query/envelope.ts`. The Work routes are
  * mounted differently: `src/dashboard/mod.rs` nests them straight onto the
  * application router, so they answer with the application's own
- * `HttpJsonEnvelope<T>` (`crates/tracedecay-api/src/lib.rs`) — a `kind`/`value`
+ * `HttpJsonEnvelope<T>` (`crates/tracedecay-api/src/lib.rs`), a `kind`/`value`
  * union wrapping an outcome packet whose `payload` field holds the contract the
  * dashboard actually asked for. None of that wrapper is in the dashboard's
  * contract catalog, so there is no generated schema to decode it with.
@@ -55,8 +55,8 @@ export type WorkResult<T> =
  * `ApplicationProblemKind` onto a status code, and that mapping is the part of
  * the problem contract the dashboard can rely on without a generated schema for
  * the problem record itself. Reading the status rather than the body is the
- * deliberate choice: the body would tell us more — which of conflict and stale
- * a 409 was, the retry directive, the legal actions — but only by hand-modelling
+ * deliberate choice: the body would tell us more, which of conflict and stale
+ * a 409 was, the retry directive, the legal actions, but only by hand-modelling
  * `ApplicationProblemRecord`, and a hand-modelled problem record that drifted
  * would misreport why a command failed.
  *
@@ -112,7 +112,7 @@ function workResolvedScope(body: unknown): ResolvedScope | undefined {
  *
  * `undefined` means the envelope was not the shape described above. It is
  * distinct from a `payload` of `null`, which is the daemon saying the operation
- * carried no value — that is returned as `null` and refused by the caller rather
+ * carried no value, that is returned as `null` and refused by the caller rather
  * than quietly becoming an empty read.
  */
 export function workPayload(body: unknown): { found: true; payload: unknown } | { found: false } {

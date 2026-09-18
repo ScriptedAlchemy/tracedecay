@@ -654,7 +654,7 @@ fn init_accepts_short_and_long_path_flag_like_dashboard_does() {
     ));
 
     // Supplying both the positional PATH and `-p`/`--path` is refused rather
-    // than silently picking one — clap's `conflicts_with` rejects it.
+    // than silently picking one, clap's `conflicts_with` rejects it.
     // `Cli` does not derive `Debug`, so match directly instead of
     // `.expect_err(...)` (which requires the `Ok` type to be `Debug`).
     let conflict =

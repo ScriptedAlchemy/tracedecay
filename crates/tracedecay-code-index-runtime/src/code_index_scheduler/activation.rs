@@ -253,7 +253,7 @@ impl CodeIndexActivationV1 {
     /// Start automatic or explicit activation.
     ///
     /// [`CodeIndexAutomaticAdmissionV1`] answers "may the daemon start indexing
-    /// this route on its own?" — a watcher policy, not an authorization
+    /// this route on its own?", a watcher policy, not an authorization
     /// boundary. Explicit demand (an operator-named reconcile: `tracedecay
     /// init`, `tracedecay sync`, `tracedecay_admin_sync`) skips exactly that
     /// question and nothing else: route liveness, the indexing identity check
@@ -411,8 +411,8 @@ impl CodeIndexActivationV1 {
 
     /// The one front door for code-index demand.
     ///
-    /// Every caller above — MCP after-edit hooks, `tracedecay sync`, the
-    /// server's startup catch-up, host admission — asks here and reports the
+    /// Every caller above, MCP after-edit hooks, `tracedecay sync`, the
+    /// server's startup catch-up, host admission, asks here and reports the
     /// verdict it gets. The watcher policy, route liveness, the exact-root
     /// check, and the choice between the mounted scheduler and the bounded
     /// pre-mount queue all live in this one place, so no layer above can
@@ -784,7 +784,7 @@ mod tests {
     /// `sync.watch_linked_worktrees`; nothing re-reads the configuration
     /// afterwards. Disabling automatic indexing must therefore not be a
     /// permanent loss of the dependent owners: this pins the requirement the
-    /// code actually carries — the enabling transition takes effect on the next
+    /// code actually carries, the enabling transition takes effect on the next
     /// route mount, which replaces the registered activation for the scope.
     #[tokio::test]
     async fn a_disabled_route_regains_its_deferred_owners_only_on_a_remount() {

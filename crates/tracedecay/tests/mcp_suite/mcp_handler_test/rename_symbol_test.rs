@@ -1,4 +1,4 @@
-//! `tracedecay_rename_symbol` — apply-grade rename bound to preview evidence.
+//! `tracedecay_rename_symbol`, apply-grade rename bound to preview evidence.
 //!
 //! The preview (`tracedecay_rename_preview`) reports the exact node identity;
 //! the apply consumes it and must succeed only while that evidence still
@@ -484,7 +484,7 @@ async fn test_rename_symbol_publication_failure_preserves_preimage() {
     // Restore permissions before asserting so the tempdir always cleans up.
     fs::set_permissions(&src_dir, writable).unwrap();
 
-    // The apply failed — either as a typed error or a failed durable effect —
+    // The apply failed, either as a typed error or a failed durable effect,
     // and never reported success.
     match apply {
         Ok(result) => {

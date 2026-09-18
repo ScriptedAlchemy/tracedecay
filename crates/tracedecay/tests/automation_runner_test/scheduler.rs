@@ -1394,7 +1394,7 @@ async fn cancelled_task_lock_acquisition_cleans_detached_owner() {
             &coordination_path,
         )
         .unwrap();
-        fs2::FileExt::lock_exclusive(&file).unwrap();
+        file.lock().unwrap();
         file
     };
     #[cfg(not(windows))]
@@ -1424,7 +1424,7 @@ async fn cancelled_task_lock_acquisition_cleans_detached_owner() {
     submitted_rx.await.unwrap();
     acquire.abort();
     assert!(acquire.await.unwrap_err().is_cancelled());
-    fs2::FileExt::unlock(&coordination).unwrap();
+    coordination.unlock().unwrap();
     drop(coordination);
 
     let acquired = tokio::time::timeout(std::time::Duration::from_secs(10), async {

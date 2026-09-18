@@ -5323,14 +5323,13 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 
 [[package]]
 name = "tracedecay"
-version = "0.1.0-beta.40"
+version = "0.1.0-beta.41"
 dependencies = [
  "axum",
  "constant_time_eq",
  "criterion",
  "dirs",
  "filetime",
- "fs2",
  "futures-util",
  "gix",
  "glob",
@@ -5416,7 +5415,6 @@ version = "0.1.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
- "fs2",
  "getrandom 0.2.17",
  "gix",
  "hex",
@@ -5485,7 +5483,6 @@ version = "0.1.0"
 dependencies = [
  "cap-std",
  "criterion",
- "fs2",
  "getrandom 0.2.17",
  "gix",
  "glob",
@@ -5551,7 +5548,6 @@ version = "0.1.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
- "fs2",
  "getrandom 0.2.17",
  "hex",
  "hotpath",
@@ -5601,14 +5597,13 @@ dependencies = [
 
 [[package]]
 name = "tracedecay-cli"
-version = "0.1.0-beta.40"
+version = "0.1.0-beta.41"
 dependencies = [
  "axum",
  "clap",
  "crossterm",
  "dirs",
  "flate2",
- "fs2",
  "futures-util",
  "hex",
  "hotpath",
@@ -5721,7 +5716,6 @@ version = "0.1.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
- "fs2",
  "gix",
  "hotpath",
  "libc",
@@ -5843,7 +5837,6 @@ dependencies = [
 name = "tracedecay-daemon-identity"
 version = "0.1.0"
 dependencies = [
- "fs2",
  "getrandom 0.2.17",
  "hex",
  "hotpath",
@@ -5881,7 +5874,6 @@ name = "tracedecay-daemon-service"
 version = "0.1.0"
 dependencies = [
  "axum",
- "fs2",
  "getrandom 0.2.17",
  "hex",
  "hotpath",
@@ -6040,7 +6032,6 @@ name = "tracedecay-graph-db"
 version = "0.1.0"
 dependencies = [
  "criterion",
- "fs2",
  "grafeo-adapters",
  "grafeo-common",
  "grafeo-core",
@@ -6345,7 +6336,7 @@ dependencies = [
 
 [[package]]
 name = "tracedecay-project"
-version = "0.1.0-beta.40"
+version = "0.1.0-beta.41"
 dependencies = [
  "hotpath",
  "rusqlite",
@@ -6421,7 +6412,6 @@ name = "tracedecay-runtime-core"
 version = "0.1.0"
 dependencies = [
  "criterion",
- "fs2",
  "getrandom 0.2.17",
  "gix",
  "hex",

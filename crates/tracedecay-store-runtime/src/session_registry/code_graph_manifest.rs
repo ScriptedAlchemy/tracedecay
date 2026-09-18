@@ -955,15 +955,15 @@ impl Drop for CodeGraphManifestRouteV1 {
     }
 }
 
-/// One already-decoded sealed generation — offered by the code-index
-/// activation path or retained from this provider's own verified disk decode —
+/// One already-decoded sealed generation, offered by the code-index
+/// activation path or retained from this provider's own verified disk decode,
 /// addressed by the exact identity that authorizes it.
 ///
 /// The producing side decoded these bytes only after verifying that their
 /// SHA-256 equals `sealed_state_digest`, so an entry that matches a replay's
 /// `generation` *and* `sealed_state_digest` denotes the same immutable payload
-/// the canonical seal file holds. Matching on the digest — never on the
-/// generation id alone — is what keeps a superseded or foreign decode from
+/// the canonical seal file holds. Matching on the digest, never on the
+/// generation id alone, is what keeps a superseded or foreign decode from
 /// being served in place of the requested seal.
 #[derive(Clone)]
 struct DecodedSealedCodeGenerationV1 {
@@ -1099,9 +1099,9 @@ impl DecodedCodeGenerationOffersV1 {
     /// The retained decode for this exact replay identity, if one is held.
     ///
     /// Deliberately not take-on-read. One activation has two legitimate
-    /// consumers of the same decode — the current-revision publication and the
+    /// consumers of the same decode, the current-revision publication and the
     /// interrupted-predecessor recovery that rebuilds a historical manifest at
-    /// its own projector revision — so consuming on first read would force the
+    /// its own projector revision, so consuming on first read would force the
     /// second to re-read and re-parse exactly the bytes this decode exists to
     /// spare. The lifetime bound is supersession and release, not first read.
     fn matching(
@@ -1204,8 +1204,8 @@ impl DecodedCodeGenerationOffersV1 {
 
 pub(super) struct DaemonCodeGraphManifestProviderV1 {
     sources: RwLock<BTreeMap<StoreShardIdV1, BoundCodeGenerationSourceV1>>,
-    /// Per-shard decoded seals — the activation offer (plan 40, stage 1) and
-    /// this provider's own last verified disk decode — so graph publication
+    /// Per-shard decoded seals, the activation offer (plan 40, stage 1) and
+    /// this provider's own last verified disk decode, so graph publication
     /// and the recovery branches reuse an already-verified decode instead of
     /// re-reading and re-parsing the same sealed payload. Held behind an
     /// `Arc` so the pressure reclaimer can reach exactly this state through a
@@ -1335,8 +1335,8 @@ impl DaemonCodeGraphManifestProviderV1 {
         )
     }
 
-    /// An already-verified decode for this exact replay — the activation
-    /// offer or the provider's own last disk decode — or `None` to read from
+    /// An already-verified decode for this exact replay, the activation
+    /// offer or the provider's own last disk decode, or `None` to read from
     /// disk.
     ///
     /// `None` is an abstention, never a verdict: it means "not already decoded
@@ -1385,8 +1385,8 @@ impl DaemonCodeGraphManifestProviderV1 {
         )
     }
 
-    /// Release the decoded seals this shard's retiring runtime commissioned —
-    /// the activation offer and any hydration retained alongside it —
+    /// Release the decoded seals this shard's retiring runtime commissioned,
+    /// the activation offer and any hydration retained alongside it,
     /// reporting the census bytes released.
     pub(super) fn release_decoded_offer(&self, project_shard: &StoreShardIdV1) -> u64 {
         self.decoded.release_shard(project_shard)
@@ -1448,7 +1448,7 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
         }
 
         // Reuse a decode whose SHA-256 was already proven equal to this
-        // replay's sealed-state digest — the one the activating code index
+        // replay's sealed-state digest, the one the activating code index
         // offered (plan 40, stage 1) or the provider's own last verified disk
         // decode. The reuse is matched on the exact generation AND sealed
         // state digest, and the identity guards below still run against it, so
@@ -2406,8 +2406,8 @@ mod tests {
     /// replay reuses that digest-verified decode and produces the identical
     /// manifest. Falsifiable by construction: the sealed file is deleted
     /// between the two hydrations, so any second read attempt fails, while
-    /// durable-source verification — which must never trust the retained
-    /// decode — is required to observe the loss.
+    /// durable-source verification, which must never trust the retained
+    /// decode, is required to observe the loss.
     #[test]
     fn disk_hydration_is_single_pass_and_source_verification_stays_fail_closed() {
         let temporary = TempDir::new().unwrap();
@@ -2517,7 +2517,7 @@ mod tests {
             Err(GraphDbError::Unavailable { .. })
         ));
 
-        // The same replay hydrates again from the retained decode — identical
+        // The same replay hydrates again from the retained decode, identical
         // manifest, zero further byte passes.
         let second = provider
             .hydrate_sealed_code_generation(&owner, &source, &|| Ok(()))
@@ -2538,7 +2538,7 @@ mod tests {
             .expect_err("a foreign sealed digest must never be served from the retained decode");
 
         // A fresh activation offer supersedes the retained decode, so the old
-        // replay can only be answered from disk again — which is now gone.
+        // replay can only be answered from disk again, which is now gone.
         provider
             .offer_decoded_code_generation(
                 shard,

@@ -2,7 +2,7 @@
 //!
 //! Walks descendants of a function/method node and counts branches,
 //! loops, early-exit statements, and maximum nesting depth. The counts
-//! are language-agnostic — each extractor supplies the node type names
+//! are language-agnostic. Each extractor supplies the node type names
 //! that correspond to each category.
 
 use tracedecay_domain::ComplexityAnalysisV1;
@@ -202,7 +202,7 @@ fn extract_call_name<'s>(
         && let Some(field_node) = node.child_by_field_name(method_field)
     {
         // For chained calls like `x.unwrap()`, the field may be a
-        // field_expression / member_expression — grab the rightmost identifier.
+        // field_expression / member_expression. Grab the rightmost identifier.
         let text = rightmost_identifier(field_node, source);
         if !text.is_empty() {
             return Some(text);
@@ -238,7 +238,7 @@ fn extract_call_name<'s>(
 /// Extracts the macro name from a macro invocation node (e.g. `assert!`).
 ///
 /// Looks for the first identifier child, stripping a trailing `!` if present.
-/// Returns a `&str` borrowed from `source` — see `extract_call_name`.
+/// Returns a `&str` borrowed from `source`. See `extract_call_name`.
 fn extract_macro_name<'s>(node: TsNode<'_>, source: &'s [u8]) -> Option<&'s str> {
     let mut cursor = node.walk();
     if cursor.goto_first_child() {
@@ -266,7 +266,7 @@ fn rightmost_identifier<'s>(node: TsNode<'_>, source: &'s [u8]) -> &'s str {
     if nk == "identifier" || nk == "field_identifier" || nk == "property_identifier" {
         return node.utf8_text(source).unwrap_or("");
     }
-    // Walk children via cursor and remember the rightmost match — `node.child(i)`
+    // Walk children via cursor and remember the rightmost match. `node.child(i)`
     // would be O(N²) for the right-to-left scan the previous revision did.
     let mut cursor = node.walk();
     let mut found = "";

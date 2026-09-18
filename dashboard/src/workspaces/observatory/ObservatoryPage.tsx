@@ -27,7 +27,7 @@ import {
 import { useObservatoryReads, type ObservatoryReads } from './useObservatoryReads.ts';
 
 /** The address of the selection: which authority is open in the inspector,
- * and — for the two Doctor-backed sources — which finding row. Replaced, not
+ * and, for the two Doctor-backed sources, which finding row. Replaced, not
  * pushed, so panning across eleven panels is not eleven places to go back to. */
 export const OBSERVATORY_INSPECT_PARAM = 'inspect';
 export const OBSERVATORY_FINDING_PARAM = 'finding';
@@ -36,10 +36,10 @@ export const OBSERVATORY_FINDING_PARAM = 'finding';
  * Observatory: system evidence from independent authorities on one time
  * context.
  *
- * Eleven sources — the canonical observations horizon, Doctor, adoption,
+ * Eleven sources, the canonical observations horizon, Doctor, adoption,
  * retrieval, the code-index pipeline, hook hints, performance budgets,
  * execution topology, analytics controls, store telemetry, and storage
- * findings — each report their own typed state, coverage, and observation
+ * findings, each report their own typed state, coverage, and observation
  * time. Nothing here averages them into a health grade. Hovering a panel or a
  * timeline mark previews its evidence in the inspector; selecting it opens the
  * exact read model beneath the grid. Every read is requested once and shared

@@ -5,8 +5,8 @@
 //! 1. A deterministic content refusal covers past the frame with a durable
 //!    typed reason (`ObservationIdentityCollision` for that exact refusal,
 //!    otherwise `AdmissionRefused`) so the stream converges.
-//! 2. Everything else — store commit/read-back failures, unbound authorities,
-//!    retryable races — is a typed [`TranscriptIngestError::HostAdmission`]
+//! 2. Everything else, store commit/read-back failures, unbound authorities,
+//!    retryable races, is a typed [`TranscriptIngestError::HostAdmission`]
 //!    block: the frontier does not advance and no coverage is written over a
 //!    record whose durable fate is unknown.
 //!
@@ -1380,7 +1380,7 @@ async fn out_of_scope_frames_are_rejected_before_the_decode() {
     assert_eq!(progress.frames_decoded, 1);
     // The coverage reason proves the decode was skipped; this proves the seam
     // *reports* it. `session_meta` names itself, so it is still decoded before
-    // it is judged — only the two frames that cannot move the cwd are refused
+    // it is judged, only the two frames that cannot move the cwd are refused
     // from the gate, and the split has to say so or a change that moves the
     // verdict earlier is invisible to production telemetry.
     assert_eq!(

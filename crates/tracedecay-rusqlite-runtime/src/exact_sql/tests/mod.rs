@@ -33,7 +33,7 @@ impl ExactSqlWriteAuthority for AtomicWriteAuthority {
 /// Drives the writer thread's fake lease clock from inside the lease it
 /// probes: authority verification is the only test code that runs on the
 /// writer thread. `run_transaction` verifies with `Execute` intent exactly
-/// twice per bounded step — before and after execution — so every even check
+/// twice per bounded step, before and after execution, so every even check
 /// is the pre-step hook.
 struct LeaseClockAdvancingAuthority {
     step: Duration,

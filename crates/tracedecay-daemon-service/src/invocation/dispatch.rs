@@ -240,7 +240,7 @@ impl DaemonInvocationService {
             .as_ref()
             .map(|runtime| runtime.source_observation_port());
         // Validate before deriving an operation label. Wire frames with a
-        // foreign `surface_operation` must fail closed as InvalidRequest —
+        // foreign `surface_operation` must fail closed as InvalidRequest,
         // never reach a panic path while labeling the request.
         let validated =
             hotpath::measure_block!("daemon.service.invocation.validate", request.validate());

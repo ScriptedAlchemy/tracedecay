@@ -1,5 +1,5 @@
 /**
- * OBSERVATORY — `GET /api/observatory` (Plan 26 canonical observations).
+ * OBSERVATORY. `GET /api/observatory` (Plan 26 canonical observations).
  *
  * This is the read model the CLI, MCP, and this dashboard all share: the same
  * `ObservatoryReadModelV1` bytes, projected once by
@@ -37,7 +37,7 @@ export function CanonicalObservations() {
       title="Canonical observations"
       blurb={
         'event flow, terminal failures, telemetry drops, and retrieval-feedback latency' +
-        ' — the same Plan 26 read model the CLI and MCP serve'
+        ', the same Plan 26 read model the CLI and MCP serve'
       }
       queryKey={OBSERVATORY_READ_MODEL_KEY}
       url={OBSERVATORY_READ_MODEL_URL}
@@ -46,7 +46,7 @@ export function CanonicalObservations() {
       loadingDetail="requesting canonical observations"
       className="border-b border-edge-subtle"
       metrics={(model) => model.metrics}
-      emptyLabel="the read model carried no measurements — this is a payload with no metrics, not a set of zeroes"
+      emptyLabel="the read model carried no measurements, this is a payload with no metrics, not a set of zeroes"
       horizonAttributes={(model) => ({
         'data-observations-current': model.current ? 'true' : 'false',
       })}

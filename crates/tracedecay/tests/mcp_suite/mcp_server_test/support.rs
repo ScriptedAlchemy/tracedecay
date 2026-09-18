@@ -51,7 +51,7 @@ pub(crate) async fn run_server_with_messages(
 }
 
 /// As [`run_server_with_messages`], but leaves the server running when the
-/// client disconnects — [`McpServer::run_connection`] is the entry point the
+/// client disconnects, [`McpServer::run_connection`] is the entry point the
 /// daemon uses per client socket. Scenarios where a hook arrives on the host's
 /// hook socket and the follow-up tool call arrives on the agent's own socket
 /// need this: two independent connections against one live server.
@@ -309,7 +309,7 @@ pub(crate) async fn expect_mcp_runtime_event(
 }
 
 /// As [`mcp_runtime_events`], but through the production composition's
-/// retained profile authority — a second profile-scoped test runtime cannot
+/// retained profile authority, a second profile-scoped test runtime cannot
 /// open the daemon-owned profile stores.
 #[cfg(feature = "test-transport")]
 pub(crate) async fn harness_mcp_runtime_events(

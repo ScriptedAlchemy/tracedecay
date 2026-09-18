@@ -193,7 +193,7 @@ function VolumeField(props: {
       }
 
       // One needle per session per semantic bucket, scaled to the visible max.
-      // Buckets without real messages stay unpainted — never invented.
+      // Buckets without real messages stay unpainted, never invented.
       const needle = (tick: SpikeTick, on: boolean) => {
         const active = activeIds.has(tick.id);
         const u = (tick.ts - props.camera.t0) / span;
@@ -528,7 +528,7 @@ function Inspector(props: {
           </div>
           <div className="sn-kv">
             <span>Source path</span>
-            <b>{s.path ?? "unavailable — not recorded"}</b>
+            <b>{s.path ?? "unavailable, not recorded"}</b>
           </div>
           <div className="sn-kv">
             <span>Loaded source</span>
@@ -551,7 +551,7 @@ function Inspector(props: {
           </div>
           <div className="sn-row">
             <span>Lifecycle</span>
-            <span className="r is-amber">unavailable — not recorded</span>
+            <span className="r is-amber">unavailable, not recorded</span>
           </div>
           <div className="sn-row">
             <span>Source status</span>
@@ -566,11 +566,11 @@ function Inspector(props: {
           </div>
           <div className="sn-kv">
             <span>Agent · EXACT</span>
-            <b>{s.agentId ?? "unavailable — not recorded"}</b>
+            <b>{s.agentId ?? "unavailable, not recorded"}</b>
           </div>
           <div className="sn-kv">
             <span>Branch / worktree / commit / task</span>
-            <b className="is-amber">unavailable — not present in spine index</b>
+            <b className="is-amber">unavailable. Not present in spine index</b>
           </div>
           <nav className="sn-pivots" aria-label="Selected session destinations">
             <a href={loomSessionUrl(s.id)} onClick={(e) => route(e, "loom", loomSessionUrl(s.id))}>LOOM ↗</a>
@@ -669,7 +669,7 @@ function Inspector(props: {
         <Prov lab="Unavailable" n={n} total={n} kind="live" />
         <Prov lab="Transport Failure" n={0} total={n} />
         <Prov lab="Total" n={n} total={n} kind="total" />
-        <p className="sn-copy">Token counts were not copied. Every row in this snapshot is unavailable — complete/partial grades were not served.</p>
+        <p className="sn-copy">Token counts were not copied. Every row in this snapshot is unavailable, complete/partial grades were not served.</p>
       </div>
       <div className="sn-block sn-sect">
         <div className="k">TRANSCRIPT SEARCH</div>
@@ -897,7 +897,7 @@ export function SessionsPage(props: { initialSessionId?: string; onInspect?: unk
         {arrival.issue ? <p className="sn-arrival-unavailable" role="status">{arrival.issue} No session has been substituted.</p> : null}
         <section className="sn-pane sn-timeline" aria-label="Message volume timeline">
           <div className="sn-tl-head">
-            <b>MESSAGE VOLUME TIMELINE — ALL SESSIONS</b>
+            <b>MESSAGE VOLUME TIMELINE, ALL SESSIONS</b>
             <span className={`sn-mode is-${mode}`}>{mode === "fixture" ? "FIXTURE · SYNTHETIC SESSION SPINE" : "SNAPSHOT · RECORDED SESSION SPINE"}</span>
             <button
               type="button"
@@ -978,7 +978,7 @@ export function SessionsPage(props: { initialSessionId?: string; onInspect?: unk
           ) : null}
           {infoOpen ? (
             <p className="sn-copy" style={{ margin: "0 0 6px" }}>
-              Spike field is per-session volume from real spine message timestamps. 71 sessions — absent periods remain empty and no token series is invented.
+              Spike field is per-session volume from real spine message timestamps. 71 sessions, absent periods remain empty and no token series is invented.
             </p>
           ) : null}
           <div className="sn-encoding" aria-label="Timeline encoding">
@@ -1192,7 +1192,7 @@ export function SessionsPage(props: { initialSessionId?: string; onInspect?: unk
                         ) : null}
                         {cols.coverage ? (
                           <td className="cov">
-                            <span className="dim" title={`coverage: ${s.coverage} — no transcript coverage to grade`}>
+                            <span className="dim" title={`coverage: ${s.coverage}, no transcript coverage to grade`}>
                               —
                             </span>
                           </td>

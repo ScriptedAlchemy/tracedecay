@@ -482,7 +482,7 @@ fn native_hook_captures_only_bound_transport_spool_records() {
 
 // The lifecycle-guarded stdin hook surface is retired: `hook-user-session-review`
 // was the only stdin hook that acquired the lifecycle lease, and the native
-// daemon cutover (58717f2ac2) deleted the subcommand — session review now runs
+// daemon cutover (58717f2ac2) deleted the subcommand, session review now runs
 // as a bounded in-process daemon action. No stdin hook engages the lifecycle
 // lock anymore, so the external-exclusive-lease quiesce and lifecycle-path
 // drain journeys have no remaining production surface.

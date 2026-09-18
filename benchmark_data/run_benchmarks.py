@@ -1,4 +1,4 @@
-"""TraceDecay vs Token-Savior — side-by-side benchmark on Python repos.
+"""TraceDecay vs Token-Savior, side-by-side benchmark on Python repos.
 
 Adapted from token-savior's benchmarks/run_benchmarks.py
 (https://github.com/Mibayy/token-savior). Runs both tools against the same
@@ -188,7 +188,7 @@ class TraceDecayMcp:
 
     Spawns a long-lived server so per-call latency reflects actual query work
     instead of process startup + DB open. Newline-delimited JSON, no Content-
-    Length framing — see src/mcp/transport.rs.
+    Length framing, see src/mcp/transport.rs.
     """
 
     def __init__(self, root: Path, env: dict[str, str] | None = None):
@@ -428,11 +428,11 @@ def generate_report(results: list[dict], naive_sizes: dict[str, int]) -> str:
         "**Memory notes.** token-savior's peak memory is measured with `tracemalloc`",
         "(Python heap only). tracedecay runs as a subprocess, so its peak is the",
         "`ru_maxrss` delta from `getrusage(RUSAGE_CHILDREN)` (resident set size).",
-        "These are *not* identical units — treat them as order-of-magnitude.",
+        "These are *not* identical units, treat them as order-of-magnitude.",
         "",
         "**Query timing.** token-savior is called in-process (pure Python dict",
         "lookups). tracedecay is driven over MCP via `tracedecay serve --timings`",
-        "and the per-query column reports the handler's `_meta.duration_us` —",
+        "and the per-query column reports the handler's `_meta.duration_us`,",
         "i.e. the time spent inside the Rust handler, with JSON-RPC / stdio /",
         "Python-parse overhead stripped out. A warm-up call is issued before",
         "each timed loop. `get_change_impact` for tracedecay sums the handler",

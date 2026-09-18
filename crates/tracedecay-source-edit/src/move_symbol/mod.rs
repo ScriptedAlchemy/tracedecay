@@ -1,6 +1,6 @@
 //! `move_symbol`: relocate a function (Rust-first, provider-agnostic shape)
 //! from its file to a destination file. The centerpiece is the post-move
-//! **impact report** — every reference, dependency, visibility, or module
+//! **impact report**, every reference, dependency, visibility, or module
 //! concern the move raises, surfaced as evidence-based, actionable hints
 //! derived from the code graph (callers/callees) and parse-level facts
 //! (identifiers, `use` lines, module declarations). Never regex-only guessing.
@@ -53,13 +53,13 @@ const MAX_MOVE_CALLERS: usize = 100_000;
 /// `dry_run` (the default at the tool layer) computes the removal span, the
 /// destination shape, the combined preview diff, and the full impact report
 /// while writing nothing. `dry_run = false` performs the move (remove the
-/// span — docs/attrs included — from the source, insert it at the
+/// span, docs/attrs included, from the source, insert it at the
 /// destination with a blank-line separator, and auto-insert unambiguous
 /// needed imports), then returns the same impact report of everything that
 /// still needs manual attention (callers, module declaration, visibility).
 ///
 /// `update_references` is reserved for a future version; in v1 caller
-/// references are never auto-edited — the exact change rides in the hints.
+/// references are never auto-edited, the exact change rides in the hints.
 #[hotpath::skip]
 pub(crate) async fn move_symbol(
     project_root: &Path,
@@ -131,7 +131,7 @@ pub(crate) async fn move_symbol(
         ));
     }
     // A contiguous leading `//!` inner module-doc line in the attested span
-    // can never belong to the moved item — inner docs attach to the enclosing
+    // can never belong to the moved item, inner docs attach to the enclosing
     // module, not the following item. Advance past it so the source keeps its
     // module doc and the destination doesn't receive a stray `//!` mid-file
     // (a hard E0753).
@@ -394,7 +394,7 @@ fn resolve_dest_rel(project_root: &Path, dest_file: &str) -> Result<String> {
     // rebuilding from `Component::Normal` parts only. Without this a
     // `./src/pricing.rs` destination compares unequal to the graph's
     // normalized `src/pricing.rs`, slipping past the same-file guard and the
-    // collision check — the apply would then write and truncate the very same
+    // collision check, the apply would then write and truncate the very same
     // inode, silently deleting the symbol.
     let mut normalized = PathBuf::new();
     for comp in rel.components() {
@@ -597,7 +597,7 @@ async fn analyze_dependencies(
 }
 
 /// Caller hints: every graph call edge into the moved symbol, classified by
-/// whether the caller shared the source module (unqualified call — needs a
+/// whether the caller shared the source module (unqualified call, needs a
 /// `use` for the new module) or referenced it via another module (path/use
 /// now points at the old location).
 #[hotpath::skip]

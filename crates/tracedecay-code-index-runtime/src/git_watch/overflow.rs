@@ -28,7 +28,7 @@ pub enum OverflowAdmission {
     /// Already retained; nothing changed.
     AlreadyCovered,
     /// The roster is at its bound. The repository has NO coverage until the
-    /// next handshake — a truthful degraded state, logged by the caller.
+    /// next handshake, a truthful degraded state, logged by the caller.
     RosterFull,
 }
 
@@ -197,7 +197,7 @@ pub async fn cover_overflowed_repositories(watcher: &GitWatcher) {
                     // Accepted or Busy both leave the entry covered; a Busy
                     // registry is retried on the next due pass. Unmounted and
                     // IdentityMismatch mean the scheduler is not serving this
-                    // root — coverage stays typed on the roster, and the next
+                    // root, coverage stays typed on the roster, and the next
                     // real handshake re-resolves identity.
                     let _ = schedulers.request_for_root(&identity).await;
                 }

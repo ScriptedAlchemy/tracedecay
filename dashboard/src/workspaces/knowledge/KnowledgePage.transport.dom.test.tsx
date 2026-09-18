@@ -13,7 +13,7 @@ import { KnowledgePage } from "./KnowledgePage.tsx";
  * HTTP fault injection for the Knowledge workspace.
  *
  * Knowledge is the subject for headline quantities. Its rail leads with the
- * fact count at display size — the single largest number the dashboard prints —
+ * fact count at display size, the single largest number the dashboard prints , 
  * and its list has "no facts recorded" written under it. A failed read that
  * produced either one would be the project's central failure: a memory store
  * nobody could reach, reported as a memory store holding nothing.

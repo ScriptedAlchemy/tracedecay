@@ -42,7 +42,7 @@ describe('summarizeActivity', () => {
 
   it('measures the rate over a window ending now, so silence falls to zero', () => {
     // A burst of twelve events, then nothing for five minutes. The ring still
-    // holds all twelve — it only empties by being overwritten — so a rate
+    // holds all twelve, it only empties by being overwritten, so a rate
     // measured across the ring's OWN span would still be reporting the burst's
     // original rate long after the stream went quiet. That is the single
     // easiest way for this panel to lie, so it is pinned here.
@@ -50,7 +50,7 @@ describe('summarizeActivity', () => {
       pulse('heartbeat', NOW - 300_000 + index * 100),
     );
     expect(summarizeActivity(burst, NOW).ratePerMinute).toBe(0);
-    // The families are still shown — the ring is real history — but the rate
+    // The families are still shown, the ring is real history, but the rate
     // is a statement about the present and is now zero.
     expect(summarizeActivity(burst, NOW).total).toBe(12);
   });

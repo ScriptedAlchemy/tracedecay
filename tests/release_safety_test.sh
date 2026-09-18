@@ -25,11 +25,7 @@ with Path("Cargo.toml").open("rb") as handle:
     root = tomllib.load(handle)
 
 version = Path("version.txt").read_text(encoding="utf-8").strip()
-release_manifest_path = Path(
-    ".release-please-manifest-beta.json"
-    if "-" in version
-    else ".release-please-manifest.json"
-)
+release_manifest_path = Path(".release-please-manifest.json")
 release_manifest = json.loads(
     release_manifest_path.read_text(encoding="utf-8")
 )
@@ -72,16 +68,28 @@ python3 - <<'PY'
 import json
 from pathlib import Path
 
-config = json.loads(
-    Path("release-please-config-beta.json").read_text(encoding="utf-8")
+beta = json.loads(Path("release-please-config.json").read_text(encoding="utf-8"))
+stable = json.loads(
+    Path("release-please-config-stable.json").read_text(encoding="utf-8")
 )
-if config.get("draft-pull-request") is not True:
-    raise SystemExit(
-        "beta release PRs must remain draft while the generated lockfile is updated"
-    )
+# The default channel, what every push to master proposes, must be a
+# prerelease. A stable release is only reachable through the explicit dispatch
+# that selects the stable config.
+if beta.get("versioning") != "prerelease" or beta.get("prerelease") is not True:
+    raise SystemExit("release-please-config.json must propose prereleases")
+if stable.get("prerelease") or stable.get("versioning") == "prerelease":
+    raise SystemExit("release-please-config-stable.json must publish full releases")
+for path, config in (
+    ("release-please-config.json", beta),
+    ("release-please-config-stable.json", stable),
+):
+    if config.get("draft-pull-request") is not True:
+        raise SystemExit(
+            f"{path}: release PRs must remain draft while the generated lockfile is updated"
+        )
 sdk_paths = [
     item.get("path", "")
-    for item in config["packages"]["."]["extra-files"]
+    for item in beta["packages"]["."]["extra-files"]
     if str(item.get("path", "")).startswith("sdks/")
 ]
 if sdk_paths:

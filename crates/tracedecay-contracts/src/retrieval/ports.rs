@@ -113,7 +113,7 @@ impl SessionRetrievalBudgetStageV1 {
 ///
 /// Both variants are exact. A bounded read never counts the rows it declined to
 /// read, so an exhausted read reports what it consumed and that storage held
-/// more — never a total it would have to run the refused scan to learn.
+/// more, never a total it would have to run the refused scan to learn.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "observation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionRetrievalBudgetObservationV1 {
@@ -127,8 +127,8 @@ pub enum SessionRetrievalBudgetObservationV1 {
 ///
 /// `stage` names which budget refused; this is what tells an oversized request
 /// apart from a read whose cost was mis-sized for it. The ceiling value also
-/// distinguishes the resources inside one stage — a record read that stopped at
-/// 1024 hit the item count, one that stopped at 16 MiB hit the byte total — so
+/// distinguishes the resources inside one stage: a record read that stopped at
+/// 1024 hit the item count, one that stopped at 16 MiB hit the byte total, so
 /// the kernel's resource spelling stays in the kernel instead of becoming a
 /// second wire vocabulary to keep in step.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

@@ -2,7 +2,7 @@
 //!
 //! The one Doctor use case composes findings from several owning authorities.
 //! Each authority is reached through a narrow, transport-neutral *source port*
-//! defined here — the same seam pattern as
+//! defined here: the same seam pattern as
 //! [`StoreSizeTelemetryPort`](crate::storage::StoreSizeTelemetryPort): the trait
 //! and its typed read model live in this crate, and the implementation is owned
 //! by the runtime/host/configuration component that actually reads the source.
@@ -1385,7 +1385,7 @@ pub struct IngestRefusalCountV1 {
 /// Deterministic refusals advance coverage with a durable typed reason so the
 /// stream converges instead of re-reporting the same records; the plans treat
 /// those refusals as visible typed outcomes, never silent drops. This read
-/// surfaces the recorded counts truthfully — re-admission of a deterministic
+/// surfaces the recorded counts truthfully. Re-admission of a deterministic
 /// refusal would deterministically fail again, so Doctor reports rather than
 /// retries.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

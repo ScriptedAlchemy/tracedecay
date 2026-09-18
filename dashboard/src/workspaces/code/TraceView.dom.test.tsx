@@ -1,8 +1,8 @@
 /**
  * The TRACE drill-in, against the wire-true neighbors fixture.
  *
- * What this suite is protecting is not the picture — jsdom has no 2D context
- * and draws nothing — but the three claims that make the picture admissible:
+ * What this suite is protecting is not the picture, jsdom has no 2D context
+ * and draws nothing, but the three claims that make the picture admissible:
  * the caption tells the truth about what is left out, the accessible equivalent
  * carries every symbol the field would draw, and reduced motion is a rendering
  * mode with the same data rather than a switched-off feature.
@@ -123,8 +123,8 @@ describe('TraceView', () => {
     const { container } = renderTrace();
     await screen.findByText(/symbols on the field/i);
     await waitFor(() => {
-      // The strip prints the absence as a reading in its own right — the word
-      // `absent`, not a blank and not a zero — and refuses the inference that
+      // The strip prints the absence as a reading in its own right, the word
+      // `absent`, not a blank and not a zero, and refuses the inference that
       // would make it comfortable.
       const readout = container.querySelector('[data-testid="trace-readout"]')!.textContent ?? '';
       expect(readout).toMatch(/Types enteredabsent/);
@@ -135,7 +135,7 @@ describe('TraceView', () => {
     });
   });
 
-  it('carries every drawn symbol in an accessible equivalent, not just on the canvas', async () => {
+  it('carries every drawn symbol on the canvas and in an accessible equivalent', async () => {
     mockFetch();
     const { container } = renderTrace();
     await screen.findByText(/symbols on the field/i);

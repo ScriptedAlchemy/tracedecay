@@ -182,7 +182,7 @@ impl JsonlFileChangeToken {
     /// The whole token also carries ctime, which moves for metadata-only
     /// operations: a rename bumps it while every byte stays put. Only mtime
     /// answers "were this file's contents written", so the two halves are
-    /// asked separately — ctime is enough to suspect a change, mtime is what
+    /// asked separately, ctime is enough to suspect a change, mtime is what
     /// proves one.
     fn data_stamp(self) -> (i64, i64) {
         (self.mtime_seconds, self.mtime_nanos)
@@ -1167,8 +1167,8 @@ struct JsonlScanGeneration {
     change: JsonlFileChangeToken,
     file_id: u64,
     file_identity: u64,
-    /// `None` only when the scan proved it would read nothing, so no batch —
-    /// and therefore no revalidation — consumes it.
+    /// `None` only when the scan proved it would read nothing, so no batch,
+    /// and therefore no revalidation, consumes it.
     snapshot_fingerprint: Option<u64>,
     seek_to: u64,
     replacement: bool,
@@ -1297,15 +1297,15 @@ impl<'a> PreparedJsonlScan<'a> {
         // No snapshot fingerprint is minted here for the common full-file scan.
         //
         // Detecting a rewrite that lands *during* a scan needs two independent
-        // full-extent hashes — one before the read and one in `revalidate`
-        // after it — because a single pass folded into the read would hash the
+        // full-extent hashes, one before the read and one in `revalidate`
+        // after it, because a single pass folded into the read would hash the
         // rewritten bytes and match itself. On a cold catch-up every file is a
         // full-file scan, so that pair ran over the whole corpus twice:
         // ingesting 109 MB of transcript charged 43.5 GB of hashing.
         //
-        // `revalidate` fails closed on every observable change without it —
-        // identity (which covers the head window and the inode), size, and
-        // mtime. What is given up is a rewrite that preserves all three: same
+        // `revalidate` fails closed on every observable change without it.
+        // Identity (which covers the head window and the inode), size, and
+        // mtime still trip the check. What is given up is a rewrite that preserves all three: same
         // inode, same length, same head window, landing inside the same mtime
         // second as the scan. The pair is still spent on the one path that has
         // real evidence of rewriting, where `rewritten_jsonl_generation` above
@@ -1775,7 +1775,7 @@ impl<'a> RawJsonlBatchScanner<'a> {
         //
         // * identity covers the inode and the head window;
         // * a length below what was read means the file shrank under the scan;
-        // * a moved change token means the inode was touched — but not what
+        // * a moved change token means the inode was touched, but not what
         //   was done to it. Length cannot tell the cases apart: a rename moves
         //   ctime without writing a byte, an append writes only past what this
         //   scan consumed, and a same-size rewrite replaces everything. So
@@ -2043,7 +2043,7 @@ mod tests {
     /// while it is scanned is the normal case for a live session, and the
     /// appended bytes are past what the scan consumed. Growth moves the same
     /// change token an in-place rewrite moves, so this pins that growth alone
-    /// is not treated as a changed generation — otherwise every scan of an
+    /// is not treated as a changed generation, otherwise every scan of an
     /// active session would fail and retry forever.
     #[test]
     fn concurrent_append_during_a_scan_is_not_a_generation_change() {

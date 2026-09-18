@@ -44,8 +44,8 @@ use tracedecay_graph_query::context::markdown_sections::{
 };
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
-/// Adds the section lane — title, truncated preview, full-body retrieval
-/// handle, line span, and parsed section structure — to every markdown section
+/// Adds the section lane, title, truncated preview, full-body retrieval
+/// handle, line span, and parsed section structure, to every markdown section
 /// symbol in a `{"symbols": [...]}` container.
 ///
 /// This is an enrichment of a surface that already answered: a file that cannot

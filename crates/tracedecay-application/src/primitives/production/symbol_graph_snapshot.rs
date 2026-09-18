@@ -23,7 +23,7 @@ use crate::lsp_runtime::LspCodeIndexProjectionIdentityPort;
 /// The generation is resolved per call rather than captured when the runtime
 /// mounts. A cached watermark would give two different graph states one cursor
 /// identity, so a cursor minted before a publication would keep verifying
-/// against the rows that replaced it — the page-set would change underneath the
+/// against the rows that replaced it. The page-set would change underneath the
 /// caller with nothing in the answer saying so.
 pub struct ProjectSymbolGraphCursorSnapshotAuthority {
     pub(super) key: SignedCursorKeyRefV1,
@@ -79,8 +79,8 @@ impl SymbolGraphCursorSnapshotAuthority for ProjectSymbolGraphCursorSnapshotAuth
                 })?;
             let code_generation_id = graph_identity.code_generation_id.clone();
             // Every component of the published generation's address folds into
-            // the identity, so any republication — even one that leaves the
-            // generation sequence alone — produces a different snapshot and
+            // the identity, so any republication, even one that leaves the
+            // generation sequence alone, produces a different snapshot and
             // therefore refuses cursors minted before it. A dirty worktree
             // seals no commit, so the revision rides along as an option: the
             // generation and content digests already distinguish its rows.
@@ -88,8 +88,8 @@ impl SymbolGraphCursorSnapshotAuthority for ProjectSymbolGraphCursorSnapshotAuth
             // Where each part is bound decides how a refusal is *typed*, and
             // the cursor codec checks the request binding before the
             // watermarks. Binding the generation into the request digest would
-            // therefore report an ordinary publication as a wrong request —
-            // indistinguishable from a forged cursor — so the generation rides
+            // therefore report an ordinary publication as a wrong request,
+            // indistinguishable from a forged cursor, so the generation rides
             // the watermarks (a mismatch there is already typed stale) and only
             // the finer content digests ride the configuration binding, which
             // is checked last and so speaks only for a republication that left

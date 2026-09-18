@@ -6,8 +6,8 @@
 //! `Send` for a generic associated write transaction.
 //!
 //! These traits intentionally do not share
-//! `SessionTemporalQuery`/`SessionTemporalExec`/`SessionTemporalWriteTxn` —
-//! this crate cannot depend on `tracedecay-session-temporal-store`. Two ports
+//! `SessionTemporalQuery`/`SessionTemporalExec`/`SessionTemporalWriteTxn`.
+//! This crate cannot depend on `tracedecay-session-temporal-store`. Two ports
 //! at two layers, one implementor, is the same relationship
 //! `registered_lcm` already has with `SessionTemporalAccess`.
 

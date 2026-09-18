@@ -272,7 +272,7 @@ pub(in crate::hooks) fn is_harness_memory_path(path: &str) -> bool {
 const REDUNDANCY_EDIT_MIN_LINES: usize = 8;
 
 /// True when a Write/Edit/MultiEdit event adds a new function-shaped body of
-/// meaningful size — the case where the model may be re-implementing logic that
+/// meaningful size, the case where the model may be re-implementing logic that
 /// already exists. Conservative by design (prefers missing a hint over
 /// spamming), and `O(len(edit_text))`: pure string scanning over the added text
 /// already in hand, with no AST parsing and no file I/O.
@@ -726,7 +726,7 @@ pub(super) fn asks_for_session_recall(text: &str) -> bool {
 }
 
 /// Distinctive confusion phrases that mean the agent found changes it did not
-/// make — commits, amends, force-pushes, or working-tree drift it cannot
+/// make, commits, amends, force-pushes, or working-tree drift it cannot
 /// account for. Grounded in real sessions that guessed instead of attributing
 /// (e.g. blind `git log` after a parallel agent amended the branch). Kept
 /// narrow on purpose: benign `git status`/`git commit` narration must not fire

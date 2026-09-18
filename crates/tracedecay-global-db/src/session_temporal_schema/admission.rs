@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 use crate::configuration::FreshConfigurationStoreEvidence;
@@ -218,7 +218,7 @@ pub(super) async fn validate_current_session_temporal_schema(
 
 /// True only when the persisted `session_relation_receipts` column list is
 /// exactly the final list minus its trailing recovery columns. Every other
-/// shape — including a partially added recovery set — is left for the final
+/// shape, including a partially added recovery set, is left for the final
 /// contract to refuse with its precise typed reason.
 async fn session_relation_receipts_lack_recovery_columns(
     conn: &impl QueryExecutor,
@@ -378,7 +378,7 @@ async fn validate_temporal_table_definition_digest(
     let sql = row
         .get::<String>(0)
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let digest = hex::encode(Sha256::digest(normalize_schema_sql(&sql).as_bytes()));
+    let digest = sha256_hex(normalize_schema_sql(&sql).as_bytes());
     if digest != expected_digest {
         return Err(session_temporal_reset_required(format!(
             "temporal table '{table}' has an incompatible CREATE TABLE contract"

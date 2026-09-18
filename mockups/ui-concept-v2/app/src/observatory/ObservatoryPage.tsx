@@ -129,7 +129,7 @@ function TimelineStrip(props: { mode: "snapshot" | "fixture"; attention: Attenti
   );
 }
 
-/* ---- doctor inspection (unlit instrument — no run in pack) ---- */
+/* ---- doctor inspection (unlit instrument, no run in pack) ---- */
 
 const MATRIX_COLS = 9;
 const MATRIX_ROWS = 8;
@@ -145,7 +145,7 @@ function DoctorCard(props: WellProps) {
       title="DOCTOR INSPECTION"
       state="unavailable"
       meta="COVERAGE —"
-      footer="LAST RUN — NONE IN SNAPSHOT"
+      footer="LAST RUN, NONE IN SNAPSHOT"
     >
       <span className="ob-doctor">
         <span className="ob-doctor-list">
@@ -253,14 +253,14 @@ const RING_X = FLOW_W * (5.5 / 7);
 const SERVE_X = (FLOW_W * 6.5) / 7;
 const STAGE5_XS = Array.from({ length: 5 }, (_, i) => (FLOW_W * (i + 0.5)) / 7);
 
-/* a gently wandering centerline — small amplitude so no single stroke can be
+/* a gently wandering centerline, small amplitude so no single stroke can be
  * traced left-to-right */
 function centerY(x: number) {
   return FLOW_MID + 5.5 * Math.sin((x / FLOW_W) * Math.PI * 4.6 + 1.1) + 3.5 * Math.sin((x / FLOW_W) * Math.PI * 9.7);
 }
 
 /* the luminous body widens and brightens under each stage label (and around
- * the ring), narrowing to bright waists in between — a volume, not a wave */
+ * the ring), narrowing to bright waists in between. A volume, not a wave */
 function bloomAt(x: number) {
   let b = 0;
   for (const sx of STAGE5_XS) b = Math.max(b, 1 - Math.abs(x - sx) / 86);
@@ -287,14 +287,14 @@ function volumePath(widthAt: (x: number) => number) {
   return `M ${top.join(" L ")} L ${bot.join(" L ")} Z`;
 }
 
-/* faint haze base only — the luminous interior is built from overlapping
+/* faint haze base only. The luminous interior is built from overlapping
  * filaments so nothing reads as continuous paint */
 const VOLUME_LAYERS = [
   { d: volumePath((x) => Math.max(5, halfWidth(x))), cls: "v-outer", o: 0.035 },
   { d: volumePath((x) => Math.max(3, halfWidth(x) * 0.6)), cls: "v-mid", o: 0.025 },
 ];
 
-/* the luminous body: dozens of filaments spanning the volume width — wide at
+/* the luminous body: dozens of filaments spanning the volume width, wide at
  * the blooms, converging at the waists; overlap makes the interior bright
  * while no single stroke is bright enough to trace */
 type Strand = { d: string; o: number; w: number; kind: "fan" | "in" | "hot" };
@@ -327,7 +327,7 @@ const FLOW_STRANDS: Strand[] = (() => {
     const u = side * (0.4 + rnd() * 0.45);
     strands.push({ d: make(u, 3), o: 0.12 + rnd() * 0.18, w: 0.3 + rnd() * 0.4, kind: "in" });
   }
-  /* white-hot glints woven through both sides of the body — bimodal, so no
+  /* white-hot glints woven through both sides of the body, bimodal, so no
    * single centerline stroke exists */
   for (let i = 0; i < 4; i++) {
     const side = i % 2 === 0 ? 1 : -1;
@@ -524,7 +524,7 @@ function HooksCard(props: WellProps) {
     >
       <span className="ob-hooks">
         <span className="ob-hooks-lab cyan">
-          <i /> hook events — host file
+          <i /> hook events, host file
         </span>
         {HOOKS.events.map((r) => (
           <span key={r.name} className="ob-hooks-row">
@@ -888,7 +888,7 @@ function inspectBody(well: Well): InspectorBody {
         source: "core local refs",
         scope: `${BRANCHES.project} · ${BRANCHES.projectId.slice(0, 16)}…`,
         affected: `${fmt(BRANCHES.localRefCount)} local refs · ${BRANCHES.prefixCount} prefixes`,
-        details: `Host-measured refs grouped by prefix — top ${BRANCHES.prefixes[0].prefix} ${fmt(BRANCHES.prefixes[0].count)} · ${BRANCHES.prefixes[1].prefix} ${fmt(BRANCHES.prefixes[1].count)} · ${BRANCHES.prefixes[2].prefix} ${fmt(BRANCHES.prefixes[2].count)}. Not 3,842 orphaned segments.`,
+        details: `Host-measured refs grouped by prefix, top ${BRANCHES.prefixes[0].prefix} ${fmt(BRANCHES.prefixes[0].count)} · ${BRANCHES.prefixes[1].prefix} ${fmt(BRANCHES.prefixes[1].count)} · ${BRANCHES.prefixes[2].prefix} ${fmt(BRANCHES.prefixes[2].count)}. Not 3,842 orphaned segments.`,
         notes: "Orphan census, prune plan and ETA stay typed absent.",
       };
     default: {

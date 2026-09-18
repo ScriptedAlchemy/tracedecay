@@ -1,7 +1,7 @@
 //! Deterministic memory-hygiene rules: secret-like content detection and
 //! transient run-output detection.
 //!
-//! These are conservative, rule-based checks — no model is ever invoked from
+//! These are conservative, rule-based checks, no model is ever invoked from
 //! Rust. Standalone tracedecay only *rejects* secret-like writes and *proposes*
 //! hygiene deletions in the curation dry-run plan; any LLM review of those
 //! proposals lives exclusively in the Hermes wrapper layer (capabilities keep
@@ -83,7 +83,7 @@ fn transient_regexes() -> Result<&'static [(Regex, &'static str)], &'static rege
 
 /// Flags facts that look like ephemeral run output (ports, PIDs, one-off
 /// /tmp paths, run-log lines) rather than durable knowledge. Used ONLY by the
-/// curation planner to mark prune CANDIDATES — never to reject or delete
+/// curation planner to mark prune CANDIDATES, never to reject or delete
 /// anything on its own.
 pub fn detect_transient(content: &str) -> Option<String> {
     let Ok(patterns) = transient_regexes() else {

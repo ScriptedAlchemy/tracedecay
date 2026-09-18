@@ -8,7 +8,7 @@ mod runtime_adapters;
 
 /// Kernel config-error mapping for analyzer failures.
 ///
-/// Lives here — not in `tracedecay-runtime-core` — so the kernel path does not
+/// Lives here, not in `tracedecay-runtime-core`, so the kernel path does not
 /// depend on the LSP crate or its lite grammars. A `From` impl is illegal here
 /// (orphan rule: neither type is local).
 pub fn analyzer_runtime_config_error(error: AnalyzerRuntimeError) -> TraceDecayError {

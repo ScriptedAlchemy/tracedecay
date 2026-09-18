@@ -82,7 +82,7 @@ pub use retention::{
 
 /// The LCM token-budget heuristic: whitespace-delimited words, never zero.
 ///
-/// Every LCM budget decision is denominated in this unit — the compression
+/// Every LCM budget decision is denominated in this unit, the compression
 /// trigger, the replay accounting, the retrieval window, and the policy
 /// reducer. It lives here, above both the contract reducers and the runtime,
 /// because the four of them must agree: a heuristic that only some callers
@@ -103,7 +103,7 @@ pub(crate) fn lcm_budget_tokens(text: &str) -> i64 {
 /// String bodies stay strings; `{ "text": ... }` objects and arrays of
 /// `{ "text": ... }` parts contribute that text. Structured payloads with no
 /// text parts fall through to `Value`'s compact Display so a count is still
-/// produced — never a silent empty from a failed stringify.
+/// produced, never a silent empty from a failed stringify.
 pub(crate) fn lcm_message_visible_text(message: &Value) -> String {
     match visible_content(message) {
         VisibleContent::Empty => String::new(),

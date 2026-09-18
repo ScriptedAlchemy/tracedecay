@@ -95,7 +95,7 @@ export interface DeclaredRetentionLifecycle {
   observedAge: string | null;
 }
 
-/** The lifetimes Plan 26 declares for optional analytics. Declared policy — the
+/** The lifetimes Plan 26 declares for optional analytics. Declared policy, the
  * view labels them as such and never presents them as observed ages. */
 export const DECLARED_RETENTION_LIFECYCLES: readonly DeclaredRetentionLifecycle[] = [
   {
@@ -141,7 +141,7 @@ export interface RetentionBacklogReading {
  * `/api/storage/findings` publishes a typed status per Doctor storage finding
  * kind. `retention_backlog` says whether retention work is falling behind, and
  * its `state` distinguishes a real reading from a partial one from a kind this
- * build does not support — three different things that a single count would
+ * build does not support, three different things that a single count would
  * flatten.
  */
 export function retentionBacklogReading(
@@ -165,7 +165,7 @@ export function retentionBacklogReading(
 }
 
 /** The findings source state, in the shared domain-state vocabulary. `real` is
- * `ready` only in the sense that the source answered — it says nothing about
+ * `ready` only in the sense that the source answered, it says nothing about
  * whether the backlog itself is healthy, and nothing here grades it. */
 function findingSourceState(state: StorageFindingKindStatusV1['state']): DomainStateKind {
   switch (state) {

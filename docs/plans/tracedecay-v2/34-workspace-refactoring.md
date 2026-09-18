@@ -67,11 +67,11 @@ remotes.
 
 Each known site has exactly one typed disposition:
 
-- `changed` — a planned bound edit;
-- `unchanged` — already correct or an approved compatibility surface;
-- `skipped` — deliberately excluded, generated, unsupported, or protected,
+- `changed`, a planned bound edit;
+- `unchanged`, already correct or an approved compatibility surface;
+- `skipped`, deliberately excluded, generated, unsupported, or protected,
   with a reason; or
-- `blocked` — unsafe until ambiguity, collision, unsupported required syntax,
+- `blocked`, unsafe until ambiguity, collision, unsupported required syntax,
   stale state, or invalid naming is resolved.
 
 Markdown and JSON render the same typed result, counts, blocked sites, and

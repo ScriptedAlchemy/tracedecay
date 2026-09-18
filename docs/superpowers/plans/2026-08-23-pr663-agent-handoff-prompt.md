@@ -1,4 +1,4 @@
-# Copy/Paste Agent Handoff — Finish PR #663 and Remove Runtime Bottlenecks
+# Copy/Paste agent handoff. Finish PR #663 and remove runtime bottlenecks
 
 Copy everything below the divider into a fresh agent chat.
 
@@ -56,7 +56,7 @@ gh pr checks 663 --json name,bucket,state,workflow,link
 
 If refs or dirty ownership changed, update the plan before proceeding. Never reset, stash, format, stage, or commit another owner's work. Re-read each file immediately before editing. Do not launch Cargo while an equivalent peer build is active, and never kill peer builds or the live daemon.
 
-## Work already completed — do not redo it
+## Work already completed, do not redo it
 
 - `150ac00b5 test(release): verify canonical provenance helper`
   - Behavioral release-helper guard is fixed.

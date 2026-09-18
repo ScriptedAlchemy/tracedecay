@@ -291,7 +291,7 @@ const SUMMARY_EVIDENCE_ROLE: &str = "summary";
 ///
 /// The summary channel's listing and full-text matches are summaries by
 /// construction, and an anchor lookup resolves either an occurrence or a
-/// summary node — a summary describe hydrates over its summary anchor and lands
+/// summary node, a summary describe hydrates over its summary anchor and lands
 /// on the anchor channel. Both carry the summary identity in
 /// `retriever_record_id` and the summary evidence role, and neither has an
 /// occurrence identity whose logical copies could be loaded.

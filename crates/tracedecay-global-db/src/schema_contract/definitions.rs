@@ -1810,7 +1810,7 @@ pub(super) const REGISTRY_TABLE_NAMES: &[&str] = &[
     "graph_scopes",
     "store_artifacts",
     // Deletion tombstones gate replay, restore, and project-open admission, so
-    // the public registry contract must prove their shape too — not only the
+    // the public registry contract must prove their shape too, not only the
     // fail-closed admission check in `ensure_registered_schema_for_admission`.
     "remote_deletion_tombstones",
 ];

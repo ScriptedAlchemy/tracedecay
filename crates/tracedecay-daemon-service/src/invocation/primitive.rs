@@ -44,7 +44,7 @@ pub(super) async fn execute_primitive(
     };
     // The route reaching here already passed project resolution and an
     // admitted project open, so a missing per-project runtime is the
-    // registration still mounting behind the core publication — a retryable
+    // registration still mounting behind the core publication, a retryable
     // unavailable state. Concealing it as not-found would misreport an
     // authenticated project the caller is standing in.
     let dispatch = service

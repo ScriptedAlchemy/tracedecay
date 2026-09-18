@@ -1412,7 +1412,7 @@ fn decode_usize(value: i64, operation: &'static str) -> ProjectionStoreResult<us
 /// `observations`. The query's row cursor lives only inside this function and
 /// is fully consumed and dropped before it returns, so a caller may safely go
 /// on to read or write further rows through the same connection and observe
-/// them — a cursor left open past that point would otherwise pin the
+/// them, a cursor left open past that point would otherwise pin the
 /// connection's read snapshot and hide those subsequent writes.
 async fn read_observation_frontier(conn: &impl QueryExecutor) -> ProjectionStoreResult<u64> {
     let mut rows = conn

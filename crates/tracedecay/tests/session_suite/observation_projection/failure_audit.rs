@@ -575,7 +575,7 @@ async fn environmental_raw_authority_failure_schedules_projection_retry() {
 
     // Fail the same raw-authority write the sanitization refusal flows
     // through, but with an engine fault: this side of the boundary must stay
-    // environmental — retained on the queue with a durable retry, never a
+    // environmental, retained on the queue with a durable retry, never a
     // committed skip disposition.
     let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
     raw_conn

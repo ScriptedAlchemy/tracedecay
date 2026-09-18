@@ -5,7 +5,7 @@
 //! and code-index surfaces that crate carries.
 //!
 //! This crate must never depend on `tracedecay-application`,
-//! `tracedecay-code-index`, `tracedecay-search-eval`, or `tracedecay-lsp` —
+//! `tracedecay-code-index`, `tracedecay-search-eval`, or `tracedecay-lsp`,
 //! that boundary is the point of the extraction.
 
 pub mod anchor_resolution;

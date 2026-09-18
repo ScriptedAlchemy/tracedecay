@@ -1,7 +1,7 @@
 //! Process-wide resolution of the `git` binary.
 //!
 //! The daemon and CLI spawn `git` from ~13 sites. A bare `Command::new("git")`
-//! makes the OS re-walk `PATH` on every spawn — cheap on Linux/macOS but
+//! makes the OS re-walk `PATH` on every spawn, cheap on Linux/macOS but
 //! ~100-300ms per spawn on Windows. This module resolves the `git` binary to an
 //! absolute path exactly once (cached in a [`OnceLock`]) and hands every product
 //! spawn site that cached path, so the long-running daemon never re-walks `PATH`.

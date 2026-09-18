@@ -164,7 +164,7 @@ fn replay_in_transaction(
 ///
 /// The identity is derived from the owner scope, the assigned sequence, and the
 /// command id, so the same draft at the same journal position always yields the
-/// same event id — an identity that is reproducible from the journal rather
+/// same event id, an identity that is reproducible from the journal rather
 /// than drawn from a clock or a counter the caller cannot see.
 fn mint_event(
     draft: &WorkProductEventDraftV1,

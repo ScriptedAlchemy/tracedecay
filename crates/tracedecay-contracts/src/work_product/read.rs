@@ -277,7 +277,7 @@ pub enum WorkGraphTimelineCoverageV1 {
 /// event records the relation scopes it was admitted under, and a selection
 /// that does not name them puts that event *outside* the slice. The events
 /// outside a selection do not poison the ones inside it, but they must never be
-/// concealed either — a caller who is shown the covered slice with no way to
+/// concealed either, a caller who is shown the covered slice with no way to
 /// learn that more exists is reading a silently incomplete graph.
 ///
 /// So the read answers over the covered slice and says so, in the same
@@ -495,7 +495,7 @@ impl WorkGraphReadV1 {
 
     /// How much of the owner's journal this selection covered. `Partial` means
     /// the entries below are the covered slice and scoped events exist outside
-    /// it — never that the graph is broken.
+    /// it, never that the graph is broken.
     #[hotpath::skip]
     pub const fn selection_coverage(&self) -> &WorkGraphSelectionCoverageV1 {
         match self {

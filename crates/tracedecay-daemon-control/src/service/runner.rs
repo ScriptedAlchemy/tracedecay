@@ -510,7 +510,7 @@ const TRANSIENT_BOOTSTRAP_INITIAL_BACKOFF: std::time::Duration =
     std::time::Duration::from_millis(200);
 const TRANSIENT_BOOTSTRAP_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_millis(1600);
 
-/// Matches only launchd's EIO bootstrap rejection — the transient window
+/// Matches only launchd's EIO bootstrap rejection, the transient window
 /// while the booted-out job is still draining. Other bootstrap failures
 /// (bad plist, permission, unknown domain) are not transient and must fail.
 pub(super) fn launchctl_output_is_transient_bootstrap_failure(output: &str) -> bool {

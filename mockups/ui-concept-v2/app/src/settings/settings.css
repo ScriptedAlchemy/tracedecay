@@ -1,4 +1,4 @@
-/* Settings interior — effective configuration review, night-glass.
+/* Settings interior, effective configuration review, night-glass.
    HUD shell owns rail / register / status strip / stamp. */
 
 .st-root {
@@ -21,7 +21,7 @@
   color: #7e8c9a;
 }
 
-/* ---- sections nav — plate-weight rail ---- */
+/* ---- sections nav, plate-weight rail ---- */
 
 .st-nav {
   grid-row: 1;
@@ -318,7 +318,7 @@
 }
 .st-row.is-sel .p-snapshot i { color: var(--signal-cyan); }
 
-/* validated-patch box — inline under the selected row (plate stack).
+/* validated-patch box. Inline under the selected row (plate stack).
    Read-only snapshot: no write path, both buttons stay disabled. */
 
 .st-apply {

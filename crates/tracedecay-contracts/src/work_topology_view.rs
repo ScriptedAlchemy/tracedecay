@@ -6,7 +6,7 @@
 //! placement lanes come from the durable placement relation joined to the
 //! attempt page, and the branch/review/integration dimensions carry the
 //! resolved work topology policy the run environment is pinned to. Nothing
-//! is synthesized — a scope with no Work is the explicit `Absent` state, and
+//! is synthesized, a scope with no Work is the explicit `Absent` state, and
 //! the view is always bound to the verified topology generation the attempt
 //! page was read under.
 

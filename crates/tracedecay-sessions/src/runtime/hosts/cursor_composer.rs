@@ -2,18 +2,18 @@
 //!
 //! Cursor's primary chat history does not live in the
 //! `~/.cursor/projects/<slug>/agent-transcripts/**.jsonl` files that
-//! [`crate::runtime::cursor`] sweeps — those cover only a slice of activity.
+//! [`crate::runtime::cursor`] sweeps, those cover only a slice of activity.
 //! The bulk lives in two SQLite-backed stores this module reads **strictly
 //! read-only**:
 //!
-//! 1. The global `~/.config/Cursor/User/globalStorage/state.vscdb` — a
+//! 1. The global `~/.config/Cursor/User/globalStorage/state.vscdb`, a
 //!    single-table (`cursorDiskKV`) key/value store with:
-//!    * `composerData:<composerId>` — one JSON *session envelope* per chat
+//!    * `composerData:<composerId>`, one JSON *session envelope* per chat
 //!      (name, createdAt/lastUpdatedAt, model, workspace path, an ordered
 //!      `fullConversationHeadersOnly` list of bubble ids, todos, git repos, …).
-//!    * `bubbleId:<composerId>:<bubbleId>` — one JSON *message record* per turn
+//!    * `bubbleId:<composerId>:<bubbleId>`, one JSON *message record* per turn
 //!      (text, thinking, `toolFormerData`, tokenCount, commits, pullRequests …).
-//! 2. The newer per-session `~/.cursor/chats/<ws-hash>/<agentId>/store.db` — a
+//! 2. The newer per-session `~/.cursor/chats/<ws-hash>/<agentId>/store.db`, a
 //!    content-addressed blob DAG (`meta` + `blobs`) walked from
 //!    `latestRootBlobId`. Best-effort: the plain-JSON `{role,content}` leaf
 //!    blobs are ingested; protobuf-framed leaves are tolerated but skipped.
@@ -29,7 +29,7 @@
 //! conditional materialization) against the shared observation / JSONL frame
 //! ceilings and the pass byte budget before any Rust
 //! `String`/`Vec`/`serde_json::Value` allocation.
-//! `store.db` blobs are fetched by id while walking the reachable DAG — never
+//! `store.db` blobs are fetched by id while walking the reachable DAG, never
 //! collected via `SELECT id, data FROM blobs`.
 //!
 //! ## Incremental + dedupe

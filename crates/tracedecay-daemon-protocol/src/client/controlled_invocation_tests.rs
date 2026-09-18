@@ -640,8 +640,8 @@ async fn two_hundred_invocations_use_at_most_eight_connections_without_leaks() {
 }
 
 /// A daemon restart closes every pooled stream at once and rotates the
-/// authority record. That rotation — not the first transport failure by
-/// itself — is what drains the pool, so the next request handshakes exactly
+/// authority record. That rotation, not the first transport failure by
+/// itself, is what drains the pool, so the next request handshakes exactly
 /// one fresh connection instead of failing once per dead idle stream.
 #[tokio::test]
 async fn daemon_restart_with_rotated_authority_purges_idle_connections_before_reconnect() {

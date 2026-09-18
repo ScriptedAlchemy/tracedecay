@@ -196,7 +196,7 @@ function twoIdHops(enrolled: string[], rows: SpineRow[]): AttributionHop[] {
 
 function worktreeHops(project: ProjectBody): AttributionHop[] {
   // Pipes exist only because these checkouts share git_common_dir.
-  // Hub is massless and is not a soma — pairs among checkouts, 1/3 energy.
+  // Hub is massless and is not a soma, pairs among checkouts, 1/3 energy.
   if (!project.linkedHub || project.checkouts.length < 2) return [];
   const hops: AttributionHop[] = [];
   for (let i = 0; i < project.checkouts.length; i++) {

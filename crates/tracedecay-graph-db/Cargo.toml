@@ -51,41 +51,6 @@ eval-helpers = []
 # never LPG data.
 graph-disk-tier = ["grafeo-engine/spill"]
 
-# `graph-tiered-storage` adds grafeo-core's own `tiered-storage` feature on
-# top. Despite the name that feature is NOT about disk: it swaps the LPG
-# store's `FxHashMap<Id, VersionChain<Record>>` for an arena + `VersionIndex`
-# + compressed `EpochStore`, all of which are heap-resident (the arena calls
-# `std::alloc::alloc`; `EpochStore` holds `RwLock<HashMap<EpochId, ..>>`).
-#
-# This was unusable on published grafeo 0.5.42:
-# `Arena::alloc_value_with_offset` only ever allocated into `chunks.first()`,
-# because `HotVersionRef` addressed records by a u32 offset within a single
-# 1 MiB chunk that `LpgStore` had no way to enlarge. `NodeRecord` is 32
-# bytes, so an epoch hit a hard ceiling near 32 Ki records and then panicked
-# in `node_ops.rs` on `AllocError::InsufficientSpace`. The fork wired in
-# through `[patch.crates-io]` at the workspace root fixes it: the u32 is now
-# a flat address over the epoch's chunks, so an epoch grows to the 4 GiB a
-# u32 can reach and exhaustion is a typed error.
-#
-# The fix holds -- `tests/tiered_storage_rss.rs` commits full native staging
-# pages (`MAX_NATIVE_GENERATION_STAGE_MUTATIONS`), twice the old ~32 Ki
-# ceiling, without panicking. It just does not pay off. The
-# arena costs resident memory rather than saving it, because nothing here is
-# ever written to disk: measured with that harness on the fork, live VmRSS
-# with the store open runs +22% at 100k rows, +32% at 500k, and +28% at 1M
-# (1873.8 -> 2405.7 MiB), and peak VmHWM +10%. Commit time is 3.3x worse at
-# 100k and roughly a wash by 1M.
-#
-# So this feature is a NO-GO for enabling, and the ceiling being gone is not
-# an argument for it. Keep it off; it exists to keep the fork exercised and
-# to make re-measuring cheap if grafeo ever gives `LpgStore` a real on-disk
-# representation.
-graph-tiered-storage = [
-    "graph-disk-tier",
-    "grafeo-core/tiered-storage",
-    "grafeo-core/mmap",
-]
-
 [dependencies]
 grafeo-adapters.workspace = true
 grafeo-common.workspace = true
@@ -101,7 +66,6 @@ grafeo-common.workspace = true
 grafeo-core = { workspace = true, features = ["compact-store"] }
 grafeo-engine = { workspace = true, features = ["mmap", "compact-store"] }
 grafeo-storage.workspace = true
-fs2 = "0.4"
 hex = "0.4"
 hotpath.workspace = true
 parking_lot = { version = "0.12", features = ["arc_lock", "send_guard"] }
@@ -163,7 +127,7 @@ name = "tiered_storage_rss"
 required-features = ["test-helpers"]
 
 # Residency probe for consecutive generation cycles (stage, retire, repeat)
-# on one incarnation — the issue #762 cross-cycle retention journey. Also
+# on one incarnation, the issue #762 cross-cycle retention journey. Also
 # `#[ignore]`d.
 [[test]]
 name = "generation_cycle_rss"

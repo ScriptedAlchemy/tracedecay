@@ -1,5 +1,5 @@
 /**
- * ADOPTION COVERAGE — eligible versus observed, late/dropped/capped,
+ * ADOPTION COVERAGE. Eligible versus observed, late/dropped/capped,
  * suppression, and denominator failures.
  *
  * Two independent reads: `GET /api/observatory` for the canonical event
@@ -64,7 +64,7 @@ export function AdoptionCoverage({ reads }: { reads: ObservatoryAccountingReads 
       title="Adoption coverage"
       blurb={
         'eligible versus observed, late/dropped/capped, suppression, and denominator failures' +
-        ' — the conditions under which the other accounting views may be read'
+        ', the conditions under which the other accounting views may be read'
       }
       result={read.result}
       pending={read.pending}
@@ -437,7 +437,7 @@ function CoverageFamilies({
       />
       <p className="text-3xs leading-snug text-text-muted" data-coverage-withheld={withheld}>
         {withheld} of {rows.length} families are withheld above. That number is this view&apos;s own
-        withholding, not a count of silent producers — the reading on each row says which it is.
+        withholding, not a count of silent producers, the reading on each row says which it is.
       </p>
     </>
   );

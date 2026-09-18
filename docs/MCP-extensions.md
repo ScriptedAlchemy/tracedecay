@@ -1,4 +1,4 @@
-# MCP Extensions — Candidate Tools
+# MCP extensions. Candidate tools
 
 Patterns observed across Claude Code sessions that current tracedecay tools don't cover well.
 Each entry explains what triggered it, what the workaround looked like, and what the tool should do.
@@ -19,7 +19,7 @@ Cross-project scan of ~32 project transcripts (~161 MB) backing the gap analysis
 | `git log` / `show` / `blame` | 130 / 32 / 1 |
 
 The 23× ratio of Bash : tracedecay for code research is the headline. Three highest-volume
-gaps — compile diagnostics, file-symbol skeletons, and AST-pattern search — are responsible
+gaps, compile diagnostics, file-symbol skeletons, and AST-pattern search, are responsible
 for roughly 60% of it. New entries below (`tracedecay_diagnostics`, `tracedecay_unsafe_patterns`,
 `tracedecay_signature_search`, etc.) target each in turn; the existing `tracedecay_outline`
 proposal already covers the symbol-skeleton case and is reinforced by the new evidence.
@@ -28,7 +28,7 @@ proposal already covers the symbol-skeleton case and is reinforced by the new ev
 
 ## `tracedecay_field_sites`
 
-**Trigger:** Evolving a struct field — adding `last_sync_duration_ms` to `GraphStats` required
+**Trigger:** Evolving a struct field, adding `last_sync_duration_ms` to `GraphStats` required
 finding every place `last_sync_at` was *written* across the codebase. After `tracedecay_search`
 identified the symbol, 4 separate `grep` passes were needed to locate all write sites in different
 files and function bodies.
@@ -42,7 +42,7 @@ reads vs. writes.
 { "field": "GraphStats::last_sync_at" }
 ```
 
-**Returns:** Two lists — `write_sites` and `read_sites` — each with file, line, enclosing
+**Returns:** Two lists, `write_sites` and `read_sites`, each with file, line, enclosing
 function, and a short code snippet. Optionally filterable to writes-only.
 
 **Value:** Any time a field is renamed, removed, or gets a new invariant, the write-site list
@@ -78,7 +78,7 @@ implementor to an interface. Currently answered by grepping for each method name
 
 **Trigger:** Adding a required field `last_sync_duration_ms` to `GraphStats` required finding
 every struct literal `GraphStats { ... }` to add the new field. `tracedecay_callers` doesn't cover
-struct construction — only function calls.
+struct construction, only function calls.
 
 **Gap:** Struct literal construction sites are invisible to the existing call-graph tools.
 
@@ -100,11 +100,11 @@ for languages without exhaustive struct checking.
 ## `tracedecay_outline`
 
 **Trigger:** In quality-improvement sessions, the common opening move was
-`wc -l src/main.rs && grep -n "^pub fn\|^pub struct\|^pub enum\|^impl"` — a "get bearings"
+`wc -l src/main.rs && grep -n "^pub fn\|^pub struct\|^pub enum\|^impl"`, a "get bearings"
 sweep before diving into a large file. `tracedecay_module_api` shows only the public API;
 `tracedecay_context` is heavier than needed when you just want navigation landmarks.
 The cross-project scan found **618** invocations of this pattern, the single largest
-grep category — confirming it as a recurring opening move on essentially any large file.
+grep category, confirming it as a recurring opening move on essentially any large file.
 
 **Gap:** No lightweight "what's in this file?" dump that includes private symbols with line numbers.
 
@@ -121,7 +121,7 @@ outline support depends on the CLI's `outline` command. There is no
 backend-selection argument.
 
 **Returns:** A flat list of `{kind, name, line, visibility}` for every top-level symbol in the
-file, sorted by line. No code bodies — just the map. The response should also preserve the
+file, sorted by line. No code bodies, just the map. The response should also preserve the
 DB-backed TraceDecay symbols for the same file in the same payload, so callers get the fresh
 CLI outline without losing indexed graph symbols, ids, or qualified names needed for
 follow-up graph calls.
@@ -132,7 +132,7 @@ missing or older than 0.44. After installing or updating `ast-grep`, rerun
 integrations refresh their generated tool surfaces and guidance.
 
 **Value:** Turns "where is X defined in this file?" from a Read + manual scan into a single
-call. Also useful as a pre-flight before `tracedecay_context` — orient first, then zoom.
+call. Also useful as a pre-flight before `tracedecay_context`, orient first, then zoom.
 
 ---
 
@@ -141,7 +141,7 @@ call. Also useful as a pre-flight before `tracedecay_context` — orient first, 
 **Trigger:** Investigating whether logging was implemented required
 `grep -r "setLevel\|logging\|log_level\|LoggingLevel\|set_level"` across the entire project.
 The concept could live in function names, config keys, environment variable names, string
-literals, or comments — `tracedecay_search` only matches symbol names.
+literals, or comments, `tracedecay_search` only matches symbol names.
 
 **Gap:** Symbol search only covers named graph nodes. Concepts encoded in string literals,
 env var names, config keys, and comments are invisible.
@@ -153,7 +153,7 @@ env var names, config keys, and comments are invisible.
 ```
 
 **Returns:** Matching symbols (as `tracedecay_search` would), plus: string literal occurrences,
-comment occurrences, and config key matches — each with file and line. Grouped by match type
+comment occurrences, and config key matches, each with file and line. Grouped by match type
 so symbol hits stay prominent.
 
 **Value:** The "is feature X even present in this codebase?" probe. Especially useful for
@@ -166,7 +166,7 @@ inherited or unfamiliar codebases where the feature may not use the obvious iden
 **Trigger:** `cargo check`, `cargo test`, `cargo clippy`, and `cargo build` were invoked
 **777 times** across all scanned conversations, with single sessions hitting 100+. Each
 invocation re-compiles, dumps raw error text into the conversation, and Claude then has to
-parse it back into structured form — usually then `Read` the offending file to see context.
+parse it back into structured form, usually then `Read` the offending file to see context.
 The same loop repeats in TypeScript projects via `tsc` and Python via `pyright`.
 
 **Gap:** No tracedecay tool wraps the compiler / type-checker. Errors arrive as flat text
@@ -229,7 +229,7 @@ multi-file `Read` to inspect signatures one by one.
 
 **Gap:** `tracedecay_search` matches on symbol names. `tracedecay_implementations`
 (also proposed) covers trait/method implementor lists. Neither searches by
-signature shape — return types, parameter types, generic bounds, attributes.
+signature shape, return types, parameter types, generic bounds, attributes.
 
 **Proposed API:**
 ```json
@@ -244,7 +244,7 @@ sub-pattern. Implementation can reuse the AST matcher already feeding `tracedeca
 
 **Value:** Unlocks signature-based refactoring questions that currently force a grep
 + manual filter. Smaller volume than `tracedecay_outline` but high token cost when it
-does come up — a single signature query can replace dozens of file Reads.
+does come up, a single signature query can replace dozens of file Reads.
 
 ---
 
@@ -299,7 +299,7 @@ investment but turns "I need to read a dep's source" into a single graph query.
 
 **Trigger:** This repo (and most others) sees frequent greps over `Cargo.toml`,
 `.github/workflows/*.yml`, `tsconfig.json`, `pyproject.toml`, `package.json` during
-release/CI work — 62 such greps recorded. TraceDecay's tree-sitter pipeline doesn't
+release/CI work, 62 such greps recorded. TraceDecay's tree-sitter pipeline doesn't
 parse YAML/TOML structurally.
 
 **Gap:** No structured query into config files. Users grep for keys, then re-read
@@ -324,7 +324,7 @@ repo's own conversation history.
 ## `tracedecay_macro_expand`
 
 **Trigger:** Rust-specific. When debugging a macro-heavy file (procedural macros, `derive`,
-custom `macro_rules!`), tracedecay's tree-sitter view shows pre-expansion source — which
+custom `macro_rules!`), tracedecay's tree-sitter view shows pre-expansion source, which
 hides the actual generated code that produces the compiler error. Workaround is `cargo expand`,
 which is slow and dumps an entire crate's worth of post-macro source.
 
@@ -340,7 +340,7 @@ which is slow and dumps an entire crate's worth of post-macro source.
 and `source` (post-expansion). Caches per-revision so repeated queries on a clean tree
 are free.
 
-**Value:** Niche but high token-cost when it does come up — a single `cargo expand`
+**Value:** Niche but high token-cost when it does come up, a single `cargo expand`
 on a workspace can be tens of thousands of lines. Region-scoped expansion is the difference
 between "usable" and "fall back to raw source."
 
@@ -348,11 +348,11 @@ between "usable" and "fall back to raw source."
 
 ## Design observation: heavy file re-reads
 
-Not a tool proposal — but the scan found single-conversation Read counts of 76× for
+Not a tool proposal, but the scan found single-conversation Read counts of 76× for
 `src/tracedecay.rs`, 85× for `claurst/src-rust/crates/api/src/lib.rs`, 47× for the
 since-removed `src/daemon.rs`. This suggests either (a) the assistant doesn't trust prior cached snippets
 to still be current, or (b) it lacks a "what's changed in this file since my last call"
-signal and re-reads defensively. Worth investigating before adding more tools — could be
+signal and re-reads defensively. Worth investigating before adding more tools, could be
 a `tracedecay_context` mode flag (`incremental: true`) that returns only deltas since the
 last call within a session, rather than a new top-level tool.
 
@@ -360,13 +360,13 @@ last call within a session, rather than a new top-level tool.
 
 ---
 
-## `tracedecay_body` ✅ implemented
+## `tracedecay_body` implemented
 
 **Status:** Shipped. Handler at `src/mcp/tools/handlers.rs:handle_body`, definition at
 `src/mcp/tools/definitions.rs:def_body`. Tests in `tests/mcp_handler_test.rs` (3 cases).
 
 **Trigger:** In `claurst` (a Rust project separate from tracedecay), the dominant navigation
-pattern was `grep -A 20 "pub fn resolve_provider_api_key"` — reading a function or constant body
+pattern was `grep -A 20 "pub fn resolve_provider_api_key"`, reading a function or constant body
 by name without knowing which file it lives in. The same `grep -A N` form appeared 15+ times for
 functions, constants (`CCH_SEED`, `ANTHROPIC_BETA_HEADER`, `CLIENT_ID`), and struct fields.
 TraceDecay was not active for that project, but the pattern maps directly to what
@@ -390,13 +390,13 @@ match exists.
 
 ---
 
-## `tracedecay_todos` ✅ implemented
+## `tracedecay_todos` implemented
 
 **Status:** Shipped. Handler at `src/mcp/tools/handlers.rs:handle_todos`, definition at
 `src/mcp/tools/definitions.rs:def_todos`. Tests in `tests/mcp_handler_test.rs` (3 cases).
 
 **Trigger:** In `bruto-pascal-lang`, three separate grep passes were made across the whole source
-tree to find `TODO`, `FIXME`, `XXX`, `HACK`, `WIP`, and `unimplemented!()` markers — each
+tree to find `TODO`, `FIXME`, `XXX`, `HACK`, `WIP`, and `unimplemented!()` markers, each
 refining the pattern to catch more variants. These were used to build a "what needs finishing"
 picture before starting a work session.
 
@@ -445,27 +445,27 @@ scan, where measurable.
 
 **Build order recommendation (revised after telemetry scan):**
 
-1. `tracedecay_outline` — optional `ast-grep` CLI outline with DB-backed TraceDecay symbols
+1. `tracedecay_outline`, optional `ast-grep` CLI outline with DB-backed TraceDecay symbols
    preserved in the same payload; requires `ast-grep` >= 0.44 and addresses the single
    largest grep category (618 hits). One afternoon.
-2. `tracedecay_unsafe_patterns` — AST predicates on top of the existing matcher. Replaces a
+2. `tracedecay_unsafe_patterns`. AST predicates on top of the existing matcher. Replaces a
    recurring review-time grep family. Half-day.
-3. `tracedecay_diagnostics` — biggest single Bash : tracedecay gap. Highest impact even though
+3. `tracedecay_diagnostics`, biggest single Bash : tracedecay gap. Highest impact even though
    complexity is the highest in this set; structured cargo errors mapped to graph nodes
    compress hundreds of recurring tool cycles. Multi-day.
-4. `tracedecay_implementations` — query existing method edges filtered by implementor. Low risk.
-5. `tracedecay_signature_search` — extends the matcher used by `ast_grep_rewrite`; small surface.
-6. `tracedecay_constructors` — depends on struct-literal edge kind; check schema.
-7. `tracedecay_field_sites` — requires field-level read/write edges; may need schema work.
-8. `tracedecay_config` — TOML/YAML parsers exist; mostly path-and-key resolution.
-9. `tracedecay_lockfile_diff` — small, isolated, parser-bound.
-10. `tracedecay_feature_map` — requires a parallel full-text index; largest investment.
-11. `tracedecay_external_node` — on-demand indexing of registry crates is a meaningful design
+4. `tracedecay_implementations`, query existing method edges filtered by implementor. Low risk.
+5. `tracedecay_signature_search`, extends the matcher used by `ast_grep_rewrite`; small surface.
+6. `tracedecay_constructors`, depends on struct-literal edge kind; check schema.
+7. `tracedecay_field_sites`, requires field-level read/write edges; may need schema work.
+8. `tracedecay_config`. TOML/YAML parsers exist; mostly path-and-key resolution.
+9. `tracedecay_lockfile_diff`, small, isolated, parser-bound.
+10. `tracedecay_feature_map`, requires a parallel full-text index; largest investment.
+11. `tracedecay_external_node`, on-demand indexing of registry crates is a meaningful design
     project; defer until prior items show whether the demand is sustained.
-12. `tracedecay_macro_expand` — niche; integrate `cargo expand` only if `tracedecay_diagnostics`
+12. `tracedecay_macro_expand`, niche; integrate `cargo expand` only if `tracedecay_diagnostics`
     work surfaces a clear tie-in (macro-generated errors).
 
-Before starting, also weigh the **heavy re-read observation** above — solving that signal
+Before starting, also weigh the **heavy re-read observation** above, solving that signal
 inside `tracedecay_context` (incremental delta mode) might remove a class of redundant Reads
 without any new tool.
 

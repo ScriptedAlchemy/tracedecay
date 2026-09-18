@@ -16,8 +16,8 @@ use crate::restart_atomicity::{
 use crate::support::{init_git_repo, setup};
 
 /// Writes a Codex rollout carrying a `thread_goal_updated` lifecycle: an
-/// initial `active` goal, an identical follow-up (only token/time drift — must
-/// be deduped), then a `paused` transition (a distinct state — must keep its
+/// initial `active` goal, an identical follow-up (only token/time drift, must
+/// be deduped), then a `paused` transition (a distinct state, must keep its
 /// own row).
 fn write_codex_rollout_with_goal_events(
     home: &std::path::Path,

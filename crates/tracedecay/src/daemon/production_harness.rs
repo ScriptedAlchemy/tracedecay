@@ -522,7 +522,7 @@ impl ProductionProjectCompositionHarnessV1 {
     ///
     /// The composition pins its transcript source home to its own isolated
     /// layout rather than reading the ambient process `HOME`, so a journey
-    /// that seeds a real transcript must write it here — a transcript written
+    /// that seeds a real transcript must write it here, a transcript written
     /// under `$HOME` is invisible to the composition and the session lane
     /// stays empty forever.
     pub fn transcript_source_home(isolation_root: impl AsRef<Path>) -> Option<PathBuf> {
@@ -722,7 +722,7 @@ impl ProductionProjectCompositionHarnessV1 {
     }
 
     /// Sums the retained profile's settled savings-ledger rows, optionally
-    /// scoped to one project path — the production accounting authority the
+    /// scoped to one project path, the production accounting authority the
     /// MCP analytics journeys assert against.
     #[hotpath::measure(label = "daemon.harness.sum_profile_savings", future = true)]
     pub async fn sum_profile_savings(

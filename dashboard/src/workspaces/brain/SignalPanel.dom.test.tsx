@@ -61,7 +61,7 @@ describe('SignalPanel connection honesty', () => {
     const { container, getByText } = renderPanel('offline', NOW - 370_000);
     expect(getByText(/frozen, not idle/i)).toBeTruthy();
     // State is carried by the taxonomy chip's own data attribute, icon and
-    // label — never by colour alone.
+    // label, never by colour alone.
     expect(container.querySelector('[data-state="offline"]')).toBeTruthy();
     expect(within(container).getByText(/^Offline$/i)).toBeTruthy();
   });

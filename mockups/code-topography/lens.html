@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>LENS — zoom as a position, not a transition</title>
+<title>LENS, zoom as a position, not a transition</title>
 <link rel="stylesheet" href="topography.css" />
 <style>
   .keystrip { display: flex; border-top: 1px solid var(--raw-edge-subtle); background: var(--raw-surface-1); }
@@ -23,7 +23,7 @@
   <header class="spine">
     <span class="chan">04</span>
     <h1>Lens</h1>
-    <span class="sub">A fourth form, offered as an argument. The horizontal axis is not space — it is
+    <span class="sub">A fourth form, offered as an argument. The horizontal axis is not space. It is
       <b>aggregation ratio</b>. One sheet holds the repository, a crate's modules and a file's symbols at once, and
       one call path is drawn through all three at each scale's own resolution.</span>
   </header>
@@ -34,7 +34,7 @@
     <div class="readout"><span class="td-legend">Thread</span><span class="v">1 412 <span class="u">call sites, conserved</span></span></div>
     <div class="readout"><span class="td-legend">Splits</span><span class="v">1 → 3 → 9</span></div>
     <div class="readout"><span class="td-legend">Bodies drawn</span><span class="v">8 + 10 + 11</span></div>
-    <div class="readout grow"><span class="td-legend">Resolution floor</span><span class="v">symbol <span class="u">statement scale is not held — drawn as the hatched margin</span></span></div>
+    <div class="readout grow"><span class="td-legend">Resolution floor</span><span class="v">symbol <span class="u">statement scale is not held, drawn as the hatched margin</span></span></div>
   </div>
 
   <div class="field graticule"><svg id="lens" viewBox="0 0 1400 800" width="100%"></svg></div>
@@ -50,14 +50,14 @@
       <div class="keyhead"><span class="td-legend">Dissolve</span><span class="td-rule"></span></div>
       <svg viewBox="0 0 200 34" width="100%" height="34" id="k-diss"></svg>
       <div class="cap">Two representations <b>overlap</b> where their ratios overlap, rather than swapping at a
-        boundary. The overlap band is where a module is simultaneously a mass and a set of symbols — which is what
+        boundary. The overlap band is where a module is simultaneously a mass and a set of symbols. Which is what
         a reader needs to carry context across a scale change.</div>
     </div>
     <div class="keycell">
       <div class="keyhead"><span class="td-legend">Thread</span><span class="td-rule"></span></div>
       <svg viewBox="0 0 200 34" width="100%" height="34" id="k-thread"></svg>
       <div class="cap">One call path, drawn at every scale at once. Width is call sites and <b>is</b> conserved
-        here, unlike sheet 02 — a split is a disaggregation of the same edge set, so 1 412 splits into 641 + 486 +
+        here, unlike sheet 02. A split is a disaggregation of the same edge set, so 1 412 splits into 641 + 486 +
         285 and then into nine landing counts that also sum to 1 412.</div>
     </div>
     <div class="keycell">
@@ -70,7 +70,7 @@
       <div class="keyhead"><span class="td-legend">Floor</span><span class="td-rule"></span></div>
       <svg viewBox="0 0 200 34" width="100%" height="34" id="k-floor"></svg>
       <div class="cap">The axis <b>stops</b> where the index stops. Statement and expression granularity are not
-        held, so the continuum is drawn to its floor and then hatched rather than trailing off — the absence of
+        held, so the continuum is drawn to its floor and then hatched rather than trailing off. The absence of
         finer resolution is itself a reading.</div>
     </div>
   </div>
@@ -78,20 +78,20 @@
   <div class="argue">
     <h2>Why this one should exist</h2>
     <p class="td-caption">Every code viewer that has ever been built makes zoom a <b>transition</b>: you click into a
-    crate, the screen replaces itself, and the thing you were looking at is gone. The cost is not the click — it is
+    crate, the screen replaces itself, and the thing you were looking at is gone. The cost is not the click. It is
     that the reader must hold the previous frame in their head, and they cannot, which is why people say they "get
     lost in the codebase". Sheets 01 and 03 each solve one scale beautifully and inherit exactly this problem the
     moment you want both.</p>
     <p class="td-caption">Lens makes zoom a <b>position</b>. The repository, the crate's modules and the file's
     symbols are all on the sheet, adjacent, with one thread running through them, so the answer to "where is this in
-    the whole thing" is never a memory operation — it is a glance to the left. It is also the only one of the four
+    the whole thing" is never a memory operation. It is a glance to the left. It is also the only one of the four
     that is honest about aggregation as a continuum rather than as a cap: the subgraph endpoint's 80–250-node
     ceiling stops being a limit you hit and becomes a <i>readable position on the ruler</i>, the point where bodies
     stop being masses and start being symbols.</p>
-    <p class="td-caption">What it gives up: it is not a map. There is no "where things are" — the vertical axis is
+    <p class="td-caption">What it gives up: it is not a map. There is no "where things are". The vertical axis is
     the only free dimension left, and it has to carry dependency depth alone. If the reader's question is spatial
-    ("what is next to what"), sheet 01 is strictly better. Lens answers a different question — "what is this, at
-    every size" — and answers it in one frame.</p>
+    ("what is next to what"), sheet 01 is strictly better. Lens answers a different question, "what is this, at
+    every size", and answers it in one frame.</p>
   </div>
 
   <div class="note">
@@ -112,7 +112,7 @@
         <dt>body area</dt><dd>symbol mass (left, middle) / line span (right). Real.</dd>
         <dt>thread width</dt><dd>call sites, conserved across splits. Real.</dd>
         <dt>contours</dt><dd>internal edges ÷ symbols, same interval as sheet 01. Real.</dd>
-        <dt>hatched margin</dt><dd>the granularity the index does not hold. Real — it is a property of the extractor.</dd>
+        <dt>hatched margin</dt><dd>the granularity the index does not hold. Real. It is a property of the extractor.</dd>
       </dl>
       <p class="td-caption" style="margin-top:8px">Left and middle are aggregates; only the right third is a direct
       render. The ruler says exactly where that changes, which is the point.</p>
@@ -121,7 +121,7 @@
       <h2>Open question</h2>
       <p class="td-caption">The thread is drawn conserved, but that is only true because this particular path
       happens to disaggregate cleanly. A call path that re-enters the same module at two scales, or a cycle, cannot
-      be a single left-to-right thread — it would have to double back, and a doubling-back thread on an axis that
+      be a single left-to-right thread. It would have to double back, and a doubling-back thread on an axis that
       means "resolution" is meaningless. Does the sheet refuse such paths, or does it grow a second thread lane?</p>
       <p class="td-caption">And the honest worry: three representations on one sheet is three grammars to learn.
       Sheet 01 has one. Is a reader who has to learn all three actually faster than one who clicks?</p>
@@ -183,7 +183,7 @@
   el('line', { x1: 1084, y1: 46, x2: 1084, y2: BOTTOM + 26, stroke: 'var(--raw-accent)',
     'stroke-width': 1, 'stroke-dasharray': '3 4', 'stroke-opacity': 0.55 }, gAxis);
   halo(text(gAxis, 1078, BOTTOM + 40,
-    'SUBGRAPH CAP CROSSED HERE — RIGHT OF THIS RULE IS A DIRECT RENDER ⟶', 'lbl',
+    'SUBGRAPH CAP CROSSED HERE, RIGHT OF THIS RULE IS A DIRECT RENDER ⟶', 'lbl',
     { 'text-anchor': 'end' })).setAttribute('fill', 'var(--raw-accent)');
 
   /* ---- 2. zone A: eight crate masses ------------------------------------ */

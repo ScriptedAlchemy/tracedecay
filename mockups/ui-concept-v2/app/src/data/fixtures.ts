@@ -174,7 +174,7 @@ export const PROJECTS: ProjectBody[] = [
 export const HUB = {
   id: "repo:git_common_dir",
   label: "repo:git_common_dir",
-  caption: "hub — massless",
+  caption: "hub, massless",
 };
 
 export const SIGNAL_FAMILIES = [

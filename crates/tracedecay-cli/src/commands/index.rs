@@ -5,7 +5,7 @@ use tracedecay::project::TraceDecay;
 use super::daemon::daemon_tool_json;
 
 /// True when the global DB has zero registered projects (or can't be opened
-/// at all) — i.e. the user has not run `tracedecay init` anywhere yet.
+/// at all), i.e. the user has not run `tracedecay init` anywhere yet.
 async fn is_fresh_install() -> bool {
     daemon_tool_json(
         None,
@@ -22,7 +22,7 @@ async fn is_fresh_install() -> bool {
 pub(crate) async fn handle_no_command() -> tracedecay_domain::errors::Result<()> {
     let project_path = tracedecay_configuration::resolve_path(None);
     if TraceDecay::has_initialized_store(&project_path).await {
-        // Already initialized — show help via clap
+        // Already initialized, show help via clap
         let _ = <crate::cli::Cli as clap::CommandFactory>::command().print_help();
         eprintln!();
         return Ok(());
@@ -142,7 +142,7 @@ fn annotate_reset_required_init_error(
         message: format!(
             "{error}\n\nthis store cannot be opened until it is reset; run:\n  \
              {reset_command}\n\
-             then re-run `{init_command}` — sessions re-ingest from the \
+             then re-run `{init_command}`, sessions re-ingest from the \
              preserved transcripts"
         ),
     }
@@ -219,7 +219,7 @@ async fn brokered_init(
         // Status `queued` means the daemon accepted the reconcile demand into
         // its pre-mount queue. Init's user-facing confirmation names that
         // request (`requested`), matching the brokered-init contract tests and
-        // dogfood journeys — not the internal queue noun.
+        // dogfood journeys, not the internal queue noun.
         Some("queued") => eprintln!(
             "initialized {}; daemon code-index reconciliation requested",
             project_path.display()

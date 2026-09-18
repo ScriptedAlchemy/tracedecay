@@ -11,8 +11,8 @@ import type { ObservatoryAccountingReads } from './accountingReads.ts';
 /**
  * The Plan 26 `analytics-controls` view.
  *
- * Two real reads back parts of it — `/api/settings` for the profile upload
- * setting and `/api/storage/findings` for the typed retention-backlog status —
+ * Two real reads back parts of it, `/api/settings` for the profile upload
+ * setting and `/api/storage/findings` for the typed retention-backlog status,
  * and they are read independently. The assertions pin the two reassuring
  * falsehoods this surface could most easily tell: that an unpublished
  * collection mode is `Off`, and that an absent exporter means zero egress

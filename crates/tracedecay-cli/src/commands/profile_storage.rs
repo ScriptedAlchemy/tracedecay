@@ -38,7 +38,7 @@ pub(crate) async fn handle_profile_storage_action(
 /// directory, session archive, and provider transcripts are preserved, so the
 /// next daemon open recreates the graph at the canonical schema and re-ingests
 /// from those durable inputs. A store already at the canonical schema is
-/// refused untouched — this command cannot be used to wipe a healthy store.
+/// refused untouched, this command cannot be used to wipe a healthy store.
 fn handle_reset_project_store(
     project_root: Option<String>,
     project_id: Option<String>,
@@ -228,14 +228,14 @@ fn verified_graph_db_schema(
     Ok((schema_version, exact_final_shape))
 }
 
-/// Verifies every graph database in the project store under `profile_root` —
-/// the root graph DB and each per-branch graph DB under `branches/` — and
+/// Verifies every graph database in the project store under `profile_root`.
+/// the root graph DB and each per-branch graph DB under `branches/`, and
 /// deletes exactly the refused ones (a real SQLite database whose version or
 /// exact relational shape this binary does not accept) with their WAL/SHM sidecars.
 /// Verification is completed for the whole set before anything is deleted, so
 /// an unrecognized file aborts the reset without partial removal. Databases
 /// already at the canonical schema and exact shape are preserved, and a store with nothing
-/// refused is a typed error — this cannot wipe a healthy store.
+/// refused is a typed error, this cannot wipe a healthy store.
 fn reset_refused_project_graph_store(
     profile_root: &Path,
     project_id: &str,
@@ -743,7 +743,7 @@ mod reset_project_store_tests {
     }
 
     /// A store can carry per-branch graph databases at the same refused schema
-    /// version. The reset must cover all of them — resetting only the root
+    /// version. The reset must cover all of them, resetting only the root
     /// left the next open refusing on `branches/develop.db` and recovery
     /// still failed.
     #[test]

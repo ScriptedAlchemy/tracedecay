@@ -15,7 +15,7 @@ import { dirname, join, resolve } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-/* A git worktree has no node_modules of its own — the dashboard's install
+/* A git worktree has no node_modules of its own. The dashboard's install
  * lives in the primary checkout. Resolve Playwright from whichever dashboard
  * dir actually has it rather than requiring an install per worktree. */
 function loadPlaywright() {

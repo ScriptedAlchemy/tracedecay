@@ -16,8 +16,8 @@ import {
 
 /**
  * An umbrella Delivery is a correlation projection, not a provider object:
- * pull requests that share one served basis identity — a Work objective, a
- * handoff token, a session, an agent — grouped under that identity. Each
+ * pull requests that share one served basis identity, a Work objective, a
+ * handoff token, a session, an agent, grouped under that identity. Each
  * basis kind forms its own umbrellas; two bases are never merged into one
  * outcome, because "same agent" and "same Work objective" are different
  * claims with different grades and a reviewer must be able to tell which one

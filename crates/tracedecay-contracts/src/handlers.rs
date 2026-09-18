@@ -63,8 +63,8 @@ impl ApplicationOperation {
     /// retained capability-routing evaluator.
     ///
     /// `scope_match` and `required_effect_class` are supplied by the caller on
-    /// purpose. Deriving them here — asserting `ScopeMatchV1::Match` and reading
-    /// the effect class off the candidate being tested — makes the evaluator's
+    /// purpose. Deriving them here, asserting `ScopeMatchV1::Match` and reading
+    /// the effect class off the candidate being tested, makes the evaluator's
     /// scope-mismatch and effect-class gates compare a value against itself, so
     /// they can never reject anything.
     #[allow(clippy::too_many_arguments)]

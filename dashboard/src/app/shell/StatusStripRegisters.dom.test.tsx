@@ -3,7 +3,7 @@
 /**
  * Workspace registers on the strip: published while the workspace is mounted,
  * numbered on from the shell's own cells, lit from the same state rule as the
- * chip, and gone the moment the workspace unmounts — so a route the reader has
+ * chip, and gone the moment the workspace unmounts, so a route the reader has
  * left can never keep reporting an authority on the strip.
  */
 import { render, screen, within } from '@testing-library/react';

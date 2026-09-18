@@ -159,7 +159,7 @@ type EventWindow = { days: number[]; timestamped: number; startDayTs: number };
 
 /**
  * Message events per UTC day across the snapshot window, aggregated from the
- * spine's message timestamps (session-sparks points) — not session starts,
+ * spine's message timestamps (session-sparks points). Not session starts,
  * not spend. Messages without a timestamp cannot be placed on the axis.
  */
 function dailyMessageEvents(): EventWindow {
@@ -312,7 +312,7 @@ function SpendChart(props: { providers: ProviderStat[]; events: EventWindow; fix
           </div>
           <div className="cs-plot-note" aria-hidden="true">
             <span className="cs-badge">{props.fixture ? "exact events" : "spend unpriced"}</span>
-            <p>{props.fixture ? "cumulative priced dollars · hatched marker excluded from total" : "no ledger, no pricing table — tracks hold the $0 baseline, not a $0.00 reading"}</p>
+            <p>{props.fixture ? "cumulative priced dollars · hatched marker excluded from total" : "no ledger, no pricing table, tracks hold the $0 baseline, not a $0.00 reading"}</p>
           </div>
           {props.fixture && <>
             <svg className={`cs-fixture-series${props.selected && props.selected !== "OpenAI" ? " is-dim" : ""}`} viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
@@ -322,7 +322,7 @@ function SpendChart(props: { providers: ProviderStat[]; events: EventWindow; fix
             </svg>
             <div className={`cs-unpriced-marker${props.selected && props.selected !== "Anthropic" ? " is-dim" : ""}`} aria-hidden="true"><span>unpriced</span></div>
           </>}
-          {/* All tracks sit ON the $0 gridline — any lift above it would encode
+          {/* All tracks sit ON the $0 gridline, any lift above it would encode
               positive spend. Providers are told apart horizontally: interleaved
               dash phases on the line, and one dot per provider per day cluster. */}
           <div className="cs-tracks" role="group" aria-label="Provider spend series">
@@ -707,7 +707,7 @@ function Inspector(props: { providers: ProviderStat[]; flow: CostFlow | null; fi
         </div>
         <div className="cs-block">
           <div className="k">AUTHORITY SOURCE</div>
-          <p className="cs-copy">{props.fixture ? "fixture/canonical-pricing/openai-r3" : "Canonical provider pricing pages — not in snapshot."}</p>
+          <p className="cs-copy">{props.fixture ? "fixture/canonical-pricing/openai-r3" : "Canonical provider pricing pages. Not in snapshot."}</p>
         </div>
         <div className="cs-block">
           <div className="k">LAST REFRESH</div>

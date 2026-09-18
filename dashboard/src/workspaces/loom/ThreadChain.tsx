@@ -33,7 +33,7 @@ import {
  *
  * The LCM session endpoint may omit `timestamp`, so the chain is ordered by
  * the store's `ordinal` and presented as a sequence unless timestamps are
- * actually present — no elapsed times are inferred from ordinal positions.
+ * actually present, no elapsed times are inferred from ordinal positions.
  */
 export interface ThreadRelations {
   commits: readonly LoomCommitV1[];
@@ -281,7 +281,7 @@ function IsolatedChain({
         {summary.timestamped ? null : (
           <p className="text-3xs leading-relaxed text-text-muted">
             The store served no timestamp on any turn of this session, so this is the
-            recorded order — not a timeline. No elapsed time between turns is known.
+            recorded order, not a timeline. No elapsed time between turns is known.
           </p>
         )}
         <ol className="max-h-56 overflow-auto border border-edge-subtle">
@@ -314,7 +314,7 @@ function IsolatedChain({
         </ol>
         {summary.truncated ? (
           <span className="text-3xs text-text-muted">
-            First {summary.steps.length} of {formatCount(summary.messageCount)} turns — the store has more
+            First {summary.steps.length} of {formatCount(summary.messageCount)} turns, the store has more
             than this page.
           </span>
         ) : null}
@@ -325,7 +325,7 @@ function IsolatedChain({
 
 function chainStepTokenLabel(step: ReturnType<typeof summarizeChain>['steps'][number]): string {
   // Unlike the transcript inspector, which omits the line, this rail keeps a
-  // cell per step — so absence is worded rather than left blank.
+  // cell per step, so absence is worded rather than left blank.
   return tokenCountLabel(step.tokenCount, step.tokenCountProvenance) ?? 'tokens unknown';
 }
 

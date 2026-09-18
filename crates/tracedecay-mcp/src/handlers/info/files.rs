@@ -1,4 +1,4 @@
-//! `tracedecay_files` — indexed file listing with prefix and glob filters.
+//! `tracedecay_files`, indexed file listing with prefix and glob filters.
 
 use crate::ToolResult;
 use crate::path_tree::format_compact_annotated_path_list;
@@ -40,7 +40,7 @@ pub async fn handle_files(
         files.retain(|f| glob.matches(&f.path));
     }
 
-    // Listing files is metadata-only — no source code is served, so no tokens saved.
+    // Listing files is metadata-only, no source code is served, so no tokens saved.
     let touched_files = vec![];
 
     let layout = args

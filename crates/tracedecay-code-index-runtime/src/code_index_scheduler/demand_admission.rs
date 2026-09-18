@@ -1,8 +1,8 @@
 //! The one verdict every code-index demand carries.
 //!
 //! Hooks, `tracedecay sync`, branch publication, and the host-admission
-//! boundary all ask the same question — "did anything take this demand, and if
-//! not, why?" — so they all read the same answer. Earlier revisions answered
+//! boundary all ask the same question, "did anything take this demand, and if
+//! not, why?", so they all read the same answer. Earlier revisions answered
 //! with a bool per layer and rebuilt the reason above it, which is how a
 //! terminal park became "retryable scheduler unavailable" and a watcher-policy
 //! refusal became "accepted".

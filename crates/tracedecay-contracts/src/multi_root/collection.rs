@@ -3,7 +3,7 @@
 //! A named collection is a persisted [`AuthorizedScopeSet`]: its revision is
 //! frozen at compare-and-swap time and its members are canonically ordered by
 //! the scope-set authority. This module owns only target selection precedence
-//! and read mapping — it never resolves paths, reads storage, or widens
+//! and read mapping. It never resolves paths, reads storage, or widens
 //! authority.
 
 use tracedecay_domain::ScopeSetId;

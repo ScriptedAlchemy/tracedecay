@@ -72,7 +72,7 @@ fn append_or_reuse_blocking(
         super::sync_run_ledger_file_and_parent(path, &file)?;
         Ok(candidate.clone())
     })();
-    let unlock = fs2::FileExt::unlock(&lock).map_err(TraceDecayError::from);
+    let unlock = lock.unlock().map_err(TraceDecayError::from);
     result.and_then(|record| unlock.map(|()| record))
 }
 
@@ -395,9 +395,9 @@ mod tests {
     fn multi_megabyte_anchor_allows_exact_reuse_and_append() {
         // The reverse scan must handle a multi-megabyte anchor with bounded
         // memory and still support exact reuse plus a later append. The
-        // candidate is newer than the anchor — the realistic order for a
+        // candidate is newer than the anchor, the realistic order for a
         // scheduler skip diagnostic computed against the latest effectful
-        // run — because a scan that stops at the anchor cannot reuse an
+        // run, because a scan that stops at the anchor cannot reuse an
         // older candidate without walking the full ledger.
         let temp = tempfile::TempDir::new().unwrap();
         let path = run_ledger_path(temp.path());

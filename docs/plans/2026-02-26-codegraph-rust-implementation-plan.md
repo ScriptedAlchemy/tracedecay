@@ -1,6 +1,6 @@
-# CodeGraph Rust Port — Implementation Plan
+# CodeGraph Rust port. Implementation plan
 
-> **Archived record — not implementation authority.** This document preserves
+> **Archived record, not implementation authority.** This document preserves
 > historical intent and evidence. Current requirements come only from the
 > `docs/plans/tracedecay-v2/` hierarchy. Exact tests and counts, source-string
 > checks, branch/commit/worktree choreography, snapshots, receipts,
@@ -168,7 +168,7 @@ fn test_edge_serde_roundtrip() {
 cargo test --test types_test
 ```
 
-Expected: FAIL — module `codegraph::types` not found.
+Expected: FAIL, module `codegraph::types` not found.
 
 **Step 5: Implement types.rs**
 
@@ -647,7 +647,7 @@ fn test_config_serde_roundtrip() {
 cargo test --test config_test
 ```
 
-Expected: FAIL — module `codegraph::config` not found.
+Expected: FAIL, module `codegraph::config` not found.
 
 **Step 3: Implement config.rs**
 
@@ -1051,7 +1051,7 @@ fn test_unresolved_refs() {
 cargo test --test db_test
 ```
 
-Expected: FAIL — module `codegraph::db` not found.
+Expected: FAIL, module `codegraph::db` not found.
 
 **Step 3: Create the SQL schema**
 
@@ -1276,7 +1276,7 @@ impl Database {
 }
 ```
 
-Create `src/db/queries.rs` — This is a larger file implementing all query methods on `Database`:
+Create `src/db/queries.rs`. This is a larger file implementing all query methods on `Database`:
 
 ```rust
 use crate::errors::{CodeGraphError, Result};
@@ -2243,7 +2243,7 @@ mod server {
 cargo test --test extraction_test
 ```
 
-Expected: FAIL — module `codegraph::extraction` not found.
+Expected: FAIL, module `codegraph::extraction` not found.
 
 **Step 3: Implement the Rust extractor**
 
@@ -2255,7 +2255,7 @@ mod rust_extractor;
 pub use rust_extractor::RustExtractor;
 ```
 
-Create `src/extraction/rust_extractor.rs` — This is the core AST extraction module. It uses `tree-sitter-rust` to parse Rust source and emit nodes and edges. The implementation should:
+Create `src/extraction/rust_extractor.rs`. This is the core AST extraction module. It uses `tree-sitter-rust` to parse Rust source and emit nodes and edges. The implementation should:
 
 1. Parse source with tree-sitter
 2. Create a file node as root
@@ -2641,7 +2641,7 @@ fn test_find_dead_code() {
     let dead = qm.find_dead_code(&[NodeKind::Function]).unwrap();
     let dead_names: Vec<_> = dead.iter().map(|n| n.name.as_str()).collect();
     assert!(dead_names.contains(&"orphan"), "orphan should be dead code");
-    // main has no incoming edges but is named "main" — should be excluded
+    // main has no incoming edges but is named "main", should be excluded
 }
 ```
 
@@ -2682,7 +2682,7 @@ git commit -m "feat: add graph traversal with BFS/DFS, impact analysis, and dead
 
 **Step 1: Implement the CodeGraph orchestrator**
 
-Create `src/codegraph.rs` — the central orchestrator that wires all subsystems together:
+Create `src/codegraph.rs`, the central orchestrator that wires all subsystems together:
 
 ```rust
 pub struct CodeGraph {
@@ -2693,12 +2693,12 @@ pub struct CodeGraph {
 ```
 
 Methods:
-- `init(project_root)` — create `.codegraph/`, init DB, save config
-- `open(project_root)` — open existing project
-- `index_all()` — scan files, extract, resolve, store
-- `sync()` — incremental update via content hashing
-- `search(query, limit)` — FTS5 search
-- `get_stats()` — graph statistics
+- `init(project_root)`, create `.codegraph/`, init DB, save config
+- `open(project_root)`, open existing project
+- `index_all()`, scan files, extract, resolve, store
+- `sync()`, incremental update via content hashing
+- `search(query, limit)`. FTS5 search
+- `get_stats()`, graph statistics
 - All graph query delegations (callers, callees, impact, etc.)
 
 **Step 2: Implement CLI with clap**
@@ -2974,12 +2974,12 @@ fn test_create_node_text() {
 **Step 2: Implement vectors module**
 
 The vectors module should provide:
-- `cosine_similarity(a, b)` — compute cosine similarity
-- `store_vector(db, node_id, embedding, model)` — store as BLOB
-- `get_vector(db, node_id)` — retrieve and decode BLOB
-- `brute_force_search(db, query, limit)` — load all vectors, compute similarity, return top-k
-- `create_node_text(node)` — create searchable text representation
-- `TextEmbedder` — wrapper around `ort` for ONNX inference (initialize with model path, embed text, embed query)
+- `cosine_similarity(a, b)`, compute cosine similarity
+- `store_vector(db, node_id, embedding, model)`, store as BLOB
+- `get_vector(db, node_id)`, retrieve and decode BLOB
+- `brute_force_search(db, query, limit)`, load all vectors, compute similarity, return top-k
+- `create_node_text(node)`, create searchable text representation
+- `TextEmbedder`, wrapper around `ort` for ONNX inference (initialize with model path, embed text, embed query)
 
 For the ONNX embedder, use the `ort` crate with `nomic-embed-text-v1.5` model. Add "search_query: " / "search_document: " prefixes per nomic model requirements.
 
@@ -3151,10 +3151,10 @@ fn test_detect_changed_files() {
 **Step 2: Implement sync module**
 
 The sync module should:
-- `content_hash(content)` — SHA256 hash of file content
-- `find_stale_files(db, current_hashes)` — compare stored vs current content hashes
-- `find_new_files(db, current_files)` — files not yet in database
-- `find_removed_files(db, current_files)` — files in DB but not on disk
+- `content_hash(content)`. SHA256 hash of file content
+- `find_stale_files(db, current_hashes)`, compare stored vs current content hashes
+- `find_new_files(db, current_files)`, files not yet in database
+- `find_removed_files(db, current_files)`, files in DB but not on disk
 
 **Step 3: Run tests, commit**
 

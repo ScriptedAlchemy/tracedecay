@@ -1,7 +1,7 @@
 /**
  * The order the accessible list reads the field out in.
  *
- * Hop first, then call sites, then name — the same three quantities the field
+ * Hop first, then call sites, then name, the same three quantities the field
  * encodes as row, channel width and label, which is what makes the list the
  * picture read aloud rather than a second arrangement of the same rows. The
  * order is a claim about the data, so it is computed here: pure, DOM-free, and
@@ -15,7 +15,7 @@ import type { TraceChannel, TraceNode } from '../../viz/trace/types.ts';
  * Both endpoints of a channel are credited with its `calls`, because a call
  * site is a fact about the edge and both ends of the edge have it. This is
  * therefore the count of call sites the FIELD draws on that symbol, not the
- * symbol's total — that total is `degree`, and the list prints it separately.
+ * symbol's total, that total is `degree`, and the list prints it separately.
  */
 export function callSiteTotals(
   channels: readonly TraceChannel[],
@@ -36,7 +36,7 @@ export function callSiteTotals(
  * a one-hop caller and a one-hop callee are equally close to the focus, and
  * sorting the signed ring would put every caller above every callee and read as
  * a claim that upstream matters more. A symbol with no drawn channel counts as
- * zero call sites rather than being dropped — it is on the field, so it is on
+ * zero call sites rather than being dropped, it is on the field, so it is on
  * the list.
  */
 export function orderByHopThenCallSites(

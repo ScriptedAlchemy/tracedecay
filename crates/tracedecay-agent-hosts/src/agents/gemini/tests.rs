@@ -206,7 +206,7 @@ fn staging_refuses_to_replace_a_directory_tracedecay_does_not_own() {
 // Host-CLI-driven lifecycle
 // ---------------------------------------------------------------------------
 
-/// Activation is Gemini's own `extensions install` against the staged source —
+/// Activation is Gemini's own `extensions install` against the staged source,
 /// not a settings.json merge.
 #[cfg(unix)]
 #[test]
@@ -407,7 +407,7 @@ fn doctor_reports_no_issue_when_the_extension_supplies_the_server() {
     assert_eq!(dc.warnings, 0);
 }
 
-/// Pre-extension state is reported as residue — a warning about duplication —
+/// Pre-extension state is reported as residue, a warning about duplication,
 /// never as the registration the doctor is looking for.
 #[test]
 fn doctor_reports_pre_extension_state_as_residue() {
@@ -440,7 +440,7 @@ fn doctor_reports_pre_extension_state_as_residue() {
 }
 
 /// A staged source that is missing its manifest is reported as "not staged",
-/// and a not-yet-adopted extension is reported as not installed — neither is
+/// and a not-yet-adopted extension is reported as not installed, neither is
 /// silently upgraded into a claim that Gemini has the extension.
 #[test]
 fn doctor_warns_when_nothing_is_staged_or_installed() {
