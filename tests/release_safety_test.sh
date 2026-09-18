@@ -106,6 +106,22 @@ if grep -q 'token: ${{ secrets.GITHUB_TOKEN }}' "$release_please"; then
   exit 1
 fi
 
+python3 - "$release_please" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+for required in (
+    "actions: write",
+    "steps.release.outputs.release_created",
+    "steps.release.outputs.tag_name",
+    'gh workflow run release-beta.yml --repo "$GITHUB_REPOSITORY" --ref master',
+    'gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref master',
+):
+    if required not in text:
+        raise SystemExit(f"{path} must dispatch release asset builds on master: {required}")
+PY
+
 python3 - "$release_please" "$release_stable" "$release_beta" <<'PY'
 import sys
 
@@ -200,6 +216,11 @@ for path, text in ((stable_path, stable), (beta_path, beta)):
             raise SystemExit(
                 f"{path} contains timestamp-sensitive packaging: {mutable_packager}"
             )
+    trigger = text.split("permissions:", 1)[0]
+    if "workflow_dispatch:" not in trigger or "\n  release:" in trigger:
+        raise SystemExit(
+            f"{path} must be dispatched on master, never triggered on a tag release"
+        )
     for required in (
         "scripts/plan-release-recovery.py",
         "scripts/verify-retained-release-assets.sh",
@@ -207,9 +228,11 @@ for path, text in ((stable_path, stable), (beta_path, beta)):
         "--repo",
         "--signer-workflow",
         "--source-digest",
+        '--signer-ref "refs/heads/master"',
         "outputs.build_required",
-        'test "$GITHUB_REF" = "refs/tags/',
-        'test "$GITHUB_SHA" = "$source_sha"',
+        'test "$GITHUB_REF" = "refs/heads/master"',
+        'git merge-base --is-ancestor "$source_sha" "$GITHUB_SHA"',
+        "ref: ${{ env.RELEASE_TAG }}",
     ):
         if required not in text:
             raise SystemExit(
@@ -276,6 +299,12 @@ if (
     and os.environ.get("GH_FAIL_ATTESTATION") == "1"
 ):
     raise SystemExit(17)
+if (
+    arguments[:2] == ["attestation", "verify"]
+    and os.environ.get("GH_FAIL_TAG_REF") == "1"
+    and arguments[arguments.index("--source-ref") + 1].startswith("refs/tags/")
+):
+    raise SystemExit(18)
 """,
         encoding="utf-8",
     )
@@ -326,6 +355,55 @@ if (
     if invocations != expected:
         raise SystemExit(
             "canonical release verifier did not preserve exact provenance: "
+            f"{invocations!r}"
+        )
+
+    invocation_log.write_text("", encoding="utf-8")
+    files_index = command.index("--files")
+    fallback_command = [
+        *command[:files_index],
+        "--signer-ref",
+        f"refs/tags/{tag}",
+        "--signer-ref",
+        "refs/heads/master",
+        *command[files_index:],
+    ]
+    fallback_environment = environment.copy()
+    fallback_environment["GH_FAIL_TAG_REF"] = "1"
+    subprocess.run(fallback_command, cwd=root, env=fallback_environment, check=True)
+    invocations = [
+        json.loads(line)
+        for line in invocation_log.read_text(encoding="utf-8").splitlines()
+    ]
+    expected = []
+    for file in files:
+        expected.append(
+            [
+                "attestation",
+                "verify",
+                str(file),
+                *expected_suffix,
+            ]
+        )
+        expected.append(
+            [
+                "attestation",
+                "verify",
+                str(file),
+                "--repo",
+                repo,
+                "--signer-workflow",
+                signer,
+                "--source-ref",
+                "refs/heads/master",
+                "--source-digest",
+                source_digest,
+                "--deny-self-hosted-runners",
+            ]
+        )
+    if invocations != expected:
+        raise SystemExit(
+            "canonical release verifier did not fall back to the allowed master ref: "
             f"{invocations!r}"
         )
 
