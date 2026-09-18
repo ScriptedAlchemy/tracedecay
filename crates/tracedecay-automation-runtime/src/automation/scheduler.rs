@@ -277,15 +277,15 @@ impl AutomationTaskLock {
 /// Task-lock release must be synchronous: callers (and tests such as
 /// `retained_settlement_guard_owns_task_lock_until_drop`) rely on the lock file
 /// being gone the instant `drop` returns. The cleanup itself is genuinely
-/// blocking — an fs2 coordination lock, `sync_all`/parent-directory fsyncs, and
-/// `std::thread::sleep` backoff between retries — so it is tempting to hand the
+/// blocking, a file coordination lock, `sync_all`/parent-directory fsyncs, and
+/// `std::thread::sleep` backoff between retries, so it is tempting to hand the
 /// owning worker's run queue away with `tokio::task::block_in_place`.
 ///
 /// That is not sound here, because this guard is reachable from inside tokio's
 /// own blocking-pool spawn path. When a runtime has begun shutting down,
 /// `blocking::pool::Spawner::spawn_task` (tokio 1.53.1) shuts a refused task
 /// down *while holding* the pool's non-reentrant `parking_lot` mutex, which
-/// drops the task's future — and with it any `AutomationTaskLock` the future
+/// drops the task's future, and with it any `AutomationTaskLock` the future
 /// owned, such as the `Arc<RetainedAutomationSettlementState>` captured by
 /// `start_retained_automation_settlement_inner`. `block_in_place` re-enters
 /// `spawn_task` on that same thread to hand off the worker core, so the release
@@ -630,7 +630,7 @@ enum BackendFailureStanding {
 /// each rules out a different kind of false positive:
 ///
 /// 1. The failure class is deterministic under a fixed backend and
-///    configuration — typed `Permanent` only. `Unavailable`, `Denied`,
+///    configuration, typed `Permanent` only. `Unavailable`, `Denied`,
 ///    `Disconnected`, `MalformedOutput`, `Timeout`, and `Retryable` keep the
 ///    ordinary failure cooldown.
 /// 2. Every attempt the backend made failed that same way. A class that got
@@ -1256,7 +1256,7 @@ fn acquire_task_lock_coordination(path: &Path) -> std::io::Result<std::fs::File>
         }
         file
     };
-    fs2::FileExt::lock_exclusive(&file)?;
+    file.lock()?;
     file.sync_all()?;
     tracedecay_private_fs::framed_log::sync_parent_directory(
         &coordination_path,
@@ -1703,7 +1703,7 @@ disconnected: config error: codex app-server closed stdout before completing";
         )];
 
         // The failure cooldown is the only thing that used to gate this, and
-        // it elapses. Every tick after it — including a full day later — must
+        // it elapses. Every tick after it, including a full day later, must
         // still refuse to spawn the backend again.
         for now_secs in [
             2_001,
@@ -2600,7 +2600,7 @@ evidence about it",
     /// shutting down, and tokio's `blocking::pool::Spawner::spawn_task` shuts
     /// the refused task down *while holding* the pool's non-reentrant mutex.
     /// The refused closure owns this guard, so its release runs under that
-    /// mutex — and a release that re-enters the runtime never returns, leaving
+    /// mutex, and a release that re-enters the runtime never returns, leaving
     /// `BlockingPool::shutdown` waiting for the thread forever.
     ///
     /// Ordering is fixed by channels, not timing: the worker is parked until

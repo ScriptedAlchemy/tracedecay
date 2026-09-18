@@ -2,7 +2,6 @@
 
 use std::path::{Path, PathBuf};
 
-use fs2::FileExt;
 use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_runtime_core::branch::BranchAddOutcome;
 
@@ -80,7 +79,7 @@ impl ManualBranchArtifactsV1 {
     /// lease is taken before the branch identity is resolved, so a typed
     /// pre-mutation refusal (missing ref, unavailable Git authority) must not
     /// leave the worktree root behind as evidence of an activation that never
-    /// happened — and nothing enumerating branch worktrees has to filter a
+    /// happened, and nothing enumerating branch worktrees has to filter a
     /// non-worktree entry out.
     fn lifecycle_lock_path(&self, data_root: &Path) -> PathBuf {
         data_root
@@ -132,12 +131,14 @@ pub fn try_acquire_manual_branch_lifecycle(
                 lock_path.display()
             ))
         })?;
-    lock.try_lock_exclusive().map_err(|error| {
-        ManualBranchActivationError::lifecycle_contended(format!(
-            "branch '{branch}' lifecycle is already active at '{}': {error}",
-            lock_path.display()
-        ))
-    })?;
+    lock.try_lock()
+        .map_err(std::io::Error::from)
+        .map_err(|error| {
+            ManualBranchActivationError::lifecycle_contended(format!(
+                "branch '{branch}' lifecycle is already active at '{}': {error}",
+                lock_path.display()
+            ))
+        })?;
     Ok(ManualBranchLifecycleLeaseV1 {
         branch: branch.to_owned(),
         _lock: lock,

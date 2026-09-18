@@ -2252,7 +2252,6 @@ async fn dropping_retained_waiter_does_not_abort_blocking_owner() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn retained_projector_panic_finishes_recovery_before_releasing_task_lock() {
-    use fs2::FileExt;
     use std::time::{Duration, Instant};
 
     let temp = tempfile::tempdir().expect("tempdir");
@@ -2278,7 +2277,7 @@ async fn retained_projector_panic_finishes_recovery_before_releasing_task_lock()
         .open(&journal_lock_path)
         .expect("projector-panic journal lock");
     journal_lock
-        .lock_exclusive()
+        .lock()
         .expect("block projector-panic recovery terminal");
 
     let (projected_tx, projected_rx) = std::sync::mpsc::channel();
@@ -2302,7 +2301,9 @@ async fn retained_projector_panic_finishes_recovery_before_releasing_task_lock()
 
     assert!(task_lock_is_denied(dashboard_root, job_id).await);
 
-    FileExt::unlock(&journal_lock).expect("release projector-panic recovery terminal");
+    journal_lock
+        .unlock()
+        .expect("release projector-panic recovery terminal");
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let terminal = read_indexed_record_blocking(&journal_path)
@@ -2467,8 +2468,6 @@ async fn dropping_request_waiting_pair_before_submit_abandons_both_authorities()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn partial_pair_submit_abandons_the_closed_sibling_under_shared_guard_ownership() {
-    use fs2::FileExt;
-
     let temp = tempfile::tempdir().expect("tempdir");
     let dashboard_root = temp.path();
     let mut fixture = request_waiting_pair_fixture(dashboard_root, "pair-partial-submit").await;
@@ -2480,7 +2479,7 @@ async fn partial_pair_submit_abandons_the_closed_sibling_under_shared_guard_owne
         ))
         .expect("open second request-waiting journal lock");
     second_journal_lock
-        .lock_exclusive()
+        .lock()
         .expect("block closed sibling abandonment");
     let submission = fixture
         .submission
@@ -2512,7 +2511,9 @@ async fn partial_pair_submit_abandons_the_closed_sibling_under_shared_guard_owne
         task_lock_is_denied(dashboard_root, &fixture.job_ids[1]).await,
         "closed sibling released its lock before durable abandonment"
     );
-    FileExt::unlock(&second_journal_lock).expect("release closed sibling abandonment");
+    second_journal_lock
+        .unlock()
+        .expect("release closed sibling abandonment");
     assert_request_waiting_pair_abandoned_cleanly(dashboard_root, &fixture).await;
 }
 

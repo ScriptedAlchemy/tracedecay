@@ -5,7 +5,7 @@
 //! relational publication journal and canonical sealed-generation seals, and
 //! session relation projections re-materialize from the relational session
 //! store. Permanent container corruption (a torn WAL write, a CRC fault in a
-//! serialized block) therefore never destroys canonical data — but before
+//! serialized block) therefore never destroys canonical data, but before
 //! this module it permanently disabled the mount: every open of the same
 //! bytes failed with the identical typed [`GraphDbError::Corrupt`], every
 //! activation retried through the same fault, and the store never healed.
@@ -18,13 +18,13 @@
 //!    retryable unavailable state and touches nothing.
 //! 2. Under the lock, the deciding authority re-runs the identical failing
 //!    open itself. Only a second corruption verdict with the byte-identical
-//!    fault message — same GRAFEO code, same block, same CRC pair — proves
+//!    fault message, same GRAFEO code, same block, same CRC pair, proves
 //!    the fault deterministic. A successful reopen is served; a drifting
 //!    fault stays a terminal typed `Corrupt` for the operator, because a
 //!    fault that changes between attempts is hardware-shaped and a rebuild
 //!    onto the same medium would only re-corrupt.
-//! 3. Quarantine moves the container family — WAL sidecar, verified marker,
-//!    spill directory, then the container itself — into one timestamped
+//! 3. Quarantine moves the container family, WAL sidecar, verified marker,
+//!    spill directory, then the container itself, into one timestamped
 //!    sibling directory named with the canonical `.corrupt-` incident-debris
 //!    segment, writes a durable `store-quarantined.json` receipt carrying
 //!    the fault fingerprint, and emits the `store_quarantined` event.
@@ -40,7 +40,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write, sync_directory};
@@ -139,7 +138,7 @@ struct QuarantineDecisionLock {
 
 impl Drop for QuarantineDecisionLock {
     fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.file);
+        let _ = self.file.unlock();
     }
 }
 
@@ -164,7 +163,7 @@ fn acquire_quarantine_decision_lock(
                 path.display()
             ))
         })?;
-    match file.try_lock_exclusive() {
+    match file.try_lock().map_err(std::io::Error::from) {
         Ok(()) => Ok(QuarantineDecisionLock { file }),
         // Windows LockFileEx reports ERROR_LOCK_VIOLATION (33) instead of
         // WouldBlock. AccessDenied and sharing violations stay generic
@@ -523,7 +522,10 @@ mod tests {
             .truncate(false)
             .open(quarantine_decision_lock_path(&container).unwrap())
             .unwrap();
-        foreign_holder.try_lock_exclusive().unwrap();
+        foreign_holder
+            .try_lock()
+            .map_err(std::io::Error::from)
+            .unwrap();
 
         let verification_attempts = AtomicUsize::new(0);
         let error = recover_deterministically_corrupt_container(&container, "fault", &|| {
@@ -543,7 +545,7 @@ mod tests {
             "a non-holder must not re-open the store it does not own"
         );
         assert!(container.exists(), "a non-holder must not move bytes");
-        FileExt::unlock(&foreign_holder).unwrap();
+        foreign_holder.unlock().unwrap();
     }
 
     #[test]
