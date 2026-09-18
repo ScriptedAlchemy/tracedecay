@@ -92,6 +92,21 @@ pub(crate) struct CaptureTransport {
 }
 
 #[cfg(feature = "test-transport")]
+impl CaptureTransport {
+    /// One inbound JSON-RPC frame, with no argument rewriting.
+    ///
+    /// [`handle_real_server_tool_call_raw`] injects `format: json`. Callers
+    /// proving the product default (markdown when `format` is omitted) must
+    /// send the arguments a client actually sends.
+    pub(crate) fn from_request(request: impl Into<String>) -> Self {
+        Self {
+            incoming: Some(request.into()),
+            output: String::new(),
+        }
+    }
+}
+
+#[cfg(feature = "test-transport")]
 impl McpTransport for CaptureTransport {
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
         Ok(self.incoming.take())
