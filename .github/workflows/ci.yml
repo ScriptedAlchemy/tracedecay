@@ -3,6 +3,11 @@ name: CI
 on:
   push:
     branches: [master, feature/holographic-memory]
+  pull_request:
+    branches: ['**']
+    # `ready_for_review` and `labeled` lift a pull request into full CI.
+    # `ci-full` is the label that keeps that lane on for this proof.
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
   workflow_dispatch:
     inputs:
       run_os:
