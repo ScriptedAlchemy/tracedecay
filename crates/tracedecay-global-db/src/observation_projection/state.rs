@@ -716,12 +716,16 @@ pub(in super::super) async fn verify_projection_rows_from_records(
     // expansions (/var -> /private/var) and user symlink families compare equal
     // to the persisted canonical row without putting FS probing into reconcile.
     let expected = canonicalize_session_project_paths(session);
-    if !actual_session.is_some_and(|actual| {
-        session_rows_compatible(&canonicalize_session_project_paths(actual), &expected)
-    }) {
-        return Err(ProjectionStoreError::OutputCollision {
+    let session_conflict = actual_session.map_or(Some("row_missing"), |actual| {
+        reconcile_session_rows_detailed(&canonicalize_session_project_paths(actual), &expected)
+            .err()
+            .map(SessionReconcileConflict::field)
+    });
+    if let Some(field) = session_conflict {
+        return Err(ProjectionStoreError::SessionOutputCollision {
             provider: session.provider.clone(),
-            message_id: format!("session:{}", session.session_id),
+            session_id: session.session_id.clone(),
+            field,
         });
     }
     let message = projection.message();
@@ -1126,8 +1130,24 @@ pub(super) fn reconcile_session_rows(
     actual: &SessionRecord,
     expected: &SessionRecord,
 ) -> Option<SessionRecord> {
+    reconcile_session_rows_detailed(actual, expected).ok()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct SessionReconcileConflict(&'static str);
+
+impl SessionReconcileConflict {
+    pub(super) const fn field(self) -> &'static str {
+        self.0
+    }
+}
+
+pub(super) fn reconcile_session_rows_detailed(
+    actual: &SessionRecord,
+    expected: &SessionRecord,
+) -> Result<SessionRecord, SessionReconcileConflict> {
     if actual.provider != expected.provider || actual.session_id != expected.session_id {
-        return None;
+        return Err(SessionReconcileConflict("identity"));
     }
     let project_key = if actual.project_key == expected.project_key {
         actual.project_key.clone()
@@ -1144,7 +1164,7 @@ pub(super) fn reconcile_session_rows(
     {
         actual.project_key.clone()
     } else {
-        return None;
+        return Err(SessionReconcileConflict("project_key"));
     };
     let project_path = if actual.project_path == expected.project_path {
         actual.project_path.clone()
@@ -1153,9 +1173,9 @@ pub(super) fn reconcile_session_rows(
     } else if expected.project_path == expected.project_key {
         actual.project_path.clone()
     } else {
-        return None;
+        return Err(SessionReconcileConflict("project_path"));
     };
-    Some(SessionRecord {
+    Ok(SessionRecord {
         provider: actual.provider.clone(),
         session_id: actual.session_id.clone(),
         project_key,
@@ -1168,39 +1188,42 @@ pub(super) fn reconcile_session_rows(
             .min(),
         ended_at: actual.ended_at.into_iter().chain(expected.ended_at).max(),
         transcript_path: reconcile_optional(
+            "transcript_path",
             actual.transcript_path.as_ref(),
             expected.transcript_path.as_ref(),
-        )
-        .ok()?,
+        )?,
         metadata_json: reconcile_metadata(
             actual.metadata_json.as_ref(),
             expected.metadata_json.as_ref(),
-        )
-        .ok()?,
+        )?,
         parent_session_id: reconcile_optional(
+            "parent_session_id",
             actual.parent_session_id.as_ref(),
             expected.parent_session_id.as_ref(),
-        )
-        .ok()?,
+        )?,
         is_subagent: actual.is_subagent || expected.is_subagent,
-        agent_id: reconcile_optional(actual.agent_id.as_ref(), expected.agent_id.as_ref()).ok()?,
+        agent_id: reconcile_optional(
+            "agent_id",
+            actual.agent_id.as_ref(),
+            expected.agent_id.as_ref(),
+        )?,
         parent_tool_use_id: reconcile_optional(
+            "parent_tool_use_id",
             actual.parent_tool_use_id.as_ref(),
             expected.parent_tool_use_id.as_ref(),
-        )
-        .ok()?,
+        )?,
     })
 }
 
-#[derive(Debug)]
-struct ReconcileConflict;
-
 fn reconcile_optional<T: Clone + Eq>(
+    field: &'static str,
     actual: Option<&T>,
     expected: Option<&T>,
-) -> Result<Option<T>, ReconcileConflict> {
+) -> Result<Option<T>, SessionReconcileConflict> {
     match (actual, expected) {
-        (Some(actual), Some(expected)) if actual != expected => Err(ReconcileConflict),
+        (Some(actual), Some(expected)) if actual != expected => {
+            Err(SessionReconcileConflict(field))
+        }
         (Some(actual), _) => Ok(Some(actual.clone())),
         (_, Some(expected)) => Ok(Some(expected.clone())),
         (None, None) => Ok(None),
@@ -1210,17 +1233,17 @@ fn reconcile_optional<T: Clone + Eq>(
 fn reconcile_metadata(
     actual: Option<&String>,
     expected: Option<&String>,
-) -> Result<Option<String>, ReconcileConflict> {
+) -> Result<Option<String>, SessionReconcileConflict> {
     let (Some(actual), Some(expected)) = (actual, expected) else {
-        return reconcile_optional(actual, expected);
+        return reconcile_optional("metadata_json", actual, expected);
     };
     if actual == expected {
         return Ok(Some(actual.clone()));
     }
     let mut actual: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_str(actual).map_err(|_| ReconcileConflict)?;
+        serde_json::from_str(actual).map_err(|_| SessionReconcileConflict("metadata_json"))?;
     let expected: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_str(expected).map_err(|_| ReconcileConflict)?;
+        serde_json::from_str(expected).map_err(|_| SessionReconcileConflict("metadata_json"))?;
     for (key, expected_value) in expected {
         match actual.get_mut(&key) {
             None => {
@@ -1228,16 +1251,16 @@ fn reconcile_metadata(
             }
             Some(actual_value) if *actual_value == expected_value => {}
             Some(actual_value) if key == "usage" => {
-                *actual_value =
-                    reconcile_usage(actual_value, &expected_value).ok_or(ReconcileConflict)?;
+                *actual_value = reconcile_usage(actual_value, &expected_value)
+                    .ok_or(SessionReconcileConflict("metadata_json"))?;
             }
             Some(_) if key == "source" => {}
-            Some(_) => return Err(ReconcileConflict),
+            Some(_) => return Err(SessionReconcileConflict("metadata_json")),
         }
     }
     serde_json::to_string(&actual)
         .map(Some)
-        .map_err(|_| ReconcileConflict)
+        .map_err(|_| SessionReconcileConflict("metadata_json"))
 }
 
 fn reconcile_usage(
@@ -1391,7 +1414,7 @@ mod reconcile_tests {
     use tracedecay_store::SessionRecord;
 
     use super::canonicalize_session_project_paths;
-    use super::reconcile_session_rows;
+    use super::{reconcile_session_rows, reconcile_session_rows_detailed};
 
     fn record(project_path: &str) -> SessionRecord {
         SessionRecord {
@@ -1507,7 +1530,12 @@ mod reconcile_tests {
         let transaction = harness.registered.begin_write_transaction().await.unwrap();
         assert!(matches!(
             super::super::apply::apply_session(&transaction, &expected).await,
-            Err(tracedecay_store::ProjectionStoreError::OutputCollision { .. })
+            Err(
+                tracedecay_store::ProjectionStoreError::SessionOutputCollision {
+                    field: "project_path",
+                    ..
+                }
+            )
         ));
         transaction.rollback().await.unwrap();
     }
@@ -1576,5 +1604,18 @@ mod reconcile_tests {
             .is_none(),
             "distinct directories must never merge"
         );
+    }
+
+    #[test]
+    fn session_reconcile_conflict_names_the_field_without_exposing_its_value() {
+        let mut actual = record("/project");
+        actual.transcript_path = Some("/private/old-transcript.jsonl".to_owned());
+        let mut expected = record("/project");
+        expected.transcript_path = Some("/private/new-transcript.jsonl".to_owned());
+
+        let conflict = reconcile_session_rows_detailed(&actual, &expected)
+            .expect_err("different transcript identities must not merge");
+
+        assert_eq!(conflict.field(), "transcript_path");
     }
 }
