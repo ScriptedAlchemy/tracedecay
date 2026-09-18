@@ -2474,7 +2474,9 @@ mod tests {
             panic!("a gated mount must project as typed unavailable");
         };
         assert!(
-            reason.contains("configure a token"),
+            // Case-insensitive: the contract is that the gate names the step,
+            // not where the sentence happens to break around it.
+            reason.to_ascii_lowercase().contains("configure a token"),
             "the credential gate must tell the reader what to do: {reason}"
         );
 

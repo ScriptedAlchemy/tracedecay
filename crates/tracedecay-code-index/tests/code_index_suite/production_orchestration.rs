@@ -3244,22 +3244,22 @@ fn partitioned_codec_fixture() -> (
 }
 
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:28f30287a415e81bf589922385146f921a539734ec0a3600bd39578ad3c8dcd3";
+    "sha256:8d84348830efc4452a078cfac1cc78e0ed44112a37f1025bd6f4f4bc152fe196";
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
-        "sha256:924c1f0b7b171b7bf5433a6eb04767eb244e7c9decc1f2343b06a657908f3a7b",
-        11_070,
+        "sha256:e50d2733b5f594d79fdccc3e44b5d30d5efb66d14805b5fe0c67d5ceb0a1d66f",
+        11_071,
     ),
     (
-        "sha256:1a6e240c8fcc1084d82cee42cbaa889bb479ff1df7a76432dcec2d51d66e1d1a",
-        5_170,
+        "sha256:1095d61bb8bbbf6637f85ca957a510d221aaba7923af8e60b0f3eef07042e6ff",
+        5_171,
     ),
     (
-        "sha256:4461a4ce08e5f59299030959a2773bd48b2c2d48056c188e06867db99609847a",
-        6_278,
+        "sha256:9921ca7da5c489307887ab570a5e8d5a7cebf192b9b6664c487e9a327943e396",
+        6_279,
     ),
     (
-        "sha256:4c54bba48f3fcf2fd0085ab5aecd8b35451a8cfc56381fa99605327165afbb15",
+        "sha256:52b5707b5312bcb1e29849372b0dbb882205b3289b345643620a35c1d260c246",
         6_837,
     ),
 ];
@@ -4601,11 +4601,11 @@ hwm_delta_kib={hwm_delta}"
 /// The shipped restore read the whole segment, parsed a `serde_json::Value`
 /// from it, rewrote identities in that tree and deserialized the tree again:
 /// peak memory was 2.35x the on-disk generation and grew with the corpus. The
-/// paged restore of the same generation runs first here, so the allocator
-/// already holds the arena a restored generation needs; the legacy restore's
-/// own peak growth over that baseline is therefore the extra cost of the
-/// pre-paging path alone, and it must stay far below the generation's on-disk
-/// size rather than scaling with it.
+/// paged restore of the same generation runs first here as the control: both
+/// forms pay the restored generation's own memory, so the legacy restore's
+/// peak growth beyond the control is the extra cost of the pre-paging path
+/// alone, and it must stay far below the evidence segment rather than
+/// scaling with it.
 #[test]
 fn legacy_generation_restore_does_not_materialize_its_evidence_segment() {
     const RSS_CHILD: &str = "TD_LEGACY_RSS_CHILD";
@@ -4696,22 +4696,39 @@ fn legacy_generation_restore_does_not_materialize_its_evidence_segment() {
     drop(generation);
     drop(owner);
 
+    // The first restore in a process pays a cold-start cost (the arena a
+    // restored generation needs) that has nothing to do with the form being
+    // restored. Spend it on a discarded probe so the two measured probes
+    // start from the same allocator state and stay comparable.
+    rss_measure_decode("warmup", &paged_manifest, &segments);
     let paged_hwm = rss_measure_decode("paged", &paged_manifest, &segments);
     let legacy_hwm = rss_measure_decode("legacy", &legacy_manifest, &segments);
-    let legacy_bytes = legacy_hwm * 1024;
+    // The paged decode of the same generation is the control, not a warm-up:
+    // both forms restore the identical generation, so only the difference is
+    // the pre-paging path's own cost. An absolute peak is not a usable
+    // measure, it is dominated by whether the allocator returned the control
+    // decode's pages to the OS between the two probes, which a developer box
+    // and a CI runner answer differently by more than the segment under test.
+    let legacy_extra_bytes = legacy_hwm.saturating_sub(paged_hwm) * 1024;
 
     println!(
         "rss_summary files={file_count} generation_on_disk_bytes={generation_bytes} \
 evidence_segment_bytes={evidence_bytes} paged_hwm_delta_kib={paged_hwm} \
-legacy_hwm_delta_kib={legacy_hwm} legacy_over_generation={:.3} legacy_over_evidence={:.3}",
-        legacy_bytes as f64 / generation_bytes as f64,
-        legacy_bytes as f64 / evidence_bytes as f64,
+legacy_hwm_delta_kib={legacy_hwm} legacy_extra_bytes={legacy_extra_bytes} \
+legacy_extra_over_evidence={:.3}",
+        legacy_extra_bytes as f64 / evidence_bytes as f64,
     );
 
+    // A restore that materializes the segment holds all of it at once and
+    // parses it on top, so it costs at least the segment; the streaming
+    // restore costs one bounded page buffer plus allocator slack, measured
+    // at a fifth to a third of the segment. The bound sits between them, and
+    // is tighter than the half-the-whole-generation bound it replaces (which
+    // permitted two and a half times this segment).
     assert!(
-        legacy_bytes * 2 < generation_bytes as u64,
-        "restoring a pre-paging generation grew peak RSS by {legacy_bytes} bytes over a warmed \
-         baseline, which is not far below the {generation_bytes}-byte on-disk generation \
-         ({evidence_bytes}-byte evidence segment): the segment is being materialized"
+        legacy_extra_bytes < evidence_bytes as u64,
+        "restoring a pre-paging generation cost {legacy_extra_bytes} bytes of peak RSS beyond the \
+         paged restore of the same {generation_bytes}-byte generation, which is not far below its \
+         {evidence_bytes}-byte evidence segment: the segment is being materialized"
     );
 }

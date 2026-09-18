@@ -22,9 +22,9 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{
     AuthorizationRevision, ComponentRevision, EphemeralSanitizedQueryViewV1, FreshnessVectorDigest,
-    HydrationStateV1, PrincipalId, QueryNormalizationRevision, RetrievalCursor, RetrievalGrainV1,
-    RetrievalRequest, RetrievalScope, SanitizerRevision, ScoreDomainId, SingleRootScopeV1,
-    VectorWatermark,
+    HydrationStateV1, PrincipalId, QueryNormalizationRevision, RetrievalBudget, RetrievalCursor,
+    RetrievalGrainV1, RetrievalRequest, RetrievalScope, SanitizerRevision, ScoreDomainId,
+    SingleRootScopeV1, VectorWatermark,
 };
 use tracedecay_query::retrieval::QueryAuthorityV1;
 use tracedecay_query::retrieval::evidence_lanes::{
@@ -144,9 +144,10 @@ impl WorkTaskSessionEvidenceRetrievalV1 {
     fn temporal_query(
         &self,
         request: &WorkTaskSessionRequestV1,
+        page_size: u32,
     ) -> Result<SessionTemporalQuery, WorkEvidenceHydrationErrorV1> {
-        let page_size = usize::try_from(request.page_size)
-            .map_err(|_| WorkEvidenceHydrationErrorV1::Unavailable)?;
+        let page_size =
+            usize::try_from(page_size).map_err(|_| WorkEvidenceHydrationErrorV1::Unavailable)?;
         let context_bytes = WORK_EVIDENCE_CONTEXT_BYTES;
         let execution_limits = ExecutionLimits {
             candidate_total_bytes: context_bytes as usize,
@@ -227,7 +228,11 @@ impl WorkTaskSessionPortV1 for WorkTaskSessionEvidenceRetrievalV1 {
                     request.source.clone(),
                 )
                 .map_err(|_| WorkEvidenceHydrationErrorV1::NotFoundOrNotAuthorized)?;
-                let temporal_query = self.temporal_query(&request)?;
+                let page_size = task_session_page_size(
+                    request.page_size,
+                    authority.profile().retrieval_budget,
+                )?;
+                let temporal_query = self.temporal_query(&request, page_size)?;
                 let retrieval_request = retrieval_request(context, &request, authority.as_ref())?;
                 let query = EphemeralSanitizedQueryViewV1::sanitize(
                     task_session_query_text(&request),
@@ -255,7 +260,7 @@ impl WorkTaskSessionPortV1 for WorkTaskSessionEvidenceRetrievalV1 {
                     context,
                     request: &request,
                     reauthorization,
-                    page_size: usize::try_from(request.page_size)
+                    page_size: usize::try_from(page_size)
                         .map_err(|_| WorkEvidenceHydrationErrorV1::Unavailable)?,
                     ranking_cursor,
                 };
@@ -364,17 +369,35 @@ fn map_reauthorization_error(
     }
 }
 
+/// The per-attempt TaskSession page size the mounted authority can actually
+/// serve.
+///
+/// `WorkEvidenceRetrieveRequestV1::page_size` bounds evidence *sources* in the
+/// Work page (validated up to `MAX_WORK_ROOTED_EVIDENCE_SOURCES_V1`), which is
+/// a different quantity from how many ranked session anchors one attempt may
+/// hydrate. Passing it through unclamped made every legal Work request above
+/// the mounted profile's hydration budget permanently `Unavailable` instead of
+/// a served page plus a continuation, so clamp to the budget here. Zero stays a
+/// refusal: no budget can serve it.
+fn task_session_page_size(
+    requested: u32,
+    budget: RetrievalBudget,
+) -> Result<u32, WorkEvidenceHydrationErrorV1> {
+    let page_size = requested
+        .min(budget.max_hydrated_results)
+        .min(budget.max_candidates_per_lane);
+    if page_size == 0 {
+        return Err(WorkEvidenceHydrationErrorV1::Unavailable);
+    }
+    Ok(page_size)
+}
+
 fn retrieval_request(
     context: &RequestContext,
     request: &WorkTaskSessionRequestV1,
     authority: &QueryAuthorityV1,
 ) -> Result<RetrievalRequest, WorkEvidenceHydrationErrorV1> {
-    if request.page_size == 0
-        || request.page_size > authority.profile().retrieval_budget.max_hydrated_results
-        || request.page_size > authority.profile().retrieval_budget.max_candidates_per_lane
-    {
-        return Err(WorkEvidenceHydrationErrorV1::Unavailable);
-    }
+    task_session_page_size(request.page_size, authority.profile().retrieval_budget)?;
     Ok(RetrievalRequest {
         principal: PrincipalId::new(context.actor().as_str())
             .map_err(|_| WorkEvidenceHydrationErrorV1::Unavailable)?,
@@ -890,7 +913,39 @@ mod unit_tests {
     use tracedecay_contracts::WorkEvidenceHydrationErrorV1;
     use tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1;
 
-    use super::{budget_hydration_refusal, cursor_manifest_hydration_refusal};
+    use tracedecay_domain::RetrievalBudget;
+
+    use super::{
+        budget_hydration_refusal, cursor_manifest_hydration_refusal, task_session_page_size,
+    };
+
+    const fn budget(max_candidates_per_lane: u32, max_hydrated_results: u32) -> RetrievalBudget {
+        RetrievalBudget {
+            max_candidates_per_lane,
+            max_fused_candidates: 32,
+            max_hydrated_results,
+            max_hydration_bytes: 65_536,
+            deadline_micros: None,
+        }
+    }
+
+    #[test]
+    fn task_session_page_size_clamps_to_the_mounted_budget() {
+        // The checked-in core query fallback policy. A legal Work evidence
+        // request (up to MAX_WORK_ROOTED_EVIDENCE_SOURCES_V1) must be served,
+        // not refused, when it asks for more than one attempt can hydrate.
+        assert_eq!(task_session_page_size(100, budget(32, 16)), Ok(16));
+        assert_eq!(task_session_page_size(8, budget(32, 16)), Ok(8));
+        assert_eq!(task_session_page_size(100, budget(4, 16)), Ok(4));
+        assert_eq!(
+            task_session_page_size(100, budget(0, 16)),
+            Err(WorkEvidenceHydrationErrorV1::Unavailable)
+        );
+        assert_eq!(
+            task_session_page_size(0, budget(32, 16)),
+            Err(WorkEvidenceHydrationErrorV1::Unavailable)
+        );
+    }
 
     #[test]
     fn task_session_structural_refusals_retain_exact_hydration_causes() {

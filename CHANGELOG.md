@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.47](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.46...v0.1.0-beta.47) (2026-09-18)
+
+
+### Bug Fixes
+
+* **cli:** cap repeated completed tool results at three attempts ([77c5504](https://github.com/ScriptedAlchemy/tracedecay/commit/77c55040d6421c1a7ef9e268343fbb6cfdabb9a2))
+* **cli:** cap repeated completed tool results at three attempts ([c857075](https://github.com/ScriptedAlchemy/tracedecay/commit/c8570754ba35bdf06bf1ab5b48dace7cbfe22e5f))
+* **clones:** bound body bytes before tokenizing large literals ([542d28c](https://github.com/ScriptedAlchemy/tracedecay/commit/542d28c4c04c6a074630e9b3ac22e2d878bf9305))
+* **clones:** bound body bytes before tokenizing large literals ([941d908](https://github.com/ScriptedAlchemy/tracedecay/commit/941d908ba92c043c561ff4d69a6f1370ca7c3d41))
+* **code-index:** shrink text builds to available memory headroom ([2a138f6](https://github.com/ScriptedAlchemy/tracedecay/commit/2a138f68d9c7a9eba02a6a1741e09412c62d8bde))
+* **code-index:** shrink text builds to available memory headroom ([0ae9fad](https://github.com/ScriptedAlchemy/tracedecay/commit/0ae9fad50e4daa2ac92e1e51c00fea5b2348132a))
+
 ## [0.1.0-beta.46](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.45...v0.1.0-beta.46) (2026-09-18)
 
 

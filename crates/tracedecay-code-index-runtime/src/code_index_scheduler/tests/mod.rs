@@ -1203,6 +1203,30 @@ async fn wait_for_quiescent_owner_pass(
     }
 }
 
+/// Wait until the mounted worker for `path` is idle with nothing queued.
+///
+/// [`wait_for_quiescent_owner_pass`] only reports that no pass is *running*.
+/// A pass that ends while a wake is already pending re-arms a busy follow-up
+/// whose receipt lands later, so a test pinning receipt accounting has to wait
+/// for the pending-wake slot as well.
+async fn wait_for_settled_owner(registry: &CodeIndexSchedulerRegistryV1, path: &Path) {
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    loop {
+        wait_for_quiescent_owner_pass(registry, path).await;
+        if registry.pending_wake_micros_for_root(path).await == Some(0)
+            && !registry.reconcile_in_progress_for_test(path).await
+        {
+            return;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "the owner for {} never settled",
+            path.display()
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
 /// Drive the seated owner's clone-fingerprint backfill to completion.
 ///
 /// The seat no longer waits for that successor: exact and lexical serve as

@@ -979,9 +979,34 @@ fn codex_preflight_reports_inactive_cache_without_interactive_guidance() {
     assert!(CodexIntegration.interactive_removal_guidance().is_none());
 }
 
+/// Install an executable `codex` on the host-program search path only.
+///
+/// Preparation is `Ready` exactly when Codex's own plugin CLI is present, so
+/// the outcome under test is a property of the environment, not of the host
+/// integration. CI runners carry no `codex` binary while a developer box
+/// usually does; pin it here instead of reading whichever the machine has.
+/// Only host program resolution sees this directory, the process `PATH` is
+/// untouched.
+fn install_fake_codex_cli(
+    dir: &Path,
+) -> tracedecay_runtime_core::config::HostProgramSearchPathGuard {
+    let binary = dir.join(format!("codex{}", std::env::consts::EXE_SUFFIX));
+    std::fs::write(&binary, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&binary, permissions).unwrap();
+    }
+    tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(dir)
+}
+
 #[test]
 fn prepare_stages_the_source_and_returns_ready_for_cli_activation() {
     let home = tempfile::tempdir().unwrap();
+    let cli_dir = tempfile::tempdir().unwrap();
+    let _codex_cli = install_fake_codex_cli(cli_dir.path());
     // Pre-existing user config: preparation runs before the component
     // transaction stages `config.toml`, so it must not write there, hook
     // trust is recorded by activation, inside the rollback boundary.

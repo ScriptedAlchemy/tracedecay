@@ -34,7 +34,7 @@ use super::{
     wait_for_initial_generation, wait_for_live_complete_generation,
     wait_for_live_complete_generation_by_polling, wait_for_queryable_text_generation,
     wait_for_queryable_text_generation_change, wait_for_queryable_text_generation_id,
-    wait_for_quiescent_owner_pass, wait_until_serving_seat, write,
+    wait_for_quiescent_owner_pass, wait_for_settled_owner, wait_until_serving_seat, write,
 };
 use crate::{
     code_index::{
@@ -669,6 +669,38 @@ async fn registry_feeds_publications_and_bounded_freshness_reads() {
     assert_ne!(changed.generation_id, initial.generation_id);
 }
 
+/// Poll a mounted worktree's dashboard clone-index status until it reports
+/// ready coverage.
+///
+/// `clone_index_status` reads the clone-successor slot with `try_lock` so a
+/// freshness read never joins a running backfill. A single sample therefore
+/// reports `Unavailable { "clone-index status is being updated" }` whenever a
+/// freshly published generation's successor still holds the slot, which is a
+/// truthful transient, not the settled answer a caller is asking for.
+async fn wait_for_ready_clone_index(
+    registry: &CodeIndexSchedulerRegistryV1,
+    path: &Path,
+) -> tracedecay_contracts::code_index_freshness::CodeCloneIndexObservationV1 {
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    loop {
+        let status = registry
+            .dashboard_freshness(path)
+            .await
+            .expect("mounted dashboard freshness")
+            .clone_index;
+        match status {
+            Some(tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Ready {
+                observation,
+            }) => return observation,
+            transient => assert!(
+                Instant::now() <= deadline,
+                "the V16 artifact never reported ready clone coverage: {transient:?}"
+            ),
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 #[tokio::test]
 async fn registry_clone_freshness_reports_coverage_and_update_accounting() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
@@ -684,16 +716,7 @@ async fn registry_clone_freshness_reports_coverage_and_update_accounting() {
         .expect("mount worktree");
     let initial = wait_for_initial_generation(&registry, fixture.path()).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
-    let initial_status = registry
-        .dashboard_freshness(fixture.path())
-        .await
-        .expect("initial clone freshness");
-    let Some(tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Ready {
-        observation,
-    }) = initial_status.clone_index
-    else {
-        panic!("a complete V16 artifact must report ready clone coverage");
-    };
+    let observation = wait_for_ready_clone_index(&registry, fixture.path()).await;
     assert_eq!(observation.coverage.source_bodies, Some(1));
     assert_eq!(observation.coverage.eligible_source_bodies, Some(0));
     assert_eq!(observation.coverage.conservative_normalized_bodies, Some(0));
@@ -711,16 +734,7 @@ async fn registry_clone_freshness_reports_coverage_and_update_accounting() {
     ));
     let _ = wait_for_generation_change(&registry, fixture.path(), &initial).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
-    let changed = registry
-        .dashboard_freshness(fixture.path())
-        .await
-        .expect("changed clone freshness");
-    let Some(tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Ready {
-        observation,
-    }) = changed.clone_index
-    else {
-        panic!("the changed V16 artifact must return to ready");
-    };
+    let observation = wait_for_ready_clone_index(&registry, fixture.path()).await;
     assert_eq!(observation.coverage.payloads_reused, Some(0));
     assert_eq!(observation.resources.stale_invalidations, Some(1));
     assert!(observation.resources.changed_symbol_update_micros.is_some());
@@ -3807,10 +3821,13 @@ async fn unchanged_background_freshness_probe_posts_no_overflow_wake() {
         .await
         .expect("mount daemon-owned scheduler");
     wait_for_initial_generation(&registry, fixture.path()).await;
-    // The seat is published mid-pass and the receipt lands after the pass
-    // releases its in-progress guard, so sample the baseline only once the
-    // mount's own receipt exists, or it is charged to the probe below.
-    wait_for_quiescent_owner_pass(&registry, fixture.path()).await;
+    // The seat no longer waits for the clone successor, so the mount leaves
+    // pending backfill behind. Draining it is a wake of its own, and every
+    // wake posts its own receipt, so settle the whole mount-era chain first:
+    // a pass that ends with a wake still pending re-arms a busy follow-up
+    // whose receipt would otherwise land inside the probe's window below.
+    drain_clone_backfill(&registry, fixture.path()).await;
+    wait_for_settled_owner(&registry, fixture.path()).await;
     wait_for_event_to_ready(&registry).await;
     let canonical = fixture.path().canonicalize().expect("canonical fixture");
     {
@@ -3822,7 +3839,11 @@ async fn unchanged_background_freshness_probe_posts_no_overflow_wake() {
             .policy
             .staleness_threshold = Duration::ZERO;
     }
-    let receipts_before = registry.event_to_ready_receipts().len();
+    // Receipts are attributed by the arrival the pass claimed, not by list
+    // position: a mount-era wake claimed before this instant belongs to the
+    // mount even when its receipt lands during the window below. Only a wake
+    // accepted from here on is the probe's.
+    let probe_at = tracedecay_contracts::now_micros().0;
 
     assert_eq!(
         registry.probe_freshness_admission(fixture.path()).await,
@@ -3841,10 +3862,15 @@ async fn unchanged_background_freshness_probe_posts_no_overflow_wake() {
         Some(0),
         "matching Git/stat evidence must not become an overflow hint"
     );
-    assert_eq!(
-        registry.event_to_ready_receipts().len(),
-        receipts_before,
-        "a suppressed probe must not fabricate a reconcile receipt"
+    let receipts = registry.event_to_ready_receipts();
+    assert!(
+        receipts.iter().all(|receipt| {
+            receipt
+                .arrival
+                .wake_micros()
+                .is_none_or(|wake_micros| wake_micros < probe_at)
+        }),
+        "a suppressed probe must not fabricate a reconcile receipt: {receipts:#?}"
     );
     drop(mounted);
     registry.shutdown().await;

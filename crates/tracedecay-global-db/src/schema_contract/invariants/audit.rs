@@ -815,12 +815,25 @@ async fn validate_message_projection_row(
         resolved.released,
     )? == StoredProvenanceRendering::Current
     {
+        // Convergence supersedes an existing output row; it never inserts one.
+        // Both repair arms below therefore require the row to be there: a
+        // vanished output stays the hard failure #1775 and #1781 both promised,
+        // instead of a recorded repair that writes nothing. The batch also
+        // derives its session keys from the message rows it found, so a missing
+        // message is reported as a missing *session* row, which is why this
+        // guard has to cover the session arm too.
+        let owner_message = owner_projection.message();
+        let output_row_present = resolved
+            .projection_rows
+            .message(&owner_message.provider, &owner_message.message_id)
+            .is_some();
         match verify_owner_output_rows(conn, resolved, &owner_projection).await {
             Ok(()) => {}
             Err(ProjectionStoreError::OutputCollision {
                 provider,
                 message_id,
-            }) if provider == owner_projection.message().provider
+            }) if output_row_present
+                && provider == owner_projection.message().provider
                 && message_id == owner_projection.message().message_id =>
             {
                 // Ownership was validated above, the immutable observation
@@ -835,7 +848,8 @@ async fn validate_message_projection_row(
                 provider,
                 session_id,
                 field: "row_missing",
-            }) if provider == owner_projection.session().provider
+            }) if output_row_present
+                && provider == owner_projection.session().provider
                 && session_id == owner_projection.session().session_id =>
             {
                 // The uniquely owned current output has no session row. The
