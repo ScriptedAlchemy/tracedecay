@@ -35,6 +35,8 @@ mod status_runtime_test;
 mod unsafe_patterns_test;
 #[cfg(feature = "test-transport")]
 mod work_test;
+#[cfg(all(feature = "test-transport", unix))]
+mod workflow_register_definition_test;
 
 // Shared lock used by sibling transport suites.
 #[cfg(feature = "test-transport")]
