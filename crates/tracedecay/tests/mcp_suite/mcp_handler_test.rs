@@ -38,6 +38,8 @@ mod grep_behavior_test;
 #[cfg(feature = "test-transport")]
 mod hermes_skill_bridge_test;
 mod inheritance_depth_test;
+#[cfg(feature = "test-transport")]
+mod lcm_grep_behavior_test;
 mod lcm_test;
 #[cfg(feature = "test-transport")]
 mod memory_contradiction_contract_test;
