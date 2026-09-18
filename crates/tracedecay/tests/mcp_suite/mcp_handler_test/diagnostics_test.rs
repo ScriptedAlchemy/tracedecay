@@ -114,8 +114,9 @@ async fn diagnostics_call_refuses_bad_arguments_and_reports_unpublished_reads() 
     assert_eq!(markdown["problem"]["legal_actions"], json!([]));
     let markdown_text = extract_real_server_text(&markdown);
     assert!(
-        markdown_text
-            .starts_with("## diagnostics_read\n\n- Operation: `diagnostics_read`\n- Binding: `"),
+        markdown_text.starts_with(
+            "## diagnostics\\_read\n\n- Operation: `diagnostics_read`\n- Binding: `binding.mcp.diagnostics_read.v1`"
+        ),
         "{markdown_text}"
     );
     assert!(markdown_text.contains("\n- Status: `problem`"));
@@ -135,7 +136,7 @@ async fn diagnostics_call_refuses_bad_arguments_and_reports_unpublished_reads() 
     assert!(markdown_text.contains("\n- Retry: `never`"));
     assert!(markdown_text.contains("\n- Retry scope: `none`"));
     assert!(markdown_text.contains("\n- Retry after: `none`"));
-    assert!(markdown_text.contains("\n- Legal actions: none"));
+    assert!(markdown_text.contains("\n- Legal actions: `none`"));
     assert!(markdown_text.contains("\n- Coverage: `not_available`"));
     assert!(
         !markdown_text.contains("findings_cleared"),
