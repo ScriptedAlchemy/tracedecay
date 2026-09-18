@@ -913,6 +913,9 @@ fn clone_status_distinguishes_unavailable_backfill_partial_ready_and_stale() {
 }
 
 #[tokio::test]
+// The std slot lock is the subject: freshness must return while this task
+// still holds it, so the guard intentionally stays across the await.
+#[allow(clippy::await_holding_lock)]
 async fn dashboard_freshness_does_not_join_a_clone_backfill_slice() {
     let fixture = GitFixture::new(&[(
         "src/lib.rs",
