@@ -203,6 +203,17 @@ async fn retain_unpublished_effect(
     assert_eq!(unknown["replayed"], false);
     assert_eq!(unknown["effect"]["receipt"]["outcome"], "effect_unknown");
     assert_eq!(unknown["effect"]["reconciliation"], "pending");
+    let unknown_message = unknown["message"].as_str().expect("effect unknown message");
+    #[cfg(unix)]
+    assert!(
+        unknown_message.contains("create source edit temporary file"),
+        "{unknown_message}"
+    );
+    #[cfg(windows)]
+    assert!(
+        unknown_message.contains("atomically publish source edit candidate"),
+        "{unknown_message}"
+    );
     assert_eq!(unknown["effect"]["idempotency_key"], original_key);
     assert_eq!(fs::read(&opened.file).unwrap(), PREIMAGE);
     unknown
@@ -210,16 +221,27 @@ async fn retain_unpublished_effect(
 
 fn assert_reconcile_attempt(value: &Value, attempt_key: &str, replayed: bool) {
     assert_eq!(value["success"], true);
-    assert_eq!(value["reconciled"], true);
     assert_eq!(value["replayed"], replayed);
-    assert_eq!(
-        value["message"],
-        if replayed {
+    if replayed {
+        assert_eq!(value["message"], "source edit reconciliation completed");
+        assert_eq!(value["effect"]["payload"]["reconciled"], true);
+        assert_eq!(value["effect"]["payload"]["success"], true);
+        assert_eq!(
+            value["effect"]["payload"]["message"],
             "source edit reconciliation completed"
-        } else {
+        );
+    } else {
+        assert_eq!(value["reconciled"], true);
+        assert_eq!(
+            value["message"],
             "source edit reconciliation attempt completed"
-        }
-    );
+        );
+        assert_eq!(value["effect"]["payload"]["reconciled"], true);
+        assert_eq!(
+            value["effect"]["payload"]["message"],
+            "source edit reconciliation completed"
+        );
+    }
     assert_eq!(value["effect"]["effect_class"], "source_edit");
     assert_eq!(value["effect"]["idempotency_key"], attempt_key);
     assert_eq!(value["effect"]["reconciliation"], "reconciled");
@@ -399,7 +421,9 @@ async fn unpublished_effect_confirms_rolled_back_and_releases_the_file() {
     );
     assert_eq!(original_retry["success"], false);
     assert_eq!(original_retry["replayed"], true);
-    assert_eq!(original_retry["reconciled"], true);
+    assert_eq!(original_retry["effect"]["reconciliation"], "reconciled");
+    assert_eq!(original_retry["effect"]["payload"]["reconciled"], true);
+    assert_eq!(original_retry["effect"]["payload"]["success"], false);
     assert_eq!(
         original_retry["message"],
         "source edit reconciliation completed"
@@ -559,7 +583,9 @@ async fn mismatched_inspection_keeps_bytes_and_confirm_committed_keeps_the_posti
     );
     assert_eq!(original_retry["success"], true);
     assert_eq!(original_retry["replayed"], true);
-    assert_eq!(original_retry["reconciled"], true);
+    assert_eq!(original_retry["effect"]["reconciliation"], "reconciled");
+    assert_eq!(original_retry["effect"]["payload"]["reconciled"], true);
+    assert_eq!(original_retry["effect"]["payload"]["success"], true);
     assert_eq!(
         original_retry["message"],
         "source edit reconciliation completed"
