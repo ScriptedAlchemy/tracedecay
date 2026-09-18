@@ -100,7 +100,7 @@ fn assert_invalid_entity_selection(problem: &Value) {
             "retryable": false,
             "owning_layer": "application",
             "terminality": "pre_admission",
-            "legal_actions": [],
+            "legal_actions": ["correct_request"],
             "committed_receipt": null
         }),
         "invalid entity selection problem: {problem}"
@@ -244,7 +244,7 @@ async fn fact_store_reason_returns_facts_that_name_every_entity() {
         &call_reason(
             &fixture,
             json!({
-                "entities": ["'Project Phoenix'", "  amari   memory "],
+                "entities": ["'Project Phoenix'", "amari  memory"],
                 "category": "project"
             }),
         )
@@ -389,9 +389,9 @@ async fn fact_store_reason_returns_facts_that_name_every_entity() {
     close_test_graph(fixture).await;
 }
 
-/// A missing, empty, or duplicated entity list is refused with the retained
-/// invalid-request problem. A blank name is a real selection that matches
-/// nothing. Schema mistakes name the offending argument.
+/// A missing, empty, duplicated, untrimmed, or out-of-range selection is the
+/// retained invalid-request problem. Schema mistakes name the offending
+/// argument instead.
 #[tokio::test]
 async fn fact_store_reason_refuses_an_unusable_entity_selection() {
     let fixture = setup_project().await;
@@ -402,16 +402,12 @@ async fn fact_store_reason_refuses_an_unusable_entity_selection() {
         json!({"entities": ["Amari Memory"], "limit": 0}),
         json!({"entities": ["Amari Memory"], "limit": 201}),
         json!({"entities": ["Amari Memory"], "min_trust": 1.5}),
+        json!({"entities": ["   "]}),
+        json!({"entities": ["  Project Phoenix  ", "Amari Memory"]}),
     ] {
         let problem = reason_problem(&call_reason(&fixture, arguments.clone()).await);
         assert_invalid_entity_selection(&problem);
     }
-
-    let blank = reason_payload(&call_reason(&fixture, json!({"entities": ["   "]})).await);
-    assert_eq!(blank["hits"], json!([]));
-    assert_eq!(blank["next_after"], Value::Null);
-    assert_eq!(blank["graph_coverage"], json!({"kind": "not_applicable"}));
-    assert_eq!(blank["owner"]["kind"], "project");
 
     assert_eq!(
         decode_refusal(&call_reason(&fixture, json!({})).await),
@@ -429,7 +425,7 @@ async fn fact_store_reason_refuses_an_unusable_entity_selection() {
             )
             .await,
         ),
-        "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_reason: unknown field `query`, expected `entities`, `memory_scope`, `category`, `min_trust`, `limit`, `project_selector`, or `after`"
+        "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_reason: unknown field `query`"
     );
     assert_eq!(
         decode_refusal(
@@ -439,7 +435,7 @@ async fn fact_store_reason_refuses_an_unusable_entity_selection() {
             )
             .await,
         ),
-        "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_reason: category: unknown variant `pitfall`, expected `general`, `user_pref`, `project`, `tool`, `decision`, or `code_area`"
+        "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_reason: unknown variant `pitfall`, expected one of `general`, `user_pref`, `project`, `tool`, `decision`, `code_area`"
     );
 
     close_test_graph(fixture).await;
