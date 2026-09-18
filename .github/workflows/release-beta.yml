@@ -314,7 +314,10 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: beta-${{ matrix.name }}
-          path: tracedecay-beta-*
+          # The exact archive, not `tracedecay-beta-*`: that glob also matched
+          # the MCPB packaged beside it, so publish found MCPBs among the
+          # binaries and refused the whole release (beta.43).
+          path: tracedecay-beta-${{ env.RELEASE_TAG }}-${{ matrix.name }}.${{ matrix.archive }}
           if-no-files-found: error
 
   publish:
