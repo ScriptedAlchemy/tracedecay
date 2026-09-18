@@ -3244,22 +3244,22 @@ fn partitioned_codec_fixture() -> (
 }
 
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:28f30287a415e81bf589922385146f921a539734ec0a3600bd39578ad3c8dcd3";
+    "sha256:8d84348830efc4452a078cfac1cc78e0ed44112a37f1025bd6f4f4bc152fe196";
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
-        "sha256:924c1f0b7b171b7bf5433a6eb04767eb244e7c9decc1f2343b06a657908f3a7b",
-        11_070,
+        "sha256:e50d2733b5f594d79fdccc3e44b5d30d5efb66d14805b5fe0c67d5ceb0a1d66f",
+        11_071,
     ),
     (
-        "sha256:1a6e240c8fcc1084d82cee42cbaa889bb479ff1df7a76432dcec2d51d66e1d1a",
-        5_170,
+        "sha256:1095d61bb8bbbf6637f85ca957a510d221aaba7923af8e60b0f3eef07042e6ff",
+        5_171,
     ),
     (
-        "sha256:4461a4ce08e5f59299030959a2773bd48b2c2d48056c188e06867db99609847a",
-        6_278,
+        "sha256:9921ca7da5c489307887ab570a5e8d5a7cebf192b9b6664c487e9a327943e396",
+        6_279,
     ),
     (
-        "sha256:4c54bba48f3fcf2fd0085ab5aecd8b35451a8cfc56381fa99605327165afbb15",
+        "sha256:52b5707b5312bcb1e29849372b0dbb882205b3289b345643620a35c1d260c246",
         6_837,
     ),
 ];
