@@ -1819,24 +1819,24 @@ pub fn c() { a(); }
     let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
         .await
         .unwrap();
-    let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
-    let cycles = output["cycles"].as_array().unwrap();
-    let chain = cycles
-        .iter()
-        .find_map(|cycle| {
-            let chain = cycle["chain"].as_array()?;
-            let names: Vec<&str> = chain.iter().filter_map(|n| n["name"].as_str()).collect();
-            (names.len() == 4).then_some(names)
-        })
-        .expect("expected a three-node cycle path");
-    let valid_edges = [("a", "b"), ("b", "c"), ("c", "a")];
-    for pair in chain.windows(2) {
-        assert!(
-            valid_edges.contains(&(pair[0], pair[1])),
-            "chain must follow real call edges; got {chain:?}"
-        );
-    }
+    let output = extract_json(&result.value);
+    assert_eq!(
+        recursion_behavior::public_recursion_report(&output),
+        json!({
+            "cycle_count": 1,
+            "cycles": [{
+                "length": 3,
+                "chain": [
+                    {"name": "a", "kind": "function", "file": "src/lib.rs", "line": 2},
+                    {"name": "b", "kind": "function", "file": "src/lib.rs", "line": 3},
+                    {"name": "c", "kind": "function", "file": "src/lib.rs", "line": 4},
+                    {"name": "a", "kind": "function", "file": "src/lib.rs", "line": 2}
+                ]
+            }]
+        }),
+        "the only cycle is a -> b -> c -> a: {output}"
+    );
+    recursion_behavior::assert_reported_cycles_close(&output);
 }
 
 /// `tracedecay_changelog`'s response must not list directories under

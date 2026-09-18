@@ -1,9 +1,11 @@
 //! Literal `tracedecay_recursion` results from production MCP `tools/call`.
 //!
 //! `length` is the number of call edges in the cycle. The chain repeats its
-//! start symbol so the path is closed. Occurrence ids are content digests, so
-//! the report pins names, kinds, files, and lines, and only requires each
-//! cycle's id to close on itself.
+//! start symbol so the path is closed. Occurrence ids include the temp
+//! project path, so which node the search starts on changes between runs.
+//! Comparisons rotate each chain to its smallest `(name, file, line)` and
+//! then pin names, kinds, files, and lines. Ids are still required to close
+//! the cycle.
 
 use std::path::Path;
 
@@ -89,14 +91,58 @@ pub(super) fn public_recursion_report(payload: &Value) -> Value {
                 .unwrap_or_else(|| panic!("chain must be an array: {cycle}"));
             json!({
                 "length": cycle["length"],
-                "chain": chain.iter().map(public_chain_node).collect::<Vec<_>>(),
+                "chain": canonical_public_chain(chain),
             })
         })
         .collect::<Vec<_>>();
+    let mut cycles = cycles;
+    cycles.sort_by(|left, right| cycle_order_key(left).cmp(&cycle_order_key(right)));
     json!({
         "cycle_count": payload["cycle_count"],
         "cycles": cycles,
     })
+}
+
+fn cycle_order_key(cycle: &Value) -> (i64, String) {
+    (
+        cycle["length"].as_i64().unwrap_or(i64::MAX),
+        cycle["chain"].to_string(),
+    )
+}
+
+fn canonical_public_chain(chain: &[Value]) -> Vec<Value> {
+    let public = chain.iter().map(public_chain_node).collect::<Vec<_>>();
+    assert!(
+        public.len() >= 2,
+        "a cycle chain must repeat its start: {public:?}"
+    );
+    assert_eq!(
+        public.first(),
+        public.last(),
+        "a cycle chain must close on the same symbol: {public:?}"
+    );
+    let body = &public[..public.len() - 1];
+    let start = body
+        .iter()
+        .enumerate()
+        .min_by(|(_, left), (_, right)| public_node_order(left).cmp(&public_node_order(right)))
+        .map(|(index, _)| index)
+        .expect("a cycle body is non-empty");
+    let mut rotated = body[start..]
+        .iter()
+        .chain(&body[..start])
+        .cloned()
+        .collect::<Vec<_>>();
+    rotated.push(rotated[0].clone());
+    rotated
+}
+
+fn public_node_order(node: &Value) -> (String, String, i64) {
+    (
+        node["name"].as_str().unwrap_or_default().to_owned(),
+        node["file"].as_str().unwrap_or_default().to_owned(),
+        node["line"].as_i64().unwrap_or(i64::MAX),
+    )
 }
 
 fn sorted_keys<'a>(value: &'a Value, label: &str) -> Vec<&'a str> {
