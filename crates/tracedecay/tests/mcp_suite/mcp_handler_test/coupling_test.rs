@@ -26,13 +26,13 @@ use crate::support::{
     warm_code_index_search,
 };
 
-const FAN_IN_JSON: &str = r#"{"direction":"fan_in","result_count":2,"ranking":[{"file":"src/shop/pricing.rs","coupled_files":3},{"file":"src/shop/inventory.rs","coupled_files":1}]}"#;
-const FAN_OUT_JSON: &str = r#"{"direction":"fan_out","result_count":3,"ranking":[{"file":"src/shop/orders.rs","coupled_files":2},{"file":"src/shop/reports.rs","coupled_files":1},{"file":"src/warehouse/auditor.rs","coupled_files":1}]}"#;
-const SHOP_FAN_IN_JSON: &str = r#"{"direction":"fan_in","result_count":2,"ranking":[{"file":"src/shop/pricing.rs","coupled_files":2},{"file":"src/shop/inventory.rs","coupled_files":1}]}"#;
-const SHOP_FAN_OUT_JSON: &str = r#"{"direction":"fan_out","result_count":2,"ranking":[{"file":"src/shop/orders.rs","coupled_files":2},{"file":"src/shop/reports.rs","coupled_files":1}]}"#;
-const TOP_FAN_IN_JSON: &str = r#"{"direction":"fan_in","result_count":1,"ranking":[{"file":"src/shop/pricing.rs","coupled_files":3}]}"#;
-const EMPTY_FAN_OUT_JSON: &str = r#"{"direction":"fan_out","result_count":0,"ranking":[]}"#;
-const EMPTY_FAN_IN_JSON: &str = r#"{"direction":"fan_in","result_count":0,"ranking":[]}"#;
+const FAN_IN_JSON: &str = r#"{"direction":"fan_in","ranking":[{"coupled_files":3,"file":"src/shop/pricing.rs"},{"coupled_files":1,"file":"src/shop/inventory.rs"}],"result_count":2}"#;
+const FAN_OUT_JSON: &str = r#"{"direction":"fan_out","ranking":[{"coupled_files":2,"file":"src/shop/orders.rs"},{"coupled_files":1,"file":"src/shop/reports.rs"},{"coupled_files":1,"file":"src/warehouse/auditor.rs"}],"result_count":3}"#;
+const SHOP_FAN_IN_JSON: &str = r#"{"direction":"fan_in","ranking":[{"coupled_files":2,"file":"src/shop/pricing.rs"},{"coupled_files":1,"file":"src/shop/inventory.rs"}],"result_count":2}"#;
+const SHOP_FAN_OUT_JSON: &str = r#"{"direction":"fan_out","ranking":[{"coupled_files":2,"file":"src/shop/orders.rs"},{"coupled_files":1,"file":"src/shop/reports.rs"}],"result_count":2}"#;
+const TOP_FAN_IN_JSON: &str = r#"{"direction":"fan_in","ranking":[{"coupled_files":3,"file":"src/shop/pricing.rs"}],"result_count":1}"#;
+const EMPTY_FAN_OUT_JSON: &str = r#"{"direction":"fan_out","ranking":[],"result_count":0}"#;
+const EMPTY_FAN_IN_JSON: &str = r#"{"direction":"fan_in","ranking":[],"result_count":0}"#;
 
 const FAN_IN_MARKDOWN: &str = "\
 **direction:** fan_in
@@ -117,15 +117,7 @@ fn tool_text(response: &JsonRpcResponse) -> &str {
 }
 
 fn assert_coupling_json(response: &JsonRpcResponse, expected: &str) {
-    let text = tool_text(response);
-    let actual: Value = serde_json::from_str(text)
-        .unwrap_or_else(|error| panic!("coupling JSON did not parse: {error}\n{text}"));
-    let expected: Value = serde_json::from_str(expected).expect("expected coupling JSON is valid");
-    assert_eq!(actual, expected, "MCP payload was {text}");
-    assert_eq!(
-        text, expected,
-        "MCP text was not the compact JSON users receive"
-    );
+    assert_eq!(tool_text(response), expected);
 }
 
 #[tokio::test]
