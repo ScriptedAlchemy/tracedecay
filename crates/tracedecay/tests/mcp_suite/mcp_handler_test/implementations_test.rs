@@ -267,7 +267,7 @@ async fn implementations_returns_literal_bodies_for_trait_interface_and_method()
                     "src/view.ts",
                     2,
                     2,
-                    "draw(): string;",
+                    "draw(): string",
                     "  draw(): string;",
                 ),
                 method_body(
