@@ -249,6 +249,25 @@ behavior.
 - Do not hand-edit `CHANGELOG.md`; release automation generates it from
   conventional commit messages.
 
+### What CI spends on a pull request
+
+CI runs on GitHub's free hosted runners: 20 concurrent jobs for the whole
+account, 5 of them macOS. Every job a pull request queues is a job the
+integration branch waits behind, so a run spends only what its state earns:
+
+| State | Runs |
+|---|---|
+| Draft | Light gates only: scope gate, commit lint, release drift, benchmark-harness self-tests. |
+| Ready for review (or labelled `ci-full`) | The Linux lane: build, clippy, fmt, feature gates, dashboard, Linux test partitions, hotpath parity, PR dogfood. |
+| Labelled `ci-os` | Adds the macOS and Windows matrices. |
+| Labelled `ci-hosts` | Adds the stock Hermes / Claude Code / OpenCode integrations. |
+| Labelled `perf` | Runs the hotpath profile, coverage, and runtime-core workflows. |
+| Push to `master` | Everything. |
+
+Marking a PR ready or adding a label starts the run; a newer push cancels
+the one in flight, on every branch including `master`. Closing or merging a
+PR cancels its remaining runs and drops its Actions caches.
+
 ## Reporting Issues
 
 Open an issue at https://github.com/ScriptedAlchemy/tracedecay/issues with:
