@@ -25,6 +25,15 @@ use tracedecay_mcp::JsonRpcResponse;
 
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(90);
 
+/// How often the waits below re-ask the public MCP surface.
+///
+/// Each `tracedecay_status` call runs the generation census ready-probe, a
+/// scheduler freshness read, and branch diagnostics — Git opens and
+/// blocking-pool work on the runtime that is also running the reconcile these
+/// waits are waiting for. A `yield_now` spin re-entered that path thousands of
+/// times a second, so the observer competed with the publication it observes.
+const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
 fn git(project: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(["-c", "core.hooksPath=.git/no-hooks"])
@@ -116,16 +125,26 @@ async fn search(
     project: &Path,
     query: &str,
 ) -> Value {
-    // Keep the page tiny: a generation-scale refresh batch otherwise returns
-    // multi-dozen-KiB candidate bodies that MCP truncates into a handle, and
-    // the wait helpers never see top-level `results` / `code_generation`.
-    tool(
+    // One ranked candidate is all these journeys read, and the frame budget is
+    // why the page has to stay that small: every candidate carries several KiB
+    // of ranking provenance, so a three-result page rendered 18 084 characters
+    // against the 15 000-character response frame.
+    let payload = tool(
         harness,
         project,
         "tracedecay_search",
-        json!({"query": query, "limit": 3, "format": "json"}),
+        json!({"query": query, "limit": 1, "format": "json"}),
     )
-    .await
+    .await;
+    // A truncated envelope moves `results` and `code_generation` inside
+    // `preview`, where every predicate below reads them as absent. That is a
+    // malformed observation, not a warming generation: the waits below would
+    // spin to their deadline against a generation that is already current.
+    assert!(
+        payload.get("truncated").is_none(),
+        "search exceeded the MCP response frame and was replaced by a retrieval handle: {payload}"
+    );
+    payload
 }
 
 fn result_paths(search: &Value) -> Vec<&str> {
@@ -168,7 +187,7 @@ async fn wait_for_current_generation(
                     return current_generation;
                 }
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(READINESS_POLL_INTERVAL).await;
         }
     })
     .await
@@ -219,7 +238,7 @@ async fn wait_for_background_refresh(
                 }
                 return;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(READINESS_POLL_INTERVAL).await;
         }
     })
     .await
