@@ -3352,6 +3352,33 @@ pub fn arrow(counter: &Counter) -> u32 {
 }
 "#;
 
+const FIELD_QUALIFIED_SOURCE: &str = r#"pub struct Counter {
+    pub n: u32,
+}
+
+pub struct Gauge {
+    pub n: u32,
+}
+
+impl Counter {
+    pub fn read(&self, gauge: &Gauge) -> u32 {
+        let kept = self.n;
+        let other = gauge.n;
+        kept + other
+    }
+}
+
+pub fn bump(counter: &mut Counter, gauge: &mut Gauge) -> u32 {
+    let same = counter.n == 0;
+    counter.n = 1;
+    gauge.n += 2;
+    let borrowed = &mut counter.n;
+    let shifted = counter.n << 1;
+    counter.n <<= 1;
+    counter.n
+}
+"#;
+
 async fn call_field_sites(host: &impl AnalysisToolHost, arguments: Value) -> Value {
     let result = handle_tool_call(host, "tracedecay_field_sites", arguments, None, None)
         .await
@@ -3418,47 +3445,6 @@ async fn field_sites_behavior_reports_literal_read_and_write_sites() {
         "writes_only must omit the read list rather than return it empty"
     );
 
-    let qualified = call_field_sites(&host, json!({"field": "Counter::n", "format": "json"})).await;
-    assert_eq!(
-        qualified,
-        json!({
-            "field": "Counter::n",
-            "qualifier": "Counter",
-            "qualifier_applied": true,
-            "write_count": 3,
-            "read_count": 6,
-            "write_sites": [
-                field_site(19, bump, "counter.n = 1;"),
-                field_site(21, bump, "let borrowed = &mut counter.n;"),
-                field_site(23, bump, "counter.n <<= 1;"),
-            ],
-            "read_sites": [
-                field_site(11, read_method, "let kept = self.n;"),
-                field_site(18, bump, "let same = counter.n == 0;"),
-                field_site(22, bump, "let shifted = counter.n << 1;"),
-                field_site(27, bump, "counter.n"),
-                field_site(31, arrow, "take!(counter.n => 1);"),
-                field_site(32, arrow, "counter.n"),
-            ],
-        }),
-        "Counter::n must drop Gauge sites"
-    );
-
-    let missing = call_field_sites(&host, json!({"field": "Missing::n", "format": "json"})).await;
-    assert_eq!(
-        missing,
-        json!({
-            "field": "Missing::n",
-            "qualifier": "Missing",
-            "qualifier_applied": true,
-            "write_count": 0,
-            "read_count": 0,
-            "write_sites": [],
-            "read_sites": [],
-        }),
-        "an unknown qualifier is an empty census, not every same-named field"
-    );
-
     // The scan stops only after both kinds have reached `limit`, so reads that
     // precede the first write stay in the result.
     let limited =
@@ -3497,7 +3483,77 @@ async fn field_sites_behavior_reports_literal_read_and_write_sites() {
         "config error: tracedecay_field_sites failed over production MCP: tool execution failed: config error: tracedecay_field_sites requires a 'field' argument"
     );
 
+    // `take!` is parseable Rust, but its body is a token tree, so the qualifier
+    // path cannot bind `counter.n` to `Counter`. The first unbound site stops
+    // the qualified census.
+    let unbound_macro = expect_tool_error(
+        handle_tool_call(
+            &host,
+            "tracedecay_field_sites",
+            json!({"field": "Counter::n", "format": "json"}),
+            None,
+            None,
+        )
+        .await,
+    );
+    assert_eq!(
+        unbound_macro,
+        "config error: tracedecay_field_sites failed over production MCP: tool project route failed: reason_code=verified-field-qualifier-unavailable retryable=false: the indexed graph cannot bind field receiver '<unresolved>' at src/lib.rs:31 to exactly one qualified owner"
+    );
     close_test_graph(host).await;
+
+    let qualified_dir = test_temp_dir();
+    let qualified_root = qualified_dir.path().join("project");
+    fs::create_dir_all(qualified_root.join("src")).unwrap();
+    fs::write(qualified_root.join("src/lib.rs"), FIELD_QUALIFIED_SOURCE).unwrap();
+    let (qualified_host, _qualified_env) = init_test_project(&qualified_root).await;
+    let qualified = call_field_sites(
+        &qualified_host,
+        json!({"field": "Counter::n", "format": "json"}),
+    )
+    .await;
+    assert_eq!(
+        qualified,
+        json!({
+            "field": "Counter::n",
+            "qualifier": "Counter",
+            "qualifier_applied": true,
+            "write_count": 3,
+            "read_count": 4,
+            "write_sites": [
+                field_site(19, bump, "counter.n = 1;"),
+                field_site(21, bump, "let borrowed = &mut counter.n;"),
+                field_site(23, bump, "counter.n <<= 1;"),
+            ],
+            "read_sites": [
+                field_site(11, read_method, "let kept = self.n;"),
+                field_site(18, bump, "let same = counter.n == 0;"),
+                field_site(22, bump, "let shifted = counter.n << 1;"),
+                field_site(24, bump, "counter.n"),
+            ],
+        }),
+        "Counter::n must drop Gauge sites"
+    );
+
+    let missing = call_field_sites(
+        &qualified_host,
+        json!({"field": "Missing::n", "format": "json"}),
+    )
+    .await;
+    assert_eq!(
+        missing,
+        json!({
+            "field": "Missing::n",
+            "qualifier": "Missing",
+            "qualifier_applied": true,
+            "write_count": 0,
+            "read_count": 0,
+            "write_sites": [],
+            "read_sites": [],
+        }),
+        "an unknown qualifier is an empty census, not every same-named field"
+    );
+    close_test_graph(qualified_host).await;
 }
 
 #[tokio::test]
