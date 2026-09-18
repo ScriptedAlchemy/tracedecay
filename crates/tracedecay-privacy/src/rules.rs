@@ -643,7 +643,7 @@ fn compile_regex(
 ///
 /// Gitleaks rules are authored for Go's RE2. RE2 and Rust's `regex` share the
 /// important restrictions, no backreferences, no lookaround, which is why the
-/// catalogue transfers at all. They disagree in exactly two places, and both
+/// catalogue transfers at all. They disagree in exactly three places, and all
 /// are mechanical:
 ///
 /// * **A literal `{`.** RE2 reads a brace that opens no valid repetition as a
