@@ -182,6 +182,8 @@ fn expected_hit(session_id: &str, prompt: &str, query: &str, body: &str) -> Valu
         "status": "ok",
         "context_blocks": [{
             "kind": "raw_message",
+            "node_id": null,
+            "source_ref": null,
             "content": body,
             "content_range": {
                 "offset": 0,
@@ -190,6 +192,8 @@ fn expected_hit(session_id: &str, prompt: &str, query: &str, body: &str) -> Valu
                 "total_chars": chars,
                 "truncated": false,
             },
+            "raw_message": null,
+            "summary_node": null,
         }],
         "needs_synthesis": true,
         "prompt": prompt,
@@ -209,6 +213,8 @@ fn expected_hit(session_id: &str, prompt: &str, query: &str, body: &str) -> Valu
         "node_ids": [],
         "matches": [{
             "kind": "raw_message",
+            "node_id": null,
+            "store_id": null,
             "snippet": body,
         }],
         "omitted": 0,
