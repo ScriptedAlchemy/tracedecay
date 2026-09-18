@@ -26,6 +26,7 @@ use crate::daemon::{
 };
 use crate::mcp::tools::{ToolCallRegistryOptions, handle_tool_call_with_registry_options};
 use crate::project::TraceDecay;
+use tracedecay_daemon_protocol::DaemonInvocationExecutor;
 use tracedecay_daemon_service::{DaemonInvocationOutcome, DaemonInvocationRequest};
 
 const SCOPE_SET_ID: &str = "scope-set.mcp-execute-proof";
@@ -197,9 +198,12 @@ async fn call_execute(
     arguments: Value,
 ) -> tracedecay_mcp::ToolResult {
     let request_id = RequestId::new(request_id).expect("request id");
-    let mut options = ToolCallRegistryOptions::default();
-    options.application_invocation_executor = executor;
-    options.application_request_id = Some(request_id);
+    let options = ToolCallRegistryOptions {
+        application_invocation_executor: executor
+            .map(|executor| executor as &dyn DaemonInvocationExecutor),
+        application_request_id: Some(request_id),
+        ..ToolCallRegistryOptions::default()
+    };
     handle_tool_call_with_registry_options(
         graph,
         "tracedecay_multi_root_execute",
