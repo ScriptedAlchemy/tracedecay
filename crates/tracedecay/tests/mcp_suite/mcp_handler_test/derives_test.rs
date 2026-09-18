@@ -11,7 +11,6 @@ use crate::support::{
 };
 use serde_json::{Value, json};
 use std::fs;
-use tracedecay_mcp::McpTransport;
 
 /// Lines are the fixture's source lines. `tracedecay_derives` reports the
 /// item line (1-based), not the attribute line above it.
@@ -111,11 +110,7 @@ async fn derives_reports_exact_attached_macro_names() {
         "node_id wins when both selectors are present"
     );
     assert_eq!(
-        call_text(
-            &fixture,
-            json!({"node_id": named_id, "format": "markdown"})
-        )
-        .await,
+        call_text(&fixture, json!({"node_id": named_id, "format": "markdown"})).await,
         format!(
             "- **NamedValue**\n  **kind:** struct\n  **file:** src/lib.rs\n  **line:** 10\n  **derives:** CustomDerive; Eq; serde::Serialize\n  **node_id:** `{named_id}`\n  **qualified_name:** `src/lib.rs::NamedValue`\n"
         )
@@ -249,9 +244,8 @@ async fn derives_reports_exact_attached_macro_names() {
 
 async fn derive_symbol(fixture: &ProductionCompositionFixture, arguments: Value) -> Value {
     let text = call_text(fixture, arguments).await;
-    let payload: Value = serde_json::from_str(&text).unwrap_or_else(|error| {
-        panic!("tracedecay_derives JSON: {error}\n{text}")
-    });
+    let payload: Value = serde_json::from_str(&text)
+        .unwrap_or_else(|error| panic!("tracedecay_derives JSON: {error}\n{text}"));
     let items = payload
         .as_array()
         .unwrap_or_else(|| panic!("tracedecay_derives must return a symbol array: {payload}"));
@@ -323,8 +317,7 @@ async fn call_derives(
     Box::pin(server.run_connection(&mut transport))
         .await
         .expect("real MCP server tool call");
-    let response: Value =
-        serde_json::from_str(transport.output.trim()).expect("JSON-RPC response");
+    let response: Value = serde_json::from_str(transport.output.trim()).expect("JSON-RPC response");
     if !response["error"].is_null() {
         return Err(response["error"].clone());
     }
