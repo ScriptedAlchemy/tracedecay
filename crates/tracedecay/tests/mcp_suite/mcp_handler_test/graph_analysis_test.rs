@@ -3039,6 +3039,332 @@ async fn pr_context_collapses_cargo_toml_keys() {
     );
 }
 
+/// Author and committer identity are fixed so the commit objects, and therefore
+/// the oids `tracedecay_pr_context` returns, are literals rather than values
+/// read back out of the repository under test.
+fn git_with_pinned_dates(dir: &Path, args: &[&str], date: Option<&str>) {
+    let mut command = std::process::Command::new(
+        tracedecay_runtime_core::git::try_git_program().expect("git executable"),
+    );
+    command
+        .args([
+            "-c",
+            "core.hooksPath=.git/no-hooks",
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "user.name=TraceDecay Test",
+            "-c",
+            "user.email=tracedecay-test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .current_dir(dir);
+    if let Some(date) = date {
+        command
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date);
+    }
+    let output = command
+        .output()
+        .unwrap_or_else(|error| panic!("git {args:?} should spawn: {error}"));
+    assert!(
+        output.status.success(),
+        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+async fn pr_context_json(host: &impl AnalysisToolHost, arguments: Value) -> Value {
+    let result = handle_tool_call(host, "tracedecay_pr_context", arguments, None, None)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("tracedecay_pr_context should return a tool result: {error}")
+        });
+    serde_json::from_str(extract_text(&result.value)).expect("PR context JSON")
+}
+
+fn symbol_facts(symbols: &Value) -> Value {
+    let mut facts = symbols
+        .as_array()
+        .unwrap_or_else(|| panic!("symbol list must be an array, got {symbols}"))
+        .iter()
+        .map(|symbol| {
+            if symbol.get("kind").and_then(Value::as_str) == Some("config_summary") {
+                json!({
+                    "config_keys": symbol["config_keys"],
+                    "file": symbol["file"],
+                    "kind": "config_summary",
+                })
+            } else {
+                json!({
+                    "file": symbol["file"],
+                    "kind": symbol["kind"],
+                    "line": symbol["line"],
+                    "name": symbol["name"],
+                })
+            }
+        })
+        .collect::<Vec<_>>();
+    facts.sort_by(|left, right| left.to_string().cmp(&right.to_string()));
+    Value::Array(facts)
+}
+
+fn pr_context_view(output: &Value) -> Value {
+    json!({
+        "affected_tests": output["affected_tests"],
+        "analysis_complete": output["analysis_coverage"]["complete"],
+        "base": output["base"],
+        "base_oid": output["base_oid"],
+        "changes": output["changes"],
+        "commits": output["commits"],
+        "coverage_status": output["symbol_changes_coverage"]["status"],
+        "error": output["error"],
+        "files_changed": output["files_changed"],
+        "head": output["head"],
+        "head_oid": output["head_oid"],
+        "impacted_modules": output["impacted_modules"],
+        "merge_base": output["merge_base"],
+        "message": output["message"],
+        "next_cursor": output["next_cursor"],
+        "status": output["status"],
+        "symbols_added": symbol_facts(&output["added"]),
+        "symbols_modified": symbol_facts(&output["modified"]),
+        "symbols_removed": symbol_facts(&output["removed"]),
+        "symbols_added_count": output["symbols_added"],
+        "symbols_modified_count": output["symbols_modified"],
+        "symbols_removed_count": output["symbols_removed"],
+        "symbol_page_complete": output["symbol_page"]["complete"],
+        "symbol_page_has_more": output["symbol_page"]["has_more"],
+        "symbol_page_limit": output["symbol_page"]["limit"],
+        "symbol_page_selection": output["symbol_page"]["selection"],
+        "test_files_changed": output["test_files_changed"],
+    })
+}
+
+/// `tracedecay_pr_context` is the pull-request summary a caller asks for.
+/// These literals are the tool result for one pinned history: `master` at
+/// `bece36f8dada44933bc1bfa4c42faaccf77dcaab` and `feature` at
+/// `bd4bc112c3374fbe23cb4ae2185cbf7945cb0e82`.
+#[tokio::test]
+async fn pr_context_reports_the_pinned_feature_summary() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    let project = project_root.as_path();
+    git_with_pinned_dates(project, &["init", "-b", "master"], None);
+    fs::write(
+        project.join("src/announce.rs"),
+        "pub fn announce() -> &'static str {\n    greet()\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        "mod announce;\n\npub fn greet() -> &'static str {\n    \"hi\"\n}\n",
+    )
+    .unwrap();
+    git_with_pinned_dates(project, &["add", "."], None);
+    git_with_pinned_dates(
+        project,
+        &["commit", "-m", "base"],
+        Some("2020-01-02T03:04:05Z"),
+    );
+    git_with_pinned_dates(project, &["switch", "-c", "feature"], None);
+    fs::write(
+        project.join("src/lib.rs"),
+        "mod announce;\n\npub fn greet() -> &'static str {\n    \"hello\"\n}\n",
+    )
+    .unwrap();
+    fs::create_dir_all(project.join("tests")).unwrap();
+    fs::write(
+        project.join("tests/greet.rs"),
+        "#[test]\nfn greet_says_hello() {}\n",
+    )
+    .unwrap();
+    git_with_pinned_dates(project, &["add", "."], None);
+    git_with_pinned_dates(
+        project,
+        &["commit", "-m", "say hello"],
+        Some("2020-01-03T03:04:05Z"),
+    );
+
+    let (host, _env) = init_test_project(project).await;
+    let feature = pr_context_json(
+        &host,
+        json!({"format": "json", "base_ref": "master", "head_ref": "feature"}),
+    )
+    .await;
+    assert_eq!(
+        feature["graph_generation"], feature["symbol_changes_coverage"]["head_generation"],
+        "the served graph must be the compared head generation: {feature}"
+    );
+    let mut feature_summary = json!({
+        "affected_tests": [],
+        "analysis_complete": true,
+        "base": "master",
+        "base_oid": "bece36f8dada44933bc1bfa4c42faaccf77dcaab",
+        "changes": [
+            {"path": "src/lib.rs", "status": "modified"},
+            {"path": "tests/greet.rs", "status": "added"}
+        ],
+        "commits": [{"hash": "bd4bc11", "subject": "say hello"}],
+        "coverage_status": "complete",
+        "error": null,
+        "files_changed": 2,
+        "head": "feature",
+        "head_oid": "bd4bc112c3374fbe23cb4ae2185cbf7945cb0e82",
+        "impacted_modules": ["src"],
+        "merge_base": "bece36f8dada44933bc1bfa4c42faaccf77dcaab",
+        "message": null,
+        "next_cursor": null,
+        "status": "complete",
+        "symbols_added": [
+            {"file": "tests/greet.rs", "kind": "annotation_usage", "line": 0, "name": "test"},
+            {"file": "tests/greet.rs", "kind": "function", "line": 1, "name": "greet_says_hello"}
+        ],
+        "symbols_modified": [
+            {"file": "src/lib.rs", "kind": "function", "line": 2, "name": "greet"}
+        ],
+        "symbols_removed": [],
+        "symbols_added_count": 2,
+        "symbols_modified_count": 1,
+        "symbols_removed_count": 0,
+        "symbol_page_complete": true,
+        "symbol_page_has_more": false,
+        "symbol_page_limit": 200,
+        "symbol_page_selection": "stable_prefix",
+        "test_files_changed": ["tests/greet.rs"],
+    });
+    for key in ["symbols_added", "symbols_modified", "symbols_removed"] {
+        feature_summary[key] = symbol_facts(&feature_summary[key]);
+    }
+    assert_eq!(
+        pr_context_view(&feature),
+        feature_summary,
+        "feature summary: {feature}"
+    );
+
+    let default_base =
+        pr_context_json(&host, json!({"format": "json", "head_ref": "feature"})).await;
+    assert_eq!(
+        pr_context_view(&default_base),
+        feature_summary,
+        "omitting base_ref must select the repository default branch master: {default_base}"
+    );
+
+    let same_ref = pr_context_json(
+        &host,
+        json!({"format": "json", "base_ref": "feature", "head_ref": "feature"}),
+    )
+    .await;
+    assert_eq!(
+        pr_context_view(&same_ref),
+        json!({
+            "affected_tests": [],
+            "analysis_complete": true,
+            "base": "feature",
+            "base_oid": "bd4bc112c3374fbe23cb4ae2185cbf7945cb0e82",
+            "changes": [],
+            "commits": [],
+            "coverage_status": "complete",
+            "error": null,
+            "files_changed": 0,
+            "head": "feature",
+            "head_oid": "bd4bc112c3374fbe23cb4ae2185cbf7945cb0e82",
+            "impacted_modules": [],
+            "merge_base": "bd4bc112c3374fbe23cb4ae2185cbf7945cb0e82",
+            "message": null,
+            "next_cursor": null,
+            "status": "complete",
+            "symbols_added": [],
+            "symbols_modified": [],
+            "symbols_removed": [],
+            "symbols_added_count": 0,
+            "symbols_modified_count": 0,
+            "symbols_removed_count": 0,
+            "symbol_page_complete": true,
+            "symbol_page_has_more": false,
+            "symbol_page_limit": 200,
+            "symbol_page_selection": "stable_prefix",
+            "test_files_changed": [],
+        }),
+        "identical refs must report an empty summary, not an error: {same_ref}"
+    );
+
+    let cursor = handle_tool_call(
+        &host,
+        "tracedecay_pr_context",
+        json!({"format": "json", "base_ref": "master", "head_ref": "feature", "cursor": 1}),
+        None,
+        None,
+    )
+    .await
+    .expect_err("a numeric cursor is not a continuation token");
+    assert_eq!(
+        cursor.to_string(),
+        "config error: tracedecay_pr_context failed over production MCP: tool execution failed: config error: PR context cursor must be a string"
+    );
+
+    close_test_graph(host).await;
+}
+
+/// A short branch name whose local tip and `origin` tip have diverged is not
+/// a comparison. The tool must say so, naming both explicit refs, instead of
+/// silently picking one side.
+#[tokio::test]
+async fn pr_context_names_both_refs_when_a_branch_has_diverged() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(&project_root).unwrap();
+    let project = project_root.as_path();
+    git_with_pinned_dates(project, &["init", "-b", "main"], None);
+    fs::write(project.join("base.txt"), "base\n").unwrap();
+    git_with_pinned_dates(project, &["add", "."], None);
+    git_with_pinned_dates(project, &["commit", "-m", "base"], None);
+    git_with_pinned_dates(
+        project,
+        &["update-ref", "refs/remotes/origin/main", "HEAD"],
+        None,
+    );
+    fs::write(project.join("local.txt"), "local\n").unwrap();
+    git_with_pinned_dates(project, &["add", "."], None);
+    git_with_pinned_dates(project, &["commit", "-m", "local advance"], None);
+    git_with_pinned_dates(
+        project,
+        &["switch", "--detach", "refs/remotes/origin/main"],
+        None,
+    );
+    fs::write(project.join("remote.txt"), "remote\n").unwrap();
+    git_with_pinned_dates(project, &["add", "."], None);
+    git_with_pinned_dates(project, &["commit", "-m", "remote advance"], None);
+    git_with_pinned_dates(
+        project,
+        &["update-ref", "refs/remotes/origin/main", "HEAD"],
+        None,
+    );
+    git_with_pinned_dates(project, &["switch", "main"], None);
+
+    let (host, _env) = init_test_project(project).await;
+    let output = pr_context_json(
+        &host,
+        json!({"format": "json", "base_ref": "main", "head_ref": "HEAD"}),
+    )
+    .await;
+    assert_eq!(
+        output,
+        json!({
+            "error": {
+                "kind": "git",
+                "operation": "diff",
+                "message": "branch 'main' has diverged local and origin tips; pass 'refs/heads/main' or 'origin/main' explicitly"
+            }
+        })
+    );
+    close_test_graph(host).await;
+}
+
 /// `tracedecay_dead_code` must not treat non-reference edges like
 /// `annotates` or `derives_macro` as "this function is alive" evidence. A
 /// private helper with no callers but an `#[inline]` (or any other
