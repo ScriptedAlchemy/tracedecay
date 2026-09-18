@@ -13,17 +13,15 @@ use crate::support::{
 };
 use serde_json::{Value, json};
 use tracedecay::mcp::McpServer;
-use tracedecay_lcm::types::LcmImmutableSummaryPublication;
 use tracedecay_lcm::{LcmSourceRef, LcmSummaryNodeDraft};
 use tracedecay_sessions::admission::HostAdmissionScope;
 
-const BODY: &str = "orchard dispatch token: alpha-brass-7";
+const BODY: &str = "orchard dispatch marker alpha-brass-seven";
 /// Offset 8 skips `orchard `; the next 16 characters are this window,
-/// including the trailing space before `alpha-brass-7`.
-const WINDOW: &str = "dispatch token: ";
+/// including the trailing space after `marker`.
+const WINDOW: &str = "dispatch marker ";
 const SESSION: &str = "expand-proof-session";
 const MESSAGE: &str = "expand-proof-message";
-const SUMMARY_ID: &str = "summary.expand-proof";
 const SUMMARY_TEXT: &str = "alpha-brass summary of the orchard dispatch";
 const NOT_FOUND: &str = "The requested resource was not found or is not authorized";
 const INVALID: &str = "The retained operation request is invalid.";
@@ -54,33 +52,54 @@ async fn lcm_expand_returns_the_seeded_message_and_refuses_the_wrong_target() {
         json!({
             "provider": "cursor",
             "session_id": SESSION,
-            "target": {"kind": "canonical_occurrence", "message_id": MESSAGE}
+            "target": {"kind": "raw_message", "store_id": store_id}
         }),
     )
     .await;
-    assert_eq!(full["status"], "ok", "{full}");
+    assert_eq!(full["status"], "partial", "{full}");
     assert_eq!(full["provider"], "cursor");
     assert_eq!(full["session_id"], SESSION);
     assert_eq!(full["grain"], "occurrence");
     assert_eq!(full["state"], "available");
-    assert_eq!(full["omitted"], 0);
-    assert_eq!(full["retrieval"]["outcome"], "complete");
+    assert_eq!(full["omitted"], 1);
+    assert_eq!(full["retrieval"]["outcome"], "partial");
     assert_eq!(full["expansion"]["kind"], "raw_message");
     assert_eq!(full["expansion"]["content"], BODY);
     assert_eq!(full["expansion"]["from_current_session"], true);
     assert_eq!(full["expansion"]["content_range"]["offset"], 0);
-    assert_eq!(full["expansion"]["content_range"]["returned_chars"], 37);
-    assert_eq!(full["expansion"]["content_range"]["total_chars"], 37);
+    assert_eq!(full["expansion"]["content_range"]["returned_chars"], 41);
+    assert_eq!(full["expansion"]["content_range"]["total_chars"], 41);
     assert_eq!(full["expansion"]["content_range"]["truncated"], false);
     assert_eq!(full["expansion"]["raw_message"]["message_id"], MESSAGE);
     assert_eq!(full["expansion"]["raw_message"]["content"], BODY);
+    assert_eq!(
+        full["expansion"]["raw_message"]["store_id"],
+        json!(store_id)
+    );
+
+    let by_message = expand(
+        &server,
+        json!({
+            "provider": "cursor",
+            "session_id": SESSION,
+            "target": {"kind": "canonical_occurrence", "message_id": MESSAGE}
+        }),
+    )
+    .await;
+    assert_eq!(by_message["status"], "partial", "{by_message}");
+    assert_eq!(by_message["expansion"]["content"], BODY);
+    assert_eq!(
+        by_message["expansion"]["raw_message"]["message_id"],
+        MESSAGE
+    );
+    assert_eq!(
+        by_message["expansion"]["raw_message"]["store_id"],
+        json!(store_id)
+    );
     assert_eq!(full["expansion"]["raw_message"]["role"], "assistant");
     assert_eq!(full["expansion"]["raw_message"]["session_id"], SESSION);
     assert_eq!(full["expansion"]["raw_message"]["provider"], "cursor");
-    assert_eq!(
-        full["expansion"]["raw_message"]["storage_kind"],
-        "canonical_occurrence"
-    );
+    assert_eq!(full["expansion"]["raw_message"]["storage_kind"], "inline");
 
     let window = expand(
         &server,
@@ -93,7 +112,7 @@ async fn lcm_expand_returns_the_seeded_message_and_refuses_the_wrong_target() {
         }),
     )
     .await;
-    assert_eq!(window["status"], "ok", "{window}");
+    assert_eq!(window["status"], "partial", "{window}");
     assert_eq!(window["expansion"]["kind"], "raw_message");
     assert_eq!(window["expansion"]["content"], WINDOW);
     assert_eq!(window["expansion"]["raw_message"]["content"], WINDOW);
@@ -103,7 +122,7 @@ async fn lcm_expand_returns_the_seeded_message_and_refuses_the_wrong_target() {
     assert_eq!(window["expansion"]["content_range"]["offset"], 8);
     assert_eq!(window["expansion"]["content_range"]["limit"], 16);
     assert_eq!(window["expansion"]["content_range"]["returned_chars"], 16);
-    assert_eq!(window["expansion"]["content_range"]["total_chars"], 37);
+    assert_eq!(window["expansion"]["content_range"]["total_chars"], 41);
     assert_eq!(window["expansion"]["content_range"]["truncated"], true);
 
     let past_end = expand(
@@ -118,9 +137,9 @@ async fn lcm_expand_returns_the_seeded_message_and_refuses_the_wrong_target() {
     )
     .await;
     assert_eq!(past_end["expansion"]["content"], "");
-    assert_eq!(past_end["expansion"]["content_range"]["offset"], 37);
+    assert_eq!(past_end["expansion"]["content_range"]["offset"], 41);
     assert_eq!(past_end["expansion"]["content_range"]["returned_chars"], 0);
-    assert_eq!(past_end["expansion"]["content_range"]["total_chars"], 37);
+    assert_eq!(past_end["expansion"]["content_range"]["total_chars"], 41);
     assert_eq!(past_end["expansion"]["content_range"]["truncated"], true);
     assert_eq!(past_end["expansion"]["raw_message"]["content"], "");
 
@@ -175,7 +194,10 @@ async fn lcm_expand_returns_the_seeded_message_and_refuses_the_wrong_target() {
         over_limit["problem"]["kind"], "invalid_request",
         "{over_limit}"
     );
-    assert_eq!(over_limit["problem"]["code"], "invalid_request");
+    assert_eq!(
+        over_limit["problem"]["code"],
+        "application.retained.invalid-request"
+    );
     assert_eq!(over_limit["problem"]["message"], INVALID);
     assert_eq!(
         over_limit["problem"]["diagnostic"]["code"],
@@ -249,15 +271,11 @@ async fn lcm_expand_returns_the_seeded_message_and_refuses_the_wrong_target() {
         }),
     )
     .await;
-    let unknown_field_message = unknown_field["error"]["message"]
-        .as_str()
-        .unwrap_or_else(|| panic!("unknown-field rejection: {unknown_field}"));
-    assert!(
-        unknown_field_message.starts_with(
-            "tool execution failed: config error: invalid retained application request for tracedecay_lcm_expand: unknown field `not_a_field`"
-        ),
-        "{unknown_field_message}"
+    assert_eq!(
+        unknown_field["error"]["message"],
+        "tool execution failed: config error: invalid retained application request for tracedecay_lcm_expand: not_a_field: unknown field `not_a_field`, expected one of `provider`, `session_id`, `target`, `content_offset`, `content_limit`, `source_limit`, `cursor`, `format`"
     );
+    assert_eq!(unknown_field["error"]["code"], -32603);
 
     server.shutdown().await;
 }
@@ -269,12 +287,10 @@ async fn lcm_expand_returns_summary_text_and_the_source_body() {
     let store_id = lcm_raw_store_id(&cg, MESSAGE).await;
     let db = open_active_project_session_db(&cg).await;
     activate_test_temporal_generation(&db, SESSION, vec![projection]).await;
-    db.lcm_publish_immutable_summary_for_test(
-        HostAdmissionScope::Project,
-        LcmImmutableSummaryPublication {
-            summary_id: SUMMARY_ID.to_string(),
-            predecessor_summary_id: None,
-            draft: LcmSummaryNodeDraft {
+    let summary = db
+        .lcm_insert_summary_node_for_test(
+            HostAdmissionScope::Project,
+            LcmSummaryNodeDraft {
                 provider: "cursor".to_string(),
                 conversation_id: SESSION.to_string(),
                 session_id: SESSION.to_string(),
@@ -288,10 +304,17 @@ async fn lcm_expand_returns_summary_text_and_the_source_body() {
                 expand_hint: Some("expand the orchard dispatch".to_string()),
                 metadata_json: None,
             },
-        },
+        )
+        .await
+        .expect("summary publication");
+    let summary_id = summary.node_id;
+    db.poison_lcm_raw_projection_for_test(
+        HostAdmissionScope::Project,
+        store_id,
+        "projection poison",
     )
     .await
-    .expect("summary publication");
+    .expect("legacy projection poison");
     let server = real_mcp_server(cg).await;
 
     let expanded = expand(
@@ -299,7 +322,7 @@ async fn lcm_expand_returns_summary_text_and_the_source_body() {
         json!({
             "provider": "cursor",
             "session_id": SESSION,
-            "target": {"kind": "summary_node", "node_id": SUMMARY_ID}
+            "target": {"kind": "summary_node", "node_id": summary_id}
         }),
     )
     .await;
@@ -310,7 +333,7 @@ async fn lcm_expand_returns_summary_text_and_the_source_body() {
     assert_eq!(expanded["session_id"], SESSION);
     assert_eq!(expanded["expansion"]["kind"], "summary_node");
     assert_eq!(expanded["expansion"]["content"], SUMMARY_TEXT);
-    assert_eq!(expanded["expansion"]["summary_node"]["node_id"], SUMMARY_ID);
+    assert_eq!(expanded["expansion"]["summary_node"]["node_id"], summary_id);
     assert_eq!(
         expanded["expansion"]["summary_node"]["summary_text"],
         SUMMARY_TEXT
