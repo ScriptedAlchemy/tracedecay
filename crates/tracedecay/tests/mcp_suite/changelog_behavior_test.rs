@@ -163,7 +163,9 @@ async fn changelog_rejects_missing_and_non_object_arguments() {
     );
 
     let missing_to = call_changelog(&repo, json!({"from_ref": "HEAD", "format": "json"})).await;
-    let missing_to = missing_to.error.expect("missing to_ref is a JSON-RPC error");
+    let missing_to = missing_to
+        .error
+        .expect("missing to_ref is a JSON-RPC error");
     assert_eq!(missing_to.code, -32602);
     assert_eq!(missing_to.message, "missing required parameter: to_ref");
     assert_eq!(
@@ -258,11 +260,7 @@ async fn changelog_between_commits_lists_the_file_and_withholds_branch_symbols()
         r#"{"changed_file_count":1,"changed_files":["src/lib.rs"],"from_ref":"HEAD~1","status":"partial","symbol_changes_coverage":{"reason":"exact_local_branch_required","retryable":false,"status":"unavailable"},"symbols_added":[],"symbols_modified":[],"symbols_removed":[],"to_ref":"HEAD"}"#
     );
 
-    let markdown = call_changelog(
-        &repo,
-        json!({"from_ref": "HEAD~1", "to_ref": "HEAD"}),
-    )
-    .await;
+    let markdown = call_changelog(&repo, json!({"from_ref": "HEAD~1", "to_ref": "HEAD"})).await;
     let markdown = success_result(&markdown);
     let rendered = markdown["content"][0]["text"]
         .as_str()
