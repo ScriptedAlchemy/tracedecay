@@ -912,6 +912,10 @@ fn clone_status_distinguishes_unavailable_backfill_partial_ready_and_stale() {
     ));
 }
 
+// Holding the clone-slice slot across the await is the scenario: freshness
+// must answer without waiting for that lock. The guard is dropped before
+// shutdown.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn dashboard_freshness_does_not_join_a_clone_backfill_slice() {
     let fixture = GitFixture::new(&[(
