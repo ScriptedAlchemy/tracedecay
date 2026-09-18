@@ -4,8 +4,8 @@ use tracedecay_code_extraction::ClojureExtractor;
 use tracedecay_code_extraction::PerlExtractor;
 use tracedecay_code_extraction::{
     CloneBodyEligibilityV1, CloneBodyTokenizationIssueV1, CloneBodyTokenizationStatusV1,
-    ConservativeCloneTokenV1, LanguageExtractor, MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1,
-    PythonExtractor, RustExtractor, TypeScriptExtractor,
+    ConservativeCloneTokenV1, LanguageExtractor, MAX_AUTOMATIC_CLONE_BODY_BYTES_V1,
+    MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1, PythonExtractor, RustExtractor, TypeScriptExtractor,
 };
 use tracedecay_domain::NodeKind;
 
@@ -242,7 +242,8 @@ fn bodies_above_the_token_maximum_are_excluded_without_streams() {
     assert_eq!(
         body.eligibility,
         CloneBodyEligibilityV1::ExcludedTooLarge {
-            maximum_tokens: MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1
+            maximum_tokens: MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1,
+            maximum_bytes: MAX_AUTOMATIC_CLONE_BODY_BYTES_V1,
         }
     );
     assert!(body.conservative_tokens.is_empty());
@@ -258,6 +259,35 @@ fn bodies_above_the_token_maximum_are_excluded_without_streams() {
     assert!(body.non_trivia_token_count <= MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1);
     assert_eq!(body.eligibility, CloneBodyEligibilityV1::Eligible);
     assert!(!body.conservative_tokens.is_empty());
+}
+
+#[test]
+fn body_bytes_are_bounded_before_a_large_literal_is_tokenized() {
+    let literal = "x".repeat(usize::try_from(MAX_AUTOMATIC_CLONE_BODY_BYTES_V1).unwrap());
+    let artifact = RustExtractor.extract_artifact(
+        "src/lib.rs",
+        &format!("fn body() {{ let value = \"{literal}\"; }}"),
+    );
+    let body = &artifact.clone_bodies[0];
+
+    assert_eq!(
+        body.eligibility,
+        CloneBodyEligibilityV1::ExcludedTooLarge {
+            maximum_tokens: MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1,
+            maximum_bytes: MAX_AUTOMATIC_CLONE_BODY_BYTES_V1,
+        }
+    );
+    assert_eq!(body.non_trivia_token_count, 0);
+    assert!(body.conservative_tokens.is_empty());
+    assert_eq!(
+        body.tokenization_issues,
+        vec![CloneBodyTokenizationIssueV1::BodyExceedsSizeBound]
+    );
+    assert_eq!(
+        body.tokenization_status,
+        CloneBodyTokenizationStatusV1::Partial
+    );
+    assert!(body.rename_tokens.is_none());
 }
 
 #[test]
