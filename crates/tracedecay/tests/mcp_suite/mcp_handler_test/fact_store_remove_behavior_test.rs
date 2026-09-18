@@ -314,7 +314,8 @@ fn assert_deleted_projection(fact: &Value, project_id: &str, fact_id: &str) {
 
 /// One production MCP journey for `tracedecay_fact_store_remove`.
 ///
-/// A matching removal deletes that fact only. A later removal of the same id
+/// A matching removal deletes that fact only, whether the caller supplies the
+/// current event id or only the fact id. A later removal of the same id
 /// reports `already_removed` and writes nothing. A well-formed id this owner
 /// never stored is `not_found`. An id that does not belong to the owner, a
 /// stale compare-and-swap token on a live fact, and a request the schema
@@ -562,6 +563,77 @@ async fn fact_store_remove_deletes_only_the_named_fact() {
 
     let status = payload(call_tool(&server, "tracedecay_memory_status", json!({})).await);
     assert_eq!(status["memory"]["fact_count"], 1, "{status}");
+
+    let bare = payload(call_tool(&server, TOOL, json!({ "fact_id": survivor.fact_id })).await);
+    assert_eq!(bare["outcome"], "removed", "{bare}");
+    assert_eq!(bare["remaining_fact_count"], 0, "{bare}");
+    assert_deleted_projection(&bare["fact"], &survivor.project_id, &survivor.fact_id);
+    assert_eq!(bare["commit"]["disposition"], "committed", "{bare}");
+    assert_eq!(bare["commit"]["fact_id"], survivor.fact_id);
+    assert_eq!(bare["commit"]["owner"]["kind"], "project");
+    assert_eq!(
+        bare["commit"]["owner"]["project_id"], survivor.project_id,
+        "{bare}"
+    );
+    assert!(bare["commit"]["active_assertion_id"].is_null(), "{bare}");
+    let survivor_event = bare["commit"]["last_event_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("fact-id-only removal event: {bare}"))
+        .to_owned();
+    assert_ne!(survivor_event, survivor.last_event_id);
+    assert_eq!(
+        bare["commit"]["committed_event_ids"],
+        json!([survivor_event]),
+        "{bare}"
+    );
+
+    let emptied = payload(
+        call_tool(
+            &server,
+            "tracedecay_fact_store_list",
+            json!({"category": "project", "min_trust": 0}),
+        )
+        .await,
+    );
+    assert_eq!(emptied["facts"], json!([]), "{emptied}");
+
+    let survivor_gone = payload(
+        call_tool(
+            &server,
+            "tracedecay_fact_store_search",
+            json!({"query": "Amber kiln glaze recipe", "min_trust": 0}),
+        )
+        .await,
+    );
+    assert_eq!(survivor_gone["hits"], json!([]), "{survivor_gone}");
+    assert_eq!(
+        survivor_gone["retrieval_telemetry"]["kind"], "recorded",
+        "{survivor_gone}"
+    );
+    assert_eq!(
+        survivor_gone["retrieval_telemetry"]["fact_count"], 0,
+        "{survivor_gone}"
+    );
+
+    let empty_status = payload(call_tool(&server, "tracedecay_memory_status", json!({})).await);
+    assert_eq!(empty_status["memory"]["fact_count"], 0, "{empty_status}");
+
+    let survivor_again =
+        payload(call_tool(&server, TOOL, json!({ "fact_id": survivor.fact_id })).await);
+    assert_eq!(
+        survivor_again["outcome"], "already_removed",
+        "{survivor_again}"
+    );
+    assert_eq!(
+        survivor_again["remaining_fact_count"], 0,
+        "{survivor_again}"
+    );
+    assert!(survivor_again.get("commit").is_none(), "{survivor_again}");
+    assert_deleted_projection(
+        &survivor_again["fact"],
+        &survivor.project_id,
+        &survivor.fact_id,
+    );
 
     production.harness.shutdown().await;
 }
