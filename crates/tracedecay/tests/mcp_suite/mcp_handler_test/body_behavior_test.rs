@@ -47,14 +47,6 @@ fn format_greeting(name: &str) -> String {
 ```
 ";
 
-/// Occurrence ids are generation-stable hashes. They are pinned after the
-/// first production `tools/call` so the assertion is the value the tool
-/// returned, not a digest recomputed beside the handler.
-const FORMAT_GREETING_ID: &str = "symbol.v1.pending-format-greeting";
-const HELPER_ID: &str = "symbol.v1.pending-helper";
-const GMRES_FUNCTION_ID: &str = "symbol.v1.pending-gmres-function";
-const GMRES_FIELD_ID: &str = "symbol.v1.pending-gmres-field";
-
 async fn open_indexed(
     write_sources: impl FnOnce(&std::path::Path),
     warm_query: &str,
@@ -108,7 +100,17 @@ fn assert_success_texts(response: &Value, texts: &[&str]) {
     assert_eq!(actual, texts, "{response}");
 }
 
-fn assert_json_payload(response: &Value, expected: Value) {
+/// Occurrence ids mix the fixture file identity into the hash, so the hex
+/// changes with the temp project root. The wire shape does not.
+fn assert_symbol_occurrence_id(id: &str) {
+    let Some(hex) = id.strip_prefix("symbol.v1.sha256:") else {
+        panic!("occurrence id {id}");
+    };
+    assert_eq!(hex.len(), 64, "{id}");
+    assert!(hex.bytes().all(|byte| byte.is_ascii_hexdigit()), "{id}");
+}
+
+fn assert_json_payload(response: &Value, expected: Value) -> Vec<String> {
     assert!(
         response.get("error").is_none_or(Value::is_null),
         "tools/call failed: {response}"
@@ -116,9 +118,27 @@ fn assert_json_payload(response: &Value, expected: Value) {
     let text = response["result"]["content"][0]["text"]
         .as_str()
         .unwrap_or_else(|| panic!("json text: {response}"));
-    let payload: Value = serde_json::from_str(text)
+    let mut payload: Value = serde_json::from_str(text)
         .unwrap_or_else(|error| panic!("body JSON was not the tool payload ({error}): {text}"));
+    let Some(matches) = payload.get_mut("matches").and_then(Value::as_array_mut) else {
+        panic!("body JSON has no matches array: {text}");
+    };
+    let mut ids = Vec::with_capacity(matches.len());
+    for item in matches.iter_mut() {
+        let Some(object) = item.as_object_mut() else {
+            panic!("match was not an object: {text}");
+        };
+        let Some(id) = object
+            .remove("id")
+            .and_then(|id| id.as_str().map(str::to_owned))
+        else {
+            panic!("match has no occurrence id: {text}");
+        };
+        assert_symbol_occurrence_id(&id);
+        ids.push(id);
+    }
     assert_eq!(payload, expected, "{text}");
+    ids
 }
 
 fn assert_invalid_params(response: &Value, message: &str, data: Value) {
@@ -145,7 +165,6 @@ async fn indexed_symbol_body_is_the_source_span() {
         json!({
             "match_count": 1,
             "matches": [{
-                "id": FORMAT_GREETING_ID,
                 "name": "format_greeting",
                 "qualified_name": "src/utils.rs::format_greeting",
                 "kind": "function",
@@ -158,15 +177,6 @@ async fn indexed_symbol_body_is_the_source_span() {
         }),
     );
 
-    let markdown = call_body(&server, json!({"symbol": "format_greeting"})).await;
-    assert_success_texts(
-        &markdown,
-        &[
-            FORMAT_GREETING_MARKDOWN,
-            "\ntracedecay_metrics: before=42 after=60",
-        ],
-    );
-
     let qualified = call_body(
         &server,
         json!({"symbol": "src/utils.rs::helper", "format": "json"}),
@@ -177,7 +187,6 @@ async fn indexed_symbol_body_is_the_source_span() {
         json!({
             "match_count": 1,
             "matches": [{
-                "id": HELPER_ID,
                 "name": "helper",
                 "qualified_name": "src/utils.rs::helper",
                 "kind": "function",
@@ -188,6 +197,15 @@ async fn indexed_symbol_body_is_the_source_span() {
                 "body": HELPER_BODY,
             }]
         }),
+    );
+
+    let markdown = call_body(&server, json!({"symbol": "format_greeting"})).await;
+    assert_success_texts(
+        &markdown,
+        &[
+            FORMAT_GREETING_MARKDOWN,
+            "\ntracedecay_metrics: before=42 after=60",
+        ],
     );
 
     let missing = call_body(&server, json!({"symbol": "no_such_symbol_anywhere"})).await;
@@ -246,13 +264,12 @@ async fn same_named_function_is_returned_ahead_of_the_field() {
     .await;
 
     let both = call_body(&server, json!({"symbol": "gmres", "format": "json"})).await;
-    assert_json_payload(
+    let both_ids = assert_json_payload(
         &both,
         json!({
             "match_count": 2,
             "matches": [
                 {
-                    "id": GMRES_FUNCTION_ID,
                     "name": "gmres",
                     "qualified_name": "src/lib.rs::gmres",
                     "kind": "function",
@@ -263,7 +280,6 @@ async fn same_named_function_is_returned_ahead_of_the_field() {
                     "body": GMRES_FUNCTION_BODY,
                 },
                 {
-                    "id": GMRES_FIELD_ID,
                     "name": "gmres",
                     "qualified_name": "src/lib.rs::Solvers::gmres",
                     "kind": "field",
@@ -282,12 +298,11 @@ async fn same_named_function_is_returned_ahead_of_the_field() {
         json!({"symbol": "gmres", "limit": 1, "format": "json"}),
     )
     .await;
-    assert_json_payload(
+    let limited_ids = assert_json_payload(
         &limited,
         json!({
             "match_count": 1,
             "matches": [{
-                "id": GMRES_FUNCTION_ID,
                 "name": "gmres",
                 "qualified_name": "src/lib.rs::gmres",
                 "kind": "function",
@@ -305,12 +320,11 @@ async fn same_named_function_is_returned_ahead_of_the_field() {
         json!({"symbol": "gmres", "limit": 0, "format": "json"}),
     )
     .await;
-    assert_json_payload(
+    let clamped_ids = assert_json_payload(
         &clamped,
         json!({
             "match_count": 1,
             "matches": [{
-                "id": GMRES_FUNCTION_ID,
                 "name": "gmres",
                 "qualified_name": "src/lib.rs::gmres",
                 "kind": "function",
@@ -322,6 +336,12 @@ async fn same_named_function_is_returned_ahead_of_the_field() {
             }]
         }),
     );
+    assert_ne!(
+        both_ids[0], both_ids[1],
+        "function and field occurrences must stay distinct"
+    );
+    assert_eq!(limited_ids.as_slice(), &both_ids[..1]);
+    assert_eq!(clamped_ids.as_slice(), &both_ids[..1]);
 
     fixture.harness.shutdown().await;
 }
