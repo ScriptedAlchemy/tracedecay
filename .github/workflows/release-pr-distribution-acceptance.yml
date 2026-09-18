@@ -64,6 +64,7 @@ jobs:
           python3 scripts/test-package-release-archive.py
           bash scripts/test-check-distribution-clean-source.sh
           bash scripts/test-check-distribution-snapshot.sh
+          bash scripts/test-check-distribution-reuse.sh
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
@@ -101,11 +102,17 @@ jobs:
       - name: Verify all-feature release build compiles
         run: cargo build --package tracedecay-cli --bin tracedecay --release --target ${{ env.TARGET }} --all-features --locked
 
+      - name: Build release binary for packaging
+        run: cargo build --package tracedecay-cli --bin tracedecay --release --target ${{ env.TARGET }} --no-default-features --features production --locked
+
       - name: Run distribution acceptance
         run: |
           set -euo pipefail
           cargo fetch --locked --target ${{ env.TARGET }}
           lockfile_sha="$(python3 -c 'import hashlib; print(hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest())')"
-          CARGO_NET_OFFLINE=true bash scripts/check-distribution-acceptance.sh
+          binary="target/${TARGET}/release/tracedecay"
+          test -f "$binary"
+          CARGO_NET_OFFLINE=true bash scripts/check-distribution-acceptance.sh \
+            --reuse-release-binary "$binary"
           actual_lockfile_sha="$(python3 -c 'import hashlib; print(hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest())')"
           test "$actual_lockfile_sha" = "$lockfile_sha"

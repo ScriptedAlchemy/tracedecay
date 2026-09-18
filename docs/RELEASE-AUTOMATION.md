@@ -96,6 +96,16 @@ a source-tree file inventory or a release-PR path policy. The archive must
 contain a self-contained Rust package graph and the embedded dashboard and
 first-party host assets required by the binary.
 
+`scripts/check-distribution-acceptance.sh` is the shared gate. Release and
+beta platform jobs pass `--reuse-release-binary` so the step proves the
+just-built `target/<triple>/release/tracedecay` instead of compiling a
+second workspace into implicit `target/release`. Non-`x86_64-linux` jobs
+also pass `--skip-packaged-runtime-battery`: `cargo package`, asset, and
+feature-wiring checks still run, but extracted-crate rebuilds, nextest,
+`cargo install`, and MCP inspector dogfood stay on the Linux release PR
+and the `x86_64-linux` release job. MCPB packaging always uses that same
+just-built binary.
+
 The installed binary is exercised with a fresh isolated host profile for every
 supported host. Each official host operation must install, update, and
 uninstall only its owned files while preserving unrelated profile content; the

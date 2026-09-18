@@ -3,11 +3,12 @@
 
 The checks are public-contract and layering rules only: the packaged manifest
 must carry the source feature set, optional native dependencies must stay
-optional and feature-wired, the supported `lang-*` surface must match the
-extraction owner, and each language feature must compile in isolation. How a
-feature is forwarded through
-intermediate crates is Cargo's job; resolved behavior is proven by the
-packaged-artifact builds and launch checks in check-distribution-acceptance.sh.
+optional and feature-wired, and the supported `lang-*` surface must match the
+extraction owner. How a feature is forwarded through intermediate crates is
+Cargo's job; resolved behavior is proven by the packaged-artifact builds and
+launch checks in check-distribution-acceptance.sh. Per-language isolation
+compiles remain available via `--check-extraction-manifest` and are not
+part of the release acceptance gate.
 """
 
 from __future__ import annotations

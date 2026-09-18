@@ -138,6 +138,7 @@ jobs:
           python3 .release-automation/scripts/test-package-release-archive.py
           bash .release-automation/scripts/test-check-distribution-clean-source.sh
           bash .release-automation/scripts/test-check-distribution-snapshot.sh
+          bash .release-automation/scripts/test-check-distribution-reuse.sh
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
@@ -145,6 +146,12 @@ jobs:
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@acdba816b0980ba6b63f1109f89a046e15fc301a # nextest
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: release-beta-${{ matrix.target }}
+          cache-on-failure: true
 
       - name: Resolve release source feature profile
         id: release-profile
@@ -183,12 +190,6 @@ jobs:
           lld-link --version
           "RUSTFLAGS=-C linker=lld-link.exe" >> $env:GITHUB_ENV
 
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          shared-key: release-beta-${{ matrix.target }}
-          cache-on-failure: true
-
       - name: Test release distribution
         if: matrix.name == 'x86_64-linux'
         run: |
@@ -208,7 +209,7 @@ jobs:
       # binary (e.g. test-transport) on disk at the shared release output
       # path for later packaging steps to pick up.
       - name: Verify all-feature release build compiles
-        if: runner.os != 'Windows'
+        if: matrix.name == 'x86_64-linux'
         run: cargo build ${{ steps.release-profile.outputs.binary_args }} --release --target ${{ matrix.target }} --all-features --locked
 
       - name: Build release binary for packaging
@@ -231,8 +232,20 @@ jobs:
           # builds prove the checked-in lockfile resolves without the network.
           cargo fetch --locked --target ${{ matrix.target }}
           lockfile_sha="$(python3 -c 'import hashlib; print(hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest())')"
+          binary="target/${{ matrix.target }}/release/tracedecay"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            binary="${binary}.exe"
+          fi
+          test -f "$binary"
+          gate_args=(--reuse-release-binary "$binary")
+          # Packaging and extracted-crate rebuilds are source-graph proofs.
+          # The Linux release PR already ran the full battery; other beta
+          # platforms only need to stamp and smoke the just-built artifact.
+          if [[ "${{ matrix.name }}" != "x86_64-linux" ]]; then
+            gate_args+=(--skip-packaged-runtime-battery)
+          fi
           CARGO_NET_OFFLINE=true \
-            "$gate_shell" scripts/check-distribution-acceptance.sh
+            "$gate_shell" scripts/check-distribution-acceptance.sh "${gate_args[@]}"
           actual_lockfile_sha="$(python3 -c 'import hashlib; print(hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest())')"
           test "$actual_lockfile_sha" = "$lockfile_sha"
 
