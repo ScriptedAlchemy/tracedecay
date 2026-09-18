@@ -296,11 +296,14 @@ async fn str_replace_reports_a_missing_span_and_leaves_the_file() {
         answer.payload
     );
     assert_eq!(answer.payload["effect"]["receipt"]["outcome"], "failed");
+    // A span miss is an edit that ran and found nothing, not a pre-effect
+    // refusal. The receipt outcome is `failed`; the retained metadata message
+    // the host receives is the completed-edit sentence with `success: false`.
     assert_payload(
         &answer.payload,
         false,
         &[PRICE_FILE],
-        "source edit failed; detailed edit output was not retained",
+        "source edit completed; detailed edit output was not retained",
         false,
     );
 }
@@ -473,9 +476,13 @@ async fn str_replace_replay_does_not_apply_the_same_span_twice() {
         replay.payload["message"],
         "source edit completed; detailed edit output was not retained"
     );
-    assert_eq!(replay.payload["durable_metadata_only"], true);
-    assert_eq!(replay.payload["operation"], OPERATION);
-    assert_eq!(replay.payload["files"], json!([PRICE_FILE]));
+    assert_payload(
+        &replay.payload,
+        true,
+        &[PRICE_FILE],
+        "source edit completed; detailed edit output was not retained",
+        false,
+    );
 }
 
 #[tokio::test]
