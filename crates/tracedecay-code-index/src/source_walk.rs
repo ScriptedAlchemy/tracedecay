@@ -110,6 +110,15 @@ pub fn source_walk(project_root: &Path, path_glob: Option<&str>) -> Result<Walk,
             if !entry.file_type().is_some_and(|kind| kind.is_dir()) {
                 return true;
             }
+            // A directory with its own Git authority is another project, not
+            // source owned by this one. This covers linked worktrees (`.git`
+            // file), nested clones/submodules (`.git` directory), and keeps a
+            // primary checkout containing agent worktrees from indexing many
+            // copies of itself. The project root is deliberately exempt at
+            // depth zero above.
+            if std::fs::symlink_metadata(entry.path().join(".git")).is_ok() {
+                return false;
+            }
             let explicitly_requested = has_positive_override
                 && (generated_dir_overrides
                     .as_ref()
@@ -153,5 +162,59 @@ fn build_overrides(
             })
         }
         _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use tempfile::TempDir;
+
+    use super::source_walk;
+
+    #[test]
+    fn nested_repository_is_not_part_of_the_parent_source_tree() {
+        let root = TempDir::new().expect("project root");
+        fs::create_dir(root.path().join(".git")).expect("parent git directory");
+        fs::create_dir_all(root.path().join("src")).expect("parent source directory");
+        fs::write(root.path().join("src/lib.rs"), "pub fn parent() {}\n").expect("parent source");
+        fs::create_dir_all(root.path().join("plain")).expect("plain directory");
+        fs::write(root.path().join("plain/keep.rs"), "pub fn keep() {}\n").expect("plain source");
+
+        let nested = root.path().join("nested-worktree");
+        fs::create_dir_all(nested.join("src")).expect("nested source directory");
+        fs::write(nested.join(".git"), "gitdir: /tmp/foreign-worktree\n")
+            .expect("linked-worktree marker");
+        fs::write(nested.join("src/foreign.rs"), "pub fn foreign() {}\n").expect("nested source");
+        let nested_clone = root.path().join("nested-clone");
+        fs::create_dir_all(nested_clone.join(".git")).expect("nested git directory");
+        fs::write(nested_clone.join("foreign.rs"), "pub fn cloned() {}\n")
+            .expect("nested clone source");
+
+        let files = source_walk(root.path(), None)
+            .expect("source walk")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+            .map(|entry| {
+                entry
+                    .path()
+                    .strip_prefix(root.path())
+                    .expect("project-relative path")
+                    .to_path_buf()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(files.contains(&PathBuf::from("src/lib.rs")));
+        assert!(files.contains(&PathBuf::from("plain/keep.rs")));
+        assert!(
+            !files.contains(&PathBuf::from("nested-worktree/src/foreign.rs")),
+            "a linked worktree nested under the project must not be indexed as parent source"
+        );
+        assert!(
+            !files.contains(&PathBuf::from("nested-clone/foreign.rs")),
+            "a nested clone must not be indexed as parent source"
+        );
     }
 }
