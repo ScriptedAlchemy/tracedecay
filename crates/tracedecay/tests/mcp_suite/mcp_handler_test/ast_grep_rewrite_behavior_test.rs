@@ -1,7 +1,3 @@
-//! Observable behavior of `tracedecay_ast_grep_rewrite` through the production
-//! MCP server. These tests call the tool the way a host does and compare the
-//! file bytes and the JSON payload the caller can read.
-
 use crate::support::{
     ProductionSourceEditFixture, TestTempDir, expect_tool_error, extract_first_json_content,
     init_production_source_edit_project, test_temp_dir,
@@ -291,6 +287,7 @@ async fn ast_grep_rewrite_exact_retry_replays_and_a_different_input_conflicts() 
     .await
     .expect("apply");
     assert_eq!(first.semantic_error(), Some(false), "{first:?}");
+    assert_eq!(first.touched_files, vec![CHECKOUT.to_owned()], "{first:?}");
     let first_json = edit_json(&first);
     assert_eq!(
         first_json["message"],
