@@ -49,6 +49,7 @@ mod memory_facts_test;
 mod memory_feedback_test;
 #[cfg(feature = "test-transport")]
 mod move_symbol_test;
+mod node_behavior_test;
 #[cfg(feature = "test-transport")]
 mod port_order_test;
 #[cfg(feature = "test-transport")]

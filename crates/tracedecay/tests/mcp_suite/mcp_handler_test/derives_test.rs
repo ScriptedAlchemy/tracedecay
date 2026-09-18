@@ -6,7 +6,7 @@
 //! the only runtime identity; every other field is a literal of the fixture.
 
 use crate::support::{
-    ProductionCompositionFixture, handle_real_server_tool_call_raw_exact,
+    ProductionCompositionFixture, dispatch_mcp_tool_call,
     production_composition_fixture_with_sources, warm_code_index_search,
 };
 use serde_json::{Value, json};
@@ -301,8 +301,7 @@ async fn call_derives(
         .harness
         .server(&fixture.project_root)
         .expect("derives fixture server");
-    let response =
-        handle_real_server_tool_call_raw_exact(&server, "tracedecay_derives", arguments).await;
+    let response = dispatch_mcp_tool_call(&server, "tracedecay_derives", arguments).await;
     if !response["error"].is_null() {
         return Err(response["error"].clone());
     }
