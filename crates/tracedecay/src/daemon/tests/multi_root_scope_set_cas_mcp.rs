@@ -9,6 +9,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -16,8 +17,8 @@ use tempfile::TempDir;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::{
-    DaemonHandshake, enter_test_daemon_database_scope, initialize_test_project,
-    test_client_identity_for, test_daemon_engine_for_profile, test_handshake_defaults,
+    DaemonHandshake, enter_test_daemon_database_scope, test_client_identity_for,
+    test_daemon_engine_for_profile, test_handshake_defaults,
 };
 
 const TOOL_NAME: &str = "tracedecay_multi_root_scope_set_compare_and_swap";
@@ -55,34 +56,30 @@ async fn run_scope_set_compare_and_swap() {
     let alpha = prepared_project(temp.path(), "alpha", ALPHA_PROJECT_ID);
     let beta = prepared_project(temp.path(), "beta", BETA_PROJECT_ID);
     let client_identity = test_client_identity_for(profile_root.clone());
-    let alpha_layout = initialize_test_project(&alpha, &client_identity).await;
-    let beta_layout = initialize_test_project(&beta, &client_identity).await;
-    assert_eq!(
-        alpha_layout.identity.project_id.as_deref(),
-        Some(ALPHA_PROJECT_ID),
-        "alpha fixture must enroll the pinned project id"
-    );
-    assert_eq!(
-        beta_layout.identity.project_id.as_deref(),
-        Some(BETA_PROJECT_ID),
-        "beta fixture must enroll the pinned project id"
-    );
-
     let _database_scope = enter_test_daemon_database_scope(&profile_root, "mcp-scope-set-cas");
     let engine = test_daemon_engine_for_profile(&profile_root);
     let handshake = DaemonHandshake {
         project_path: Some(alpha.clone()),
+        allow_init: true,
         client_identity,
         client_instance_id: "mcp-scope-set-cas".to_owned(),
         ..test_handshake_defaults()
     };
-    // `initialize` is a one-shot bootstrap reply until a project owner is
-    // cached. Opening that owner first is what keeps the following
-    // `tools/call` frames on the production RMCP connection a host uses.
+    // Both roots must be registered before the call. A selector the daemon
+    // has not mounted answers `unavailable` instead of compare-and-swap
+    // evidence, which would hide the revision the caller can observe.
     engine
-        .project_server(&handshake)
+        .open_project_server(&handshake)
         .await
-        .expect("open production project server");
+        .expect("register alpha project");
+    let beta_handshake = DaemonHandshake {
+        project_path: Some(beta.clone()),
+        ..handshake.clone()
+    };
+    engine
+        .open_project_server(&beta_handshake)
+        .await
+        .expect("register beta project");
 
     let (server_stream, client_stream) =
         tokio::net::UnixStream::pair().expect("scope-set socket pair");
@@ -296,10 +293,28 @@ async fn run_scope_set_compare_and_swap() {
         .expect("serve scope-set connection");
 }
 
+fn git(root: &Path, args: &[&str]) {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .status()
+        .expect("run Git fixture command");
+    assert!(status.success(), "git {args:?} in {}", root.display());
+}
+
 fn prepared_project(root: &Path, name: &str, project_id: &str) -> PathBuf {
     let project = root.join(name);
     std::fs::create_dir_all(project.join("src")).expect("project source directory");
     std::fs::write(project.join("src/lib.rs"), "pub fn mcp_cas() {}\n").expect("project source");
+    git(&project, &["init", "--quiet"]);
+    git(&project, &["config", "user.name", "TraceDecay Test"]);
+    git(
+        &project,
+        &["config", "user.email", "tracedecay@example.com"],
+    );
+    git(&project, &["add", "."]);
+    git(&project, &["commit", "--quiet", "-m", "base"]);
     let project = project.canonicalize().expect("canonical project root");
     tracedecay_runtime_core::storage::pin_fixture_repository_identity(&project, project_id)
         .expect("pin fixture project id");
