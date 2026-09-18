@@ -246,11 +246,11 @@ fn invalid_request_problem() -> Value {
     json!({
         "revision": 1,
         "kind": "invalid_request",
-        "code": "application.surface.invalid_request",
-        "message": "The daemon rejected the application request",
+        "code": "application.retained.invalid-request",
+        "message": "The retained operation request is invalid.",
         "diagnostic": {
-            "code": "application.surface.invalid_request",
-            "message": "The daemon rejected the application request"
+            "code": "application.retained.invalid-request",
+            "message": "The retained operation request is invalid."
         },
         "committed_receipt": null,
         "owning_layer": "application",
@@ -265,7 +265,7 @@ fn invalid_request_problem() -> Value {
         "request_id": "request.stable",
         "trace_id": "request.stable",
         "details": [],
-        "legal_actions": [],
+        "legal_actions": ["correct_request"],
         "coverage": null
     })
 }
