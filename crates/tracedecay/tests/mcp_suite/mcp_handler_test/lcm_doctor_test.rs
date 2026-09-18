@@ -1,9 +1,10 @@
 //! `tracedecay_lcm_doctor` through the production MCP `tools/call` path.
 //!
-//! The registered test server mounts `UnavailableSessionTemporalRefreshWake`
-//! and does not bind a session relation graph. Doctor must name both of those
-//! states. It must not invent a current projection, and it must not accept a
-//! repair argument.
+//! An empty project store has a complete temporal schema and no findings. The
+//! registered test server mounts `UnavailableSessionTemporalRefreshWake`, so
+//! the projection is not current and the report is partial. Doctor must name
+//! that worker, must not invent a current projection, and must refuse a repair
+//! argument without changing the diagnosis.
 
 use serde_json::{Value, json};
 
@@ -17,10 +18,8 @@ fn empty_project_doctor_report() -> Value {
         "status": "partial",
         "authority_outcome": { "state": "ready" },
         "health": {
-            "status": "partial",
-            "findings": [
-                { "kind": "relation_graph_unavailable", "count": 1 }
-            ]
+            "status": "complete",
+            "findings": []
         },
         "projection": {
             "state": "unavailable",
@@ -69,7 +68,7 @@ async fn lcm_doctor_refuses_a_repair_argument_and_keeps_the_same_diagnosis() {
     assert_eq!(refused["error"]["code"], -32603);
     assert_eq!(
         refused["error"]["message"],
-        "tool execution failed: config error: invalid retained application request for tracedecay_lcm_doctor: unknown field `apply`, there are no fields"
+        "tool execution failed: config error: invalid retained application request for tracedecay_lcm_doctor: apply: unknown field `apply`, there are no fields"
     );
     assert_eq!(refused["error"]["data"]["tool"], "tracedecay_lcm_doctor");
 
@@ -86,6 +85,12 @@ async fn lcm_doctor_refuses_a_repair_argument_and_keeps_the_same_diagnosis() {
 async fn lcm_doctor_rejects_an_unknown_storage_scope() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let server = real_mcp_server(cg).await;
+
+    let before = handle_real_server_tool_call(&server, "tracedecay_lcm_doctor", json!({})).await;
+    let before: Value =
+        serde_json::from_str(extract_real_server_text(&before)).expect("doctor diagnosis");
+    assert_eq!(before, empty_project_doctor_report());
+
     let refused = handle_real_server_tool_call_raw(
         &server,
         "tracedecay_lcm_doctor",
@@ -98,5 +103,12 @@ async fn lcm_doctor_rejects_an_unknown_storage_scope() {
         refused["error"]["message"],
         "tool execution failed: config error: storage_scope must be one of project, user"
     );
+    assert_eq!(refused["error"]["data"]["tool"], "tracedecay_lcm_doctor");
+
+    let after = handle_real_server_tool_call(&server, "tracedecay_lcm_doctor", json!({})).await;
+    let after: Value =
+        serde_json::from_str(extract_real_server_text(&after)).expect("doctor diagnosis");
+    assert_eq!(after, empty_project_doctor_report());
+
     server.shutdown().await;
 }
