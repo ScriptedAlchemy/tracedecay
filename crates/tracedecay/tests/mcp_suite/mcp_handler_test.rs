@@ -54,6 +54,8 @@ mod source_edit_reconcile_test;
 mod status_runtime_test;
 #[cfg(feature = "test-transport")]
 mod test_map_test;
+#[cfg(feature = "test-transport")]
+mod todos_test;
 mod unsafe_patterns_test;
 #[cfg(feature = "test-transport")]
 mod work_test;
