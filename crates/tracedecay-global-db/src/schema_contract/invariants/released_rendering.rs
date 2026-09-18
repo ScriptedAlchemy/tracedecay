@@ -79,7 +79,7 @@ pub(super) struct ReleasedRenderingLedger {
 }
 
 impl ReleasedRenderingLedger {
-    fn record(&self, projection: &SessionMessageProjection) {
+    pub(super) fn record(&self, projection: &SessionMessageProjection) {
         let mut outputs = self
             .outputs
             .lock()
@@ -599,6 +599,67 @@ mod tests {
             converged,
             "a second open must be a no-op"
         );
+    }
+
+    /// A beta-era interrupted convergence could stamp the current digest while
+    /// leaving the previous mutable message rendering behind. The immutable
+    /// observation plus the uniquely owned current provenance authorize the
+    /// current row, so reopening must finish that projection write rather than
+    /// degrade ProfileSessions forever.
+    #[tokio::test]
+    async fn current_provenance_repairs_its_stale_output_row() {
+        let directory = TempDir::new().unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .unwrap();
+        seed(&runtime, &observation()).await.unwrap();
+        let database = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+
+        let snapshot = database.read_snapshot().await.unwrap();
+        let current = stored_output(&snapshot, RECORD_ID).await;
+        drop(snapshot);
+
+        let transaction = database
+            .runtime_database()
+            .begin_write_transaction("seed current provenance over a stale output")
+            .await
+            .unwrap();
+        downgrade_to_released(
+            &transaction,
+            released()["released_output_digest"].as_str().unwrap(),
+        )
+        .await;
+        transaction
+            .execute(
+                "UPDATE observation_projection_provenance SET output_digest = ?2
+                 WHERE projector_version = ?1 AND observation_id = ?3",
+                tracedecay_runtime_core::params![
+                    SESSION_MESSAGE_PROJECTOR_VERSION,
+                    current.digest.as_str(),
+                    canonical_observation_id()
+                ],
+            )
+            .await
+            .expect("stamp current provenance digest only");
+        transaction.commit().await.unwrap();
+
+        let snapshot = database.read_snapshot().await.unwrap();
+        let interrupted = stored_output(&snapshot, RECORD_ID).await;
+        drop(snapshot);
+        assert_eq!(interrupted.digest, current.digest);
+        assert_ne!(
+            interrupted, current,
+            "the fixture must carry current provenance over a stale output row"
+        );
+
+        super::super::ensure_authority_invariants(database.runtime_database(), true, false)
+            .await
+            .expect("current provenance must repair its stale mutable output row");
+
+        let snapshot = database.read_snapshot().await.unwrap();
+        assert_eq!(stored_output(&snapshot, RECORD_ID).await, current);
     }
 
     /// One observation's projection authority: whether it still owns a served
