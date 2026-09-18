@@ -16,6 +16,9 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
+  # Prebuilt dashboard/app-dist is proven in this job; cargo embeds it instead
+  # of running a second npm ci + rsbuild inside tracedecay-cli/build.rs.
+  TRACEDECAY_SKIP_DASHBOARD_BUILD: "1"
 
 concurrency:
   group: release-beta-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
@@ -102,13 +105,6 @@ jobs:
           ref: ${{ needs.validate.outputs.source_sha }}
           persist-credentials: false
 
-      - name: Checkout release automation
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.validate.outputs.source_sha }}
-          path: .release-automation
-          persist-credentials: false
-
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22.23.2"
@@ -127,34 +123,61 @@ jobs:
           npm ci
           npm run build
 
+      - name: Export dashboard bundle digest for skip-mode builds
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest="$(python3 scripts/check-dashboard-bundle.py dashboard/app-dist --print-digest)"
+          echo "TRACEDECAY_DASHBOARD_BUNDLE_SHA256=${digest}" >> "$GITHUB_ENV"
+
       - name: Validate portable distribution harnesses
         run: |
-          python3 .release-automation/scripts/test-check-packaged-lsp-bridge.py
-          python3 .release-automation/scripts/test-build-mcpb.py
-          python3 .release-automation/scripts/test-resolve-installed-binary.py
-          python3 .release-automation/scripts/test-check-packaged-mcp-stdio.py
-          python3 .release-automation/scripts/test-check-distribution-feature-wiring.py
-          python3 .release-automation/scripts/test-resolve-release-source-profile.py
-          python3 .release-automation/scripts/test-package-release-archive.py
-          bash .release-automation/scripts/test-check-distribution-clean-source.sh
-          bash .release-automation/scripts/test-check-distribution-snapshot.sh
-          bash .release-automation/scripts/test-check-distribution-reuse.sh
+          python3 scripts/test-check-packaged-lsp-bridge.py
+          python3 scripts/test-build-mcpb.py
+          python3 scripts/test-resolve-installed-binary.py
+          python3 scripts/test-check-packaged-mcp-stdio.py
+          python3 scripts/test-check-distribution-feature-wiring.py
+          python3 scripts/test-resolve-release-source-profile.py
+          python3 scripts/test-package-release-archive.py
+          bash scripts/test-check-distribution-clean-source.sh
+          bash scripts/test-check-distribution-snapshot.sh
+          bash scripts/test-check-distribution-reuse.sh
 
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      # rust-toolchain.toml is the only compiler this job may install.
+      # dtolnay/rust-toolchain@stable also installs floating stable, and
+      # rust-cache hashes every rustc into the environment key, so each
+      # stable bump (1.98.0 → 1.98.1 on beta.40 macOS) makes every release
+      # prefix unrestorable. Windows CI already refuses that extra install.
+      - name: Resolve pinned toolchain
+        id: pin
+        shell: bash
+        run: |
+          python3 -c 'import pathlib, tomllib; print("toolchain=" + tomllib.loads(pathlib.Path("rust-toolchain.toml").read_text(encoding="utf-8"))["toolchain"]["channel"])' >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # 1.97.1 pin
         with:
+          toolchain: ${{ steps.pin.outputs.toolchain }}
           targets: ${{ matrix.target }}
 
+      # Restore before the first cargo invocation. resolve-release-source-profile
+      # runs `cargo tree` twice (~4 min cold on beta.40) and used to do that
+      # before rust-cache, so a warm registry sitting in Actions cache never
+      # reached the step that needed it. Tag runs can restore only same-ref or
+      # default-branch caches; this shared-key must stay stable so a later
+      # master writer can seed them. cache-workspace-crates stays false: the
+      # 10 GB repo budget is already full of CI lineages (~13.8 GB / 28 entries).
       - name: Cache Rust build
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: release-beta-${{ matrix.target }}
+          cache-workspace-crates: "false"
           cache-on-failure: true
 
       - name: Resolve release source feature profile
         id: release-profile
         shell: bash
         run: |
-          python3 .release-automation/scripts/resolve-release-source-profile.py \
+          python3 scripts/resolve-release-source-profile.py \
             --source . \
             --target "${{ matrix.target }}" \
             --github-output "$GITHUB_OUTPUT"
@@ -216,12 +239,12 @@ jobs:
             binary="${binary}.exe"
           fi
           bundle="tracedecay-beta-${RELEASE_TAG}-${{ matrix.name }}.mcpb"
-          python3 .release-automation/scripts/build-mcpb.py build \
+          python3 scripts/build-mcpb.py build \
             --binary "$binary" \
             --output "$bundle" \
             --version "${{ steps.version.outputs.version }}" \
             --platform "${{ matrix.name }}"
-          python3 .release-automation/scripts/build-mcpb.py verify \
+          python3 scripts/build-mcpb.py verify \
             --bundle "$bundle" \
             --version "${{ steps.version.outputs.version }}" \
             --platform "${{ matrix.name }}"
@@ -255,7 +278,7 @@ jobs:
             source="${source}.exe"
             entry_name="${entry_name}.exe"
           fi
-          python3 .release-automation/scripts/package-release-archive.py \
+          python3 scripts/package-release-archive.py \
             --binary "$source" \
             --output "tracedecay-beta-${RELEASE_TAG}-${{ matrix.name }}.${{ matrix.archive }}" \
             --format "${{ matrix.archive }}" \
