@@ -1172,8 +1172,12 @@ pub async fn handle_similar(ctx: &McpToolContext<'_>, args: Value) -> Result<Too
             minimum_tokens,
         } => SimilarCoverageV1::ExcludedTooSmall { minimum_tokens },
         tracedecay_code_index::clones::CloneBodyEligibilityV1::ExcludedTooLarge {
+            maximum_tokens,
             maximum_bytes,
-        } => SimilarCoverageV1::ExcludedTooLarge { maximum_bytes },
+        } => SimilarCoverageV1::ExcludedTooLarge {
+            maximum_tokens,
+            maximum_bytes,
+        },
         tracedecay_code_index::clones::CloneBodyEligibilityV1::ExcludedIncompleteTokenization => {
             SimilarCoverageV1::ExcludedIncompleteTokenization
         }
