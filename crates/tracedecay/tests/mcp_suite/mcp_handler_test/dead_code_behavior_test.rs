@@ -298,11 +298,10 @@ async fn dead_code_reports_only_the_uncalled_private_symbols() {
         "default dead_code failed: {:?}",
         markdown.error
     );
-    let markdown = extract_text(
-        &markdown
-            .result
-            .expect("default dead_code returned a production MCP result"),
-    );
+    let markdown = markdown
+        .result
+        .expect("default dead_code returned a production MCP result");
+    let markdown = extract_text(&markdown);
     assert_eq!(
         markdown_without_ids(markdown),
         "\
