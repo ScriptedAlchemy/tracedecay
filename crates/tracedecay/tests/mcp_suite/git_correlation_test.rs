@@ -1,6 +1,6 @@
 //! End-to-end tests for the `tracedecay_sessions_for` session↔git correlation
-//! query surface, driven through the real `handle_tool_call` dispatch against a
-//! temp project with a linked git worktree and a seeded `sessions.db`.
+//! query. Each case is one JSON-RPC `tools/call` on the live MCP connection
+//! against a temp project with a linked git worktree.
 
 #![cfg(feature = "test-transport")]
 
@@ -22,7 +22,6 @@ use tracedecay_sessions::runtime::git_correlation::{
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
 use crate::common;
-use crate::support::extract_tool_result_json as extract_json;
 
 fn run_git(dir: &Path, args: &[&str]) {
     let status = Command::new(common::git_program())
@@ -116,29 +115,115 @@ async fn record_span(runtime: &HostAdmissionTestRuntimeV1, observation: &SpanObs
         .unwrap_or_else(|e| panic!("record span: {e}"));
 }
 
-async fn call(server: &McpServer, tool: &str, mut args: Value) -> Value {
+/// What a host receives from one `tools/call`.
+struct HostCall {
+    response: Value,
+    /// First JSON content block. An evidence answer is still the retained
+    /// envelope; the owner payload is selected from it below.
+    text: Value,
+}
+
+async fn host_call(server: &McpServer, mut args: Value) -> HostCall {
     if let Some(obj) = args.as_object_mut() {
         obj.entry("format".to_string())
             .or_insert_with(|| json!("json"));
     }
     for _ in 0..60 {
-        let result = server
-            .call_tool_for_test(tool, args.clone())
-            .await
-            .unwrap_or_else(|e| panic!("{tool} should succeed: {e}"));
-        let envelope = extract_json(&result);
-        if envelope.pointer("/problem/code").and_then(Value::as_str)
+        let response = crate::support::handle_real_server_tool_call_raw(
+            server,
+            "tracedecay_sessions_for",
+            args.clone(),
+        )
+        .await;
+        assert_eq!(response["jsonrpc"], json!("2.0"), "{response}");
+        assert_eq!(response["id"], json!(1), "{response}");
+        if response.get("error").is_some() {
+            if response["error"]["data"]["reason_code"].as_str()
+                == Some("application_surface_unavailable")
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
+            return HostCall {
+                response,
+                text: Value::Null,
+            };
+        }
+        let text = response["result"]["content"]
+            .as_array()
+            .and_then(|items| {
+                items.iter().find_map(|item| {
+                    let raw = item["text"].as_str()?;
+                    serde_json::from_str::<Value>(raw).ok()
+                })
+            })
+            .unwrap_or_else(|| {
+                panic!("tracedecay_sessions_for returned no JSON content: {response}")
+            });
+        if text.pointer("/problem/code").and_then(Value::as_str)
             == Some("application.surface.unavailable")
         {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             continue;
         }
-        return envelope
-            .pointer("/outcome/value/payload")
-            .cloned()
-            .unwrap_or(envelope);
+        return HostCall { response, text };
     }
-    panic!("{tool} project runtime did not finish mounting")
+    panic!("tracedecay_sessions_for project runtime did not finish mounting")
+}
+
+async fn call(server: &McpServer, tool: &str, args: Value) -> Value {
+    assert_eq!(
+        tool, "tracedecay_sessions_for",
+        "this suite owns only tracedecay_sessions_for"
+    );
+    let host = host_call(server, args).await;
+    assert!(
+        host.response.get("error").is_none(),
+        "a sessions_for answer is a JSON-RPC result, not an error: {}",
+        host.response
+    );
+    assert_ne!(
+        host.response["result"]["isError"],
+        json!(true),
+        "an answered query is not a tool error: {}",
+        host.response
+    );
+    assert_eq!(
+        host.text
+            .pointer("/contract/schema_id")
+            .and_then(Value::as_str),
+        Some("schema.application.retained.sessions-for.result"),
+        "host text must be the retained sessions_for envelope: {}",
+        host.text
+    );
+    assert_eq!(
+        host.text
+            .pointer("/outcome/outcome")
+            .and_then(Value::as_str),
+        Some("evidence"),
+        "{}",
+        host.text
+    );
+    host.text
+        .pointer("/outcome/value/payload")
+        .cloned()
+        .unwrap_or_else(|| panic!("sessions_for evidence missing payload: {}", host.text))
+}
+
+async fn reject(server: &McpServer, args: Value) -> Value {
+    let host = host_call(server, args).await;
+    assert!(
+        host.response.get("error").is_none(),
+        "a typed retained refusal stays a JSON-RPC success: {}",
+        host.response
+    );
+    assert_eq!(
+        host.response["result"]["isError"],
+        json!(true),
+        "invalid input must be a tool error, not an empty match: {}",
+        host.response
+    );
+    host.text
 }
 
 /// An empty correlation index (sessions present, but no spans recorded) must be
@@ -251,8 +336,9 @@ async fn sessions_for_distinguishes_empty_correlation_index_from_no_match() {
     server.shutdown().await;
 }
 
-/// `tracedecay_sessions_for` through MCP dispatch: the caller sees the session
-/// that touched the ref, an explicit empty-index state, or a typed rejection.
+/// `tracedecay_sessions_for` through JSON-RPC `tools/call`: the caller sees the
+/// session that touched the ref, an explicit empty-index state, or a typed
+/// rejection.
 /// Index generation and source watermark are content-addressed (they include
 /// the temp worktree), so they are masked after a same-index equality check.
 #[cfg(feature = "test-transport")]
@@ -579,26 +665,11 @@ async fn sessions_for_names_the_sessions_that_touched_the_git_ref() {
         ),
     );
 
+    assert_invalid_request(&reject(&server, json!({ "git_ref": "commit", "value": "abc" })).await);
+    assert_invalid_request(&reject(&server, json!({ "git_ref": "branch", "value": " " })).await);
     assert_invalid_request(
-        &call(
+        &reject(
             &server,
-            "tracedecay_sessions_for",
-            json!({ "git_ref": "commit", "value": "abc" }),
-        )
-        .await,
-    );
-    assert_invalid_request(
-        &call(
-            &server,
-            "tracedecay_sessions_for",
-            json!({ "git_ref": "branch", "value": " " }),
-        )
-        .await,
-    );
-    assert_invalid_request(
-        &call(
-            &server,
-            "tracedecay_sessions_for",
             json!({ "git_ref": "branch", "value": "main", "since": 20, "until": 10 }),
         )
         .await,
@@ -761,14 +832,33 @@ fn assert_invalid_request(envelope: &Value) {
 }
 
 async fn assert_schema_rejection(server: &McpServer, args: Value, detail: &str) {
-    let error = server
-        .call_tool_for_test("tracedecay_sessions_for", args)
-        .await
-        .expect_err("malformed tracedecay_sessions_for arguments must be rejected");
-    let (code, retryable, actual) = error
-        .project_route_context()
-        .unwrap_or_else(|| panic!("expected a typed project-route rejection, got {error}"));
-    assert_eq!(code, "application_surface_invalid_request", "{error}");
-    assert!(!retryable, "{error}");
-    assert_eq!(actual, detail, "{error}");
+    let host = host_call(server, args).await;
+    let error = &host.response["error"];
+    assert_eq!(error["code"], json!(-32602), "{}", host.response);
+    assert_eq!(
+        error["message"],
+        json!(format!(
+            "tool project route failed: reason_code=application_surface_invalid_request retryable=false: {detail}"
+        )),
+        "{}",
+        host.response
+    );
+    assert_eq!(
+        error["data"],
+        json!({
+            "tool": "tracedecay_sessions_for",
+            "reason_code": "application_surface_invalid_request",
+            "retryable": false,
+            "detail": detail,
+            "kind": "invalid_request",
+            "code": "application_surface_invalid_request"
+        }),
+        "{}",
+        host.response
+    );
+    assert!(
+        host.response.get("result").is_none(),
+        "schema rejection must not return a tool result: {}",
+        host.response
+    );
 }
