@@ -26,7 +26,7 @@ fn tokens(
         "{:?}",
         artifact.result.nodes
     );
-    artifact.clone_bodies[0].conservative_tokens.clone()
+    artifact.clone_bodies[0].conservative_tokens.to_vec()
 }
 
 #[test]

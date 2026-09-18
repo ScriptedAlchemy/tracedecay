@@ -10,9 +10,10 @@
  * detail.
  */
 import { PayloadBoundary } from '../../ui/ReadSection.tsx';
+import { formatMicrosUtc } from '../../ui/format.ts';
 import { Panel, Readout } from '../../ui/instrument.tsx';
 import { useMemoryOplog, type OplogEvent, type OplogPayload } from '../../data/query/memory.ts';
-import { formatUtcMicros, oplogReading } from './memoryModel.ts';
+import { oplogReading } from './memoryModel.ts';
 
 export function MemoryOplog() {
   const oplog = useMemoryOplog();
@@ -97,7 +98,7 @@ function OplogRow({ event }: { event: OplogEvent }) {
     <li className="flex flex-col gap-0.5 border-l-2 border-edge-subtle pl-2">
       <p className="flex flex-wrap items-baseline gap-x-2 text-3xs text-text-muted">
         <span className="td-value" data-cell="numeric">
-          {formatUtcMicros(event.ts)}
+          {formatMicrosUtc(event.ts)}
         </span>
         <span className="text-text-secondary">{event.op}</span>
         {/* `fact_id` is null only for an operation with no canonical fact target. */}

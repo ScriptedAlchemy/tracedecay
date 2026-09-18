@@ -12,9 +12,7 @@ name: Release PR distribution acceptance
 
 on:
   pull_request:
-    branches:
-      - master
-      - codex/tracedecay-total-redesign-plan-reopened
+    branches: [master]
 
 permissions:
   contents: read

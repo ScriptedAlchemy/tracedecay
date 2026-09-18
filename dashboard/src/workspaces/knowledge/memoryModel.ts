@@ -30,11 +30,6 @@ import type {
 
 /* ---- trust history ------------------------------------------------------- */
 
-/** Formats canonical UTC microseconds only at the presentation boundary. */
-export function formatUtcMicros(value: number): string {
-  return new Date(Math.trunc(value / 1_000)).toISOString();
-}
-
 export interface TrustHistoryReading {
   /** Events this bounded audit response returned. */
   readonly count: number;

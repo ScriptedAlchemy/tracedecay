@@ -11,7 +11,6 @@ use std::time::{Duration, SystemTime};
 #[cfg(test)]
 use std::cell::RefCell;
 
-use fs2::FileExt;
 use rusqlite::backup::StepResult;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -89,7 +88,7 @@ pub async fn backup_live_sqlite_database(source: &Path, destination: &Path) -> i
 /// swap that directory themselves.
 ///
 /// A WAL family whose transient `-shm` is absent is copied as an offline
-/// unlocked family and folded in staging — opening it as a reader would
+/// unlocked family and folded in staging, opening it as a reader would
 /// reconstruct SHM in the source directory.
 fn backup_live_sqlite_database_sync(source: &Path, destination: &Path) -> io::Result<()> {
     backup_live_sqlite_database_with(source, destination, || Ok(()))
@@ -385,7 +384,7 @@ pub struct SnapshotDatabase {
     source_state: Vec<FileState>,
     /// The `file:...` URI used to ATTACH this snapshot. Percent-encoded and
     /// carrying `mode=ro`/`immutable=1`, so it is never a valid filesystem
-    /// path — use `identity_path` for anything that touches the filesystem.
+    /// path, use `identity_path` for anything that touches the filesystem.
     path: PathBuf,
     /// The real on-disk file this snapshot reads: the untouched source in
     /// direct-immutable mode, or the scratch copy in copy mode.
@@ -995,7 +994,7 @@ async fn finish_one(
     }
     control.checkpoint()?;
     // `identity_path` is the real file on disk; `attach_path` is the URI used
-    // to ATTACH it. They are never interchangeable — the URI is percent-encoded
+    // to ATTACH it. They are never interchangeable, the URI is percent-encoded
     // and carries query parameters, so passing it to the filesystem fails.
     let (open_path, attach_path, identity_path, flags, scratch) =
         if matches!(prepared.mode, SnapshotMode::DirectImmutable) {
@@ -1102,7 +1101,7 @@ fn create_scratch_directory(
 ) -> io::Result<ScratchDirectory> {
     ensure_private_root(root, expected_uid)?;
     let cleanup_lock = open_private_lock(&root.join(".cleanup.lock"), true)?;
-    cleanup_lock.lock_exclusive()?;
+    cleanup_lock.lock()?;
     cleanup_stale_directories(root)?;
     for _ in 0..100 {
         let id = NEXT_SNAPSHOT.fetch_add(1, Ordering::Relaxed);
@@ -1110,8 +1109,8 @@ fn create_scratch_directory(
         match create_private_directory(&path) {
             Ok(()) => {
                 let owner_lock = open_private_lock(&path.join(".owner.lock"), true)?;
-                owner_lock.lock_exclusive()?;
-                FileExt::unlock(&cleanup_lock)?;
+                owner_lock.lock()?;
+                cleanup_lock.unlock()?;
                 return Ok(ScratchDirectory {
                     path,
                     owner_lock: Some(owner_lock),
@@ -1318,7 +1317,7 @@ fn cleanup_stale_directories(root: &Path) -> io::Result<()> {
             continue;
         }
         let removable = match open_private_lock(&path.join(".owner.lock"), false) {
-            Ok(lock) => lock.try_lock_exclusive().is_ok(),
+            Ok(lock) => lock.try_lock().map_err(std::io::Error::from).is_ok(),
             Err(error) if error.kind() == io::ErrorKind::NotFound => true,
             Err(error) => return Err(error),
         };

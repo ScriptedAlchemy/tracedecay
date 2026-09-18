@@ -1,14 +1,13 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
-use sha2::{Digest as _, Sha256};
 use tracedecay_graph_db::{GraphIdempotencyKey, GraphNamespace, GraphProjectorRevision};
 use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1;
 
 use super::{
     CommitEvidence, CommitRelation, CommitSessionRecord, GIT_EVIDENCE_PROJECTOR_REVISION,
     GitCorrelationError, GitCorrelationSessionStore, GitEvidenceProjectionStore,
-    GitEvidenceProjectionV1, SessionGitSpan, SpanObservation, SpanOverlapKind,
+    GitEvidenceProjectionV1, SessionGitSpan, SpanObservation, SpanOverlapKind, digest_bytes,
     git_evidence_projection_identity, normalize_worktree, observation_extends_span,
     providers_compatible, publish_git_evidence_projection, recover_git_evidence_projection,
 };
@@ -185,10 +184,7 @@ pub fn stable_backfill_span(
         branch.unwrap_or("\0")
     );
     SessionGitSpan {
-        span_id: format!(
-            "backfill:{}",
-            hex::encode(Sha256::digest(identity.as_bytes()))
-        ),
+        span_id: format!("backfill:{}", digest_bytes(identity.as_bytes())),
         provider: provider.to_owned(),
         session_id: session_id.to_owned(),
         thread_id: None,
@@ -483,10 +479,7 @@ fn transcript_span_id(observation: &SpanObservation, worktree: &str) -> String {
         "{}\0{}\0{thread_id}\0{branch}\0{}\0{}\0{:?}",
         observation.provider, observation.session_id, worktree, observation.ts, observation.source,
     );
-    format!(
-        "transcript:{}",
-        hex::encode(Sha256::digest(material.as_bytes()))
-    )
+    format!("transcript:{}", digest_bytes(material.as_bytes()))
 }
 
 pub fn graph_evidence_publication_key(
@@ -495,7 +488,7 @@ pub fn graph_evidence_publication_key(
     commits: &[CommitSessionRecord],
 ) -> Result<String, GitCorrelationError> {
     let bytes = serde_json::to_vec(&(prefix, spans, commits))?;
-    Ok(format!("{prefix}:{}", hex::encode(Sha256::digest(bytes))))
+    Ok(format!("{prefix}:{}", digest_bytes(&bytes)))
 }
 
 fn merge_span(spans: &mut Vec<SessionGitSpan>, incoming: &SessionGitSpan) -> bool {

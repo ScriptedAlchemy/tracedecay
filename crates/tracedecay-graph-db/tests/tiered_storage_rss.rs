@@ -2,7 +2,7 @@
 //!
 //! Ignored by default: these build six- and seven-figure synthetic generations
 //! and are measurement harnesses, not contracts. Nothing here asserts on a
-//! memory figure — the numbers are printed for a human to compare across
+//! memory figure, the numbers are printed for a human to compare across
 //! feature states. Run them explicitly:
 //!
 //! ```text
@@ -10,9 +10,6 @@
 //!     --test tiered_storage_rss -- --ignored --nocapture --test-threads=1
 //!
 //! cargo test -p tracedecay-graph-db --features test-helpers,graph-disk-tier \
-//!     --test tiered_storage_rss -- --ignored --nocapture --test-threads=1
-//!
-//! cargo test -p tracedecay-graph-db --features test-helpers,graph-tiered-storage \
 //!     --test tiered_storage_rss -- --ignored --nocapture --test-threads=1
 //! ```
 //!
@@ -39,25 +36,9 @@
 //! Linux-only: `/proc/self/status` does not exist elsewhere, and the probes
 //! report that and return rather than failing on other platforms.
 //!
-//! # Why the small probe does not hit the arena ceiling
-//!
-//! Under `graph-tiered-storage` each `apply_unverified` commit advances the
-//! epoch, and every epoch gets its own arena. `SMALL_BATCH_SIZE` entities at 32
-//! bytes per `NodeRecord` fit in one chunk, so `synthetic_generation_peak_rss`
-//! never approaches the addressing limit. It is also why the tiered numbers
-//! come out *worse* there: 20 batches means 20 arenas holding 20 MiB of largely
-//! empty chunks, plus the `VersionIndex` entries layered on the records.
-//!
-//! `production_page_generation_rss` is the probe that actually stresses the
-//! arena, because it commits in pages of
-//! [`MAX_NATIVE_GENERATION_STAGE_MUTATIONS`]-many mutations — the real staging
-//! page size the native generation runtime uses. At 32 bytes per record that
-//! page is 2 MiB, which is exactly what overflowed the published grafeo
-//! 0.5.42 arena (a `u32` offset inside a single 1 MiB chunk, ceiling ~32 Ki
-//! records) and panicked. The fork this workspace patches in spans an epoch
-//! arena across chunks, so the page commits instead of aborting.
-//!
-//! [`MAX_NATIVE_GENERATION_STAGE_MUTATIONS`]: tracedecay_graph_db::MAX_NATIVE_GENERATION_STAGE_MUTATIONS
+//! The grafeo LPG arena (`tiered-storage`) was measured here and removed: it
+//! raised live RSS and did not spill node records. This probe still compares
+//! the baseline store with `graph-disk-tier`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -78,7 +59,7 @@ use support::RegisteredGraph;
 const ENTITY_COUNT: usize = 100_000;
 
 /// Entities per write batch in the small probe. Deliberately far below the
-/// production staging page so the two probes bracket the arena behaviour.
+/// production staging page so the two probes bracket a small write and a page.
 const SMALL_BATCH_SIZE: usize = 5_000;
 
 /// Total entities in the production-shaped probe. Override with
@@ -117,14 +98,12 @@ fn batch(watermark: &str, mutations: Vec<GraphMutation>) -> GraphWriteBatch {
     .unwrap()
 }
 
-/// Which of the three feature states this binary was compiled in.
+/// Which spill feature this binary was compiled with.
 fn feature_state() -> &'static str {
-    if cfg!(feature = "graph-tiered-storage") {
-        "graph-tiered-storage (disk tier + grafeo-core LPG arena)"
-    } else if cfg!(feature = "graph-disk-tier") {
+    if cfg!(feature = "graph-disk-tier") {
         "graph-disk-tier (disk tier only)"
     } else {
-        "baseline (no tiered feature)"
+        "baseline (no spill feature)"
     }
 }
 

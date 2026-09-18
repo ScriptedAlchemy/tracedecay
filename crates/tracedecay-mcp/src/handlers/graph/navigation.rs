@@ -799,11 +799,17 @@ fn collect_method_bodies(
     });
 
     let mut out: Vec<Value> = Vec::new();
+    let mut cached_path: Option<String> = None;
+    let mut cached_source = String::new();
     for (file_path, _, child) in methods {
         let metadata = required_graph_metadata(&child)?;
-        let source = graph.read_indexed_source_file(&file_path)?;
+        if cached_path.as_deref() != Some(file_path.as_str()) {
+            cached_source = graph.read_indexed_source_file(&file_path)?;
+            cached_path = Some(file_path);
+        }
         let end_line = graph_symbol_end_line(metadata)?;
-        let body = crate::handlers::info::extract_lines(&source, metadata.start_line, end_line);
+        let body =
+            crate::handlers::info::extract_lines(&cached_source, metadata.start_line, end_line);
         out.push(json!({
             "name": metadata.simple_name,
             "kind": metadata.kind,

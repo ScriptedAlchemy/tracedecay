@@ -1058,7 +1058,8 @@ fn with_journal_lock<T>(path: &Path, operation: impl FnOnce() -> Result<T>) -> R
     let lock = open_lock_nofollow(&lock_path)
         .map_err(|error| contract_error(format!("automation terminal lock failed: {error}")))?;
     let result = operation();
-    let unlock = fs2::FileExt::unlock(&lock)
+    let unlock = lock
+        .unlock()
         .map_err(|error| contract_error(format!("automation terminal unlock failed: {error}")));
     match (result, unlock) {
         (Err(error), _) => Err(error),
@@ -1242,7 +1243,7 @@ fn open_lock_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
         ));
     }
     let file = file.into_std();
-    fs2::FileExt::lock_exclusive(&file)?;
+    file.lock()?;
     Ok(file)
 }
 

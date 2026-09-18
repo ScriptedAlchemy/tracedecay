@@ -657,6 +657,12 @@ fn compile_regex(
 ///   Expanding `\w` to its RE2 meaning fixes the semantics and the size at once
 ///   — every rule in the catalogue then compiles under the default limit, with
 ///   no memory headroom bought and no rule dropped.
+////// * **`\b` / `\B`.** RE2's word boundary is ASCII. Rust's is Unicode-aware,
+///   and a Unicode boundary is the one construct the lazy DFA gives up on the
+///   moment the haystack holds a non-ASCII byte: every file with an em-dash or
+///   an emoji in a comment was then scanned by the PikeVM, the slowest engine,
+///   once per rule. `(?-u:\b)` is both the upstream meaning and a DFA-eligible
+///   pattern.
 ///
 /// `\W`, `\D` and `\S` would need the same treatment but appear nowhere in the
 /// catalogue; a refresh that introduces one is caught by the compile test,
@@ -665,7 +671,11 @@ fn compile_regex(
 /// Character classes are tracked because `\w` expands differently inside one:
 /// `[\w-]` has to become `[0-9A-Za-z_-]`, never a nested class.
 fn re2_compatible_regex(pattern: &str) -> Cow<'_, str> {
-    if !pattern.contains('{') && !pattern.contains(r"\w") {
+    if !pattern.contains('{')
+        && !pattern.contains(r"\w")
+        && !pattern.contains(r"\b")
+        && !pattern.contains(r"\B")
+    {
         return Cow::Borrowed(pattern);
     }
     let bytes = pattern.as_bytes();
@@ -679,6 +689,15 @@ fn re2_compatible_regex(pattern: &str) -> Cow<'_, str> {
                     "0-9A-Za-z_"
                 } else {
                     "[0-9A-Za-z_]"
+                });
+                index += 2;
+                continue;
+            }
+            if !in_class && matches!(bytes[index + 1], b'b' | b'B') {
+                rewritten.push_str(if bytes[index + 1] == b'b' {
+                    "(?-u:\\b)"
+                } else {
+                    "(?-u:\\B)"
                 });
                 index += 2;
                 continue;
@@ -1374,9 +1393,14 @@ mod tests {
     /// meaning both inside and outside a character class.
     #[test]
     fn re2_translation_preserves_meaning() {
-        for untouched in [r"[A-Z]{16}", r"sk-[A-Za-z0-9_-]{20,}", r"\bplain\b"] {
+        for untouched in [r"[A-Z]{16}", r"sk-[A-Za-z0-9_-]{20,}", r"plain"] {
             assert_eq!(re2_compatible_regex(untouched), untouched);
         }
+
+        // Word boundaries take RE2's ASCII meaning; inside a class `\b` is a
+        // backspace and is left alone.
+        assert_eq!(re2_compatible_regex(r"\bplain\B"), r"(?-u:\b)plain(?-u:\B)");
+        assert_eq!(re2_compatible_regex(r"[\b]"), r"[\b]");
 
         assert_eq!(
             re2_compatible_regex(r"^\$(?:\d+|{\d+})$"),
