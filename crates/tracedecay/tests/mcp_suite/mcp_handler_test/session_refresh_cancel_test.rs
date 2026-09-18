@@ -177,19 +177,19 @@ async fn dispatch_cancel(
     refresh: Option<&dyn tracedecay_session_runtime::retained::RetainedSessionRefreshPortV1>,
     arguments: Value,
 ) -> Value {
+    let mut options = ToolCallRegistryOptions::with_session_authorities(
+        SessionAuthorities::default()
+            .with_profile_retained_authority(Some(authority))
+            .with_profile_session_refresh(refresh),
+    );
+    options.profile_root = Some(profile_root);
     let result = handle_tool_call_with_registry_options(
         graph,
         "tracedecay_session_refresh_cancel",
         arguments,
         None,
         None,
-        ToolCallRegistryOptions {
-            profile_root: Some(profile_root),
-            session_authorities: SessionAuthorities::default()
-                .with_profile_retained_authority(Some(authority))
-                .with_profile_session_refresh(refresh),
-            ..Default::default()
-        },
+        options,
     )
     .await
     .expect("session refresh cancel dispatch");
@@ -536,22 +536,22 @@ async fn cancel_of_an_unfinished_refresh_stores_a_cancelled_receipt() {
     );
 
     let begun = {
+        let mut options = ToolCallRegistryOptions::with_session_authorities(
+            SessionAuthorities::default()
+                .with_profile_retained_authority(Some(&authority))
+                .with_profile_session_refresh(Some(
+                    &refresh
+                        as &dyn tracedecay_session_runtime::retained::RetainedSessionRefreshPortV1,
+                )),
+        );
+        options.profile_root = Some(&profile_root);
         let result = handle_tool_call_with_registry_options(
             &graph,
             "tracedecay_session_refresh_begin",
             refresh_arguments(session_id, None),
             None,
             None,
-            ToolCallRegistryOptions {
-                profile_root: Some(&profile_root),
-                session_authorities: SessionAuthorities::default()
-                    .with_profile_retained_authority(Some(&authority))
-                    .with_profile_session_refresh(Some(
-                        &refresh
-                            as &dyn tracedecay_session_runtime::retained::RetainedSessionRefreshPortV1,
-                    )),
-                ..Default::default()
-            },
+            options,
         )
         .await
         .expect("session refresh begin");
