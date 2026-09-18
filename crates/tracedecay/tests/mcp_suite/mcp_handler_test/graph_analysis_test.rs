@@ -1,5 +1,6 @@
 #![cfg(feature = "test-transport")]
 
+mod gini;
 mod graph_readiness;
 mod hotspots;
 
@@ -1196,31 +1197,6 @@ async fn test_changelog_with_real_git() {
         payload["changed_files"],
         json!(["src/lib.rs"]),
         "src/lib.rs is the only file in the diff: {payload}"
-    );
-}
-
-#[tokio::test]
-async fn test_gini() {
-    let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_gini",
-        json!({ "metric": "lines" }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
-    assert!(
-        parsed.get("gini").is_some(),
-        "gini field should exist, got: {}",
-        text
-    );
-    assert!(
-        parsed.get("interpretation").is_some(),
-        "interpretation field should exist"
     );
 }
 
