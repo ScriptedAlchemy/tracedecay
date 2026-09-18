@@ -22,6 +22,8 @@ mod memory_fact_assertions;
 mod memory_facts_test;
 mod memory_feedback_test;
 #[cfg(feature = "test-transport")]
+mod move_symbol_behavior_test;
+#[cfg(feature = "test-transport")]
 mod move_symbol_test;
 #[cfg(feature = "test-transport")]
 mod rename_symbol_test;
