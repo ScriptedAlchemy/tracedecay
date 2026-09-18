@@ -53,7 +53,17 @@ const MOVED_SPAN: &str = concat!(
     "    total\n",
     "}",
 );
-const GRAND_TOTAL_RS: &str = concat!("use crate::pricing::LineItem;\n\n", MOVED_SPAN, "\n");
+const GRAND_TOTAL_RS: &str = concat!(
+    "use crate::pricing::LineItem;\n\n",
+    "/// Grand total in cents.\n",
+    "pub fn compute_grand_total(items: &[LineItem]) -> u64 {\n",
+    "    let mut total = 0u64;\n",
+    "    for item in items {\n",
+    "        total += item.unit_price * item.quantity as u64;\n",
+    "    }\n",
+    "    total\n",
+    "}\n",
+);
 const PREVIEW_DIFF: &str = concat!(
     "--- src/pricing.rs (source, remove)\n",
     "@@ -3,12 +3,3 @@\n",
@@ -111,15 +121,18 @@ fn assert_pricing_crate_unchanged(project: &Path) {
 /// the live workspace, and returns the preview digest the caller must pass
 /// back to apply.
 fn stable_payload(text: &str) -> (String, Value) {
-    let mut payload: Value = serde_json::from_str(text)
+    let payload: Value = serde_json::from_str(text)
         .unwrap_or_else(|error| panic!("move_symbol text was not JSON: {error}\n{text}"));
-    let object = payload
-        .as_object_mut()
-        .unwrap_or_else(|| panic!("move_symbol payload was not an object: {payload}"));
-    let expected_state = object
-        .remove("expected_state")
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .unwrap_or_else(|| panic!("move_symbol omitted expected_state: {payload}"));
+    let mut object = match payload {
+        Value::Object(object) => object,
+        other => panic!("move_symbol payload was not an object: {other}"),
+    };
+    let expected_value = object.remove("expected_state");
+    let expected_state = expected_value
+        .as_ref()
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| panic!("move_symbol omitted expected_state: {object:?}"));
     assert!(
         expected_state.len() == "sha256:".len() + 64
             && expected_state.starts_with("sha256:")
@@ -130,7 +143,7 @@ fn stable_payload(text: &str) -> (String, Value) {
     );
     object.remove("predicted_state");
     object.remove("effect");
-    (expected_state, payload)
+    (expected_state, Value::Object(object))
 }
 
 async fn call_move_symbol(server: &tracedecay::mcp::McpServer, arguments: Value) -> Value {
