@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.45](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.44...v0.1.0-beta.45) (2026-09-18)
+
+
+### Bug Fixes
+
+* **clones:** bound clone bodies by tokens, not source bytes ([a10c021](https://github.com/ScriptedAlchemy/tracedecay/commit/a10c0211bb02301b2af10aae0bd3389335453936))
+* **clones:** bound clone bodies by tokens, not source bytes ([7f19751](https://github.com/ScriptedAlchemy/tracedecay/commit/7f19751069e154faa427d10fc23775f64683e8fe))
+* **code-index:** move every extractor revision for the clone-body bound ([c7eb62e](https://github.com/ScriptedAlchemy/tracedecay/commit/c7eb62eaea31bfbe707fcf5181b9aa519db75344))
+* **code-index:** move every extractor revision for the clone-body bound ([fe58bba](https://github.com/ScriptedAlchemy/tracedecay/commit/fe58bba408d9a9014030646e0d6b48e52d5f35b3))
+
+
+### Performance Improvements
+
+* **cli:** ship mimalloc in the production feature ([c183290](https://github.com/ScriptedAlchemy/tracedecay/commit/c1832900046af7ec6c79a1def6a08d0e556c69e3))
+* **cli:** ship mimalloc in the production feature ([9981f98](https://github.com/ScriptedAlchemy/tracedecay/commit/9981f9819669d4100006464c5caa54916ae67b81))
+* **release:** run tag builds on master so dependency caches survive ([049289a](https://github.com/ScriptedAlchemy/tracedecay/commit/049289aabe1d6044282adcfacc95467013d0f16a))
+* **release:** run tag builds on master so dependency caches survive ([3ac7ae1](https://github.com/ScriptedAlchemy/tracedecay/commit/3ac7ae16406d8539b32ca58f34628cdf64f95bdc))
+
+## [0.1.0-beta.44](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.43...v0.1.0-beta.44) (2026-09-18)
+
+
+### Bug Fixes
+
+* **clones:** exclude oversized bodies instead of parking the projection ([3d64ef5](https://github.com/ScriptedAlchemy/tracedecay/commit/3d64ef5b2dc1d7be5034ce452e51f069c34b2955))
+* **clones:** exclude oversized bodies instead of parking the projection ([51db8b9](https://github.com/ScriptedAlchemy/tracedecay/commit/51db8b98bb1588286b926245dc94ecabeec02d9d))
+* **release:** upload only the beta archive as the binary artifact ([2f44a63](https://github.com/ScriptedAlchemy/tracedecay/commit/2f44a63aa3f0d19655da74df974037dfbe0503fd))
+* **release:** upload only the beta archive as the binary artifact ([ba2bf3c](https://github.com/ScriptedAlchemy/tracedecay/commit/ba2bf3c49e0dd60fe9ca9ab397be74a5288d3cd4))
+
 ## [0.1.0-beta.43](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.42...v0.1.0-beta.43) (2026-09-18)
 
 
