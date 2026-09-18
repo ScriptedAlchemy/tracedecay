@@ -103,6 +103,14 @@ unauthorized external action after completing independent, authorized work.
 
 ## Engineering Hygiene
 
+- When `ripwire` is installed, use its CLI where it shortens the work:
+  orient in unfamiliar subsystems, find and reuse existing symbols, trace
+  callers and impact, select relevant tests, and check a diff before landing
+  (`--pr-context`, `--edit-check`, or `--quality-delta` as appropriate).
+  Ripwire's static graph is coverage-bounded navigation and risk evidence, not
+  final correctness; confirm decisions with focused source reads, compiler
+  checks, and production-behavior tests. Do not block work when it is absent
+  or stale.
 - Limits are symptoms, not knobs. For a deadline, admission, memory, or backoff
   failure, use the `using-hotpath` skill to measure the operation and fix
   mis-sized work such as N+1 queries, unbatched writes, or accidental
