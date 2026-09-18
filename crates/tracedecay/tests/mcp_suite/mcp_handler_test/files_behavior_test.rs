@@ -117,20 +117,20 @@ async fn files_lists_the_indexed_census_and_filters() {
         "explicit grouped layout must match the default"
     );
 
-    let census = census(3, "grouped", all_files());
+    let grouped_census = listing(3, "grouped", all_files());
     assert_eq!(
         call_json(&fixture, json!({"format": "json"})).await,
-        census,
+        grouped_census,
         "json census"
     );
     assert_eq!(
         call_json(&fixture, json!({"format": "JSON"})).await,
-        census,
+        grouped_census,
         "format is case-insensitive"
     );
     assert_eq!(
         call_json(&fixture, json!({"format": "json", "layout": "flat"})).await,
-        census(3, "flat", all_files()),
+        listing(3, "flat", all_files()),
         "flat changes the layout field, not the file records"
     );
     assert_eq!(
@@ -142,12 +142,12 @@ async fn files_lists_the_indexed_census_and_filters() {
     let src_files = json!([file("src/greeting.rs", 1, 32), file("src/lib.rs", 2, 72),]);
     assert_eq!(
         call_json(&fixture, json!({"format": "json", "path": "src"})).await,
-        census(2, "grouped", src_files.clone()),
+        listing(2, "grouped", src_files.clone()),
         "path src"
     );
     assert_eq!(
         call_json(&fixture, json!({"format": "json", "path": "src/"})).await,
-        census(2, "grouped", src_files),
+        listing(2, "grouped", src_files),
         "a trailing slash is the same directory"
     );
     assert_eq!(
@@ -162,7 +162,7 @@ async fn files_lists_the_indexed_census_and_filters() {
             json!({"format": "json", "path": "src/greeting.rs"})
         )
         .await,
-        census(1, "grouped", json!([file("src/greeting.rs", 1, 32)])),
+        listing(1, "grouped", json!([file("src/greeting.rs", 1, 32)])),
         "an exact file path matches that file"
     );
     assert_eq!(
@@ -177,7 +177,7 @@ async fn files_lists_the_indexed_census_and_filters() {
     );
     assert_eq!(
         call_json(&fixture, json!({"format": "json", "path": "src/lib.rs/"})).await,
-        empty_grouped(),
+        listing(0, "grouped", json!([])),
         "a trailing slash after a file is a directory prefix, not that file"
     );
     assert_eq!(
@@ -187,13 +187,13 @@ async fn files_lists_the_indexed_census_and_filters() {
     );
     assert_eq!(
         call_json(&fixture, json!({"format": "json", "path": ""})).await,
-        empty_grouped(),
+        listing(0, "grouped", json!([])),
         "an empty path is a prefix of nothing"
     );
 
     assert_eq!(
         call_json(&fixture, json!({"format": "json", "pattern": "*.rs"})).await,
-        census(
+        listing(
             2,
             "grouped",
             json!([file("src/greeting.rs", 1, 32), file("src/lib.rs", 2, 72),])
@@ -202,7 +202,7 @@ async fn files_lists_the_indexed_census_and_filters() {
     );
     assert_eq!(
         call_json(&fixture, json!({"format": "json", "pattern": "*.toml"})).await,
-        census(1, "grouped", json!([file("Cargo.toml", 4, 66)])),
+        listing(1, "grouped", json!([file("Cargo.toml", 4, 66)])),
         "*.toml"
     );
     assert_eq!(
@@ -212,7 +212,7 @@ async fn files_lists_the_indexed_census_and_filters() {
     );
     assert_eq!(
         call_json(&fixture, json!({"format": "json", "pattern": "*.md"})).await,
-        empty_grouped(),
+        listing(0, "grouped", json!([])),
         "a heading-less markdown file is not indexed"
     );
     assert_eq!(
@@ -221,7 +221,7 @@ async fn files_lists_the_indexed_census_and_filters() {
             json!({"format": "json", "path": "src", "pattern": "*.toml"})
         )
         .await,
-        empty_grouped(),
+        listing(0, "grouped", json!([])),
         "path and pattern both have to match"
     );
     assert_eq!(
@@ -230,7 +230,7 @@ async fn files_lists_the_indexed_census_and_filters() {
             json!({"format": "json", "path": "src", "pattern": "**/lib.rs"})
         )
         .await,
-        census(1, "grouped", json!([file("src/lib.rs", 2, 72)])),
+        listing(1, "grouped", json!([file("src/lib.rs", 2, 72)])),
         "path and glob intersect on src/lib.rs"
     );
     assert_eq!(
@@ -273,12 +273,8 @@ fn file(path: &str, symbols: u64, bytes: u64) -> Value {
     json!({"path": path, "symbols": symbols, "bytes": bytes})
 }
 
-fn census(count: u64, layout: &str, files: Value) -> Value {
+fn listing(count: u64, layout: &str, files: Value) -> Value {
     json!({"count": count, "layout": layout, "files": files})
-}
-
-fn empty_grouped() -> Value {
-    census(0, "grouped", json!([]))
 }
 
 async fn call_json(fixture: &ProductionCompositionFixture, arguments: Value) -> Value {
