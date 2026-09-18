@@ -230,6 +230,21 @@ async fn ast_grep_rewrite_dry_run_then_apply_swaps_every_call_and_leaves_the_res
     assert_eq!(applied_json["replayed"], json!(false), "{applied_json}");
     assert_eq!(
         applied_json["expected_state"],
+        json!(expected_state),
+        "{applied_json}"
+    );
+    assert_eq!(
+        applied_json["predicted_state"],
+        json!(predicted_state),
+        "{applied_json}"
+    );
+    assert_eq!(
+        applied_json["effect"]["receipt"]["expected_state"],
+        json!(expected_state),
+        "{applied_json}"
+    );
+    assert_eq!(
+        applied_json["effect"]["receipt"]["committed_state"],
         json!(predicted_state),
         "{applied_json}"
     );
@@ -283,10 +298,15 @@ async fn ast_grep_rewrite_exact_retry_replays_and_a_different_input_conflicts() 
         "{first_json}"
     );
     assert_eq!(first_json["replayed"], json!(false), "{first_json}");
+    assert_eq!(first_json["pattern"], json!(PATTERN), "{first_json}");
     let effect_id = first_json["effect"]["effect_id"].clone();
-    let committed = first_json["expected_state"]
+    let bound_state = first_json["expected_state"]
         .as_str()
         .expect("apply expected_state")
+        .to_owned();
+    let predicted_state = first_json["predicted_state"]
+        .as_str()
+        .expect("apply predicted_state")
         .to_owned();
     assert_file(&fixture, CHECKOUT, CHECKOUT_AFTER);
 
@@ -297,7 +317,7 @@ async fn ast_grep_rewrite_exact_retry_replays_and_a_different_input_conflicts() 
             "pattern": PATTERN,
             "rewrite": REWRITE,
             "idempotency_key": "ast-grep-rewrite.behavior.replay",
-            "expected_state": committed
+            "expected_state": bound_state
         }),
     )
     .await
@@ -306,20 +326,38 @@ async fn ast_grep_rewrite_exact_retry_replays_and_a_different_input_conflicts() 
     assert!(retry.touched_files.is_empty(), "{retry:?}");
     let retry_json = edit_json(&retry);
     assert_eq!(retry_json["success"], json!(true), "{retry_json}");
+    assert_eq!(retry_json["failed"], json!(false), "{retry_json}");
     assert_eq!(retry_json["replayed"], json!(true), "{retry_json}");
+    assert!(
+        retry_json.get("pattern").is_none(),
+        "a replay does not restate the live rewrite body: {retry_json}"
+    );
     assert_eq!(
         retry_json["message"],
         json!("source edit completed; detailed edit output was not retained"),
         "{retry_json}"
     );
-    assert_eq!(retry_json["operation"], json!(OPERATION), "{retry_json}");
-    assert_eq!(retry_json["files"], json!([CHECKOUT]), "{retry_json}");
     assert_eq!(
-        retry_json["durable_metadata_only"],
-        json!(true),
+        retry_json["expected_state"],
+        json!(bound_state),
+        "{retry_json}"
+    );
+    assert_eq!(
+        retry_json["predicted_state"],
+        json!(predicted_state),
         "{retry_json}"
     );
     assert_eq!(retry_json["effect"]["effect_id"], effect_id, "{retry_json}");
+    assert_eq!(
+        retry_json["effect"]["payload"]["operation"],
+        json!(OPERATION),
+        "{retry_json}"
+    );
+    assert_eq!(
+        retry_json["effect"]["payload"]["files"],
+        json!([CHECKOUT]),
+        "{retry_json}"
+    );
     assert_file(&fixture, CHECKOUT, CHECKOUT_AFTER);
 
     let conflict = call_rewrite(
@@ -329,7 +367,7 @@ async fn ast_grep_rewrite_exact_retry_replays_and_a_different_input_conflicts() 
             "pattern": PATTERN,
             "rewrite": "reserve_stock($SKU, $QTY)",
             "idempotency_key": "ast-grep-rewrite.behavior.replay",
-            "expected_state": committed
+            "expected_state": bound_state
         }),
     )
     .await;
@@ -395,7 +433,12 @@ async fn ast_grep_rewrite_refuses_unmatched_patterns_paths_and_stale_previews() 
         &unmatched_json,
         "failed",
         false,
-        "source edit failed; detailed edit output was not retained",
+        "source edit completed; detailed edit output was not retained",
+    );
+    assert_eq!(
+        unmatched_json["effect"]["payload"]["failed"],
+        json!(false),
+        "{unmatched_json}"
     );
     assert_file(&fixture, CHECKOUT, CHECKOUT_BEFORE);
 
