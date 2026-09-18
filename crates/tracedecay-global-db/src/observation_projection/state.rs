@@ -1103,10 +1103,6 @@ pub(in super::super) async fn resolve_output_projection(
     Ok(owner_projection)
 }
 
-pub(super) fn session_rows_compatible(actual: &SessionRecord, expected: &SessionRecord) -> bool {
-    reconcile_session_rows(actual, expected).is_some()
-}
-
 /// Normalize projection rows through the same authority as runtime session writes
 /// and project-scoped reads. Host/display spellings are not durable identity.
 /// Reconciliation remains pure over the normalized stored strings.
@@ -1126,6 +1122,7 @@ pub(super) fn canonicalize_session_project_paths(session: &SessionRecord) -> Ses
 /// so this function, reached from the verify/audit and rebuild paths as well
 /// as apply, never touches the filesystem and stays reproducible from stored
 /// evidence.
+#[cfg(test)]
 pub(super) fn reconcile_session_rows(
     actual: &SessionRecord,
     expected: &SessionRecord,

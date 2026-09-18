@@ -22,8 +22,7 @@ use tracedecay_sessions::runtime::store_access::find_preceding_codex_goal_respon
 
 use super::state::{
     canonicalize_session_project_paths, read_message, read_output_state, read_session,
-    reconcile_session_rows, reconcile_session_rows_detailed, storage, storage_message,
-    verify_output_state,
+    reconcile_session_rows_detailed, storage, storage_message, verify_output_state,
 };
 use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
@@ -2026,6 +2025,7 @@ mod authority_tests;
 
 #[cfg(test)]
 mod tests {
+    use super::super::state::reconcile_session_rows;
     use super::*;
 
     #[test]
