@@ -5,8 +5,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, LazyLock, Mutex};
 
-#[cfg(any(test, feature = "test-transport"))]
-
 /// Canonical daemon-authority state names live in [`crate::storage`]; the
 /// ambient-Test authority probe shares that single definition with the
 /// `tracedecay-daemon-identity` crate that elects the lock.
