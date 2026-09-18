@@ -4734,8 +4734,11 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         .symbols
         .iter()
         .find(|record| {
+            // Trait-impl methods are owned by `<Type as Trait>`, so a
+            // `contains("Processor")` probe also matches every impl of the
+            // trait. Only the declaration itself is owned by the trait.
             record.simple_name == "process"
-                && record.qualified_name.contains("Processor")
+                && record.qualified_name.ends_with("::Processor::process")
                 && record.kind == "method"
         })
         .expect("trait method symbol")
