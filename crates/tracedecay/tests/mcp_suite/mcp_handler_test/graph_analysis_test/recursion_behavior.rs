@@ -99,7 +99,7 @@ pub(super) fn public_recursion_report(payload: &Value) -> Value {
     })
 }
 
-fn sorted_keys(value: &Value, label: &str) -> Vec<&str> {
+fn sorted_keys<'a>(value: &'a Value, label: &str) -> Vec<&'a str> {
     let mut keys = value
         .as_object()
         .unwrap_or_else(|| panic!("{label} must be an object: {value}"))
