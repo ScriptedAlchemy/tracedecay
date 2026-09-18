@@ -1165,9 +1165,11 @@ fn transient_clone_successor_reservation_refusal_retries_without_cooling_v14_own
     );
     scheduler.bind_resident_memory(Arc::clone(&resident_memory));
     let latest = scheduler.latest_complete().expect("restored generation");
-    assert_eq!(
-        latest.advance_text_serving(1),
-        Err(tracedecay_query::retrieval::RetrievalPortError::BudgetExceeded),
+    assert!(
+        matches!(
+            latest.advance_text_serving(1),
+            Err(tracedecay_query::retrieval::RetrievalPortError::AuthorityUnavailable(_))
+        ),
         "the competing reservation must deny the first successor admission"
     );
     latest
