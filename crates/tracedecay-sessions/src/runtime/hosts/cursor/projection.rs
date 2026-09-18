@@ -19,6 +19,18 @@ pub struct CursorTranscriptIngestStats {
     pub messages_upserted: u64,
     pub bytes_consumed: u64,
     pub source_deferred: bool,
+    /// Observations this pass durably admitted. `messages_upserted` counts
+    /// only what this pass's own projection drain materialized, and the
+    /// projection queue is shared per scope, so a peer drainer can consume
+    /// these rows first. Admission is the commit; keep it accounted for
+    /// separately from whoever projects it.
+    pub observations_committed: u64,
+    /// This pass changed nothing because its observations were already
+    /// durable: every scanned source resumed at its stored cursor with no new
+    /// frame to persist, or the projection drain met only exact duplicates.
+    /// Distinguishes an already-committed replay from a pass that committed
+    /// nothing at all; both report `messages_upserted == 0`.
+    pub exact_duplicate: bool,
 }
 
 #[derive(Debug, Default)]
@@ -102,6 +114,7 @@ pub async fn try_ingest_cursor_user_sweep_capped_with_admission<S: BuildHasher>(
 pub(in crate::runtime) struct CursorProjectionDrainStats {
     pub session_ids: Vec<String>,
     pub messages_upserted: u64,
+    pub exact_duplicates: u64,
     pub source_deferred: bool,
 }
 
@@ -141,6 +154,7 @@ pub(in crate::runtime) async fn drain_cursor_observation_projections_with_sessio
     Ok(CursorProjectionDrainStats {
         session_ids: outcome.session_ids,
         messages_upserted: outcome.projected_outputs,
+        exact_duplicates: outcome.exact_duplicates,
         source_deferred: outcome.deferred,
     })
 }
@@ -152,6 +166,8 @@ impl CursorProjectionDrainStats {
             messages_upserted: self.messages_upserted,
             bytes_consumed: 0,
             source_deferred: self.source_deferred,
+            observations_committed: 0,
+            exact_duplicate: self.messages_upserted == 0 && self.exact_duplicates > 0,
         }
     }
 

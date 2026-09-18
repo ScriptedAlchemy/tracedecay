@@ -1036,9 +1036,17 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
             .expect("registered daemon ingest response text"),
     )
     .expect("registered daemon ingest payload");
-    assert_eq!(
-        payload["status"], "committed",
-        "registered daemon ingest did not commit: {response}"
+    // The daemon's project catch-up sweep drains the whole Cursor projection
+    // queue for this scope, so it can project the observations this ingest
+    // admitted on an earlier deferred pass. Both terminal states below prove
+    // the transcript is durable; only `accepted_for_replay` would not.
+    assert!(
+        matches!(
+            payload["status"].as_str(),
+            Some("committed" | "exact_duplicate")
+        ),
+        "registered daemon ingest did not commit: {response}\ndaemon log:\n{}",
+        std::fs::read_to_string(&daemon_log).expect("read isolated advisory daemon log"),
     );
 
     // Codex records a turn in its rollout, not in the Stop event, so the
