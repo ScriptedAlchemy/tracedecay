@@ -172,17 +172,22 @@ for marker in external_publication_markers:
             f"{stable_path} must not publish external package repositories: {marker}"
         )
 
+# Ship jobs build, smoke, and package the production binary and nothing else
+# (#1587): the packaged-crate battery is visibility, not a ship gate, and it
+# must keep running somewhere. Losing the daily job silently would leave the
+# extracted crate graph unproven with no failing check to say so.
+battery_path = ".github/workflows/distribution-acceptance.yml"
+battery = open(battery_path, encoding="utf-8").read()
+if "schedule:" not in battery or "workflow_dispatch:" not in battery:
+    raise SystemExit(f"{battery_path} must run on a schedule and on dispatch")
+if "scripts/check-distribution-acceptance.sh" not in battery:
+    raise SystemExit(f"{battery_path} must run scripts/check-distribution-acceptance.sh")
+if "x86_64-unknown-linux-gnu" not in battery:
+    raise SystemExit(f"{battery_path} must run the battery on x86_64-linux")
 for path, text in ((stable_path, stable), (beta_path, beta)):
-    release_test = re.search(
-        r"- name: Test release distribution\n"
-        r"\s+if: matrix\.name == 'x86_64-linux'\n"
-        r"\s+run: (?:(?!- name:)[\s\S])*?"
-        r"cargo test --workspace --release --target",
-        text,
-    )
-    if release_test is None:
+    if "scripts/check-distribution-acceptance.sh" in text:
         raise SystemExit(
-            f"{path} must run the full release test suite once on x86_64-linux"
+            f"{path} must not run the packaged-crate battery on the ship path"
         )
     if "scripts/package-release-archive.py" not in text:
         raise SystemExit(f"{path} must use deterministic release archive packaging")
