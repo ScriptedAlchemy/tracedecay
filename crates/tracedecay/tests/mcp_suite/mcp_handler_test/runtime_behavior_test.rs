@@ -94,7 +94,9 @@ async fn runtime_reports_this_process_and_the_admitted_store_files() {
         observed_file_len(&with_suffix(&graph_db, "-shm"))
     );
     assert_eq!(database["journal_mode"], "wal");
-    assert_eq!(database["synchronous"], 1);
+    // The telemetry query reads the admitted connection, whose SQLite default
+    // is FULL (2). That is not the writer lane's NORMAL (1).
+    assert_eq!(database["synchronous"], 2);
     assert_eq!(database["quick_check_ok"], Value::Null);
     assert_eq!(database["quick_check_error"], Value::Null);
     assert_eq!(
