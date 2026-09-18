@@ -198,12 +198,20 @@ fn assert_invalid_request(answer: &McpAnswer, message: &str) {
         "invalid configuration set must be an MCP isError"
     );
     assert_eq!(answer.result["isError"], true);
-    assert_eq!(answer.result["problem"]["kind"], "invalid_request");
+    assert_eq!(
+        answer.result["problem"]["kind"], "invalid_request",
+        "problem record: {}",
+        answer.result["problem"]
+    );
     assert_eq!(
         answer.result["problem"]["code"],
         "configuration.invalid_request"
     );
-    assert_eq!(answer.result["problem"]["message"], message);
+    assert_eq!(
+        answer.result["problem"]["message"], message,
+        "problem record: {}",
+        answer.result["problem"]
+    );
     assert_eq!(answer.result["problem"]["retry"], "never");
     assert_eq!(answer.result["problem"]["retryable"], false);
     assert_eq!(answer.result["problem"]["retry_scope"], Value::Null);
@@ -371,9 +379,44 @@ async fn configuration_set_over_mcp_persists_the_boolean_replays_and_refuses_con
         ),
     )
     .await;
-    assert_invalid_request(
-        &wrong_layer,
-        "The configuration request is invalid: setting diagnostics.prewarm.v1 cannot be written in layer Default",
+    // A project setting written on the default layer is refused before mutation.
+    // The refusal is the shared not-found-or-not-authorized record, not a
+    // validation message that would confirm the layer exists.
+    assert!(
+        wrong_layer.refused,
+        "wrong-layer set must be an MCP isError"
+    );
+    assert_eq!(wrong_layer.result["isError"], true);
+    assert_eq!(
+        wrong_layer.result["problem"]["kind"],
+        "not_found_or_not_authorized"
+    );
+    assert_eq!(
+        wrong_layer.result["problem"]["code"],
+        "not_found_or_not_authorized"
+    );
+    assert_eq!(
+        wrong_layer.result["problem"]["message"],
+        "The requested resource was not found or is not authorized"
+    );
+    assert_eq!(wrong_layer.result["problem"]["retry"], "never");
+    assert_eq!(wrong_layer.result["problem"]["retryable"], false);
+    assert_eq!(wrong_layer.result["problem"]["legal_actions"], json!([]));
+    assert_eq!(
+        wrong_layer.result["problem"]["committed_receipt"],
+        Value::Null
+    );
+    assert_eq!(
+        wrong_layer.payload["problem"]["kind"],
+        "not_found_or_not_authorized"
+    );
+    assert_eq!(
+        wrong_layer.payload["problem"]["code"],
+        "not_found_or_not_authorized"
+    );
+    assert_eq!(
+        wrong_layer.payload["problem"]["message"],
+        "The requested resource was not found or is not authorized"
     );
     assert_read_is(
         &read_setting(&harness, &project).await,
