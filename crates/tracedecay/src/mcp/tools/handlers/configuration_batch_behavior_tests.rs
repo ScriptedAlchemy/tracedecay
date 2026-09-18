@@ -176,7 +176,7 @@ fn assert_schema_refusal(response: &JsonRpcResponse) {
     assert_eq!(data["retryable"], false);
     assert_eq!(
         error.message,
-        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: application surface request does not match its reviewed schema: unknown field `repository_path`, expected one of `mutations`, `expected_revision`, `idempotency_key`"
+        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: application surface request does not match its reviewed schema: configuration surface request is inconsistent with the application contract"
     );
 }
 
@@ -232,6 +232,7 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
         .as_str()
         .expect("initial revision")
         .to_owned();
+    assert_eq!(initial_revision, "configuration.initial.canonical.v1");
     assert_eq!(timings["revision_id"], initial_revision);
     assert_eq!(prewarm["key"], PREWARM_KEY);
     assert_eq!(timings["key"], TIMINGS_KEY);
@@ -256,12 +257,20 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
     .await;
     let (refused, applied_payload) = tool_text(&applied);
     assert!(!refused, "batch refused: {applied_payload}");
+    assert_eq!(
+        applied_payload["contract"]["schema_id"],
+        "schema.application.configuration.configuration_batch.result"
+    );
     assert_eq!(applied_payload["outcome"]["outcome"], "effect");
     let effect = &applied_payload["outcome"]["value"];
     assert_eq!(effect["effect_class"], "configuration_write");
     assert_eq!(effect["reconciliation"], "pending");
     assert_eq!(effect["idempotency_key"], BATCH_KEY);
     assert_eq!(effect["receipt"]["effect_class"], "configuration_write");
+    assert_eq!(
+        effect["receipt"]["operation"],
+        "use-case.application.configuration.batch"
+    );
     assert_eq!(effect["receipt"]["outcome"], "completed");
     assert_eq!(effect["receipt"]["idempotency_key"], BATCH_KEY);
     assert_eq!(effect["execution"]["termination"], "completed");
@@ -303,14 +312,17 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
     .await;
     let (refused, observed_payload) = tool_text(&observed);
     assert!(!refused, "observed state refused: {observed_payload}");
-    let states = observed_payload["outcome"]["value"]["payload"]
-        .as_array()
-        .expect("observed states");
-    assert!(
-        states
-            .iter()
-            .all(|state| state["desired_revision_id"] == committed_revision),
-        "every component must adopt the batch revision: {states:?}"
+    assert_eq!(
+        observed_payload["outcome"]["value"]["payload"],
+        json!([{
+            "component": "configuration.runtime-cache",
+            "desired_revision_id": committed_revision,
+            "observed_revision_id": committed_revision,
+            "last_working_revision_id": committed_revision,
+            "restart_required": false,
+            "activation_error_code": null,
+            "drift": "current"
+        }])
     );
 
     let replay = call_batch(
@@ -328,7 +340,12 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
     .await;
     let (refused, replay_payload) = tool_text(&replay);
     assert!(!refused, "exact replay refused: {replay_payload}");
-    assert_eq!(replay_payload, applied_payload);
+    // The envelope request id is minted per MCP call. The durable effect is not.
+    assert_ne!(replay_payload["request_id"], applied_payload["request_id"]);
+    assert_eq!(
+        replay_payload["outcome"]["value"],
+        applied_payload["outcome"]["value"]
+    );
     assert_eq!(
         read_setting(&harness, &project, PREWARM_KEY).await["revision_id"],
         committed_revision
@@ -378,6 +395,8 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
         json!(["refresh"]),
     );
 
+    // Grant admission collapses an empty batch and a mixed-layer batch to one
+    // target refusal. Duplicate keys pass that gate and keep their own message.
     let empty = call_batch(
         &harness,
         &project,
@@ -392,7 +411,7 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
         &empty,
         "invalid_request",
         "configuration.invalid_request",
-        "The configuration request is invalid: direct configuration batch must be non-empty",
+        "The configuration request is invalid: invalid configuration mutation target",
         "never",
         json!([]),
     );
@@ -436,7 +455,7 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
         &mixed,
         "invalid_request",
         "configuration.invalid_request",
-        "The configuration request is invalid: direct configuration batch must target one layer",
+        "The configuration request is invalid: invalid configuration mutation target",
         "never",
         json!([]),
     );
