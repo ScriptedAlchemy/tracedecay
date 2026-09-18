@@ -8,8 +8,7 @@ use super::{
     ProcessResidentMemoryV1, RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1,
     ResidentMemoryAdmissionFailureV1, ResidentMemoryComponentIdV1, ResidentMemoryKeyV1,
     ResidentMemoryPressureStateV1, ResidentMemoryPressureV1, cgroup_v2_memory_limit_v1,
-    effective_memory_bytes_v1, process_resident_memory_limit_for_system_v1,
-    process_resident_memory_limit_v1,
+    effective_memory_bytes_v1, process_resident_memory_limit_v1,
 };
 
 fn bytes(value: u64) -> NonZeroU64 {
@@ -127,6 +126,22 @@ fn configured_override_cannot_exceed_the_cgroup_ceiling() {
 }
 
 #[test]
+fn cgroup_service_allowance_is_not_discounted_twice() {
+    let gib = 1024 * 1024 * 1024;
+
+    assert_eq!(
+        process_resident_memory_limit_v1(128 * gib, Some(26 * gib), None).get(),
+        26 * gib,
+        "the cgroup already reserves host headroom for this service"
+    );
+    assert_eq!(
+        process_resident_memory_limit_v1(16 * gib, Some(30 * gib), None).get(),
+        12 * gib,
+        "a larger cgroup must not erase the physical-host reserve"
+    );
+}
+
+#[test]
 fn unlimited_cgroup_memory_files_keep_host_memory_capacity() {
     let (_directory, proc_self_cgroup, cgroup_root) = cgroup_fixture(
         Some("0::/trace.slice/daemon.scope\n"),
@@ -182,7 +197,7 @@ fn low_effective_cgroup_ceiling_engages_measured_pressure_before_the_cap() {
         Some("100663296\n"),
     );
     let effective = effective_memory_bytes(8 * 1024 * mib, &proc_self_cgroup, &cgroup_root);
-    let limit = process_resident_memory_limit_for_system_v1(effective);
+    let limit = process_resident_memory_limit_v1(8 * 1024 * mib, Some(effective), None);
     let pressure = Arc::new(ResidentMemoryPressureV1::new(limit));
     let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
         limit,
@@ -190,7 +205,7 @@ fn low_effective_cgroup_ceiling_engages_measured_pressure_before_the_cap() {
     ));
 
     assert_eq!(effective, 96 * mib);
-    assert_eq!(limit.get(), 72 * mib);
+    assert_eq!(limit.get(), effective);
     assert!(pressure.high_watermark_bytes() < effective);
     assert!(
         pressure

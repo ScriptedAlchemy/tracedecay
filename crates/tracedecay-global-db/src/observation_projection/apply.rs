@@ -22,7 +22,8 @@ use tracedecay_sessions::runtime::store_access::find_preceding_codex_goal_respon
 
 use super::state::{
     canonicalize_session_project_paths, read_message, read_output_state, read_session,
-    reconcile_session_rows, storage, storage_message, verify_output_state,
+    reconcile_session_rows, reconcile_session_rows_detailed, storage, storage_message,
+    verify_output_state,
 };
 use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
@@ -567,12 +568,13 @@ pub(super) async fn apply_session(
     match read_session(conn, &session.provider, &session.session_id).await? {
         Some(actual) => {
             let normalized_actual = canonicalize_session_project_paths(&actual);
-            let Some(merged) = reconcile_session_rows(&normalized_actual, session) else {
-                return Err(ProjectionStoreError::OutputCollision {
+            let merged = reconcile_session_rows_detailed(&normalized_actual, session).map_err(
+                |conflict| ProjectionStoreError::SessionOutputCollision {
                     provider: session.provider.clone(),
-                    message_id: format!("session:{}", session.session_id),
-                });
-            };
+                    session_id: session.session_id.clone(),
+                    field: conflict.field(),
+                },
+            )?;
             if merged == actual {
                 return Ok(());
             }
@@ -835,6 +837,11 @@ pub(in super::super) async fn converge_released_output_rendering(
     conn: &impl Executor,
     projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<ConvergedRendering> {
+    // A beta-era partial projection may retain current provenance and message
+    // rows after losing their shared session row. The immutable projection is
+    // the canonical insert authority; `apply_session` also preserves richer
+    // compatible session metadata when the row already exists.
+    apply_session(conn, projection.session()).await?;
     let message = projection.message();
     supersede_projected_message(conn, message).await?;
     if message.provider != "hermes" {
