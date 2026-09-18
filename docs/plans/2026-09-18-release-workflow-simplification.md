@@ -81,7 +81,7 @@ Sibling evidence:
   126.7m of the x86_64 Linux step in the cold all-feature workspace test
   compile and another 15.3m in two Hotpath helper builds. It also confirms
   that packaging, upload, dashboard, and cache save are not the wall.
-- Single-compile draft
+- Migration step 1, closed after broader implementation
   [#1582](https://github.com/ScriptedAlchemy/tracedecay/pull/1582) deletes the
   standalone beta all-feature CLI compile and leaves the production packaging
   build as the sole artifact compile. Its dependency comparison found that the
@@ -214,12 +214,41 @@ production CLI once, verifies that exact binary, packages it as the archive and
 MCPB, and uploads it. Existing CI owns workspace and Hotpath tests; one
 periodic stock Linux runner owns crate-extract rehearsal.
 
-Merged PR #1587 is the first implementation of A. It removes distribution
-acceptance, the x86_64 Linux workspace release tests, the all-feature CLI
-compile, nextest setup, and macOS acceptance Bash from beta and stable ship
-jobs. It also replaces the release-PR battery with one periodic crate-extract
-authority. PR #1587 subsumes PR #1582's beta-only all-feature deletion, so
-PR #1582 must not land separately.
+#### A1. Migration step 1: delete the all-feature verify compile
+
+PR #1582 is the minimal first migration from the beta.40 workflow. Delete the
+standalone all-feature CLI build and retain the production packaging build as
+the only artifact compile.
+
+Measured cut:
+
+- aarch64 Linux: 24.9m;
+- aarch64 macOS: 45.5m;
+- x86_64 Windows: 0m because the step was already skipped; and
+- x86_64 Linux: approximately 0m because its preceding all-feature workspace
+  build had already produced the same compile coverage.
+
+PR #1582 is now closed because merged PR #1587 subsumed this deletion across
+both beta and stable. Keep A1 as the migration boundary, but do not reopen or
+land the overlapping branch.
+
+#### A2. Migration step 2: delete the Linux workspace release test
+
+Deleting A1 alone leaves the largest sink intact. Census PR #1583 measured
+15.3m in two Hotpath helper builds and 126.7m before the first
+`cargo test --workspace --release --all-features` suite started. Existing CI
+already owns those tests and Hotpath parity.
+
+Required cut: remove `Test release distribution` from the x86_64 Linux ship
+job. Merged PR #1587 has done so; current `master` contains neither that step
+nor the workspace release-test command. The next Release Beta must confirm the
+127m sink is absent at runtime.
+
+#### A3. Migration step 3: move crate-extract acceptance off the ship path
+
+Merged PR #1587 removes distribution acceptance, nextest setup, and macOS
+acceptance Bash from beta and stable ship jobs. It replaces the release-PR
+battery with one periodic stock Linux crate-extract authority.
 
 This architecture cut has the following measured components:
 
@@ -231,13 +260,11 @@ This architecture cut has the following measured components:
 - aarch64 macOS: at least 40m from distribution acceptance.
 - x86_64 Windows: unquantified. The observed 0.5m was only an early failure,
   not a healthy acceptance run.
-- Removing the extra all-feature CLI compile contributes 24.9m on aarch64
-  Linux and 45.5m on aarch64 macOS. Windows already had one binary build.
 
 The periodic journey and the first slim Release Beta remain unverified. Those
 production runs, not source-shape checks, decide whether A is complete.
 
-#### A2. Remove release-time feature-graph resolution
+#### A4. Remove release-time feature-graph resolution
 
 For current releases, pass the reviewed production arguments directly. Run the
 two-graph equivalence proof in ordinary CI and the heavy battery, once per
@@ -250,7 +277,7 @@ The target argument is currently ignored by
 `production_release_features`, so repeating the proof per target provides no
 target-specific evidence.
 
-#### A3. Remove duplicate source checkout and repeated harness self-tests
+#### A5. Remove duplicate source checkout and repeated harness self-tests
 
 Invoke release scripts from the immutable source checkout. Keep script unit
 tests in CI; release jobs should execute the reviewed scripts, not retest their
@@ -264,7 +291,7 @@ Keep the dashboard build in beta for now. It costs seconds and its bytes are
 embedded into the binary. Centralizing it would add artifact ceremony for
 little critical-path gain.
 
-#### A4. Pin one Rust toolchain and embed the already-built dashboard
+#### A6. Pin one Rust toolchain and embed the already-built dashboard
 
 Install the `rust-toolchain.toml` channel rather than an additional floating
 `stable`, and pass the validated dashboard digest to the CLI build's existing
@@ -369,20 +396,25 @@ cache services.
 1. Treat merged PR #1584 as the A architecture authority and merged PR #1587
    as its implementation baseline. The slim one-compile job replaces the
    triple-compile path; do not optimize the old shape.
-2. Do not land PR #1582 after #1587; both delete the beta
-   all-feature verify step.
-3. Treat PR #1585 as secondary C work after the #1584 architecture and #1583
+2. Record PR #1582 as migration step 1: delete the all-feature verify compile.
+   Do not land its closed branch after #1587, which already applied the cut.
+3. Require migration step 2 in the same architecture wave: delete the x86_64
+   Linux workspace release test measured at 127m by #1583. PR #1587 applied
+   the deletion; verify it on the next Release Beta.
+4. Keep migration step 3 on one periodic stock runner: crate-extract
+   acceptance is visibility, not a release shard or artifact gate.
+5. Treat PR #1585 as secondary C work after the #1584 architecture and #1583
    census. Its rebased head preserves #1587 while adding the non-overlapping
    no-second-checkout, pinned-toolchain, dashboard-digest, and cache-order
    changes. Treat cache hits as unverified until a same-key `master` writer
    and a release restore are both observed.
-4. Do not land the sibling timing and architecture docs as parallel plan
+6. Do not land the sibling timing and architecture docs as parallel plan
    authorities. This document consolidates #1583 and #1584.
-5. Run the next Release Beta and establish successful single-build timings for
+7. Run the next Release Beta and establish successful single-build timings for
    all four targets.
-6. Land measured B changes one at a time, starting with the Windows production
+8. Land measured B changes one at a time, starting with the Windows production
    graph because its single build was 55.7m.
-7. Re-evaluate C only after two comparable successful runs show persistent
+9. Re-evaluate C only after two comparable successful runs show persistent
    dependency recompilation.
 
 ## Verification on the next Release Beta
