@@ -315,11 +315,12 @@ fn assert_deleted_projection(fact: &Value, project_id: &str, fact_id: &str) {
 /// One production MCP journey for `tracedecay_fact_store_remove`.
 ///
 /// A matching removal deletes that fact only, whether the caller supplies the
-/// current event id or only the fact id. A later removal of the same id
-/// reports `already_removed` and writes nothing. A well-formed id this owner
-/// never stored is `not_found`. An id that does not belong to the owner, a
-/// stale compare-and-swap token on a live fact, and a request the schema
-/// rejects each refuse without deleting the remaining fact.
+/// current event id or only the fact id. Repeating that same request replays
+/// the commit. A different request for the deleted id is `already_removed`
+/// and writes nothing. A well-formed id this owner never stored is
+/// `not_found`. An id that does not belong to the owner, a stale
+/// compare-and-swap token on a live fact, and a request the schema rejects
+/// each refuse without deleting the remaining fact.
 #[tokio::test]
 async fn fact_store_remove_deletes_only_the_named_fact() {
     let production = production_composition_fixture().await;
@@ -627,15 +628,34 @@ async fn fact_store_remove_deletes_only_the_named_fact() {
 
     let survivor_again =
         payload(call_tool(&server, TOOL, json!({ "fact_id": survivor.fact_id })).await);
-    assert_eq!(
-        survivor_again["outcome"], "already_removed",
-        "{survivor_again}"
-    );
+    assert_eq!(survivor_again["outcome"], "removed", "{survivor_again}");
     assert_eq!(
         survivor_again["remaining_fact_count"], 0,
         "{survivor_again}"
     );
-    assert!(survivor_again.get("commit").is_none(), "{survivor_again}");
+    assert_eq!(
+        survivor_again["commit"]["disposition"], "idempotent_replay",
+        "{survivor_again}"
+    );
+    assert_eq!(survivor_again["commit"]["fact_id"], survivor.fact_id);
+    assert_eq!(
+        survivor_again["commit"]["last_event_id"], survivor_event,
+        "replaying the same remove must not append an event: {survivor_again}"
+    );
+    assert_eq!(
+        survivor_again["commit"]["committed_event_ids"],
+        json!([survivor_event]),
+        "{survivor_again}"
+    );
+    assert_eq!(survivor_again["commit"]["owner"]["kind"], "project");
+    assert_eq!(
+        survivor_again["commit"]["owner"]["project_id"], survivor.project_id,
+        "{survivor_again}"
+    );
+    assert!(
+        survivor_again["commit"]["active_assertion_id"].is_null(),
+        "{survivor_again}"
+    );
     assert_deleted_projection(
         &survivor_again["fact"],
         &survivor.project_id,
