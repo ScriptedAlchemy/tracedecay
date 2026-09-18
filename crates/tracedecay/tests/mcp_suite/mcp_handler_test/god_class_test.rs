@@ -116,12 +116,15 @@ fn typescript_ranking() -> Vec<Value> {
 }
 
 fn assert_ranking(payload: &Value, expected: &[Value]) {
-    let keys = payload
+    // A JSON object has no ordered keys. Compare the set, not emission order.
+    let mut keys = payload
         .as_object()
-        .map(|object| object.keys().cloned().collect::<Vec<_>>());
+        .map(|object| object.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_else(|| panic!("god class payload is not an object: {payload}"));
+    keys.sort();
     assert_eq!(
         keys,
-        Some(vec!["result_count".to_owned(), "ranking".to_owned()]),
+        vec!["ranking".to_owned(), "result_count".to_owned()],
         "{payload}"
     );
     assert_eq!(payload["result_count"], json!(expected.len()), "{payload}");
