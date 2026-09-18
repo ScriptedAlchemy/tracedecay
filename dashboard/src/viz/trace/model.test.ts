@@ -46,7 +46,7 @@ describe('buildTraceModel', () => {
   it('places every symbol on the ring it was fetched at, and nowhere else', () => {
     // The row caption is "hop distance from the focus, not elevation", so a
     // node's drawn row and the hop at which the fetch reached it cannot be
-    // allowed to disagree — that caption is the whole reason this is not a
+    // allowed to disagree, that caption is the whole reason this is not a
     // decorative flow diagram.
     const built = model();
     const root = neighbors('sym-0');
@@ -79,7 +79,7 @@ describe('buildTraceModel', () => {
       expect(channel.calls).toBeGreaterThan(0);
     }
     // Symbols the fetched lists named but the budget excluded are counted, not
-    // discarded — the caption prints this number.
+    // discarded, the caption prints this number.
     expect(built.coverage.namedButNotDrawn).toBeGreaterThan(0);
     expect(built.coverage.drawn).toBe(built.nodes.length);
   });
@@ -108,7 +108,7 @@ describe('buildTraceModel', () => {
     }
 
     // A payload with no `contains` rows must produce NO membranes and must
-    // record that the wire did not carry them — never an inferred enclosure
+    // record that the wire did not carry them, never an inferred enclosure
     // from shared file paths.
     const root = neighbors('sym-0');
     const stripped: NeighborsPayload = {

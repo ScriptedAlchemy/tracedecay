@@ -205,7 +205,7 @@ async fn timed_out_repository_discovery_defers_the_route() {
 ///
 /// Live wedge this covers: on a slow volume every retry re-ran discovery, was
 /// deferred at the same budget, and the root stayed "warming" for as long as
-/// the client kept asking — minutes, with no path to a resolved route.
+/// the client kept asking, minutes, with no path to a resolved route.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_deferred_discovery_converges_on_the_next_request() {
     let home = TempDir::new().expect("isolated home");

@@ -17,7 +17,7 @@ import { TaskChip } from './TaskChip.tsx';
 import { ChannelLedger, EmptyReading, ViewCaption } from './WorkViewChannel.tsx';
 
 /**
- * Causal — the disagreement field over the declared dependency graph.
+ * Causal, the disagreement field over the declared dependency graph.
  *
  * The field holds what the plan declares against what the run left behind, and
  * the loud reading is an edge whose dependent carries terminal evidence while
@@ -27,8 +27,8 @@ import { ChannelLedger, EmptyReading, ViewCaption } from './WorkViewChannel.tsx'
  * itself is the reading this projection exists to surface.
  *
  * Half the field is missing. Observed execution order needs attempt
- * timestamps, and the field's other half — an edge that executed but was never
- * declared — cannot be found at all without an order to find it against. Both
+ * timestamps, and the field's other half, an edge that executed but was never
+ * declared, cannot be found at all without an order to find it against. Both
  * are drawn as the absences they are, because a page that quietly omitted them
  * would read as a survey for undeclared coupling that came back clean.
  *
@@ -67,8 +67,8 @@ const READING_FILL: Record<WorkCausalReadingKind, string> = {
  * The two bands of the distribution.
  *
  * The split is the honest one: an edge whose two ends carry different evidence
- * can be read as an order, and an edge whose ends carry the same evidence — or
- * whose far end is off the page — cannot be read at all. `order_unread` sits
+ * can be read as an order, and an edge whose ends carry the same evidence, or
+ * whose far end is off the page, cannot be read at all. `order_unread` sits
  * below the rule with the other unknowns, never beside `consistent`.
  */
 const READING_BANDS: readonly {
@@ -79,7 +79,7 @@ const READING_BANDS: readonly {
   {
     legend: 'What the evidence orders',
     kinds: ['dependent_ahead', 'consistent'],
-    note: 'One end has a terminal attempt in the exact graph and the other does not, so these edges read as an order. Consistent means consistent so far — the dependent has not finished, and nothing has been proved about it.',
+    note: 'One end has a terminal attempt in the exact graph and the other does not, so these edges read as an order. Consistent means consistent so far, the dependent has not finished, and nothing has been proved about it.',
   },
   {
     legend: 'What nothing here orders',
@@ -298,7 +298,7 @@ function Disagreements({
                 reading.counts.unresolved > 0
                   ? ` ${reading.counts.unresolved} of them could not be read at all, because the task at the far end was not returned.`
                   : ''
-              } This is one reading coming back empty over ${plural(reading.declared, 'declared edge')} — not a finding that the plan and the run agree.`}
+              } This is one reading coming back empty over ${plural(reading.declared, 'declared edge')}, not a finding that the plan and the run agree.`}
         </EmptyReading>
       ) : (
         <div className="flex min-w-0 flex-col gap-2">
@@ -361,7 +361,7 @@ function Disagreements({
  *
  * The work-product graph's `candidate_edges`, drawn exactly as what they are:
  * DECLARED data. An empty set is available and empty rather than absent,
- * because the authority answered — nobody nominated a candidate — and that is a
+ * because the authority answered, nobody nominated a candidate, and that is a
  * different statement from the panel below it, where the search could not be
  * run at all. The two sit apart deliberately; collapsing them would let "the
  * plan declares no candidate" be read as "no hidden coupling was found".
@@ -390,7 +390,7 @@ function DeclaredCandidates({ reading }: { reading: WorkCausalReading }) {
         <p className="text-3xs leading-snug text-text-muted">{candidates.detail}</p>
       ) : candidates.value.length === 0 ? (
         <EmptyReading>
-          The work-product graph declares no causal candidate at all. Nobody nominated one — this
+          The work-product graph declares no causal candidate at all. Nobody nominated one, this
           is the authority answering, and it says nothing whatever about coupling the plan failed
           to write down, which is the panel below and is a question this build cannot ask.
         </EmptyReading>
@@ -422,7 +422,7 @@ function DeclaredCandidates({ reading }: { reading: WorkCausalReading }) {
  *
  * An undeclared edge is one the plan never wrote down, and it can only be
  * found by holding the plan against an observed order. With no order the
- * search cannot be run at all — a different statement from running it and
+ * search cannot be run at all, a different statement from running it and
  * finding nothing, and the two must never render alike.
  */
 function UndeclaredCoupling() {
@@ -440,13 +440,13 @@ function UndeclaredCoupling() {
           declared: one task in fact waited on another and the plan says nothing about it.
           Finding one needs an observed order of execution to hold the plan against. The
           snapshot carries no timestamp at all, and the work-product graph carries when a task
-          was created, changed, scheduled and is due — a calendar, not a record of what ran
+          was created, changed, scheduled and is due, a calendar, not a record of what ran
           before what.
         </p>
         <p>
           So this page has not searched for undeclared coupling and come back empty. It could
           not search. Nothing about hidden coupling follows from the fact that none is listed
-          here — the measurement was not taken.
+          here, the measurement was not taken.
         </p>
       </div>
     </Panel>

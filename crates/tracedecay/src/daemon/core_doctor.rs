@@ -304,7 +304,7 @@ async fn doctor_runtime_value_inner(
         .canonicalize()
         .unwrap_or_else(|_| graph_path.clone());
     // A retained admission bool is not a store observation. If the file the
-    // route was opened against is gone, say so — do not project "live".
+    // route was opened against is gone, say so, do not project "live".
     let route_retained = {
         let servers = store_administration.project_servers().lock().await;
         servers.servers.iter().any(|(key, entry)| {

@@ -83,7 +83,7 @@ impl OcamlExtractor {
             "module_definition" => Self::visit_module_definition(state, node),
             "class_definition" => Self::visit_class_definition(state, node),
             "open_module" => Self::visit_open(state, node),
-            // structure/signature items — recurse to find definitions inside
+            // structure/signature items. Recurse to find definitions inside
             "structure_item" | "signature_item" | "structure" | "signature" => {
                 Self::visit_children(state, node);
             }

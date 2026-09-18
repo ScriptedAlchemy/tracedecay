@@ -12,14 +12,14 @@ use tracedecay_domain::errors::TraceDecayError;
 /// Principle 6 of `docs/SERVING-PATH-PERFORMANCE.md`: deadlines bound failure,
 /// not work. Before this existed only the git and memory groups were wrapped,
 /// so `dispatch_deadline_horizon_micros` returning `None` for a graph tool meant
-/// `tracedecay_context` dispatched with no bound at all — a live Codex call once
+/// `tracedecay_context` dispatched with no bound at all, a live Codex call once
 /// hung for 900 seconds against a daemon grinding a failing publish loop, and
 /// only the client's own timeout ended it. A firing ceiling is always a bug
 /// somewhere above it; the fix is that bug, never a larger ceiling.
 pub const TOOL_DISPATCH_CEILING: std::time::Duration = std::time::Duration::from_mins(2);
 
-/// The ceiling for the few tools whose *requested work* is itself a long job —
-/// running a test suite, an admin index/sync — rather than an interactive read.
+/// The ceiling for the few tools whose *requested work* is itself a long job,
+/// running a test suite, an admin index/sync, rather than an interactive read.
 ///
 /// These are still bounded: nothing may run unbounded, and nothing may reach the
 /// 900 seconds that motivated this wrap. They simply cannot share the
@@ -31,7 +31,7 @@ pub const LONG_RUNNING_TOOL_DISPATCH_CEILING: std::time::Duration =
 ///
 /// Deliberately tiny and explicit: membership is a statement that the tool's
 /// duration is the caller's own job, not a serving-path stall. Everything not
-/// listed here — every graph, info, analysis, health, session, and memory read —
+/// listed here, every graph, info, analysis, health, session, and memory read,
 /// inherits [`TOOL_DISPATCH_CEILING`] automatically, so a tool added tomorrow is
 /// bounded without touching this file.
 const LONG_RUNNING_DISPATCH_TOOLS: &[&str] = &[
@@ -57,7 +57,7 @@ pub fn tool_dispatch_ceiling(tool_name: &str) -> std::time::Duration {
 /// deadline when it is present and shorter, otherwise the tool's own ceiling.
 ///
 /// `None` means the carried deadline has already elapsed, which must be
-/// rejected rather than dispatched — the same rule the git and memory wraps
+/// rejected rather than dispatched, the same rule the git and memory wraps
 /// apply to a non-positive budget.
 pub fn tool_dispatch_budget(
     tool_name: &str,

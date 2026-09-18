@@ -1,9 +1,9 @@
-//! `GET /api/doctor/findings` — root composition for the Doctor finding family.
+//! `GET /api/doctor/findings`, root composition for the Doctor finding family.
 //!
 //! An admitted daemon owner injects the canonical composed report reader into
 //! [`DashboardState`]. This module only resolves scope and invokes that reader.
-//! Every presentation decision — family vocabulary, coverage, freshness,
-//! domain state, notes, and refresh action — belongs to
+//! Every presentation decision, family vocabulary, coverage, freshness,
+//! domain state, notes, and refresh action, belongs to
 //! [`tracedecay_api::doctor`]. A dashboard opened without an admitted reader
 //! remains explicitly unsupported.
 

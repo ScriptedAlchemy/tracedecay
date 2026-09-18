@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use sha2::{Digest, Sha256};
 use tracedecay_domain::FactOwnerV1;
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_graph_db::{
     GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationId, GraphGenerationManifest,
     GraphGenerationRelation, GraphLabel, GraphProjectionIdentity, GraphRelationId,
@@ -53,13 +54,13 @@ pub(super) fn build_manifest(
             .map_err(|error| graph_error(owner, error))?;
         insert_projection_entity(&mut entity_ids, from.clone())?;
         insert_projection_entity(&mut entity_ids, to.clone())?;
-        let relation_digest = hex::encode(Sha256::digest(
+        let relation_digest = sha256_hex(
             format!(
                 "{}\0{}\0{}",
                 relation.source, relation.target, relation.kind
             )
             .as_bytes(),
-        ));
+        );
         relations.push(
             GraphGenerationRelation::new(
                 GraphRelationId::new(format!("memory-relation:{relation_digest}"))

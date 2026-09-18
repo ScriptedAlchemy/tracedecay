@@ -46,7 +46,7 @@ pub(super) fn def_message_search() -> ToolDefinition {
                 "goals": {
                     "type": "boolean",
                     "default": false,
-                    "description": "When true, list each session's latest Codex goal (kind='goal') — objective as text plus lifecycle status (e.g. active/paused) from metadata — newest first, instead of running a full-text search. query becomes optional; limit and project_key still apply. Scoped to the selected project store."
+                    "description": "When true, list each session's latest Codex goal (kind='goal'), objective as text plus lifecycle status (e.g. active/paused) from metadata, newest first, instead of running a full-text search. query becomes optional; limit and project_key still apply. Scoped to the selected project store."
                 },
                 "provider": {
                     "type": "string",

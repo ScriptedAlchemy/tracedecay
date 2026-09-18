@@ -56,7 +56,7 @@ pub(super) fn tool_payload(response: &JsonRpcResponse) -> Value {
 ///
 /// A payload larger than the MCP response cap is carried as a preview plus a
 /// local response handle. That is reversible transport framing, not a
-/// retrieval outcome — and the preview is cut mid-JSON, so parsing it would
+/// retrieval outcome, and the preview is cut mid-JSON, so parsing it would
 /// silently yield an empty result set. `tracedecay_retrieve` pages the stored
 /// response through `offset` / `next_offset` / `has_more`; reassemble it
 /// exactly as an agent does before parsing.

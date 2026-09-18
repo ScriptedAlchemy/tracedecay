@@ -32,7 +32,7 @@ export interface LoomPlayback {
 /**
  * Presentation cursor over the selected session's canonically ordered page.
  *
- * The cursor is the `loomEvent` URL parameter — a stable message identity —
+ * The cursor is the `loomEvent` URL parameter, a stable message identity , 
  * so a link reproduces the same reveal boundary, and a refetch that drops the
  * named message reports it missing instead of silently snapping to the tail.
  * Playing and speed are ephemeral component state: a link never autoplays.

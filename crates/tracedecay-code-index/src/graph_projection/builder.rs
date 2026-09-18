@@ -49,7 +49,7 @@ pub fn build_published_code_graph_manifest_checked(
     // and the seat/reconcile duplicate publication of one sealed generation
     // reuse the first complete build instead of re-serializing and re-hashing
     // every entity and relation. Fail-closed: only a fully successful build is
-    // memoized — an interrupted or deadline-exceeded build records nothing —
+    // memoized, an interrupted or deadline-exceeded build records nothing,
     // and the `check` above refuses a cancelled or expired request before a
     // memo hit can be served.
     if let Some(manifest) = generation.memoized_graph_manifest(&projection, projector_revision) {
@@ -279,9 +279,9 @@ pub(super) fn build_projection(
             ))
         })?;
     // Chunks bind symbols to files and spans above; they are not graph rows.
-    // No reader addresses a chunk through the graph — traversal alternates
+    // No reader addresses a chunk through the graph, traversal alternates
     // symbol and edge-evidence entities, and a symbol's binding already
-    // names its chunk — so projecting one entity plus one relation per chunk
+    // names its chunk, so projecting one entity plus one relation per chunk
     // only multiplied every graph artifact by the chunk count.
     hotpath::measure_block!("code_index.seal.collect.emit", {
         let mut entities = Vec::with_capacity(

@@ -70,7 +70,7 @@ pub fn structured_hook_error_data(error: &TraceDecayError) -> Option<Value> {
 ///
 /// Handlers that build results structurally (e.g. edit tools, whose result
 /// struct carries a `success: bool`) call
-/// [`ToolResult::with_semantic_error`] to record the outcome directly — that
+/// [`ToolResult::with_semantic_error`] to record the outcome directly, that
 /// marker is authoritative and wins over the rendered text. Handlers that
 /// have not been migrated to set the marker leave it `None`, and this falls
 /// back to the pre-existing text-based heuristic (`value_has_semantic_error`)
@@ -89,7 +89,7 @@ pub fn tool_result_has_semantic_error(result: &ToolResult) -> bool {
 /// "`old_str` not found"); falls back to the rendered response's first text
 /// block for handlers that only signal failure via `value_has_semantic_error`
 /// text heuristics. Callers must only invoke this once the result is already
-/// known to be a semantic failure — it does not itself re-check that.
+/// known to be a semantic failure, it does not itself re-check that.
 #[must_use]
 pub fn semantic_failure_reason(result: &ToolResult) -> Option<String> {
     if let Some(message) = result.failure_message() {

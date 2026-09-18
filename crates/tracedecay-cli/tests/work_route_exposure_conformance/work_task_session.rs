@@ -19,7 +19,7 @@
 //! * TaskSession *hydration* is owned by the activated evaluated federated
 //!   query authority (`DaemonWorkFederatedQueryAuthorityV1::authority_for`).
 //!   This fixture activates no evaluated profile, so hydration is legitimately
-//!   absent — and the point of grading it here is that absence stays a typed
+//!   absent, and the point of grading it here is that absence stays a typed
 //!   `unavailable` omission on both mounts rather than a fabricated empty
 //!   session. The hydrated path, its exact continuation, and the rank-final
 //!   `stale` revocation verdict are proven where that authority is real, in
@@ -67,7 +67,7 @@ const POLL_BUDGET: Duration = Duration::from_secs(180);
 ///
 /// `verified_version` is the graph identity the parent journey observed after
 /// creating the task; every mutation below advances it, so the caller's pin is
-/// deliberately *not* reused for the reads — a read that still answered under
+/// deliberately *not* reused for the reads, a read that still answered under
 /// the stale pin would be the bug.
 pub(super) fn assert_provider_qualified_task_session_evidence(
     agent: &ureq::Agent,
@@ -105,7 +105,7 @@ pub(super) fn assert_provider_qualified_task_session_evidence(
     // -- The task root itself, through the prepared-mutation handoff. --------
     // Created under the profile-owned no-Git selection, which is how a profile
     // owner's work actually begins: no repository relation is named until an
-    // authority that can only act under one — attempt admission, below —
+    // authority that can only act under one, attempt admission, below.
     // appends beside it. That sequence is what the no-Git coverage assertion
     // after settlement grades.
     let mut create_draft = super::product_task_create_draft();
@@ -266,8 +266,8 @@ pub(super) fn assert_provider_qualified_task_session_evidence(
     // -- Grade the read on both mounts, in every temporal mode. --------------
     // `tracedecay dashboard` is a launcher, not a server: it asks the daemon to
     // host the dashboard, prints the bound URL, and exits. The server therefore
-    // lives inside the daemon, so it is started here — against the daemon that
-    // is actually serving — rather than at test start against a predecessor
+    // lives inside the daemon, so it is started here, against the daemon that
+    // is actually serving, rather than at test start against a predecessor
     // whose in-process server died with it.
     let selection = repository_selection(fixture);
     let dashboard = DashboardProcess::start(fixture);
@@ -316,7 +316,7 @@ pub(super) fn assert_provider_qualified_task_session_evidence(
 /// had to be created under the repository selection because a settled provider
 /// attempt publishes repository-scoped events onto the same owner journal, and
 /// the no-Git selection then refused *every* read of it. `work/views` answered
-/// `200` before start-attempt and a permanent `404` after — work the caller was
+/// `200` before start-attempt and a permanent `404` after, work the caller was
 /// plainly authorized for became unreachable because of an event admitted
 /// beside it.
 ///
@@ -325,8 +325,8 @@ pub(super) fn assert_provider_qualified_task_session_evidence(
 /// * the read succeeds over the slice the selection covers, and
 /// * it carries a truthful typed disclosure that scoped events exist outside
 ///   that slice, so the caller can never mistake the slice for the whole, and
-/// * a mutation is still refused — a prepared change pins the head it read, and
-///   a covered slice's head is not the journal's — but now by a refusal that
+/// * a mutation is still refused, a prepared change pins the head it read, and
+///   a covered slice's head is not the journal's, but now by a refusal that
 ///   names the cause and the selection remedy instead of concealing it as an
 ///   absence.
 fn assert_no_git_selection_reads_its_covered_slice(
@@ -372,7 +372,7 @@ fn assert_no_git_selection_reads_its_covered_slice(
 
     // The slice is answered as itself: the no-Git create's own version, folded
     // from covered events alone. The accepted-attempt relation lives in a
-    // repository-scoped event, so it must NOT appear here — that would be the
+    // repository-scoped event, so it must NOT appear here, that would be the
     // partial fold this contract exists to prevent.
     assert_eq!(
         graph["snapshot"]["verified_version"]["graph_version"].as_u64(),
@@ -597,7 +597,7 @@ fn assert_both_mounts(
         // 2. The exact TaskSession expansion the dashboard evidence panel
         //    issues. Hydration is owned by an authority this fixture has not
         //    activated, so the only truthful answer is the same typed
-        //    omission — never a fabricated empty session, and never a
+        //    omission, never a fabricated empty session, and never a
         //    silently dropped relation.
         let expanded = evidence_request(
             selection.clone(),
@@ -1024,7 +1024,7 @@ fn accepted_attempts(graph: &Value, identity: &Value) -> bool {
 /// scope, so it publishes repository-scoped Work events onto the same owner
 /// journal the no-Git create started. This selection names those scopes, and a
 /// `relations` selection also covers the scope-free events beside them, so it
-/// is the one selection that reads this journey's journal whole — which is
+/// is the one selection that reads this journey's journal whole, which is
 /// exactly the remedy the coverage disclosure points a no-Git caller at.
 fn repository_selection(fixture: &ProductionDaemon) -> Value {
     let common_dir = tracedecay_runtime_core::worktree::git_common_dir(&fixture.project)

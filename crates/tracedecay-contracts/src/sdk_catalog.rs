@@ -365,7 +365,7 @@ mod tests {
     /// Handoff and multi-root shipped mounted HTTP routes that the SDK
     /// projection silently omitted, so authorized non-enumerating results were
     /// callable over HTTP but absent from both generated SDKs. Asserting the
-    /// whole mounted set — not one named family — is what keeps a future
+    /// whole mounted set, not one named family, is what keeps a future
     /// family from repeating that omission.
     #[test]
     fn sdk_registry_projects_every_mounted_family_including_handoff_and_multi_root() {

@@ -26,7 +26,7 @@ import { LedgerReadouts, SchedulerBay } from './SchedulerBay.tsx';
 import { ledgerWindow, receiptsByRun, sameInspected, type Inspected } from './ledger.ts';
 
 /**
- * Automations — channel nine. Scheduler status and its one real control,
+ * Automations, channel nine. Scheduler status and its one real control,
  * managed jobs, skills, automatic fact outcomes, and the durable run ledger,
  * with an inspector for whichever identity is hovered, focused or selected.
  *
@@ -208,14 +208,14 @@ function controlFailure(result: SchedulerControlResult | undefined): string | nu
     case 'error':
       return `The daemon refused the change (${result.detail}).`;
     case 'unsupported_schema':
-      return 'The daemon answered in a shape this dashboard cannot read, so whether the scheduler changed is unknown — reload to re-read it.';
+      return 'The daemon answered in a shape this dashboard cannot read, so whether the scheduler changed is unknown, reload to re-read it.';
     case 'unavailable':
       return `The scheduler was not changed: ${result.reason ?? result.status}.`;
     case 'read_only_scope':
       return `The scheduler was not changed: ${result.refusal.detail}.`;
     case 'not_dispatched':
       return scopeWriteSentence(result.writability, {
-        writable: (target) => `Nothing was sent, though writes to ${target} are accepted — reload to re-read the scheduler.`,
+        writable: (target) => `Nothing was sent, though writes to ${target} are accepted, reload to re-read the scheduler.`,
         refused: (reason) => `Nothing was sent. ${reason}`,
       });
     default: {

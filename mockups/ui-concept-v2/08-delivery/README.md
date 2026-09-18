@@ -37,7 +37,7 @@ The repository field preserves indexed recency, body size, branch count, checkou
 
 Each projection keeps its own ready, served-empty, stale, rate-limited, denied, not-published, unavailable, or failed state. One healthy local projection never paints a provider projection green.
 
-When `github_read_authority` is configured and the pull-request projection is usable, the global or project PR inbox becomes an upgrade from that local-first landing—not a prerequisite for using Delivery. If authority is missing, the inbox shows `not_published · requires github_read_authority` and a truthful configuration affordance. Unauthorized, denied, rate-limited, stale, unavailable, and served-empty responses remain distinct; none collapse into a blank list or fabricated zero.
+When `github_read_authority` is configured and the pull-request projection is usable, the global or project PR inbox becomes an upgrade from that local-first landing, not a prerequisite for using Delivery. If authority is missing, the inbox shows `not_published · requires github_read_authority` and a truthful configuration affordance. Unauthorized, denied, rate-limited, stale, unavailable, and served-empty responses remain distinct; none collapse into a blank list or fabricated zero.
 
 ## Product boundary
 

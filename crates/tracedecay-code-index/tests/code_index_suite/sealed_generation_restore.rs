@@ -171,8 +171,8 @@ fn sealed_seek_reader_restore_reencodes_identically() {
 }
 
 /// `unresolved_references` was added to the per-file artifact after revision
-/// six had already been persisted. Those earlier records mean exactly “no
-/// retained cross-file reference candidates”; restoring them must preserve
+/// six had already been persisted. Those earlier records mean exactly "no
+/// retained cross-file reference candidates"; restoring them must preserve
 /// that meaning so the scheduler can observe the old chunker revision and
 /// build a current successor rather than retrying a decode failure forever.
 #[test]

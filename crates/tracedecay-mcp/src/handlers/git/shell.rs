@@ -492,8 +492,8 @@ fn git_commit_log_controlled(
 
 /// Classify a file path into a semantic role.
 ///
-/// Inline tests inside source files don't make the file's role "test" —
-/// that bucket is reserved for files that exist purely to host tests
+/// Inline tests inside source files don't make the file's role "test".
+/// That bucket is reserved for files that exist purely to host tests
 /// (the path-based check). A `src/foo.rs` with a `#[cfg(test)] mod tests`
 /// at the bottom still has role "source".
 #[allow(clippy::ptr_arg)]
@@ -748,7 +748,7 @@ mod tests {
     }
 
     /// Regression for bug #3 follow-up: a source file with `#[cfg(test)] mod
-    /// tests` at the bottom is still a source file — its role must not flip
+    /// tests` at the bottom is still a source file, its role must not flip
     /// to "test" just because it contains inline tests. Only the path-based
     /// `is_test_file` check governs role classification.
     #[test]

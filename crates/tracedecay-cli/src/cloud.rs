@@ -158,7 +158,7 @@ fn platform_asset_name(prefix: &str, version: &str) -> String {
 const PRE_RESET_EPOCH_MIN_MAJOR: u64 = 4;
 
 /// True when `tag_name` (e.g. `v6.1.3`) belongs to the pre-reset release
-/// epoch — see [`PRE_RESET_EPOCH_MIN_MAJOR`].
+/// epoch, see [`PRE_RESET_EPOCH_MIN_MAJOR`].
 fn release_is_pre_reset_epoch(tag_name: &str) -> bool {
     let version = tag_name.trim_start_matches('v');
     let major = version
@@ -186,7 +186,7 @@ fn release_has_current_platform_asset(release: &GitHubRelease) -> bool {
 /// For beta builds, fetches the latest prerelease; for stable builds,
 /// fetches the latest stable release. This ensures each channel only
 /// sees updates from its own channel. Releases whose CI hasn't yet
-/// uploaded the current-platform binary are skipped — see
+/// uploaded the current-platform binary are skipped, see
 /// `release_has_current_platform_asset`.
 pub fn fetch_latest_version() -> Option<String> {
     if is_beta() {
@@ -229,7 +229,7 @@ pub fn fetch_latest_beta_version() -> Option<String> {
     // First prerelease that has the current platform's asset already
     // uploaded. GitHub returns the list newest-first, so the first match
     // is the latest installable beta. Releases whose CI is still in
-    // progress are skipped — they will be picked up on the next check.
+    // progress are skipped, they will be picked up on the next check.
     releases
         .into_iter()
         .find(|r| r.prerelease && release_has_current_platform_asset(r))
@@ -337,7 +337,7 @@ mod tests {
     #[test]
     fn rejects_stable_named_asset_on_beta_release() {
         // If someone uploads a stable-named asset to a prerelease, the
-        // filter should still reject — the naming convention says beta
+        // filter should still reject, the naming convention says beta
         // releases carry `*-beta-v...` assets.
         let stable_name = asset_name("0.9.9-beta.1", false);
         let r = release("v0.9.9-beta.1", true, &[&stable_name]);

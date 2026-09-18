@@ -1,8 +1,8 @@
 //! The provenance probe `build.rs` bakes into the binary, exercised as the
-//! exact code the build script mounts — not a copy that can drift.
+//! exact code the build script mounts, not a copy that can drift.
 //!
 //! Covers the three-source contract (verified git worktree, release env sha,
-//! `cargo package` VCS journal — in that order, failing when none applies)
+//! `cargo package` VCS journal, in that order, failing when none applies)
 //! and the Cargo rerun semantics of the repo watcher: edits that change the
 //! answer rerun the script, its own output does not, and probing never
 //! rewrites the `.git/index` it hands Cargo as a trigger.
@@ -61,7 +61,7 @@ fn head_sha(root: &std::path::Path) -> String {
 }
 
 /// `resolve` for a fixture whose repository root and manifest dir coincide,
-/// with no release env sha — the shape every git-vs-vcs-info test uses.
+/// with no release env sha, the shape every git-vs-vcs-info test uses.
 fn resolve_local(root: &std::path::Path) -> Result<ResolvedSourceProvenance, String> {
     resolve(root, root, None)
 }
@@ -252,7 +252,7 @@ fn no_source_fails_naming_all_three_sources() {
 }
 
 /// A crate unpacked below an unrelated repository must not inherit that
-/// repository's commit — the exact shape of a `cargo install` from the
+/// repository's commit, the exact shape of a `cargo install` from the
 /// registry inside a developer's checkout.
 #[test]
 fn a_subdirectory_of_another_repository_has_no_git_identity() {
@@ -267,7 +267,7 @@ fn a_subdirectory_of_another_repository_has_no_git_identity() {
         "an unrelated repository must not drive this crate's rebuilds"
     );
 
-    // With packaged VCS metadata present, the same nested unpack resolves —
+    // With packaged VCS metadata present, the same nested unpack resolves.
     // from Cargo's journal, not from the enclosing repository.
     write_vcs_info(&unpacked, &format!(r#"{{"git":{{"sha1":"{VCS_SHA}"}}}}"#));
     let resolved = resolve_local(&unpacked).expect("packaged metadata resolves");

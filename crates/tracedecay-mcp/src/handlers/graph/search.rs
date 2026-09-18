@@ -461,7 +461,7 @@ fn append_coverage_md(md: &mut Md, value: &Value) {
     }
     md.blank()
         .heading(3, "Coverage")
-        .line("Partial recall — some retrieval lanes did not answer:");
+        .line("Partial recall. Some retrieval lanes did not answer:");
     for note in notes {
         md.bullet(&note);
     }
@@ -494,13 +494,13 @@ fn render_search_md(value: &Value) -> String {
                         let name = render::field_str(display, "name");
                         let kind = render::field_str(display, "kind");
                         md.bullet(&format!(
-                            "**{name}** ({kind}, {exact_class}) — rank {} · utility {utility}{via}",
+                            "**{name}** ({kind}, {exact_class}), rank {} · utility {utility}{via}",
                             ordinal.saturating_add(1)
                         ));
                         md.line(&format!("  anchor_id: `{anchor}`"));
                     } else {
                         md.bullet(&format!(
-                            "**{anchor}** ({exact_class}) — rank {} · utility {utility}{via}",
+                            "**{anchor}** ({exact_class}), rank {} · utility {utility}{via}",
                             ordinal.saturating_add(1)
                         ));
                     }
@@ -518,7 +518,7 @@ fn render_search_md(value: &Value) -> String {
                 let id = render::field_str(it, "id");
                 let score = it.get("score").and_then(Value::as_f64).unwrap_or(0.0);
                 md.bullet(&format!(
-                    "**{name}** ({kind}) — {file}:{line} · score {score:.1}"
+                    "**{name}** ({kind}), {file}:{line} · score {score:.1}"
                 ));
                 let sig = render::field_str(it, "signature");
                 if sig.is_empty() {
@@ -556,7 +556,7 @@ fn render_search_md(value: &Value) -> String {
 /// every edge, then discard all but `max_nodes`. That walk is CPU-bound and
 /// shows no warm benefit. Cap examination at a small multiple of the kept
 /// page. Semantic kind lives on the edge entity (not the physical
-/// SOURCE/TARGET relation type), so the page is all-kinds — the same
+/// SOURCE/TARGET relation type), so the page is all-kinds, the same
 /// neighborhood the previous complete walk returned, just a prefix.
 fn context_related_relation_budget(max_nodes: usize) -> usize {
     max_nodes.saturating_mul(4).clamp(16, 64)
@@ -711,7 +711,7 @@ fn append_context_search_matches(output: &mut String, matches: &[ContextSearchMa
     for search_match in matches {
         let _ = writeln!(
             output,
-            "- **{}** ({}) — `{}` · rank {} · utility {}",
+            "- **{}** ({}), `{}` · rank {} · utility {}",
             search_match.name,
             search_match.kind,
             search_match.file,
@@ -959,7 +959,7 @@ where
     ))
 }
 
-/// Bare-name lookup against `idx_nodes_name` — no BM25 scoring, no fuzzy
+/// Bare-name lookup against `idx_nodes_name`, no BM25 scoring, no fuzzy
 /// match, no qualified-name suffix walk. Returns every node whose `name`
 /// column equals the query exactly. Useful when you already know the symbol
 /// and want the apples-to-apples cost of an index hit instead of
@@ -1400,11 +1400,11 @@ struct RenameReferenceSiteInput {
     evidence_start_byte: u64,
 }
 
-/// READ-ONLY: reports what a rename of the given symbol WOULD touch — the
+/// READ-ONLY: reports what a rename of the given symbol WOULD touch, the
 /// declaration site and every graph reference site (incoming edges; outgoing
 /// edges reference other symbols and so are excluded), each with a
 /// current-text snippet, plus a per-file count of literal name occurrences
-/// that are NOT backed by a graph edge ("text-only matches — review
+/// that are NOT backed by a graph edge ("text-only matches, review
 /// manually"). Nothing is rewritten.
 #[hotpath::measure(label = "mcp.graph.rename_preview.total")]
 pub async fn handle_rename_preview(
@@ -1416,7 +1416,7 @@ pub async fn handle_rename_preview(
         decode_primitive_request(&args, "tracedecay_rename_preview")?;
 
     let occurrence = graph_occurrence_id(&request.node_id)?;
-    // Graph occurrences per file (declaration + reference sites) — subtracted
+    // Graph occurrences per file (declaration + reference sites), subtracted
     // from the literal textual count to isolate the text-only matches.
     let mut graph_counts: HashMap<String, usize> = HashMap::new();
     let mut touched: Vec<String> = Vec::new();
@@ -1524,7 +1524,7 @@ pub async fn handle_rename_preview(
             // Text-only matches per touched file: literal identifier occurrences
             // of the name minus the graph occurrences already accounted for.
             // These are the comments/strings/dynamic-dispatch/unresolved sites a
-            // graph-only rename would miss — the scan is bounded to files that
+            // graph-only rename would miss, the scan is bounded to files that
             // already appear in the preview, so occurrences in wholly unrelated
             // files are not counted.
             let mut text_only_matches = Vec::<RenamePreviewTextOnlyMatchV1>::new();
@@ -1542,7 +1542,7 @@ pub async fn handle_rename_preview(
                     text_only_matches.push(RenamePreviewTextOnlyMatchV1 {
                         file: file.clone(),
                         text_only_count: text_only,
-                        note: "text-only matches — review manually".to_owned(),
+                        note: "text-only matches, review manually".to_owned(),
                     });
                 }
             }
@@ -1561,7 +1561,7 @@ pub async fn handle_rename_preview(
         "mcp.graph.rename_preview.serialize",
         serde_json::to_value(RenamePreviewPrimitiveResultV1 {
             read_only: true,
-            note: "Preview only — nothing is edited. 'references' are graph reference sites \
+            note: "Preview only. Nothing is edited. 'references' are graph reference sites \
                (the declaration is reported separately in 'node'); 'text_only_matches' are \
                literal name occurrences NOT backed by a graph edge (comments, strings, \
                dynamic dispatch, unresolved refs) and must be reviewed by hand. Graph \
@@ -1588,7 +1588,7 @@ mod tests {
     fn clone_lanes_report_one_unavailable_wire_protocol() {
         use tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1 as Reason;
 
-        // Retired branch-local opaque tokens — never shipped on master; must
+        // Retired branch-local opaque tokens, never shipped on master; must
         // stay absent from the shared mapper wire (migrate-then-delete, not
         // one-release alias). Request-schema / catalog `alias_of` for these
         // tools lives on #1433 and is separable.
@@ -1844,7 +1844,7 @@ mod tests {
             .as_str();
 
         // Admit the sibling lane so the request is authorized, then omit the
-        // lane under test — the Codex P2 gap (opaque missing-executor tokens).
+        // lane under test, the Codex P2 gap (opaque missing-executor tokens).
         let similar_stub: tracedecay_query::code_search::CodeIndexSimilarExecutor =
             std::sync::Arc::new(|_| {
                 Box::pin(async {

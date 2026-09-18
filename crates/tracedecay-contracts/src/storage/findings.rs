@@ -48,8 +48,8 @@ const fn kind_slug(kind: DoctorStorageFindingKindV1) -> &'static str {
 
 /// Report a store whose historical schema migrations have not completed.
 ///
-/// These migrations cost what the store costs — a full index rebuild, a
-/// whole-table rewrite — so they run as background convergence after
+/// These migrations cost what the store costs: a full index rebuild, a
+/// whole-table rewrite, so they run as background convergence after
 /// admission rather than inside an open's write lease, and the daemon serves
 /// while they run. `state` carries what the convergence authority observed:
 /// `Stale` while a store is behind its current schema but readable, and
@@ -294,7 +294,7 @@ pub fn table_growth_finding(
 
 /// Produce the `OverBudgetStore` finding from a telemetry read and its budget.
 ///
-/// An over-budget store is *always* a non-healthy finding — the budget is never
+/// An over-budget store is *always* a non-healthy finding. The budget is never
 /// silently ignored. Unobservable telemetry yields an honest
 /// unsupported/denied/unknown finding, and a within-budget store yields a
 /// healthy finding only when coverage is genuinely complete.
@@ -464,8 +464,8 @@ pub fn incident_debris_finding(
 
 /// Produce the `RetentionBacklog` finding from a retention backlog record.
 ///
-/// Backlog past the retention window is `Stale` — evidence held past its
-/// watermark — and references the retention-collection operation.
+/// Backlog past the retention window is `Stale`: evidence held past its
+/// watermark, and references the retention-collection operation.
 pub fn retention_backlog_finding(
     record: &RetentionBacklogRecordV1,
     completeness: DoctorCoverageCompletenessV1,
@@ -502,7 +502,7 @@ pub fn retention_backlog_finding(
 /// stranded-scope class one level up.
 ///
 /// Both classes share one finding because they describe the same store from the
-/// owner's point of view — "how many code-index bytes are being held that
+/// owner's point of view: "how many code-index bytes are being held that
 /// nothing reads". They are reported as separate numbers because a scope-local
 /// generation census structurally cannot see a stranded sibling scope, and
 /// folding the two totals together would let a clean generation census hide

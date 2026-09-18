@@ -271,7 +271,7 @@ if ((use_samply)) && [[ -n "$(tool_path samply)" ]]; then
   mark_tool_used samply
 fi
 if ((use_ebpf)) && [[ -n "$(tool_path bpftrace)" ]]; then
-  # Kernel stacks and a counter only — no userspace paths or filenames.
+  # Kernel stacks and a counter only, no userspace paths or filenames.
   start_sidecar bpftrace timeout 30 bpftrace -e \
     "profile:hz:49 /pid == ${sample_pid}/ { @oncpu = count(); } interval:s:20 { exit(); }"
   mark_tool_used bpftrace

@@ -194,7 +194,7 @@ pub fn retrieve_response_handle(
 /// A record file is published by atomically renaming a fully synced staging
 /// file over its handle path and is never modified in place, so one `read`
 /// observes either a complete prior record, a complete replacement, or no
-/// file — never mixed bytes. Identity is revalidated from the bytes read
+/// file, never mixed bytes. Identity is revalidated from the bytes read
 /// (`validate_record` recomputes the digest), so a concurrent replacement
 /// cannot be mistaken for the record this lookup started with. Expired files
 /// are not reclaimed here; cleanup and the renewing publication remove them

@@ -14,7 +14,7 @@ import { AutomationsPage } from "./AutomationsPage.tsx";
  *
  * Automations is the subject for read isolation because it renders five
  * independent reads side by side, and because four of its five bays have an
- * empty state written in plain English — "no automation jobs defined", "no
+ * empty state written in plain English, "no automation jobs defined", "no
  * managed skills", "no fact application outcomes are recorded", "no automation
  * runs are recorded". Those sentences are the exact fabrication this project
  * forbids: a queue nobody could read must never present as a queue that was

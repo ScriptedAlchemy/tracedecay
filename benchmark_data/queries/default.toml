@@ -5,7 +5,7 @@
 # and compares to a baseline that reads the full content of every file
 # referenced by the resulting context. The ratio is the retrieval savings.
 #
-# These queries are intentionally generic — they target patterns present in
+# These queries are intentionally generic, they target patterns present in
 # most application codebases (CLIs, daemons, services) rather than this repo
 # specifically. For tighter recall numbers on a specific project, write your
 # own query file and pass it via `tracedecay bench --queries <file>`.

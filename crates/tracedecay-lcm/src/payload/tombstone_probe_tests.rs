@@ -4,7 +4,7 @@
 //! `expand_payload` asks `tombstoned_raw_ref_exists` exactly one question: was
 //! *this* payload reference tombstoned in raw message text? Answering it must
 //! not transfer or retain the store's whole tombstone history, so these tests
-//! assert on rows visited — every row `SQLite` hands back to the scan — rather
+//! assert on rows visited, every row `SQLite` hands back to the scan, rather
 //! than on query text or plan wording.
 
 use std::cell::Cell;

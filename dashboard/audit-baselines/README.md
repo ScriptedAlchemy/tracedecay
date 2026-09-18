@@ -1,7 +1,7 @@
 # Visual audit baselines
 
 This directory holds the **committed reference screenshots** the visual audit
-diffs against. It ships empty on purpose — baselines are established
+diffs against. It ships empty on purpose. Baselines are established
 deliberately, not auto-generated, so a diff always compares against a reviewed
 image.
 

@@ -3,8 +3,8 @@
 //! Every other transport already lets the caller name the deadline the daemon
 //! must enforce: HTTP carries `x-tracedecay-deadline-micros`, and the typed
 //! application-surface path sends an absolute [`Deadline`] inside the
-//! invocation request. The MCP `tools/call` wire — the route the CLI's
-//! compatibility tools and every MCP host take — carried none, so the daemon
+//! invocation request. The MCP `tools/call` wire, the route the CLI's
+//! compatibility tools and every MCP host take, carried none, so the daemon
 //! fell back to the tool's canonical dispatch ceiling for *every* caller. A
 //! caller asking for a one-second budget was silently served on a
 //! thirty-second one, and the deadline-elapsed typed terminals that budget

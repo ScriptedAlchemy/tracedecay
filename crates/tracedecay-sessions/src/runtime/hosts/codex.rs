@@ -6,36 +6,36 @@
 //! line is `{"timestamp": "<iso8601>", "type": "<kind>", "payload": {…}}`. The
 //! relevant kinds for conversation text are:
 //!
-//! * `session_meta` — first line; `payload.cwd`, session `id`. Real rollouts
+//! * `session_meta`, first line; `payload.cwd`, session `id`. Real rollouts
 //!   carry no `model` here (only `model_provider`); the active model is on
 //!   `turn_context` lines and can change mid-session.
 //! * `event_msg` with `payload.type == "item_completed"` and
-//!   `payload.item.type == "UserMessage"` — a current Codex user prompt
+//!   `payload.item.type == "UserMessage"`, a current Codex user prompt
 //!   (`payload.item.content`). The stable item id is retained as message
 //!   identity. Legacy `payload.type == "user_message"` records remain
 //!   supported through `payload.message`.
-//! * `event_msg` with `payload.type == "agent_message"` — a real assistant reply
+//! * `event_msg` with `payload.type == "agent_message"`, a real assistant reply
 //!   (`payload.message`).
-//! * `event_msg` with `payload.type == "token_count"` — provider usage captured
+//! * `event_msg` with `payload.type == "token_count"`, provider usage captured
 //!   by the canonical observation path, not conversational message metadata.
-//! * `event_msg` with `payload.type == "thread_goal_updated"` — the structured
+//! * `event_msg` with `payload.type == "thread_goal_updated"`, the structured
 //!   session goal and its lifecycle (`payload.goal.{objective,status,tokensUsed,
 //!   timeUsedSeconds,createdAt,updatedAt}`). `TraceDecay` records each state as a
 //!   compact `goal` row (objective as text, the rest in `metadata_json`) so the
 //!   session's goal and whether it is still active is searchable. `status` is
-//!   stored verbatim — real rollouts emit `active`/`paused`, but any future
+//!   stored verbatim, real rollouts emit `active`/`paused`, but any future
 //!   value (e.g. `completed`) is carried through unchanged rather than mapped to
 //!   a fixed enum. Consecutive events that repeat the same `(objective, status)`
 //!   within one parse pass are deduped; each genuine transition keeps its row.
-//! * `compacted` — Codex context-compression boundary. The rollout stores the
+//! * `compacted`. Codex context-compression boundary. The rollout stores the
 //!   replacement history and an encrypted compaction body, so `TraceDecay` records
 //!   the boundary/provenance as a summary record without claiming plaintext
 //!   access to Codex's private summary.
-//! * `response_item` goal context — Codex replays active thread goals as
+//! * `response_item` goal context. Codex replays active thread goals as
 //!   synthetic user context. `TraceDecay` indexes those as compact goal-context
 //!   records so LCM can catalog the objective and budget without treating the
 //!   instruction boilerplate as normal conversation.
-//! * subagent rollouts — separate `rollout-*.jsonl` files whose leading
+//! * subagent rollouts, separate `rollout-*.jsonl` files whose leading
 //!   `session_meta` has `thread_source == "subagent"` and parent ids in
 //!   `forked_from_id` / `source.subagent.thread_spawn.parent_thread_id`.
 //!
@@ -127,7 +127,7 @@ const IDLE_FULL_VALIDATION_CYCLES: u16 = 256;
 /// Retained directories revalidated on *every* idle poll, ahead of the
 /// round-robin rotation.
 ///
-/// Creating or removing a transcript changes exactly one directory identity —
+/// Creating or removing a transcript changes exactly one directory identity,
 /// its parent. A uniform rotation over the whole retained authority therefore
 /// hides a brand-new session behind an O(corpus) rotation, so recent-first
 /// discovery would only notice today's session after several scheduler ticks
@@ -1957,7 +1957,7 @@ fn retained_scan_step(
     // The structural walk and the candidate walk are distinct bounded budgets.
     // Charging both against one counter lets a deep-but-small tree spend the
     // whole pass discovering its own bucket layout, leaving nothing to retain
-    // candidates with — a corpus far under `max_files` then reports truncation
+    // candidates with. A corpus far under `max_files` then reports truncation
     // forever. Each phase is bounded independently.
     // Reaching one candidate can require walking every component of its dated
     // bucket path. Scale structural work with the requested candidate slice

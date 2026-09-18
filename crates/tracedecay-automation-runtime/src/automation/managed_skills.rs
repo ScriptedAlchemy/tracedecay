@@ -4,7 +4,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use super::config_error;
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use tracedecay_automation::run_labels::SKILL_OVERLAP_REMOVAL_TOMBSTONE;
 use tracedecay_domain::errors::Result;
@@ -107,7 +106,7 @@ struct SkillStoreLock(File);
 
 impl Drop for SkillStoreLock {
     fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.0);
+        let _ = self.0.unlock();
     }
 }
 
@@ -132,7 +131,7 @@ fn lock_skill_store(profile_root: &Path) -> Result<SkillStoreLock> {
                 path.display()
             ))
         })?;
-    file.lock_exclusive().map_err(|e| {
+    file.lock().map_err(|e| {
         config_error(format!(
             "failed to lock skill store '{}': {e}",
             path.display()

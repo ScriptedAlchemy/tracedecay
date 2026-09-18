@@ -13,16 +13,16 @@ vi.mock('../../viz/graph/GraphCanvas.tsx', () => ({
 /**
  * Zeros this page measured, against reads it never got.
  *
- * This suite used to assert the opposite — that a well-formed 200 reporting
- * zeros "is still not a measurement" — and the page was written to match:
+ * This suite used to assert the opposite, that a well-formed 200 reporting
+ * zeros "is still not a measurement", and the page was written to match:
  * every zero total, empty slice, and empty result set rendered as
  * "unverified", on the stated grounds that the response could not tell zero
  * from a query failure.
  *
  * It can. `ReadSection` invokes a surface's render function only after a 2xx
- * response satisfies the envelope and route schema; every other reading —
+ * response satisfies the envelope and route schema; every other reading,
  * offline, 401, 403, a canonical 404/503, an undecodable body, and the 500
- * these graph routes raise when the query fails — renders as that failure
+ * these graph routes raise when the query fails, renders as that failure
  * instead. So a zero reaching the page has been measured, and the guard was
  * suppressing real figures. It was also an `||`: one zero among the three
  * withheld all three, so a freshly indexed project with symbols but no

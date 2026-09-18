@@ -176,7 +176,7 @@ fn handle_branch_action_inner(
                         "exact index pending".to_string()
                     };
                     eprintln!(
-                        "  {}{} — {}{}, {}",
+                        "  {}{}, {}{}, {}",
                         branch
                             .get("name")
                             .and_then(serde_json::Value::as_str)
@@ -424,7 +424,7 @@ async fn handle_branch_autotrack_action(
                     eprintln!("Tracked PR branches:");
                     for entry in managed {
                         eprintln!(
-                            "  {} — PR #{} (head {})",
+                            "  {}, PR #{} (head {})",
                             entry.branch, entry.pr, entry.head_branch
                         );
                     }

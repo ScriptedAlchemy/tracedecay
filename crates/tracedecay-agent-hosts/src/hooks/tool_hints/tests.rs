@@ -342,7 +342,7 @@ fn edit_input(tool_name: &str, file_path: &str) -> ToolHintInput {
 
 #[test]
 fn non_memory_edits_get_no_memory_store_hint() {
-    // A regular source edit is not a memory location — and edit tools have no
+    // A regular source edit is not a memory location, and edit tools have no
     // other hint branch, so no hint at all.
     assert!(decide_hint(&edit_input("Write", "src/lib.rs")).is_none());
     // A markdown file in a non-`.claude` `memory` dir does not match.

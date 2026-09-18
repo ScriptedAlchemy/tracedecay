@@ -85,7 +85,7 @@ function layout(w: number, h: number): Scene {
   const col1 = Math.max(col0 + 110, Math.min(Math.max(w * 0.42, 300), w - 240));
   const maxMsg = Math.max(1, ...PACK.sessions.map((s) => s.messages));
 
-  // One ghost source per distinct missing parent — dangling sessions must not
+  // One ghost source per distinct missing parent, dangling sessions must not
   // be attributed to a parent they never named.
   const ghostGroups = new Map<string, typeof DANGLING>();
   DANGLING.forEach((d) => {
@@ -368,7 +368,7 @@ function Inspector(props: { sel: string | null }) {
       </div>
       <div className="ag-block">
         <div className="k">FAILURE CONTEXT (if any)</div>
-        <div className="ag-row is-abs"><span>status</span><span className="r abs">unavailable — not in pack</span></div>
+        <div className="ag-row is-abs"><span>status</span><span className="r abs">unavailable. Not in pack</span></div>
         <div className="ag-row"><span>session status</span><span className="r">{n.session.status}</span></div>
         <p className="ag-copy">{n.session.coverage}. Bodies were not copied. Do not read that as a node failure.</p>
       </div>
@@ -688,7 +688,7 @@ function SnapshotAgentsPage(props: { initialSessionId?: string; onInspect?: unkn
           </div>
           <div className="ag-topo-legend">
             left-to-right generations · size = messages · <i className="cy">solid = EXACT spawn / parent record</i> · <i className="am">dashed = UNAVAILABLE parent record</i> · handoff / rejoin: unavailable
-            <span className="ag-risk-unavailable">issue / risk filter unavailable — failure authority was not captured. Token and downstream-work authorities remain unavailable; this topology does not infer them.</span>
+            <span className="ag-risk-unavailable">issue / risk filter unavailable, failure authority was not captured. Token and downstream-work authorities remain unavailable; this topology does not infer them.</span>
           </div>
           <div className="ag-snapshot-controls"><button type="button" aria-pressed={exact} onClick={() => setExact((value) => !value)}>EXACT ROWS</button><button type="button" onClick={() => { setSel(defaultSelectedId()); setExact(false); setQuery(""); }}>FIT SELECTION</button><input type="search" aria-label="Search snapshot agents" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search agent, session, project" /></div>
           <Field sel={sel} onPick={pick} />

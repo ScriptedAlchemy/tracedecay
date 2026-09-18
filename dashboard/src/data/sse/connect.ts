@@ -56,7 +56,7 @@ export interface SseConnection {
   /** Recent accepted pulses, oldest first. Non-consuming: reading this never
    * disturbs the reducer's batch boundary. */
   activity(): readonly LiveActivityPulse[];
-  /** Monotone counter — a stable `useSyncExternalStore` snapshot. */
+  /** Monotone counter, a stable `useSyncExternalStore` snapshot. */
   activityRevision(): number;
   subscribe(listener: () => void): () => void;
   close(): void;
@@ -84,7 +84,7 @@ export function connectEvents(url = '/api/events'): SseConnection {
   let activityRevision = 0;
   const deliveryAckUrl = `${url.replace(/\?.*$/, '').replace(/\/$/, '')}/delivery-ack`;
 
-  /** Record an accepted event as a pulse. Only newly accepted events pulse —
+  /** Record an accepted event as a pulse. Only newly accepted events pulse,
    * duplicates, stale generations, and superseded revisions must not light the
    * visualization twice for one real occurrence. */
   const recordActivity = (event: DecodedSseEvent) => {
@@ -253,7 +253,7 @@ function parseScopeProjectId(scope: string): string | null {
  * Refusing those frames is not a stricter check, it is a silent outage: it drops
  * every hook, session-ingest, code-index, tool-call and task frame the daemon
  * sends, while `receive` has already reported the link as live. A run id with no
- * epoch is a lane that never rotates one, which is generation zero — and the
+ * epoch is a lane that never rotates one, which is generation zero, and the
  * reducer still orders the lane by revision, so nothing is loosened by saying
  * so. Malformation is caught by the field checks above, which this never was.
  */

@@ -37,7 +37,7 @@ impl GitWatcher {
     }
 
     /// Admission body behind [`Self::ensure_watching_with_config`], separated
-    /// so every typed outcome — refusals included — crosses one counter choke
+    /// so every typed outcome, refusals included, crosses one counter choke
     /// point instead of instrumenting each early return.
     async fn ensure_watching_admission(
         &self,

@@ -96,7 +96,7 @@ impl CodeIndexSchedulerRegistryV1 {
         ))
     }
 
-    /// Serving slot only — no Git open, no freshness ladder, no wake.
+    /// Serving slot only, no Git open, no freshness ladder, no wake.
     #[cfg(test)]
     pub async fn latest_complete_serving_for_test(
         &self,

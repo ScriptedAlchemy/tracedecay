@@ -12,11 +12,11 @@ Type-level exploration for the `tracedecay:exploring-code` skill.
    (`trait` form: implementing types + impl-block methods; `method` form:
    every function named X grouped by enclosing type, with bodies).
 2. **Impl blocks by trait, type, or both → `tracedecay_impls`** (avoid the
-   no-filter form — it returns every impl in the graph).
+   no-filter form. It returns every impl in the graph).
 3. **Recursive hierarchy → `tracedecay_type_hierarchy`**; deepest
    extends-chains → `tracedecay_inheritance_depth`.
 4. **"Where does this method come from?" → `tracedecay_derives`**: the
-   `#[derive(...)]` macros on a type and the methods each synthesizes — check
+   `#[derive(...)]` macros on a type and the methods each synthesizes. Check
    before concluding `.clone()` / `.eq()` has no definition.
 5. **Construction sites → `tracedecay_constructors`** (every struct-literal
    site with present and missing fields); **field usage →

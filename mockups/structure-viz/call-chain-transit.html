@@ -1,18 +1,18 @@
 <!doctype html>
 <!--
-  MOCKUP — not production code. Concept 2 of 3: CALL-CHAIN TRANSIT MAP.
+  MOCKUP. Not production code. Concept 2 of 3: CALL-CHAIN TRANSIT MAP.
 
   Chrome tokens copied verbatim from dashboard/src/theme/tokens.css and the
   @theme block of dashboard/src/theme/tailwind.css; kindColor() is a
   line-for-line port of dashboard/src/viz/graph/kindColor.ts.
 
-  Every value is INVENTED but honestly shaped — see notes/call-chain-transit.md.
+  Every value is INVENTED but honestly shaped. See notes/call-chain-transit.md.
   Theme: append ?theme=light to the file:// URL.
 -->
 <html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8" />
-<title>Call-chain transit map — mockup</title>
+<title>Call-chain transit map, mockup</title>
 <style>
 :root {
   --raw-surface-0: oklch(0.145 0.003 260);
@@ -142,7 +142,7 @@ svg { display: block; }
   </header>
 
   <!-- ==================================================================
-       ROUTE A — the healthy shape. Every hop stays level or steps DOWN a
+       ROUTE A. The healthy shape. Every hop stays level or steps DOWN a
        band, so the route reads as a staircase with no risers. That single
        silhouette is the whole diagnostic; nobody has to read a name to
        know this chain respects the layering.
@@ -162,19 +162,19 @@ svg { display: block; }
     <svg id="route-a" viewBox="0 0 1440 532" width="1440" height="532" role="img"
          aria-label="Route A: eight symbols crossing six occupied crate bands from dependency depth 5 down to 0, with no upward hop."></svg>
     <figcaption>
-      band order = <b style="color:var(--raw-text-secondary);font-weight:500">measured dependency depth</b> — the longest
+      band order = <b style="color:var(--raw-text-secondary);font-weight:500">measured dependency depth</b>. The longest
       path from that crate to a leaf crate in the workspace's Cargo dependency graph (domain = 0, api = 5). It is a
       measurement, not an editorial diagram of how the layers ought to sit ·
       vertical position = the crate that owns the station · horizontal position = position in the chain, evenly spaced,
       and encodes nothing about time or cost · station hue = symbol kind, on the product's kindColor arc ·
       the ruler at the foot carries one numeral per hop: the depth delta that hop crosses, negative downward ·
-      the two hatched bands are workspace crates at these depths that this chain never enters — they keep their full
+      the two hatched bands are workspace crates at these depths that this chain never enters. They keep their full
       height and their label, because a chart that drops the layers a chain skips cannot show a layer being skipped
     </figcaption>
   </figure>
 
   <!-- ==================================================================
-       ROUTE B — same axis, same geometry, and the shape breaks. Hop 5 is a
+       ROUTE B, same axis, same geometry, and the shape breaks. Hop 5 is a
        riser: the chain reaches the runtime and then climbs three bands back
        into application. The map does not have to accuse anyone; the line
        simply goes the wrong way, and it is the only line on the surface
@@ -195,10 +195,10 @@ svg { display: block; }
     <svg id="route-b" viewBox="0 0 1440 532" width="1440" height="532" role="img"
          aria-label="Route B: eight symbols on the same depth axis; the fifth hop climbs three bands upward from the rusqlite runtime back into the application crate, violating the layering."></svg>
     <figcaption>
-      the same bands, the same scale and the same station geometry as route A — only the line differs ·
+      the same bands, the same scale and the same station geometry as route A. Only the line differs ·
       the climbing hop is drawn at its true steepness (it cannot be given a 45° elbow, because the depth it crosses
       exceeds the horizontal room a single hop gets) and wears the error hue and a double stroke ·
-      <b style="color:var(--raw-state-error);font-weight:500">this chain is not proof of a bug</b> — a legitimate
+      <b style="color:var(--raw-state-error);font-weight:500">this chain is not proof of a bug</b>. A legitimate
       callback can climb; what the map claims is only that the call graph crosses a layer boundary upward, which is
       the thing worth arguing about
     </figcaption>
@@ -215,7 +215,7 @@ svg { display: block; }
 </div>
 
 <script>
-/* kindColor — line-for-line port of dashboard/src/viz/graph/kindColor.ts. */
+/* kindColor, line-for-line port of dashboard/src/viz/graph/kindColor.ts. */
 function hashKind(kind) {
   let hash = 0;
   for (let i = 0; i < kind.length; i += 1) hash = (hash * 31 + kind.charCodeAt(i)) >>> 0;
@@ -355,7 +355,7 @@ function drawRoute(svgId, route, lineColor) {
     } else {
       /* Transit elbow: run level, take a 45° diagonal, run level again.
        * When the vertical jump exceeds the horizontal room the hop is given,
-       * the diagonal simply gets steeper — which is exactly why the climbing
+       * the diagonal simply gets steeper. Which is exactly why the climbing
        * hop looks wrong: its steepness IS its depth delta. */
       const k = Math.min(dy, x2 - x1 - 60);
       d = `M ${x1} ${y1} L ${x2 - k - 26} ${y1} L ${x2 - 26} ${y2} L ${x2} ${y2}`;
@@ -368,7 +368,7 @@ function drawRoute(svgId, route, lineColor) {
     }
     /* The hop's own measurement gets its own lane at the foot of the panel
      * rather than a numeral parked on the diagonal. Printed on the line, the
-     * deltas landed inside the station names — and a measurement you have to
+     * deltas landed inside the station names, and a measurement you have to
      * dig out from under a label is worse than one you have to look down for. */
     const mx = (x1 + x2) / 2;
     const label = delta === 0 ? '0' : (delta > 0 ? '+' : '−') + Math.abs(delta);

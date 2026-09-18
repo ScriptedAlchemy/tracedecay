@@ -34,7 +34,7 @@ use super::daemon_ports::{
 
 pub(crate) enum HookDispatch {
     NotApplicable,
-    /// The native dispatcher recognised the event but could not take ownership of it — no
+    /// The native dispatcher recognised the event but could not take ownership of it, no
     /// published binding, an unreadable store layout, or an envelope it could
     /// not decode. The disposition is still worth recording, but the event has
     /// not been admitted anywhere, so callers must fall back to their ordinary

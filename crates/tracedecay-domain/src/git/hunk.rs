@@ -124,7 +124,7 @@ pub fn full_hunk_selection_bitmap(line_count: u32) -> Vec<u64> {
 /// Immutable hunk identity for compare-and-swap. A hunk is identified by exact repository,
 /// direction, path, expected base/index/worktree identity, normalized hunk
 /// header, context and patch digests, and the preview that issued the
-/// reference — never by display ordinal or line number alone.
+/// reference, never by display ordinal or line number alone.
 ///
 /// query mints these as read-only identity evidence only. Applying them is a
 /// daemon Git mutation path and is not representable here.

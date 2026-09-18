@@ -2,7 +2,7 @@
 //! out to `git`.
 
 /// The `-c` overrides every fixture git invocation carries, so the operator's
-/// global git configuration — hooks, gc, identity, commit signing — cannot
+/// global git configuration, hooks, gc, identity, commit signing, cannot
 /// reach a fixture commit, and a CI runner that has no `user.identity` at all
 /// can still commit.
 pub const GIT_FIXTURE_CONFIG: [&str; 10] = [

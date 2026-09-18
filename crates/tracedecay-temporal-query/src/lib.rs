@@ -318,11 +318,11 @@ pub async fn execute_temporal_kernel(
 ///
 /// The window is the unit a cursor can rank inside: scores are cohort-relative,
 /// so a ranked position is only meaningful against the same window. Filling the
-/// window while storage still holds rows is a continuation — the returned key
-/// is where the next window starts — not exhausted coverage.
+/// window while storage still holds rows is a continuation, the returned key
+/// is where the next window starts, not exhausted coverage.
 ///
-/// An empty query is a scope browse — the authorized scope's records in
-/// temporal order — never a zero-clause (structurally empty) plan. Text queries
+/// An empty query is a scope browse, the authorized scope's records in
+/// temporal order, never a zero-clause (structurally empty) plan. Text queries
 /// rank through the lexical/phrase/entity channels instead.
 async fn read_candidate_window(
     read_port: &impl TemporalReadPort,
@@ -547,7 +547,7 @@ pub async fn execute_temporal_candidate_export(
     // A derived-evidence group anchor names a span/burst container, never a
     // retrievable payload: no hydration authority resolves a group, so ranking
     // one as a standalone row can only spend a result slot and a diversity
-    // slot, then report an unresolvable omission — evicting real messages from
+    // slot, then report an unresolvable omission, evicting real messages from
     // the page it was supposed to enrich. Groups contribute their bounds to the
     // record read and their evidence to rank fusion; they never become results.
     let visible_candidates = all_candidates
@@ -816,7 +816,7 @@ fn temporal_context_frames(
     // Ranked summaries carry their own provenance: each summary anchor
     // supports-derives from its source anchors. Surfacing that as Supports
     // lineage keeps summary describes traceable without a stored assertion
-    // row per source. Only summaries actually returned contribute edges —
+    // row per source. Only summaries actually returned contribute edges,
     // merely-eligible summaries must not pollute unrelated results' lineage.
     for summary in summaries {
         if !ranked_anchors.contains(summary.summary_anchor_id())

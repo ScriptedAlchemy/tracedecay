@@ -42,7 +42,7 @@ pub fn retrieval_cursor(args: &Value) -> Result<Option<tracedecay_domain::Retrie
 /// Lifts internal analytics out of `value` so they travel beside the result
 /// instead of inside the client payload, renders the default-format (markdown)
 /// body with `md`, and records `touched_files`. The `format:"json"` path is
-/// unaffected — [`render::finalize`] serializes `value` compactly there.
+/// unaffected, [`render::finalize`] serializes `value` compactly there.
 pub fn rendered_tool_result<F: FnOnce() -> String>(
     project_root: Option<&Path>,
     args: &Value,
@@ -96,7 +96,7 @@ pub fn tool_json_with_md<F: FnOnce() -> String>(
 }
 
 /// [`rendered_tool_result`] for handlers that don't need a custom markdown
-/// renderer — the default body is [`render::generic_md`] over the same value.
+/// renderer, the default body is [`render::generic_md`] over the same value.
 pub fn generic_tool_result(
     project_root: Option<&Path>,
     args: &Value,

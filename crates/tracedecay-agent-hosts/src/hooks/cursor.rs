@@ -45,7 +45,7 @@ const CURSOR_FILE_PATH_FIELDS: &[&str] = &[
 /// Emits soft `additional_context` hints steering exploration tools (Grep,
 /// Glob, Read, semantic search, shell `rg`) toward tracedecay MCP tools.
 /// Registered on `postToolUse` rather than `preToolUse` because Cursor's
-/// documented `preToolUse` output schema has no context-injection field —
+/// documented `preToolUse` output schema has no context-injection field,
 /// `additional_context` is only honored on `postToolUse`. The hook runs
 /// unmatched (the docs enumerate no matcher value for Cursor's semantic
 /// search tool) and irrelevant tools fail open with no output. Each hint
@@ -180,7 +180,7 @@ pub fn cursor_post_tool_use_decision(runtime: &HookRuntimeV1, event_json: &str) 
 /// once per Cursor session across short-lived hook processes. Hints are also
 /// suppressed entirely when the workspace has no tracedecay index (suggesting
 /// tracedecay tools there would be misleading). When no session id is present
-/// the hint is emitted as-is — dedupe is impossible but the hint is still
+/// the hint is emitted as-is, dedupe is impossible but the hint is still
 /// useful (fail-open).
 fn cursor_hint_root(
     event_json: &str,

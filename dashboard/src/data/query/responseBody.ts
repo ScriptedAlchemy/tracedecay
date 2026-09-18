@@ -1,5 +1,5 @@
 /** Sentinel for a body that was not JSON at all, kept distinct from a body
- * that decoded to `null` — the second is a legal body that must still fail
+ * that decoded to `null`, the second is a legal body that must still fail
  * the caller's schema rather than being mistaken for a decode failure. */
 export const UNDECODABLE: unique symbol = Symbol('undecodable');
 
@@ -8,8 +8,8 @@ export const UNDECODABLE: unique symbol = Symbol('undecodable');
  *
  * `response.json()` rejects identically for a malformed body and for a body
  * whose consumption was aborted after the headers arrived. Only the second is
- * the caller's own doing — a scope change or an SSE invalidation abandoning a
- * read — and it must stay a rejection: React Query recognises the abort and
+ * the caller's own doing, a scope change or an SSE invalidation abandoning a
+ * read, and it must stay a rejection: React Query recognises the abort and
  * leaves the cache entry untouched, whereas a fabricated `UNDECODABLE` would
  * be written into the abandoned scope as a schema mismatch nobody observed.
  * Every fetch seam therefore threads its request signal through here.

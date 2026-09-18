@@ -315,7 +315,7 @@ struct SlimRepositoryProvenance {
 }
 
 /// The repository capture is identical for every observation taken under one
-/// checkout state — 29 distinct captures stood behind 187k provenance rows on
+/// checkout state, 29 distinct captures stood behind 187k provenance rows on
 /// one store, and each row held the ~1.2 KB capture twice (in `capture_json`
 /// and again inside `availability_json.value`). Persist it once, keyed by its
 /// own content id, and leave a digest-sized reference in each row.

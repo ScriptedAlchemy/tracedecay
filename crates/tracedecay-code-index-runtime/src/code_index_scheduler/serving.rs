@@ -190,7 +190,7 @@ const TEXT_ARTIFACT_MAXIMUM_CLONE_WARMUP_ADVANCES_V1: usize = 1;
 const TEXT_ARTIFACT_FINALIZATION_ROWS_PER_OPERATION_V1: usize = 4 * 1024;
 
 /// Outcome of the one-slice clone-fingerprint warmup on a similar/redundancy
-/// request. `Pending` means the retained worker owns remaining backfill —
+/// request. `Pending` means the retained worker owns remaining backfill,
 /// never collapse that into a hard `GenerationUnavailable` miss.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CloneSimilarityWarmupForRequestV1 {
@@ -825,7 +825,7 @@ enum CloneSuccessorSourcePositionV1 {
 /// The slot is the generation-owned partial-state authority; the condvar
 /// wakes arrivals parked behind a `HeadOpening` claim. A corpus-sized
 /// verified open (the published-head reopen or the publication tail's
-/// reopen — two full SHA-256 passes plus `SQLite` verification each) runs
+/// reopen, two full SHA-256 passes plus `SQLite` verification each) runs
 /// with the slot lock released, so a concurrent wake parks with typed
 /// cancellation instead of blocking on the mutex for the whole open. This
 /// stays a plain `std::sync::Mutex` rather than `hotpath::mutex!` because
@@ -880,7 +880,7 @@ impl CodeTextProjectionStateV1 {
 /// One wake's exclusive claim on a corpus-sized verified head open.
 ///
 /// Restores the slot to `Idle` and wakes every parked arrival on all exit
-/// paths — success, typed failure, and unwind — so a failed open can never
+/// paths, success, typed failure, and unwind, so a failed open can never
 /// strand concurrent wakes behind a stale `HeadOpening` marker.
 struct TextHeadOpenClaimV1<'a> {
     state: &'a CodeTextProjectionStateV1,
@@ -1589,7 +1589,7 @@ impl LatestCodeTextGenerationV1 {
     ///
     /// This is the sole readiness predicate for a publication's graph seat
     /// gate and for admitting a full sealed-generation graph replay. Clone
-    /// fingerprint backfill may still be unfinished when this returns true —
+    /// fingerprint backfill may still be unfinished when this returns true,
     /// that remaining work is [`Self::text_projection_needs_work`], not a
     /// seat or replay precondition.
     pub fn query_owners_are_ready(&self) -> bool {
@@ -1943,7 +1943,7 @@ impl LatestCodeTextGenerationV1 {
     /// Lexical owners can be Ready while clone backfill is still background
     /// work. `tracedecay_similar` needs those postings; ordinary search does not
     /// wait here. Drive at most one bounded slice inline and leave the rest to
-    /// the retained worker wake the caller must have requested — owning the
+    /// the retained worker wake the caller must have requested, owning the
     /// whole successor on the request thread was the #1339 S1 regression.
     pub(crate) fn finish_clone_similarity_warmup_for_request(
         &self,
@@ -2183,7 +2183,7 @@ impl LatestCodeTextGenerationV1 {
             // cursor sits one file rollover beyond the last durably accepted
             // page whenever that page filled exactly at a file's last record.
             // The completion receipt is the accepted-source authority from
-            // here on — the same one the builder seals the artifact against —
+            // here on, the same one the builder seals the artifact against,
             // and it binds the source state digest, the page count, every
             // emitted counter, and both digest chains.
             Some(receipt) => receipt
@@ -3149,7 +3149,7 @@ impl LatestCodeTextGenerationV1 {
             false,
         )?;
         // The publication tail content-addresses the finalized staging file
-        // and reopens it verified — corpus-sized digest work — so it runs
+        // and reopens it verified, corpus-sized digest work, so it runs
         // under a fresh `HeadOpening` claim with the slot lock released, the
         // same discipline as the durable-head reopen. On failure the claim
         // restores `Idle` and the durable staging file resumes on a later
@@ -3598,8 +3598,8 @@ fn ensure_private_text_artifacts_root(path: &Path) -> Result<(), RetrievalPortEr
             // A pre-existing root that fails owner-privacy validation is most
             // often a legacy directory an older binary created under a
             // permissive umask. Ownership is the proof this process may
-            // tighten it in place; a root it does not own — or that is not a
-            // directory at all — stays a typed deterministic contract
+            // tighten it in place; a root it does not own, or that is not a
+            // directory at all, stays a typed deterministic contract
             // violation for the operator instead of an endless silent retry.
             match make_private_directory(path) {
                 Ok(receipt) => {

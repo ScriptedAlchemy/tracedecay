@@ -240,7 +240,7 @@ pub enum SessionTemporalExecutionError {
     Redacted,
     Deleted,
     Denied,
-    /// The authority a request needs is absent — no store, no manifest, no
+    /// The authority a request needs is absent, no store, no manifest, no
     /// payload. A storage operation that *failed* is [`Self::Storage`]; keeping
     /// them apart is what tells an empty root from a broken read.
     Unavailable,

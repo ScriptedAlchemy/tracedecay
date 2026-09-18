@@ -10,7 +10,6 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 [dependencies]
 cap-fs-ext = "4.0.2"
 cap-std = "4.0.2"
-fs2 = "0.4"
 gix = { version = "=0.86.0", default-features = false, features = ["revision", "parallel", "sha1", "sha256", "status"] }
 hotpath.workspace = true
 serde = { version = "1", features = ["derive"] }

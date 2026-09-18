@@ -792,7 +792,7 @@ fn remote_normalization_memo() -> &'static RemoteNormalizationMemo {
 /// Credential-stripped remote identity, memoized on the raw remote string.
 ///
 /// Provenance is captured once per ingested observation, so this normalization
-/// ran once per record — and for an `https://` remote `Url::parse` runs the
+/// ran once per record, and for an `https://` remote `Url::parse` runs the
 /// host through idna/ICU domain mapping, which is disproportionately expensive
 /// next to the rest of a per-record capture. The remote is still read live from
 /// Git config on every capture; only the pure normalization of that string is

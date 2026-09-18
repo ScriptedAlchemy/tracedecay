@@ -217,7 +217,7 @@ fn cursor_plugin_manifest_path(home: &Path) -> PathBuf {
 
 /// Deploy directory of the native diagnostics extension, versioned exactly
 /// like every VS Code-family extension install (`publisher.name-version`) and
-/// stamped with the real release version — a `0.0.0` directory next to
+/// stamped with the real release version, a `0.0.0` directory next to
 /// otherwise-versioned components was an unstampable literal.
 pub(super) fn cursor_native_extension_relative_dir() -> String {
     format!(
@@ -252,7 +252,7 @@ fn cursor_native_extension_registration(home: &Path) -> HostBundleRegistrationSt
     }
 }
 
-/// Doctor coverage for the deployed native diagnostics extension — the one
+/// Doctor coverage for the deployed native diagnostics extension, the one
 /// Cursor component the plugin-dir checks never touched, so a missing or
 /// half-deployed extension was invisible. A wholly absent extension is
 /// informational (the plugin-only install surface never claims it); a
@@ -270,14 +270,14 @@ fn doctor_check_native_extension(dc: &mut DoctorCounters, home: &Path) {
             let stale = stale_native_extension_dirs(home);
             if stale.is_empty() {
                 dc.info(&format!(
-                    "Cursor native diagnostics extension {} not deployed ({}) — run \
+                    "Cursor native diagnostics extension {} not deployed ({}), run \
                      `tracedecay install --agent cursor`",
                     crate::PRODUCT_VERSION,
                     install_dir.display()
                 ));
             } else {
                 dc.warn(&format!(
-                    "Cursor native diagnostics extension is stale ({}) while {} is current — \
+                    "Cursor native diagnostics extension is stale ({}) while {} is current. \
                      run `tracedecay install --agent cursor` to redeploy",
                     stale.join(", "),
                     crate::PRODUCT_VERSION
@@ -286,11 +286,11 @@ fn doctor_check_native_extension(dc: &mut DoctorCounters, home: &Path) {
         }
         HostBundleRegistrationStateV1::Repairable => dc.warn(&format!(
             "Cursor native diagnostics extension at {} is incomplete (dist/extension.js \
-             missing) — run `tracedecay install --agent cursor`",
+             missing), run `tracedecay install --agent cursor`",
             install_dir.display()
         )),
         HostBundleRegistrationStateV1::Corrupt => dc.fail(&format!(
-            "package.json at {} is not the tracedecay cursor-native extension — inspect and \
+            "package.json at {} is not the tracedecay cursor-native extension, inspect and \
              remove it, then run `tracedecay install --agent cursor`",
             install_dir.display()
         )),
@@ -466,7 +466,7 @@ fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
     // The directory is tracedecay-owned. Sweep every skill dir the *current*
     // bundle no longer ships (retired dispatcher/workflow/memory skills), then
     // remove the managed skill overlay. Deriving the keep-set from the live
-    // bundle means a newly retired skill is swept automatically — no
+    // bundle means a newly retired skill is swept automatically, no
     // hand-maintained legacy list to fall out of date. User-added files
     // outside `skills/` (and any non-tracedecay skill dir) are preserved.
     sweep_retired_bundle_skill_dirs(install_dir)?;
@@ -716,7 +716,7 @@ fn legacy_project_cursor_has_tracedecay(cursor_dir: &Path) -> bool {
 /// and the steering rule into `<project>/.cursor/`; the user-level plugin
 /// owns all three surfaces now. This is the project-level counterpart of the
 /// user-level plugin-dir clean replace: detection-gated so projects without
-/// legacy artifacts are untouched, and only tracedecay-owned entries are removed —
+/// legacy artifacts are untouched, and only tracedecay-owned entries are removed,
 /// user-authored config (other MCP servers, custom hooks and rules, and
 /// `permissions.json` allowlists, which the plugin README still recommends
 /// per-repo) is preserved.
@@ -762,7 +762,7 @@ fn sweep_legacy_project_artifacts(project_path: &Path) -> Result<()> {
 }
 
 /// The project directory a cwd-based legacy sweep should target, or `None`
-/// when the cwd *is* the home directory — there `.cursor/` is Cursor's
+/// when the cwd *is* the home directory, there `.cursor/` is Cursor's
 /// user-level config tree, not a project workspace.
 fn cwd_sweep_target(cwd: PathBuf, home: &Path) -> Option<PathBuf> {
     let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
@@ -886,7 +886,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
     let manifest_path = cursor_plugin_manifest_path(home);
     if !manifest_path.exists() {
         dc.warn(&format!(
-            "{} not found — run `tracedecay install --agent cursor` if you use Cursor",
+            "{} not found, run `tracedecay install --agent cursor` if you use Cursor",
             manifest_path.display()
         ));
         if legacy_mcp_has_tracedecay(&home.join(".cursor/mcp.json")) {
@@ -925,7 +925,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
 fn doctor_check_plugin_mcp(dc: &mut DoctorCounters, mcp_path: &Path) {
     if !mcp_path.exists() {
         dc.warn(&format!(
-            "{} not found — run `tracedecay install --agent cursor`",
+            "{} not found, run `tracedecay install --agent cursor`",
             mcp_path.display()
         ));
         return;
@@ -945,7 +945,7 @@ fn doctor_check_plugin_mcp(dc: &mut DoctorCounters, mcp_path: &Path) {
         ));
     } else {
         dc.fail(&format!(
-            "Cursor plugin MCP config is incomplete in {} — run `tracedecay install --agent cursor`",
+            "Cursor plugin MCP config is incomplete in {}, run `tracedecay install --agent cursor`",
             mcp_path.display()
         ));
     }
@@ -984,7 +984,7 @@ fn cursor_plugin_hook_expectations() -> Vec<(String, String)> {
 fn doctor_check_plugin_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
     if !hooks_path.exists() {
         dc.warn(&format!(
-            "{} not found — run `tracedecay install --agent cursor`",
+            "{} not found, run `tracedecay install --agent cursor`",
             hooks_path.display()
         ));
         return;
@@ -1017,7 +1017,7 @@ fn doctor_check_plugin_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
         ));
     } else {
         dc.fail(&format!(
-            "Cursor plugin hook(s) missing for {} — run `tracedecay install --agent cursor`",
+            "Cursor plugin hook(s) missing for {}, run `tracedecay install --agent cursor`",
             missing.join(", ")
         ));
     }
@@ -1118,7 +1118,7 @@ fn report_cursor_session_ingest<'a>(
         dc.warn(&format!(
             "Cursor transcript ingest looks stalled: a transcript has {} un-ingested \
              byte(s) ({} byte(s) total across {} transcript(s)), exceeding the {} byte \
-             per-transcript hook catch-up cap — it will not drain automatically and \
+             per-transcript hook catch-up cap, it will not drain automatically and \
              session recall is missing those turns. Run `tracedecay sessions import \
              --project-path {}` to schedule bounded convergence",
             health.max_transcript_pending_bytes,
@@ -1167,11 +1167,11 @@ fn cursor_plugin_rule_doctor_state(rule_path: &Path) -> CursorPluginRuleDoctorSt
 fn doctor_check_plugin_rule(dc: &mut DoctorCounters, rule_path: &Path) {
     match cursor_plugin_rule_doctor_state(rule_path) {
         CursorPluginRuleDoctorState::Missing => dc.warn(&format!(
-            "{} not found — run `tracedecay install --agent cursor`",
+            "{} not found, run `tracedecay install --agent cursor`",
             rule_path.display()
         )),
         CursorPluginRuleDoctorState::Unreadable => dc.fail(&format!(
-            "Cursor plugin tracedecay rule is unreadable in {} — run `tracedecay install --agent cursor`",
+            "Cursor plugin tracedecay rule is unreadable in {}, run `tracedecay install --agent cursor`",
             rule_path.display()
         )),
         CursorPluginRuleDoctorState::Active => dc.pass(&format!(
@@ -1179,7 +1179,7 @@ fn doctor_check_plugin_rule(dc: &mut DoctorCounters, rule_path: &Path) {
             rule_path.display()
         )),
         CursorPluginRuleDoctorState::Incomplete => dc.fail(&format!(
-            "Cursor plugin tracedecay rule is incomplete in {} — run `tracedecay install --agent cursor`",
+            "Cursor plugin tracedecay rule is incomplete in {}, run `tracedecay install --agent cursor`",
             rule_path.display()
         )),
     }
@@ -1275,7 +1275,7 @@ mod tests {
                 .exists(),
             "a representative native slash command should be embedded"
         );
-        // Cursor no longer ships the `tracedecay-*` dispatcher *skills* — those
+        // Cursor no longer ships the `tracedecay-*` dispatcher *skills*, those
         // slugs are native commands now.
         assert!(
             !install_dir
@@ -1589,9 +1589,9 @@ mod tests {
         );
     }
 
-    /// A live pre-receipt Cursor bundle — deployed by a release that predates
+    /// A live pre-receipt Cursor bundle, deployed by a release that predates
     /// host-bundle receipts, stamped with an older product version and binary
-    /// path, and recorded by no receipt — must be taken over by the production
+    /// path, and recorded by no receipt, must be taken over by the production
     /// component transaction. `Install` (the operator's
     /// `install --agent cursor`) adopts it, and `Update` (`update-plugin`)
     /// restamps it to the running binary, instead of refusing with a
@@ -1907,7 +1907,7 @@ mod tests {
     }
 
     /// The skill index injected into Cursor `sessionStart` context must match
-    /// the *model-invocable* skills shipped in the bundle — slash dispatchers
+    /// the *model-invocable* skills shipped in the bundle, slash dispatchers
     /// (`disable-model-invocation: true`) are explicit-invoke-only and would
     /// be noise in steering context.
     #[test]
@@ -2242,7 +2242,7 @@ mod tests {
     }
 
     /// A project whose `.cursor/` only holds user-authored config (no legacy
-    /// tracedecay artifacts) must come through the sweep byte-identical — no
+    /// tracedecay artifacts) must come through the sweep byte-identical, no
     /// rewrites, no backups, no deletions.
     #[test]
     fn sweep_is_noop_without_legacy_tracedecay_artifacts() {

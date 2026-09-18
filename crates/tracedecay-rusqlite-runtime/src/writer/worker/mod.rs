@@ -1,7 +1,7 @@
 //! The writer's single worker thread.
 //!
 //! [`Worker::run`] owns the connection and the loop; the siblings own the two
-//! halves the loop leans on — [`ingress`] for how work arrives and where it is
+//! halves the loop leans on, [`ingress`] for how work arrives and where it is
 //! parked, and [`rejection`] for settling work that will never run.
 
 use std::{
@@ -964,8 +964,8 @@ impl Worker {
 /// The checkpoint policy this writer runs under.
 ///
 /// The operator's WAL budget arrives on `AdmissionConfigV1` and is validated
-/// against the contract ceilings before the writer starts, so it — not a
-/// crate-local default — is what governs when the controller checkpoints.
+/// against the contract ceilings before the writer starts, so it, not a
+/// crate-local default, is what governs when the controller checkpoints.
 pub(super) fn checkpoint_config(config: &AdmissionConfigV1) -> CheckpointConfig {
     CheckpointConfig::from(&config.wal)
 }

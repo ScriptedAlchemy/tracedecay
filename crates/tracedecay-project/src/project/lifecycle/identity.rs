@@ -51,7 +51,7 @@ impl TraceDecay {
     }
 
     /// First-touch resolution that can remap a moved non-git project whose
-    /// store evidence still names the previous registry root — only under an
+    /// store evidence still names the previous registry root, only under an
     /// explicit operator adoption decision; ambient first-touch passes
     /// [`MovedStoreAdoption::Never`] and always mints fresh.
     #[hotpath::measure(label = "lifecycle.resolve_first_touch_layout", future = true)]
@@ -107,7 +107,7 @@ impl TraceDecay {
         // following open registers it durably (registry row plus `.git/`
         // marker); after that, the marker or registry resolves first and the
         // legacy file is never consulted again. The file itself is left
-        // untouched — users may delete it.
+        // untouched, users may delete it.
         if selected.is_none() {
             let enrollment_root =
                 tracedecay_runtime_core::worktree::repository_identity_root(project_root)
@@ -144,7 +144,7 @@ impl TraceDecay {
                 // The registry refuses to mint a durable authority for a root
                 // under the OS temp directory, but by the time it is asked the
                 // shard directory, hook configs, and databases have already
-                // been materialized from the default layout — which is how a
+                // been materialized from the default layout, which is how a
                 // fixture reaching a daemon under another profile left 111
                 // /tmp-rooted stores in that profile. Refuse here, before any
                 // layout exists to write into.
@@ -345,8 +345,8 @@ mod tests {
     }
 
     /// First touch of a root under the OS temp directory against a durable
-    /// profile is refused before any layout — and therefore any shard
-    /// directory — exists. A hermetic (temp) profile still admits temp roots.
+    /// profile is refused before any layout, and therefore any shard
+    /// directory, exists. A hermetic (temp) profile still admits temp roots.
     #[tokio::test]
     async fn first_touch_refuses_an_ephemeral_root_before_minting_a_layout() {
         let ephemeral_project = tempfile::TempDir::new().expect("ephemeral project");

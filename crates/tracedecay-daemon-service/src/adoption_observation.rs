@@ -4,7 +4,7 @@
 //! `application_catalog_contributions` is the one closed composition
 //! authority the daemon serves, so enumerating it is a complete census
 //! (`Known` coverage). Per family: `eligible` = every composed capability,
-//! `enabled` = default-profile eligible, `available` = enabled and callable —
+//! `enabled` = default-profile eligible, `available` = enabled and callable,
 //! the exact filter stages of `catalog_composition::application_profile` in
 //! funnel order. Families with no composed capability are not emitted: a
 //! `Known`-zero census would falsely claim their population is empty.
@@ -37,7 +37,7 @@ const FAMILY_NAMESPACES: &[(&str, &str)] = &[
     ("capability.git.", "git"),
     ("capability.application.lsp.", "lsp"),
     // The Observatory read surface exposes only the canonical observability
-    // and cost read models — the analytics family's one composed capability.
+    // and cost read models, the analytics family's one composed capability.
     ("capability.application.observatory-read", "analytics"),
 ];
 

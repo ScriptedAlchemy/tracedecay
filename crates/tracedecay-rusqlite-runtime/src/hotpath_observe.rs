@@ -3,7 +3,7 @@
 //! These exist to answer one question the writer's own timings cannot: when
 //! `begin_immediate` averages 10.65 ms against an 82 µs p95, a few transactions
 //! are blocking for ~200 ms while nearly all are instant. `BEGIN IMMEDIATE`
-//! takes SQLite's write lock, so something else was holding it — and the
+//! takes SQLite's write lock, so something else was holding it, and the
 //! maintenance paths (checkpoint, incremental vacuum, online backup) take that
 //! lock outside the normal write queue.
 //!
@@ -153,7 +153,7 @@ pub(crate) fn record_requested_checkpoint_dispatch() {
 /// One valid writer offer, before bounded admission makes its decision.
 ///
 /// Session ingestion and code indexing share every writer frame, so a run that
-/// does both cannot attribute `submit_authorized` counts from timings alone —
+/// does both cannot attribute `submit_authorized` counts from timings alone,
 /// which is exactly what made an earlier batches-per-frame ratio unquotable.
 /// Priority is already on the operation metadata, so splitting on it costs
 /// nothing and needs no new field threaded through the contract.
@@ -250,7 +250,7 @@ pub(crate) fn record_writer_transaction(rows: u64, lock_held_micros: u64) {
 /// One admission refusal, split by which resource was saturated.
 ///
 /// `submit_authorized` already counts sheds by priority, but a shed alone
-/// cannot say whether the operation lane or the byte budget filled first —
+/// cannot say whether the operation lane or the byte budget filled first,
 /// and the fix differs (batch fan-out versus payload size). The two causes
 /// are recorded at the sole admission authority so any future caller of
 /// [`crate::admission::Admission::reserve`] is counted the same way.

@@ -2629,7 +2629,7 @@ fn applied_retention_refuses_a_metadata_only_plan() {
 /// The OOM-crash debris shape: sealed generation files and derived artifacts
 /// exist, but the publish never reached its pointer write, so no active
 /// pointer file exists. The pass must reclaim everything through the ordinary
-/// journal/receipt/release machinery — before this, such stores were
+/// journal/receipt/release machinery, before this, such stores were
 /// unreachable by every retention pass while their worktree root stayed live.
 #[test]
 fn unpublished_store_retention_reclaims_orphaned_partial_generations() {

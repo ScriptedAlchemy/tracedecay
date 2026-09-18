@@ -100,8 +100,8 @@ fn captured_source_bytes_are_charged_until_the_snapshot_drops() {
 /// unchanged checkout reuses the active generation's rows instead of
 /// re-reading them, so it retains no source Arcs and holds no charge for
 /// bytes it is not keeping resident. This pins the invariant that survived
-/// that change — the charge always equals what the scheduler still retains,
-/// on the build path and on the no-build path alike — rather than the
+/// that change, the charge always equals what the scheduler still retains,
+/// on the build path and on the no-build path alike, rather than the
 /// pre-proportional behaviour where every reconcile re-captured, and so
 /// re-charged, the whole snapshot.
 #[test]
@@ -360,7 +360,7 @@ async fn registry_reports_retained_generation_bytes_without_scheduler_locks() {
 }
 
 /// Measured RSS, not the reservation ledger, decides worker admission once a
-/// sample says the process is over budget — and the refusal names the observed
+/// sample says the process is over budget, and the refusal names the observed
 /// and configured bytes so it is never a silent stall.
 #[test]
 fn measured_rss_pressure_refuses_worker_admission_and_readmits_as_it_falls() {

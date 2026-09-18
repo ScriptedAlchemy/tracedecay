@@ -340,7 +340,7 @@ fn guidance_result(
 
 /// Daemon configuration owns this delivery switch. Host lifecycle code may
 /// publish a new revision; hook code only dispatches Hook V2 through it. The
-/// retired Legacy route is gone — every production constructor already chose
+/// retired Legacy route is gone, every production constructor already chose
 /// Hook V2, and every `deliver_legacy` impl was an Unavailable stub.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

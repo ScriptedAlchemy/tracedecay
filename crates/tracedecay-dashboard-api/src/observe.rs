@@ -1,6 +1,6 @@
 //! Opt-in hotpath probes for dashboard HTTP, events, and projections.
 //!
-//! Labels are compile-time static. Poll/delivery sites share one bucket each —
+//! Labels are compile-time static. Poll/delivery sites share one bucket each,
 //! never a per-tick, per-project, or per-receipt name. Error class is a closed
 //! typed set, never an unbounded message.
 

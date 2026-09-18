@@ -808,7 +808,7 @@ fn result_from_receipt(
     receipt: GitIndexTransactionReceiptV1,
     execution: OperationReceipt,
 ) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError> {
-    // Every apply result — fresh, replayed, or inline-recovered — terminates
+    // Every apply result, fresh, replayed, or inline-recovered, terminates
     // here exactly once; `replayed_total`/`recovered_total` discriminate the
     // overlapping populations.
     match receipt.outcome {

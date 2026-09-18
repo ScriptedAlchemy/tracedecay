@@ -408,9 +408,7 @@ fn handle_gitignore_inner(
                     mutations,
                 )
                 .await?;
-                eprintln!(
-                    "gitignore enabled — .gitignore rules will be respected during indexing."
-                );
+                eprintln!("gitignore enabled. .gitignore rules will be respected during indexing.");
                 eprintln!("Run `tracedecay sync` to re-index with the new setting.");
                 report_configuration_receipt(receipt.as_ref());
             }
@@ -441,7 +439,7 @@ fn handle_gitignore_inner(
                     mutations,
                 )
                 .await?;
-                eprintln!("gitignore disabled — .gitignore rules will be ignored during indexing.");
+                eprintln!("gitignore disabled. .gitignore rules will be ignored during indexing.");
                 eprintln!("Run `tracedecay sync` to re-index with the new setting.");
                 report_configuration_receipt(receipt.as_ref());
             }

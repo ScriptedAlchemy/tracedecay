@@ -77,7 +77,7 @@ fn git_error_result(
 /// Git tree walks, revwalks, diffs, and the branch-add index build are
 /// unbounded on pathological or diverged inputs. When the carried deadline
 /// elapses the caller must receive the same shaped, semantic error every other
-/// git failure surfaces — never a bare hang or a panic.
+/// git failure surfaces, never a bare hang or a panic.
 pub fn git_dispatch_deadline_result(ctx: &McpToolContext<'_>, tool_name: &str) -> ToolResult {
     let message =
         format!("git tool '{tool_name}' exceeded its dispatch deadline and was cancelled");

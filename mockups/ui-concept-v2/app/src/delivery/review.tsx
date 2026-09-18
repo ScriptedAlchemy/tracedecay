@@ -452,7 +452,7 @@ export function ReviewCoverage() {
           <div className="dl-fbox">
             <div className="fk">BODY (EXCERPT) · Available (excerpts only)</div>
             <p className="dl-microbody">
-              “{selectedThread.body}” <em>(truncated)</em>
+              "{selectedThread.body}" <em>(truncated)</em>
             </p>
           </div>
           <div className="dl-fbox">
@@ -529,7 +529,7 @@ export function ReviewCoverage() {
           <LocalFeedbackPanel feedback={feedback} history={feedbackHistory} onFeedback={setFeedback} />
           <p className="dl-hint">
             Provider review is OBSERVED data, not correctness authority. Review attention is bound to named sources on
-            the selected hunk — not a numeric PR risk score.
+            the selected hunk. Not a numeric PR risk score.
           </p>
         </div>
       </aside>
@@ -874,7 +874,7 @@ export function FollowStory() {
         </section>
       </div>
       <div className="dl-evidencestrip">
-        <div className="k">SOURCE &amp; EVIDENCE (RESIZABLE) — EXACT ANCHORS <span className="mono dim">Drag to resize</span></div>
+        <div className="k">SOURCE &amp; EVIDENCE (RESIZABLE), EXACT ANCHORS <span className="mono dim">Drag to resize</span></div>
         <div className="cards">
           {[
             {
@@ -909,7 +909,7 @@ export function FollowStory() {
               k: "🗃 ARTIFACT EVIDENCE",
               t: "17:12",
               grade: "EXACT",
-              body: "head-only artifact confirmed — compiler-cache-profile-head.json (24.3 KB) uploaded by base-unavailable job",
+              body: "head-only artifact confirmed, compiler-cache-profile-head.json (24.3 KB) uploaded by base-unavailable job",
               anchor: "artifact/9b3c5a1e2d44",
             },
           ].map((c) => (
@@ -1189,9 +1189,9 @@ export function DecisionToCode() {
               {[
                 "15 ordinary CI checks passed",
                 "Provider check matrix.",
-                "Profile path was not exercised — head_bench_available=false; base blank; no timing or workload JSON.",
-                "Privileged comment workflow failed pre-merge — workflow_run loaded the old default-branch workflow; missing base_timing.json.",
-                "Post-merge guard skipped tooling/comment — no real head/base comparison exists yet.",
+                "Profile path was not exercised, head_bench_available=false; base blank; no timing or workload JSON.",
+                "Privileged comment workflow failed pre-merge, workflow_run loaded the old default-branch workflow; missing base_timing.json.",
+                "Post-merge guard skipped tooling/comment, no real head/base comparison exists yet.",
               ].map((x) => (
                 <div className="fr" key={x}>
                   <span className="fl">{x}</span>

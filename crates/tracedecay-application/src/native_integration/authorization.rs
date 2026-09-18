@@ -6,7 +6,7 @@
 //! write, shell, query, or preflight permission is insufficient for apply.
 //!
 //! Every decision is taken from the immutable request the caller already
-//! carries — the `RequestContext` grant, the frozen preview, and the one-use
+//! carries. The `RequestContext` grant, the frozen preview, and the one-use
 //! approval. Nothing here reads configuration, opens a store, or widens a
 //! grant; a missing or mismatched fact fails without disclosing whether the
 //! target was absent or denied.
@@ -128,7 +128,7 @@ impl NativeIntegrationAuthorizationPort for DaemonNativeIntegrationAuthorization
     /// `before_ref_commit` is deliberately not used to vary any predicate.
     /// The daemon must reauthorize before the first durable
     /// mutation and again before ref commit, and the second check is only
-    /// meaningful if it is exactly as strict as the first — a boundary that
+    /// meaningful if it is exactly as strict as the first, a boundary that
     /// relaxed anything would be a bypass rather than a re-check. The flag
     /// stays in the signature so the coordinator's two call sites remain
     /// self-documenting.

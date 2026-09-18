@@ -636,13 +636,13 @@ fn append_codex_turn_lifecycle_fact(
 ) {
     // Exact singular task_complete / task_started / turn_aborted only
     // (write_codex_rollout_with_structured_events, task_events_become_turn_boundary_rows).
-    // Do not index last_agent_message as content — classic turn rows exclude it.
+    // Do not index last_agent_message as content. Classic turn rows exclude it.
     let provider_reference = payload
         .get("turn_id")
         .and_then(Value::as_str)
         .filter(|turn_id| !turn_id.is_empty())
         .map(str::to_string);
-    // Keep native `reason` in content only — do not promote it to status
+    // Keep native `reason` in content only. Do not promote it to status
     // (no fixture evidence that abort reason is a workflow status vocabulary).
     let mut content = serde_json::Map::new();
     content.insert("type".to_string(), Value::String(event.to_string()));

@@ -62,8 +62,8 @@ impl OrphanStoreRecordV1 {
 ///
 /// `stranded_scope_*` counts a disjoint storage class one level up: whole
 /// `code-index-v1/<scope>/` directories whose canonical project root no longer
-/// exists. They are not superseded generations of *this* scope — they are bytes
-/// no scope-local census can reach at all — so they are reported alongside the
+/// exists. They are not superseded generations of *this* scope: they are bytes
+/// no scope-local census can reach at all, so they are reported alongside the
 /// generation totals rather than folded into them.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -108,8 +108,8 @@ pub struct CodeGenerationRetentionRecordV1 {
     /// Retirements the journal has already decided whose native rows are
     /// still in the live container: retirement tombstones awaiting their
     /// engine delete plus superseded replays behind an installed head. A
-    /// hibernated engine is never opened just to delete — opening a
-    /// multi-gigabyte LPG container costs about twice its size in RAM — so
+    /// hibernated engine is never opened just to delete: opening a
+    /// multi-gigabyte LPG container costs about twice its size in RAM, so
     /// these wait for the next publication, which holds the engine open.
     #[serde(default)]
     pub deferred_native_retirement_count: u64,

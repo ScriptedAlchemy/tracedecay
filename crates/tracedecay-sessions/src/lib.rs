@@ -16,7 +16,7 @@
 //!
 //! These manifests and results carry file-identity digests pinned to their
 //! exact paths and contents. Re-seal them together from a clean source
-//! commit if they ever need to move or regenerate — never hand-edit:
+//! commit if they ever need to move or regenerate, never hand-edit:
 //!
 //! - `benchmark_data/claude-observation/workload-v1.json` and
 //!   `benchmark_data/claude-observation/result-2026-07-26-dc17dd73.json`

@@ -1,4 +1,4 @@
-# Holographic Memory — Retrieval & Entity Quality Evaluation
+# Holographic memory. Retrieval & entity quality evaluation
 
 This document maps the current project-memory recall pipeline (candidate
 generation, scoring, fusion) and the entity extractor that feeds it, then
@@ -6,8 +6,7 @@ records which of the previously-identified quality risks still hold against
 the current implementation.
 
 The retrieval pipeline described here lives in
-`crates/tracedecay-session-memory/src/fact_store/{candidates.rs,scoring.rs,search.rs}`
-— async, transaction-scoped, `project_memory_*`-prefixed functions operating
+`crates/tracedecay-session-memory/src/fact_store/{candidates.rs,scoring.rs,search.rs}`, async, transaction-scoped, `project_memory_*`-prefixed functions operating
 over the `memory_v2_*` SQLite tables
 (`crates/tracedecay-runtime-core/src/db/memory_v2/schema/`). This is a full
 rewrite of an earlier single-crate `src/memory/{retrieval.rs,store.rs}`
@@ -23,7 +22,7 @@ longer cites it.
 `project_memory_search_candidates_tx` (in `candidates.rs`) unions three SQL
 channels, each capped at `SEARCH_CANDIDATE_ARM_LIMIT` (1,000) rows:
 
-1. **FTS5 BM25** — `project_memory_fts_candidates_tx` queries the
+1. **FTS5 BM25**, `project_memory_fts_candidates_tx` queries the
    `memory_v2_assertion_payloads_fts` virtual table (SQLite FTS5, default
    `unicode61` tokenizer, **no stemmer configured**) joined through
    `memory_v2_current_facts` / `memory_v2_facts` / `memory_v2_assertion_payloads`,
@@ -31,27 +30,27 @@ channels, each capped at `SEARCH_CANDIDATE_ARM_LIMIT` (1,000) rows:
    covers fact **content** (not tags or entities).
 
    The query text is built by `project_memory_fts_query`: every query token is
-   quoted, and — **not documented in earlier versions of this doc** — any
+   quoted, and, **not documented in earlier versions of this doc**, any
    token with 4 or more characters gets a trailing `*`, turning it into an
    FTS5 prefix query; all tokens are OR'd together. A query token like
    `install` therefore prefix-matches `installing`/`installs` in the index,
    even though FTS5 itself is not stemming.
 
-2. **Entity match** — `project_memory_entity_candidates_tx` tokenizes the
+2. **Entity match**, `project_memory_entity_candidates_tx` tokenizes the
    query text and also adds the whole normalized/lowercased query string as
    one more term, then matches each term against every fact's `$.entities`
    JSON array (extracted via `json_each`) with either an exact
    case-insensitive match or a `LIKE '%term%'` broadening (escaped for SQL
    wildcards). No stopword list is applied to these terms.
 
-3. **Newest-facts baseline** — `project_memory_newest_candidates_tx`: every
+3. **Newest-facts baseline**, `project_memory_newest_candidates_tx`: every
    trust/category-eligible fact, ordered by `updated_at DESC`, capped at the
    arm limit. This ensures a query with no lexical/entity match at all still
    has a bounded pool of recent facts to rank (they will usually fail the
    recall gate below unless the query has no tokens).
 
 4. **Graph-assist expansion** (new since the rewrite, not present in the old
-   pipeline) — `project_memory_graph_assist` in `search.rs`: when the memory
+   pipeline), `project_memory_graph_assist` in `search.rs`: when the memory
    graph runtime is mounted, it expands the FTS/entity candidate roots with
    facts related through the code/entity graph
    (`super::graph::project_memory_graph`), and reports coverage as
@@ -64,7 +63,7 @@ channels, each capped at `SEARCH_CANDIDATE_ARM_LIMIT` (1,000) rows:
 
 Ranking (`project_memory_rank_facts_tx` in `search.rs`, `Search` arm) drops a
 candidate if the query has tokens and it scored **zero on both** the FTS
-component and the Jaccard component — i.e. it needs at least a partial BM25
+component and the Jaccard component, i.e. it needs at least a partial BM25
 match (with coverage) or a shared token to survive. There is still no
 stopword list applied here.
 
@@ -78,12 +77,12 @@ computes:
   - `normalized_bm25` comes from `project_memory_normalize_fts5_ranks`:
     SQLite's `bm25()` rank (negative; lower is a better match) is negated and
     floored at 0, then divided by the **maximum** relevance across the
-    candidate set for that query — a max-relative normalization. This
+    candidate set for that query, a max-relative normalization. This
     replaces the collection-size-dependent `1/(1+|bm25|)` formula from the
     pre-rewrite pipeline.
   - `coverage` = `project_memory_term_coverage`: the fraction of query tokens
     present in the fact's token set, where a match is either exact or (for
-    query tokens of 4+ characters) a prefix match against a fact token — the
+    query tokens of 4+ characters) a prefix match against a fact token, the
     same prefix-tolerance the FTS query itself uses.
 - **`jaccard`** = `project_memory_jaccard`, the exact Jaccard similarity
   between `project_memory_tokens(query)` and `project_memory_fact_tokens(fact)`
@@ -91,14 +90,14 @@ computes:
 - **`holographic`** = `project_memory_holographic_score`: FHRR-2048 binding of
   content + normalized entities via `HolographicEncoder`
   (`crates/tracedecay-session-memory/src/memory/encoding.rs`, unchanged in
-  spirit from the pre-rewrite code) — every token still becomes a
+  spirit from the pre-rewrite code), every token still becomes a
   deterministic SHA-256-derived coefficient vector; there is no semantic
   embedding model. The raw FHRR similarity is rescaled with
   `midpoint(sim, 1.0)` (i.e. `(sim + 1) / 2`), so the usable band is still
   `[0, 1]` with an unrelated-content floor near 0.5.
 - **`trust`** = the fact's persisted `trust_score` (a `Confidence` in
   `[0, 1]`; see the companion `TRUST-DECAY-SEMANTICS.md` for how it changes).
-- **`temporal_decay`** = `project_memory_temporal_decay` — unchanged formula
+- **`temporal_decay`** = `project_memory_temporal_decay`, unchanged formula
   (see the trust-decay doc): `0.5^(age_days / 365)`, clamped to `[0.10, 1.0]`.
 - **`retrieval_count`** = the fact's stored retrieval counter, feeding the new
   usage-boost term below.
@@ -116,7 +115,7 @@ score       = relevance * trust * temporal_decay * usage_boost
 The `0.40 / 0.30 / 0.30` fusion weights are unchanged from the pre-rewrite
 pipeline. **`usage_boost` is new and was not described in earlier versions of
 this document**: the more often a fact has previously been retrieved
-(`retrieval_count`, incremented on every successful search hit — see
+(`retrieval_count`, incremented on every successful search hit, see
 `project_memory_update_retrieval_projection_tx`), the more its score is
 nudged upward, on a `ln(1 + n)` curve capped so the multiplier never exceeds
 `1.5×` (`RETRIEVAL_REINFORCEMENT_CAP = 0.50`, weight
@@ -140,9 +139,9 @@ retrieval_count=…`).
 
 `Probe`, `Related`, and `Reason` queries resolve candidate fact ids from
 `project_memory_exact_entity_candidates_tx` (an **exact** normalized-entity
-match only — no `LIKE` broadening in these modes) and then score every
+match only, no `LIKE` broadening in these modes) and then score every
 surviving fact as `score = trust`, `holographic = 1.0`, `fts = jaccard = 0`.
-These modes still carry **no query-relevance signal** — a fact is ranked by
+These modes still carry **no query-relevance signal**, a fact is ranked by
 trust alone once it matches the requested entity/entities, same as the
 pre-rewrite pipeline.
 
@@ -163,11 +162,11 @@ case-insensitively:
   (`is_common_sentence_word`: articles, pronouns, auxiliaries, etc.).
 
 Every candidate is additionally shape-checked (`is_valid_entity`): at most 80
-characters, at most 6 words, and — for anything that isn't a single trusted
-code token — every word must be a clean identifier-ish token (no stray
+characters, at most 6 words, and, for anything that isn't a single trusted
+code token, every word must be a clean identifier-ish token (no stray
 sentence punctuation).
 
-### Risk A — resolved
+### Risk A, resolved
 
 An earlier version of this document flagged entity extraction as brittle
 because (1) the leading-verb exclusion list matched only exact base forms
@@ -191,11 +190,11 @@ Both are fixed in the current `entities.rs`:
   `Database` are all extractable as entities in their own right, not only as
   part of a ≥2-word phrase.
 
-Both fixes are covered by unit tests in `entities.rs` itself — notably
+Both fixes are covered by unit tests in `entities.rs` itself, notably
 `leading_verbs_match_across_inflections`,
 `leading_verb_no_longer_swallows_following_entity`,
 `single_capitalized_proper_nouns_are_extracted`, and
-`verb_led_multiword_phrase_exposes_head_noun` — and the code comments
+`verb_led_multiword_phrase_exposes_head_noun`, and the code comments
 explicitly cite "Risk A" as the motivation for the change.
 
 ## 3. Remaining considerations
@@ -204,8 +203,8 @@ The rest of the original risk list still describes real architectural
 properties of the current pipeline, verified against the source above. The
 **specific fixture measurements** from the original evaluation run (exact
 score tables against an 8-fact corpus) are not reproduced here: the scoring
-formula changed enough — coverage-weighted and max-normalized BM25, plus the
-new `usage_boost` term — that those old numbers would not replay verbatim
+formula changed enough, coverage-weighted and max-normalized BM25, plus the
+new `usage_boost` term, that those old numbers would not replay verbatim
 against the current code. Re-run the reproduction steps in §4 with the
 current binary before citing exact scores again.
 
@@ -217,7 +216,7 @@ current binary before citing exact scores again.
   of another (`install` → `installing`), but not compound/word-order
   differences (`backup` vs. `back up`) or non-suffix inflection.
 - **Trust remains a hard multiplicative gate.** `score = relevance * trust *
-  temporal_decay * usage_boost` — a low-trust, on-topic fact still needs a
+  temporal_decay * usage_boost`, a low-trust, on-topic fact still needs a
   proportionally larger relevance or usage-count advantage to outrank a
   higher-trust, less-relevant peer.
 - **The holographic signal is still a lexical hash, not a semantic
@@ -303,6 +302,6 @@ tracedecay tool fact_store_search --args '{"query":"database backup","limit":5}'
 Run against a scratch project (a temporary `HOME` and an initialized project
 directory, as before) so the reproduction never touches a real `.tracedecay/`
 store. The exact commands above have not been re-executed as part of this
-rewrite — treat them as a starting point to reproduce and re-measure the
+rewrite, treat them as a starting point to reproduce and re-measure the
 "Remaining considerations" in §3 against the current binary, not as verified
 output.

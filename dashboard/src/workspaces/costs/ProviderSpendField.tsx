@@ -18,8 +18,8 @@ import {
  * The spend field: one dated line per provider, priced dollars per UTC day,
  * beside a legend that is also the provider control.
  *
- * Hover and focus inspect — the other lines dim, the inspected provider is
- * reported to the inspector — and never change scope. Enter or Space on a
+ * Hover and focus inspect, the other lines dim, the inspected provider is
+ * reported to the inspector, and never change scope. Enter or Space on a
  * legend row scopes the query to that provider; Escape clears the scope. The
  * exact series stays available as a table under the field, so nothing the
  * canvas draws is canvas-only.
@@ -130,7 +130,7 @@ export function ProviderSpendField({
               aria-label={describe}
             >
               {ledger.usageEvents === 0
-                ? 'no usage observations in this range — an empty series, not a zero bill'
+                ? 'no usage observations in this range, an empty series, not a zero bill'
                 : 'usage was observed but none of it carries a timestamp, so there is no dated series to draw'}
             </div>
           )}

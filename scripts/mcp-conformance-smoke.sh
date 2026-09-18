@@ -7,7 +7,7 @@
 # official TypeScript SDK client, so every call here additionally proves
 #   - protocol-version negotiation with a *newer* client (the 0.22.0 client
 #     requests protocolVersion 2025-11-25; the server answers 2024-11-05 and
-#     the SDK accepts it — the Rust tests only ever send 2024-11-05),
+#     the SDK accepts it, the Rust tests only ever send 2024-11-05),
 #   - SDK-side Zod validation of the initialize result, capability shapes,
 #     and every tool's inputSchema in tools/list,
 #   - the notifications/initialized + logging/setLevel lifecycle a real

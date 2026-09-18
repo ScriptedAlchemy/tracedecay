@@ -63,8 +63,8 @@ export function DoctorInspector() {
 /**
  * What this scope means for acting on the diagnosis.
  *
- * The Doctor route is read-only by design — corrective actions stay with the
- * owning daemon — so there is no control here to disable. But a reader on a
+ * The Doctor route is read-only by design, corrective actions stay with the
+ * owning daemon, so there is no control here to disable. But a reader on a
  * non-active project scope still needs to know that everything on this page is
  * an observation of a project the gateway will not let them change, and how to
  * reach the scope that would. A writable scope renders nothing: a sentence
@@ -83,7 +83,7 @@ function ScopeWritabilityNote() {
       {scopeWriteSentence(writability, {
         writable: (target) => `Writes apply to ${target}.`,
         refused: (reason) =>
-          `This diagnosis is read-only here — corrective actions stay with the owning daemon. ${reason}`,
+          `This diagnosis is read-only here, corrective actions stay with the owning daemon. ${reason}`,
       })}
     </p>
   );
@@ -234,7 +234,7 @@ function consultationState(
     // An unreachable source is a source-level refusal, not a lost dashboard.
     case 'unavailable':
       return 'unavailable';
-    // Observed degradations of the source itself — a stronger claim than
+    // Observed degradations of the source itself, a stronger claim than
     // "could not be determined", and rendered as the fault it is.
     case 'reset_required':
     case 'corrupt':

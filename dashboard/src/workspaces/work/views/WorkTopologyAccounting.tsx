@@ -35,7 +35,7 @@ import { ChannelAbsence, ViewCaption } from './WorkViewChannel.tsx';
  *   A figure is drawn only from `channel.available`. There is no fallback
  *   branch, no `?? 0`, and no default. An absent channel renders its state chip
  *   and its sentence through `ChannelAbsence`, which is the same mark the four
- *   Work projections use for the same purpose — so an absence on this ledger
+ *   Work projections use for the same purpose, so an absence on this ledger
  *   reads as the absence a reader has already learned elsewhere on the page.
  *
  *   A meter is drawn only beside a figure that exists. A zero-length bar under
@@ -68,7 +68,7 @@ export function WorkTopologyAccounting({
       <div className="flex min-w-0 flex-col gap-3">
         <ViewCaption
           population={`${reading.measured} of ${reading.cards.length} dimensions measured`}
-          note="Plan 26's execution-topology mandate, dimension by dimension. Every card states its support, eligible denominator, censoring, interval coverage, horizon, revision pin, and safe anchors — including when the answer to all seven is that this build cannot establish them."
+          note="Plan 26's execution-topology mandate, dimension by dimension. Every card states its support, eligible denominator, censoring, interval coverage, horizon, revision pin, and safe anchors, including when the answer to all seven is that this build cannot establish them."
         />
 
         <ol
@@ -198,7 +198,7 @@ const CELL_LABEL: Record<string, string> = {
  *
  * Rendered as a table so every cell has a row header and a column header a
  * screen reader can announce; the visual grid is not the only place the cell's
- * identity lives. Each cell renders its own state — there is no aggregate row,
+ * identity lives. Each cell renders its own state, there is no aggregate row,
  * no aggregate column, and no derived scalar, because the plan keeps these
  * cells separate and the moment one number summarised them the separation
  * would be gone.
@@ -308,7 +308,7 @@ function ProvenanceFooter({
         {(value) =>
           value.kind === 'metric_descriptor'
             ? value.value
-            : `source read pin — ${value.value} (not a metric descriptor revision)`
+            : `source read pin, ${value.value} (not a metric descriptor revision)`
         }
       </Facet>
       <Facet name="anchors" label="Safe anchors" channel={provenance.anchors}>

@@ -2,7 +2,7 @@
 design_status: current
 ---
 
-# Code 02 — Structural comparison
+# Code 02, Structural comparison
 
 - **Image:** [Concept board](02-structural-comparison.png), lower-right frame.
 - **Boundary:** CONCEPT / SYNTHETIC DATA; illustrated counts are not measurements.

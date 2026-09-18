@@ -250,7 +250,7 @@ fn scope_set_cas_selects_exact_registered_roots() {
 
 /// `0a9ebc97a` made every federated root carry the one shared profile-store
 /// locator. That locator is a *shared physical store* identity, and the
-/// authorized set still refuses a mixed one — it is not a substitute for the
+/// authorized set still refuses a mixed one. It is not a substitute for the
 /// per-project authorization each root brings.
 #[test]
 fn federated_roots_refuse_a_foreign_profile_store_locator() {

@@ -161,7 +161,7 @@ pub struct DiagnosticsSummary {
 /// Why a broker holds default analyzer settings instead of the project's
 /// persisted ones.
 ///
-/// A project that never configured settings is not degraded — `load_settings`
+/// A project that never configured settings is not degraded, `load_settings`
 /// returns the defaults as `Ok` for an absent file. This is set only when a
 /// settings file exists and could not be read or parsed, in which case every
 /// custom analyzer the user configured is missing from this broker.
@@ -490,8 +490,8 @@ impl DiagnosticBroker {
                 // TraceDecay findings still project, but it is never reported
                 // as mountable: mounting is what starts the second analyzer
                 // process. A proxy whose toolchain lacks the analyzer is
-                // equally unmountable — mounting it would be the install
-                // attempt — and the refusal is recorded as the language's
+                // equally unmountable, mounting it would be the install
+                // attempt, and the refusal is recorded as the language's
                 // typed `Unavailable` state here, because project-open may
                 // never run a refresh that would otherwise record it.
                 let analyzer_available = !host_retained.contains(&language)

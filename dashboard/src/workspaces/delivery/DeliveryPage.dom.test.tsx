@@ -10,7 +10,7 @@ import {
 } from '../../test/deliveryFixtures.ts';
 import { PR_42, renderDelivery } from '../../test/renderDelivery.tsx';
 
-/** Inbox already joined by the server — overlapping_edit is Active with typed
+/** Inbox already joined by the server, overlapping_edit is Active with typed
  * proximity evidence (no client `/api/feedback/proximity` re-join). */
 const INBOX_WITH_PROXIMITY_ATTENTION: DeliveryInboxV1 = {
   ...INBOX,

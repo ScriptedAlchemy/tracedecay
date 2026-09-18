@@ -23,7 +23,7 @@ import {
  *
  * Every cell is a measurement of the record or a typed absence. The integrity
  * column is the daemon's chain verdict from the per-run artifacts route, which
- * is read only once a run has been inspected — so a row that has not been
+ * is read only once a run has been inspected, so a row that has not been
  * inspected says `unchecked`, never `verified`, and a run with no artifacts
  * has nothing to verify and says so.
  */

@@ -104,10 +104,10 @@ impl RExtractor {
             return;
         }
 
-        // Extract function name — handle simple identifiers and `pkg::fn` forms.
+        // Extract function name. Handle simple identifiers and `pkg::fn` forms.
         let name = match lhs.kind() {
             "namespace_operator" => {
-                // pkg::fn — use the rightmost identifier
+                // pkg::fn. Use the rightmost identifier
                 lhs.child((lhs.child_count() - 1) as u32)
                     .map_or_else(|| state.node_text(lhs), |n| state.node_text(n))
             }

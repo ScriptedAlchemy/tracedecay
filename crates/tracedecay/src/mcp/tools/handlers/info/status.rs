@@ -1,4 +1,4 @@
-//! Daemon-only `tracedecay_admin_sync` — still needs the code-index reconcile sink.
+//! Daemon-only `tracedecay_admin_sync`, still needs the code-index reconcile sink.
 
 use super::*;
 use tracedecay_code_index_runtime::code_index_scheduler::{

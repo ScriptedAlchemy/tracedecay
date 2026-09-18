@@ -8,7 +8,7 @@
 //! facade composed without it rejects every frame before preparation and
 //! stops ingesting host observations silently.
 //!
-//! In production the daemon is the sole owner — profile worker-plan admission
+//! In production the daemon is the sole owner, profile worker-plan admission
 //! during daemon bootstrap (`install_profile_worker_plan` ->
 //! `tracedecay_code_index::parallelism::install_worker_plan`) constructs it at
 //! the effective indexing width and hands it to every ingest composition, and

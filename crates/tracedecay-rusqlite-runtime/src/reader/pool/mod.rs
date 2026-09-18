@@ -2,7 +2,7 @@
 //!
 //! This module owns capacity: how many workers exist per lane, who is holding
 //! one, and when an idle one retires. The siblings own the two things that hang
-//! off it — [`lease`] the RAII checkout that always returns a worker, and
+//! off it, [`lease`] the RAII checkout that always returns a worker, and
 //! [`outcome`] the result vocabulary an acquisition reports in.
 
 use std::{
@@ -167,7 +167,7 @@ pub(super) struct PoolState {
     /// Workers whose snapshot end outran [`SNAPSHOT_END_GRACE`].
     ///
     /// Their lease has ended but the worker has not confirmed its rollback, so
-    /// it is neither available nor leased. It is still counted here — a limbo
+    /// it is neither available nor leased. It is still counted here, a limbo
     /// worker that vanished from the accounting would silently shrink the lane
     /// and let a shutdown declare quiescence with work still in flight.
     pub(super) limbo_general: u16,
@@ -817,7 +817,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         // Retiring burst workers walks and rebuilds the idle deque under the
         // state lock; it only has anything to do when the idle set has actually
         // changed. Run it on entry and after a notified wake, never on every
-        // bounded poll tick — a timed-out wait leaves the idle set untouched, so
+        // bounded poll tick, a timed-out wait leaves the idle set untouched, so
         // repeating the scan each 5ms merely adds lock traffic to the hot path.
         let mut retire_pending = true;
 
@@ -872,8 +872,8 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             }
             // Foreground reservation. A background acquisition holding fewer
             // than `lease_ceiling` leases may take or grow a worker; at the
-            // ceiling it waits here instead, leaving the rest of the lane —
-            // both idle workers and unspawned headroom — for interactive
+            // ceiling it waits here instead, leaving the rest of the lane,
+            // both idle workers and unspawned headroom, for interactive
             // reads. Foreground acquisitions see the whole lane.
             let leased = match lane {
                 ReaderLane::General => state.leased_general,
@@ -1072,7 +1072,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
 
 /// Folds per-worker release results into one truthful pool outcome.
 ///
-/// A worker fault — the pragma itself reporting a SQLite error — propagates
+/// A worker fault, the pragma itself reporting a SQLite error, propagates
 /// as `Err` carrying the partial-release count, so the caller's degraded log
 /// fires instead of the failure vanishing into a "pool closed" no-op. Workers
 /// that were skipped (terminated, or busy inside a retained snapshot) are not

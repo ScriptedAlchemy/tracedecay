@@ -4,8 +4,8 @@
 //! Both branches now answer through `fact_response_metadata_tx`. These tests
 //! pin that shared measurement against a seeded database and, critically, pin
 //! that the measured values differ from the constants the runtime branch used
-//! to fabricate — `FactQueryCoverageV1::new(0, 0, observed, 0)` and
-//! `FactContradictionStateV1::Unknown` — so a regression back to constants
+//! to fabricate. `FactQueryCoverageV1::new(0, 0, observed, 0)` and
+//! `FactContradictionStateV1::Unknown`, so a regression back to constants
 //! cannot pass.
 //!
 //! The unit-test database fixture publishes a `Profile`-scoped shard, which
@@ -39,7 +39,7 @@ fn profile_fact_id(operation: &str) -> FactId {
 
 /// Seeds a purged fact whose only lineage is a purge and a contradiction, so
 /// the measured coverage is `hidden` and the measured contradiction is
-/// `Present` — neither of which a constant could have produced.
+/// `Present`, neither of which a constant could have produced.
 async fn seed_purged_and_contradicted_fact(db: &Database, fact_id: &FactId, other: &FactId) {
     let owner = FactOwnerV1::Profile;
     let owner_key = OwnerKey::new(&owner).unwrap();

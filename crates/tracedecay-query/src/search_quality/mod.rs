@@ -15,8 +15,8 @@
 //! Everything in this module is therefore evidence-only. A `Pass` report says
 //! the checked-in labels were met on the packaged corpus; it does not qualify,
 //! activate, promote, or accept a retrieval profile, and no caller may treat it
-//! as doing so. Validation of the packaged workload — including natural-language
-//! need provenance — attests that the measurement inputs are fit and sourced,
+//! as doing so. Validation of the packaged workload, including natural-language
+//! need provenance, attests that the measurement inputs are fit and sourced,
 //! never that retrieval is qualified.
 //!
 //! Re-introducing a qualification gate is a schema change, not a comment

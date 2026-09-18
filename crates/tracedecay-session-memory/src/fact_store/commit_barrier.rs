@@ -8,13 +8,13 @@
 //! wide, so a wall-clock deadline either lands before the commit (a typed
 //! timeout, nothing written) or after settlement (a plain success). Measuring
 //! that window on a real daemon put it under a tenth of a second inside a
-//! multi-second request — a race, not a test.
+//! multi-second request, a race, not a test.
 //!
 //! This barrier removes the race without inventing an outcome: the daemon does
 //! the real commit, then parks *inside* the operation until the test releases
 //! it. The caller's real deadline elapses while it is parked, so the owner's
 //! own settlement classification observes exactly what production observes when
-//! a slow commit outlives its budget — commit started, deadline elapsed — and
+//! a slow commit outlives its budget, commit started, deadline elapsed, and
 //! produces the real `PartialEffect`.
 //!
 //! Compiled only under the `test-transport` feature, the same gate the rest of
@@ -36,7 +36,7 @@ const RELEASE_POLL: Duration = Duration::from_millis(10);
 /// A no-op unless [`BARRIER_DIR_ENV`] names a directory holding an `armed`
 /// file. When that directory also holds `expect_content`, only a commit whose
 /// `committed_content` matches that file byte-for-byte (trimmed) may claim the
-/// barrier — so a foreign project-open or curator write cannot steal the park
+/// barrier, so a foreign project-open or curator write cannot steal the park
 /// from the mutation the journey is watching. Renaming `armed` to `claimed` is
 /// the claim: a concurrent matching fact commit cannot also consume this
 /// one-shot barrier. Arrival is published as `arrived`; the park ends when

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>CORE SAMPLE — six files as strat columns</title>
+<title>CORE SAMPLE, six files as strat columns</title>
 <link rel="stylesheet" href="topography.css" />
 <style>
   .keystrip { display: flex; border-top: 1px solid var(--raw-edge-subtle); background: var(--raw-surface-1); }
@@ -20,7 +20,7 @@
     <span class="chan">03</span>
     <h1>Core&nbsp;sample</h1>
     <span class="sub">Six files pulled as vertical cores and stood side by side against one shared line datum. Every
-      band is a symbol at its true line span, so the reader is looking at the file's actual stratigraphy — not a
+      band is a symbol at its true line span, so the reader is looking at the file's actual stratigraphy. Not a
       list of its contents.</span>
   </header>
 
@@ -46,7 +46,7 @@
     <div class="keycell">
       <div class="keyhead"><span class="td-legend">Hue</span><span class="td-rule"></span></div>
       <svg viewBox="0 0 200 40" width="100%" height="40" id="k-hue"></svg>
-      <div class="cap"><b>kind</b>, through <code>kindColor.ts</code> — the same arc the graph canvas and the
+      <div class="cap"><b>kind</b>, through <code>kindColor.ts</code>. The same arc the graph canvas and the
         connectivity spine already use, so a <code>struct</code> is the same colour everywhere in the console.</div>
     </div>
     <div class="keycell">
@@ -72,7 +72,7 @@
       <div class="keyhead"><span class="td-legend">Absence</span><span class="td-rule"></span></div>
       <svg viewBox="0 0 200 40" width="100%" height="40" id="k-abs"></svg>
       <div class="cap">Core 6 is banded to <b>line 331 and no further</b>. The rest of the file is drawn at full
-        length, hatched, and labelled with why. Its outgoing edges are unknown, not zero — so no arc leaves it.</div>
+        length, hatched, and labelled with why. Its outgoing edges are unknown, not zero. So no arc leaves it.</div>
     </div>
   </div>
 
@@ -94,18 +94,18 @@
         <dt>hue</dt><dd><code>kind</code> via <code>kindColor.ts</code>. Real.</dd>
         <dt>rail</dt><dd>per-symbol cyclomatic complexity. Real; it is already computed.</dd>
         <dt>arc width</dt><dd>call sites on that <code>calls</code> edge. Real.</dd>
-        <dt>column order</dt><dd>DSM cluster order — the same left-to-right order as sheet 01, not alphabetical.</dd>
+        <dt>column order</dt><dd>DSM cluster order. The same left-to-right order as sheet 01, not alphabetical.</dd>
         <dt>hatch</dt><dd>lines present in the file with no node covering them. Real: the index knows what it parsed.</dd>
       </dl>
-      <p class="td-caption" style="margin-top:8px">54 symbols and 23 edges — a single-file-set query, far below the
+      <p class="td-caption" style="margin-top:8px">54 symbols and 23 edges. A single-file-set query, far below the
       subgraph cap. No aggregation on this sheet either.</p>
     </section>
     <section>
       <h2>Open question</h2>
       <p class="td-caption">Six cores fit. Sixty do not, and "many files" was the actual ask. The honest options are
-      (a) keep six and make core selection the interesting problem — cores chosen by churn, by complexity, by being
+      (a) keep six and make core selection the interesting problem, cores chosen by churn, by complexity, by being
       on the traced path from sheet 02; or (b) let the core width collapse toward a hairline as the count grows, so
-      forty files become forty ruled strips with bands but no names — a <i>fabric</i> rather than a set of samples.
+      forty files become forty ruled strips with bands but no names. A <i>fabric</i> rather than a set of samples.
       (b) is closer to "the topography of the codebase" and gives up the line numbers.</p>
       <p class="td-caption">Also: nesting. A method inside an <code>impl</code> inside a module is three
       containments, and this sheet flattens them to one band. Indenting the band by containment depth would show
@@ -122,7 +122,7 @@
   var el = T.el, text = T.text;
 
   var TOP = 116;            // the datum: line 1, shared by every core
-  var SCALE = 0.742;        // px per source line — 1 px ≈ 1.35 lines
+  var SCALE = 0.742;        // px per source line, 1 px ≈ 1.35 lines
   var COL_W = 116;
   var RULE_EVERY = 200;
 
@@ -170,7 +170,7 @@
 
     // The absence beat: banded to 331 and no further.
     { path: 'crates/tracedecay-hooks/src/session/vendor_bridge.rs', lines: 612, x: 1200,
-      indexedTo: 331, why: 'extractor bailed at line 331 — unbalanced cfg block', symbols: [
+      indexedTo: 331, why: 'extractor bailed at line 331, unbalanced cfg block', symbols: [
       ['VendorBridge', 'struct', 26, 64, 1], ['attach', 'method', 72, 142, 6],
       ['forward_event', 'method', 148, 268, 10], ['drain', 'method', 274, 330, 4],
     ], internal: [[1, 2, 3]] },
@@ -187,7 +187,7 @@
     { from: [5, 2], to: [2, 5], calls: 5 },
   ];
 
-  /* The severity ramp, five ordered steps — complexity, not kind. */
+  /* The severity ramp, five ordered steps, complexity, not kind. */
   function railTone(cx) {
     if (cx <= 2) return 'var(--raw-sev-info)';
     if (cx <= 5) return 'var(--raw-sev-low)';
@@ -216,7 +216,7 @@
   }
   halo(text(gRules, 88, 34, 'DATUM ↓', 'lbl', { 'text-anchor': 'end' }));
   halo(text(gRules, 1380, 34,
-    'ONE VERTICAL SCALE FOR ALL SIX CORES — 1 PX = 1.35 SOURCE LINES', 'lbl', { 'text-anchor': 'end' }));
+    'ONE VERTICAL SCALE FOR ALL SIX CORES, 1 PX = 1.35 SOURCE LINES', 'lbl', { 'text-anchor': 'end' }));
 
   /* ---- 2. external arcs, behind the cores ------------------------------- */
   var gExt = el('g', {}, svg);
@@ -260,7 +260,7 @@
         { 'text-anchor': 'middle' })).setAttribute('fill', 'var(--raw-text-muted)');
       halo(text(g, core.x + COL_W / 2, hy + 50, '281 lines', 'num', { 'text-anchor': 'middle' }))
         .setAttribute('fill', 'var(--raw-text-muted)');
-      var wrap = core.why.split(' — ');
+      var wrap = core.why.split(', ');
       halo(text(g, core.x + COL_W / 2, hy + 70, wrap[0], 'num', { 'text-anchor': 'middle' }))
         .setAttribute('fill', 'var(--raw-text-muted)');
       halo(text(g, core.x + COL_W / 2, hy + 82, wrap[1], 'num', { 'text-anchor': 'middle' }))

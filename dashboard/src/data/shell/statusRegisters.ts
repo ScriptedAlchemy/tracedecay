@@ -1,7 +1,7 @@
 /**
  * Workspace-owned registers on the shell's bottom status strip.
  *
- * The strip's first cells — Link, Feed, Source, Query — are the shell's own
+ * The strip's first cells, Link, Feed, Source, Query, are the shell's own
  * transport facts. A workspace may publish the states of the authorities it
  * is reading beside them so the strip and the aperture report the same words:
  * the Code workspace posts its graph read, index freshness and pinned

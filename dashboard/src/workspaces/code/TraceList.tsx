@@ -1,14 +1,14 @@
 /**
  * The same symbols the field draws, as text, in call-site order.
  *
- * This is not a summary of the picture — it is the picture's exact contents.
+ * This is not a summary of the picture, it is the picture's exact contents.
  * Anything the field encodes as a position, a width or a latency is printed
  * here as a number, which is what makes the canvas legitimately one `role="img"`
  * rather than a grid of controls a screen reader has to walk.
  *
  * It carries that load twice over, which is why it is a module of its own: it is
  * the accessible equivalent of the field AND the whole reading whenever the
- * field is not drawn — too narrow a column, or a browser with no 2D context. A
+ * field is not drawn, too narrow a column, or a browser with no 2D context. A
  * component that has to stay symbol-for-symbol identical to another one is
  * easier to keep that way when it is not buried in the file that draws it.
  */

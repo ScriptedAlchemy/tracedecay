@@ -2,9 +2,9 @@
 //!
 //! Handles registration of the tracedecay MCP server in:
 //!
-//! - `~/.gemini/antigravity/mcp_config.json` — the Antigravity IDE config,
+//! - `~/.gemini/antigravity/mcp_config.json`, the Antigravity IDE config,
 //!   shape `{"mcpServers": {"tracedecay": {...}}}`.
-//! - `~/.gemini/antigravity-cli/plugins/tracedecay.json` — the Antigravity
+//! - `~/.gemini/antigravity-cli/plugins/tracedecay.json`, the Antigravity
 //!   CLI (`agy`) plugin file, same shape. Required because the IDE config
 //!   is not picked up by the CLI (#85).
 //!
@@ -225,7 +225,7 @@ fn doctor_check_registration(
 ) {
     if !config.exists() {
         dc.warn(&format!(
-            "{} not found — run `tracedecay install --agent antigravity` if you use {}",
+            "{} not found, run `tracedecay install --agent antigravity` if you use {}",
             config.display(),
             product
         ));

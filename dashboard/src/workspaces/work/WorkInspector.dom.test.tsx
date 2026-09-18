@@ -3,8 +3,8 @@
  *
  * The inspector separates definition, admission, relations, placement, and
  * evidence so no status stands in for another, and it prints the fields the
- * concept plate pictures but no Work authority publishes — priority, an owner
- * field — as the typed absences they are. Every row carries a grade.
+ * concept plate pictures but no Work authority publishes, priority, an owner
+ * field, as the typed absences they are. Every row carries a grade.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor, within } from '@testing-library/react';

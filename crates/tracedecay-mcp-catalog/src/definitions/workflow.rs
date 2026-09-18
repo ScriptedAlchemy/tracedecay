@@ -1,7 +1,7 @@
 //! MCP discovery projected from the canonical Workflow executable registry.
 //!
 //! The executable owns Workflow's operation set, request schemas, effects, and
-//! availability. MCP contributes only its transport prefix and presentation —
+//! availability. MCP contributes only its transport prefix and presentation.
 //! the same division the Work family holds, so the two closed families cannot
 //! drift into two different discovery stories.
 

@@ -2,8 +2,8 @@ use std::ops::Range;
 
 use serde_json::Value;
 
-// Credential rules — the vendored community catalogue and TraceDecay's local
-// supplement — live in `super::rules`, which owns their schema, provenance and
+// Credential rules, the vendored community catalogue and TraceDecay's local
+// supplement, live in `super::rules`, which owns their schema, provenance and
 // compilation. They are re-exported here because this is the module every
 // consumer already imports the detector kernel from, and moving the rules out
 // of hand-written code should not move every caller with them.

@@ -141,8 +141,8 @@ function stubWebGl(available: boolean) {
   });
 }
 
-/** Give anything the canvas started asynchronously — an emergent field loads
- * its layout engine on demand — its turn to run, so an assertion that nothing
+/** Give anything the canvas started asynchronously, an emergent field loads
+ * its layout engine on demand, its turn to run, so an assertion that nothing
  * was built means never rather than not yet. */
 async function flushPendingWork(): Promise<void> {
   for (let tick = 0; tick < 3; tick += 1) {
@@ -351,7 +351,7 @@ describe('GraphCanvas', () => {
     expect(document.querySelector('[role="status"][aria-live="polite"]')).not.toBeNull();
     // Never constructed: Sigma throws without a context, and that exception
     // would take the whole workspace route down through the error boundary.
-    // Held across the layout engine's async boundary too — a renderer that
+    // Held across the layout engine's async boundary too, a renderer that
     // merely arrives late is still a renderer that must not exist.
     expect(sigmaState.nodeReducer).toBeUndefined();
     await flushPendingWork();

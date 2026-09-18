@@ -3,7 +3,7 @@
 //! Runs an ast-grep structural pattern over the project working tree *in
 //! process* (via [`tracedecay_code_index::ast_grep_search`], which wires the
 //! repo's bundled tree-sitter grammars into the `ast-grep-core` pattern
-//! engine — no external `ast-grep` binary required).
+//! engine, no external `ast-grep` binary required).
 
 use std::path::Path;
 
@@ -140,7 +140,7 @@ fn render_md(hits: &[AstGrepSearchMatch], truncated: bool, files_scanned: usize)
     md.blank();
     let mut summary = format!("_{} matches across {files_scanned} files._", hits.len());
     if truncated {
-        summary.push_str(" Results capped — narrow with `path_glob` or `max_results`.");
+        summary.push_str(" Results capped. Narrow with `path_glob` or `max_results`.");
     }
     md.line(&summary);
     md.render()

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end proof that `tracedecay install --agent hermes` works against
-# STOCK (upstream NousResearch/hermes-agent) Hermes — not just customized
+# STOCK (upstream NousResearch/hermes-agent) Hermes, not just customized
 # forks. Used by the `hermes-integration` CI job and runnable locally:
 #
 #   git clone https://github.com/NousResearch/hermes-agent.git /tmp/hermes-upstream

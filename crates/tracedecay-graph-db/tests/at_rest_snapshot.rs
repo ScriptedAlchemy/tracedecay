@@ -1,6 +1,6 @@
 //! At-rest snapshot probe: full LPG replay vs a columnar `CompactStore` base.
 //!
-//! Ignored by default. This is a measurement harness, not a contract — nothing
+//! Ignored by default. This is a measurement harness, not a contract, nothing
 //! here asserts on a timing or a memory figure. It answers one question:
 //!
 //! > Reopening a *sealed* generation costs a full replay of every node and edge
@@ -48,8 +48,8 @@
 //! * `open wall` is the figure that maps onto activation of a sealed
 //!   generation. This is the 619s number the investigation is chasing.
 //! * `VmRSS after open` is the residency a daemon carries per open generation.
-//! * `first read` exercises the reads that actually have to work afterwards —
-//!   point lookups and a bounded traversal — so a fast open that cannot answer
+//! * `first read` exercises the reads that actually have to work afterwards,
+//!   point lookups and a bounded traversal, so a fast open that cannot answer
 //!   a query is not scored as a win.
 //! * `VmHWM delta over close` is the publish peak: the transient cost of
 //!   serializing the generation out. Only comparable across separate processes.
@@ -236,7 +236,7 @@ struct FirstReads {
 /// These are deliberately real calls through the public read surface rather
 /// than a claim that the store "would" answer them: a columnar base that opens
 /// instantly but cannot resolve an entity is not a win, and this is where that
-/// shows up — as a zero hit count or a resolution error.
+/// shows up, as a zero hit count or a resolution error.
 fn first_reads(db: &GraphDbLeaseV1, rows: usize) -> FirstReads {
     let namespace = namespace();
 

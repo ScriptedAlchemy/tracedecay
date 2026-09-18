@@ -8,7 +8,7 @@ agent hosts through MCP, hooks, LSP, and an embedded dashboard.
 
 Deliver a fully integrated final-V2 product through real production journeys,
 truthful typed states, maintainable crate/module boundaries, and direct
-behavioral evidence—not PR choreography, gate scaffolding, or code that merely
+behavioral evidence, not PR choreography, gates built only to be checked, or code that merely
 compiles.
 
 ## Task completion
@@ -38,30 +38,30 @@ unauthorized external action after completing independent, authorized work.
 
 ## Layout
 
-- The repository root is a **virtual workspace** — it has no package of its
+- The repository root is a **virtual workspace**. It has no package of its
   own. Every crate lives under `crates/`.
-- `crates/tracedecay/` — the composition-root library (daemon, MCP tools,
+- `crates/tracedecay/`, the composition-root library (daemon, MCP tools,
   global DB, sessions, code index, application services). Its integration
   suites are `crates/tracedecay/tests/`, and the ones that use the fixture
   surface in `tests/common/` require `test-helpers`. Check the selected test
   target's `required-features` in `Cargo.toml`; `mcp_suite` also requires
   `test-transport`.
-- `crates/tracedecay-cli/` — the package that produces the shipped
+- `crates/tracedecay-cli/`, the package that produces the shipped
   `tracedecay` binary.
-- `crates/` — the remaining workspace member crates (`tracedecay-api`,
+- `crates/`, the remaining workspace member crates (`tracedecay-api`,
   `-application`, `-contracts`, `-domain`, `-store`, `-hooks`, `-policy`,
   `-tool-catalog`, rusqlite parity/runtime crates).
-- `dashboard/` — the single embedded dashboard (React + rsbuild + vitest).
-  `dashboard/src/contracts/` is generated from Rust schemas via schemars —
-  never hand-edit it; regenerate with the `contracts:generate` script and
+- `dashboard/`, the single embedded dashboard (React + rsbuild + vitest).
+  `dashboard/src/contracts/` is generated from Rust schemas via schemars.
+  Never hand-edit it; regenerate with the `contracts:generate` script and
   verify with `contracts:check`.
-- `plugin/` — host bundles (Claude, Codex, Cursor, Kimi, opencode).
-- `tests/` — shared fixtures, distribution suites, and shell/Python gates that
+- `plugin/`, host bundles (Claude, Codex, Cursor, Kimi, opencode).
+- `tests/`, shared fixtures, distribution suites, and shell/Python gates that
   no single crate owns; crate-level integration suites and criterion benches
   live under that crate's own `tests/` and `benches/`.
-- `benchmark_data/` — benchmark fixtures, harnesses, and provenance;
-  `evals/` — memory, hermetic, and agent-adoption evals; `docs/` — plans and guides.
-- `scripts/` — CI/dev gates (commit-msg check, bundle checks, release drift).
+- `benchmark_data/`, benchmark fixtures, harnesses, and provenance;
+  `evals/`, memory, hermetic, and agent-adoption evals; `docs/`, plans and guides.
+- `scripts/`. CI/dev gates (commit-msg check, bundle checks, release drift).
 
 ## Build & test
 
@@ -70,7 +70,7 @@ unauthorized external action after completing independent, authorized work.
 - Dashboard: `npm run build` (rsbuild), `npm run typecheck` (`tsc --noEmit`),
   `npm test` (vitest) from `dashboard/`.
 - libtest `--exact` requires the full module path and exits 0 when a filter
-  matches nothing — a vacuous "0 passed" green. For name-filtered runs prefer
+  matches nothing. That is a vacuous "0 passed" green. For name-filtered runs prefer
   the ad-hoc anti-vacuity helper `scripts/require-exact-test.sh`; it is not a
   reason to ossify CI or test names. Otherwise pass the full path
   (`module::path::test_name`) and confirm the reported count is non-zero before
@@ -97,7 +97,7 @@ unauthorized external action after completing independent, authorized work.
   `.githooks/commit-msg` hook runs it locally via
   `scripts/install-git-hooks.sh`).
 - Integration branch is `master` (GitHub: ScriptedAlchemy/tracedecay); CI
-  lives in `.github/workflows` (hidden — search with `rg --hidden`).
+  lives in `.github/workflows` (hidden, search with `rg --hidden`).
 - `.github/`, `.githooks/`, and nested `AGENTS.md` files may carry more
   specific guidance; the deeper file wins.
 
@@ -111,7 +111,7 @@ unauthorized external action after completing independent, authorized work.
   overrides before merge. Keep the observability layers distinct:
   `tracing` events are the always-compiled operator log surface, Hotpath
   macros the compile-to-no-op measurement surface (tracing bridges exist only
-  for third-party emitters like sqlx — see the skill), and `eprintln!`
+  for third-party emitters like sqlx, see the skill), and `eprintln!`
   scaffolds never merge.
 - Reuse canonical TraceDecay authorities and maintained libraries first.
   Custom parsers, cursors, caches, retries, transports, registries, schedulers,
@@ -132,12 +132,12 @@ unauthorized external action after completing independent, authorized work.
   provenance, and `--no-tests=fail`.
 - Complete cutovers in one delivery slice: migrate every caller and datum,
   then delete compatibility façades, duplicate routes, old flags, dead aliases,
-  and superseded scaffolding.
+  and support code left from the move.
 - Add a V2/V3 contract, compatibility alias, deprecation path, or data
   migration only after proving the prior shape shipped on `origin/master`, in
   a published package, or in a live persisted format. Branch-local and
   unreleased contracts change in place; a `V1` suffix alone is not release
-  evidence and does not justify compatibility scaffolding.
+  evidence and does not justify compatibility shims.
 - Keep boundaries explicit: use top-level explicit imports/reexports, avoid
   wildcard parent-child cycles and inline imports, maintain one generated wire
   authority, and do not hand-write duplicate DTOs.
@@ -151,11 +151,11 @@ unauthorized external action after completing independent, authorized work.
   language, and superseded plan authority. `00-plan-set-index.md` is the sole
   roadmap precedence; historical plans and benchmarks are archival.
 - Name production modules, APIs, tests, scripts, and CI jobs for durable product
-  capabilities—not PR numbers, milestones, phases, or temporary gates. Keep
+  capabilities, not PR numbers, milestones, phases, or temporary gates. Keep
   PR/milestone labels only in clearly archival plans and benchmark provenance.
 - Tests must be falsifiable and cover failure, denial, staleness, isolation,
   cancellation, and rollback where relevant, without duplicating the same
-  substrate across every host × OS combination.
+  base across every host × OS combination.
 
 ## Shared work
 

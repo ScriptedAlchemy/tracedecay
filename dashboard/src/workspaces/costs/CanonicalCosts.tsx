@@ -1,9 +1,9 @@
 /**
- * COSTS — `GET /api/costs` (Plan 26 canonical cost observations).
+ * COSTS, `GET /api/costs` (Plan 26 canonical cost observations).
  *
  * The savings overview above it is the legacy rollup: real figures, but shaped
  * for a dashboard rather than for accounting. This is the projection the CLI
- * and MCP also serve, and it carries what the rollup cannot — the eligible
+ * and MCP also serve, and it carries what the rollup cannot, the eligible
  * population behind each figure, how much of that population was actually
  * observed, what the value was priced against, and the reason a measurement is
  * missing when it is.
@@ -34,7 +34,7 @@ export function CanonicalCosts() {
       title="Canonical cost observations"
       blurb={
         'usage, estimated cost, and provider latency with their eligible populations,' +
-        ' coverage, and provenance — the same Plan 26 read model the CLI and MCP serve'
+        ' coverage, and provenance, the same Plan 26 read model the CLI and MCP serve'
       }
       queryKey={COSTS_QUERY_KEY}
       url={COSTS_URL}
@@ -43,7 +43,7 @@ export function CanonicalCosts() {
       loadingDetail="requesting canonical cost observations"
       className="border-t border-edge-subtle"
       metrics={(model) => [...model.usage, ...model.estimated_cost]}
-      emptyLabel="the read model carried no cost measurements — this is a payload with no metrics, not a zero bill"
+      emptyLabel="the read model carried no cost measurements, this is a payload with no metrics, not a zero bill"
       horizonAttributes={(model) => ({ 'data-costs-current': model.current ? 'true' : 'false' })}
       horizonFields={(model) => <HorizonFields model={model} />}
       footer={(model) => <ProviderLatencyCohorts cohorts={model.latency} />}

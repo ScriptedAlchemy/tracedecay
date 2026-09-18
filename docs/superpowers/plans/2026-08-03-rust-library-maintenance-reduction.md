@@ -43,7 +43,7 @@ generic SSE framing and `serde_path_to_error` for typed payload diagnostics.
 Keep TraceDecay sequence, frontier, correlation, resume-gap, retry, terminal,
 and cancellation state machines. Delete manual SSE and blocking iterator code.
 
-### 3. `octocrab` — rejected
+### 3. `octocrab`, rejected
 
 Preflight found no deletion-positive cutover. Octocrab's convenience paths
 enable or assume redirect/retry/unbounded collection behavior that cannot own

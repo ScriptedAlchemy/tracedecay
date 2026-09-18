@@ -3141,7 +3141,7 @@ pub(super) enum DurableDatabaseInventoryV1 {
     Interrupted,
     /// The complete set of database paths, relative to the store's data root.
     Resolved(Vec<PathBuf>),
-    /// The set could not be enumerated — a missing or malformed manifest, or a
+    /// The set could not be enumerated, a missing or malformed manifest, or a
     /// directory that could not be listed. Never a green light for deletion.
     Unverifiable,
 }
@@ -3382,7 +3382,7 @@ pub(super) async fn check_store_durable_memory(
 /// It lives under the *profile* root, never inside the store being examined.
 /// Two reasons, both load-bearing: the store is a deletion candidate, and
 /// writing into it bumps the newest mtime that
-/// [`walk_store_stats`] uses as the revival fence — a store that failed one
+/// [`walk_store_stats`] uses as the revival fence, a store that failed one
 /// check would have its age reset by the check itself and could never mature
 /// past the retention window again.
 pub(super) fn durable_check_scratch_root(profile_root: &Path) -> PathBuf {
@@ -3423,8 +3423,8 @@ async fn check_durable_memory_rows(
     }
     // The snapshot layer creates only the final scratch component, so its
     // parent must exist first. Without this the snapshot fails NotFound, the
-    // check fails closed as `Unverifiable`, and — because `Unverifiable` is
-    // treated exactly like `Present` — *every* collection is refused. That is
+    // check fails closed as `Unverifiable`, and because `Unverifiable` is
+    // treated exactly like `Present`, *every* collection is refused. That is
     // safe, but it silently disables orphan reclamation entirely.
     if control.completion().is_some() || std::fs::create_dir_all(scratch_root).is_err() {
         return if control.completion().is_some() {

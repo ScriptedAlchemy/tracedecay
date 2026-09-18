@@ -160,7 +160,7 @@ impl WorktreeCleanupInspectRequestV1 {
     }
 }
 
-/// Confirmation names the exact inspection digest, not just a worktree id.
+/// Confirmation names the exact inspection digest, not a worktree id alone.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorktreeCleanupConfirmRequestV1 {

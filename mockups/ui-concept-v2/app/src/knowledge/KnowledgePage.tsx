@@ -154,7 +154,7 @@ function FixtureInspector(props: { fact: ExampleFact; node: AtlasNode; cam: Cam;
       <div className="kn-block">
         <div className="k">REDACTION</div>
         <Row label="content availability" value="shown fixture claim; no withheld value" />
-        <Row label="policy receipt" value="unavailable — fixture has no policy authority" unavailable />
+        <Row label="policy receipt" value="unavailable, fixture has no policy authority" unavailable />
       </div>
     </InspectFrame>
   );

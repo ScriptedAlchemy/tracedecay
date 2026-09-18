@@ -1,4 +1,4 @@
-//! Where OpenCode's own plugin CLI owns TraceDecay's plugin — and where it
+//! Where OpenCode's own plugin CLI owns TraceDecay's plugin, and where it
 //! does not.
 //!
 //! Every other host in this crate that owns its plugin lifecycle gets that
@@ -32,7 +32,7 @@
 //! config dir plus each `.opencode` dir found walking up from the project.
 //! TraceDecay's deployed `plugins/tracedecay.ts` is therefore loaded by
 //! OpenCode's *own* discovery contract, with no registration step at all. The
-//! file deployment is not emulation of host-private state — it is the host's
+//! file deployment is not emulation of host-private state, it is the host's
 //! documented directory contract, which is precisely the condition under which
 //! the host-capability doctrine does **not** demand CLI adoption.
 //!
@@ -47,7 +47,7 @@
 //! * **There is no removal counterpart.** OpenCode ships `plugin` only; there
 //!   is no `plugin remove`/`uninstall` subcommand. An adopted install would
 //!   leave TraceDecay editing the host-recorded `plugin` array by hand on
-//!   uninstall — strictly more emulation than today, not less.
+//!   uninstall, strictly more emulation than today, not less.
 //! * **The project-local scope cannot be targeted anyway.** `opencode plugin`
 //!   without `--global` resolves its scope from the process working directory,
 //!   and [`super::super::host_cli::run_host_cli`] admits the profile home as
@@ -90,7 +90,7 @@ const HOST_PLUGIN_DISCOVERY_EXTENSIONS: &[&str] = &["ts", "js"];
 ///
 /// The host's glob is exactly one level deep, so a file nested in a
 /// sub-directory (a staged *module*, which is what `opencode plugin` would
-/// need) is deliberately **not** discovered — that asymmetry is the whole
+/// need) is deliberately **not** discovered, that asymmetry is the whole
 /// reason the CLI is not adopted here, and the tests below pin it.
 pub(super) fn is_host_discovered_plugin_path(path: &Path) -> bool {
     let discovered_extension = path
@@ -123,7 +123,7 @@ pub(super) fn host_owned_plugin_registration(
 /// deliberately does not drive it, and therefore TraceDecay must not write its
 /// effect either. Emulating the key would be indistinguishable on disk from a
 /// real `opencode plugin` install while carrying none of the host's own
-/// manifest and engine validation — exactly the half-emulated state the
+/// manifest and engine validation, exactly the half-emulated state the
 /// host-capability doctrine forbids. A guard is cheaper than the incident.
 pub(super) fn ensure_host_owned_plugin_registration_untouched(
     before: Option<&serde_json::Value>,
@@ -154,7 +154,7 @@ mod tests {
     /// The global deployment path must stay one OpenCode discovers on its own.
     /// If it ever moves out of `plugins/` or stops being a `.ts` file, the
     /// host silently stops loading the plugin and nothing else in this crate
-    /// would notice — the config would still validate.
+    /// would notice, the config would still validate.
     #[test]
     fn the_deployed_global_plugin_path_is_discovered_by_the_hosts_own_loader() {
         let deployed = Path::new(super::super::OPENCODE_PLUGIN_RELATIVE);
@@ -167,8 +167,8 @@ mod tests {
     }
 
     /// The executable form of the adoption decision: a staged *module*
-    /// directory — the only shape `opencode plugin` accepts, because it needs
-    /// a `package.json` entrypoint — is NOT discovered by the host's own
+    /// directory, the only shape `opencode plugin` accepts, because it needs
+    /// a `package.json` entrypoint, is NOT discovered by the host's own
     /// loader. Driving the CLI would therefore add a second, distinct plugin
     /// origin next to the discovered file rather than replacing it.
     #[test]
@@ -282,7 +282,7 @@ mod tests {
         );
     }
 
-    /// An untouched key — the steady state — passes.
+    /// An untouched key, the steady state, passes.
     #[test]
     fn an_untouched_plugin_registration_passes_the_guard() {
         let before = json!(["operator-plugin"]);

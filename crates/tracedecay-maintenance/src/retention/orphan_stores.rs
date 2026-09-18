@@ -8,13 +8,13 @@
 //! silently strands the prior store on disk. Registry GC removes the
 //! stale *registry row* but never the on-disk store *data*, so the payload
 //! accumulates invisibly (measured at ~41 GB in one observed profile). This
-//! module makes those stores a typed finding — carrying age and size — and
+//! module makes those stores a typed finding, carrying age and size, and
 //! collects them under an owner-visible retention window.
 //!
 //! The contract is "re-link or explicitly retire, never orphan silently": a
 //! store whose registry roots are gone but whose manifest points at a
 //! *different, currently-live* root is classified [`StoreDisposition::Relinkable`]
-//! and is never collected here — an applied sweep atomically transfers its
+//! and is never collected here, an applied sweep atomically transfers its
 //! registry identity to that exact live project. Only stores with no live root
 //! at all are eligible for collection, and only once older than the retention
 //! window.
@@ -135,8 +135,8 @@ pub struct OrphanStoreFinding {
     pub expected_content_fence: StoreContentFence,
     pub expected_manifest_bytes: Option<Vec<u8>>,
     /// Registered graph-scope database paths, relative to `data_root`; carried
-    /// through so the durable-data check covers every scope, not just the main
-    /// graph.
+    /// through so the durable-data check covers every registered graph-scope
+    /// database.
     pub graph_scope_relpaths: Vec<PathBuf>,
 }
 
@@ -180,7 +180,7 @@ fn classify_one(entry: &StoreCensusEntry) -> StoreDisposition {
         };
     }
     // Registry identity is dead. If the manifest still names a live root the
-    // repository moved rather than vanished — re-link instead of collecting.
+    // repository moved rather than vanished, re-link instead of collecting.
     if let Some(manifest_root) = entry.manifest_root.as_deref()
         && manifest_root != entry.canonical_root
         && entry.display_root.as_deref() != Some(manifest_root)
@@ -228,14 +228,14 @@ pub fn classify_stores(census: &[StoreCensusEntry], now: i64) -> Vec<OrphanStore
 /// The partitioned collection decision over a set of findings.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CollectionPlan {
-    /// Orphaned and older than the retention window — collect these.
+    /// Orphaned and older than the retention window, collect these.
     pub collect: Vec<OrphanStoreFinding>,
-    /// Orphaned but still inside the retention window — kept for now, surfaced.
+    /// Orphaned but still inside the retention window, kept for now, surfaced.
     pub retained_immature: Vec<OrphanStoreFinding>,
-    /// Re-linkable (moved repository) — never collected; an applied sweep
+    /// Re-linkable (moved repository), never collected; an applied sweep
     /// transfers these to the exact registered live project identity.
     pub relink: Vec<OrphanStoreFinding>,
-    /// Liveness could not be proven either way — never collected, surfaced so
+    /// Liveness could not be proven either way, never collected, surfaced so
     /// an owner can resolve the inspection failure instead of losing the store.
     pub unverifiable: Vec<OrphanStoreFinding>,
 }
@@ -250,7 +250,7 @@ impl CollectionPlan {
 }
 
 /// Partition findings under a retention window. Live stores are dropped from
-/// the plan entirely — they are never a retention concern. Pure.
+/// the plan entirely, they are never a retention concern. Pure.
 pub fn plan_collection(findings: Vec<OrphanStoreFinding>, retention_secs: i64) -> CollectionPlan {
     let mut plan = CollectionPlan::default();
     for finding in findings {
@@ -368,7 +368,7 @@ pub enum CollectionFailureKind {
     PayloadChanged,
     /// The store's graph database carries rows in a durable per-project memory
     /// table (or the check could not prove otherwise). Never collected, even
-    /// when every other eligibility check passed — see
+    /// when every other eligibility check passed, see
     /// [`DurableMemoryCheck`]/[`check_durable_memory_rows`].
     DurableDataProtected,
 }

@@ -63,7 +63,7 @@ pub enum CodeSearchEligibilityV1 {
     },
 }
 
-/// One generation-bound file manifest — the scheduling/checkpoint unit.
+/// One generation-bound file manifest, the scheduling/checkpoint unit.
 /// Chunks are the projection and receipt unit.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -149,8 +149,8 @@ pub struct ExactExtractionAuthorityV1 {
 /// still this allocation carries the minted bytes and allocation identity
 /// alone admits it.
 ///
-/// The digest is therefore what a row the authority did *not* mint — a fresh
-/// allocation, a row minted elsewhere, a forgery — is compared against, and
+/// The digest is therefore what a row the authority did *not* mint, a fresh
+/// allocation, a row minted elsewhere, a forgery, is compared against, and
 /// only such a row makes the mint pay for one. Minting it up front cost a
 /// corpus-scale digest sweep per generation for a comparison most rows never
 /// reach. The minted row is held, not weakly referenced, so the digest stays

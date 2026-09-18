@@ -109,7 +109,7 @@ export function FactLedger({
   }, [selectedFactId]);
   // Recall counts have no absolute ceiling, so the rail is scaled to the
   // busiest fact actually on screen. That makes the column a ranking of what
-  // is loaded — which is what it is — rather than an implied fraction of some
+  // is loaded, which is what it is, rather than an implied fraction of some
   // total the daemon never reported.
   const recallCeiling = facts.reduce(
     (max, fact) => Math.max(max, fact.retrieval_count ?? 0),
@@ -179,7 +179,7 @@ export function FactLedger({
  * The list is a top-100 slice ordered so the highest-trust facts fill it. A
  * reader scrolling ninety-six rows that all read 1.00 will conclude the store
  * has no low-trust facts; the store in fact holds twenty-one below 0.75 that
- * this slice never reaches. That is not a detail — it is the difference
+ * this slice never reaches. That is not a detail, it is the difference
  * between "feedback never moves a score" and "you are looking at the top of
  * the list".
  */
@@ -208,7 +208,7 @@ function LedgerHeader({
       <p className="td-legend">
         {loaded.total.toLocaleString()} facts loaded · {loaded.measured.toLocaleString()} with
         trust · {loaded.unavailable.toLocaleString()} unavailable
-        {query ? ` · matching “${query}”` : ''}
+        {query ? ` · matching "${query}"` : ''}
       </p>
       <p className="text-2xs leading-relaxed text-text-muted">
         {measuredRange == null
@@ -226,9 +226,9 @@ function LedgerHeader({
           Sorted within this slice only. The read is bounded to the top{' '}
           {factsCoverage.limit.toLocaleString()} by trust
           {beyond != null
-            ? ` — ${beyond.toLocaleString()} more ${beyond === 1 ? 'fact lies' : 'facts lie'} beyond it`
+            ? `, ${beyond.toLocaleString()} more ${beyond === 1 ? 'fact lies' : 'facts lie'} beyond it`
             : eligible == null
-              ? ' — the store did not report how many facts lie beyond it'
+              ? ', the store did not report how many facts lie beyond it'
               : ''}
           ; the memory route serves no page cursor, so paging is unavailable rather than hidden.
         </span>
@@ -291,7 +291,7 @@ function ColumnLegend() {
  * reinforced) get a printed figure AND a length: the digits for precision, the
  * rail for ranking. Facts here run to nearly two thousand characters on ONE
  * line, so the summary clamps to two lines, carries the full text on `title`,
- * and prints an explicit control on any row that is still cut — the control
+ * and prints an explicit control on any row that is still cut, the control
  * opens the same inspector the row does, where the content is shown in full.
  */
 function FactRow({

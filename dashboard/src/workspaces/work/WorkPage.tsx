@@ -46,13 +46,13 @@ import { currentWorkProductView, type WorkProductView } from './workProductView.
 import { workDagReading } from './workViewsModel.ts';
 
 /**
- * Work — channel thirteen.
+ * Work, channel thirteen.
  *
  * This page reads one current `WorkGraphReadV1` and
  * reduces its exact product-graph entry to the local camera model; the legacy
  * projection snapshot is not a second authority. A route that refuses is
  * reported as the refusal it was. Execution belongs to the Workflow runtime,
- * which has its own workspace — this channel is the task graph.
+ * which has its own workspace, this channel is the task graph.
  *
  * Six projections over ONE product graph version. The switcher moves the camera and the
  * graph does not change underneath it: a task selected in any projection
@@ -243,7 +243,7 @@ function graphRegister(
 /**
  * The Work register: four independent facts about this page, in the same
  * grammar as the shell's status strip. The graph read, the immutable version,
- * the selection, and the camera are separate facts — a served graph does not
+ * the selection, and the camera are separate facts, a served graph does not
  * imply a selection, and a selection does not imply a fresh read.
  */
 function WorkRegister({
@@ -378,7 +378,7 @@ export function WorkPage() {
               {/* The region the camera points at, drawn in every state rather than
                 * only when there is a projection to put in it. The tabs above
                 * declare that they control this region, so it has to exist for as
-                * long as they do — and under a refusal it is where a reader who
+                * long as they do, and under a refusal it is where a reader who
                 * just moved the camera looks to find out why nothing moved. */}
               <div
                 role="tabpanel"

@@ -20,7 +20,7 @@ thread_local! {
 }
 
 impl ManifestDigest {
-    /// Canonical `sha256:`-tagged encoding of raw SHA-256 digest bytes — the
+    /// Canonical `sha256:`-tagged encoding of raw SHA-256 digest bytes, the
     /// one constructor for digest material, so call sites never re-roll their
     /// own `format!`/hex loop over an already-computed hash.
     pub fn from_sha256_bytes(digest: &[u8]) -> Result<Self, DomainError> {

@@ -101,12 +101,12 @@ pub async fn grep(
 
 /// Deterministic post-fetch re-rank applied to every grep page:
 ///
-/// 1. **Inventory downrank** — for the relevance-shaped sorts (the default
+/// 1. **Inventory downrank**, for the relevance-shaped sorts (the default
 ///    `relevance` and `hybrid`), messages that are themselves transcript
 ///    inventory/listing tool calls (or are dominated by file-path lists) are
 ///    stably moved below substantive hits. `recency` is left untouched so the
 ///    explicit "most recent first" contract still holds.
-/// 2. **Per-session cap** — in cross-session (`scope: all`) pages no single
+/// 2. **Per-session cap**, in cross-session (`scope: all`) pages no single
 ///    session may contribute more than [`PER_SESSION_HIT_CAP`] hits, so one
 ///    noisy session cannot flood the page. Single-session scopes are exempt.
 ///

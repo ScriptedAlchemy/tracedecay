@@ -11,8 +11,8 @@ import { StateChip, type DomainStateKind } from './StateChip';
 
 /**
  * The truth header every `DashboardEnvelopeV1` read carries: its domain state,
- * its coverage with denominator, its freshness, and — only when the server
- * returned one — a refresh control bound to the server's own legal-action
+ * its coverage with denominator, its freshness, and, only when the server
+ * returned one, a refresh control bound to the server's own legal-action
  * reference.
  *
  * The refresh button is deliberately conditional on that reference rather than
@@ -69,7 +69,7 @@ export function EnvelopeTruth({
 }
 
 /** The envelope's authorization outcome as its own domain state. `authorized`
- * has no chip — it is the ordinary case, and a badge on every read would make
+ * has no chip, it is the ordinary case, and a badge on every read would make
  * the three that matter invisible. */
 export function authorizationState(authorization: DashboardAuthorizationV1): DomainStateKind | null {
   switch (authorization.outcome) {

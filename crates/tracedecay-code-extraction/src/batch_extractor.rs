@@ -17,7 +17,7 @@ pub struct BatchExtractor;
 
 /// Collects the direct children of `parent` into a `Vec` via cursor walk.
 ///
-/// Tree-sitter's `parent.child(i)` is O(i) — it walks sibling links — so a
+/// Tree-sitter's `parent.child(i)` is O(i), it walks sibling links, so a
 /// `for i in 0..N { parent.child(i) }` loop is O(N²). Materializing once
 /// up front gives O(N) build + O(1) lookups for the rest of the extraction.
 fn collect_children(parent: TsNode<'_>) -> Vec<TsNode<'_>> {
@@ -95,7 +95,7 @@ impl BatchExtractor {
     ///
     /// Children are materialized into a `Vec` once via a cursor (O(N)), and
     /// downstream helpers index into that slice instead of calling
-    /// `root.child(i)` repeatedly — tree-sitter's `child(i)` is O(i), so the
+    /// `root.child(i)` repeatedly. Tree-sitter's `child(i)` is O(i), so the
     /// previous index loops were O(N²) on large `.bat` files. See `complexity.rs`
     /// for the same fix on the universal hot path.
     fn visit_root_child(state: &mut ExtractionState, children: &[TsNode<'_>], child: TsNode<'_>) {

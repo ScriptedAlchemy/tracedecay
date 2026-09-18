@@ -140,9 +140,9 @@ async fn rmcp_receive_waits_for_full_close_after_request_half_close() {
     );
 }
 
-/// A client that half-closes after every accepted request settled — the
+/// A client that half-closes after every accepted request settled, the
 /// cancelling client pattern: it keeps its read half open awaiting the
-/// daemon's EOF — must observe this side close without a full peer close.
+/// daemon's EOF, must observe this side close without a full peer close.
 #[tokio::test]
 async fn rmcp_receive_closes_after_half_close_once_accepted_requests_settle() {
     let (server, client) = tokio::net::UnixStream::pair().expect("UnixStream pair");

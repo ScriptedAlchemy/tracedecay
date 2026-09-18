@@ -136,7 +136,7 @@ impl SemanticProviderPort for UnavailableSemanticProvider {
 }
 
 /// Records every fan-out call so short-circuiting after a successful
-/// cancellation is observable, not just the aggregated boolean.
+/// cancellation is observable beyond the aggregated boolean.
 struct RecordingCancellation {
     cancels: bool,
     invoked: AtomicBool,

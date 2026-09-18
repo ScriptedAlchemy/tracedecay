@@ -9,7 +9,7 @@
 //! through the host's own CLI: the plugin deployment already *is* `OpenCode`'s
 //! own discovery contract, `opencode mcp add` is interactive, and the LSP and
 //! prompt registrations have no host command at all. [`plugin_cli`] is the
-//! decision record — including why driving `opencode plugin <module>` would
+//! decision record, including why driving `opencode plugin <module>` would
 //! double-load the plugin and could not be undone.
 
 mod plugin_cli;
@@ -364,7 +364,7 @@ fn local_config_has_tracedecay(project_root: &Path) -> bool {
 // Config path resolution
 // ---------------------------------------------------------------------------
 
-/// Honors an absolute `$XDG_CONFIG_HOME`, including locations outside `HOME` —
+/// Honors an absolute `$XDG_CONFIG_HOME`, including locations outside `HOME`,
 /// but only when `home` *is* this process user's home. See
 /// [`ambient_xdg_config_home`].
 fn opencode_config_path(home: &Path) -> std::path::PathBuf {
@@ -375,8 +375,8 @@ fn opencode_config_path(home: &Path) -> std::path::PathBuf {
 ///
 /// `$XDG_CONFIG_HOME` names *this process user's* config root, so it only
 /// answers for a caller that is resolving that same user's home. A caller that
-/// names a different root — a per-home sweep, a managed-skill export
-/// destination scan, a test sandbox — must stay inside the root it named.
+/// names a different root, a per-home sweep, a managed-skill export
+/// destination scan, a test sandbox, must stay inside the root it named.
 ///
 /// Reading it unconditionally let a lifecycle export sweep that was handed a
 /// sandbox `home` resolve OpenCode to the operator's real
@@ -417,8 +417,8 @@ fn opencode_config_path_for(home: &Path, xdg: Option<&std::ffi::OsStr>) -> std::
 /// TraceDecay's own managed artifacts (`plugins/`, `agent/`, `command/`,
 /// `skills/`), which a component-set transaction writes between the moment the
 /// registration authority confirms a revision and the moment it applies. Keying
-/// on the directory therefore moved this path — and with it the hashed
-/// registration path list — mid-transaction, so every apply rechecked against a
+/// on the directory therefore moved this path, and with it the hashed
+/// registration path list, mid-transaction, so every apply rechecked against a
 /// different revision and rolled back with `StalePreview`. No managed artifact
 /// ever writes an `AGENTS.md`, so file existence is stable across a deploy.
 ///
@@ -646,7 +646,7 @@ fn install_mcp_server(config_path: &Path, tracedecay_bin: &str) -> Result<()> {
 ///
 /// `plugin` is the one key here that *is* owned by a host command TraceDecay
 /// declines to drive, so forging its effect is refused on both the install and
-/// uninstall paths — see
+/// uninstall paths, see
 /// [`plugin_cli::ensure_host_owned_plugin_registration_untouched`].
 #[hotpath::measure(label = "hosts.agent.opencode.registration_install")]
 fn install_registration_entries(
@@ -809,7 +809,7 @@ fn merge_registration_entries(
 ///
 /// Stays TraceDecay-written: `OpenCode` has no command that edits instruction
 /// files, and `AGENTS.md` is operator-editable Markdown discovered by
-/// convention — no host-owned state to emulate. The block is marker-delimited
+/// convention, no host-owned state to emulate. The block is marker-delimited
 /// so a refresh replaces exactly what TraceDecay wrote.
 fn install_prompt_rules(prompt_path: &Path) -> Result<()> {
     let block = super::prompt_rules::standard_prompt_rules(
@@ -907,7 +907,7 @@ fn strip_registration_entries(
 ) -> Result<(OpenCodeRegistrationRemoval, TextFileMutation)> {
     let mut config = JsonConfigDialect::Json.parse_for_edit(config_path, existing)?;
     // Uninstall drops only what TraceDecay wrote. A plugin registration the
-    // host recorded through `opencode plugin` is not ours to remove — and
+    // host recorded through `opencode plugin` is not ours to remove, and
     // OpenCode ships no removal command we could drive instead, which is one
     // of the reasons that command is not adopted for install either.
     let host_plugin_before = plugin_cli::host_owned_plugin_registration(&config);
@@ -988,7 +988,7 @@ fn doctor_check_config(dc: &mut DoctorCounters, home: &Path) {
     let config_path = opencode_config_path(home);
     if !config_path.exists() {
         dc.warn(&format!(
-            "{} not found — run `tracedecay install --agent opencode` if you use OpenCode",
+            "{} not found, run `tracedecay install --agent opencode` if you use OpenCode",
             config_path.display()
         ));
         return;
@@ -998,7 +998,7 @@ fn doctor_check_config(dc: &mut DoctorCounters, home: &Path) {
     let mcp_entry = &config["mcp"]["tracedecay"];
     if !mcp_entry.is_object() {
         dc.fail(&format!(
-            "MCP server NOT registered in {} — run `tracedecay install --agent opencode`",
+            "MCP server NOT registered in {}, run `tracedecay install --agent opencode`",
             config_path.display()
         ));
         return;
@@ -1013,7 +1013,7 @@ fn doctor_check_config(dc: &mut DoctorCounters, home: &Path) {
     if has_serve {
         dc.pass("MCP server args include \"serve\"");
     } else {
-        dc.fail("MCP server args missing \"serve\" — run `tracedecay install --agent opencode`");
+        dc.fail("MCP server args missing \"serve\", run `tracedecay install --agent opencode`");
     }
     let lsp = &config["lsp"]["tracedecay"];
     let lsp_command = lsp["command"].as_array();
@@ -1030,9 +1030,7 @@ fn doctor_check_config(dc: &mut DoctorCounters, home: &Path) {
     if has_bridge && has_extensions && duplicate_avoidance {
         dc.pass("custom TraceDecay LSP bridge configured with duplicate-analyzer avoidance");
     } else {
-        dc.fail(
-            "custom TraceDecay LSP config is stale — run `tracedecay install --agent opencode`",
-        );
+        dc.fail("custom TraceDecay LSP config is stale, run `tracedecay install --agent opencode`");
     }
 }
 
@@ -1057,7 +1055,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
         ));
     } else {
         dc.fail(&format!(
-            "native edit/idle plugin missing from {} — run `tracedecay install --agent opencode`",
+            "native edit/idle plugin missing from {}, run `tracedecay install --agent opencode`",
             plugin_path.display()
         ));
     }

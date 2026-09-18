@@ -4,7 +4,7 @@ import { StateChip, type DomainStateKind } from './StateChip';
 
 /**
  * Every domain state renders a
- * non-color-alone chip — an icon *and* a text label. The `Record` type below is
+ * non-color-alone chip, an icon *and* a text label. The `Record` type below is
  * the compile-time exhaustiveness gate: if the taxonomy in StateChip.tsx gains
  * or drops a state, tsc fails here until this table is updated, so the "all
  * states" claim can never silently rot.
@@ -51,7 +51,7 @@ describe('StateChip', () => {
     const chip = container.querySelector(`[data-state="${kind}"]`);
     expect(chip, `chip for ${kind}`).not.toBeNull();
 
-    // Icon: lucide renders an inline <svg> (aria-hidden) — never color alone.
+    // Icon: lucide renders an inline <svg> (aria-hidden), never color alone.
     expect(chip!.querySelector('svg'), `icon for ${kind}`).not.toBeNull();
 
     // Label: the human-readable text is present and exact.
@@ -63,7 +63,7 @@ describe('StateChip', () => {
   /**
    * The two near-neighbours a reader must never confuse: a reachable authority
    * reporting that one source cannot answer, and nothing being reachable at
-   * all. They share a hue deliberately — both mean no reading arrived — so the
+   * all. They share a hue deliberately, both mean no reading arrived, so the
    * separation has to be carried by label, glyph and `data-state`. Asserting
    * the shared lamp alongside them is the point: if the colour were ever made
    * to do the work, this test would still hold the chip to saying it in a form
@@ -83,7 +83,7 @@ describe('StateChip', () => {
   /**
    * The other deliberate near-neighbour pair: a source that answered with
    * less than everything, and a provider quota that paused the read. Both
-   * mean the shown evidence is real and incomplete, so they share a hue —
+   * mean the shown evidence is real and incomplete, so they share a hue,
    * but a rate limit has its own remedy (wait for the reset), so it must be
    * tellable from `partial` by label and glyph, never only by detail text.
    */

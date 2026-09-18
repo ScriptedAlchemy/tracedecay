@@ -128,7 +128,7 @@ async fn reconcile_codex_goal_response(
 /// Reads one durable cursor by its canonical key.
 ///
 /// `path_identity_key` is applied on every write to this table, so the stored
-/// form is unique and this stays a single primary-key lookup — no candidate
+/// form is unique and this stays a single primary-key lookup, no candidate
 /// expansion, no table scan, on the per-file-per-pass ingest hot path.
 pub async fn get_parse_offset(
     conn: &impl QueryExecutor,
@@ -236,7 +236,7 @@ pub async fn require_expected_offset(
 
 /// Writes one durable cursor under its canonical key.
 ///
-/// Normalising here — the single write funnel for this table — is what keeps
+/// Normalising here, the single write funnel for this table, is what keeps
 /// [`get_parse_offset`] a primary-key lookup.
 pub async fn set_parse_offset(
     conn: &impl Executor,
@@ -596,8 +596,8 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     }
 
     /// Atomically upserts several transcript sessions (and their messages),
-    /// writing only the searchable `session_messages` projection — never
-    /// `lcm_raw_messages` — and then advances one shared parse cursor.
+    /// writing only the searchable `session_messages` projection, never
+    /// `lcm_raw_messages`, and then advances one shared parse cursor.
     #[hotpath::skip]
     pub async fn upsert_transcript_projection_batches(
         &self,

@@ -203,8 +203,8 @@ async fn registered_quarantined_legacy_source_never_enters_temporal_sinks() {
     );
 }
 
-/// Naming two sinks only proves those two are clean. A sink added later — a
-/// new occurrence, summary, or fact index — would carry the quarantined text
+/// Naming two sinks only proves those two are clean. A sink added later, a
+/// new occurrence, summary, or fact index, would carry the quarantined text
 /// with nothing complaining, so sweep every full-text sink the schema defines.
 #[tokio::test]
 async fn registered_quarantined_legacy_source_reaches_no_full_text_sink() {

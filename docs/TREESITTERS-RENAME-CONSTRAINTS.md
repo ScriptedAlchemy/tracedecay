@@ -1,4 +1,4 @@
-# `tracedecay-large-treesitters` — Rename Constraints
+# `tracedecay-large-treesitters`. Rename constraints
 
 > Finding for Kanban task `t_4070b0b0`: why the grammar bundle dependency must keep
 > its legacy `tracedecay-*` name after the tracedecay rebrand, what would have to
@@ -12,7 +12,7 @@ for the foreseeable future.** The name is owned and published by an **external
 upstream** (`aovestdipaperino`), the three crates form a hard internal dependency
 chain whose names are baked into the upstream's *own* manifests, and the package is
 public on crates.io with external consumers. Renaming would require forking and
-permanently maintaining the entire three-tier grammar pipeline — which directly
+permanently maintaining the entire three-tier grammar pipeline, which directly
 contradicts the project's "never push to / fork the aovestdipaperino upstream"
 policy. The real long-term exit is dropping these deps entirely via the Rust-parser
 migration (`docs/RUST-PARSER-MIGRATION.md`), not renaming them.
@@ -35,7 +35,7 @@ The project *itself* rebranded tracedecay → tracedecay (lib/bin name is `trace
 pre-rebrand compatibility shims (legacy `.tracedecay/` dir at `src/config.rs:16`,
 legacy archive names at `src/cloud.rs:140`, legacy `TRACEDECAY_*` env at
 `src/config.rs:152`). **Only the grammar-bundle dependency retains the legacy
-`tracedecay-` prefix — and that is intentional** (`AGENTS.md:20`).
+`tracedecay-` prefix, and that is intentional** (`AGENTS.md:20`).
 
 ## Why it must keep the name (constraints)
 
@@ -49,7 +49,7 @@ legacy archive names at `src/cloud.rs:140`, legacy `TRACEDECAY_*` env at
 2. **Three-tier name coupling in the upstream's own manifests.** The `large` crate
    declares a dependency named `tracedecay-medium-treesitters` (`Cargo.lock:4480`),
    which in turn declares `tracedecay-lite-treesitters` (`Cargo.lock:4531`). You
-   cannot rename `large` in isolation — the names are part of the upstream's
+   cannot rename `large` in isolation, the names are part of the upstream's
    internal `Cargo.toml`, not ours.
 
 3. **Public registry package with external consumers.** `tracedecay-large-treesitters`
@@ -66,12 +66,12 @@ legacy archive names at `src/cloud.rs:140`, legacy `TRACEDECAY_*` env at
 5. **Forking cost is high and policy-violating.** To rename we would have to fork
    the entire three-tier set, rename all three crates coherently, republish to
    crates.io, and permanently maintain: the grammar build scripts, the vendored
-   C/C++ grammars, the `.cargo/config.toml` `NDEBUG` build-flag interplay
+   C/C++ grammars, the `.cargo/config.toml` `NDEBUG` build-flag interaction
    (`CHANGELOG.md:582-583`), and grammar-set updates on every language addition.
    This contradicts the no-fork policy in (1).
 
 6. **API is defined upstream.** tracedecay consumes `all_languages()`,
-   `markdown::LANGUAGE`, and `markdown::inline::LANGUAGE` — names and shapes we do
+   `markdown::LANGUAGE`, and `markdown::inline::LANGUAGE`, names and shapes we do
    not control (`ts_provider.rs:27`, `markdown_extractor.rs:70,139`).
 
 ## What would have to change before a rename is safe
@@ -79,13 +79,13 @@ legacy archive names at `src/cloud.rs:140`, legacy `TRACEDECAY_*` env at
 A rename becomes viable only under one of these two paths:
 
 - **Upstream-driven rename (preferred).** `aovestdipaperino` renames all three crates
-  consistently — git repo, crates.io packages, and internal `Cargo.toml`
-  references — and publishes new versions. tracedecay then bumps its dep line and
+  consistently, git repo, crates.io packages, and internal `Cargo.toml`
+  references, and publishes new versions. tracedecay then bumps its dep line and
   the three import sites. Zero fork maintenance.
 - **Controlled fork.** ScriptedAlchemy forks the full `large`/`medium`/`lite` set,
   renames all three coherently, republishes under `tracedecay-*-treesitters`, and
   permanently owns the grammar build pipeline (build scripts, vendored grammars,
-  `NDEBUG` interplay, grammar additions). This must be approved as an explicit
+  `NDEBUG` interaction, grammar additions). This must be approved as an explicit
   policy change to `AGENTS.md:20` *before* starting.
 
 In **either** path, the mechanical changes in tracedecay itself are the same:
@@ -119,15 +119,15 @@ Add the following (verbatim or adapted) to the compatibility policy / `AGENTS.md
 
 ## Verification trail
 
-- `Cargo.toml:108` — git dep declaration (current, `0.5.0`, aovestdipaperino).
-- `Cargo.lock:4472-4506` — `large` 0.5.0 git source + deps incl. `tracedecay-medium-treesitters`.
-- `Cargo.lock:4509-4523` — `lite` 0.2.0 from crates.io.
-- `Cargo.lock:4525-4531` — `medium` 0.2.0 from crates.io, depends on `lite`.
-- `src/extraction/ts_provider.rs:27` — `tracedecay_large_treesitters::all_languages()`.
-- `src/extraction/markdown_extractor.rs:70,139` — `markdown::inline::LANGUAGE` / `markdown::LANGUAGE`.
-- `CHANGELOG.md:530,533,552` — prior crates.io publication history (0.3.2 / 0.4.0).
-- `CHANGELOG.md:905` — confirms `large` includes `medium` + `lite`.
-- `CHANGELOG.md:582-583` — upstream build-script / `NDEBUG` coupling.
-- `Cargo.toml:97,100` + `CHANGELOG.md:12` — project rebrand to `tracedecay`.
-- `AGENTS.md:20` — existing upstream / no-fork policy statement.
-- `docs/RUST-PARSER-MIGRATION.md:69,219` — vendored-grammar ownership + planned drop of the deps.
+- `Cargo.toml:108`, git dep declaration (current, `0.5.0`, aovestdipaperino).
+- `Cargo.lock:4472-4506`, `large` 0.5.0 git source + deps incl. `tracedecay-medium-treesitters`.
+- `Cargo.lock:4509-4523`, `lite` 0.2.0 from crates.io.
+- `Cargo.lock:4525-4531`, `medium` 0.2.0 from crates.io, depends on `lite`.
+- `src/extraction/ts_provider.rs:27`, `tracedecay_large_treesitters::all_languages()`.
+- `src/extraction/markdown_extractor.rs:70,139`, `markdown::inline::LANGUAGE` / `markdown::LANGUAGE`.
+- `CHANGELOG.md:530,533,552`, prior crates.io publication history (0.3.2 / 0.4.0).
+- `CHANGELOG.md:905`, confirms `large` includes `medium` + `lite`.
+- `CHANGELOG.md:582-583`, upstream build-script / `NDEBUG` coupling.
+- `Cargo.toml:97,100` + `CHANGELOG.md:12`, project rebrand to `tracedecay`.
+- `AGENTS.md:20`, existing upstream / no-fork policy statement.
+- `docs/RUST-PARSER-MIGRATION.md:69,219`, vendored-grammar ownership + planned drop of the deps.

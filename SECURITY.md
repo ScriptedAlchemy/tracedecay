@@ -15,10 +15,10 @@ Only the current major release line is supported. All minor and patch versions w
 
 | Version | Supported |
 |---------|-----------|
-| 6.x (current) | Yes — all minor and patch releases |
+| 6.x (current) | Yes, all minor and patch releases |
 | < 6 | No |
 
-When a vulnerability is found, the fix is shipped as a new release — there are no backports to older major versions. Fixes are not applied in place to existing binaries. **If you run tracedecay in production automation (CI pipelines, scheduled agents, server-side MCP deployments), keep it updated to the latest release** so any future fix reaches you immediately via `tracedecay upgrade`.
+When a vulnerability is found, the fix is shipped as a new release. There are no backports to older major versions. Fixes are not applied in place to existing binaries. **If you run tracedecay in production automation (CI pipelines, scheduled agents, server-side MCP deployments), keep it updated to the latest release** so any future fix reaches you immediately via `tracedecay upgrade`.
 
 ## Security Model
 
@@ -33,7 +33,7 @@ tracedecay builds a **local** code graph stored in the active project store. Rep
 - Cross-session memory: durable facts, named entities, code-area notes, decisions, and feedback events in the holographic fact store. Those rows are local-only project data.
 - A response cache for `tracedecay_read` (`read_cache` table): the rendered output served to the agent, stored as a BLOB keyed by file path, mode, and arguments. For full/line-range reads this rendered output contains source text. Rows are freshness-gated by file mtime and swept after a period of inactivity.
 
-Aside from the `read_cache`, the graph itself does **not** persist raw source code — it stores structural metadata only. The active project store is local-only — there is no cloud sync, remote database, or server-side storage.
+Aside from the `read_cache`, the graph itself does **not** persist raw source code. It stores structural metadata only. The active project store is local-only. There is no cloud sync, remote database, or server-side storage.
 
 The user-level `~/.tracedecay/global.db` tracks indexed projects, aggregate token-savings counts, and cost accounting data parsed from Claude Code session transcripts. Cursor transcript search is stored in the active project's session store (`.tracedecay/sessions.db` for repo-local projects), which contains ingested Cursor user/assistant message text plus transcript paths and metadata for that project. Both stores remain local-only and are not synced to a remote service.
 
@@ -92,14 +92,14 @@ The MCP server exposes **more than 70 tools** (one fewer when the optional `ast-
 
 **File-editing tools** (modify source files in your project):
 
-- `tracedecay_str_replace`, `tracedecay_multi_str_replace` — anchored string replacement
-- `tracedecay_insert_at`, `tracedecay_insert_at_symbol` — anchored insertion
-- `tracedecay_replace_symbol` — replace a symbol's body
-- `tracedecay_ast_grep_rewrite` — structural rewrite via the external `ast-grep` binary
+- `tracedecay_str_replace`, `tracedecay_multi_str_replace`, anchored string replacement
+- `tracedecay_insert_at`, `tracedecay_insert_at_symbol`, anchored insertion
+- `tracedecay_replace_symbol`, replace a symbol's body
+- `tracedecay_ast_grep_rewrite`, structural rewrite via the external `ast-grep` binary
 
 **Local-state tools** (write only inside the active TraceDecay store, never your source):
 
-- `tracedecay_fact_store_add`, `tracedecay_fact_store_update`, `tracedecay_fact_store_remove`, `tracedecay_fact_store_supersede`, and `tracedecay_fact_feedback` — store, remove, or supersede fact text, entity names, feedback events, and trust-score inputs in the local project database. The other exact `tracedecay_fact_store_*` routes and `tracedecay_memory_status` are read-only; repair is daemon-owned background work.
+- `tracedecay_fact_store_add`, `tracedecay_fact_store_update`, `tracedecay_fact_store_remove`, `tracedecay_fact_store_supersede`, and `tracedecay_fact_feedback`, store, remove, or supersede fact text, entity names, feedback events, and trust-score inputs in the local project database. The other exact `tracedecay_fact_store_*` routes and `tracedecay_memory_status` are read-only; repair is daemon-owned background work.
 
 ### Support bundles and storage diagnostics
 
@@ -109,13 +109,13 @@ Also redact credential-bearing git remotes, database overrides such as `TRACEDEC
 
 **Test execution:**
 
-- `tracedecay_run_affected_tests` — compiles and runs the project's own test suite via a `cargo` subprocess (bounded by a configurable wall-clock timeout, default 300 s, and a per-invocation test cap)
+- `tracedecay_run_affected_tests`, compiles and runs the project's own test suite via a `cargo` subprocess (bounded by a configurable wall-clock timeout, default 300 s, and a per-invocation test cap)
 
 The edit tools target a single file with a unique anchor and re-index in place.
 They never run shell commands you did not supply. Network-capable operations
 are limited to the documented release, pricing, semantic-model, telemetry, and
 configured GitHub review paths above. Every editing and state-mutating tool is
-single-file or single-record scoped — there is no bulk-delete or
+single-file or single-record scoped. There is no bulk-delete or
 recursive-write primitive.
 
 > Note: file edits are applied by the agent on your behalf through your agent's own tool-approval flow. Treat tracedecay's edit tools with the same caution as your agent's built-in file-write tools.
@@ -140,8 +140,8 @@ tracedecay installs **no background daemon, system service, or autostart process
 
 The codebase contains minimal `unsafe`, used in two cross-platform places:
 
-- **Memory-mapped monitor ring buffer** (`src/monitor.rs`) — `memmap2` maps `~/.tracedecay/monitor.mmap`, the shared buffer the `tracedecay monitor` TUI reads
-- **Tree-sitter FFI** (`crates/tracedecay-code-extraction/src/ts_provider.rs`) — constructing the bundled WGSL grammar from its raw C entry point
+- **Memory-mapped monitor ring buffer** (`src/monitor.rs`). `memmap2` maps `~/.tracedecay/monitor.mmap`, the shared buffer the `tracedecay monitor` TUI reads
+- **Tree-sitter FFI** (`crates/tracedecay-code-extraction/src/ts_provider.rs`), constructing the bundled WGSL grammar from its raw C entry point
 
 The Windows-elevation `unsafe` documented in earlier versions was removed alongside the daemon in 6.0.0.
 

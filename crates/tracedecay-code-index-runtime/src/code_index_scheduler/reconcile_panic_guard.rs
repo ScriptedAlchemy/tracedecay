@@ -4,7 +4,7 @@
 //! A reconcile fans per-file work across the indexing pool over arbitrary user
 //! source. A panic there aborts the pass and surfaces as an opaque `JoinError`
 //! on the worker loop. The loop then restored the pending arrival and waited
-//! for the next wake — and because the offending input is still on disk, the
+//! for the next wake, and because the offending input is still on disk, the
 //! next wake reproduced the identical panic. One malformed file therefore
 //! blocked a project's entire code index indefinitely, retrying forever with
 //! no backoff and no terminal state.
@@ -267,8 +267,8 @@ mod tests {
 ///
 /// The retry is deliberately narrow. A panicking or permanently refused pass
 /// reproduces on every attempt, so retrying it forever is the failure this
-/// module exists to prevent; only a failure that is *transient by construction*
-/// — capacity another holder will release — earns a re-arm, and even that is
+/// module exists to prevent; only a failure that is *transient by construction*,
+/// capacity another holder will release, earns a re-arm, and even that is
 /// capped so a genuinely undersized budget degrades to stale instead of
 /// spinning.
 pub const RECONCILE_CAPACITY_RETRY_FLOOR: Duration = if cfg!(any(test, feature = "test-helpers")) {

@@ -42,13 +42,13 @@ import type { WorkTaskView } from './workProductView.ts';
  * The data arrives from three reads, and which read a channel comes from is the
  * thing to keep straight:
  *
- *   the product graph   `WorkItemV1` — task command gates and the declared
+ *   the product graph   `WorkItemV1`, task command gates and the declared
  *                       dependency graph
- *   the attempt list    `WorkAttemptV1` — the execution record: who ran what
+ *   the attempt list    `WorkAttemptV1`, the execution record: who ran what
  *                       (`requested_route`/`actual_route`), the retry chains,
  *                       the typed cancellation ladder, and the instant each
  *                       terminated attempt was observed to finish
- *   the graph read      `WorkGraphReadV1` — one immutable work-product graph
+ *   the graph read      `WorkGraphReadV1`, one immutable work-product graph
  *                       version and the whole `WorkProductProjectionBundleV1`
  *                       derived from that same version: declared effort and the
  *                       effort-weighted critical path, the gating edge set, the
@@ -66,13 +66,13 @@ import type { WorkTaskView } from './workProductView.ts';
  *
  *   wall clock       the attempt record has an end and no start.
  *                    `WorkLeaseFenceV1` is `{epoch, lease_id}` and
- *                    `WorkAttemptProgressV1` is `{completed, total}` — neither
- *                    is a clock — so a terminated attempt yields an instant and
+ *                    `WorkAttemptProgressV1` is `{completed, total}`, neither
+ *                    is a clock, so a terminated attempt yields an instant and
  *                    never a width. The bundle does not change that: its
  *                    runtime projection carries an attempt's identity and its
  *                    STATE, and no instant at all.
  *   observed order   the causal projection's `candidate_edges` are DECLARED
- *                    data — what the plan nominated as a possible cause — and
+ *                    data, what the plan nominated as a possible cause, and
  *                    the graph read carries no execution order to hold them
  *                    against. An empty candidate set means nobody declared one.
  *                    It must never be filled in from the order things were
@@ -86,8 +86,8 @@ import type { WorkTaskView } from './workProductView.ts';
  */
 
 /*
- * The channel vocabulary — `WorkChannel`, the two surviving `WorkChannelGap`
- * absences and their sentences — lives in `workChannel.ts`, and the
+ * The channel vocabulary, `WorkChannel`, the two surviving `WorkChannelGap`
+ * absences and their sentences, lives in `workChannel.ts`, and the
  * work-product graph read that feeds the graph-fed channels below lives in
  * `workGraphModel.ts`. This module owns the four projections themselves.
  */
@@ -99,7 +99,7 @@ import type { WorkTaskView } from './workProductView.ts';
  *
  * Cycles are condensed rather than broken, the same Tarjan discipline the code
  * strata use. A component with more than one member is a declared dependency
- * cycle, which must be drawn and captioned as an observation — it is a real
+ * cycle, which must be drawn and captioned as an observation, it is a real
  * reading of the plan, not a rendering error.
  */
 export interface WorkDagComponent {
@@ -172,7 +172,7 @@ export interface WorkDagReading {
  * module controls, and a blown call stack would take the whole page down.
  *
  * Returns one component index per task, in reverse topological order of the
- * condensation — Tarjan's natural output order.
+ * condensation, Tarjan's natural output order.
  */
 function stronglyConnected(
   taskIds: readonly string[],
@@ -290,7 +290,7 @@ export function workDagReading(
   // it emits the condensation in REVERSE topological order along the
   // dependency-to-dependent edges it walked. Descending index is therefore
   // topological order, and one pass down it visits every dependency before the
-  // thing that depends on it — which is what lets a single sweep settle the
+  // thing that depends on it, which is what lets a single sweep settle the
   // longest path.
   const ordered = [...members.keys()].sort((a, b) => b - a);
   const depthOf = new Map<number, number>();
@@ -399,7 +399,7 @@ export function workDagReading(
 // --- Timeline / attempts: loom weave ----------------------------------------
 
 /** One crossing of a run over a task. `crossings` counts the attempts the exact
- * graph attributes to that run and task — a repeated crossing of the same
+ * graph attributes to that run and task, a repeated crossing of the same
  * landing, which is the weave's rendering of a retry. */
 export interface WorkWeaveLanding {
   readonly taskId: string;
@@ -445,8 +445,8 @@ export interface WorkWeaveReading {
 /**
  * Why a channel the attempt list would have supplied has no value.
  *
- * Distinct from `channelGap` on purpose. These are not schema absences — the
- * contract carries the measurement — so reporting them as `unsupported_schema`
+ * Distinct from `channelGap` on purpose. These are not schema absences, the
+ * contract carries the measurement, so reporting them as `unsupported_schema`
  * would tell a reader the build cannot do something it can. Each one is the
  * state the read actually returned, in that state's own words.
  */
@@ -471,7 +471,7 @@ export function attemptChannelGap(
       return {
         available: false,
         state: 'denied',
-        detail: `the daemon reports no Work attempts in this scope — a typed absence its policy makes indistinguishable from a denial, so ${measure} is neither drawn nor guessed`,
+        detail: `the daemon reports no Work attempts in this scope, a typed absence its policy makes indistinguishable from a denial, so ${measure} is neither drawn nor guessed`,
       };
     case 'listed':
       return {
@@ -504,15 +504,15 @@ function attemptChannel<T>(
  * exact graph's runtime attempts. The attempt list adds the execution record
  * around it. A thread's executor is now read
  * from `actual_route` instead of being refused, and a retry is now a link in a
- * recovery chain instead of a repeated reference that merely looked like one —
+ * recovery chain instead of a repeated reference that merely looked like one,
  * `retryWeave` is the measured version of `WorkWeaveLanding.crossings`, and the
  * two are kept side by side rather than one overwriting the other, because they
  * count different things and disagreeing is informative.
  *
  * Every mark stays hollow. The page brought an end instant and no start, so the
  * weave gained `observedOrder` and did not gain a width; `wallClock` still says
- * so. The graph read does not change that either — it brought four calendar
- * instants per task and no duration anywhere — which is exactly why `instants`
+ * so. The graph read does not change that either, it brought four calendar
+ * instants per task and no duration anywhere, which is exactly why `instants`
  * and `wallClock` are two channels and not one.
  *
  * Both read arguments default to `pending` so a caller that has not issued a
@@ -632,7 +632,7 @@ export interface WorkCausalReading {
    * observed order to find an edge the plan never declared. */
   readonly undeclared: WorkChannel<never>;
   /**
-   * The causal candidates the work-product graph DECLARES — what the plan
+   * The causal candidates the work-product graph DECLARES, what the plan
    * nominated as a possible cause, edge by edge.
    *
    * The one channel on this page whose empty value is a reading. An empty
@@ -763,7 +763,7 @@ export interface WorkloadReading {
   readonly effortMass: WorkChannel<WorkEffortMassReading>;
   readonly concurrency: WorkChannel<WorkConcurrencyReading>;
   /** Recent change, measured against the instant the graph version was observed
-   * at — which is the clock this projection did not have until the graph read
+   * at, which is the clock this projection did not have until the graph read
    * was mounted. */
   readonly churn: WorkChannel<WorkChurnReading>;
   /** The live attempt projection under this graph version, and the one coverage
@@ -779,8 +779,8 @@ export interface WorkloadReading {
  *
  * The aggregation ratio a cortex view must print is `taskCount` against
  * `regions.length`. Area stays TASK COUNT and says so: the regions are the
- * exact graph's run/task attempt incidence, and `effortMass` — the effort
- * measurement — is a property of the whole work-product graph rather than
+ * exact graph's run/task attempt incidence, and `effortMass`, the effort
+ * measurement, is a property of the whole work-product graph rather than
  * of any run. The two are kept as separate readings instead of one being
  * rescaled by the other, because the graph version and snapshot page need not
  * cover the same tasks and a bar weighted across that seam would be a number
@@ -842,8 +842,8 @@ export function workloadReading(
             split: effortSplit(entry),
           },
     ),
-    // Not routed through `graphChannel`: this one has two ways to be absent —
-    // the read did not answer, and the read answered without the figures — and
+    // Not routed through `graphChannel`: this one has two ways to be absent,
+    // the read did not answer, and the read answered without the figures, and
     // they carry different states and different sentences.
     concurrency:
       entry === null

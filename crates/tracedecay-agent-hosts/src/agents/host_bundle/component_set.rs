@@ -766,7 +766,7 @@ impl HostBundleWriterV1 {
     ///    loss. This also closes the crash window between the artifact write
     ///    and the `wrote_new` journal update.
     ///
-    /// Anything else — foreign bytes that match neither — stays fail-closed
+    /// Anything else, foreign bytes that match neither, stays fail-closed
     /// with `RecoveryRequired`, and the operator resolves it explicitly with
     /// `tracedecay host-bundle recover`.
     fn restore_component_set_entry(
@@ -835,8 +835,8 @@ impl HostBundleWriterV1 {
             // rollback wants it gone. `remove_if_digest_matches` already
             // converges on the two safe outcomes (already absent, or holding
             // this transaction's cataloged bytes). Foreign bytes at a path this
-            // transaction created are genuinely ambiguous — removing them could
-            // destroy another writer's file — so that case stays fail-closed.
+            // transaction created are genuinely ambiguous, removing them could
+            // destroy another writer's file, so that case stays fail-closed.
             remove_if_digest_matches(
                 &parent,
                 &name,
@@ -888,7 +888,7 @@ fn component_set_receipt_from_prepared(
     // Update left untouched while it did real work on a sibling. Two gates bound
     // this:
     //
-    // * The operation is an Update — the only incremental one. Install
+    // * The operation is an Update, the only incremental one. Install
     //   first-deploys every component, Repair re-asserts ownership of the whole
     //   cataloged set, and Uninstall removes it, so each legitimately stamps its
     //   operation onto every receipt, changed or not.
@@ -907,8 +907,8 @@ fn component_set_receipt_from_prepared(
     let component_receipts = prepared
         .iter()
         .map(|component| {
-            // An unchanged companion — one whose plan writes nothing and whose
-            // manifest is byte-identical to its durable receipt — keeps its
+            // An unchanged companion, one whose plan writes nothing and whose
+            // manifest is byte-identical to its durable receipt, keeps its
             // original operation provenance. "Writes nothing" must be read from
             // each mutation's action, not from an empty mutation list: a
             // component with manifest artifacts always plans one Noop mutation
@@ -930,7 +930,7 @@ fn component_set_receipt_from_prepared(
                 .map(|receipt| receipt.rollback_history.clone())
                 .unwrap_or_default();
             // A Repair that overwrites a receipt-owned path whose bytes drifted
-            // from the catalog backs up genuinely foreign content — a user edit,
+            // from the catalog backs up genuinely foreign content, a user edit,
             // never tracedecay's own prior output, because Repair replaces a
             // path only when its observed digest differs from the cataloged one,
             // which for an unchanged Repair manifest is also the previously

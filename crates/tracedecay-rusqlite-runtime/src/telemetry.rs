@@ -1,6 +1,6 @@
 //! Canonical DB timing and queue instrumentation for this crate.
 //!
-//! Callers must use these snapshots — they must not invent parallel counters.
+//! Callers must use these snapshots, they must not invent parallel counters.
 
 mod lock_work;
 mod reader;

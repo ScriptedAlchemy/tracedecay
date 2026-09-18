@@ -1,4 +1,4 @@
-//! `tracedecay_constructors` — struct-literal construction sites and the fields each one sets.
+//! `tracedecay_constructors`, struct-literal construction sites and the fields each one sets.
 
 use super::*;
 use tree_sitter::{Node, Parser};
@@ -95,8 +95,8 @@ pub async fn handle_constructors(
 
     // Reading and parsing every source file in the project is a long CPU and
     // I/O slice with no await points. Running it inline pinned a request
-    // runtime worker for the whole scan — tens of seconds on a large
-    // repository — which is exactly what starves other interactive calls. The
+    // runtime worker for the whole scan, tens of seconds on a large
+    // repository, which is exactly what starves other interactive calls. The
     // scan is self-contained, so it belongs on a blocking thread.
     let mut scan_paths = files.into_iter().collect::<Vec<_>>();
     scan_paths.sort();

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 mod types;
 
-// Lite — always available (no cfg needed)
+// Lite. Always available (no cfg needed)
 mod astro_extractor;
 mod c_extractor;
 mod clone_body;
@@ -122,7 +122,7 @@ mod wgsl_extractor;
 #[cfg(feature = "lang-zig")]
 mod zig_extractor;
 
-// Lite — always available (no cfg needed)
+// Lite. Always available (no cfg needed)
 pub use astro_extractor::AstroExtractor;
 pub use c_extractor::CExtractor;
 pub use clone_body::{
@@ -369,7 +369,7 @@ impl LanguageRegistry {
     pub fn new() -> Self {
         #[allow(unused_mut)]
         let mut extractors: Vec<Box<dyn LanguageExtractor>> = vec![
-            // Lite — always available
+            // Lite. Always available
             Box::new(RustExtractor),
             Box::new(GoExtractor),
             Box::new(JavaExtractor),

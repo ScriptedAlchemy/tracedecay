@@ -56,7 +56,7 @@ describe('ScopeUrlSync', () => {
   it('keeps a registry-corrected label when an unrelated search param changes', async () => {
     // The reason the URL->store guard keys on the id alone. Once the registry
     // replaces the link's label, the store's label no longer matches the URL's
-    // — and a guard that compared labels would read that as a different scope,
+    //, and a guard that compared labels would read that as a different scope,
     // re-apply the stale claim, and drop the scope back to `unresolved`. The
     // correction has to survive a filter change.
     mount('/costs?scope=proj_abc&scopeLabel=Stale%20Bookmark%20Name');

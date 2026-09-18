@@ -112,9 +112,9 @@ Official implementation references:
 | `tracedecay-semantic` | Produce verified embeddings; persist/search admitted vectors through graph-db. |
 | `tracedecay-sessions` | Move LCM/source/successor/logical-copy/thread/agent DAG relations to graph-db; retain raw content and replay/retention journals in SQLite. |
 | `tracedecay-temporal-query` | Consume typed session graph ports. |
-| `tracedecay-rusqlite-parity` | Delete graph/vector fixtures and probes after cutover; retain SQLite parity for retained relational stores. (Update 2026-08-07: crate deleted outright, not retained — "refactor(storage): remove the superseded sqlite parity crates"; `git grep rusqlite-parity` outside plan history returns zero hits.) |
+| `tracedecay-rusqlite-parity` | Delete graph/vector fixtures and probes after cutover; retain SQLite parity for retained relational stores. (Update 2026-08-07: crate deleted outright, not retained, "refactor(storage): remove the superseded sqlite parity crates"; `git grep rusqlite-parity` outside plan history returns zero hits.) |
 | `tracedecay-rusqlite-runtime` | Delete the `graph` module and graph-shaped Work/workflow SQL after callers move; retain connection, ledger, repository, receipt, idempotency, and relational transaction support. |
-| `tracedecay-sqlite-parity-protocol` | Remove graph/vector parity variants; retain relational protocol variants. (Update 2026-08-07: crate deleted outright — same commit as `tracedecay-rusqlite-parity`; no relational variants were retained because no production caller remained.) |
+| `tracedecay-sqlite-parity-protocol` | Remove graph/vector parity variants; retain relational protocol variants. (Update 2026-08-07: crate deleted outright, same commit as `tracedecay-rusqlite-parity`; no relational variants were retained because no production caller remained.) |
 | `tracedecay-store` | Own graph-db-neutral attachment, snapshot, generation, and operation ports. |
 | `tracedecay-tool-catalog` | No storage dependency. |
 | `tracedecay-application` | Replace Git/vector SQL access with typed graph-db application calls. |
@@ -624,7 +624,7 @@ Recall re-derives candidate vectors from canonical content at query time; that
 is the production holographic path and it must be preserved.
 
 Owner decision (2026-08-07, second, supersedes the placement flexibility
-above): evidence review found persisted derived vectors are write-only — no
+above): evidence review found persisted derived vectors are write-only, no
 recall path reads stored bank vectors or stored per-fact vectors. They are
 therefore deleted, not relocated: remove the bank tables (V1 `memory_banks`,
 `memory_v2_banks`, `memory_v2_bank_dirty`), the bank rebuild/repair/scheduler
@@ -633,7 +633,7 @@ per-fact stored vectors (which leave with `memory_facts` in Step 3).
 Status/dashboard read models recompute their counts from facts directly.
 Replacing the holographic algebra itself remains out of scope. For any future
 vector projection work: stored vectors are purely real, so FHRR similarity is
-exactly cosine — `VectorMetric::Cosine` is algebra-faithful, and this breaks
+exactly cosine, `VectorMetric::Cosine` is algebra-faithful, and this breaks
 if imaginary components are ever persisted. Any re-landed purge/retention
 writer must scope bank/vector deletes to the affected rows; the salvaged
 branch's unscoped `DELETE FROM memory_banks` data-loss defect must not return.
@@ -822,13 +822,13 @@ git commit -am "feat(graph-db): wire embedded graph journeys"
 **Files:**
 - Delete/modify: `crates/tracedecay-runtime-core/src/db/migrations.rs`
 - Delete/modify: `crates/tracedecay-rusqlite-parity/src/fixture_ddl.rs`
-  (Update 2026-08-07: moot — the whole `tracedecay-rusqlite-parity` crate,
+  (Update 2026-08-07: moot, the whole `tracedecay-rusqlite-parity` crate,
   21 files, was deleted outright rather than modified.)
 - Modify: `crates/tracedecay-sqlite-parity-protocol/src/request.rs`
 - Modify: `crates/tracedecay-sqlite-parity-protocol/src/response.rs`
 - Modify: `crates/tracedecay-sqlite-parity-protocol/src/results.rs`
 - Modify: `crates/tracedecay-sqlite-parity-protocol/src/tests.rs`
-  (Update 2026-08-07: moot — the whole `tracedecay-sqlite-parity-protocol`
+  (Update 2026-08-07: moot, the whole `tracedecay-sqlite-parity-protocol`
   crate, 10 files, was deleted outright rather than modified; see
   "refactor(storage): remove the superseded sqlite parity crates".)
 - Delete: `crates/tracedecay-migrate/src/memory_cutover.rs`
@@ -957,7 +957,7 @@ lease, not a bespoke re-seal or a quarantine-and-rebuild:
    digest proving equal in compact and replay form for that fixture.
 2. Add a maintenance-cadence step beside `run_branch_compaction`: when a
    project's live container exceeds twice the summed bytes of its verified
-   heads' sealed artifacts (both figures are already censused — see the
+   heads' sealed artifacts (both figures are already censused, see the
    `RetentionBacklog` finding's sealed evidence), take the project store
    maintenance lease, quiesce the graph owner, `compact()`, close, and reopen.
    The reopen reconstructs the layered store from the `CompactStore` section;
@@ -986,7 +986,7 @@ The decision above rests on a wrong premise. Read against the pinned fork:
   retires two of three bulk generations and the container gives back more
   than half within two checkpoints. `compact()` is not what shrinks the
   file, and the "relation scalar endpoints" defect belongs to an older
-  sealed-lane design — sealed stores have built in compact form at
+  sealed-lane design, sealed stores have built in compact form at
   generation scale since `sealed_store.rs` adopted
   `IncrementalCompactStoreBuilder`.
 - What keeps an 10.6 GB container at 10.6 GB is that its rows were never
@@ -1008,16 +1008,16 @@ The decision above rests on a wrong premise. Read against the pinned fork:
    `publish_journaled`), so an active project converges to one-to-two
    generations of container within two checkpoints of its next publish.
    Landed: a deferred retirement still deletes the generation's sealed
-   artifact on the first pass — the directory needs no engine, and on the
-   measured project that is 9.5 GB of the 20 GB the project holds — while
+   artifact on the first pass, the directory needs no engine, and on the
+   measured project that is 9.5 GB of the 20 GB the project holds, while
    the tombstone keeps the native row delete queued for the next open.
    Landed: the Doctor `RetentionBacklog` finding carries the live container
    bytes, the sealed heads' bytes, and the deferred native retirement count,
    and reads Stale when retirements are deferred and the container exceeds
-   twice its heads — the inactive-project case is visible instead of silent.
+   twice its heads, the inactive-project case is visible instead of silent.
    Landed: the maintenance sweep's retirement pass now follows the release
-   sweep's policy — when the census finds work and the engine is
-   hibernated, open it once, delete, hibernate again — so an inactive
+   sweep's policy, when the census finds work and the engine is
+   hibernated, open it once, delete, hibernate again, so an inactive
    project converges on the ordinary maintenance cadence at the cost of
    one open per productive tick. That open still costs roughly twice the
    container in RAM the first time; the designs below remove the cost
@@ -1031,10 +1031,10 @@ The decision above rests on a wrong premise. Read against the pinned fork:
       cadence. Blocked on validating TraceDecay's staging writes against a
       `LayeredStore` (README gaps 3 and 4: `has_vector_index` planning and
       the MVCC-free base).
-   b. Rebuild a fresh container by streaming the retained authorities —
+   b. Rebuild a fresh container by streaming the retained authorities,
       sealed heads and their dependency closure from their compact stores,
       pending replays from `canonical_replay_source`, vector generations
-      from their sealed stores — then prove every generation's recovered
+      from their sealed stores, then prove every generation's recovered
       digest against the journal before swapping files under the
       maintenance lease. Memory is bounded by the largest generation, not
       the container. Blocked on vector generations: the sealed lane never
