@@ -1,3 +1,9 @@
+//! Production MCP proof for `tracedecay_todos`.
+//!
+//! Every call goes through `ProductionProjectCompositionHarnessV1::call_tool`,
+//! which is a JSON-RPC `tools/call`. Assertions compare that response to the
+//! marker text, line, enclosing symbol, and error the server actually returned.
+
 #![cfg(feature = "test-transport")]
 
 use std::fs;
