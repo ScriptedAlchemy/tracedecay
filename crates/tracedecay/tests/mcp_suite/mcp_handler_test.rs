@@ -31,6 +31,7 @@ mod move_symbol_test;
 mod rename_symbol_test;
 mod retrieve_truncation_test;
 mod schema_test;
+mod session_refresh_begin_test;
 mod session_search_test;
 #[cfg(feature = "test-transport")]
 mod shell_dead_code_test;
