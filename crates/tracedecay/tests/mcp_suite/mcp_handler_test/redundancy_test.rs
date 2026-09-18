@@ -742,14 +742,35 @@ async fn redundancy_ranks_exact_copies_by_duplicated_body_bytes() {
         markdown.error
     );
     let markdown = extract_text(markdown.result.as_ref().expect("redundancy markdown"));
+    // Default markdown stops before nested member paths. The caller-visible
+    // row is the ranking summary; JSON above pins the paths and spans.
     assert!(
-        markdown.contains("**ranked_by:** reviewable_source_bytes"),
+        markdown.contains("**ranked_by:** reviewable_source_bytes\n"),
         "{markdown}"
     );
-    assert!(markdown.contains("src/ledger/alpha.rs"), "{markdown}");
-    assert!(markdown.contains("src/ledger/bravo.rs"), "{markdown}");
-    assert!(markdown.contains("src/ledger/charlie.rs"), "{markdown}");
-    assert!(markdown.contains(&ledger_bytes.to_string()), "{markdown}");
+    assert!(
+        markdown
+            .contains("**examined_families:** 1\n**examined_members:** 3\n**status:** complete\n"),
+        "{markdown}"
+    );
+    assert!(
+        markdown.contains("match_class=conservative_exact"),
+        "{markdown}"
+    );
+    assert!(markdown.contains("member_count=3"), "{markdown}");
+    assert!(markdown.contains("normalization_revision=1"), "{markdown}");
+    assert!(
+        markdown.contains(&format!("**reviewable_source_bytes:** {ledger_bytes}\n")),
+        "{markdown}"
+    );
+    assert!(
+        markdown.contains("**total_member_count:** 3\n"),
+        "{markdown}"
+    );
+    assert!(
+        markdown.contains("**generated_members:** none"),
+        "{markdown}"
+    );
     assert!(
         !markdown.starts_with('{'),
         "omitted format must not be JSON: {markdown}"
@@ -834,19 +855,12 @@ async fn redundancy_reports_renames_only_under_the_rename_class_and_refuses_fore
     );
     retired["max_pairs"] = json!(4);
     let retired = handle_real_server_tool_call_raw(&server, "tracedecay_redundancy", retired).await;
-    let retired_message = retired["error"]["message"]
-        .as_str()
-        .unwrap_or_else(|| panic!("retired shape must be rejected: {retired}"));
-    assert!(
-        retired_message
-            .starts_with("tool execution failed: invalid arguments for tracedecay_redundancy: "),
-        "{retired}"
-    );
-    assert!(
-        retired_message.contains("unknown field `max_pairs`"),
-        "{retired}"
-    );
     assert_eq!(retired["error"]["code"], -32603, "{retired}");
+    assert_eq!(
+        retired["error"]["message"],
+        "tool execution failed: config error: invalid arguments for tracedecay_redundancy: unknown field `max_pairs`, expected one of `project_id`, `repository_id`, `match_classes`, `scope`, `include_generated_paths`, `family_limit`, `member_limit`, `work_limit`, `cursor`",
+        "{retired}"
+    );
 
     let unauthorized = handle_real_server_tool_call_raw(
         &server,
