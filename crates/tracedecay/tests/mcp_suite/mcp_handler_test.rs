@@ -37,6 +37,8 @@ mod impls_behavior_test;
 #[cfg(feature = "test-transport")]
 mod insert_at_test;
 mod largest_test;
+#[cfg(feature = "test-transport")]
+mod lcm_describe_behavior;
 mod lcm_doctor_test;
 #[cfg(feature = "test-transport")]
 mod lcm_expand_behavior_test;
