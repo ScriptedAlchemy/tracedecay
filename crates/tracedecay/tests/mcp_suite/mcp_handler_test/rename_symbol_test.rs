@@ -138,44 +138,60 @@ fn assert_workspace_unchanged(project: &Path) {
 
 /// Caller-visible site fields. Identity digests and byte offsets are omitted
 /// because they are addresses, not the rename the caller observes.
-fn visible_sites(payload: &Value) -> Vec<Value> {
-    payload["sites"]
-        .as_array()
-        .map(|sites| {
-            sites
-                .iter()
-                .map(|site| {
-                    json!({
-                        "kind": site["kind"],
-                        "disposition": site["disposition"],
-                        "file": site["file"],
-                        "line": site["line"],
-                        "expected_bytes": site["expected_bytes"],
-                        "replacement_bytes": site["replacement_bytes"],
-                        "reason": site["reason"],
+fn visible_sites(payload: &Value) -> Value {
+    Value::Array(
+        payload["sites"]
+            .as_array()
+            .map(|sites| {
+                sites
+                    .iter()
+                    .map(|site| {
+                        json!({
+                            "kind": site["kind"],
+                            "disposition": site["disposition"],
+                            "file": site["file"],
+                            "line": site["line"],
+                            "expected_bytes": site["expected_bytes"],
+                            "replacement_bytes": site["replacement_bytes"],
+                            "reason": site["reason"],
+                        })
                     })
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+                    .collect()
+            })
+            .unwrap_or_default(),
+    )
 }
 
-fn visible_hazards(payload: &Value) -> Vec<Value> {
-    payload["hazards"]
-        .as_array()
-        .map(|hazards| {
-            hazards
-                .iter()
-                .map(|hazard| {
-                    json!({
-                        "kind": hazard["kind"],
-                        "blocking": hazard["blocking"],
-                        "message": hazard["message"],
+fn visible_hazards(payload: &Value) -> Value {
+    Value::Array(
+        payload["hazards"]
+            .as_array()
+            .map(|hazards| {
+                hazards
+                    .iter()
+                    .map(|hazard| {
+                        json!({
+                            "kind": hazard["kind"],
+                            "blocking": hazard["blocking"],
+                            "message": hazard["message"],
+                        })
                     })
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+                    .collect()
+            })
+            .unwrap_or_default(),
+    )
+}
+
+fn matching(items: &Value, pred: impl Fn(&Value) -> bool) -> Value {
+    Value::Array(
+        items
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|item| pred(item))
+            .cloned()
+            .collect(),
+    )
 }
 
 /// One production `tools/call`. JSON is the public `format` a host requests
@@ -400,7 +416,7 @@ async fn test_rename_symbol_dry_run_default_reports_plan_and_writes_nothing() {
         "{p}"
     );
     assert_eq!(p["diff"], PRICING_DIFF, "diff: {}", p["diff"]);
-    assert_eq!(visible_hazards(&p), Vec::<Value>::new(), "{p}");
+    assert_eq!(visible_hazards(&p), json!([]), "{p}");
 
     assert_workspace_unchanged(project);
 }
@@ -637,10 +653,9 @@ async fn test_rename_symbol_blocks_unresolved_cross_module_spelling() {
     assert_eq!(payload["dry_run"], true, "{payload}");
     assert_eq!(payload["message"], BLOCKED_MESSAGE, "{payload}");
     assert_eq!(
-        visible_sites(&payload)
-            .into_iter()
-            .filter(|site| site["file"] == "src/nested/orders.rs")
-            .collect::<Vec<_>>(),
+        matching(&visible_sites(&payload), |site| {
+            site["file"] == "src/nested/orders.rs"
+        }),
         json!([
             {
                 "kind": "unresolved_text",
@@ -664,10 +679,9 @@ async fn test_rename_symbol_blocks_unresolved_cross_module_spelling() {
         "{payload}"
     );
     assert_eq!(
-        visible_hazards(&payload)
-            .into_iter()
-            .filter(|hazard| hazard["kind"] == "ambiguous_symbol")
-            .collect::<Vec<_>>(),
+        matching(&visible_hazards(&payload), |hazard| {
+            hazard["kind"] == "ambiguous_symbol"
+        }),
         json!([
             {
                 "kind": "ambiguous_symbol",
