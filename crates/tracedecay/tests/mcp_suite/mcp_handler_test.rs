@@ -62,6 +62,7 @@ mod status_runtime_test;
 #[cfg(feature = "test-transport")]
 mod test_map_test;
 #[cfg(feature = "test-transport")]
+mod test_risk_behavior_test;
 mod todos_test;
 mod type_hierarchy_test;
 mod unsafe_patterns_test;
