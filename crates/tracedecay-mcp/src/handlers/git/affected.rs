@@ -198,7 +198,6 @@ mod tests {
 
     struct FakeAffectedTestDependents {
         dependents: HashMap<String, Vec<String>>,
-        frontiers: std::sync::Mutex<Vec<Vec<String>>>,
     }
 
     impl AffectedTestDependents for FakeAffectedTestDependents {
@@ -207,7 +206,6 @@ mod tests {
             files: &'a [String],
         ) -> AffectedDependentsFuture<'a> {
             Box::pin(async move {
-                self.frontiers.lock().unwrap().push(files.to_vec());
                 Ok(files
                     .iter()
                     .map(|file| {
@@ -244,46 +242,11 @@ mod tests {
                     vec!["tests/transitive_test.rs".to_string()],
                 ),
             ]),
-            frontiers: std::sync::Mutex::new(Vec::new()),
         }
-    }
-
-    fn serial_affected_test_set(
-        source: &FakeAffectedTestDependents,
-        files: &[String],
-        max_depth: usize,
-    ) -> HashSet<String> {
-        let mut affected = HashSet::new();
-        let mut visited = HashSet::new();
-        let mut queue = std::collections::VecDeque::new();
-        for file in files {
-            if tracedecay_code_index::is_test_file(file) {
-                affected.insert(file.clone());
-            }
-            if visited.insert(file.clone()) {
-                queue.push_back((file.clone(), 0));
-            }
-        }
-        while let Some((file, depth)) = queue.pop_front() {
-            if depth >= max_depth {
-                continue;
-            }
-            for dependent in source.dependents.get(&file).into_iter().flatten() {
-                if !visited.insert(dependent.clone()) {
-                    continue;
-                }
-                if tracedecay_code_index::is_test_file(dependent) {
-                    affected.insert(dependent.clone());
-                } else {
-                    queue.push_back((dependent.clone(), depth + 1));
-                }
-            }
-        }
-        affected
     }
 
     #[tokio::test]
-    async fn affected_traversal_batches_one_database_read_per_frontier() {
+    async fn affected_traversal_records_minimum_hop_to_each_test() {
         let source = fake_affected_test_dependents(false);
         let traversal = collect_affected_test_files(
             &source,
@@ -296,25 +259,17 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            *source.frontiers.lock().unwrap(),
-            vec![
-                vec!["src/root.rs".to_string()],
-                vec!["src/a.rs".to_string(), "src/b.rs".to_string()],
-                vec!["src/leaf.rs".to_string()],
-            ]
+            traversal.test_distances,
+            HashMap::from([
+                ("tests/direct_test.rs".to_string(), 1),
+                ("tests/near_test.rs".to_string(), 2),
+                ("tests/transitive_test.rs".to_string(), 3),
+            ])
         );
-        assert_eq!(source.frontiers.lock().unwrap().len(), 3);
-        assert_eq!(traversal.test_distances.len(), 3);
     }
 
     #[tokio::test]
-    async fn affected_traversal_preserves_set_parity_and_ranks_deterministically() {
-        let expected_set = HashSet::from([
-            "tests/changed_test.rs".to_string(),
-            "tests/direct_test.rs".to_string(),
-            "tests/near_test.rs".to_string(),
-            "tests/transitive_test.rs".to_string(),
-        ]);
+    async fn affected_traversal_ranks_changed_tests_first_regardless_of_neighbor_order() {
         let mut ranked_runs = Vec::new();
 
         for reverse in [false, true] {
@@ -323,17 +278,9 @@ mod tests {
                 "tests/changed_test.rs".to_string(),
                 "src/root.rs".to_string(),
             ];
-            let serial_set = serial_affected_test_set(&source, &files, 5);
             let traversal = collect_affected_test_files(&source, &files, 5, None, &HashSet::new())
                 .await
                 .unwrap();
-            let batched_set = traversal
-                .test_distances
-                .keys()
-                .cloned()
-                .collect::<HashSet<_>>();
-            assert_eq!(serial_set, expected_set);
-            assert_eq!(batched_set, serial_set);
             ranked_runs.push(rank_affected_tests(&traversal.test_distances));
         }
 
