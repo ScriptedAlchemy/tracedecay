@@ -241,7 +241,7 @@ async fn wait_for_feedback_owner(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
 ) -> JsonRpcResponse {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         let response = harness
             .call_tool(
