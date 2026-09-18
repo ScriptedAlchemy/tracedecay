@@ -312,16 +312,23 @@ async fn memory_status_reports_the_seeded_project_and_keeps_user_memory_separate
         json!({"project_selector": {"project_id": "project.missing"}}),
     )
     .await;
+    // Routing rejects an unregistered selector before the status handler runs,
+    // so the caller sees a project-route failure, not an application-surface
+    // denial, and the response carries no result.
     assert_eq!(
-        denied["error"]["data"]["tool"], "tracedecay_memory_status",
+        denied["error"],
+        json!({
+            "code": -32602,
+            "message": "tool project route failed: reason_code=project_route_not_found retryable=false: registered project not found for project_selector.project_id=project.missing; run tracedecay_project_search",
+            "data": {
+                "tool": "tracedecay_memory_status",
+                "reason_code": "project_route_not_found",
+                "retryable": false,
+                "detail": "registered project not found for project_selector.project_id=project.missing; run tracedecay_project_search"
+            }
+        }),
         "denied selector response: {denied}"
     );
-    assert_eq!(
-        denied["error"]["data"]["reason_code"],
-        "application_surface_not_found_or_not_authorized"
-    );
-    assert_eq!(denied["error"]["data"]["kind"], "denied");
-    assert_eq!(denied["error"]["data"]["retryable"], false);
     assert_eq!(denied.get("result"), None);
     expect_memory_report(
         &memory_status(
@@ -339,15 +346,22 @@ async fn memory_status_reports_the_seeded_project_and_keeps_user_memory_separate
         json!({"memory_scope": "galaxy"}),
     )
     .await;
+    // Decode failures are a config error, so the MCP boundary currently
+    // reports them as an untyped execution failure. The message still names
+    // the rejected argument and the admitted scopes.
     assert_eq!(
-        invalid["error"]["data"]["tool"], "tracedecay_memory_status",
+        invalid["error"],
+        json!({
+            "code": -32603,
+            "message": "tool execution failed: config error: invalid retained application request for tracedecay_memory_status: memory_scope: unknown variant `galaxy`, expected `project` or `user`",
+            "data": {
+                "tool": "tracedecay_memory_status",
+                "cli_fallback": "This tool is also available from the shell: `tracedecay tool memory_status ...` (`tracedecay tool memory_status --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly."
+            }
+        }),
         "invalid scope response: {invalid}"
     );
-    assert_eq!(
-        invalid["error"]["data"]["reason_code"],
-        "application_surface_invalid_request"
-    );
-    assert_eq!(invalid["error"]["data"]["kind"], "invalid_request");
+    assert_eq!(invalid.get("result"), None);
 
     invoke_production_tool(
         &fixture,
