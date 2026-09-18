@@ -36,6 +36,13 @@ async fn add(fixture: &super::memory_facts_test::FactStoreMcpFixture, arguments:
     result.clone()
 }
 
+fn added_fact_id(result: &Value) -> String {
+    result["fact"]["fact"]["fact_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("added fact id: {result}"))
+        .to_owned()
+}
+
 fn by_content<'a>(payload: &'a Value) -> BTreeMap<&'a str, &'a Value> {
     payload["facts"]
         .as_array()
@@ -155,10 +162,7 @@ async fn fact_store_list_pages_current_facts_by_identity_and_filters() {
         }),
     )
     .await;
-    let project_fact_id = project["fact"]["fact"]["fact_id"]
-        .as_str()
-        .unwrap_or_else(|| panic!("added project fact id: {project}"))
-        .to_owned();
+    let project_fact_id = added_fact_id(&project);
 
     let listed = list(&fixture, json!({})).await;
     assert_eq!(
@@ -287,10 +291,7 @@ async fn fact_store_list_pages_current_facts_by_identity_and_filters() {
         }),
     )
     .await;
-    let successor_id = successor["fact"]["fact_id"]
-        .as_str()
-        .expect("successor fact id")
-        .to_owned();
+    let successor_id = added_fact_id(&successor);
     let low_id = listed["facts"]
         .as_array()
         .expect("facts")
@@ -461,7 +462,7 @@ async fn fact_store_list_rejects_malformed_selectors_and_out_of_range_limits() {
     .await;
     assert_eq!(
         unknown_scope["error"]["message"],
-        "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_list: memory_scope: unknown variant `session`, expected `project` or `user`"
+        "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_list: unknown variant `session`, expected `project` or `user`"
     );
 
     for arguments in [
