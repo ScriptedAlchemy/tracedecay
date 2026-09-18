@@ -452,8 +452,8 @@ fn session_fact_category(category: &str) -> Option<FactCategoryV1> {
 ///
 /// Deliberate decision: the prompt forbids string labels, but they are
 /// accepted defensively rather than rejecting an otherwise valid fact. Note
-/// that the "high" representative can clear automatic-apply thresholds —
-/// this is intentional.
+/// that the "high" representative can clear automatic-apply thresholds.
+/// This is intentional.
 fn candidate_trust_value(value: &Value) -> Option<f64> {
     if let Some(trust) = value.as_f64() {
         return (0.0..=1.0).contains(&trust).then_some(trust);

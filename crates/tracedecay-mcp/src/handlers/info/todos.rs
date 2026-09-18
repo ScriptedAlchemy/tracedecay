@@ -1,4 +1,4 @@
-//! `tracedecay_todos` — marker-word scan (TODO, FIXME, …) across indexed files.
+//! `tracedecay_todos`, marker-word scan (TODO, FIXME, …) across indexed files.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;

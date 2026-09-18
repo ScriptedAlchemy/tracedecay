@@ -1,4 +1,4 @@
-//! `tracedecay_config` — dotted-path lookups into TOML and JSON config files.
+//! `tracedecay_config`, dotted-path lookups into TOML and JSON config files.
 
 use std::path::Path;
 

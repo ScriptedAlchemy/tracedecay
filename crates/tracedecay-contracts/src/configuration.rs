@@ -205,8 +205,8 @@ pub enum ConfigurationWireRequestV1 {
 
 /// Decode an envelope-stripped configuration invocation payload.
 ///
-/// Callers send the operation's inner request body — the same shape every
-/// surface parser accepts — not the adjacently tagged `operation`/`request`
+/// Callers send the operation's inner request body, the same shape every
+/// surface parser accepts, not the adjacently tagged `operation`/`request`
 /// envelope [`ConfigurationWireRequestV1`] uses on the daemon contract. The
 /// envelope form fails admission because the inner request structs deny
 /// unknown fields (`operation` is not a member of those structs).

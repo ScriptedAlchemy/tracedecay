@@ -1,6 +1,6 @@
 ---
 name: investigating-unexpected-changes
-description: 'Attribute unexpected working-tree, branch, or commit changes using Git evidence and correlated sessions while preserving other agents’ work.'
+description: 'Attribute unexpected working-tree, branch, or commit changes using Git evidence and correlated sessions while preserving other agents' work.'
 ---
 
 # Investigating unexpected changes

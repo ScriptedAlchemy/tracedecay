@@ -1,4 +1,4 @@
-# V2 implementation audit — 2026-08-14
+# V2 implementation audit, 2026-08-14
 
 ## Method
 
@@ -46,7 +46,7 @@ Per repository policy, each implemented-but-unmounted item below must be wired
 to a real production caller or deleted.
 
 | ID | Rank | Consolidated item | Evidence and witness verdicts |
-| A22 | OWNER-DESIGN | Noncooperative authoritative-effect task retention | Added 2026-08-14 (settlement wave): a permanently noncooperative authoritative effect now correctly returns typed `ResetRequired` after the response grace, but its detached task remains unjoined; safely retaining/joining that task needs explicit owner design (settlement agent's architectural handoff — see dispatch settlement commits `232ed9411`…`f5f255818`). |
+| A22 | OWNER-DESIGN | Noncooperative authoritative-effect task retention | Added 2026-08-14 (settlement wave): a permanently noncooperative authoritative effect now correctly returns typed `ResetRequired` after the response grace, but its detached task remains unjoined; safely retaining/joining that task needs explicit owner design (settlement agent's architectural handoff, see dispatch settlement commits `232ed9411`…`f5f255818`). |
 | A21 | RC-BLOCKING | Advisory host-delivery consume path | Added post-consolidation (hawk rerun triage, 2026-08-14): `crates/tracedecay-usecases/src/advisory/host_delivery.rs` delivery/consume/hook-notice surface is registered at daemon startup (`src/daemon/service/invocation/registrars.rs`) but the production call site uses only `.runtime().run_once()`; the consume/deliver half has zero production callers. Wire the delivery consumption or retire that half. |
 |---|---|---|---|
 | A1 | RC-BLOCKING | Generalized external-source acquisition, canonical refetch, correction, and tombstone production | Host-observation specialization is mounted, but `GitHubExternalSourceAcquisitionV1` and the generalized owner remain uncalled (`crates/tracedecay-usecases/src/external_source_github.rs:213-425`; `external_source_acquisition.rs:341-510`). Plans 02 and 03 independently verdict this `IMPLEMENTED-UNMOUNTED`. |
@@ -66,7 +66,7 @@ to a real production caller or deleted.
 | A15 | POST-RC | Derived HTTP route documents | `http_route_documents` derives catalog-backed route documentation (`crates/tracedecay-api/src/http.rs:489-532`) but has only a catalog test caller. |
 | A16 | POST-RC | Policy source-authorization replay | Exact/recorded/current-best-effort replay exists at `crates/tracedecay-policy/src/replay.rs:17-174`; all callers are policy tests. |
 | A17 | POST-RC | Dashboard Work topology accounting read | `dashboard/src/workspaces/work/workTopologyAccounting.ts` explicitly states that its read model is not published; there is no generated contract or route for that advanced accounting sub-surface. |
-| A18 | RC-BLOCKING | Dashboard code-index-generation event | `DashboardEventKindV1::CodeIndexGenerationPublished` is explicitly “Declared but unfed” (`crates/tracedecay-dashboard-api/src/events_api.rs:109-112`) and is only constructed in a serialization test. The scheduler's internal publication bus is a different mounted event. |
+| A18 | RC-BLOCKING | Dashboard code-index-generation event | `DashboardEventKindV1::CodeIndexGenerationPublished` is explicitly "Declared but unfed" (`crates/tracedecay-dashboard-api/src/events_api.rs:109-112`) and is only constructed in a serialization test. The scheduler's internal publication bus is a different mounted event. |
 | A19 | RC-BLOCKING | Plan 24 branch-stack/integration Work surface | Integration observation/contracts exist, but `WorkOperation::ALL` has no Work integration apply/review/stack operation (`crates/tracedecay-api/src/work.rs:62-345`). Native integration exists as a separate family, so it does not mount this Work-context requirement. |
 | A20 | RC-BLOCKING | Exact PR-head/manual branch activation | PR-head poll and manual branch-add activation are now wired: bootstrap injects the daemon-owned scheduler into `pr_autotrack`, `track_pr` and `activate_manual_branch_head` prepare a linked worktree then mount it through shared `activate_linked_worktree` (`src/daemon/bootstrap.rs`; `src/daemon/pr_autotrack.rs`; `src/daemon/branch_add.rs`). Public `reconcile_project` and `activate_manual_branch` stay fail-closed because those APIs have no scheduler to inject (`reconciliation_without_scheduler_fails_*`; `manual_branch_without_scheduler_fails_*`). |
 
@@ -118,12 +118,12 @@ to a real production caller or deleted.
 
 | ID | Rank | Conflict | Ruling |
 |---|---|---|---|
-| D1 | RECORDED | Scout contracts/hooks “mounted” versus zero selection/owner callers | Controls, address registry, and advisory successor remain mounted; Scout envelope production remains parked. See [A2 ruling](#a2-ruling-2026-08-14). |
+| D1 | RECORDED | Scout contracts/hooks "mounted" versus zero selection/owner callers | Controls, address registry, and advisory successor remain mounted; Scout envelope production remains parked. See [A2 ruling](#a2-ruling-2026-08-14). |
 | D2 | RC-BLOCKING | Plan 25 duplicate witnesses disagree on Git/diagnostic joins | Broader Git and LSP routes are mounted, but the exact generation join entrypoints are not. Caller/type evidence resolves A4 as unmounted. |
 | D3 | POST-RC | One Plan 35 witness reported missing host/feedback mounts; the other found the production route | Current project-open source mounts feedback/advisory and LSP semantic authorities (`src/daemon/project_open_owners/advisory_runtime.rs:291-308,423-628`; LSP protocol uses `semantic_request`). Those product paths are mounted. Only the 19 convenience façades remain unmounted (A14). |
 | D4 | RC-REQUIRED-EVIDENCE | Plan 36 witnesses disagree on native approval/fanout mounting | Current source mounts the owner, six operations, exact topology, and coordinator preflight. Approval is structurally mounted; the gap is the public approval-to-receipt/restart journey, not an absent handler. Manual branch activation remains independently unavailable (A20). |
 | D5 | RC-BLOCKING | Plan 37 witnesses disagree on PR auto-track and CI localization | Background discovery/stack/advisory CI localization are mounted. Delivery failure localization is intentionally `NotConfigured` and superseded by decision. PR-head poll activation and manual `branch_add` are now scheduler-mounted through the same linked-worktree path. Public reconcile and `activate_manual_branch` without a scheduler remain fail-closed. |
-| D6 | RC-BLOCKING | Semantic path called “implemented-unmounted” versus Plan 31 mounted runtime | Runtime, vector publication, and query fallback are mounted. The live acceptance failure is evaluation/activation rejection, not absence of a semantic production caller. P12/E3 govern. |
+| D6 | RC-BLOCKING | Semantic path called "implemented-unmounted" versus Plan 31 mounted runtime | Runtime, vector publication, and query fallback are mounted. The live acceptance failure is evaluation/activation rejection, not absence of a semantic production caller. P12/E3 govern. |
 | D7 | RC-BLOCKING | Plan 27 calls Kimi/OpenCode plugin artifacts mounted; mount census calls live hooks capture-only | Artifact generation/install and handler functions exist, but the pre-main capture fast path prevents live handler dispatch for those command forms. The census's executable-path evidence wins. A12's Codex/Kimi registration slice is recorded separately; this row is the capture-fast-path only. |
 | D8 | POST-RC | `task_activity` listed as an unmounted conformance exception | Current daemon code publishes `ActivityFamilyV1::Task` after committed Work mutation (`src/daemon/service/invocation/work.rs:107-123`), and Dashboard subscribes. The exception is stale test/ledger maintenance, not a product gap. |
 | D9 | POST-RC | Plan 34 requests read-only LSP rename candidate/preview; Plan 35 explicitly keeps rename unavailable | The current gateway intentionally returns unavailable (`crates/tracedecay-lsp/src/gateway.rs:2683-2693`) and never applies edits. Plan 35 is the more specific current LSP authority; treat Plan 34's read-only rename binding as a post-RC plan-authority reconciliation, not an RC edit-safety defect. |
@@ -227,7 +227,7 @@ owner remount-or-retire choice. A2 stays parked, not silently green.
 
 ### Why not WIRE
 
-The “smallest honest slice” is not a hook-to-`prepare_configured` call.
+The "smallest honest slice" is not a hook-to-`prepare_configured` call.
 `selection_input` requires a fully assembled canonical packet (address
 registry bind, authority pin, `RequestContext`, lifecycle, committed
 publication, candidates). That assembler was fed by the deleted lifecycle

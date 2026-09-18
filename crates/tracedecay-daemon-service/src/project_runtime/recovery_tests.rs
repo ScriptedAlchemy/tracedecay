@@ -249,7 +249,7 @@ async fn captured_admission_continues_after_quiescence_installs_its_fence() {
 }
 
 /// Recovery owners used to be cancelled deep inside the async `shut_down_all`
-/// drain, so they kept running through every shutdown phase in front of it —
+/// drain, so they kept running through every shutdown phase in front of it,
 /// blocked-interval and workflow-census scans were still logging seconds after
 /// the daemon began shutting down. `begin_shutdown` runs in the synchronous
 /// `cancel_admissions` half of shutdown, so the cancellation must already have
@@ -281,7 +281,7 @@ async fn begin_shutdown_cancels_project_recovery_owners_before_it_returns() {
 /// owner starts another cycle.
 ///
 /// Time is paused on a current-thread runtime, so the worker cannot be polled
-/// while the synchronous `begin_shutdown` runs — the cycle count read after it
+/// while the synchronous `begin_shutdown` runs, the cycle count read after it
 /// returns is exactly the count at the moment it returned.
 #[tokio::test(start_paused = true)]
 async fn no_recovery_cycle_starts_after_begin_shutdown_returns() {
@@ -334,8 +334,8 @@ async fn no_recovery_cycle_starts_after_begin_shutdown_returns() {
 }
 
 /// Cancelling at prepare time is only safe because registry admission is
-/// one-way. `shut_down_all` is retryable — a failed drain clears
-/// `shutdown_started` — so a retry re-enters `begin_shutdown`; this pins the
+/// one-way. `shut_down_all` is retryable, a failed drain clears
+/// `shutdown_started`, so a retry re-enters `begin_shutdown`; this pins the
 /// property that makes that harmless: nothing can re-admit an owner for the
 /// retry to run, and the sweep is idempotent.
 #[tokio::test]

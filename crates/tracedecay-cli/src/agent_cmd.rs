@@ -767,7 +767,7 @@ fn apply_canonical_component_set(
         )?;
     // Recover this host's own outstanding journal before previewing, exactly as
     // `HostComponentSetTransactionV1::execute` does. Without this the residue of
-    // any earlier failure — including one that has since been fixed — makes
+    // any earlier failure, including one that has since been fixed, makes
     // every later run refuse with `RecoveryRequired` until somebody runs
     // `host-bundle recover` by hand, so a transient fault becomes permanent.
     transaction
@@ -1422,7 +1422,7 @@ pub(crate) async fn handle_reinstall_command(adopt: bool) -> tracedecay_domain::
         )
         .await;
         // Reporting lives in `partition_reinstall_results`, which every
-        // reinstall pass shares. Keep the reason with the name — a bare id list
+        // reinstall pass shares. Keep the reason with the name, a bare id list
         // left "failed for: claude, cursor, hermes, kimi" undiagnosable.
         match crate::update_cmd::partition_reinstall_results(results) {
             crate::update_cmd::ReinstallOutcome::AllOk => {
@@ -1879,7 +1879,7 @@ mod tests {
 "#;
     /// [`PinnedUserDataDir`] gives each test its own profile root (and its own
     /// `HOME`) for the duration of the guard, and holds the crate-wide
-    /// user-data-dir lock while the override is installed — the same lock every
+    /// user-data-dir lock while the override is installed, the same lock every
     /// other profile-mutating test takes, so the mutation cannot be observed
     /// half-applied. Hold it for as long as any `home` fixture is alive.
     ///
@@ -2012,8 +2012,8 @@ mod tests {
     }
 
     /// An explicit component repair that would claim an unrecorded file with
-    /// no recognizable legacy provenance is refused without `--adopt` — even
-    /// at preview time, which stays read-only — and the refusal names the
+    /// no recognizable legacy provenance is refused without `--adopt`, even
+    /// at preview time, which stays read-only, and the refusal names the
     /// contested path plus the explicit adoption remedy.
     #[tokio::test]
     async fn explicit_component_repair_refuses_adoption_without_the_adopt_flag() {
@@ -2341,7 +2341,7 @@ mod tests {
 
     /// Forwards the whole lifecycle to the real authority but always fails
     /// `verify`, which interrupts the transaction after its artifacts are on
-    /// disk — the state that leaves a recovery journal behind.
+    /// disk, the state that leaves a recovery journal behind.
     struct AlwaysFailVerifyRegistration {
         inner: CatalogHostComponentRegistrationAuthority,
     }

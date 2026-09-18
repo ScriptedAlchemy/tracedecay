@@ -10,7 +10,7 @@ import { type CountRow, rankedCounts } from './activity.ts';
  * The analytics diagnostics fold records how the window's events came out
  * (`by_outcome`) and carries a short tape of the latest events with their own
  * outcomes (`recent_events`). The work-product graph read carries the runtime
- * projection — every attempt the daemon could observe, with the state it is in
+ * projection, every attempt the daemon could observe, with the state it is in
  * (`WorkAttemptStateV1`, whose members include `failed`, `timed_out`,
  * `cancelled` and `recovery_required`).
  *
@@ -42,7 +42,7 @@ export const FAILED_OUTCOMES: readonly string[] = [
 
 /** Outcome words this build reads as a call that did not fail. `observed` is
  * here because hook-routing events carry it and they are not tool calls at
- * all — they are events the fold saw go past. */
+ * all, they are events the fold saw go past. */
 export const SETTLED_OUTCOMES: readonly string[] = [
   'success',
   'succeeded',
@@ -73,7 +73,7 @@ export interface OutcomeReading {
 }
 
 /** `by_outcome`, split three ways. `counted` is the sum of everything the row
- * set carried — the only denominator these shares may be taken against, because
+ * set carried, the only denominator these shares may be taken against, because
  * the window's own event count includes events this array never described. */
 export function readOutcomes(rows: readonly CountRow[]): OutcomeReading {
   const ranked = rankedCounts(rows, 'outcome');
@@ -157,7 +157,7 @@ export type AttemptFailureReading =
       readonly attempts: number;
       /** The runtime projection's own coverage. `unavailable` means the daemon
        * could observe NO attempt, which is not the same as observing none to
-       * have failed — the surface must not print a zero for it. */
+       * have failed, the surface must not print a zero for it. */
       readonly coverage: 'complete' | 'partial' | 'unavailable';
       /** Attempts the daemon named as unobservable under `partial` coverage. */
       readonly unobserved: number;

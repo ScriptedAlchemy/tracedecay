@@ -1,16 +1,16 @@
 /**
- * SESSION PROVENANCE INSPECTOR — what is durably known about one session, and
+ * SESSION PROVENANCE INSPECTOR, what is durably known about one session, and
  * from where, with every gap typed.
  *
  * Three authorities meet here and stay separate:
  *
- *   index row      `GET /api/loom/temporal` — the retained session store's
+ *   index row      `GET /api/loom/temporal`, the retained session store's
  *                  own row: provider-qualified identity, recorded model
  *                  identities, start / end / last-message stamps, the message
  *                  count the store holds. Read with the index page, so a
  *                  session that is not on the loaded page has no row here and
  *                  says so.
- *   transcript     `GET /api/plugins/hermes-lcm/session/{id}` — the persisted
+ *   transcript     `GET /api/plugins/hermes-lcm/session/{id}`, the persisted
  *                  turns one server page at a time, the compactor's summary
  *                  nodes, the whole-session counts, and the opaque cursor that
  *                  bounds the page. A message whose body the store does not
@@ -110,7 +110,7 @@ export function SessionInspector({
 }
 
 /* ------------------------------------------------------------------------ *
- * Identity — the index row, or the typed reason there is none
+ * Identity, the index row, or the typed reason there is none
  * ------------------------------------------------------------------------ */
 
 type Identity =
@@ -359,12 +359,12 @@ function LoomPivot({ provider, sessionId }: { provider: string; sessionId: strin
 }
 
 /* ------------------------------------------------------------------------ *
- * Transcript — one server page at a time
+ * Transcript, one server page at a time
  * ------------------------------------------------------------------------ */
 
 export function SessionTranscript({ sessionId }: { sessionId: string }) {
   // The cache token comes from the authority, never a second construction of
-  // it here — `scopeKey` is what every scoped read keys by.
+  // it here, `scopeKey` is what every scoped read keys by.
   const scopeCacheKey = useScope((state) => scopeKey(state.scope));
   return <SessionTranscriptPage key={`${scopeCacheKey}:${sessionId}`} sessionId={sessionId} />;
 }
@@ -466,7 +466,7 @@ function SessionBody({
 
 /**
  * The session's own totals, which are whole-session figures rather than page
- * figures — that distinction is stated, because the message list below shows
+ * figures, that distinction is stated, because the message list below shows
  * one page and the count above it does not.
  *
  * The compaction ratio is the one derived number here and it is labelled as a
@@ -511,7 +511,7 @@ function SessionCounts({ payload }: { payload: LcmSessionPayloadV1 }) {
       </div>
       {compaction != null ? (
         <p className="text-3xs leading-snug text-text-muted">
-          Summaries hold {(compaction * 100).toFixed(1)}% of the source tokens they replaced —
+          Summaries hold {(compaction * 100).toFixed(1)}% of the source tokens they replaced , 
           derived from the two counts above, not a stored ratio.
         </p>
       ) : sourceTokens != null && summaryTokens != null ? (
@@ -530,7 +530,7 @@ function SessionCounts({ payload }: { payload: LcmSessionPayloadV1 }) {
 
 /** The compactor's cuts. Each node states the depth it sits at, the category
  * and source type it was built from, and the exact token exchange it made. A
- * summary is a persisted derived artifact — EXPLICIT — never the source text. */
+ * summary is a persisted derived artifact, EXPLICIT, never the source text. */
 function CompactionBoundaries({ payload }: { payload: LcmSessionPayloadV1 }) {
   const nodes = payload.summary_nodes;
   return (
@@ -613,7 +613,7 @@ function SummaryNodeRow({ node }: { node: LcmSummaryNodeV1 }) {
 }
 
 /** Token provenance across the loaded page, tallied from each message's own
- * provenance field — a page-level statement, never a session-level one. */
+ * provenance field, a page-level statement, never a session-level one. */
 function pageProvenance(messages: readonly LcmMessageV1[]) {
   let counted = 0;
   let unavailable = 0;
@@ -648,8 +648,8 @@ function RawMessages({
   /**
    * The requested page is on screen, so put focus back if paging lost it.
    * Focus lands on the range line rather than the first row, because the
-   * range line is the answer a reader who just paged is holding — which page
-   * am I on now — and it renders in every state, including an empty page.
+   * range line is the answer a reader who just paged is holding, which page
+   * am I on now, and it renders in every state, including an empty page.
    * Only when focus was actually orphaned.
    */
   useEffect(() => {
@@ -662,7 +662,7 @@ function RawMessages({
       <Legend>raw messages</Legend>
 
       {/* Loaded page count, whole-session total, and whether another page
-        * exists — all three, because any one alone lets a page read as the
+        * exists, all three, because any one alone lets a page read as the
         * transcript. A status region so paging announces where the reader now
         * is; `tabIndex={-1}` so the focus repair can land here without adding
         * a tab stop. */}
@@ -783,7 +783,7 @@ function MessageRow({ message }: { message: LcmMessageV1 }) {
 }
 
 /* ------------------------------------------------------------------------ *
- * Git relations — each under its own daemon source status
+ * Git relations, each under its own daemon source status
  * ------------------------------------------------------------------------ */
 
 function RelationsSection({ identity }: { identity: Identity }) {
@@ -812,7 +812,7 @@ function RelationsBody({ identity }: { identity: Identity }) {
       return (
         <StateChip
           kind="unavailable"
-          detail={`not loaded — relations are read with index page ${identity.page}`}
+          detail={`not loaded, relations are read with index page ${identity.page}`}
         />
       );
     case 'row':

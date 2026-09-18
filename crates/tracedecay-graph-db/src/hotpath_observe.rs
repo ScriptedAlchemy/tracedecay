@@ -2,7 +2,7 @@
 //!
 //! Lock-wait labels stay separate from generation, read, and traversal work.
 //! Gauges and `val!` keys are bounded: counts and enumerated hydration sources
-//! only — never paths, digests, query text, or identifiers.
+//! only, never paths, digests, query text, or identifiers.
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HydrationSource {
@@ -149,7 +149,7 @@ pub(crate) fn record_generation_verification(
 /// verified-generation marker over byte-identical container bytes.
 ///
 /// Kept apart from [`record_generation_verification`] so the staging
-/// container's proof counters — which the publication contract tests pin —
+/// container's proof counters, which the publication contract tests pin,
 /// stay a statement about the authority's rows.
 #[inline(always)]
 pub(crate) fn record_sealed_copy_verification(

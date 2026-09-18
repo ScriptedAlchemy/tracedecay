@@ -25,10 +25,10 @@ entry). Kimi Code also uses `tracedecay`, registered in session/user
 `tracedecay_` prefix (they are stable identifiers referenced by skills, docs,
 and analytics), and non-plugin/direct installs still register the server under
 the `tracedecay` key (the `mcp__tracedecay__*` namespace). Skills are
-referenced as `tracedecay:<skill-slug>` — the host prefix plus the skill slug,
+referenced as `tracedecay:<skill-slug>`, the host prefix plus the skill slug,
 never a doubled `tracedecay`.
 
-## Source Layout
+## Source layout
 
 - `skills/`: shared `SKILL.md` workflow instructions.
 - `commands/`: Claude/shared slash-command sources (numbered tool steps).

@@ -173,11 +173,11 @@ pub(super) fn def_branch_diff() -> ToolDefinition {
                 },
                 "file": {
                     "type": "string",
-                    "description": "Optional file path filter — only show diffs for symbols in this file"
+                    "description": "Optional file path filter, only show diffs for symbols in this file"
                 },
                 "kind": {
                     "type": "string",
-                    "description": "Optional kind filter — only show diffs for this symbol kind (e.g. 'function', 'struct')"
+                    "description": "Optional kind filter, only show diffs for this symbol kind (e.g. 'function', 'struct')"
                 },
                 "limit": {
                     "type": "number",

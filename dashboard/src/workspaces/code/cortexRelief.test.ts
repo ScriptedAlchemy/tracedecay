@@ -1,7 +1,7 @@
 /**
  * The CORTEX layout model, against a wire-true `StrataMeasurementV1`.
  *
- * What this suite protects is not the picture — it is the four claims that make
+ * What this suite protects is not the picture, it is the four claims that make
  * the picture admissible: a region is placed at a depth one of its own files
  * actually has, area carries the file count, a contour is a real interval of a
  * real quantity, and nothing the drawing cap folds out disappears from the
@@ -134,7 +134,7 @@ describe('elevation', () => {
       ),
     );
     const region = model.regions[0]!;
-    // The mean of 0,2,2,6 is 2.5 — a depth no file in this region is at. The
+    // The mean of 0,2,2,6 is 2.5, a depth no file in this region is at. The
     // lower median is 2, which is a depth two of them are at.
     expect(region.depth).toBe(2);
     expect(region.depthMin).toBe(0);

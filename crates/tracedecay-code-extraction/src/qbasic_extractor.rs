@@ -589,7 +589,7 @@ impl QBasicExtractor {
     /// Recursively walk AST nodes looking for `call_statement` nodes.
     ///
     /// `function_call` nodes (built-ins like `STR$()`) are deliberately not
-    /// extracted — they aren't user-defined.
+    /// extracted. They aren't user-defined.
     fn walk_for_calls(state: &mut ExtractionState, node: TsNode<'_>) {
         if node.kind() == "call_statement" {
             Self::extract_call_from_call_statement(state, node);

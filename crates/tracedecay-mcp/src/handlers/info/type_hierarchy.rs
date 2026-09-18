@@ -1,4 +1,4 @@
-//! `tracedecay_type_hierarchy` — verified implements/extends tree rooted at a symbol.
+//! `tracedecay_type_hierarchy`, verified implements/extends tree rooted at a symbol.
 
 use std::collections::HashSet;
 use std::fmt::Write as _;

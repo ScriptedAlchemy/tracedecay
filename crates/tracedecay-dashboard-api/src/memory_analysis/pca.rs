@@ -3,8 +3,8 @@
 //! The projection needs the two dominant eigenpairs of the centered Gram
 //! operator `G = Fc·Fcᵀ` for an `n × d` feature matrix with `n ≤ 2000` and
 //! `d = 4096`. This runs Lanczos with full reorthogonalization against `G`
-//! applied implicitly — `G·v = Fc·(Fcᵀ·v)` with the centering folded into the
-//! two products — so neither `Fc` nor the `n × n` Gram matrix is ever
+//! applied implicitly. `G·v = Fc·(Fcᵀ·v)` with the centering folded into the
+//! two products, so neither `Fc` nor the `n × n` Gram matrix is ever
 //! materialized: the working set is the Krylov basis (`steps × n`) plus one
 //! `d`-vector, and each step costs one pass over the features instead of the
 //! `O(n²·d)` Gram build. Lanczos converges in far fewer operator applications

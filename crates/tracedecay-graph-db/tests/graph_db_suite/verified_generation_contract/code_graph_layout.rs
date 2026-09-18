@@ -6,7 +6,7 @@
 //!
 //! * publishing generation N+1 supersedes N as an ordinary verified-head
 //!   replacement, and N is then reclaimed through the ordinary
-//!   `retire_replay` path — never through the head-retirement escape hatch;
+//!   `retire_replay` path, never through the head-retirement escape hatch;
 //! * a store persisted under the retired per-generation layout still opens,
 //!   and its immortal per-generation head is drained through the existing
 //!   superseded-head retirement path without disturbing the canonical
@@ -207,7 +207,7 @@ fn canonical_code_graph_namespace_is_per_shard_and_disjoint_from_the_legacy_layo
 
 /// Publishing a second generation of one code shard supersedes the first head,
 /// and the superseded generation is then reclaimed by the ordinary
-/// `retire_replay` path — the head-retirement escape hatch is never used.
+/// `retire_replay` path, the head-retirement escape hatch is never used.
 #[test]
 fn second_generation_supersedes_the_head_and_the_first_retires_without_head_retirement() {
     let temp = TempDir::new().unwrap();
@@ -669,8 +669,8 @@ fn publish_generation(
 
 /// Installing a new head is the ordinary reclaim of every generation it
 /// superseded: their journal rows are tombstoned and finalized, and their
-/// sealed artifacts leave the disk, while the head — and any generation a
-/// live reader still holds — stays.
+/// sealed artifacts leave the disk, while the head, and any generation a
+/// live reader still holds, stays.
 #[test]
 fn installing_a_head_retires_every_superseded_generation_it_no_longer_needs() {
     let temp = TempDir::new().unwrap();

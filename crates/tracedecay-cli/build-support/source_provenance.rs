@@ -38,10 +38,10 @@ pub struct ResolvedSourceProvenance {
 }
 
 /// Resolves the commit identity of the crate rooted at `repository_root`,
-/// consulting three sources in strict order — verified git worktree,
+/// consulting three sources in strict order, verified git worktree,
 /// `TRACEDECAY_RELEASE_GIT_SHA` (passed in by the build script so this stays
 /// testable without process-global env mutation), then the `cargo package`
-/// VCS journal adjacent to `manifest_dir` — and failing when none applies.
+/// VCS journal adjacent to `manifest_dir`, and failing when none applies.
 ///
 /// A registry install unpacks the crate into a directory that can itself sit
 /// inside an unrelated repository, where `git rev-parse HEAD` would happily
@@ -75,8 +75,8 @@ pub fn resolve(
 
 /// Verified-git source: applies only when `root` is its own worktree with a
 /// resolvable `HEAD`. An unborn `HEAD` (fresh `git init`) is not a hit and
-/// falls through to the explicit sources; a probe that half-answers — a HEAD
-/// with no readable status — is a hard failure rather than a fabricated
+/// falls through to the explicit sources; a probe that half-answers, a HEAD
+/// with no readable status, is a hard failure rather than a fabricated
 /// "clean".
 fn resolve_from_git(root: &std::path::Path) -> Result<Option<ResolvedSourceProvenance>, String> {
     if !is_own_worktree(root) {
@@ -303,7 +303,7 @@ fn source_watch_paths(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     paths
 }
 
-/// Whether git reports `root` itself — not some ancestor — as a worktree top
+/// Whether git reports `root` itself, not some ancestor, as a worktree top
 /// level. This is the guard that keeps an unrelated enclosing repository out of
 /// both the baked commit and the rebuild triggers.
 fn is_own_worktree(root: &std::path::Path) -> bool {
@@ -320,8 +320,8 @@ fn is_own_worktree(root: &std::path::Path) -> bool {
 /// missing, the command failed, or it printed nothing.
 ///
 /// `--no-optional-locks` keeps every probe strictly read-only. Plain
-/// `git status` refreshes the index stat cache and rewrites `.git/index` — a
-/// path [`watch_paths`] hands Cargo as a rebuild trigger — so probing the tree
+/// `git status` refreshes the index stat cache and rewrites `.git/index`, a
+/// path [`watch_paths`] hands Cargo as a rebuild trigger, so probing the tree
 /// would arm the very trigger it reads. The flag suppresses only that
 /// incidental write; the reported status is unchanged.
 fn git_stdout(root: &std::path::Path, args: &[&str]) -> Option<String> {

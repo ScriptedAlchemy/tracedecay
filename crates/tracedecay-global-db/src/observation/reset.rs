@@ -3,7 +3,7 @@
 //! Admission refuses a sessions store whose `observations` or
 //! `source_cursor_advances` table carries a pre-release branch-local shape,
 //! or whose retained rows were committed under a superseded native-source
-//! scheme (see [`OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION`]) — both typed
+//! scheme (see [`OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION`]), both typed
 //! `ResetRequired` naming [`OBSERVATION_AUTHORITY`]. Because the refusal
 //! fires before any runtime can mount the store, recovery runs offline over a
 //! plain connection while the operator holds the profile's exclusive
@@ -12,11 +12,11 @@
 //! The reset is scoped to exactly the refused authority: it drops the
 //! observation-authority tables plus their pure projection derivations,
 //! recreates every one of them empty at the canonical shape (through the same
-//! DDL, index, and trigger authorities the schema installer uses — attach
+//! DDL, index, and trigger authorities the schema installer uses, attach
 //! only validates existing stores, it never reinstalls), clears the
 //! `session_messages` projector output (classified `Recoverable`; the cleared
 //! evidence re-derives by re-ingesting provider transcripts), and preserves
-//! everything else in the store — transcripts, LCM content, configuration,
+//! everything else in the store, transcripts, LCM content, configuration,
 //! registry, workflow, and the session-temporal state that is not a
 //! projection of observations. The session-temporal projection *is* one, so it
 //! resets with the stream it projects (see
@@ -27,7 +27,7 @@
 //! an anchor is verified field-for-field when its observation is admitted
 //! again, so a retained one whose source generation moved (the transcript
 //! file was replaced) fails every re-admission as a storage collision, and a
-//! retained alias whose record was revised refuses it deterministically —
+//! retained alias whose record was revised refuses it deterministically,
 //! either way the rebuild the reset promises never happens.
 //!
 //! The derived usage (`observation_provider_usage`), the admission cursors
@@ -41,8 +41,8 @@
 //! receipts and current-state rows attest observation commits the reset just
 //! destroyed. Re-admission of an unchanged transcript reuses the same
 //! logical-effect idempotency key (derived from the stable observation id)
-//! with a new request digest — new anchors, cursors, and sanitization
-//! receipts — so the surviving journal reports a conflict and the admission
+//! with a new request digest, new anchors, cursors, and sanitization
+//! receipts, so the surviving journal reports a conflict and the admission
 //! worker retries the whole batch on its fixed cadence. That is not a
 //! supersession of the prior command: the attested state was deliberately
 //! removed. The receipts therefore reset with the stream they describe (see
@@ -57,8 +57,8 @@
 //! and `PRAGMA foreign_key_check` proves the rest before the transaction
 //! commits (the reset suspends per-statement enforcement for its own
 //! intermediate drop states, and `PRAGMA integrity_check` does not cover
-//! foreign keys). And every step — trigger removal, deletion, temporal
-//! invalidation, trigger restoration, scheme enrollment — runs inside that one
+//! foreign keys). And every step, trigger removal, deletion, temporal
+//! invalidation, trigger restoration, scheme enrollment, runs inside that one
 //! transaction, so a failure anywhere leaves the store exactly as refused.
 
 use std::collections::BTreeSet;
@@ -125,7 +125,7 @@ const OBSERVATION_PROJECTION_TABLES: &[&str] = &[
 /// below. Their triggers are dropped and reinstalled from the same canonical
 /// authority inside the reset transaction, the way the observation tables are
 /// dropped and recreated: immutability guards ordinary writers, not the
-/// authority rebuild itself. Runtime immutability is unchanged — the store
+/// authority rebuild itself. Runtime immutability is unchanged, the store
 /// leaves this function carrying the same trigger set it arrived with.
 ///
 /// `session_occurrences` is deliberately absent: its triggers keep the
@@ -153,7 +153,7 @@ const IMMUTABLE_DERIVED_TEMPORAL_TABLES: &[&str] = &[
 /// availability, and the projection receipts that certify exactly those
 /// counts and digests. Deleting occurrences while preserving the generation
 /// would leave those receipts certifying coverage that no longer exists and
-/// `validate_final_projection_receipt` recomputing a disagreement — and a
+/// `validate_final_projection_receipt` recomputing a disagreement, and a
 /// retained active frontier of 100 would exclude the re-ingested effects
 /// 1..=100 from `pending_session_temporal_refresh_page_result`, suppressing
 /// the rebuild it is supposed to trigger. So the generation is invalidated
@@ -196,8 +196,8 @@ const OBSERVATION_DERIVED_TEMPORAL_DELETES: &[&str] = &[
 /// capture anchor, and the projector's message anchors. The anchors those
 /// columns name, and the aliases resolving native records to them, are
 /// re-derived and re-verified by the next admission of the same records; they
-/// go with the stream. Anchors owned by preserved rows — summary anchors,
-/// git-topology anchors — are never named here and stay.
+/// go with the stream. Anchors owned by preserved rows, summary anchors,
+/// git-topology anchors, are never named here and stay.
 const OBSERVATION_ANCHOR_BINDING_COLUMNS: &[(&str, &str)] = &[
     ("observation_retrieval_anchors", "anchor_id"),
     ("observation_repository_provenance", "retrieval_anchor_id"),
@@ -220,7 +220,7 @@ const OBSERVATION_ANCHOR_BINDING_COLUMNS: &[(&str, &str)] = &[
 /// epochs, and provider-rotation cursors (`tracedecay-internal:`). A retained
 /// Codex epoch that says the corpus was swept, or a coverage row that says
 /// `complete`, makes the rebuilt authority skip exactly the transcripts the
-/// reset promised to re-read — so they reset with the observation cursors.
+/// reset promised to re-read, so they reset with the observation cursors.
 /// The only other tenant of the table, the hook-analytics import cursor, feeds
 /// `analytics_events` and is not a derivation of observations; it stays.
 const NATIVE_SOURCE_SCHEDULING_CURSOR_DELETE: &str =
@@ -233,7 +233,7 @@ const NATIVE_SOURCE_SCHEDULING_CURSOR_DELETE: &str =
 /// sanitization receipts the reset recreates empty. Leaving them makes the
 /// next admission of the same observation id a conflicting reuse of the
 /// prior command rather than a rebuild. Definition and binding revisions
-/// stay — they are the source contract, not observation content, and the
+/// stay, they are the source contract, not observation content, and the
 /// next commit `INSERT OR IGNORE`s them.
 const OBSERVATION_DERIVED_EXTERNAL_SOURCE_DELETES: &[&str] = &[
     "DELETE FROM external_source_acquisition_queue_v1",
@@ -254,16 +254,16 @@ const OBSERVATION_DERIVED_EXTERNAL_SOURCE_DELETES: &[&str] = &[
 /// Writer-ledger identities minted for external-source commits
 /// (`external-source.{logical-effect-suffix}`). A remount that keeps the
 /// same incarnation and epoch would otherwise replay those rows as a
-/// conflict even after the receipt tables are empty. Other ledger keys —
-/// including newer or foreign markers — are not named here.
+/// conflict even after the receipt tables are empty. Other ledger keys,
+/// including newer or foreign markers, are not named here.
 const EXTERNAL_SOURCE_RUNTIME_IDEMPOTENCY_DELETE: &str =
     "DELETE FROM td_runtime_writer_idempotency_v2 WHERE idempotency_key LIKE 'external-source.%'";
 
 /// Preserved rows that would be orphaned by the reset, with the authority
 /// they would be orphaned from.
 ///
-/// `session_external_payload_manifests` is LCM publication metadata — durable,
-/// immutable by trigger, and outside every deletion above — whose `receipt_id`
+/// `session_external_payload_manifests` is LCM publication metadata, durable,
+/// immutable by trigger, and outside every deletion above, whose `receipt_id`
 /// names a `sanitization_receipts` row the reset drops with the observation
 /// authority. There is no scoped treatment that keeps both coherent: the
 /// manifests are not reconstructible from the transcripts, and deleting
@@ -484,7 +484,7 @@ pub fn reset_refused_observation_authority(
     // reject the intermediate drop states of an exclusive maintenance
     // connection; `require_referential_integrity` proves the committed result
     // instead. The setting belongs to the connection, not to this operation,
-    // so it is restored before the caller reuses it — on both paths.
+    // so it is restored before the caller reuses it, on both paths.
     let enforced_foreign_keys = conn
         .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, bool>(0))
         .map_err(reset_storage)?;
@@ -604,7 +604,7 @@ fn reset_within_maintenance_transaction(
     }
     // Recreate the authority empty at the canonical shape through the same
     // DDL, index, and invariant-trigger authorities the schema installer
-    // uses. Attach only validates an existing store — it never reinstalls —
+    // uses. Attach only validates an existing store, it never reinstalls,
     // so the reset itself must leave the store at the final contract.
     transaction
         .execute_batch(OBSERVATION_AUTHORITY_SCHEMA_SQL)

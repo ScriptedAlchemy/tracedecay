@@ -67,7 +67,7 @@ def _group_has_runnable_member(pgid: int) -> bool:
     """Whether the group still holds a member that can execute.
 
     killpg(pgid, 0) keeps succeeding while an exited leader is an unreaped
-    zombie of the calling shell — a process this helper can never reap.
+    zombie of the calling shell, a process this helper can never reap.
     Counting that zombie as live would burn the entire stop grace period and
     misreport a graceful shutdown as forced cleanup.
     """

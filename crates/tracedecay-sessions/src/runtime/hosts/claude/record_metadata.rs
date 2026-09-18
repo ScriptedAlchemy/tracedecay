@@ -613,7 +613,7 @@ fn append_attribution_metadata(metadata: &mut Map<String, Value>, record: &Value
 
 /// Record edited-file facts from a user `tool_result` record's top-level
 /// `toolUseResult` (Edit/Write payloads), and fold the file into the session
-/// accumulator. Stores only the path, change type, and hunk count — never the
+/// accumulator. Stores only the path, change type, and hunk count, never the
 /// patch bodies.
 fn append_edited_file_metadata(
     metadata: &mut Map<String, Value>,

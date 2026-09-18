@@ -203,7 +203,7 @@ fn normalize_composer_bubble_record(
             // A bubble's tokenCount is that bubble's own token spend, and the
             // envelope relations already carry the composer session and bubble
             // message identity: message scope, delta semantics. Only the
-            // bubble's own model spellings name the model — the session-level
+            // bubble's own model spellings name the model, the session-level
             // `modelConfig` (`tracedecaySessionModel`) is not per-message
             // evidence and mid-session model switches would misattribute it.
             facts.push(CanonicalObservationFactV1::ProviderUsage {

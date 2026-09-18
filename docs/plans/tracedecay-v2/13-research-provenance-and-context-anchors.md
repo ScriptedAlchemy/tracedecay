@@ -27,10 +27,10 @@ Pure source-only/internal request helpers and wire-visible V2 request revisions
 may converge in place.
 `V1` may identify an initial final wire record.
 
-**Status (2026-07-23):** Landed on this branch. Plan 13's core — `RetrievalAnchorId`
+**Status (2026-07-23):** Landed on this branch. Plan 13's core, `RetrievalAnchorId`
 identity and resolution, the branch's V2/V3-named anchor targets, native Git/worktree/integration-receipt
 topology anchors, the immutable evidence-span/occurrence/retriever-contribution
-contract, dispositions and safe tombstones, and the atomic evidence-assembly store — is
+contract, dispositions and safe tombstones, and the atomic evidence-assembly store, is
 implemented across `crates/tracedecay-domain/src/research/`,
 `crates/tracedecay-store/src/{evidence_assembly,retrieval_anchor}.rs`,
 `crates/tracedecay-rusqlite-runtime/src/repository/evidence_assembly.rs`,
@@ -59,7 +59,7 @@ and no code outside `crates/tracedecay-domain` constructs
 `RetrievalAnchorTargetV2::GitTopology` / `RetrievalAnchorTargetV3::GitTopology`.
 This is SANCTIONED-PENDING contract breadth, not drift: Required behavior 11-21
 mandate each target, and every producer is owned by another plan. Do not refile
-any row below as a Plan 13 gap, and do not delete it as unused breadth — the
+any row below as a Plan 13 gap, and do not delete it as unused breadth, the
 owning plan binds to this contract rather than minting a parallel reference
 family.
 
@@ -106,8 +106,8 @@ acceptance coverage. `ResearchBundleEnvelopeV1`, `ResearchBundleManifestV1`,
 and the `ResearchAnchorSubjectV1` research-subject variants, have no production
 consumer; their only callers are `tests/v2_corpus_suite/{anchor_retargeting,
 research_anchors}.rs` and `tests/v2_corpus_suite/research_anchors/support.rs`.
-"Does not own" already disclaims this subject matter — research manifests,
-research ledgers, private corpus registries, and subagent rosters — and Acceptance
+"Does not own" already disclaims this subject matter, research manifests,
+research ledgers, private corpus registries, and subagent rosters, and Acceptance
 requires that repository search find no research-ledger requirement in this
 contract. This family is therefore a candidate for delete-with-last-caller, but it
 is **not** covered by the pending-producer sanction above and was deliberately
@@ -286,7 +286,7 @@ evidence-span identity, and payload-free retriever-contribution anchors all exis
 Shipped reality:
 
 - Item 1: the opaque `RetrievalAnchorId` is realized as a derived, digest-tagged
-  string — `retrieval.v2.sha256:<hex>` for observation/repository/entity targets and
+  string, `retrieval.v2.sha256:<hex>` for observation/repository/entity targets and
   `retrieval.v3.sha256:<hex>` for Git-topology and the V3 occurrence/span/contribution
   targets (`derive_anchor_id`/`derive_v3_anchor_id`,
   `crates/tracedecay-domain/src/research/anchor.rs`). The digest is over owner+target
@@ -670,7 +670,7 @@ payload.
 `EvidenceAssemblyWriteV1`, and `EvidenceAssemblyIdempotencyKeyV1` ship in
 `crates/tracedecay-store/src/evidence_assembly.rs`; `publish_or_replay` returns the
 existing receipt on identical scoped material and `ReplayConflict` on changed material.
-A contribution stays explanation-only evidence — rank/score/query/embedding cannot
+A contribution stays explanation-only evidence, rank/score/query/embedding cannot
 retarget it.
 
 ## Authorization, lineage, and deletion
@@ -755,10 +755,10 @@ authorization, replay-conflict, tombstone-whitelist, and payload-free
 persistence. Failure blocks admission without re-enabling deleted or redacted
 payloads.
 
-**Status (2026-07-23):** Implemented. The four-layer split — domain validation, store
+**Status (2026-07-23):** Implemented. The four-layer split, domain validation, store
 publish-or-replay, application authorization/orchestration
 (`crates/tracedecay-application/src/evidence_assembly.rs`), and infra persistence
-(`crates/tracedecay-rusqlite-runtime/src/repository/evidence_assembly.rs`) — is in place
+(`crates/tracedecay-rusqlite-runtime/src/repository/evidence_assembly.rs`), is in place
 with immutable inserts and atomic rollback on replay conflict.
 
 ## Cross-plan ownership

@@ -619,7 +619,7 @@ fn production_increment_reuses_retained_tree_and_reports_bounded_parse_work() {
 /// after restore. `code_index_reused_parses` is the matching hotpath success
 /// event (`add_reused_parses(1)`); these extract counts are the readable
 /// re-extract dual on the default (non-hotpath) path. No carry-forward miss
-/// to fix — this locks the counter floor so a later fallback would fail.
+/// to fix, this locks the counter floor so a later fallback would fail.
 #[test]
 fn unchanged_increment_does_not_reextract_carried_files() {
     let store = SharedPublicationStore::default();
@@ -2710,8 +2710,8 @@ fn linked_worktree_no_op_reuses_only_its_compatible_generation() {
 /// A checkout misclassified as "not a git repository" resolves a scope
 /// without a reference or worktree while the store still answers with the
 /// sealed git-identified generation. That answer must be one terminal typed
-/// reset state — never the generic contract error callers can only retry on
-/// a one-second cadence — and the sealed generation's git identity must
+/// reset state, never the generic contract error callers can only retry on
+/// a one-second cadence, and the sealed generation's git identity must
 /// survive the refusal untouched.
 #[test]
 fn misclassified_non_git_scope_reaches_a_terminal_reset_state_instead_of_retrying() {
@@ -2822,7 +2822,7 @@ fn non_git_scope_stays_independently_active_beside_git_identified_generations() 
 /// partial key (repository-only pointer) must never adopt a generation
 /// sealed for another checkout. A same-checkout label move is a rebuild
 /// that still names the incumbent as the compare-and-swap expected token
-/// (`active_generation` stays `Option<Published>` — reuse denied is
+/// (`active_generation` stays `Option<Published>`, reuse denied is
 /// `Ok(None)`; CAS is proven by a successful publish against the slot).
 #[test]
 fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
@@ -2873,7 +2873,7 @@ fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
     );
 
     // The exact sealed full scope still dispatches while the incumbent sits
-    // in the slot — before the label-move publish replaces it.
+    // in the slot, before the label-move publish replaces it.
     assert_eq!(
         owner
             .active_generation(&hawk_scope)
@@ -2902,7 +2902,7 @@ fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
     );
 }
 
-/// The code shard/slot key is the sealed branch label inside the full scope —
+/// The code shard/slot key is the sealed branch label inside the full scope,
 /// never a filesystem path (the scope carries none) and never the generation
 /// id: successive generations share their branch's slot while a second branch
 /// on the same worktree splits into its own independently active slot.
@@ -3056,7 +3056,7 @@ fn production_owner_never_activates_a_generation_after_projection_failure() {
 
 /// Width is sizing policy, never semantics. A generation built with the
 /// per-file sweep running inline must be byte-identical to one built at full
-/// machine width — same manifest, same chunks, same digests, same order.
+/// machine width, same manifest, same chunks, same digests, same order.
 #[test]
 fn parallel_and_sequential_generations_are_byte_identical() {
     parallel_equivalence::assert_parallel_and_sequential_generations_are_byte_identical();
@@ -3629,8 +3629,8 @@ fn partitioned_codec_reads_pre_paging_evidence_descriptor() {
 
 /// Bytes the unmodified pre-paging writer emitted (see the fixture README and
 /// `provenance.json`), sealed at the retired manifest revision seven. That
-/// revision named two payload shapes — a manifest with its census and one
-/// without — so every reader that authenticates or decodes a manifest refuses
+/// revision named two payload shapes, a manifest with its census and one
+/// without, so every reader that authenticates or decodes a manifest refuses
 /// the carrier with the typed rebuild error instead of picking a shape, and
 /// refuses it before reading a single segment byte. Only retention's
 /// descriptor projection abstains, because a store that still holds a retired
@@ -3904,7 +3904,7 @@ fn both_retired_manifest_census_shapes_reach_the_typed_refusal() {
 /// Revision 10 stored generation-bound symbol occurrence lists on each file
 /// segment descriptor. The current writer emits generation-independent
 /// symbol identities (revision 11), so a revision-10 carrier must be refused
-/// before its payload is parsed — never migrated in place.
+/// before its payload is parsed, never migrated in place.
 #[test]
 fn prior_partitioned_symbol_occurrence_revision_reaches_the_typed_refusal() {
     let (_, manifest, _) = partitioned_codec_fixture();

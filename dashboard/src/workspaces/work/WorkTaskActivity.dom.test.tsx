@@ -98,7 +98,7 @@ describe('the Work task-activity reading', () => {
  * `/api/events` is one connection for the whole dashboard and the pulse buffer
  * behind it is shared, so every project's task frames sit in the same 64 entries
  * regardless of which project is selected. Counting the family alone therefore
- * reported project A's work under project B — a false "N in live window" that
+ * reported project A's work under project B, a false "N in live window" that
  * looks exactly like real work in the scope a reader is actually looking at.
  * There is no per-project event route to switch to, and inventing one is not the
  * fix; the scoping belongs on what the buffer already holds.
@@ -110,11 +110,11 @@ describe('the Work task-activity window, by scope', () => {
     pulse('task_activity', 'project.beta'),
     pulse('task_activity', null),
     // Another family, from the selected project, which must not be counted for
-    // any scope — the original filter's one correct half.
+    // any scope, the original filter's one correct half.
     pulse('hook_activity', 'project.beta'),
   ];
 
-  it('counts only the selected project’s frames, and never another project’s', () => {
+  it('counts only the selected project\'s frames, and never another project\'s', () => {
     expect(
       taskActivityWindow(MIXED, {
         kind: 'project',
@@ -135,7 +135,7 @@ describe('the Work task-activity window, by scope', () => {
   });
 
   /** The aggregate answers for every project, so a frame that named none is
-   * still a frame it received — and there is nothing to report separately. */
+   * still a frame it received, and there is nothing to report separately. */
   it('counts every attributed and unattributed task frame under all projects', () => {
     expect(taskActivityWindow(MIXED, { kind: 'all' })).toEqual({
       observed: 4,

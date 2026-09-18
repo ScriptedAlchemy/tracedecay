@@ -48,7 +48,7 @@ fn schema_convergence_status(findings: &[SchemaConvergenceFindingV1]) -> Value {
 /// sealed-generation census the retrieval lanes enforce.
 ///
 /// `serving_branch` is store provenance, but readers take it as a serving
-/// claim — on a fresh daemon it named a branch seconds into enrollment while
+/// claim, on a fresh daemon it named a branch seconds into enrollment while
 /// every retrieval lane truthfully refused `generation_rebuilding`. Status
 /// must report the same serving truth the lanes enforce: the branch claim is
 /// gated on a sealed complete generation existing, and the typed
@@ -445,7 +445,7 @@ pub async fn handle_status(
 ///
 /// Only the first is retryable-by-waiting: a `warming` read converges on its
 /// own, while a `parked` read names a deterministic contract violation the
-/// background worker re-checks every wake but can never fix by waiting — so
+/// background worker re-checks every wake but can never fix by waiting, so
 /// the warning carries the exact reason and remediation instead of a
 /// wait-longer message.
 fn code_index_freshness_projection(

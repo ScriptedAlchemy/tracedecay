@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>TRACE — one function as a watershed</title>
+<title>TRACE, one function as a watershed</title>
 <link rel="stylesheet" href="topography.css" />
 <style>
   .hero { position: relative; }
@@ -53,7 +53,7 @@
     <div class="keycell">
       <div class="keyhead"><span class="td-legend">Membrane</span><span class="td-rule"></span></div>
       <svg viewBox="0 0 210 34" width="100%" height="34" id="k-mem"></svg>
-      <div class="cap">A translucent enclosure is <b>one type</b> — an <code>impl</code> block, solid edge; a
+      <div class="cap">A translucent enclosure is <b>one type</b>. An <code>impl</code> block, solid edge; a
         <code>trait</code>, dashed edge, because the concrete side is chosen at run time. Ports mark where flow
         crosses the boundary.</div>
     </div>
@@ -85,9 +85,9 @@
       system</b> rather than two lists or a route map. Fifty-three call sites converge from four modules into one
       basin; sixty-one leave it and disperse into five.</p>
       <p class="td-caption">Callers and callees are the same picture because they are the same water. The reader
-      does not trace a path between two points — they see a catchment: how wide it is, where it drains from, and
+      does not trace a path between two points. They see a catchment: how wide it is, where it drains from, and
       which types the water has to pass <i>through</i>. The membranes are the part that makes this structural rather
-      than topological: a call is not just an arrow between functions, it is an entry into a type, a movement
+      than topological: a call is an entry into a type, a movement
       between that type's methods, and an exit.</p>
     </section>
     <section>
@@ -99,18 +99,18 @@
         <dt>node hue</dt><dd><code>kind</code> through <code>kindColor.ts</code>, unchanged.</dd>
         <dt>membrane</dt><dd><code>contains</code> edges from an impl/trait node to its methods. Real; <code>contains</code> is an edge kind.</dd>
         <dt>underlay</dt><dd>sheet 01's relief, filtered to the modules holding a traced <code>file_path</code>. Real.</dd>
-        <dt>dashed mouth</dt><dd>a <code>calls</code> edge whose target failed to resolve. Real — it is the absence the extractor already records.</dd>
+        <dt>dashed mouth</dt><dd>a <code>calls</code> edge whose target failed to resolve. Real. It is the absence the extractor already records.</dd>
       </dl>
       <p class="td-caption" style="margin-top:8px">26 nodes at ≤3 hops, well inside the subgraph endpoint's 80–250
-      band, so this sheet is a <b>direct render</b> — no aggregation, unlike sheet 01.</p>
+      band, so this sheet is a <b>direct render</b>, no aggregation, unlike sheet 01.</p>
     </section>
     <section>
       <h2>Open question</h2>
       <p class="td-caption">Membranes and modules are two different containments drawn as two different kinds of
-      enclosure, and at three hops they already overlap awkwardly — a type whose methods live in two files cannot be
+      enclosure, and at three hops they already overlap awkwardly. A type whose methods live in two files cannot be
       one convex membrane. Options: (a) let a membrane be non-convex and let it look like the mess it is; (b) drop
-      the module underlay on this sheet and keep only types; (c) draw the membrane as a <i>tint on the flow</i> —
-      the water changes colour while it is inside a type — instead of an enclosure at all. (c) is the only one that
+      the module underlay on this sheet and keep only types; (c) draw the membrane as a <i>tint on the flow</i>,
+      the water changes colour while it is inside a type. Instead of an enclosure at all. (c) is the only one that
       composes at 6 hops, but it loses the "you are inside something" feeling that makes this sheet work.</p>
       <p class="td-caption">Also unresolved: at depth 3 this is legible; at depth 5 the tributary count roughly
       cubes. Does the sheet degrade by aggregating far rows into single channels with a count, or by refusing and
@@ -146,7 +146,7 @@
   node('ctxroute',   { x: 300,  y: ROW.u2, name: 'context_route',       kind: 'method',   deg: 24, mod: 'api/routes' });
   node('schroute',   { x: 545,  y: ROW.u2, name: 'search_route',        kind: 'method',   deg: 17, mod: 'api/routes' });
   node('profile',    { x: 880,  y: ROW.u2, name: 'build_profile',       kind: 'function', deg: 22, mod: 'tool-catalog/snapshot' });
-  node('bind',       { x: 1180, y: ROW.u2, name: 'bind_surfaces',       kind: 'method',   deg: 15, mod: 'application/git', source: 'no callers ≤3 hops — public surface' });
+  node('bind',       { x: 1180, y: ROW.u2, name: 'bind_surfaces',       kind: 'method',   deg: 15, mod: 'application/git', source: 'no callers ≤3 hops, public surface' });
 
   node('hctx',       { x: 405,  y: ROW.u1, name: 'handle_context_request', kind: 'function', deg: 46, mod: 'application/handlers' });
   node('hsearch',    { x: 680,  y: ROW.u1, name: 'handle_search_request',  kind: 'function', deg: 28, mod: 'application/handlers' });
@@ -245,7 +245,7 @@
     });
     region.cx = cx; region.cy = cy; region.rx = rx; region.ry = ry;
   });
-  // Region names sit ON the shoreline, at full strength — the underlay is dim,
+  // Region names sit ON the shoreline, at full strength. The underlay is dim,
   // its labels are not, because a boundary you cannot name is decoration.
   var gUnderNames = el('g', {}, svg);
   REGIONS.forEach(function (region) {
@@ -335,7 +335,7 @@
     m.of.forEach(function (id) {
       var n = N[id];
       // A port is drawn where the node's own channels cross the enclosure, on
-      // the top and bottom edges — the two directions this sheet has.
+      // the top and bottom edges. The two directions this sheet has.
       [b.y0, b.y1].forEach(function (edgeY) {
         el('line', { x1: n.x - 9, y1: edgeY, x2: n.x + 9, y2: edgeY,
           stroke: m.hero ? 'var(--raw-accent)' : 'var(--raw-edge-strong)', 'stroke-width': 2.4 }, gPorts);
@@ -388,7 +388,7 @@
       nm.setAttribute('fill', 'var(--raw-text-muted)');
       halo(text(gLabels, n.x, n.y + dy + 12, n.unresolved, 'num', { 'text-anchor': 'middle' }))
         .setAttribute('fill', 'var(--raw-state-unknown)');
-      halo(text(gLabels, n.x, n.y + dy - 12, 'CHANNEL ENDS — TARGET NOT IN GRAPH', 'lbl',
+      halo(text(gLabels, n.x, n.y + dy - 12, 'CHANNEL ENDS, TARGET NOT IN GRAPH', 'lbl',
         { 'text-anchor': 'middle' })).setAttribute('fill', 'var(--raw-state-unknown)');
       return;
     }
@@ -429,7 +429,7 @@
   });
   halo(text(gRows, 88, 40, 'HOP RING ↓', 'lbl', { 'text-anchor': 'end' }));
   halo(text(gRows, 1416, 40,
-    'DEPTH LIMIT 3 — 41 FURTHER SYMBOLS EXIST BEYOND THIS FRAME AND ARE NOT DRAWN', 'lbl',
+    'DEPTH LIMIT 3, 41 FURTHER SYMBOLS EXIST BEYOND THIS FRAME AND ARE NOT DRAWN', 'lbl',
     { 'text-anchor': 'end' }));
 
   /* ---- key strip figures ------------------------------------------------ */

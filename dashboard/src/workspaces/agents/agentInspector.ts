@@ -16,8 +16,8 @@ import type {
 
 /** How the subject came to be in the inspector. `inspecting` is a hover or
  * focus and persists nothing; `selected` is a reader's click or Enter;
- * `default` is the page's own choice when nothing is selected — the newest
- * root — and is labelled as such rather than passed off as a selection. */
+ * `default` is the page's own choice when nothing is selected, the newest
+ * root, and is labelled as such rather than passed off as a selection. */
 export type SubjectMode = 'inspecting' | 'selected' | 'default';
 
 export type InspectorSubject =
@@ -140,7 +140,7 @@ export function incomingDelegation(
         kind: 'missing_parent',
         grade: 'UNAVAILABLE',
         parentSessionId: node.parent_session_id,
-        detail: `parent ${node.parent_session_id ?? '(unnamed)'} is not in this reading — a cut edge, not a root`,
+        detail: `parent ${node.parent_session_id ?? '(unnamed)'} is not in this reading, a cut edge, not a root`,
       };
     case 'cycle':
       return {

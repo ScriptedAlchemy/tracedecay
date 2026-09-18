@@ -33,8 +33,8 @@ const BOOTSTRAP_TERMINAL_CACHE_FOR: Duration = Duration::from_secs(2);
 /// Total wall-clock a bootstrap worker may spend retrying one profile before
 /// giving up.
 ///
-/// Retry backoff caps at two seconds, so a permanently retryable failure — a
-/// broker that never opens, a profile root that never becomes readable — spins
+/// Retry backoff caps at two seconds, so a permanently retryable failure, a
+/// broker that never opens, a profile root that never becomes readable, spins
 /// a task forever at 0.5 Hz for the daemon's whole life, and every retry logs
 /// nothing after the first. Bounding the total turns that into one warned
 /// give-up. It is not a permanent refusal: a terminal worker is evicted after
@@ -46,7 +46,7 @@ const BOOTSTRAP_RETRY_BUDGET: Duration = Duration::from_mins(1);
 ///
 /// Handshake callers already canonicalize, but a test (or any caller holding
 /// the operator's own spelling) hands over the raw path. On macOS the two
-/// differ — `/var/folders/...` versus `/private/var/folders/...` — so keying
+/// differ, `/var/folders/...` versus `/private/var/folders/...`, so keying
 /// on the raw path silently splits one profile into two registry entries and
 /// turns every lookup into a miss. Resolving on both the storing and the
 /// reading side makes the registry answer for the profile, not the spelling.

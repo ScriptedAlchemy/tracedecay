@@ -1162,14 +1162,14 @@ fn application_error_tool_result_exits_nonzero() {
 
 /// A truthful *degraded* answer is not a failure. Retrieval lanes that report
 /// themselves `unavailable` inside an otherwise successful payload, partial
-/// coverage, and warming generations all keep exit 0 — only an outcome the
+/// coverage, and warming generations all keep exit 0, only an outcome the
 /// daemon itself marked `isError` changes the status.
 #[test]
 fn typed_unavailable_coverage_inside_a_successful_result_stays_exit_zero() {
     let markdown = json!({
         "content": [{
             "type": "text",
-            "text": "### Coverage\nPartial recall — some retrieval lanes did not answer:\n\
+            "text": "### Coverage\nPartial recall. Some retrieval lanes did not answer:\n\
                      - exact: unavailable (generation_rebuilding)\n\
                      - graph: unavailable (generation_rebuilding)"
         }]

@@ -143,7 +143,7 @@ const visibleTask = event(27, 'render-task', '14:10:02.441', 'task', 'Visible ta
 const read = event(27, 'render-read', '14:31:02.119', 'file-read', 'Read source', { file: 'dashboard/src/components/TimelineCanvas.tsx' });
 const selectedEventId = event(27, 'timeline-file-edited', '14:32:17.803', 'file-edit', 'file.edited', {
   task: 'Dashboard review', file: 'dashboard/src/components/TimelineCanvas.tsx',
-  body: 'DESIGN ILLUSTRATION — example transcript, not a profile capture.\nAdjust event rendering guard to avoid drawing entries beyond the visible time window while retaining pinned and forced events.',
+  body: 'DESIGN ILLUSTRATION, example transcript, not a profile capture.\nAdjust event rendering guard to avoid drawing entries beyond the visible time window while retaining pinned and forced events.',
   diff: 'Illustrated hunk · dashboard/src/components/TimelineCanvas.tsx\n256  const withinWindow = event.time >= windowStart && event.time <= windowEnd;\n257  const isPinned = pinnedIds.has(event.id);\n-258 if (!withinWindow && !isPinned) {\n+258 if (!withinWindow && !isPinned && !event.forceRender) {\n259    return;\n260  }',
 });
 const symbol = event(27, 'timeline-symbol', '14:32:18.021', 'file-edit', 'Changed symbol · TimelineCanvas', { file: 'dashboard/src/components/TimelineCanvas.tsx' });
@@ -167,11 +167,11 @@ const coverageGaps = [{eventId:captureGap, sessionId:sid(27), from:stamp('14:12:
 // Brief 06: an authored historical review is separate from present-day notes.
 // Its lifecycle is supported by named example events and explicit relationships;
 // a newly saved local comment can never inherit this illustrated outcome.
-const feedbackEvent = event(27, 'review-challenge', '14:34:02', 'message', 'Challenge assumption', { task: 'Dashboard review', body: 'DESIGN ILLUSTRATION — authored reviewer note. What guarantees pinned events remain reachable outside the visible window? Target: timeline-file-edited, illustrated hunk L258.' });
+const feedbackEvent = event(27, 'review-challenge', '14:34:02', 'message', 'Challenge assumption', { task: 'Dashboard review', body: 'DESIGN ILLUSTRATION, authored reviewer note. What guarantees pinned events remain reachable outside the visible window? Target: timeline-file-edited, illustrated hunk L258.' });
 events.find(e => e.id === feedbackEvent)!.role = 'illustrated-reviewer';
-const reopened = event(27, 'review-task-reopened', '14:34:18', 'task', 'Task reopened', { task: 'Dashboard review', body: 'DESIGN ILLUSTRATION — acknowledgement of review-challenge. Reopen the event-visibility task and verify the pinned-event path.' });
+const reopened = event(27, 'review-task-reopened', '14:34:18', 'task', 'Task reopened', { task: 'Dashboard review', body: 'DESIGN ILLUSTRATION, acknowledgement of review-challenge. Reopen the event-visibility task and verify the pinned-event path.' });
 const reviewSpawn = event(27, 'review-subagent-spawned', '14:34:33', 'spawn', 'Subagent spawned', { task: 'Dashboard review', body: 'Illustrated explicit delegation to agent-07 to address review-challenge.' });
-const revision = event(7, 'review-revision-edit', '14:36:21', 'file-edit', 'Revision edit · pinned lane', { task: 'Dashboard review', file: 'dashboard/src/components/TimelineCanvas.tsx', body: 'DESIGN ILLUSTRATION — this revision explicitly addresses review-challenge by rendering pinned events in the pinned lane independently of the time window.', diff: 'Illustrated revision · not a captured repository diff\n318 // Pinned events remain reachable in the pinned lane.\n+319 if (isPinned) {\n+320   renderPinned(event);\n+321 }' });
+const revision = event(7, 'review-revision-edit', '14:36:21', 'file-edit', 'Revision edit · pinned lane', { task: 'Dashboard review', file: 'dashboard/src/components/TimelineCanvas.tsx', body: 'DESIGN ILLUSTRATION. This revision explicitly addresses review-challenge by rendering pinned events in the pinned lane independently of the time window.', diff: 'Illustrated revision · not a captured repository diff\n318 // Pinned events remain reachable in the pinned lane.\n+319 if (isPinned) {\n+320   renderPinned(event);\n+321 }' });
 const focusedTest = event(7, 'review-focused-test', '14:37:45', 'test', 'Focused test passed', { task: 'Dashboard review', body: 'Illustrated test: an out-of-window pinned event remains available in the pinned lane. Authored relation explicitly targets review-revision-edit; this is not a real test run.' });
 const reviewHandoff = event(7, 'review-handoff', '14:38:08', 'handoff', 'Handoff returned', { task: 'Dashboard review', body: 'Illustrated handoff to agent-27: revision and focused test address review-challenge.' });
 const amendment = event(27, 'review-commit-amended', '14:39:12', 'commit', 'Commit amended', { task: 'Dashboard review', body: 'Illustrated commit amendment includes review-revision-edit and its focused test. No real commit hash or provider write is claimed.' });
@@ -223,7 +223,7 @@ export const DESIGN_SCENARIO: {
   sessions, events, groups, episodes, relations, feedback, details, coverageGaps, selectedEventId,
   windows: { tail: [stamp('09:40:00'), stamp('10:31:08')], dense: [stamp('14:06:00'), stamp('14:42:00')] },
   notes: [
-    'CONCEPT / SYNTHETIC DATA — authored from the five supplied Loom plates. This is not a TraceDecay profile capture.',
+    'CONCEPT / SYNTHETIC DATA, authored from the five supplied Loom plates. This is not a TraceDecay profile capture.',
     '103 illustrative agent identities, including 19 subagents. Group participation counts are 34, 27, 18, 14, 11 and 19; 20 overlapping memberships make 123 participations, not 123 unique agents.',
     'The morning close-view example belongs to Other; the afternoon dense view reuses these identities. Time windows are explicit, never compressed into fabricated chronology.',
     'Exact and explicit grades describe the authored example only. Inferred, ambiguous, stale and unavailable relations remain separate; no grade asserts an observation about either real profile.',

@@ -50,7 +50,7 @@ async fn prepared_restart_with_preimages_restores_partial_bytes_before_another_e
 /// The exact live-verified durability defect: a daemon crash (kill -9) lands
 /// AFTER the edit's atomic writes reach disk but BEFORE the journal advances to
 /// `Applied`. Recovery must roll the finished edit forward and preserve every
-/// written byte — never silently revert it to the durable preimage.
+/// written byte, never silently revert it to the durable preimage.
 #[tokio::test]
 async fn prepared_restart_with_completed_edit_rolls_forward_and_preserves_bytes() {
     let fixture = effect_unknown_fixture().await;

@@ -45,7 +45,7 @@ impl AstroExtractor {
         let content_end = lines[content_start..]
             .iter()
             .position(|l| l.trim() == "---")
-            .map_or(lines.len(), |rel| content_start + rel); // unclosed — include everything
+            .map_or(lines.len(), |rel| content_start + rel); // unclosed. Include everything
 
         Self::mask_lines(source, |line| line >= content_start && line < content_end)
     }

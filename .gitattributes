@@ -1,4 +1,4 @@
-# Force LF line endings for test fixtures — tree-sitter grammars
+# Force LF line endings for test fixtures. Tree-sitter grammars
 # expect Unix line endings and produce wrong parse trees with CRLF.
 tests/fixtures/** text eol=lf
 # The search-quality candidate workload pins each corpus document against the
@@ -12,7 +12,7 @@ crates/tracedecay-query/assets/runtime-root/** text eol=lf
 # canonical source files are LF-only, and Windows checkout otherwise rewrites
 # them before the lint runs.
 plugin/** text eol=lf
-# Force LF for embedded Hermes plugin template assets — they are pulled into
+# Force LF for embedded Hermes plugin template assets. They are pulled into
 # the binary via include_str! and the generated-plugin snapshot test asserts
 # their exact bytes.
 crates/tracedecay-agent-hosts/src/agents/hermes/templates/** text eol=lf

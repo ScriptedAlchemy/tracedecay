@@ -17,7 +17,7 @@ import {
 
 /**
  * The PR journey field: time is X, source lane is Y. Every mark here is a
- * projection of a DOM row in the exact table and the inspector — the field is
+ * projection of a DOM row in the exact table and the inspector, the field is
  * never the only place a time, grade or destination can be read. Undated
  * records sit in the hatched gutter, never on the axis; observation time is
  * shaped differently from event time; a lane whose authority is not served is

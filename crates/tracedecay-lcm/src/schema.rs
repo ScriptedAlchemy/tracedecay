@@ -17,7 +17,7 @@ const MIGRATION_NAME: &str = "lcm";
 ///
 /// `lcm_status` aggregates whole-store counts on every probe. Without these
 /// indexes four of its components scan the full `lcm_raw_messages` /
-/// `lcm_summary_nodes` / `lcm_external_payloads` records — multi-gigabyte
+/// `lcm_summary_nodes` / `lcm_external_payloads` records, multi-gigabyte
 /// body reads on a long-lived profile store for a one-row answer (issue #767
 /// measured 10.65 s daemon-side). Each entry is one independently committed
 /// idempotent batch. Fresh stores install the final index shape with the
@@ -900,7 +900,7 @@ mod tests {
     }
 
     /// A fresh install carries every status performance index, and the
-    /// superseded plain payload owner index is gone — its replacement covers
+    /// superseded plain payload owner index is gone, its replacement covers
     /// the same leading columns.
     #[tokio::test]
     async fn fresh_schema_installs_status_performance_indexes() -> Result<(), String> {

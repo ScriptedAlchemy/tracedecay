@@ -1,9 +1,9 @@
 //! The HTTP, MCP-host, and Rust SDK legs of the typed-terminal journey.
 //!
 //! The CLI leg lives in this target's root module. It induces both terminals
-//! through real production mechanisms — a fact that commits durably and then
+//! through real production mechanisms, a fact that commits durably and then
 //! outlives its caller's request deadline at the daemon's own commit boundary,
-//! and a project store whose relational shape this binary refuses — and proves
+//! and a project store whose relational shape this binary refuses, and proves
 //! each survives a physical daemon kill and respawn.
 //!
 //! This module drives those same two genuinely-induced terminals through the
@@ -29,8 +29,8 @@
 //!   generated typed operations. Its `OperationRequestOptions::deadline_micros`
 //!   is the SDK's own name for the same header.
 //!
-//! Every leg asserts the terminal's kind, its legal actions, and — for
-//! `PartialEffect` — the committed receipt, then the daemon process is replaced
+//! Every leg asserts the terminal's kind, its legal actions, and, for
+//! `PartialEffect`, the committed receipt, then the daemon process is replaced
 //! and the same contract is re-asserted against the new process over the same
 //! on-disk state.
 
@@ -307,8 +307,8 @@ fn mcp_payload(response: &Value) -> Value {
 
 /// Normalizes any transport's payload to `{ "problem": ... }`.
 ///
-/// The transports wrap the canonical problem envelope differently — a bare
-/// envelope, a `value` body, an `outcome.value` — but the envelope itself is
+/// The transports wrap the canonical problem envelope differently, a bare
+/// envelope, a `value` body, an `outcome.value`, but the envelope itself is
 /// the contract under test, so the journey asserts against it wherever the
 /// transport parked it rather than hard-coding one wrapper.
 fn problem_envelope(payload: &Value, context: &str) -> Value {

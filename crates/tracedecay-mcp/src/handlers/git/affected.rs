@@ -1,4 +1,4 @@
-//! `tracedecay_affected` — breadth-first reverse-dependency traversal from changed files to the tests that cover them.
+//! `tracedecay_affected`, breadth-first reverse-dependency traversal from changed files to the tests that cover them.
 
 use super::*;
 use tracedecay_application::primitives::{

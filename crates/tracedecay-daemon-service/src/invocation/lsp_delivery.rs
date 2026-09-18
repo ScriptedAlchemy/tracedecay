@@ -72,7 +72,7 @@ pub fn retain_lsp_delivery_attempt(
 ///
 /// The admission refusals are values rather than a swallowed log line: a
 /// refused receipt means this transport's delivery evidence never became
-/// durable, and only a typed outcome lets a caller — or a test — tell that
+/// durable, and only a typed outcome lets a caller, or a test, tell that
 /// apart from "there was nothing in flight".
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LspDeliverySettlementAdmissionV1 {

@@ -9,7 +9,7 @@ import {
 } from '../../contracts/generated.ts';
 
 /** Wire-true `GET /api/projects` body. `projects.rs::list` answers both failure
- * statuses with an explicit `"summary": null` / `"project_tree": null` — the
+ * statuses with an explicit `"summary": null` / `"project_tree": null`, the
  * shape the two hand-written copies of this route both declared non-nullable,
  * so the exact responses `status` exists to distinguish were the ones that
  * failed to parse. */
@@ -32,7 +32,7 @@ function registryBody(status: string, error: string | null = null) {
  * The transport status each body really arrives with.
  *
  * `projects.rs::list` answers both registry failures with 503, never with a
- * 200 carrying a failing status — so serving these at 200, as this suite used
+ * 200 carrying a failing status, so serving these at 200, as this suite used
  * to, exercised a response the daemon cannot produce. It passed only because
  * the former generic client discarded non-2xx bodies, which made these very
  * branches unreachable in production.
@@ -105,7 +105,7 @@ describe('BrainPage registry states', () => {
   });
 
   // `projects.rs` writes `status` as a bare JSON string literal, so a fourth
-  // value added there is not a malformed response — it is a response this
+  // value added there is not a malformed response, it is a response this
   // dashboard has not been taught yet. Rejecting it at the parser would take
   // the whole page down over a word, which is the failure Explorer shipped when
   // it typed `freshness` as a closed enum against a Rust `String`. So the

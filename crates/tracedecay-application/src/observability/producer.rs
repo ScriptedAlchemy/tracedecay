@@ -64,7 +64,7 @@ impl ObservabilityProducerIdentityV1 {
     }
 
     /// The one store-owner alias gate: a provenance-stamping frontend must
-    /// match its owner on every store-authority field — the authorized scope,
+    /// match its owner on every store-authority field, the authorized scope,
     /// the boot stream, and the producer revision. The configuration and
     /// policy revisions are the mounting root's own at its own open time: the
     /// store's canonical configuration advances while the owner stays

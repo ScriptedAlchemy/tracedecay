@@ -49,7 +49,7 @@ describe('summarizeChain', () => {
     ]);
   });
 
-  it('reports that no turn carried a timestamp — the real-profile case', () => {
+  it('reports that no turn carried a timestamp, the real-profile case', () => {
     const summary = summarizeChain([message({ timestamp: null })]);
     expect(summary.timestamped).toBe(false);
   });

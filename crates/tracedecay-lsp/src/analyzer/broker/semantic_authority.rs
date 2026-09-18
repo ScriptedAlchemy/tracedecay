@@ -234,8 +234,8 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                     }
                     // Holding the client lock is what makes a start single
                     // owner, so an ordinary concurrent caller queues here and
-                    // then joins whatever this one left behind — the client in
-                    // the slot — instead of spawning a competitor. The attempt
+                    // then joins whatever this one left behind, the client in
+                    // the slot, instead of spawning a competitor. The attempt
                     // this caller ends up owning fences its own late result
                     // out if it is dropped and someone takes the start over.
                     let (attempt, client) = if let Some(client) = slot.take() {
@@ -443,7 +443,7 @@ mod tests {
     /// slot and told the supervisor nothing); it now records the retirement on
     /// the shared supervisor, so this is the fallback for a client that
     /// vanished. The analyzer's semantic surface must still restart the process
-    /// and report that start's own typed outcome — never the terminal
+    /// and report that start's own typed outcome, never the terminal
     /// `Unavailable` the gateway renders as `providerUnavailable` on a live
     /// project.
     ///
@@ -508,8 +508,8 @@ mod tests {
     }
 
     /// A semantic request that owns an in-flight start can be dropped inside
-    /// it — its LSP request is cancelled, or its spawned operation is evicted
-    /// — releasing the analyzer client lock with the supervisor left in
+    /// it, its LSP request is cancelled, or its spawned operation is evicted,
+    /// releasing the analyzer client lock with the supervisor left in
     /// `Starting` and no event coming to conclude it. The next request holds
     /// that same lock, so nothing is racing it: it must take the start over
     /// rather than read a stranded `Starting` as a refusal and answer

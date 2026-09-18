@@ -2,8 +2,8 @@
 //!
 //! The portable [`TranscriptStore`] contract owns cursor and transcript
 //! writes. Transcript ingest additionally needs a session merge read and git
-//! evidence that commits inside the same authoritative transaction — both
-//! expressed purely in session values — so the extension trait belongs here
+//! evidence that commits inside the same authoritative transaction, both
+//! expressed purely in session values, so the extension trait belongs here
 //! rather than next to the registered-database adapter that implements it.
 
 use std::future::Future;

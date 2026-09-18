@@ -92,7 +92,7 @@ export function SchedulerBay({
             <span className="td-legend">observed scheduler run</span>
             {observed === null ? (
               <span className="text-2xs text-text-muted">
-                no scheduler-triggered run is recorded for any task — the status above is configuration, not liveness
+                no scheduler-triggered run is recorded for any task, the status above is configuration, not liveness
               </span>
             ) : (
               <span className="td-value text-2xs text-text-secondary">
@@ -114,7 +114,7 @@ export function SchedulerBay({
             <span className="td-unit ml-1">with a skip reason</span>
           </span>
           <span className="min-w-0 text-3xs text-text-muted">
-            due timestamps are not served — the scheduler reports a due flag per tick
+            due timestamps are not served, the scheduler reports a due flag per tick
           </span>
         </div>
         <LedgerTable

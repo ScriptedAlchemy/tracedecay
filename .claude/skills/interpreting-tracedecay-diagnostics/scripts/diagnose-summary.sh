@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# diagnose-summary.sh — turn TraceDecay diagnostics into a mapped-owner summary.
+# diagnose-summary.sh. Turn TraceDecay diagnostics into a mapped-owner summary.
 #
 # Runs the graph-aware diagnostic path this skill prescribes and prints: how many
 # diagnostics were recognized, which symbol/file owns each failure, the callers
@@ -63,7 +63,7 @@ print(f"recognized    : {parsed} parsed, {returned} returned  ({errs} error, {wa
 print(f"mapped/unmapped: {mapped} mapped to a symbol, {unmapped} UNMAPPED")
 if d.get("truncated"): print("note          : output truncated (raise --max-diagnostics for more)")
 if not diags:
-    print("\nclean — no diagnostics with a resolvable file:line span.")
+    print("\nclean. No diagnostics with a resolvable file:line span.")
 
 # Group by mapped owner so shared root causes cluster.
 from collections import defaultdict
@@ -88,7 +88,7 @@ if by_owner:
             print(f"    - {loc}  {tag}")
 
 if unmapped_hits:
-    print("\n## UNMAPPED (parse/file-mapping coverage gap — still real errors)")
+    print("\n## UNMAPPED (parse/file-mapping coverage gap, still real errors)")
     for loc, tag in unmapped_hits[:10]:
         print(f"    - {loc}  {tag}")
     print("  -> If these own real code, that is a TraceDecay extractor/mapping gap worth an issue.")

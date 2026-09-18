@@ -1168,7 +1168,7 @@ async fn run_automation_scheduler_loop(
                     break;
                 }
                 // Still configured or the generation advanced, so stay in the
-                // loop — but yield until the next tick or an explicit wake
+                // loop, but yield until the next tick or an explicit wake
                 // instead of spinning through the gate locks.
                 tokio::select! {
                     () = tokio::time::sleep(Duration::from_secs(
@@ -1189,7 +1189,7 @@ async fn run_automation_scheduler_loop(
                 // the daemon's life and logs identically every time. Back the
                 // retries off, and escalate to a terminal exit once the failure
                 // is clearly not transient. A finished scheduler is dropped
-                // from the registry, so the next reconcile respawns this loop —
+                // from the registry, so the next reconcile respawns this loop,
                 // the exit costs a retry, not the lane.
                 consecutive_open_failures = consecutive_open_failures.saturating_add(1);
                 log_daemon_event(
@@ -1460,7 +1460,7 @@ fn reserve_global_retention(now: std::time::Instant) -> Option<GlobalRetentionRe
     };
     // `then` (not `then_some`) so the reservation only exists when the
     // cadence granted it: `then_some` constructs the value eagerly, and a
-    // denied reservation would be dropped right here — its Drop re-locks
+    // denied reservation would be dropped right here, its Drop re-locks
     // GLOBAL_RETENTION_CADENCE while this guard is still held, deadlocking
     // the scheduler tick (and falsely finishing a pass it never owned).
     guard

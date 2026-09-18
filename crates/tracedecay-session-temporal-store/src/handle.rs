@@ -1,7 +1,7 @@
 //! Registered-store handle the session-temporal crate composes against.
 //!
 //! `RegisteredGlobalDb` lives in `tracedecay-global-db` and implements this
-//! trait there. This crate must not depend on that crate — doing so would
+//! trait there. This crate must not depend on that crate, doing so would
 //! recreate the wave-7 spine chain.
 //!
 //! Query/execute futures are `Send` here because RPITIT `async fn` on

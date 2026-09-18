@@ -98,7 +98,7 @@ impl BrokerWorkDeliverySettlement for RmcpWorkDeliverySettlement {
 
 pub struct BrokerStreamTransport {
     // Every daemon read of this transport races something else in a
-    // `tokio::select!` — draining, an owner open, a completed handler. The
+    // `tokio::select!`, draining, an owner open, a completed handler. The
     // bounded reader owns the partial-frame accumulator so a read dropped by a
     // lost race resumes instead of restarting mid-frame and desynchronizing
     // JSON-RPC framing for the rest of the connection.
@@ -338,7 +338,7 @@ impl BrokerStreamTransport {
     }
 
     /// Resolves once this connection has accepted at least one request and
-    /// every accepted request has settled — delivered, suppressed, or answered
+    /// every accepted request has settled, delivered, suppressed, or answered
     /// with its typed cancellation. After the peer half-closes its request
     /// side, a connection in that state has nothing left it could ever
     /// deliver, so waiting for the peer's full close would only strand clients
@@ -538,7 +538,7 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
                     // service and strands the request permit. Once every
                     // accepted request has settled, though, the half-open
                     // connection has nothing left to deliver, and a client
-                    // that reads until daemon EOF — a cancelling client does —
+                    // that reads until daemon EOF, a cancelling client does,
                     // needs this side to close first.
                     let settled = Self::wait_for_accepted_requests_settled(
                         Arc::clone(&self.active_requests),

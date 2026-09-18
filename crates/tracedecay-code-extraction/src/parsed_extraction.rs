@@ -309,8 +309,8 @@ pub(crate) fn superseded_previous_nodes<'p>(
     Some(removed)
 }
 
-/// The delta's maximal non-file spans — the complete top-level syntax nodes it
-/// re-extracted — as `(start, end)` positions in the previous source.
+/// The delta's maximal non-file spans, the complete top-level syntax nodes it
+/// re-extracted, as `(start, end)` positions in the previous source.
 fn reextracted_regions(
     delta: &ExtractionResult,
     edit: ParseInputEdit,

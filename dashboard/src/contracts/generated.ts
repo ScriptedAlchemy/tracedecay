@@ -290,8 +290,8 @@ export type AnalyticsSubagentNodeV1 = z.infer<typeof AnalyticsSubagentNodeV1Sche
 
 /** The subagent tree: parent/child session edges, not a per-agent rollup.
 
-`nodes` is a pre-order flattening — every node appears after its own parent
-and before that parent's later siblings — so a reader can draw the tree from
+`nodes` is a pre-order flattening, every node appears after its own parent
+and before that parent's later siblings, so a reader can draw the tree from
 `depth` alone without reassembling edges client-side. */
 export const AnalyticsSubagentTreePayloadV1Schema = z.object({
   available: z.boolean(),
@@ -859,7 +859,7 @@ export type CodeIndexGenerationRecoveryV1 = z.infer<typeof CodeIndexGenerationRe
 /** Closed staleness ladder for one mounted worktree.
 
 The scheduler publishes one of these tokens. MCP, the dashboard, and the
-CLI must match the variant — not a hand-copied string — so a new ladder
+CLI must match the variant, not a hand-copied string, so a new ladder
 state cannot appear at one caller and be missed at the others. */
 export const CodeIndexStalenessStateV1Schema = z.enum(["fresh", "indexing", "parked", "refreshing", "stale", "verifying"]);
 export type CodeIndexStalenessStateV1 = z.infer<typeof CodeIndexStalenessStateV1Schema>;
@@ -1046,7 +1046,7 @@ export const DashboardCoverageCompletenessV1Schema = z.enum(["complete", "partia
 export type DashboardCoverageCompletenessV1 = z.infer<typeof DashboardCoverageCompletenessV1Schema>;
 
 /** Coverage statement. Counts are optional; an unknown denominator is `None`,
-never a fabricated `0`/`100%`. The completeness axis is authoritative — the
+never a fabricated `0`/`100%`. The completeness axis is authoritative, the
 frontend never derives `complete` from a `matched == eligible` coincidence. */
 export const DashboardCoverageV1Schema = z.object({
   completeness: z.lazy(() => DashboardCoverageCompletenessV1Schema),
@@ -1067,8 +1067,8 @@ export type DashboardCoverageV1 = z.infer<typeof DashboardCoverageV1Schema>;
 The first sixteen variants are the plan's exact `DashboardDomainState`
 discriminated union. [`Self::Unsupported`] is the backend-gap binding
 state: the read model's HTTP surface exists, but its live producer/source is
-not yet wired server-side. It is never healthy or empty — the frontend
-renders a distinct "not yet available" state — and it is deliberately
+not yet wired server-side. It is never healthy or empty, the frontend
+renders a distinct "not yet available" state, and it is deliberately
 separate from [`Self::UnsupportedSchema`] (an undecodable schema/variant). */
 export const DashboardDomainStateV1Schema = z.union([z.enum(["cancelled", "complete_zero_findings", "conflicting", "denied", "error", "loading", "locked", "offline", "partial", "ready", "redacted", "stale", "timed_out", "unauthorized", "unknown", "unsupported_schema"]), z.literal("unsupported")]).catch("unsupported_schema");
 export type DashboardDomainStateV1 = z.infer<typeof DashboardDomainStateV1Schema>;
@@ -3201,7 +3201,7 @@ export type LinkAcceptedWorkAttemptRequestV1 = z.infer<typeof LinkAcceptedWorkAt
 
 Mirrors [`IssueTaskHandoffResultV1`]'s doctrine: the complete binding stays
 inside the daemon authority, and only these identifiers cross the wire. No
-bearer secret exists to leak here — the authority never stored one — and the
+bearer secret exists to leak here. The authority never stored one, and the
 issuer's grant identity and policy digests stay concealed. */
 export const ListedTaskHandoffV1Schema = z.object({
   consumed_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
@@ -5067,8 +5067,8 @@ export type SessionId = z.infer<typeof SessionIdSchema>;
 
 `stage` names which budget refused; this is what tells an oversized request
 apart from a read whose cost was mis-sized for it. The ceiling value also
-distinguishes the resources inside one stage — a record read that stopped at
-1024 hit the item count, one that stopped at 16 MiB hit the byte total — so
+distinguishes the resources inside one stage: a record read that stopped at
+1024 hit the item count, one that stopped at 16 MiB hit the byte total, so
 the kernel's resource spelling stays in the kernel instead of becoming a
 second wire vocabulary to keep in step. */
 export const SessionRetrievalBudgetAccountingV1Schema = z.object({
@@ -5081,7 +5081,7 @@ export type SessionRetrievalBudgetAccountingV1 = z.infer<typeof SessionRetrieval
 
 Both variants are exact. A bounded read never counts the rows it declined to
 read, so an exhausted read reports what it consumed and that storage held
-more — never a total it would have to run the refused scan to learn. */
+more, never a total it would have to run the refused scan to learn. */
 export const SessionRetrievalBudgetObservationV1Schema = z.discriminatedUnion("observation", [z.object({
   observation: z.literal("consumed_with_more_available"),
   units: z.number().int().safe().min(0),
@@ -6530,7 +6530,7 @@ export type WorkflowDefinitionId = z.infer<typeof WorkflowDefinitionIdSchema>;
 Plan 32 ("Typed workflow definitions"): "Lifecycle retains candidate,
 validate, activate, retire, reject, list, get, diff, and history operations
 through the same application surfaces." The definition payload itself stays
-immutable — "Editing creates a new version; admitted runs remain pinned" —
+immutable, "Editing creates a new version; admitted runs remain pinned",
 so the disposition is a separate revisioned aggregate keyed by the same
 definition identity. */
 export const WorkflowDefinitionLifecycleStateSchema = z.enum(["active", "candidate", "rejected", "retired", "validated"]);
@@ -6880,7 +6880,7 @@ A selection names a slice of the owner's work, not the whole journal: an
 event records the relation scopes it was admitted under, and a selection
 that does not name them puts that event *outside* the slice. The events
 outside a selection do not poison the ones inside it, but they must never be
-concealed either — a caller who is shown the covered slice with no way to
+concealed either, a caller who is shown the covered slice with no way to
 learn that more exists is reading a silently incomplete graph.
 
 So the read answers over the covered slice and says so, in the same
@@ -7561,7 +7561,7 @@ export const WorkProviderRouteV1Schema = z.object({
 }).strict();
 export type WorkProviderRouteV1 = z.infer<typeof WorkProviderRouteV1Schema>;
 
-/** Ranked route. Dimensions stay SEPARATE — no scalar score field is permitted here. */
+/** Ranked route. Dimensions stay SEPARATE. No scalar score field is permitted here. */
 export const WorkRankedRouteV1Schema = z.object({
   autonomy: z.lazy(() => WorkOrdinalBandV1Schema),
   correctness: z.lazy(() => WorkOrdinalBandV1Schema),

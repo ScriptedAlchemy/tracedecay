@@ -2,11 +2,11 @@
 //! (issue #762): cycle `i` stages the full corpus as generation `i` in its
 //! own physical namespace, then retires generation `i - 1` by deleting its
 //! rows the way `delete_generation_contents` does. Red when a cycle's
-//! post-retirement baseline does not return near the first cycle's — the
+//! post-retirement baseline does not return near the first cycle's, the
 //! operator daemon's cross-cycle retention shape, where every generation
 //! swap stacked another resident corpus until the kernel killed the daemon.
 //!
-//! Ignored by default. This is a measurement harness, not a contract —
+//! Ignored by default. This is a measurement harness, not a contract,
 //! nothing asserts on a memory figure.
 //!
 //! ```text
@@ -153,7 +153,7 @@ fn stage_cycle(db: &GraphDbLeaseV1, cycle: usize, rows: usize) {
 }
 
 /// Deletes a retired cycle's rows the way `delete_generation_contents`
-/// does — relations first, then entities — through the public apply path.
+/// does, relations first, then entities, through the public apply path.
 fn retire_cycle(db: &GraphDbLeaseV1, cycle: usize, rows: usize) {
     let page_rows = page_size(rows);
     let relations = rows / RELATION_DIVISOR;

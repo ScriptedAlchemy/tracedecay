@@ -2,7 +2,7 @@
 design_status: current
 ---
 
-# Loom 07 — Evidence gaps
+# Loom 07, Evidence gaps
 
 - **Asset:** `07-evidence-gaps.png`
 - **Lifecycle:** `current`
@@ -28,7 +28,7 @@ Evidence filters or a selected gap focus the affected time range and causal neig
 
 ## Evidence and honesty
 
-The canonical ladder—`exact`, `explicit`, `inferred`, `ambiguous`, `stale`, and `unavailable`—is visible in both the weave and exact fallbacks. Missing/private reasoning is explicitly unavailable. Ambiguous candidates remain candidates; stale evidence retains its source timestamp; no inferred identity or event is fabricated.
+The canonical ladder, `exact`, `explicit`, `inferred`, `ambiguous`, `stale`, and `unavailable`, is visible in both the weave and exact fallbacks. Missing/private reasoning is explicitly unavailable. Ambiguous candidates remain candidates; stale evidence retains its source timestamp; no inferred identity or event is fabricated.
 
 ## Interaction model
 

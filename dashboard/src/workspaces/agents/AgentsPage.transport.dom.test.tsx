@@ -51,7 +51,7 @@ type FailKind = keyof typeof GUIDANCE;
  *
  * The last two rows deliberately declare the same reading. `PayloadResult`
  * carries a `detail` only on `error`, so a body that is not JSON and a body the
- * decoder rejects both arrive as a bare `unsupported_schema` — one state,
+ * decoder rejects both arrive as a bare `unsupported_schema`, one state,
  * because both mean "this build cannot read what came back". Every other pair
  * here is required to be distinguishable, and the test below derives that
  * requirement from this table rather than from a hand-counted total.
@@ -103,8 +103,8 @@ describe('AgentsPage under HTTP transport faults', () => {
         if (other !== kind) expect(screen.queryAllByText(GUIDANCE[other])).toHaveLength(0);
       }
 
-      // The delegation plates stay on screen as named, failed regions — the
-      // frame is honest — but nothing was read, so nothing may be reported:
+      // The delegation plates stay on screen as named, failed regions, the
+      // frame is honest, but nothing was read, so nothing may be reported:
       // no event-window readouts and none of the counts the fixtures serve.
       expect(screen.getByRole('region', { name: 'Agents content' })).toBeTruthy();
       expect(screen.queryByText('Event window')).toBeNull();
@@ -130,8 +130,8 @@ describe('AgentsPage under HTTP transport faults', () => {
     }
 
     // Two faults may render alike only where MATRIX says they mean the same
-    // thing. Anything else collapsing — a 403 reading as a 500, an unreachable
-    // daemon reading as a bad payload — shows up as a shortfall here.
+    // thing. Anything else collapsing, a 403 reading as a 500, an unreachable
+    // daemon reading as a bad payload, shows up as a shortfall here.
     const declared = new Set(MATRIX.map((row) => `${row.kind}|${row.detail ?? ''}`));
     expect(new Set(rendered.values()).size).toBe(declared.size);
 
@@ -143,7 +143,7 @@ describe('AgentsPage under HTTP transport faults', () => {
 
   it('keeps a failed diagnostics read from becoming zero tool calls', async () => {
     // Only the slow diagnostics fold fails. Usage and hints answer from the
-    // fixtures, so the page renders — which is exactly when a fabricated zero
+    // fixtures, so the page renders, which is exactly when a fabricated zero
     // would be invisible, sitting in a readout among real numbers.
     server.use(faultHandler('*/api/plugins/analytics/diagnostics', 'server_error'));
     renderAgents();
@@ -164,7 +164,7 @@ describe('AgentsPage under HTTP transport faults', () => {
     for (const chip of failed) expect(chip.textContent).toContain('HTTP 500');
 
     // And the dashes are accounted for as a FAILED read. "unavailable" is the
-    // source's own declaration, which never arrived here — the strip used to
+    // source's own declaration, which never arrived here, the strip used to
     // put that word in the daemon's mouth for every pending or failed read.
     expect(screen.getAllByText(/analytics diagnostics could not be read/i).length)
       .toBeGreaterThan(0);

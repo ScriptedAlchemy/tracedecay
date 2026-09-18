@@ -4,7 +4,7 @@
  * The defect these guard is silent and has no visible symptom until it matters:
  * four surfaces read the project registry, each had its own query key, and the
  * SSE `project_registry_changed` handler named exactly one of them. The scope
- * bar's key was not the one, and the scope bar has no poll — so a project rename
+ * bar's key was not the one, and the scope bar has no poll, so a project rename
  * or an active-project switch left it holding the pre-change answer for the rest
  * of the session, and it is the read that decides whether write controls are
  * offered.
@@ -55,7 +55,7 @@ describe('project registry query keys', () => {
    * The same claim, made against React Query itself rather than against the
    * model of it above. `matches` is this file's reading of prefix matching, and
    * a wrong reading would let both tests pass while the client invalidated
-   * nothing — so one test holds real cache entries and checks they were really
+   * nothing, so one test holds real cache entries and checks they were really
    * marked stale.
    */
   it('marks both the listing and each entry stale in a real client', async () => {

@@ -1,6 +1,6 @@
 /**
  * Automations read model: pure projections over the daemon's automation
- * authorities. Nothing here fetches, and nothing here invents a value — every
+ * authorities. Nothing here fetches, and nothing here invents a value, every
  * function returns either a measurement of its input or a typed absence.
  *
  * The authorities are independent and stay independent through this module:
@@ -120,7 +120,7 @@ const SIGNAL: Tone = {
 };
 
 /** `AutomationRunStatus` (run_ledger.rs): queued, running, succeeded, failed,
- * skipped. Any other word is printed as-is under the unknown family — the
+ * skipped. Any other word is printed as-is under the unknown family, the
  * ledger's word is the truth, the tone only says which family it is in. */
 export function runStatusTone(status: string): Tone {
   switch (status) {
@@ -207,7 +207,7 @@ export function failureClassTone(classification: string): Tone {
 
 /** The scheduler status word read as a configuration state.
  *
- * `configured` is a CONFIGURATION reading — automation enabled, a backend
+ * `configured` is a CONFIGURATION reading, automation enabled, a backend
  * chosen, not paused. It is not an observation that the scheduler loop is
  * alive; the route serves no heartbeat. The only runtime evidence on this
  * surface is the per-task `last_scheduler_run` ledger record, which
@@ -321,7 +321,7 @@ export function epochSeconds(stamp: string | null | undefined): number | null {
 
 const pad = (value: number, width = 2) => String(value).padStart(width, '0');
 
-/** `2026-09-17 01:57:02` in UTC — the ledger's own clock, never the browser's
+/** `2026-09-17 01:57:02` in UTC, the ledger's own clock, never the browser's
  * locale. */
 export function formatUtc(epochSecs: number): string {
   const date = new Date(epochSecs * 1000);
@@ -487,7 +487,7 @@ export function jobTaskKey(jobId: string): string {
 
 /** The newest run in the loaded page recorded under `taskKey`. The page is
  * served newest-first, so the first match is the latest. `undefined` means
- * no run for this key is in the loaded page — not that the job never ran. */
+ * no run for this key is in the loaded page, not that the job never ran. */
 export function latestRunForKey(runs: readonly RunRow[], taskKey: string): RunRow | undefined {
   return runs.find((run) => run.task_key === taskKey);
 }

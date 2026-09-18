@@ -47,7 +47,7 @@ pub struct DaemonRuntimeHealthSignalV1 {
 /// degraded condition: it reports `Unreachable`. A serving runtime whose storage
 /// authority signals prove a failure is `Stuck`; one that is serving but has not
 /// converged is `Degraded`; one that is serving, converged, and clean is
-/// `Healthy` — but only with complete coverage when every optional signal was
+/// `Healthy`, but only with complete coverage when every optional signal was
 /// actually observed. A missing signal drops coverage to partial (an honest
 /// "healthy so far as observed", never a healthy-complete claim).
 #[must_use]
@@ -160,8 +160,8 @@ pub fn advisory_feedback_read_from_publication(
 /// Wrap a set of typed storage findings the retention producers emitted into a
 /// kernel read.
 ///
-/// An empty finding set is a typed [`DoctorStorageFamilyReadV1::Absent`] — the
-/// runtime was consulted but produced nothing — never a fabricated healthy
+/// An empty finding set is a typed [`DoctorStorageFamilyReadV1::Absent`]. The
+/// runtime was consulted but produced nothing, never a fabricated healthy
 /// claim; the composer classifies an empty observed read as absent regardless,
 /// and this keeps the intent explicit at the source.
 #[must_use]

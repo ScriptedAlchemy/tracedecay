@@ -14,7 +14,7 @@ use std::io::Write as _;
 use std::os::fd::{FromRawFd, RawFd};
 
 /// Opening marker of every bespoke daemon log line. Watcher recovery anchors
-/// on it, so `tracing` output — which never carries the marker — cannot forge
+/// on it, so `tracing` output, which never carries the marker, cannot forge
 /// a `git_watch_*` event through a structured field that happens to be named
 /// `event`.
 pub const DAEMON_LOG_MARKER: &str = "[tracedecay] event=";

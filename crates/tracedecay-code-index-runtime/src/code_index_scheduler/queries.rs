@@ -325,7 +325,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Resolve the generation a callable-code query serves.
     ///
     /// An explicit, caller-pinned generation is matched exactly and served
-    /// generation-bound and read-only — the freshness ladder is deliberately
+    /// generation-bound and read-only, the freshness ladder is deliberately
     /// bypassed so a pin is a stable, reproducible read. The reserved unpinned
     /// sentinel instead runs the three-tier freshness ladder and serves the
     /// latest complete compatible generation, so out-of-band changes are

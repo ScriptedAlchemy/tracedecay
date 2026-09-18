@@ -9,6 +9,7 @@ on:
   push:
     branches: [master]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "plugin/**"
       - "plugin/cursor-native-extension/**"
@@ -35,6 +36,7 @@ concurrency:
 
 jobs:
   dashboard-assets:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     name: Build dashboard artifact
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -67,6 +69,7 @@ jobs:
           include-hidden-files: true
 
   manifest-schema:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     name: Manifest schema
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -107,6 +110,7 @@ jobs:
             done
 
   claude-native-validation:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     name: Claude native plugin validation
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -125,6 +129,7 @@ jobs:
   # Uses MCP Inspector's TypeScript SDK client to cover stdio handshake and
   # schema compatibility beyond the in-repo Rust MCP tests.
   mcp-conformance-smoke:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     name: MCP conformance smoke
     needs: dashboard-assets
     runs-on: ubuntu-latest

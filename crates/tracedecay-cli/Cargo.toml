@@ -51,7 +51,7 @@ default = ["production"]
 # owners whose compiled behaviour changes, and cargo's feature unification
 # lights every other crate's hotpath macros from `hotpath/hotpath` alone.
 # `tracedecay-sdk` mirrors the selected backend onto its build-script (host)
-# context — see its manifest. `dep:regex` backs the `HOTPATH_FOCUS` validation
+# context, see its manifest. `dep:regex` backs the `HOTPATH_FOCUS` validation
 # in `main.rs`.
 hotpath = [
     "dep:regex",
@@ -77,7 +77,6 @@ hotpath-mcp = ["hotpath", "hotpath/hotpath-mcp"]
 production = ["tracedecay/production"]
 # Opt-in tiered graph storage; not part of `production`.
 graph-disk-tier = ["tracedecay/graph-disk-tier"]
-graph-tiered-storage = ["tracedecay/graph-tiered-storage"]
 token-counting = ["tracedecay/token-counting"]
 lite = ["tracedecay/lite"]
 medium = ["tracedecay/medium"]
@@ -200,7 +199,6 @@ libc = "0.2"
 [dev-dependencies]
 axum = "0.8"
 dirs = "6"
-fs2 = "0.4"
 regex = "1.12.3"
 tokio = { version = "1", features = ["full", "test-util"] }
 toml = "1"
@@ -220,13 +218,6 @@ xattr = "1"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }
-
-# `fs2` is consumed only by `../tracedecay/tests/common/fixture.rs`, which
-# this crate's integration test binaries pull in through relative `#[path]`
-# attributes. Cargo-shear's per-crate scan cannot see files outside this
-# crate's directory tree, so it reports a false positive.
-[package.metadata.cargo-shear]
-ignored = ["fs2"]
 
 [build-dependencies]
 serde_json = "1"

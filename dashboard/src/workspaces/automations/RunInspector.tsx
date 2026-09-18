@@ -37,7 +37,7 @@ import {
  * The inspector: exact evidence for whichever identity is being inspected.
  *
  * A run shows its own ledger record, the fact receipts filed under its id,
- * and — read only once the run is inspected — the daemon's artifact list and
+ * and, read only once the run is inspected, the daemon's artifact list and
  * chain-integrity verdict, then one artifact's payload once that artifact is
  * chosen. A scheduler task, a user job and a fact receipt each show their own
  * record and link to a run only through an exact recorded `run_id`.

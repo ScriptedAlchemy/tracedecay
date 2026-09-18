@@ -10,7 +10,7 @@ import type { Umbrella, UmbrellaProjection } from './umbrella.ts';
  * Deterministic geometry for the Delivery field at outcome zoom: project hubs
  * on a ring, admitted pull requests orbiting their hub, and umbrella roots
  * placed at the centroid of their members with a graded edge to each. No
- * force simulation — identical inputs give identical coordinates, and a node
+ * force simulation, identical inputs give identical coordinates, and a node
  * moves only when the inbox it is drawn from changes.
  */
 export interface FieldHub {

@@ -96,8 +96,8 @@ fn key_label(prefix: &str, key: &str) -> String {
 /// The indexed unique-key value for one entity.
 ///
 /// Entity identity resolves through [`ENTITY_KEY_PROPERTY`], never through a
-/// synthetic per-entity label. A label index would mint one native label — and
-/// therefore one columnar node table — per entity, which caps out at grafeo's
+/// synthetic per-entity label. A label index would mint one native label, and
+/// therefore one columnar node table, per entity, which caps out at grafeo's
 /// `u16` table id long before a real repository graph is loaded.
 pub(crate) fn entity_key_value(namespace: &GraphNamespace, identity: &GraphEntityId) -> Value {
     Value::from(stable_key(namespace, identity.as_str()))
@@ -706,9 +706,9 @@ const COMPACT_LABEL_SEPARATOR: char = '|';
 
 /// Every native label `node` carries, whichever store it came from.
 ///
-/// A `CompactStore` files a multi-label node under a *composite* label — the
+/// A `CompactStore` files a multi-label node under a *composite* label, the
 /// node's label set sorted and joined with `|`
-/// (`grafeo-core/src/graph/compact/builder.rs:1129`) — and its `get_node`
+/// (`grafeo-core/src/graph/compact/builder.rs:1129`), and its `get_node`
 /// restores that composite as the node's single label
 /// (`compact/graph_store_impl.rs:31`). An entity carries a record label plus
 /// owner and domain labels, so reading `node.labels` directly sees one fused

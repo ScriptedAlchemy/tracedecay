@@ -1,20 +1,20 @@
-# Test-Map / Test-Risk Calibration — Design Note
+# Test-Map / Test-Risk calibration. Design note
 
-> **Archived supporting design — not implementation authority.** This document
+> **Archived supporting design, not implementation authority.** This document
 > preserves historical calibration rationale. Current requirements come only
 > from the `docs/plans/tracedecay-v2/` hierarchy. The source scan described
 > below is part of the proposed product algorithm, not an acceptance shortcut;
 > exact counts, source shape, and golden snapshots are not rebuild instructions.
 
 **Task:** `t_d000933c` (Design integration-test coverage calibration heuristics)
-**Built on:** `TEST-MAP-AUDIT.md` (`t_b1feb03c`, formerly `docs/archive/`, now in git history only) — the root-cause audit of the ~12% signal.
+**Built on:** `TEST-MAP-AUDIT.md` (`t_b1feb03c`, formerly `docs/archive/`, now in git history only), the root-cause audit of the ~12% signal.
 **Scope:** how `tracedecay_test_risk` and `tracedecay_test_map` should change so their coverage
 signal is *defensible* on integration-heavy Rust repos. This is a design spec, not an implementation.
 
 > **Thesis.** The headline number is wrong because it is a shallow *attribution* artifact, not a
-> missing-tests signal. Calibration has two independent jobs: (1) **accuracy** — close the part of
+> missing-tests signal. Calibration has two independent jobs: (1) **accuracy**, close the part of
 > the undercount that is statically provable (transitive closure, trait dispatch, public-API
-> imports, CLI entry points); and (2) **honesty** — stop conflating "statically attributed" with
+> imports, CLI entry points); and (2) **honesty**, stop conflating "statically attributed" with
 > "tested," stop reporting orphans / non-Rust code as gaps, and label what is known to undercount.
 > The two are equally important: a bigger number that still overstates is a regression.
 
@@ -41,7 +41,7 @@ signal is *defensible* on integration-heavy Rust repos. This is a design spec, n
 Each heuristic lists **what**, **inputs**, **expected delta** (against the audit's reproduced
 baseline of 4397 src fns / 542 attributed / 12.3%), and the **risk class**.
 
-### H1 — Transitive closure to depth 3 in `test_risk`  *(Phase 1, mandatory, zero-FP)*
+### H1. Transitive closure to depth 3 in `test_risk`  *(Phase 1, mandatory, zero-FP)*
 
 **What.** Replace the depth-1 seed step with a single seeded forward BFS. Seed = every node in a
 test file **or** every `#[test]`-annotated fn (identical seed to today). Walk outgoing `Calls`
@@ -52,14 +52,14 @@ edges up to depth 3, marking every reached function attributed. Cap at 3 to matc
 
 **Implementation shape (required).** Do **not** call `get_callers(node, 3)` per source function
 (that is ~4,397 backward BFS passes and will be slow on large graphs). Build a reverse-adjacency
-view once and run **one forward BFS from the seed set** — exactly the shape the audit's Python
+view once and run **one forward BFS from the seed set**, exactly the shape the audit's Python
 reimplementation used to reproduce the depth table. This is O(edges) total, not O(nodes × edges).
 
 **Expected delta.** `attributed` 542 → ~1,103 (25.1% at depth 3; full-transitive ceiling 27.3%).
 **Risk:** none (pure static reachability); the only "over-count" is cfg-gated/panic-only callees,
 which the depth-1 path already suffers identically.
 
-### H2 — Trait / dynamic-dispatch resolution to concrete impls  *(Phase 2, bounded-FP)*
+### H2. Trait / dynamic-dispatch resolution to concrete impls  *(Phase 2, bounded-FP)*
 
 **What.** When a reached node is a trait method (or a method reached only through a trait object),
 attribute coverage to its concrete `impl` methods using the **`Implements`/`Extends` edges already
@@ -80,9 +80,9 @@ crate boundary as the test's call.
 
 **Expected delta.** Recovers the extractor families (~tens of fns per language × ~15 languages).
 Modest in count, high in value (these are the literal things the `*_extraction_test.rs` suites run).
-**Risk:** over-attribution across unrelated impls — see gate above.
+**Risk:** over-attribution across unrelated impls, see gate above.
 
-### H3 — Public-API / integration-test import mapping  *(Phase 2, confidence-tagged)*
+### H3. Public-API / integration-test import mapping  *(Phase 2, confidence-tagged)*
 
 **What.** Integration tests in `tests/` exercise the crate via its **public surface**. Map a
 `tests/` file to the **`pub`** symbols it both `use`s **and** calls: a `Uses` edge from the test to
@@ -93,7 +93,7 @@ evidence the public API is exercised. Attribute that symbol (and, via H1, its cl
 **No new extraction.**
 
 **Attribution rule.** Require **both** an import (`Uses` → `pub` symbol) **and** a call path into
-that symbol's closure — import alone is *not* attribution (a test may import and never call). Symbols
+that symbol's closure, import alone is *not* attribution (a test may import and never call). Symbols
 attributed only this way carry `attribution_method: "public_api"` and a lower confidence than direct
 calls, so they are separable in the report.
 
@@ -101,7 +101,7 @@ calls, so they are separable in the report.
 the `dashboard_api_test/` suite, among others. **Risk:** import-without-exercise
 → mitigated by the dual requirement.
 
-### H4 — CLI / binary entry attribution  *(Phase 3, opt-in by default)*
+### H4. CLI / binary entry attribution  *(Phase 3, opt-in by default)*
 
 **What.** `src/main.rs::run` is the #1 "top-risk-untested" yet is spawned by 10+ integration test
 files via `Command::new("tracedecay")`. A process spawn emits **no `Calls` edge**, so it is
@@ -126,19 +126,19 @@ real exercise. When (b) fires, it lowers the bin's risk multiplier but never mar
 highest-risk functions). **Risk:** `--help`/`--version` over-attribution → mitigated by opt-in + the
 `cli_entry` tag so a human can audit.
 
-### H5 — Honest bucketing + calibrated confidence labels  *(Phase 1, mandatory, no FP)*
+### H5. Honest bucketing + calibrated confidence labels  *(Phase 1, mandatory, no FP)*
 
 **What.** Stop reporting one number. Split the population and label the signal's nature. Computed
 *after* H1–H4 attribution:
 
-- **attributed** — statically reachable from a test (H1) or resolved (H2/H3/H4).
-- **reachable_unattributed** — has incoming `Calls` (so not an orphan) but no static path from any
-  test reaches it. This is the genuine attribution backlog (audit's ~1,063) — *likely tested via
+- **attributed**, statically reachable from a test (H1) or resolved (H2/H3/H4).
+- **reachable_unattributed**, has incoming `Calls` (so not an orphan) but no static path from any
+  test reaches it. This is the genuine attribution backlog (audit's ~1,063), *likely tested via
   dispatch/process boundaries we can't see statically*. Never call these "untested."
-- **orphan_entry** — zero incoming `Calls` edges. Includes real public entry points (e.g. `main`,
+- **orphan_entry**, zero incoming `Calls` edges. Includes real public entry points (e.g. `main`,
   which is orphan until H4 attributes it), trait impls whose only caller is dynamic, and genuine dead
-  code. **`orphan_entry` ≠ dead code** — label it as "no static caller" and surface separately.
-- **excluded** — non-`src/` code (dashboard Python, scripts, benches, `build.rs`). Removed from the
+  code. **`orphan_entry` ≠ dead code**, label it as "no static caller" and surface separately.
+- **excluded**, non-`src/` code (dashboard Python, scripts, benches, `build.rs`). Removed from the
   denominator entirely (audit's 357).
 
 Plus a **confidence label** on the aggregate: when any of H2/H3/H4 is active or the
@@ -167,7 +167,7 @@ analysis layer and avoids touching tree-sitter extractors.
 
 ## 4. Expected output / wording changes
 
-### 4.1 `tracedecay_test_risk` — summary
+### 4.1 `tracedecay_test_risk`, summary
 
 Current:
 ```json
@@ -179,12 +179,12 @@ Proposed (additive; old fields preserved for one release, then `tested` is depre
 ```json
 "summary": {
   "total_functions": <denominator = attributed + reachable_unattributed + orphan_entry>,
-  "coverage_pct": <attributed / total_functions, rounded — semantics now "statically attributed">,
+  "coverage_pct": <attributed / total_functions, rounded, semantics now "statically attributed">,
   "top_risk_untested": <unchanged, but computed over reachable_unattributed + orphan_entry>,
 
   "attribution": {
     "depth": 3,
-    "direct_unit_attributed":   <depth-1 #[test]-caller count — the old "tested" = 542 baseline>,
+    "direct_unit_attributed":   <depth-1 #[test]-caller count, the old "tested" = 542 baseline>,
     "closure_attributed":       <added by depth 2–3 BFS>,
     "trait_resolved_attributed": <H2>,
     "public_api_attributed":     <H3>,
@@ -195,7 +195,7 @@ Proposed (additive; old fields preserved for one release, then `tested` is depre
     "attributed":              <total_attributed>,
     "reachable_unattributed":  <has callers, no static test path>,
     "orphan_entry":            <zero incoming Calls edges>,
-    "excluded":                <non-src/: dashboard/scripts/benches — removed from denom>
+    "excluded":                <non-src/: dashboard/scripts/benches, removed from denom>
   },
   "confidence": "static_lower_bound",
   "confidence_note": "coverage_pct is a static attribution lower bound; real exercised coverage is higher (see known_undercount).",
@@ -207,7 +207,7 @@ Proposed (additive; old fields preserved for one release, then `tested` is depre
 }
 ```
 
-### 4.2 `tracedecay_test_risk` — per risk item
+### 4.2 `tracedecay_test_risk`, per risk item
 
 Add `attribution_method` (one of `direct_unit`, `closure`, `trait_resolved`, `public_api`,
 `cli_entry`, `none`) so indirect/integration attribution is separable from direct unit mapping at
@@ -245,10 +245,10 @@ from direct unit mappings."
   stay in `excluded`; never silently credited to Rust functions. (A future opt-in heuristic only.)
 - **Dynamic dispatch beyond traits** (fn pointers, broad trait objects): do not enumerate all impls;
   attribute only impls that are themselves statically reachable.
-- **Macros / generated code:** skip — unreliable node identity.
+- **Macros / generated code:** skip, unreliable node identity.
 - **Benches / `build.rs` / scripts:** excluded from the denominator, never attributed.
 - **Never mark a function `has_test: true` on inference alone without an `attribution_method` tag**
-  — inference is always auditable/visible, never silent.
+ , inference is always auditable/visible, never silent.
 
 ---
 
@@ -288,7 +288,7 @@ a Python reimplementation of the algorithm that already matched the tool to the 
 
 - **Phase 1 (ship together, zero added FP):** H1 (closure) + H5 (bucketing + confidence labels).
   This alone turns a misleading "12% tested" into "25% statically attributed, ~1,063 reachable but
-  unattributed, ~1,776 no static caller, 357 excluded — a lower bound." Mandatory, low-risk.
+  unattributed, ~1,776 no static caller, 357 excluded, a lower bound." Mandatory, low-risk.
 - **Phase 2 (bounded FP, behind the attribution tag):** H2 (trait/impl) + H3 (public-API). Each adds
   value and is independently auditable via `attribution_method`.
 - **Phase 3 (opt-in):** H4 CLI entry. Mechanism (a) docstring always on; mechanism (b)

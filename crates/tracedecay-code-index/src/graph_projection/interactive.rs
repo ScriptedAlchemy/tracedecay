@@ -13,7 +13,7 @@
 //! lazily by one bounded, cancellable scan of the projection and cached on the
 //! owning [`CodeGraphProjectionStore`]. The catalog is derived from the
 //! verified snapshot and shares its lifetime, so it is a cache of the
-//! projection authority — not a second authority. Per-seed adjacency reads go
+//! projection authority, not a second authority. Per-seed adjacency reads go
 //! straight to the snapshot's kind-filtered relation fan-outs.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -628,8 +628,8 @@ impl CodeGraphInteractiveReader {
     /// twice per read. `max_symbols_examined` bounds the scan itself, not just
     /// the output: reaching it returns `complete: false` rather than silently
     /// ranking a prefix as if it were the graph. Ordering is total and
-    /// deterministic — total degree descending, then qualified name, then
-    /// occurrence — so equal-degree symbols do not reshuffle between reads.
+    /// deterministic, total degree descending, then qualified name, then
+    /// occurrence, so equal-degree symbols do not reshuffle between reads.
     pub fn degree_ranking(
         &self,
         top: usize,
@@ -1043,7 +1043,7 @@ impl CodeGraphInteractiveReader {
     /// Hydration is staged so excluded work is never paid: each adjacency row
     /// loads its relation and edge payload first, edges outside the admitted
     /// kinds stop there without touching their far endpoint, and each unique
-    /// far endpoint that survives the filter is hydrated once per batch —
+    /// far endpoint that survives the filter is hydrated once per batch,
     /// impact frontiers and shared callees converge on the same neighbors, so
     /// per-edge endpoint reads repeated the same snapshot lookups.
     fn semantic_neighbors(
@@ -1146,7 +1146,7 @@ impl CodeGraphInteractiveReader {
     }
 
     /// Loads one adjacency row up to its validated edge payload: the relation,
-    /// the edge entity, and the seed-endpoint check — no far-endpoint read.
+    /// the edge entity, and the seed-endpoint check, no far-endpoint read.
     fn hydrate_edge_record(
         &self,
         seed: &SymbolOccurrenceId,

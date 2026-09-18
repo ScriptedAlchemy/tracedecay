@@ -71,9 +71,9 @@ impl DiagnosticRecordStateKindV1 {
 
     /// Rebuilds the typed state from this kind plus the decoded back-pointer.
     ///
-    /// Returns `None` when the two disagree — a non-current kind with no
-    /// generation, or a current kind carrying one — so the caller reports a
-    /// corrupt row rather than inventing a state.
+    /// Returns `None` when the two disagree so the caller reports a corrupt
+    /// row rather than inventing a state. That covers a non-current kind with
+    /// no generation, or a current kind carrying one.
     pub fn into_state(
         self,
         state_generation: Option<CodeGenerationId>,

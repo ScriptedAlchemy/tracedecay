@@ -310,7 +310,7 @@ async fn outline_preserves_generation_payload_and_adds_ast_grep_outline_when_ava
 /// A markdown plan is a work ledger. Outlining one must answer "what is under
 /// this heading, and which of its checklist items are still open" without a
 /// second read, and must hand back a retrieval id for the full section body
-/// through the existing `tracedecay_retrieve` handle cache — not a new tool.
+/// through the existing `tracedecay_retrieve` handle cache, not a new tool.
 #[tokio::test]
 async fn outline_markdown_section_carries_preview_handle_and_checklist_state() {
     if !tracedecay_mcp::ast_grep_outline_available() {
@@ -701,7 +701,7 @@ async fn test_multi_str_replace_overlapping_ranges_error() {
 async fn test_replace_symbol_documented_fn_keeps_single_doc_comment() {
     // The replaced span must cover the leading doc-comment block, so replacing
     // a documented fn with new_source that carries its own doc yields exactly
-    // one doc comment — not the old one orphaned above the new one.
+    // one doc comment, not the old one orphaned above the new one.
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
     let project = project_root.as_path();
@@ -926,7 +926,7 @@ async fn ast_grep_rewrite_uses_current_cli_update_flag() {
 
 /// When ast-grep exits non-zero with empty stderr (no language inferred
 /// from the file extension, or pattern matches nothing), the tool must not
-/// surface `"ast-grep failed: "` — a useless empty trailer. The message
+/// surface `"ast-grep failed: "`, a useless empty trailer. The message
 /// must explain the likely cause so the caller can act on it.
 #[tokio::test]
 async fn ast_grep_rewrite_surfaces_useful_error_on_empty_stderr() {
@@ -960,7 +960,7 @@ async fn ast_grep_rewrite_surfaces_useful_error_on_empty_stderr() {
     let message = output["message"].as_str().unwrap_or_default();
     assert!(
         !message.trim_end_matches(':').trim().eq("ast-grep failed"),
-        "message must not end as an empty 'ast-grep failed:' — got: {message:?}"
+        "message must not end as an empty 'ast-grep failed:', got: {message:?}"
     );
     assert!(
         message.contains("exit") || message.contains("0 nodes") || message.contains("no language"),

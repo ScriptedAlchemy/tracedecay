@@ -2,9 +2,9 @@
 //!
 //! The symbol graph stays heading-level: sections are the only markdown
 //! symbols, and bullets are never exploded into graph nodes. But the content
-//! that makes a plan document a *work ledger* — task-list checkboxes and their
+//! that makes a plan document a *work ledger*, task-list checkboxes and their
 //! checked state, nested bullets, ordered steps, tables, block quotes, fenced
-//! code and its language tag — has to survive into retrieval as structure, not
+//! code and its language tag, has to survive into retrieval as structure, not
 //! as one flat text blob. Otherwise "which checklist items under 'Remaining
 //! work' are still unchecked" is unanswerable without re-reading the file.
 //!
@@ -92,7 +92,7 @@ impl MarkdownSectionStructure {
             && self.code_blocks.is_empty()
     }
 
-    /// Checklist items still unchecked — the question plan documents are
+    /// Checklist items still unchecked. The question plan documents are
     /// actually asked.
     pub fn unchecked(&self) -> impl Iterator<Item = &MarkdownChecklistItem> {
         self.checklist.iter().filter(|item| !item.checked)

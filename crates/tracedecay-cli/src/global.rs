@@ -243,7 +243,7 @@ pub(crate) fn gather_local_projects(
 
 /// Same as [`gather_local_projects`] but takes the starting directory explicitly.
 ///
-/// Pure (apart from filesystem reads) — easier to test than the cwd-driven wrapper.
+/// Pure (apart from filesystem reads), easier to test than the cwd-driven wrapper.
 pub(crate) fn gather_local_projects_from(
     cwd: &Path,
     home_tracedecay: &Option<std::path::PathBuf>,
@@ -307,7 +307,7 @@ pub(crate) fn find_descendant_tracedecay(
     let mut work: Vec<std::path::PathBuf> = vec![start.to_path_buf()];
 
     while let Some(dir) = work.pop() {
-        // Cycle guard — best-effort. If canonicalize fails (permission, broken
+        // Cycle guard, best-effort. If canonicalize fails (permission, broken
         // symlink) we fall back to the raw path, which still dedupes most cases.
         let canon = dir.canonicalize().unwrap_or_else(|_| dir.clone());
         if !visited.insert(canon) {
@@ -394,10 +394,10 @@ fn local_project_marker_exists(project_root: &Path, data_dir: &Path) -> bool {
 pub(crate) fn print_flash_warning(all: bool, targets: &[ProjectStorageLocation]) {
     // Banner is `INNER_WIDTH` display columns wide. The colored title row is
     // padded with red-background spaces so the highlight reaches the same
-    // width as the `═` rules above and below — a fixed-width visual block
+    // width as the `═` rules above and below, a fixed-width visual block
     // rather than a short red strip floating between long horizontal lines.
     const INNER_WIDTH: usize = 64;
-    let title = "⚠  DESTRUCTIVE ACTION — TRACEDECAY WIPE  ⚠";
+    let title = "⚠  DESTRUCTIVE ACTION. TRACEDECAY WIPE  ⚠";
     // Visible columns: ⚠(2) + "  "(2) + 36 + "  "(2) + ⚠(2) = 44.
     // Modern terminals render U+26A0 as a 2-col emoji glyph; older terminals
     // that pick the text presentation will leave a 2-col gap, which is mild.

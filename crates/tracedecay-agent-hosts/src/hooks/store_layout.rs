@@ -5,14 +5,14 @@
 //! `hook_completed` from the timing span's `Drop`), once in the native Hook
 //! `prepare_bound_hook`, once per surviving hint in the dedupe path, and twice
 //! more in the memory-injection seen-facts path. Every one of those repeats the
-//! same filesystem work — reading the enrollment and repository identity
+//! same filesystem work, reading the enrollment and repository identity
 //! markers, and, for a checkout no authority names yet, a `read_dir` sweep of
 //! the whole profile's `projects/` directory.
 //!
 //! A hook is a one-shot subprocess spawned by `hook_cmd` for a single event, so
 //! resolution is stable for its entire lifetime and the answer can simply be
 //! kept. The cache is keyed by (profile root, project root) so a changed
-//! `TRACEDECAY_USER_DATA_DIR` — the shape tests and multi-profile runs use —
+//! `TRACEDECAY_USER_DATA_DIR`, the shape tests and multi-profile runs use,
 //! never reads another profile's answer.
 //!
 //! Errors collapse to `None`, matching every hook caller, all of which already

@@ -6,7 +6,7 @@
 
 use tracedecay_mcp::get_tool_definitions;
 
-/// Host cap on tool description length. Generous — it exists to catch runaway
+/// Host cap on tool description length. Generous. It exists to catch runaway
 /// description growth, not to force terseness.
 const MAX_DESCRIPTION_CHARS: usize = 8192;
 

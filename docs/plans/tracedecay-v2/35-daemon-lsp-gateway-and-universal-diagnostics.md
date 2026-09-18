@@ -40,7 +40,7 @@ for a top-level `src/lsp/` module, global `--no-lsp`, `TRACEDECAY_LSP`,
 ship and is not a missing requirement of this plan.
 
 (Update 2026-08-07: the cited path is stale. `src/lsp_bridge.rs` no longer
-exists — it was removed by `chore: delete orphaned root modules` (0bc74fde09)
+exists, it was removed by `chore: delete orphaned root modules` (0bc74fde09)
 after the gateway and transport bridge moved into the dedicated
 `crates/tracedecay-lsp/` crate. The clarification's substance is unchanged,
 only relocated: the request boundary is

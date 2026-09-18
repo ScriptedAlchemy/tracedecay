@@ -114,7 +114,7 @@ impl WorktreeChangeClassificationV1 {
             let path = item.location().to_str_lossy().into_owned();
             // TraceDecay's own project-local private store is daemon-written
             // state, never checkout content. Counting it as a worktree change
-            // would make every enrolled checkout permanently "dirty" — see
+            // would make every enrolled checkout permanently "dirty", see
             // [`is_tracedecay_owned_state_path`].
             if is_tracedecay_owned_state_path(&path) {
                 continue;
@@ -309,7 +309,7 @@ mod tests {
 
     /// Enrolling a project writes `.tracedecay/enrollment.json` into the
     /// checkout. That is `TraceDecay`'s own state, so a checkout that is
-    /// otherwise clean must stay classified clean — otherwise no capture can
+    /// otherwise clean must stay classified clean, otherwise no capture can
     /// seal an exact HEAD tree and exact-scope admission refuses forever with
     /// `lsp-code-index-source-revision-unavailable`.
     #[test]

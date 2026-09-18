@@ -486,7 +486,7 @@ async fn backlog_read_emits_clean_zero_record_for_configured_window() -> Result<
 }
 
 // (c)-analogue for one-content-copy: the projected twin obeys the window while
-// the raw copy is retained — proving raw and projected do not both persist.
+// the raw copy is retained, proving raw and projected do not both persist.
 #[tokio::test]
 async fn dedupe_drops_projected_duplicate_and_keeps_raw() -> Result<(), String> {
     let store = test_store().await?;

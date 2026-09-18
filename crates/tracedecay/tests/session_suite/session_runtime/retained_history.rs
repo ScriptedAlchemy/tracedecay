@@ -620,8 +620,8 @@ async fn shutdown_cancels_and_joins_in_flight_history_pass() {
 }
 
 /// A saturated daemon-wide historical-ingest admission defers the pass as
-/// typed retryable state — the ingestor never runs, the worker keeps cycling
-/// (serving stays available) — and the deferred pass runs once a permit
+/// typed retryable state, the ingestor never runs, the worker keeps cycling
+/// (serving stays available), and the deferred pass runs once a permit
 /// frees, so a huge backlog on other stores cannot wedge this one.
 #[tokio::test]
 async fn saturated_history_admission_defers_the_pass_and_resumes() {

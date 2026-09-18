@@ -7,7 +7,7 @@ use tree_sitter::Parser;
 
 use tracedecay_domain::code_intelligence::{NodeKind, Visibility};
 
-/// Item kinds that a `use` statement can bring into scope — the ones a moved
+/// Item kinds that a `use` statement can bring into scope, the ones a moved
 /// body could depend on across a module boundary.
 pub(super) fn is_importable_item(kind: &NodeKind) -> bool {
     matches!(

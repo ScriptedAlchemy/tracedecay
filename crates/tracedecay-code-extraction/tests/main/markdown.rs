@@ -125,7 +125,7 @@ fn test_markdown_handles_header_with_punctuation() {
 
 #[test]
 fn test_markdown_link_inside_heading_emits_uses_edge() {
-    // `## See [main](src/main.rs)` — the link inside the heading should
+    // `## See [main](src/main.rs)`. The link inside the heading should
     // be captured as a Uses edge parented to that heading.
     let source = "## See [main](src/main.rs)\n";
     let result = MarkdownExtractor.extract("README.md", source);
@@ -154,7 +154,7 @@ fn test_markdown_link_inside_heading_emits_uses_edge() {
 #[test]
 fn test_markdown_link_in_heading_does_not_double_count_body_links() {
     // A heading with a link, plus a body paragraph with another link,
-    // produces exactly two Uses edges — one per link.
+    // produces exactly two Uses edges. One per link.
     let source = "# [foo](src/foo.rs)\n\nSee also [bar](src/bar.rs).\n";
     let result = MarkdownExtractor.extract("README.md", source);
     let uses_edges: Vec<_> = result

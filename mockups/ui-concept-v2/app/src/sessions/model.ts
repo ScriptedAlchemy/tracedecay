@@ -116,7 +116,7 @@ export const SPIKES: SpikeTick[] = (() => {
 /**
  * Message volume per session at the requested semantic bucket size.
  * One needle per session per active bucket, positioned at the volume-weighted
- * mean of that session's real timestamps inside the bucket — so simultaneous
+ * mean of that session's real timestamps inside the bucket. So simultaneous
  * sessions fan out into distinct needles. Empty hours produce nothing;
  * needles are never invented.
  */

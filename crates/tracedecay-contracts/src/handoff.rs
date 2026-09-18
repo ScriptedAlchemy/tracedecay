@@ -608,7 +608,7 @@ pub enum HandoffOpenAuthorityError {
 /// Deliberately the same three fields [`HandoffOpenExpectationV1`] matches on,
 /// minus the kind: a caller may enumerate EXACTLY the grants it could redeem,
 /// across both kinds. That equivalence is the whole safety argument for the
-/// operation — listing hands out no authority the caller did not already hold,
+/// operation, listing hands out no authority the caller did not already hold,
 /// because every row returned is a token it could already have consumed had it
 /// held the bearer. It is not an issuer view: an issuer that could enumerate by
 /// its own identity would be reading tokens addressed to other principals.
@@ -788,7 +788,7 @@ pub struct ListTaskHandoffsRequestV1 {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskHandoffTokenStateV1 {
-    /// Not yet redeemed, and not yet expired — the live frontier.
+    /// Not yet redeemed, and not yet expired: the live frontier.
     Open,
     /// Redeemed. Single-use, so it can never be redeemed again.
     Consumed,
@@ -801,7 +801,7 @@ pub enum TaskHandoffTokenStateV1 {
 ///
 /// Mirrors [`IssueTaskHandoffResultV1`]'s doctrine: the complete binding stays
 /// inside the daemon authority, and only these identifiers cross the wire. No
-/// bearer secret exists to leak here — the authority never stored one — and the
+/// bearer secret exists to leak here. The authority never stored one, and the
 /// issuer's grant identity and policy digests stay concealed.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

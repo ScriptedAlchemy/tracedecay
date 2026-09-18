@@ -1,8 +1,8 @@
 //! Parse-before-scan and typed-assessment contract tests.
 //!
 //! Every format case here uses the same placeholder value under a
-//! semantically sensitive key. The value is deliberately ordinary — no
-//! credential prefix, no digits, below the entropy floor — and every case first
+//! semantically sensitive key. The value is deliberately ordinary, no
+//! credential prefix, no digits, below the entropy floor, and every case first
 //! asserts that the pre-existing raw sweep leaves it untouched. A case only
 //! passes because the payload was parsed and the *field* was understood.
 
@@ -268,8 +268,8 @@ fn yaml_decoy_comment_mentioning_the_key_does_not_redirect_the_redaction_span() 
     // Line 1 is a decoy: it mentions the key name in a comment, well before
     // the real `vault_passphrase:` assignment. An unanchored `raw.find(key)`
     // would match the decoy and redact its (harmless) comment line while the
-    // real value — a YAML folded scalar spread across the following two
-    // lines — sails through untouched. A folded scalar's decoded value
+    // real value, a YAML folded scalar spread across the following two
+    // lines, sails through untouched. A folded scalar's decoded value
     // differs from its raw bytes (folding turns newlines into spaces), so
     // byte-for-byte value location also fails and the key-line-tail
     // fallback is the only thing standing between this secret and the
@@ -350,7 +350,7 @@ fn lcm_json_credential_bearing_keys_quarantine_instead_of_faulting_the_receipt()
     // A successfully parsed LCM JSON payload whose object *key* carries
     // credential material cannot be redacted in place (rewriting a key changes
     // the document's structure), so the sanitizer refuses it fail-closed. That
-    // refusal is the sanitizer doing its job — it must surface as a structured
+    // refusal is the sanitizer doing its job. It must surface as a structured
     // quarantine, never as a receipt-construction fault.
     let credential_key = ["sk", "-test-", "1234567890abcdef"].concat();
     let raw = format!(r#"{{"{credential_key}":"ordinary-value"}}"#);
@@ -370,7 +370,7 @@ fn lcm_non_json_credential_bearing_keys_are_key_quarantine_not_parse_ambiguity()
     // itself credential material. (TOML rather than `key: value`, which the
     // format probe reads as an HTTP header block whose line path never scans
     // keys.) The refusal must name the key quarantine, not claim the document
-    // was ambiguous — it parsed fine.
+    // was ambiguous. It parsed fine.
     let credential_key = ["sk", "-test-", "1234567890abcdef"].concat();
     let raw = format!("{credential_key} = \"ordinary-value\"\nregion = \"us-east\"\n");
 
@@ -421,8 +421,8 @@ fn lcm_non_json_parse_ambiguity_stays_a_structured_quarantine() {
 
 #[test]
 fn sanitizer_verdicts_stay_distinguishable_from_sanitizer_faults() {
-    // Re-rendering an already-captured output converges to a *verdict* — the
-    // sanitizer withheld content it proved it cannot serve — and stays
+    // Re-rendering an already-captured output converges to a *verdict*, the
+    // sanitizer withheld content it proved it cannot serve, and stays
     // fail-closed on a *fault*, where nothing about the content was decided.
     // Collapsing the two either degrades a store forever or serves content the
     // sanitizer never cleared.

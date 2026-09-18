@@ -91,8 +91,8 @@ impl EmbeddedDashboard {
 ///
 /// Checkout mode embeds an immutable, digest-named copy under `OUT_DIR`, never
 /// the checkout-global `dashboard/app-dist` that `rsbuild dev` and other
-/// target directories rewrite. The frontend is rebuilt — straight into the
-/// store's staging directory — only when the fingerprint of its inputs
+/// target directories rewrite. The frontend is rebuilt, straight into the
+/// store's staging directory, only when the fingerprint of its inputs
 /// differs from the recorded one; `npm ci` runs only when the installed tree
 /// cannot attest the current `package-lock.json`. When
 /// `TRACEDECAY_SKIP_DASHBOARD_BUILD` is set the prebuilt `dashboard/app-dist`
@@ -337,7 +337,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let repository_root = manifest_dir.join(REPOSITORY_ROOT_FROM_CRATE);
 
     // Source provenance: the exact commit this binary compiles, in strict
-    // source order — verified git worktree, release env, packaged VCS journal.
+    // source order, verified git worktree, release env, packaged VCS journal.
     println!("cargo::rerun-if-env-changed=TRACEDECAY_RELEASE_GIT_SHA");
     println!("cargo::rerun-if-changed=build-support/source_provenance.rs");
     let release_env_sha = match std::env::var_os("TRACEDECAY_RELEASE_GIT_SHA") {

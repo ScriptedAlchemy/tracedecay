@@ -1,6 +1,6 @@
 //! Artifact hydration contract: topology-pinned paging, typed absence,
 //! stale-cursor refusal, typed evidence coverage, and page-consistency
-//! refusal — all without ever carrying artifact bytes.
+//! refusal, all without ever carrying artifact bytes.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};

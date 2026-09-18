@@ -9,8 +9,8 @@
 //! weaker copy silently accepts rows the real table would reject, and the
 //! divergence surfaces only in production.
 //!
-//! Every consumer that creates one of these tables — production installer,
-//! adapter test fixture, or parity harness — should install it from here
+//! Every consumer that creates one of these tables, production installer,
+//! adapter test fixture, or parity harness, should install it from here
 //! rather than restating the columns.
 
 /// Immutable, owner-bound retrieval anchors.

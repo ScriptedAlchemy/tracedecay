@@ -35,7 +35,7 @@ pub enum WorkflowDefinitionAuthorityError {
 /// Plan 32 ("Typed workflow definitions"): "Lifecycle retains candidate,
 /// validate, activate, retire, reject, list, get, diff, and history operations
 /// through the same application surfaces." The definition payload itself stays
-/// immutable — "Editing creates a new version; admitted runs remain pinned" —
+/// immutable, "Editing creates a new version; admitted runs remain pinned",
 /// so the disposition is a separate revisioned aggregate keyed by the same
 /// definition identity.
 #[derive(
@@ -127,7 +127,7 @@ impl WorkflowLifecycleOperation {
     /// with retire and reject as terminal dispositions, and "Unknown
     /// operations, cycles, dangling references, incompatible schemas,
     /// unbounded fan-out, privilege expansion, unsupported effects, or
-    /// recursive generic execution reject before activation" — so activating a
+    /// recursive generic execution reject before activation", so activating a
     /// candidate records the intermediate `validated` disposition it had to
     /// clear, and every state it passes through gets its own immutable history
     /// entry. `None` names an illegal transition.
@@ -484,8 +484,8 @@ where
 
     /// Admission every activation must clear before its lifecycle transition
     /// is journaled: structural revalidation plus tool-catalog admission of
-    /// every step operation. The one authority both activation paths — this
-    /// service and the daemon's journaled effect — run.
+    /// every step operation. The one authority both activation paths, this
+    /// service and the daemon's journaled effect, run.
     pub fn admit_activation(
         &self,
         definition_id: &WorkflowDefinitionId,
@@ -1047,7 +1047,7 @@ impl fmt::Debug for TaskHandoffRedeemRequest {
 /// The receipt is checkpoint evidence only. It deliberately carries no
 /// lease, fence, or acceptance authority: redeeming a handoff cannot renew
 /// a lease, establish task acceptance, or mutate graph or runtime state
-/// (Plan 24) — the redeemer must earn runtime authority through the normal
+/// (Plan 24). The redeemer must earn runtime authority through the normal
 /// admission and lease paths.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

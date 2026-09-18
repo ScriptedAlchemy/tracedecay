@@ -109,7 +109,7 @@ async fn resolve_canonical_occurrence_anchor(
 /// Provider matching reads `session_occurrences.source_provider`, the
 /// projection-materialized column that already restores the wire default
 /// (`ObservationSourceIdentityV1` omits `provider` when it is `claude`), so no
-/// direct read re-parses `observation_json` per row — exactly as the candidate,
+/// direct read re-parses `observation_json` per row, exactly as the candidate,
 /// hydration, and derived-evidence queries do.
 #[hotpath::measure(future = true, label = "session_temporal.query.direct_occurrence")]
 async fn resolve_occurrence_anchor(

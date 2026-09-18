@@ -1,4 +1,4 @@
-"""TraceDecay dashboard plugin for Hermes — tracedecay-backed API routes.
+"""TraceDecay dashboard plugin for Hermes. Tracedecay-backed API routes.
 
 Mounted at /api/plugins/tracedecay/ by the Hermes dashboard plugin system.
 
@@ -199,7 +199,7 @@ except Exception:  # pragma: no cover - exotic libc
 # spawning from the request thread used to SIGTERM the child seconds later
 # (surfacing as random 502 "connection reset by peer" on the next request).
 # All Popen calls therefore run on this single long-lived worker thread,
-# which survives until interpreter shutdown — restoring the intended
+# which survives until interpreter shutdown. Restoring the intended
 # "die with the Hermes host process" semantics.
 _spawn_pool = concurrent.futures.ThreadPoolExecutor(
     max_workers=1, thread_name_prefix="tracedecay-dashboard-spawn"
@@ -294,7 +294,7 @@ def _spawn_dashboard() -> str:
         stderr=subprocess.PIPE,
         text=True,
         env=_dashboard_env(),
-        preexec_fn=_child_preexec if _libc is not None else None,  # noqa: PLW1509 — minimal prctl-only hook
+        preexec_fn=_child_preexec if _libc is not None else None,  # noqa: PLW1509, minimal prctl-only hook
     ).result(timeout=_SPAWN_TIMEOUT_SECONDS)
 
     # Single reader per pipe, for the child's whole lifetime: the stderr
@@ -352,7 +352,7 @@ def _spawn_dashboard() -> str:
 def _terminate_process(process: subprocess.Popen) -> None:
     """Terminate-then-kill a spawned child without touching its pipes.
 
-    The drain threads own the pipes — never communicate() here (that would
+    The drain threads own the pipes, never communicate() here (that would
     race a second reader against them on the same fd).
     """
     try:
@@ -470,7 +470,7 @@ def _proxy(method: str, upstream_path: str, request: Request, body: bytes | None
     # after re-resolving the upstream: _upstream_base reaps a dead child and
     # respawns it (then waits for readiness), so a mid-flight engine death
     # heals transparently instead of surfacing a one-off 502. POSTs are never
-    # retried — curation applies must not run twice.
+    # retried. Curation applies must not run twice.
     attempts = 2 if method == "GET" else 1
     last_exc: Exception | None = None
     for attempt in range(attempts):
@@ -487,7 +487,7 @@ def _proxy(method: str, upstream_path: str, request: Request, body: bytes | None
             headers={"Content-Type": "application/json"} if body else {},
         )
         try:
-            with urllib.request.urlopen(req, timeout=_PROXY_TIMEOUT_SECONDS) as resp:  # noqa: S310 — loopback/configured upstream only
+            with urllib.request.urlopen(req, timeout=_PROXY_TIMEOUT_SECONDS) as resp:  # noqa: S310, loopback/configured upstream only
                 payload = json.loads(resp.read().decode("utf-8"))
                 return JSONResponse(payload, status_code=resp.status)
         except urllib.error.HTTPError as exc:
@@ -522,7 +522,7 @@ def get_dashboard_url() -> JSONResponse:
 
     The upstream loopback server is started here so a spawn failure is a typed
     503 rather than a later iframe 502. The URL itself is always the Hermes
-    proxy path — never ``http://127.0.0.1``.
+    proxy path, never ``http://127.0.0.1``.
     """
     _upstream_base()
     return JSONResponse({"url": DASHBOARD_EMBED_PATH})
@@ -603,7 +603,7 @@ def _embed_once(
         headers=headers,
     )
     try:
-        resp = urllib.request.urlopen(req, timeout=timeout)  # noqa: S310 — loopback/configured upstream only
+        resp = urllib.request.urlopen(req, timeout=timeout)  # noqa: S310, loopback/configured upstream only
     except urllib.error.HTTPError as exc:
         error_body = exc.read()
         media = "application/octet-stream"
@@ -669,7 +669,7 @@ def get_capabilities() -> JSONResponse:
 def get_holographic_root(request: Request) -> JSONResponse:
     """Holographic memory overview (proxied).
 
-    Forwards to upstream ``GET /api/plugins/holographic/`` — the dashboard
+    Forwards to upstream ``GET /api/plugins/holographic/``. The dashboard
     overview payload (provider status, facts, entities, association graph).
     Query parameters (``q``, ``limit``, ``graph_limit``) pass through verbatim.
     """

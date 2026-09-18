@@ -18,7 +18,7 @@ sophisticated judge):
 * otherwise at least one tracedecay MCP tool was used, AND
 * no ``anti_tools`` were used,
 * when a scenario supplies ``verify_cmd``, its exit status is folded in as
-  ``verify_pass`` — a non-zero verify fails the scenario even if fragments
+  ``verify_pass``, a non-zero verify fails the scenario even if fragments
   matched (silent-failure detector),
 * ``tool_cmd_attempts`` counts captured commands containing ``tracedecay tool``
   (optionally narrowed by per-scenario ``attempt_tool``); ``self_corrected`` is

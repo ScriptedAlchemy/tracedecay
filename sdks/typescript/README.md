@@ -49,7 +49,7 @@ Malformed or unavailable contracts fail closed.
 
 `npm test` runs the fast, mock-server unit suite only; it does not by itself
 demonstrate that the built package works against a real daemon. `npm publish`
-runs `prepublishOnly`, which additionally requires `npm run test:installed` —
+runs `prepublishOnly`, which additionally requires `npm run test:installed`,
 a check that requires a prebuilt production `tracedecay` executable at
 `target/debug/tracedecay`, or at the absolute path supplied through
 `TRACEDECAY_TEST_BIN`; the check does not build the daemon. It starts that
@@ -66,7 +66,7 @@ GitHub Release trigger that ships the binaries. An unprivileged
 `build-typescript` job packs the tarball exactly once, runs
 typecheck/unit/conformance against that same tarball, and stages both the
 artifact and digest-pinned npm tooling. A separate protected
-`publish-typescript` job — gated on the release verification job — re-verifies
+`publish-typescript` job, gated on the release verification job, re-verifies
 those exact bytes and publishes through tokenless npm trusted publishing
 (OIDC; provenance attached automatically; no `NPM_TOKEN` exists), without
 installing code. Prerelease package versions publish under the `beta`

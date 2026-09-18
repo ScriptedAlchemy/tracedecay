@@ -1,7 +1,7 @@
 /**
  * The Settings inspector: the exact evidence behind the inspected row, then
  * the identity of the configuration snapshot every row came from, then the two
- * operational planes — multi-root and Remote Brain — that sit beside
+ * operational planes, multi-root and Remote Brain, that sit beside
  * configuration without being configuration values.
  *
  * Inspection is a reading. It follows hover and focus, changes nothing, and
@@ -148,7 +148,7 @@ function RowInspection({
             <span className="td-value break-all text-2xs text-text-secondary">{row.section.location}</span>
           ) : (
             <span className="text-2xs text-text-muted">
-              not served — the payload names no source for this group
+              not served, the payload names no source for this group
             </span>
           )}
         </Fact>
@@ -278,8 +278,8 @@ function SnapshotFacts({
 }
 
 /**
- * The one review the editor can hold, stated here so a verdict — a conflict,
- * a withdrawn authority, a failed write — stays visible after its row's panel
+ * The one review the editor can hold, stated here so a verdict, a conflict,
+ * a withdrawn authority, a failed write, stays visible after its row's panel
  * is closed, rather than surviving only as a word in the register.
  */
 function HeldReviewFact({ state }: { state: SettingsEditorState }) {

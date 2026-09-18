@@ -1,7 +1,7 @@
 //! Admitted Work-family synthesis over fan-out sibling evidence (Plan 32).
 //!
 //! Synthesis is another admitted attempt under the same deadline,
-//! cancellation generation, and effect ledger as every other attempt — never
+//! cancellation generation, and effect ledger as every other attempt, never
 //! a rewrite of the evidence it consumes. Admission seals the ordered source
 //! envelopes it was asked to synthesize: each sibling attempt's terminal
 //! outcome is captured verbatim from the Work authority (success with its
@@ -164,8 +164,8 @@ pub struct WorkSynthesisAdmissionV1 {
     /// every citable source digest and is verified downstream by
     /// [`crate::workflow_synthesis::verify_workflow_synthesis_draft`].
     pub draft: WorkflowSynthesisDraft,
-    /// Sources preserved without citations — failures, unknowns, and
-    /// artifact-less successes — in the caller's requested order.
+    /// Sources preserved without citations: failures, unknowns, and
+    /// artifact-less successes, in the caller's requested order.
     pub uncited: Vec<WorkAttemptIdentityV1>,
 }
 
@@ -192,8 +192,8 @@ pub enum WorkSynthesisAttemptV1 {
 
 /// Validates the source set against the canonical product graph, seals it,
 /// and atomically commits the product link, attempt, and synthesis record.
-/// Every source outcome is read from the attempt authority — never trusted
-/// from the caller — and preserved verbatim in the admission record.
+/// Every source outcome is read from the attempt authority, never trusted
+/// from the caller, and preserved verbatim in the admission record.
 /// Provider instructions are prepared only after replay and source validation;
 /// their hydrated content is not part of the caller's immutable request identity.
 #[hotpath::measure(label = "application.work.synthesis.admit")]

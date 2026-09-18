@@ -22,7 +22,7 @@ export interface DispositionPresentation {
   disposition: ComparisonDispositionV1;
   label: string;
   state: DomainStateKind;
-  /** What this disposition asserts — and, for `insufficient_evidence`, what it
+  /** What this disposition asserts, and, for `insufficient_evidence`, what it
    * explicitly does not. */
   meaning: string;
 }

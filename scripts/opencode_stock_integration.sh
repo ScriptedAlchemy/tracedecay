@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end proof that `tracedecay install --agent opencode` works against a
-# STOCK OpenCode CLI — the host's own config loader must accept every file the
+# STOCK OpenCode CLI, the host's own config loader must accept every file the
 # installer writes, and the host's own MCP client must negotiate a session
 # with `tracedecay serve`. Used by the `opencode-integration` CI job and
 # runnable locally:

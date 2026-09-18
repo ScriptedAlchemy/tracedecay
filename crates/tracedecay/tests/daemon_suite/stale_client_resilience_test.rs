@@ -62,7 +62,7 @@ async fn version_skewed_client_cannot_crash_the_daemon() {
     let profile_root = profile_root_for(home.path());
 
     // A project tool from a projectless connection exercises the full
-    // tools/call dispatch — the poll frame that previously overflowed — and
+    // tools/call dispatch, the poll frame that previously overflowed, and
     // must come back as the daemon's typed refusal, not a dead socket.
     let skewed = projectless_handshake(&profile_root, SKEWED_CLIENT_VERSION, "stale-skewed-client");
     let refusal = tokio::time::timeout(

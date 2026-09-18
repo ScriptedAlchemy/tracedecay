@@ -1349,12 +1349,12 @@ fn with_index_lock<T>(path: &Path, operation: impl FnOnce() -> Result<T>) -> Res
                 "automation pending index lock is not a regular file",
             ));
         }
-        fs2::FileExt::lock_exclusive(&file)?;
+        file.lock()?;
         Ok(file)
     })
     .map_err(|error| contract_error(format!("automation pending index lock failed: {error}")))?;
     let result = operation();
-    let unlock = fs2::FileExt::unlock(&lock).map_err(|error| {
+    let unlock = lock.unlock().map_err(|error| {
         contract_error(format!("automation pending index unlock failed: {error}"))
     });
     match (result, unlock) {

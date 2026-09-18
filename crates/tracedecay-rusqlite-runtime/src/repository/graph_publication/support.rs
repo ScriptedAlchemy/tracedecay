@@ -814,7 +814,7 @@ pub(super) fn retired_cleanup_metadata_page(
 
 /// Batched tombstone materialization for one already-selected cleanup page:
 /// one `IN (...)` query for the tombstone rows, one for their retained
-/// replay sources, and the chunked dependency batch — instead of the former
+/// replay sources, and the chunked dependency batch, instead of the former
 /// three queries per tombstone. The page's byte cap
 /// (`MAX_GRAPH_REPLAY_PAGE_SOURCE_BYTES_V1`, well under the exact-SQL
 /// transport's 64 MiB materialization bound) keeps the batched source fetch
@@ -1938,7 +1938,7 @@ mod dependency_batch_tests {
     }
 
     /// RED (pre-fix behaviour, reproduced explicitly below): materializing N
-    /// cleanup tombstones issued three queries per tombstone — the tombstone
+    /// cleanup tombstones issued three queries per tombstone, the tombstone
     /// row, its retained replay source, and its dependency rows.
     ///
     /// GREEN (this crate's current behaviour):
@@ -1967,7 +1967,7 @@ mod dependency_batch_tests {
 
         // A three-publication verified chain on one projection: the first
         // two become historical once the third holds the head, so both are
-        // retire-able. The first carries dependencies, the second none —
+        // retire-able. The first carries dependencies, the second none,
         // covering both decode shapes in one batched page.
         let (first, first_head) = publish_verified_head(
             &mut storage,

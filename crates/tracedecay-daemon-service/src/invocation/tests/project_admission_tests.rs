@@ -271,7 +271,7 @@ async fn admit_project_without_retained_runtime(
 
 /// The retained runtime registers in the full server's owner phase, after the
 /// core route is already admitted. A retained request that lands in that
-/// window must read as the owner still mounting — retryable — never as a scope
+/// window must read as the owner still mounting, retryable, never as a scope
 /// with no retained runtime.
 #[tokio::test]
 async fn retained_request_stays_retryable_while_owners_are_warming() {
@@ -431,8 +431,8 @@ fn retained_grant(
     .expect("retained grant")
 }
 
-/// Two routes of one project — a linked worktree, or a reopen of a route whose
-/// ports were rebuilt — must alias one retained runtime. Keying the
+/// Two routes of one project, a linked worktree, or a reopen of a route whose
+/// ports were rebuilt, must alias one retained runtime. Keying the
 /// registration on the ports object instead refused every second route.
 #[tokio::test]
 async fn same_authority_routes_alias_one_retained_runtime() {
@@ -523,8 +523,8 @@ impl tracedecay_graph_query::CodeGraphProjectionReadPort for UnavailableCodeGrap
     }
 }
 
-/// Two routes of one project — a linked worktree, or a reopen through the
-/// retained canonical runtime — each build their own source-edit owner. The
+/// Two routes of one project, a linked worktree, or a reopen through the
+/// retained canonical runtime, each build their own source-edit owner. The
 /// registration is keyed on the authorized scope, as the retained runtime is:
 /// the same scope aliases the incumbent, a foreign scope is refused, and
 /// neither replaces what is registered.

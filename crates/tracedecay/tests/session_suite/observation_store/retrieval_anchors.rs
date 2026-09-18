@@ -622,7 +622,7 @@ async fn unauthorized_anchor_resolution_is_indistinguishable_from_absence() {
         .await
         .expect_err("owner Y must not resolve a never-created anchor");
 
-    // Same variant, and the only payload is the caller's own echoed request id —
+    // Same variant, and the only payload is the caller's own echoed request id,
     // never a signal of whether the target exists under some other owner.
     let existing_echo = match &existing_outcome {
         EvidenceAnchorResolutionError::Unavailable { anchor_id } => anchor_id.clone(),

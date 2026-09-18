@@ -265,7 +265,7 @@ impl PersistentBenchmarkGraph {
     }
 
     /// Publishes `manifest` against its own projection's verified head, so
-    /// many projections can accumulate in the same store — the shape of the
+    /// many projections can accumulate in the same store, the shape of the
     /// real code graph's shard-by-shard build.
     #[allow(dead_code)] // Each bench binary compiles this module separately.
     pub fn publish_new_projection(
@@ -342,8 +342,8 @@ impl PersistentBenchmarkGraph {
         commit.snapshot
     }
 
-    /// Closes the shard's store through the registry — the same path every
-    /// production close takes — and re-mounts the runtime so later
+    /// Closes the shard's store through the registry, the same path every
+    /// production close takes, and re-mounts the runtime so later
     /// operations can reopen it. Separated from [`Self::recover_snapshot`]
     /// so benches can time the close in isolation.
     #[allow(dead_code)] // Each bench binary compiles this module separately.

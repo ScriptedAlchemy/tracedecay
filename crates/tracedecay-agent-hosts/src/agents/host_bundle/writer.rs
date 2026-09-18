@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
-use fs2::FileExt;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_json_bytes;
 use tracedecay_host_integration::host_bundle_recovery_required;
@@ -1312,7 +1311,8 @@ fn open_host_writer_lock(
         .open_with(&name, &options)
         .map_err(|_| HostBundleError::UnsafeInstallPath)?
         .into_std();
-    file.try_lock_exclusive()
+    file.try_lock()
+        .map_err(std::io::Error::from)
         .map_err(|_| host_bundle_recovery_required!())?;
     Ok(HostWriterLock { host, file })
 }

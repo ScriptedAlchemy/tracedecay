@@ -332,7 +332,7 @@ async fn structural_edit_failure_writes_real_failure_reason_to_analytics() {
 
     // An anchor mismatch (str_replace's `old_str` not present in the file) is
     // a structural failure the handler already knows about via
-    // `EditResult::success == false` — the resulting analytics event should
+    // `EditResult::success == false`, the resulting analytics event should
     // carry that exact message, not a generic "tool_dispatch_error" marker.
     let resp = call_tool(
         Arc::clone(&server),

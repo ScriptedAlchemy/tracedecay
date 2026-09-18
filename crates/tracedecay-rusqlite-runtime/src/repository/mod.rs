@@ -8,7 +8,7 @@
 //! `crates/tracedecay-runtime-core/src/shard_runtime/registry/ports.rs`. The
 //! executors still contain no
 //! locator, opener, migration installer, registry binding, or
-//! generic SQL surface — the attachment supplies all of those.
+//! generic SQL surface, the attachment supplies all of those.
 //!
 //! Which operations are live is a separate question from whether the executors
 //! are mounted. Every payload and read operation an application actually

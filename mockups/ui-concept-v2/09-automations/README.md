@@ -27,7 +27,7 @@ Route: `/automations`.
 | Denied, malformed, stale, disconnected, unavailable | [final/01-scheduler-run-ledger.md](final/01-scheduler-run-ledger.md) | Read each independent authority state. |
 | A pause or resume mutation | No current plate | Required interaction/result is not depicted. |
 
-“Depicted” means visible in the plate (including a labelled state legend), not executed by the still. “No current plate” is reserved for required behavior or result that no current plate pictures.
+"Depicted" means visible in the plate (including a labelled state legend), not executed by the still. "No current plate" is reserved for required behavior or result that no current plate pictures.
 
 ## Historical provenance
 

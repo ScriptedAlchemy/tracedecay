@@ -45,7 +45,7 @@ export const WARM: Record<RecencyBucket, number> = {
 
 export type LabKind = "project" | "checkout" | "hub" | "session";
 
-/** Identity for a lab soma. Projects or checkouts — sessions are tufts, hub is a glyph. */
+/** Identity for a lab soma. Projects or checkouts, sessions are tufts, hub is a glyph. */
 export type LabIdentity = {
   id: string;
   name: string;
@@ -120,7 +120,7 @@ export type Pipe = { a: LabBody; b: LabBody; warm: number; admitted: boolean; en
  *
  * Slim-pack scan (CONCEPT / PROFILE SNAPSHOT, profile-pack/ + src/data):
  *   sessions, agents, session_threads, observations-slim, tracedecay-pack.ts
- *   — every ActivityPulse / session is project-scoped; no row names two of
+ *  , every ActivityPulse / session is project-scoped; no row names two of
  *     the six registry project ids.
  * Not hops (never drawn as inter-project pipes):
  *   a) worktrees sharing git_common_dir are ONE soma already
@@ -249,7 +249,7 @@ export function catmullBend(
 
 export type TubeRec = { pts: THREE.Vector3[]; radius: number };
 
-/** Irregular dendrite wrap — not a binary L-system.
+/** Irregular dendrite wrap. Not a binary L-system.
  *  `packed`: keep every segment inside a spherical envelope of radius somaR
  *  (checkout nebula orbs). Overview passes false and is unchanged.
  */

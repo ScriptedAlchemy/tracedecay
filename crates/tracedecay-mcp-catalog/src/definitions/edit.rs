@@ -197,7 +197,7 @@ pub(super) fn def_source_edit_rollback() -> ToolDefinition {
 pub(super) fn def_str_replace() -> ToolDefinition {
     ToolDefinition {
         name: "tracedecay_str_replace".to_string(),
-        description: "Replace a unique string in a file with new content. Fails if the old string is not found or matches more than once. This is the safest edit primitive — use this instead of sed/awk.".to_string(),
+        description: "Replace a unique string in a file with new content. Fails if the old string is not found or matches more than once. This is the safest edit primitive. Use this instead of sed/awk.".to_string(),
         input_schema: source_edit_schema(json!({
             "type": "object",
             "properties": {
@@ -323,9 +323,9 @@ pub(super) fn def_rename_preview(input_schema: Value) -> ToolDefinition {
          an optional `new_name`, returns the declaration site plus every graph \
          reference site (from call/use/etc. edges), each with its current-text \
          line snippet, and a per-file count of literal textual occurrences of \
-         the name that are NOT graph references ('text-only matches — review \
-         manually'). It does NOT edit anything and does NOT rewrite occurrences \
-         — pass the reported node identity to `tracedecay_rename_symbol` to \
+         the name that are NOT graph references ('text-only matches, review \
+         manually'). It does NOT edit anything and does NOT rewrite occurrences. \
+         Pass the reported node identity to `tracedecay_rename_symbol` to \
          apply the rename. Graph call-edge coverage improves as the resolver \
          does; text-only counts catch what the graph misses (comments, \
          strings, dynamic dispatch, unresolved refs).",
@@ -340,7 +340,7 @@ pub(super) fn def_rename_symbol() -> ToolDefinition {
         "Apply-grade rename of a graph-bound symbol across its declaration and \
          every graph reference site. Consumes the exact identity reported by \
          `tracedecay_rename_preview` (node_id, qualified_name, kind, file, \
-         old_name) — a bare spelling is never sufficient — and rewrites \
+         old_name), a bare spelling is never sufficient, and rewrites \
          whole-identifier occurrences only on graph-attested lines. Text-only \
          matches (comments, strings, dynamic dispatch, unresolved refs) are \
          reported and never rewritten. Defaults to a DRY RUN returning the \
@@ -437,7 +437,7 @@ pub(super) fn def_ast_grep_search() -> ToolDefinition {
         "Structural (AST) code search: find call shapes, argument orders, and other \
          syntax-tree patterns that a text regex cannot express. Uses ast-grep's SGPattern \
          syntax (metavariables: `$X` one node, `$$$` many). Runs IN-PROCESS over the project \
-         working tree using the bundled tree-sitter grammars — no external ast-grep binary, no \
+         working tree using the bundled tree-sitter grammars, no external ast-grep binary, no \
          gating. Each hit resolves its enclosing symbol, so the natural next call is \
          tracedecay_body. Routing: use this when the pattern is structural (e.g. `foo($$$)`, \
          `if ($C) { $$$ }`); for a literal/regex string use tracedecay_grep; for a symbol name \
@@ -515,7 +515,7 @@ pub(super) fn def_replace_symbol() -> ToolDefinition {
          still ambiguous the edit is refused. The replaced span covers the \
          item's LEADING doc-comment / attribute block (e.g. `///` docs, `#[...]` \
          attributes) as well as its body, so `new_source` must itself include \
-         any docs/attributes you want to keep — otherwise they are dropped. \
+         any docs/attributes you want to keep, otherwise they are dropped. \
          The result's `replaced_span` returns the exact text that was swapped \
          out (docs/attrs included) so you can recover them; a `message` note \
          flags when the old span had docs/attrs the replacement appears to omit. \
@@ -529,7 +529,7 @@ pub(super) fn def_replace_symbol() -> ToolDefinition {
                 },
                 "new_source": {
                     "type": "string",
-                    "description": "Full replacement source — must include the symbol's own declaration line, plus any leading doc-comments/attributes to preserve (the replaced span includes the old ones)."
+                    "description": "Full replacement source, must include the symbol's own declaration line, plus any leading doc-comments/attributes to preserve (the replaced span includes the old ones)."
                 },
                 "dry_run": {
                     "type": "boolean",
@@ -550,14 +550,14 @@ pub(super) fn def_move_symbol() -> ToolDefinition {
         "tracedecay_move_symbol",
         "Move Symbol Across Files",
         "Move a function (Rust-first) from its file to a destination file, and \
-         — the centerpiece — report the full IMPACT of the move: every caller \
+, the centerpiece, report the full IMPACT of the move: every caller \
          whose reference breaks, every dependency the body loses at the \
          destination, visibility that must be escalated, destination collisions, \
          and missing module declarations. Each finding is an evidence-based hint \
          { kind, file, line, detail, suggestion } derived from the code graph \
          (callers/callees) and parse-level facts (identifiers, `use` lines), not \
          regex guessing. The moved span includes the item's leading \
-         doc-comment / attribute block. Defaults to a DRY RUN — the report and a \
+         doc-comment / attribute block. Defaults to a DRY RUN, the report and a \
          combined source+destination preview diff are the product; applying is \
          opt-in via `dry_run: false`, which removes the span from the source, \
          inserts it at the destination, and auto-inserts unambiguous needed \

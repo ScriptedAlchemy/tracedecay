@@ -1,7 +1,7 @@
 //! Publishing and reading one evidence assembly.
 //!
 //! The executor owns the transaction shape; the siblings own the pieces it
-//! composes — [`writes`] the replay-safe table inserts, [`reads`] the two read
+//! composes, [`writes`] the replay-safe table inserts, [`reads`] the two read
 //! operations, and [`anchor_state`] the retrieval-anchor liveness both consult.
 
 use rusqlite::{OptionalExtension, Savepoint, Transaction, params};

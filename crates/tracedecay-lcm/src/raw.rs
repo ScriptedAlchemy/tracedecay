@@ -98,7 +98,7 @@ fn verify_raw_message_receipt(message: &LcmRawMessage) -> Result<(), LcmError> {
 /// The decode + integrity phase of every LCM read: content hashing and
 /// receipt verification per row, separable in a profile from the enclosing
 /// query spans (span minus this ≈ SQLite evaluation and row transport).
-/// Substantive per call — SHA-256 over the full content — and bounded by the
+/// Substantive per call, SHA-256 over the full content, and bounded by the
 /// caller's page/session row count, so it is not an inner-loop micro-probe.
 #[hotpath::measure(label = "sessions.lcm.raw.verify_row")]
 pub fn verified_raw_message_from_row(row: &Row) -> Result<LcmRawMessage, LcmError> {

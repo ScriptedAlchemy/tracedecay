@@ -2,7 +2,7 @@
  * The Cortex ledger: the field's exact, keyboard-reachable equivalent.
  *
  * Two readings share the strip under the aperture. With no search applied it
- * lists the graph's most connected symbols — the endpoint's twelve degree
+ * lists the graph's most connected symbols, the endpoint's twelve degree
  * leaders, drawn as one spine and a ranked grid of cards. With a search
  * applied it lists the matches, capped as the route caps them and said so.
  *
@@ -109,7 +109,7 @@ export function SymbolMatches({
  *               canvas above paints with.
  *
  *   the FIELD   the same hubs as cards on a dense grid, where the NAME's type
- *               size falls with rank — magnitude read as typography, costing
+ *               size falls with rank, magnitude read as typography, costing
  *               no horizontal column.
  *
  * The endpoint serves at most twelve generation-pinned degree leaders. So the
@@ -216,7 +216,7 @@ function HubField({
   const leadName = displayName(ranked[0]);
   const tailName = displayName(ranked[ranked.length - 1]);
   // Eight of the twelve hubs on a real Rust graph are language primitives or
-  // one-word generics — `path`, `json`, `u64`, `Value`, `trim`, `kind` — and
+  // one-word generics, `path`, `json`, `u64`, `Value`, `trim`, `kind`, and
   // two of them are literally the same word. `qualified_name` is not served on
   // this route, so the file is the only thing that can tell them apart.
   const annotated = annotateHubs(ranked);
@@ -267,7 +267,7 @@ function HubField({
                 <span
                   key={node.id ?? rank}
                   aria-hidden
-                  title={`${displayName(node)} · ${node.kind} · ${degree.toLocaleString()} deg — click to pin`}
+                  title={`${displayName(node)} · ${node.kind} · ${degree.toLocaleString()} deg, click to pin`}
                   onClick={() => handlers.onPin(node)}
                   onPointerEnter={() => handlers.onInspect(node)}
                   className="absolute top-1/2 cursor-pointer rounded-full bg-[var(--kind-dark)] [[data-theme=light]_&]:bg-[var(--kind-light)]"
@@ -353,7 +353,7 @@ function HubCard({
   rank: number;
   /** Directory the symbol lives in, trailing slash included. */
   module: string;
-  /** File name alone — the part that actually disambiguates. */
+  /** File name alone, the part that actually disambiguates. */
   file: string;
   /** Another card in this set carries the same name. */
   ambiguous: boolean;

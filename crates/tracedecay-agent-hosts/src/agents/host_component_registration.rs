@@ -199,7 +199,7 @@ impl CatalogHostComponentRegistrationAuthority {
         }
         // The transaction error vocabulary is fixed, so surface the
         // integration's own message here before it is collapsed into the
-        // generic storage failure — otherwise the actionable cause (for
+        // generic storage failure, otherwise the actionable cause (for
         // example a refused symlinked project config) is lost.
         eprintln!("{error}");
         host_bundle_storage_failure!()
@@ -521,7 +521,7 @@ impl CatalogHostComponentRegistrationAuthority {
     /// declared writes held constant.
     ///
     /// Some hosts register themselves *through* a file this component set also
-    /// installs as a managed artifact — Kiro's `~/.kiro/settings/mcp.json` is
+    /// installs as a managed artifact. Kiro's `~/.kiro/settings/mcp.json` is
     /// simultaneously the registration path and the `context_mcp` artifact. A
     /// revision taken over the raw bytes of such a path necessarily changes the
     /// moment the transaction performs its own declared write, so a post-write
@@ -1439,7 +1439,7 @@ impl crate::agents::host_bundle::HostComponentSetRegistrationV1
             == crate::agents::host_bundle::HostBundleLifecycleOpV1::Install;
         self.should_apply = match self.operation {
             // A registration that is partially present or `Repairable` on
-            // install is TraceDecay's own residue — staged sources, a
+            // install is TraceDecay's own residue, staged sources, a
             // marketplace entry, or a stale native cache left by a prior
             // install of this same bundle. Reinstall/update over it must
             // converge by re-activating, exactly as `Update` does; only a
@@ -1491,7 +1491,7 @@ impl crate::agents::host_bundle::HostComponentSetRegistrationV1
                 // Removal is the host's to perform first: stripping a bundle the
                 // host still has registered would leave it resolving a
                 // marketplace that no longer exists. This arm must precede the
-                // update/activation arms below — both of those remediate as
+                // update/activation arms below, both of those remediate as
                 // "refresh or activate the plugin", which can never unblock an
                 // uninstall, so routing removal through them makes the host's
                 // integration impossible to remove. Once the operator has run
@@ -1918,7 +1918,7 @@ mod tests {
     /// The live reinstall journey: TraceDecay's own staging residue (a
     /// personal marketplace entry with no native activation yet) makes every
     /// Codex component registration read `Repairable`. An install over that
-    /// self-owned residue must proceed and re-activate — refusing it as an
+    /// self-owned residue must proceed and re-activate, refusing it as an
     /// ownership conflict made `tracedecay install --agent codex` fail on
     /// every reinstall/update of TraceDecay's own prior install.
     #[test]

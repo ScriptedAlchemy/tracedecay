@@ -544,7 +544,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
     .expect("save source file");
     deliver_save(&project, &["src/saved.rs"]).await;
     // Dirty worktree generations keep ref/worktree identity but must not claim
-    // HEAD as source_revision — that field is exact-commit evidence only.
+    // HEAD as source_revision, that field is exact-commit evidence only.
     let saved = wait_for_terminal_generation(
         &socket,
         &handshake,

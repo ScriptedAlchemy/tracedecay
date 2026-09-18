@@ -3,7 +3,7 @@
 //! A commit or projection receipt embeds its mutations and its aggregate
 //! frontiers, and every one of those payloads already has a home of its own:
 //! mutations in `external_source_mutations_v1`, effects in
-//! `external_source_projection_effects_v2`, and — as of this shape — frontiers
+//! `external_source_projection_effects_v2`, and, as of this shape, frontiers
 //! in `external_source_frontiers_v1`. Persisted receipts therefore carry
 //! digests where the domain type carries payloads (2 KB of mutation and 500 B
 //! of frontier per message became 5 KB of receipt on one store, 2.5 GB in all)

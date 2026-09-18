@@ -1,20 +1,20 @@
 /**
  * The drawn CORTEX field: one canvas, one model, and the wiring the renderer
- * needs to live in a browser — a viewport measured from the host box, a palette
+ * needs to live in a browser, a viewport measured from the host box, a palette
  * resampled when the theme flips, and pointer hits translated into world
  * coordinates. Nothing here reads a payload or writes a caption.
  *
  * There is no simulation. The plan's performance boundary (`:175`) puts springs
  * on the ≤250-node TRACE subgraph and says the cortex "simulates dozens of
  * bodies, not thousands"; at this altitude the bodies are aggregated regions
- * whose positions are the MEASUREMENT — depth and cluster order — so moving
+ * whose positions are the MEASUREMENT, depth and cluster order, so moving
  * them would destroy the only thing they encode. The relief is a still map, on
  * purpose, and that is also why it costs one paint rather than 60 a second.
  *
  * Two states are printed instead of drawn, because a field that cannot be
  * measured must not be shown: a column narrower than `MIN_FIELD_WIDTH`, and a
  * browser that hands back no 2D context. In both, the table below carries every
- * region this would have drawn — which is what keeps the canvas legitimately
+ * region this would have drawn, which is what keeps the canvas legitimately
  * one `role="img"` rather than the only copy of the data.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -134,7 +134,7 @@ export function CortexCanvas({
   return (
     <div ref={hostRef} className="relative w-full">
       {/* The description is a summary of the MEASUREMENTS, not a narration of
-       * pixels, so it stands whether or not this browser gave a canvas — which
+       * pixels, so it stands whether or not this browser gave a canvas, which
        * is what makes it a text alternative rather than a caption. It is
        * dropped only at widths where the relief is not drawn at all and the
        * table sits immediately below it, because a reader there would be told

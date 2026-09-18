@@ -149,20 +149,20 @@ impl Deref for ReceiptBoundCodeFileV1 {
 ///
 /// Admission checks, in order:
 ///
-/// 1. `MissingReceipt` — no sanitization receipts bind the snapshot.
-/// 2. `IncompatibleSanitizerRevision` — the snapshot's sanitizer revision is
+/// 1. `MissingReceipt`, no sanitization receipts bind the snapshot.
+/// 2. `IncompatibleSanitizerRevision`, the snapshot's sanitizer revision is
 ///    not the revision this indexer was built for.
-/// 3. `StaleSnapshot` — the snapshot is older than the configured maximum
+/// 3. `StaleSnapshot`, the snapshot is older than the configured maximum
 ///    age relative to the validator's reference time (only when a staleness
 ///    bound is configured).
-/// 4. `MixedSnapshot` — the snapshot fails single-snapshot canonical
+/// 4. `MixedSnapshot`, the snapshot fails single-snapshot canonical
 ///    structure: duplicate or unordered receipts, duplicate file occurrence
 ///    identities or logical paths, or non-canonical file ordering (the
 ///    domain contract's snapshot validation owns these rules).
-/// 5. `UnsanitizedInput` — the snapshot fails sanitized-file canonical
+/// 5. `UnsanitizedInput`, the snapshot fails sanitized-file canonical
 ///    structure (empty or non-canonical logical path, a `Present` file with
 ///    no declared language), or a `Present` file declares a language the
-///    language registry does not know — capture must mark such files
+///    language registry does not know, capture must mark such files
 ///    `UnsupportedLanguage`, `Ignored`, `Binary`, or `Generated` instead of
 ///    presenting them as sanitized source.
 ///

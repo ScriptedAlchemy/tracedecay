@@ -4,14 +4,14 @@ import type { GraphCanvasEdge } from './GraphCanvas.tsx';
  * Undirected one-hop adjacency over the SAME edge list the canvas draws.
  *
  * Travelling activation is only honest if it travels along relations that
- * actually exist. Building the map from the rendered edge set — rather than
+ * actually exist. Building the map from the rendered edge set, rather than
  * re-deriving "who is next to whom" from whatever data happened to shape the
- * graph — means a strike can never light a neighbour the viewer cannot also
+ * graph, means a strike can never light a neighbour the viewer cannot also
  * see a line to. If an edge is not on screen, it cannot conduct.
  *
  * One hop only, deliberately. Each additional hop is a further claim about
  * what happened, and the claim gets weaker with distance: on the Brain graph
- * one hop from a checkout reaches its repository (true — activity in a
+ * one hop from a checkout reaches its repository (true, activity in a
  * checkout is activity in that repository), while two hops would reach its
  * sibling checkouts and assert something that did not happen at all.
  */

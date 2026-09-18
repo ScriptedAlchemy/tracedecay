@@ -2,7 +2,7 @@
 //!
 //! Project-open spawns one bounded background rescan per adopted project
 //! store after admission has finished; it never blocks admission or retrieval.
-//! The caller passes the admitted project and its grant — not a composition-root
+//! The caller passes the admitted project and its grant, not a composition-root
 //! handle. Grant expiry, cancellation, and commit denial fail closed. The
 //! rescan re-runs the current in-process detector over the persisted stores
 //! the caller already opened. Project-memory detector hits are terminally

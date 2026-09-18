@@ -768,7 +768,7 @@ pub(super) async fn handle_dashboard(
                     "stopping"
                 };
                 // The lookup is keyed by this project's own canonicalized
-                // root, so the reused server always serves *this* project —
+                // root, so the reused server always serves *this* project,
                 // only the host/port the caller asked for may differ from
                 // what is actually bound. `port == 0` means "any port is
                 // fine", so it can never be dishonored.
@@ -789,7 +789,7 @@ pub(super) async fn handle_dashboard(
             }
 
             // Shared construction with the CLI path: resolved LCM/session store
-            // selection included. No catch-up ingest spawn here — the host
+            // selection included. No catch-up ingest spawn here, the host
             // MCP server already swept hookless transcripts at startup.
             let retained_server_resolver =
                 retained_project_server_resolver.as_ref().ok_or_else(|| {

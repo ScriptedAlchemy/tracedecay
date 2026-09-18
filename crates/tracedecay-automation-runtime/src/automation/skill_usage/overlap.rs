@@ -2,8 +2,8 @@
 //! parity). Detection is purely lexical (token Jaccard on normalized titles
 //! and bodies) and deterministic; it never mutates skills.
 //!
-//! This module is the single skill-overlap authority. Validation — at
-//! proposal parse time and again at lifecycle apply time — goes through
+//! This module is the single skill-overlap authority. Validation at proposal
+//! parse time and again at lifecycle apply time goes through
 //! [`detected_skill_overlap_pair`], which judges exactly one pair and is
 //! therefore order-independent and stable: whether two skills validate can
 //! never depend on unrelated skills crowding a ranked list. The ranked
@@ -43,8 +43,8 @@ pub struct SkillOverlapCandidate {
 
 /// Order-independent pairwise overlap predicate: the single validation
 /// authority shared by proposal parsing and lifecycle application. The
-/// decision depends only on the two skills — their consolidation eligibility
-/// and the lexical thresholds — never on how a pair ranks against unrelated
+/// decision depends only on the two skills, their consolidation eligibility
+/// and the lexical thresholds, never on how a pair ranks against unrelated
 /// skills.
 pub fn detected_skill_overlap_pair(first: &ManagedSkill, second: &ManagedSkill) -> bool {
     detected_overlap(first, second).is_some()

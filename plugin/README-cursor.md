@@ -57,7 +57,7 @@ Cursor after installation so the extension starts
 
 The extension forwards bounded native diagnostics only for the single admitted
 workspace folder. It sends URI, document version, range, source, message, and
-safe diagnostic metadata—never document text or arbitrary diagnostic payloads.
+safe diagnostic metadata, never document text or arbitrary diagnostic payloads.
 The gateway merges that native upstream lane internally but, in Cursor-native
 mode, publishes only TraceDecay findings back to avoid duplicating Cursor's own
 diagnostics. Multi-root workspaces are not supported.
@@ -302,7 +302,7 @@ Notes:
   project-local truncated MCP response. Use it for one omitted span; do not
   reassemble the stored body into the conversation. It does not re-run the
   source tool.
-- Do **not** use `tracedecay:*` — it would auto-approve the editing tools too.
+- Do **not** use `tracedecay:*`. It would auto-approve the editing tools too.
 - Entries from per-user and per-repo files are concatenated; allowlists are a
   convenience, not a security boundary.
 
@@ -324,9 +324,9 @@ Two layers of defense ship with this plugin:
   `--path`) makes resolution succeed.
 - `tracedecay doctor` scans supported host integration evidence
   (`~/.config/Cursor/logs` on Linux, `~/Library/Application Support/Cursor/logs`
-  on macOS, `%APPDATA%\Cursor\logs` on Windows) for tracedecay spawn failures —
+  on macOS, `%APPDATA%\Cursor\logs` on Windows) for tracedecay spawn failures,
   literal `${workspaceFolder}` errors, `Connection failed: MCP error -32000`,
-  degraded-mode notices — and checks that the installed plugin bundle version
+  degraded-mode notices, and checks that the installed plugin bundle version
   matches the binary.
 
 If a scope has already failed: fix the cause (usually `tracedecay init` in the

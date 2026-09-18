@@ -10,7 +10,7 @@ A lineage is the part of a key the workflow restores by prefix:
 Swatinem/rust-cache saves `v<N>-rust-<prefix>-<env hash>-<lockfile hash>` and
 restores `v<N>-rust-<prefix>-<env hash>-` by prefix. rustc writes `.rmeta`
 read-only, so an older lockfile or generation of the same lane is not a
-usable compile cache — only the newest entry of that lane can be restored.
+usable compile cache, only the newest entry of that lane can be restored.
 
 Keys outside that shape (setup-node's `node-cache-…`, arbitrary
 `actions/cache` keys) are left alone: the same prefix can legitimately carry

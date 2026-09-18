@@ -630,7 +630,7 @@ fn safe_hook_rel_paths(paths: &[String]) -> Vec<String> {
 /// instead of the read-only fallback-ancestor DB. The downstream
 /// `add_hook_branch_tracking` returns `AlreadyTracked` cheaply and
 /// idempotently, so re-planning `AddBranchAt` for an already-tracked worktree
-/// branch is a no-op — we do not need branch-meta visibility here.
+/// branch is a no-op, we do not need branch-meta visibility here.
 fn plan_session_start_hook_event(
     event: &HookEvent,
     project_root: &Path,

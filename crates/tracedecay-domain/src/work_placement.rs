@@ -307,7 +307,7 @@ impl WorkPlacementObservationV1 {
     /// The typed blockers that forbid *removing* this placement's bytes.
     ///
     /// Removal is judged more strictly than admission, and deliberately so:
-    /// dirt in a linked worktree — which does not block creating one — does
+    /// dirt in a linked worktree, which does not block creating one, does
     /// block deleting one. An unmanaged placement owns no bytes, so it has
     /// nothing removal could destroy.
     pub fn removal_blockers(

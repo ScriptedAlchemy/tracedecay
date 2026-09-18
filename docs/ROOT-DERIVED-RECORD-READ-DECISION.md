@@ -55,7 +55,7 @@ with how large the store's spans and bursts are, not with the request.
 `execute_temporal_candidate_export` excludes derived group anchors from
 `visible_candidates`; a span or burst can never be a result. The group exists
 to pull its member occurrences into the record read so that a member matching
-on its own is ranked — but such a member already has its own Lexical or Phrase
+on its own is ranked, but such a member already has its own Lexical or Phrase
 candidate. The only consumer of the extra anchors is
 `temporal_context_frames`, which counts them into the visible / hidden /
 unknown coverage totals.
@@ -109,8 +109,8 @@ Burst stay in the candidate plan, `record_limit` is unchanged, and occurrence
 records are deduplicated by identity before the budget is charged, so a boundary
 that also matched directly is one record and keeps its group provenance.
 
-Coverage now counts the query-relevant result-eligible population — the distinct
-anchors a channel proposed as results — rather than a group census. A member that
+Coverage now counts the query-relevant result-eligible population, the distinct
+anchors a channel proposed as results, rather than a group census. A member that
 matched nothing was never a result this query could have returned, so it is not
 a hidden omission.
 
@@ -120,7 +120,7 @@ relation projection), and `execute` no longer collapses distinct failures: a
 budget refusal carries its stage, ceiling, and count, while deadline, cancel,
 stale, storage, and reset stay separate typed states.
 
-Measured on that fixture — 300 sessions, one matching message, a 2,000-member
+Measured on that fixture, 300 sessions, one matching message, a 2,000-member
 span: the member-expanding read refuses with `RecordReadExhausted` (limit 1024,
 consumed 1024 with more available); the boundary read returns the hit with
 coverage totalling exactly the one query-relevant anchor. At the record-read

@@ -412,7 +412,7 @@ pub struct LcmDescribeResponse {
     pub summary_node: Option<LcmDescribeSummaryNode>,
     pub external_payload: Option<LcmDescribeExternalPayload>,
     /// Complete session token estimate from the store-status authority, or
-    /// typed-absent when the bounded scan could not cover the whole session —
+    /// typed-absent when the bounded scan could not cover the whole session,
     /// a partial estimate is never presented as the session's size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_token_estimate: Option<i64>,
@@ -445,7 +445,7 @@ impl LcmStorageKind {
 /// Reject any payload reference that is not a single normal path component.
 ///
 /// Containment is decided on the reference itself, before any storage root is
-/// joined, so every caller — session store, registered renderer, hydration —
+/// joined, so every caller, session store, registered renderer, hydration,
 /// rejects traversal identically.
 pub fn validate_payload_ref(payload_ref: &str) -> Result<&str, LcmError> {
     if payload_ref.is_empty()
@@ -528,8 +528,8 @@ pub enum LcmError {
     /// instead of scheduling a retry.
     SanitizationRefused {
         reason: String,
-        /// Set when the sanitizer reached a quarantine verdict — it withheld
-        /// content it proved it cannot serve — rather than failing to run.
+        /// Set when the sanitizer reached a quarantine verdict, it withheld
+        /// content it proved it cannot serve, rather than failing to run.
         /// A verdict is the sanitizer's current rendering of these bytes, so a
         /// re-render of already-captured content converges to the withheld
         /// state; a fault stays fail-closed.

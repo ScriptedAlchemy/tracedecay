@@ -6,7 +6,7 @@
  * status strip whose registry cell reports the registry's own typed state.
  *
  * jsdom has no layout, so the 192px/48px/52px/32px geometry is asserted where
- * it is authored — the class names read the shell tokens — and measured by
+ * it is authored, the class names read the shell tokens, and measured by
  * the Playwright audits, not here.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -91,7 +91,7 @@ describe('the navigation rail', () => {
     expect(current.map((link) => link.getAttribute('aria-label'))).toEqual(['Code']);
   });
 
-  it('presents the brand block as identity only — not a link, not a status', () => {
+  it('presents the brand block as identity only, not a link, not a status', () => {
     renderRail();
     const nav = screen.getByRole('navigation', { name: 'Workspaces' });
     const brand = nav.querySelector('[data-brand]');

@@ -14,7 +14,7 @@
 //! for the exact repository/worktree IDs before any retained route lookup.
 //! Every failure state stays explicit: a CWD-relative root, a non-canonical
 //! registry identity, an unauthorized sibling root, or an inconsistent scope
-//! digest fails closed — the MCP surface never substitutes another project.
+//! digest fails closed, the MCP surface never substitutes another project.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
