@@ -476,7 +476,7 @@ pub enum SimilarCoverageV1 {
     Complete,
     Partial,
     ExcludedTooSmall { minimum_tokens: u32 },
-    ExcludedTooLarge { maximum_bytes: u64 },
+    ExcludedTooLarge { maximum_tokens: u32 },
     ExcludedIncompleteTokenization,
 }
 

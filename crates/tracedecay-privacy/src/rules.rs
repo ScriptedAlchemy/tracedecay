@@ -1397,9 +1397,14 @@ mod tests {
             assert_eq!(re2_compatible_regex(untouched), untouched);
         }
 
-        // Word boundaries take RE2's ASCII meaning; inside a class `\b` is a
-        // backspace and is left alone.
-        assert_eq!(re2_compatible_regex(r"\bplain\B"), r"(?-u:\b)plain(?-u:\B)");
+        // Word boundaries take RE2's ASCII meaning: a non-ASCII letter is not a
+        // word character, so `key` sits on a boundary after `é`. Rust's own
+        // Unicode `\b` disagrees, and is also what forces the PikeVM on any
+        // non-ASCII haystack. Inside a class `\b` is a backspace and is left alone.
+        let ascii_boundary = Regex::new(&re2_compatible_regex(r"\bkey\b")).unwrap();
+        assert!(ascii_boundary.is_match("ékey="));
+        assert!(!Regex::new(r"\bkey\b").unwrap().is_match("ékey="));
+        assert!(!ascii_boundary.is_match("mykey="));
         assert_eq!(re2_compatible_regex(r"[\b]"), r"[\b]");
 
         assert_eq!(
