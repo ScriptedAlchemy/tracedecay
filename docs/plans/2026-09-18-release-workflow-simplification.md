@@ -83,6 +83,17 @@ Sibling evidence:
   all beta.40 release caches missed. Tag cache scope, a full 10 GiB repository
   cache budget, a floating unused stable toolchain, cargo running before
   restore, and the duplicate checkout all prevent reliable reuse.
+- Simpler-release draft
+  [#1584](https://github.com/ScriptedAlchemy/tracedecay/pull/1584) independently
+  arrives at the one-production-compile beta pipeline and estimates slim cold
+  jobs at 25-35m for aarch64 Linux, 25-40m for x86_64 Linux, 40-55m for
+  aarch64 macOS, and 55-65m for Windows.
+- Acceptance-reuse draft
+  [#1587](https://github.com/ScriptedAlchemy/tracedecay/pull/1587) proves the
+  first 23m34s of aarch64 Linux acceptance was a cold production workspace
+  rebuild into implicit `target/release`, while the shipping binary already
+  existed under the matrix target directory. Staging and packaging then took
+  about three seconds before an isolated language check failed.
 
 The preceding all-feature build does not warm the production graph enough to
 justify its 24.9m Linux and 45.5m macOS cost. Compiler-profile savings remain
@@ -164,6 +175,18 @@ The periodic run is visibility, not evidence that a later tagged SHA passed.
 Stable still requires its pre-tag battery. Beta relies on ordinary required CI,
 the most recent periodic signal, and direct checks of every produced artifact.
 
+Expected cold target-job envelopes after A, before compiler or cache wins:
+
+| Target | Beta.40 failed job | Slim artifact job |
+| --- | ---: | ---: |
+| aarch64 Linux | 74m | 25-35m |
+| x86_64 Linux | 149m | 25-40m |
+| aarch64 macOS | 127m | 40-55m |
+| x86_64 Windows | 65m | 55-65m |
+
+Windows remains dominated by the one shipping compile. It is the first target
+for B, not a reason to keep general acceptance in the artifact job.
+
 ## Ranked cuts
 
 Savings are per affected job on the existing stock runners. They are not all
@@ -188,9 +211,15 @@ Estimated cut:
 - x86_64 Windows: unquantified. The observed 0.5m was only an early failure,
   not a healthy acceptance run.
 
-Land this first, together with the explicit beta/stable/periodic ownership
-above. It removes the most work and places failures before tagging or directly
-against the artifact they concern.
+Make this the main architecture wave immediately after the ready
+single-compile deletion. It removes the most work and places failures before
+tagging or directly against the artifact they concern.
+
+PR #1587 is a measured fallback if deep acceptance cannot leave the release
+job immediately: reuse the exact shipping binary and keep only cheap package
+and feature-wiring checks outside the full Linux battery. It is not the target
+architecture. Its new acceptance modes add transitional surface that should be
+deleted when the heavy battery moves to periodic/stable-pre-tag ownership.
 
 #### A2. Compile exactly one shipping feature set per target
 
@@ -339,11 +368,15 @@ cache services.
 3. Land the rest of A as a coherent workflow cut: define the light beta path,
    keep the heavy battery periodic and stable-pre-tag, and remove post-tag
    general testing and repeated release-time validation.
-4. Run the next Release Beta and establish successful single-build timings for
+   If policy blocks that move, use PR #1587's exact-binary reuse as a bounded
+   intermediate and remove the extra modes during the final cutover.
+4. Do not land the sibling timing and architecture docs as parallel plan
+   authorities. This document consolidates #1583 and #1584.
+5. Run the next Release Beta and establish successful single-build timings for
    all four targets.
-5. Land measured B changes one at a time, starting with the Windows production
+6. Land measured B changes one at a time, starting with the Windows production
    graph because its single build was 55.7m.
-6. Re-evaluate C only after two comparable successful runs show persistent
+7. Re-evaluate C only after two comparable successful runs show persistent
    dependency recompilation.
 
 ## Verification on the next Release Beta
