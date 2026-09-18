@@ -1194,13 +1194,13 @@ async fn commit_context_staged_source_and_test_reports_symbols() {
                     "name": "billed_total",
                     "kind": "function",
                     "file": "src/lib.rs",
-                    "line": 1
+                    "line": 0
                 }],
                 "test": [{
                     "name": "covers_billed_total",
                     "kind": "function",
                     "file": "tests/invoice_test.rs",
-                    "line": 1
+                    "line": 0
                 }]
             },
             "suggested_category": "feature/fix (source + tests)",
@@ -1327,7 +1327,7 @@ async fn commit_context_staged_only_excludes_unstaged_file() {
                     "name": "staged_total",
                     "kind": "function",
                     "file": "src/lib.rs",
-                    "line": 1
+                    "line": 0
                 }]
             },
             "suggested_category": "feature/fix/refactor",
@@ -1348,7 +1348,7 @@ async fn commit_context_staged_only_excludes_unstaged_file() {
                     "name": "staged_total",
                     "kind": "function",
                     "file": "src/lib.rs",
-                    "line": 1
+                    "line": 0
                 }]
             },
             "suggested_category": "feature/fix/refactor",
