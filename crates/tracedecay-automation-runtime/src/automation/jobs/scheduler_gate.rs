@@ -15,9 +15,9 @@ use super::{
 ///
 /// `occurrence_anchor_run_id` is the latest scheduler-effectful terminal that
 /// was visible in the **same** ledger snapshot the caller minted `run_id`
-/// from. That anchor — never one derived from a fresher read taken here —
-/// bounds the anti-duplicate scan behind every diagnostic appended by this
-/// gate.
+/// from. That anchor bounds the anti-duplicate scan behind every diagnostic
+/// appended by this gate. Never derive the anchor from a fresher read taken
+/// here.
 ///
 /// Invariant: a diagnostic row can only carry a `run_id` derived from anchor
 /// `A` if `A` was already durable when that id was minted, so the row was

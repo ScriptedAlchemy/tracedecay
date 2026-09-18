@@ -70,8 +70,8 @@ type SummaryAvailabilityById = BTreeMap<String, (String, Option<String>)>;
 ///
 /// Sources are validated in order first (existence, ownership, eligibility,
 /// manifest agreement) so a per-source refusal surfaces exactly as before.
-/// The shared authorities — active generation, session owner, canonical
-/// message anchors, child-summary availability — are then each read once for
+/// The shared authorities, active generation, session owner, canonical
+/// message anchors, child-summary availability, are then each read once for
 /// the whole publication instead of once per source, and the bindings are
 /// assembled in source order from those results.
 #[hotpath::measure(future = true, label = "session_temporal.sources.prepare")]

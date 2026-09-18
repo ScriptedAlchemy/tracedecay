@@ -47,7 +47,7 @@ export type SettingsMutationResult =
       readonly detail: string;
     }
   /** The scope declined the write before anything was sent. Not a failure of
-   * the write — the absence of one, with the scope authority's own reason. */
+   * the write, the absence of one, with the scope authority's own reason. */
   | {
       readonly outcome: 'not_dispatched';
       readonly detail: string;
@@ -223,7 +223,7 @@ function projectSettingsPatchResponse(
  * the write.
  *
  * Exhaustive over `ScopeWritability`, so a state added to the scope authority
- * cannot reach this write as an implicit permission — which is the direction
+ * cannot reach this write as an implicit permission, which is the direction
  * the mistake would go, since anything not matched would fall through to the
  * PATCH.
  */
@@ -282,7 +282,7 @@ function contractedPayload(body: unknown, authority: string): ContractedPayload 
 }
 
 /**
- * CONTRACT GAP — the settings refusal bodies are not generated.
+ * CONTRACT GAP, the settings refusal bodies are not generated.
  *
  * `/api/settings/{project,user}` build their 400/409/503 bodies with
  * `serde_json::json!` in `crates/tracedecay-api/src/configuration.rs`
@@ -292,7 +292,7 @@ function contractedPayload(body: unknown, authority: string): ContractedPayload 
  * is contracted and is parsed as such above; only the refusals are read here.
  *
  * Every member below is therefore optional and every absence resolves to a
- * stated unavailable value — a missing `actual_revision_id` reads as unknown,
+ * stated unavailable value, a missing `actual_revision_id` reads as unknown,
  * a missing `detail` says the authority is unavailable without naming which.
  * None of it is inferred, and none of it turns a refusal into a success.
  */

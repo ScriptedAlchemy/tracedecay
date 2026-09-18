@@ -186,7 +186,7 @@ impl TraceDecay {
     ) -> Result<Self> {
         let meta = branch_meta::load_branch_meta(&store_layout.data_root).ok_or_else(|| {
             TraceDecayError::Config {
-                message: "no branch tracking configured — run `tracedecay branch add` first"
+                message: "no branch tracking configured. Run `tracedecay branch add` first"
                     .to_string(),
             }
         })?;

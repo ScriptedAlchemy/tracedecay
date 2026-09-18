@@ -238,7 +238,7 @@ impl Drop for Spinner {
 /// Stack size for the thread driving the async entrypoint. Windows gives the
 /// process main thread only 1 MiB of stack (Linux and macOS give 8 MiB), and
 /// the combined CLI + MCP tool-dispatch futures exceed that in unoptimized
-/// builds — `tracedecay serve` and `tracedecay tool` died with
+/// builds, `tracedecay serve` and `tracedecay tool` died with
 /// STATUS_STACK_OVERFLOW on Windows CI. Running the runtime on a thread with
 /// an explicit stack size gives every platform the same headroom.
 const ASYNC_STACK_BYTES: usize = 16 * 1024 * 1024;
@@ -626,7 +626,7 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
     // the composition root. Must precede argument parsing: hook, install, and
     // ingest paths all read these slots, and an unregistered slot fails quietly
     // (no LCM redaction, no memory injection, zero turn costs) rather than
-    // loudly. The agent-host MCP catalog is no longer among them — host
+    // loudly. The agent-host MCP catalog is no longer among them, host
     // installers read it from `tracedecay-mcp` on demand, so `tool` still
     // pays nothing for the ~160 schemas it never looks at.
     tracedecay::register_runtime_ports()?;
@@ -682,7 +682,7 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
             std::env::set_var(tracedecay::config::USER_DATA_DIR_ENV, profile_root);
         }
     }
-    // Route tracing events (degradation causes, ingest warnings) to stderr —
+    // Route tracing events (degradation causes, ingest warnings) to stderr.
     // without a subscriber every `tracing::warn!` in the runtime is silently
     // dropped, which hid the causes behind typed catch-up reason codes. The
     // daemon runs through this same entrypoint, so this is also the daemon's
@@ -729,7 +729,7 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
     {
         hotpath::tokio_runtime!(runtime.handle());
         // Process-level runtime shape only. Request, project-server, history,
-        // and projection gauges belong on those authorities — not bootstrap.
+        // and projection gauges belong on those authorities, not bootstrap.
         hotpath::gauge!("tokio_worker_threads").set(worker_threads);
         hotpath::gauge!("tokio_blocking_threads").set(blocking_threads);
         let command_family = cli.command.as_ref().map_or("none", |command| {
@@ -851,7 +851,7 @@ async fn run_startup_preamble(command: &Commands) {
     let mut user_config = tracedecay_session_memory::user_config::UserConfig::load();
     // Skip the worldwide-counter flush on hot startup paths. `try_flush`
     // makes a synchronous HTTP call which can add seconds to
-    // `tracedecay serve` startup on slow networks — long enough to blow the
+    // `tracedecay serve` startup on slow networks, long enough to blow the
     // MCP client's 30 s `initialize` timeout. The canonical setting lookup is
     // only consulted when there are pending tokens to flush: with nothing
     // pending the setting cannot change behavior, and probing it on every

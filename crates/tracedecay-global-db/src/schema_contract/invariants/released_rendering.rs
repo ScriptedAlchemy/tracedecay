@@ -16,12 +16,12 @@
 //!
 //! What did change, after the newest tag, is one *rendering*:
 //! `provider_message_semantics` gives a Codex user message carrying an
-//! `<codex_internal_context source="goal">` block a typed rendering — role
+//! `<codex_internal_context source="goal">` block a typed rendering, role
 //! `system`, text `Codex active goal: …`, kind `goal_context`, and five extra
-//! metadata keys — where every release stored the raw user message. The
+//! metadata keys, where every release stored the raw user message. The
 //! rendering feeds the digest, so on a profile holding one such record the
 //! audit recomputes a digest no release could have written, and the store was
-//! refused with `projection provenance disagrees with deterministic output` —
+//! refused with `projection provenance disagrees with deterministic output`,
 //! leaving profile-session convergence degraded on every open with no remedy
 //! but discarding 1.6 GB of session history.
 //!
@@ -30,15 +30,15 @@
 //! flag. So a row whose only disagreement is the content digest, and whose
 //! digest is exactly the digest of the output row this store still holds, is a
 //! released rendering: admitted by the audit and converged by the write step
-//! that owns the transaction. A row disagreeing on identity — anchor, receipt,
-//! output provider or message id — or carrying a digest that matches neither
+//! that owns the transaction. A row disagreeing on identity, anchor, receipt,
+//! output provider or message id, or carrying a digest that matches neither
 //! this binary's output nor its own output row is not a rendering difference,
 //! and stays refused, named.
 //!
 //! Convergence has two outcomes because rendering does. Some released
-//! renderings are content the current LCM privacy sanitizer withholds — a
+//! renderings are content the current LCM privacy sanitizer withholds, a
 //! Codex goal-context objective carrying mixed structure renders as an
-//! ambiguous structured document — and a capture running now derives no
+//! ambiguous structured document, and a capture running now derives no
 //! servable output for them at all: it records the `sanitization_refused`
 //! disposition instead. A quarantine verdict is therefore the current
 //! rendering, and the released row converges to it. Only a sanitizer *fault*
@@ -93,8 +93,8 @@ impl ReleasedRenderingLedger {
     /// ledger empty so a resumed pass records afresh.
     ///
     /// One ledger lives for exactly one audit pass and converges inside that
-    /// pass's own transaction, so the exhaustive path — the one a store needing
-    /// convergence takes — retains and rewrites one resumable page at a time.
+    /// pass's own transaction, so the exhaustive path, the one a store needing
+    /// convergence takes, retains and rewrites one resumable page at a time.
     /// The incremental suffix path audits its whole frontier in one
     /// transaction, so there a ledger's peak is that frontier's released
     /// outputs rather than a page's; that is the suffix pass's existing bound,
@@ -212,8 +212,8 @@ fn disagreement(
 /// row that disagrees with its own output.
 ///
 /// `stored` carries the page's output rows, read once for the whole page. An
-/// absent output row is not a rendering question — the row the provenance names
-/// is missing, which the caller's own row verification reports — so the digest
+/// absent output row is not a rendering question, the row the provenance names
+/// is missing, which the caller's own row verification reports, so the digest
 /// disagreement stands.
 pub(super) fn classify_provenance_rendering(
     actual: &ProjectionProvenanceRow,
@@ -297,7 +297,7 @@ mod tests {
     /// The verbatim v0.1.0-beta.37 rendering of one Codex goal-context record,
     /// emitted by that tag's own `derive_canonical_projection` and
     /// `SessionMessageProjection::output_digest` rather than derived from this
-    /// tree's contract. v0.1.0-beta.32 — the profile in the report — emits the
+    /// tree's contract. v0.1.0-beta.32, the profile in the report, emits the
     /// same bytes.
     const RELEASED: &str = include_str!("../../../tests/fixtures/codex-goal-context-released.json");
 
@@ -765,7 +765,7 @@ mod tests {
     }
 
     /// The same profile holding a Codex goal-context record whose *current*
-    /// rendering the LCM privacy sanitizer withholds — its objective carries
+    /// rendering the LCM privacy sanitizer withholds, its objective carries
     /// mixed structure, so `Codex active goal: …` reads as an ambiguous
     /// structured document.
     ///

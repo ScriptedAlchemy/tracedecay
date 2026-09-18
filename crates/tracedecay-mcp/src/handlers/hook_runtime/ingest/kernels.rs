@@ -10,7 +10,7 @@
 //! `payload_route` is part of the key because a provider can be reached two
 //! ways: `TraceDecay` scanning the host's own on-disk sources, or the host
 //! inlining a turn's messages in the request. Both are capture routes and both
-//! belong in the registry — expressing the second one as a branch above the
+//! belong in the registry, expressing the second one as a branch above the
 //! lookup is what previously let it skip admission entirely.
 
 use std::future::Future;

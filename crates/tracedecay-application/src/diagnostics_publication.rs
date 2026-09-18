@@ -141,7 +141,7 @@ pub struct CleanGenerationDiagnosticScopeV1 {
 /// Every file identity `TraceDecay` publishes has exactly one mint: the
 /// code-index scheduler, which derives `file.daemon.<digest>` from
 /// `(repository, worktree, logical path, content digest)`. A producer that
-/// invented its own file identity — a repository-relative path, say — would
+/// invented its own file identity, a repository-relative path, say, would
 /// publish records the LSP feedback projection can only refuse, because that
 /// projection compares a record's `file_occurrence_id` against the saved-edit
 /// cycle's impact target, which is minted by the same authority.
@@ -254,8 +254,8 @@ pub type CodeIndexPublicationIdentityFuture<'a> =
 /// Type-erased access to the code-index generation authority.
 ///
 /// The daemon owns the only production implementation
-/// (`CodeIndexSchedulerRegistryV1`). A caller that cannot reach the daemon —
-/// a direct, non-daemon MCP server — has no resolver, and the correct outcome
+/// (`CodeIndexSchedulerRegistryV1`). A caller that cannot reach the daemon,
+/// a direct, non-daemon MCP server, has no resolver, and the correct outcome
 /// there is to publish nothing rather than to guess an identity.
 pub trait CodeIndexPublicationIdentityPortV1: Send + Sync {
     fn resolve(&self, project_root: PathBuf) -> CodeIndexPublicationIdentityFuture<'_>;
@@ -508,7 +508,7 @@ fn contract(message: String) -> TraceDecayError {
 /// The compiler's own code (`E0308`, `clippy::redundant_closure`) is
 /// preserved; when a diagnostic carried no code the severity name is used so
 /// the record still has a stable, non-empty code. Only the compiler's bounded
-/// message is copied — never the rendered snippet.
+/// message is copied, never the rendered snippet.
 pub fn compiler_contribution_v1(
     diagnostic: &crate::diagnose::Diagnostic,
     anchor: RetrievalAnchorId,
@@ -601,7 +601,7 @@ const COMPILER_ANCHOR_DOMAIN_V1: &str = "tracedecay.diagnostics.compiler-anchor.
 
 /// Deterministic anchor for one compiler finding.
 ///
-/// Identity is the generation, file, span, and code — so republishing the same
+/// Identity is the generation, file, span, and code, so republishing the same
 /// unchanged generation converges on the same anchors, and a moved or changed
 /// finding gets a new anchor rather than mutating an immutable record.
 pub fn compiler_anchor_v1(
@@ -682,8 +682,8 @@ impl std::fmt::Display for CompilerDiagnosticResolutionSkipV1 {
 /// is unreadable, or whose reported line does not exist is refused with a named
 /// reason rather than published under invented identity.
 ///
-/// The span runs from the reported column to the end of the reported line —
-/// the honest extent of what `cargo` reports without re-parsing the source.
+/// The span runs from the reported column to the end of the reported line.
+/// The honest extent of what `cargo` reports without re-parsing the source.
 #[hotpath::measure(label = "usecases.diagnostics.resolve_compiler", future = true)]
 pub async fn resolve_compiler_diagnostics_v1(
     project_root: &Path,
@@ -789,8 +789,8 @@ fn line_column_span(text: &str, line: u32, column: u32) -> Option<SourceSpan> {
 /// Publishes compiler diagnostics as one clean-generation snapshot.
 ///
 /// This is the production write path: `tracedecay_diagnose` parses real
-/// `cargo check` output and calls here, so the durable store — and therefore
-/// the LSP Problems projection — is populated for a real edit cycle.
+/// `cargo check` output and calls here, so the durable store, and therefore
+/// the LSP Problems projection, is populated for a real edit cycle.
 ///
 /// Contributions that cannot form a valid record are reported, never silently
 /// dropped.
@@ -843,7 +843,7 @@ pub async fn publish_compiler_diagnostics_v1(
 /// writing records under an identity the LSP feedback projection must refuse.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CompilerDiagnosticPublicationOutcomeV1 {
-    /// No resolver at this call site — a direct, non-daemon server.
+    /// No resolver at this call site, a direct, non-daemon server.
     CodeIndexIdentityUnavailable,
     /// The resolver exists but has no complete, fresh generation for this root.
     CodeIndexGenerationUnavailable,
@@ -865,8 +865,8 @@ pub enum CompilerDiagnosticPublicationOutcomeV1 {
 /// This is the exact sequence `tracedecay_diagnose` runs: resolve the
 /// code-index generation authority, resolve every parsed diagnostic's identity
 /// against it, then publish one clean-generation snapshot under that same
-/// generation. Both identities the LSP feedback projection compares —
-/// `file_occurrence_id` and `generation_id` — therefore come from the same mint
+/// generation. Both identities the LSP feedback projection compares,
+/// `file_occurrence_id` and `generation_id`, therefore come from the same mint
 /// as the saved-edit cycle's impact target.
 #[hotpath::measure(label = "usecases.diagnostics.publish_compiler_indexed", future = true)]
 pub async fn publish_compiler_diagnostics_through_code_index_v1(
@@ -1047,7 +1047,7 @@ mod tests {
 
     /// Every pillar's published record must resolve to its own LSP `source`
     /// through the exact mapping the projection uses. This publishes real
-    /// records and reads them back — it never inspects source strings.
+    /// records and reads them back, it never inspects source strings.
     #[tokio::test]
     async fn published_pillar_records_map_to_producer_specific_lsp_sources() {
         let temp = tempfile::tempdir().expect("tempdir");

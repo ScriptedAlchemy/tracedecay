@@ -19,7 +19,7 @@ import {
  * The Plan 24 integration/stack cards, fed from the mounted
  * `operation.work.topology_metrics` read.
  *
- * Work mounts no integration apply/review/stack mutation operation — Plan 24
+ * Work mounts no integration apply/review/stack mutation operation, Plan 24
  * keeps accepted integration lowered only through the Plan 36
  * native-integration family. These builders decode the observed accounting
  * the projection publishes, cell by cell: nothing here derives a rate, sums a
@@ -279,7 +279,7 @@ export function integrationOutcomesCard(
     INTEGRATION_MANDATE,
     {
       available: true,
-      value: `${coverage.observed} observed native integrations across ${readableCells.length} readable kind/outcome ${readableCells.length === 1 ? 'cell' : 'cells'}${suppressedNote} — counts are the projector's own cells, never summed here`,
+      value: `${coverage.observed} observed native integrations across ${readableCells.length} readable kind/outcome ${readableCells.length === 1 ? 'cell' : 'cells'}${suppressedNote}, counts are the projector's own cells, never summed here`,
     },
     rows,
     metricsProvenance(model, coverage, descriptorRevision, 'observed native integrations'),

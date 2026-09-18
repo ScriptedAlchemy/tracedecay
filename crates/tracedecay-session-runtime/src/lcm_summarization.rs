@@ -22,8 +22,8 @@ pub(super) struct AuthoritativeSummary {
     pub(super) text: String,
     pub(super) route: String,
     /// Provenance of the summarized interval. A summary whose interval is
-    /// absent carries why — a session's genuinely-first message has no
-    /// predecessor, an owed-but-missing interval is unavailable — so the
+    /// absent carries why, a session's genuinely-first message has no
+    /// predecessor, an owed-but-missing interval is unavailable, so the
     /// caller can refuse instead of publishing provenance-free evidence.
     pub(super) source_range: LcmPredecessorRangeState,
 }

@@ -362,7 +362,7 @@ fn replace_entity(
 ///
 /// A GQL `MATCH … WHERE id(n) = …` statement enumerates and sorts every
 /// visible node id before filtering, so a statement-per-row deletion is
-/// O(store) per row — generation retirement at corpus scale exceeded every
+/// O(store) per row, generation retirement at corpus scale exceeded every
 /// deadline it ran under (issue #762). The session delete is the same
 /// transactional, WAL-logged mutation at O(row).
 ///

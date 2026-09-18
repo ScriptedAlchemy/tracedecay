@@ -148,8 +148,8 @@ async fn answer_initialize_route_proxy_request(
 }
 
 /// A slow or contended first Git probe defers the route; it must never be a
-/// terminal failure. Both retry classifiers — the CLI's message check and the
-/// proxy's JSON-RPC response check — have to accept the deferral, or a cold
+/// terminal failure. Both retry classifiers, the CLI's message check and the
+/// proxy's JSON-RPC response check, have to accept the deferral, or a cold
 /// first open on a slow volume fails `init`/`status` outright.
 #[cfg(unix)]
 #[test]
@@ -721,7 +721,7 @@ async fn serve_stays_in_process_without_socket_or_installed_service() {
     let other_socket = dir.path().join("other.sock");
 
     // No socket and no service claiming it: fall back immediately, even
-    // with a long grace configured — startup must not stall.
+    // with a long grace configured, startup must not stall.
     let decision = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         super::super::should_proxy_serve_to_daemon_with(
@@ -1160,7 +1160,7 @@ async fn proxy_uses_daemon_initialize_route_without_registry_access() {
 ///
 /// RED (before the drain bound): the client disconnects while a request is in
 /// flight, the daemon never answers, and `proxy_host_input_to_daemon` awaited
-/// that request unconditionally — the serve process stayed alive forever,
+/// that request unconditionally, the serve process stayed alive forever,
 /// holding its stdio fds and daemon connection. That is the shape of a
 /// long-lived orphan serve.
 #[cfg(unix)]

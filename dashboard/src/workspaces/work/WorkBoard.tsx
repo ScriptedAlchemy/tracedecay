@@ -25,7 +25,7 @@ import type { WorkProductView, WorkTaskView } from './workProductView.ts';
  * has none, and the stage each group here names is read directly off
  * `accepted_proposal`, `task_accepted`, `execution_admitted` and terminal
  * attempts in the exact Work graph. Every column below is likewise a field the
- * daemon sent — there is no derived progress, no elapsed time, no health.
+ * daemon sent, there is no derived progress, no elapsed time, no health.
  *
  * Empty groups are drawn, with a count of zero. A stage with no tasks in it is
  * a fact the snapshot supports; hiding it would leave a reader unable to tell an

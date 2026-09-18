@@ -430,8 +430,8 @@ async fn describe_summary_sources(
                 // projection-durability retention drop pass deletes raw rows
                 // precisely because the summary is the durable survivor, so
                 // the lineage outlives the row it names. Describe still
-                // reports the source — eliding it would understate the
-                // summary's lineage — but carries no raw metadata for it, which
+                // reports the source, eliding it would understate the
+                // summary's lineage, but carries no raw metadata for it, which
                 // is how this overview already spells "no raw row backs this
                 // ref" (`role`/`storage_kind` are read straight off that row).
                 // `tracedecay_lcm_expand` on the same node reports the typed
@@ -701,7 +701,7 @@ async fn anchor_store_id(
 /// projected record still names the locator the anchor can no longer reach.
 ///
 /// The recovered locator only ever *names* a source that the caller then reports
-/// as retention-expired — no content or metadata is disclosed. It is refused
+/// as retention-expired, no content or metadata is disclosed. It is refused
 /// unless the raw row is genuinely absent: a present row that the anchor failed
 /// to reach is an identity or ownership problem, not retention, and must keep
 /// failing closed.
@@ -772,7 +772,7 @@ async fn load_summary_sources(
                 // An *absent* raw row is not an ownership violation: publication
                 // proves every raw source exists and is session-owned before the
                 // lineage row is written (`operations::sources::prepare_raw_source`),
-                // so a row missing at read time was removed afterwards — by the
+                // so a row missing at read time was removed afterwards, by the
                 // projection-durability retention drop pass, whose whole premise
                 // is that the summary is the durable survivor. Report the source
                 // as `HydrationStateV1::RetentionExpired` and keep rendering;

@@ -1,9 +1,9 @@
 /**
  * The instrument's channel list: the fourteen workspaces in their fixed panel
  * order (mockups/ui-concept-v2/NAVIGATION.md "Canonical rail"). A workspace's
- * channel number is part of its identity in this design — the nav rail
+ * channel number is part of its identity in this design, the nav rail
  * numbers them, the scope register repeats the active one, every workspace
- * header repeats its own — so the order lives in exactly one place.
+ * header repeats its own, so the order lives in exactly one place.
  *
  * This mirrors `WORKSPACES` in `app/routes.tsx`; it is a plain data module
  * with no JSX so the shell chrome and the pages can both read it without an

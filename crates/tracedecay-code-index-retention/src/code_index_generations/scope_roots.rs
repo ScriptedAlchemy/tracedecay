@@ -4,7 +4,7 @@
 //! (`code-index-v1/<sha256(canonical_project_root)>/`). Every process opens
 //! exactly one scope from the project root it was handed, so no journey ever
 //! enumerates the siblings. A profile therefore accumulates scope trees
-//! belonging to project roots that no longer exist — and those bytes are
+//! belonging to project roots that no longer exist, and those bytes are
 //! unreachable by generation retention and uncounted by any report.
 //!
 //! This module closes that gap under the same discipline as generation
@@ -88,8 +88,8 @@ pub fn record_scope_root(scope_root: &Path, canonical_project_root: &Path) -> st
 ///
 /// `true` only when a record exists, hashes to `scope_hash` (so a stray or
 /// tampered record cannot condemn a different scope), and the path is
-/// definitively absent. Any other observation — no record, a mismatch, a
-/// present root, or an unreadable one — is `false`: the age gate decides.
+/// definitively absent. Any other observation, no record, a mismatch, a
+/// present root, or an unreadable one, is `false`: the age gate decides.
 fn recorded_scope_root_missing(scope_root: &Path, scope_hash: &str) -> bool {
     let Ok(recorded) = std::fs::read_to_string(scope_root.join(SCOPE_ROOT_RECORD_FILE)) else {
         return false;
@@ -541,8 +541,8 @@ pub(super) fn plan_scope_root_retention_from_hashes(
             continue;
         };
         // Only a directory literally named `hex(sha256(root))` is a scope. This
-        // is what keeps the receipts and quarantine directories — and anything
-        // else a future layout adds — structurally uncollectable.
+        // is what keeps the receipts and quarantine directories, and anything
+        // else a future layout adds, structurally uncollectable.
         if !is_code_index_scope_hash(&scope_hash) {
             plan.unrecognized_entry_count = plan.unrecognized_entry_count.saturating_add(1);
             continue;
@@ -944,7 +944,7 @@ pub(super) fn is_code_index_scope_hash(value: &str) -> bool {
 /// Retention lock files and the scope root's own directory mtime are excluded
 /// deliberately: acquiring the scope lock creates that file and stamps that
 /// directory, so including them would make the execution-time "nothing changed
-/// since the mark phase" fence unsatisfiable. Symlinks are refused outright —
+/// since the mark phase" fence unsatisfiable. Symlinks are refused outright,
 /// nothing in a code-index scope creates them, and a tree that is about to be
 /// renamed and unlinked is the wrong place to start interpreting them.
 pub(super) fn measure_scope_tree(

@@ -2,8 +2,8 @@
 //!
 //! This read answers, for one authority-scoped page of attempts, which
 //! artifacts each attempt declared and which sealed terminal evidence record
-//! backs them. It pages exactly like the attempt list — a cursor pinned to
-//! the verified Work topology generation it was minted under — and it answers
+//! backs them. It pages exactly like the attempt list: a cursor pinned to
+//! the verified Work topology generation it was minted under, and it answers
 //! coverage as a typed state, never a silently truncated list.
 //!
 //! Artifact bytes are deliberately not part of this contract. An artifact is

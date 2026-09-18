@@ -9,7 +9,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import { cn } from './cn';
 
 /** Row list virtualization. Below the threshold the list renders
- * plainly — byte-identical DOM to a bare `.map()` so the common case keeps the
+ * plainly, byte-identical DOM to a bare `.map()` so the common case keeps the
  * archetype's exact scroll/selection idiom. Above it, rows are windowed with
  * @tanstack/react-virtual so the mounted count stays bounded (a 36px row over
  * even a very tall viewport plus overscan mounts well under 250 rows) instead
@@ -19,7 +19,7 @@ import { cn } from './cn';
 /** Result rows switch to windowing above this many entries. */
 const VIRTUALIZE_THRESHOLD = 200;
 /** DataRow is a fixed-height button that never wraps, so a single fixed
- * estimate positions every row exactly with no measurement pass — provided the
+ * estimate positions every row exactly with no measurement pass, provided the
  * estimate matches the row. It is read from `--row-height-data`, the same token
  * DataRow sizes itself from, because a hard-coded copy had already drifted 4px
  * away from the real row height and offset every windowed row. */

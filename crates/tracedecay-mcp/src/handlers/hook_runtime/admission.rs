@@ -69,7 +69,7 @@ pub(super) fn hook_v2_catchup_response(action: &str) -> Value {
 }
 
 /// Where the daemon keeps the durable admission idempotency ledgers. One
-/// ledger per (hook data root, producing host) — the same daemon-owned hook
+/// ledger per (hook data root, producing host), the same daemon-owned hook
 /// data root that already holds the published bindings and the replay spool.
 /// No migrated database participates.
 pub fn hook_v2_admission_ledger_root(
@@ -207,7 +207,7 @@ pub fn hook_v2_pending_work_envelopes(
 }
 
 /// Durably record one admission identity. `None` means the ledger itself is
-/// unavailable — the caller must not claim an admission it cannot deduplicate.
+/// unavailable, the caller must not claim an admission it cannot deduplicate.
 pub fn record_hook_v2_admission(
     data_root: &Path,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
@@ -585,7 +585,7 @@ async fn admit_hook_v2_envelope_with_lifecycle_inner(
     };
     let first_admission = receipt.decision == tracedecay_hooks::HookAdmissionDecisionV1::Admitted;
     // Live-activity tap: a bound hook-v2 envelope reaching admission IS an agent
-    // working in this project — the primary live hook path for every v2-bound
+    // working in this project, the primary live hook path for every v2-bound
     // host. Publish it here, where the project scope is already resolved; the
     // application lane retains it across dashboard disconnects and restarts.
     if first_admission

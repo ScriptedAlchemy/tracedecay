@@ -467,8 +467,8 @@ fn route_identity_from_arguments(arguments: &Value, keys: &[&str]) -> Option<Str
         .find_map(|value| keys.iter().find_map(|key| string_field(value, key)))
 }
 
-/// Top-level argument keys that are semantic tool arguments — owned and
-/// validated by the tool's own request schema — rather than registered-project
+/// Top-level argument keys that are semantic tool arguments, owned and
+/// validated by the tool's own request schema, rather than registered-project
 /// route selectors, per tool. Route selection and its guards must skip these
 /// so a semantic field never masquerades as an unresolved route.
 pub(crate) fn semantic_route_argument_fields(tool_name: &str) -> &'static [&'static str] {

@@ -726,7 +726,7 @@ async fn registry_clone_freshness_reports_coverage_and_update_accounting() {
     assert!(observation.resources.changed_symbol_update_micros.is_some());
 }
 
-/// The generation-publication broadcast carries only verified publishes —
+/// The generation-publication broadcast carries only verified publishes,
 /// generations that crossed the durable publication compare-and-swap, the
 /// verified graph snapshot publish, and the serving swap. A restart that
 /// restores a retained generation is a `Noop` apply and must reach the
@@ -2234,8 +2234,8 @@ async fn unchanged_git_watcher_probe_does_not_enqueue_authoritative_capture() {
 }
 
 /// The live outage this covers: a background reconcile owns the scheduler
-/// mutex for its whole pass — sealing a production-scale corpus holds it for
-/// minutes per generation — while the seated serving generation stays fully
+/// mutex for its whole pass, sealing a production-scale corpus holds it for
+/// minutes per generation, while the seated serving generation stays fully
 /// decoded, activated, and proven current from before the pass began.
 /// Verified graph reads (diagnose, `dead_code`, callers, impact)
 /// resolve through `latest_complete_ready_decoded_for_root_scope`; refusing
@@ -2392,7 +2392,7 @@ async fn busy_scheduler_still_refuses_a_seated_generation_without_a_currency_wit
         .await
         .expect("mounted worktree witness");
     // Hold the scheduler first so no reconcile pass can re-prove the seat,
-    // then withdraw the proof — the exact state a restart-restored seat is in
+    // then withdraw the proof, the exact state a restart-restored seat is in
     // before its first passing probe.
     let (locked_tx, locked_rx) = tokio::sync::oneshot::channel::<()>();
     let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
@@ -2450,7 +2450,7 @@ async fn busy_scheduler_still_refuses_a_seated_generation_without_a_currency_wit
 /// `code_index_post_projection_source_unverified`) can only be re-proven by a
 /// pass. When the retained native graph already serves, the swap arm that
 /// used to do that never runs, so the unchanged-pass path must bind the
-/// renewed proof to the seat itself — and only for the exact snapshot the
+/// renewed proof to the seat itself, and only for the exact snapshot the
 /// pass verified.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unchanged_pass_binds_its_source_proof_to_an_unproven_seat() {
@@ -3084,8 +3084,8 @@ async fn a_disproving_exact_source_probe_withdraws_the_busy_read_witness() {
 /// The pointer-supersession half of the verified-read outage: a reconcile
 /// pass publishes a successor generation and flips the durable pointer
 /// minutes before the successor's O(store) decode + native activation seats
-/// it. When that successor sealed the SAME source content — a convergence or
-/// repair republication, not an edit — the seated predecessor still describes
+/// it. When that successor sealed the SAME source content, a convergence or
+/// repair republication, not an edit, the seated predecessor still describes
 /// exactly the bytes on disk, so verified reads must keep serving it through
 /// the successor's activation window instead of refusing "not ready".
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3110,7 +3110,7 @@ async fn a_same_content_successor_pointer_keeps_the_seated_generation_serving() 
     let generation_id = ready.generation().manifest().generation_id.clone();
 
     // Flip the durable pointer to an unseated successor sealed from the same
-    // source content — the exact durable state between a convergence
+    // source content, the exact durable state between a convergence
     // republication's publish and its seat.
     advance_pointer_to_unseated_successor(
         &super::super::scoped_code_index_store_root(
@@ -3240,8 +3240,8 @@ fn graph_publication_conflict_re_arms_activation_instead_of_orphaning_serving() 
     );
 }
 
-/// A conflict verdict identical to the previous seat attempt's — same guard
-/// site, same compared evidence, same sealed generation — is deterministic:
+/// A conflict verdict identical to the previous seat attempt's, same guard
+/// site, same compared evidence, same sealed generation, is deterministic:
 /// the sealed inputs are immutable, so replaying activation reproduces the
 /// exact refusal forever. The seat loop must recognize the repeat and take
 /// the terminal typed-refusal arm instead of looping at the backoff ceiling
@@ -3336,7 +3336,7 @@ fn repeated_identical_conflict_verdict_is_terminal_not_retryable() {
 /// A first publication conflict is a concurrent-publisher race, not a
 /// deterministic refusal. The seat loop must schedule exactly one retry and
 /// seat the sealed generation when that retry succeeds (issue #765). A later
-/// conflict at a different guard site stays retryable — only an identical
+/// conflict at a different guard site stays retryable, only an identical
 /// repeat is terminal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn first_activation_conflict_retries_once_and_then_seats() {
@@ -4740,8 +4740,8 @@ fn swapping_two_same_length_files_with_preserved_mtimes_reconciles() {
 /// A checkout whose clean filters separate the bytes on disk from HEAD's blobs
 /// (`core.autocrlf=true` over CRLF files) seals LF blob digests from the exact
 /// HEAD tree. The content comparison must recognise the unchanged checkout as
-/// current through the repository's own filter pipeline — never looping into a
-/// reconcile every staleness window — while a same-length preserved-mtime
+/// current through the repository's own filter pipeline, never looping into a
+/// reconcile every staleness window, while a same-length preserved-mtime
 /// rewrite of the same file is still disproved.
 #[test]
 fn clean_filtered_checkout_verifies_current_and_still_disproves_a_rewrite() {
@@ -5019,7 +5019,7 @@ async fn shutdown_signals_code_index_worker_without_taking_busy_scheduler_lock()
     // Let the mount-time reconcile finish first. Until it does, the background
     // worker owns the scheduler lock itself, and shutdown joining a worker that
     // is *already* blocked acquiring that lock is a different wait than the one
-    // under test — this test is about shutdown never taking the lock on its own
+    // under test, this test is about shutdown never taking the lock on its own
     // behalf.
     wait_for_live_complete_generation(&registry, fixture.path()).await;
     let scheduler = registry
@@ -5220,8 +5220,8 @@ async fn simultaneous_cold_mounts_admit_exactly_one_worktree_owner() {
 }
 
 // Each caller begins from the same empty pending slot. Holding the scheduler
-// lock forces every request onto the BusyFollowUp path, where the registry—not
-// the worker's later wake coalescing—is solely responsible for one admission.
+// lock forces every request onto the BusyFollowUp path, where the registry, not
+// the worker's later wake coalescing, is solely responsible for one admission.
 #[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_query_admissions_claim_one_pending_wake_before_worker_coalescing() {
@@ -5736,7 +5736,7 @@ async fn background_reconciles_respect_a_single_admission_permit() {
     }
     // Publication broadcasts at publish time, before the pass's deliberately
     // admission-free tail (graph prepare, activation, serving seat) has run.
-    // Wait for both serving seats — the tail's last scheduler-lock step — so
+    // Wait for both serving seats, the tail's last scheduler-lock step, so
     // each worker is parked on its wake. Holding the first scheduler's lock
     // any earlier wedges that worker inside its tail, where it holds no
     // permit, and the second worktree would overtake through the free permit
@@ -5845,9 +5845,9 @@ async fn distinct_stores_reconcile_in_parallel_under_bounded_admission() {
     // With two permits, hold the FIRST worktree's scheduler lock so its worker
     // takes one permit and blocks mid-reconcile (an in-flight reconcile analog).
     // The SECOND worktree, writing to a different path-scoped store, must still
-    // acquire the remaining permit and publish — proving distinct stores are NOT
-    // serialized behind one another. (Same-store exclusion — that one worktree
-    // never runs two overlapping reconciles — is structural, from its single
+    // acquire the remaining permit and publish, proving distinct stores are NOT
+    // serialized behind one another. (Same-store exclusion, that one worktree
+    // never runs two overlapping reconciles, is structural, from its single
     // worker plus per-scheduler `Mutex`, and is covered by
     // `scheduler_notifications_release_registry_while_reconcile_is_busy`.)
     let first = GitFixture::new(&[("src/lib.rs", "pub fn first() -> u32 { 1 }\n")]);
@@ -5895,7 +5895,7 @@ async fn distinct_stores_reconcile_in_parallel_under_bounded_admission() {
     first_wake.notify_one();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // The second worktree — a distinct path-scoped store — must proceed on the
+    // The second worktree, a distinct path-scoped store, must proceed on the
     // remaining permit and publish a new generation without the first releasing.
     // (Note: the first scheduler lock is deliberately held here, so we must NOT
     // query the first worktree via `latest_generation_id`, which would block on
@@ -5915,7 +5915,7 @@ async fn distinct_stores_reconcile_in_parallel_under_bounded_admission() {
     );
 
     // Release the first worktree and confirm it, too, reconciles the pending edit
-    // once its lock frees — it was blocked, never starved.
+    // once its lock frees, it was blocked, never starved.
     release_tx.send(()).expect("release first scheduler");
     lock_thread.join().expect("first lock thread joins");
     let advanced_first =
@@ -6731,7 +6731,7 @@ fn same_content_head_move_publishes_new_source_identity() {
 
 /// A text freshness query that arrives while the worker still owns a pass
 /// cannot run the ladder itself, and the in-flight pass observed the source
-/// when *it* started — after publication it is still projecting text or
+/// when *it* started, after publication it is still projecting text or
 /// seating the graph of the previous source state. Answering stale without
 /// leaving a wake stranded the remedy until an unrelated hint arrived; the
 /// out-of-band commit stayed unserved (issue #917, the flaky tail of
@@ -6901,7 +6901,7 @@ async fn text_freshness_query_during_owner_work_schedules_a_follow_up_pass() {
 /// A text owner whose sealed source the fence has verified against the live
 /// tree is current even while the worker owns a pass: the read answers from
 /// source truth and leaves no follow-up wake. Treating every in-flight pass as
-/// staleness made a polling reader and the worker livelock — each read during
+/// staleness made a polling reader and the worker livelock, each read during
 /// a `Noop` pass posted a follow-up, the follow-up was another pass, and the
 /// owner was never called current although nothing moved (issue #1103). The
 /// same read during the same pass must still report a genuine edit stale.
@@ -8122,8 +8122,8 @@ fn graph_off_stale_witness_reconciles_unchanged_source_without_full_decode() {
 }
 
 /// A query freshness probe against a restored owner that no pass has verified
-/// yet must report "not current" — the restart's first pass is still the
-/// remedy — without minting an observed source change: no overflow hint and no
+/// yet must report "not current", the restart's first pass is still the
+/// remedy, without minting an observed source change: no overflow hint and no
 /// cancellation epoch, because nothing was observed to move. The fabricated
 /// overflow made the graph-on restart's own verifying pass skip the
 /// sealed-digest witness a quiet tree satisfies and fall into the full sealed
@@ -8765,7 +8765,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Seal releases the decoded active generation so text projection does
-        // not keep a whole-generation owner. Inspect the durable pointer — do
+        // not keep a whole-generation owner. Inspect the durable pointer, do
         // not call load_active_shared here or the probe itself would decode.
         assert_eq!(
             scheduler.sealed_decode_count(),
@@ -10177,7 +10177,7 @@ fn a_publication_seats_its_own_generation_without_waiting_for_a_quiet_tree() {
         "a publication whose replacement text owner did not become ready must not start graph work"
     );
     // The ready bit above is `query_owners_are_ready` at both the published
-    // seat gate and the full-replay skip — never a second, forked check for
+    // seat gate and the full-replay skip, never a second, forked check for
     // "exact/lexical" or clone-complete. See
     // `query_owners_ready_admits_seat_and_replay_both_directions`.
     assert_eq!(
@@ -10295,7 +10295,7 @@ fn serving_swap_seats_a_generation_whose_publication_moved_while_it_activated() 
         ServingSwapOutcomeV1::decide(false, false, true),
         ServingSwapOutcomeV1::SeatedStale,
         "an activated generation whose pointer moved must seat when no active \
-         publication holds the slot — empty, or an incumbent the store \
+         publication holds the slot, empty, or an incumbent the store \
          superseded as well"
     );
     assert_eq!(

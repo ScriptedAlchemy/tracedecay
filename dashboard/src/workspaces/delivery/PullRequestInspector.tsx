@@ -38,7 +38,7 @@ import { umbrellasFor } from './umbrella.ts';
  * identity, the provider state of its project, each attention source with
  * its evidence, and every membership edge with basis and grade. Destinations
  * are the journey, the review workspace, Code, Loom, and the provider's own
- * URL — read-only throughout.
+ * URL, read-only throughout.
  */
 export function PullRequestInspector({
   context,

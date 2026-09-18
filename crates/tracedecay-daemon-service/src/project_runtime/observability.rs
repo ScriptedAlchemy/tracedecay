@@ -107,7 +107,7 @@ enum StoreObservabilityStateV1 {
         core: Arc<StoreObservabilityCoreV1>,
         /// Live alias handles onto this owner. Each
         /// [`RegisteredObservabilityProducerV1`] surrenders its single
-        /// release token exactly once — by explicit shutdown or by drop —
+        /// release token exactly once, by explicit shutdown or by drop,
         /// so this registry-owned count is the one refcount authority.
         aliases: usize,
     },
@@ -124,7 +124,7 @@ struct StoreObservabilityEntryV1 {
 }
 
 /// One project root's request to mount observability for an exact registered
-/// store. An incumbent owner must answer to the same store authority — the
+/// store. An incumbent owner must answer to the same store authority, the
 /// authorized scope and the producer revision. `configuration_revision` and
 /// `policy_revision` are this root's own provenance at its own open time,
 /// stamped by the resulting alias frontend rather than compared against the
@@ -235,7 +235,7 @@ impl StoreObservabilityRegistryV1 {
                     // mount time and the store's canonical configuration keeps
                     // advancing underneath it, so comparing them refused every
                     // later root of a store whose configuration had been
-                    // written once — permanently, for the daemon's life.
+                    // written once, permanently, for the daemon's life.
                     if incumbent.authorized_scope_ref != mount.authorized_scope_ref
                         || incumbent.producer_revision != mount.producer_revision
                     {
@@ -455,8 +455,8 @@ pub struct RegisteredObservabilityProducerV1 {
     delivery_settlement_authority: Arc<DeliverySettlementAuthorityV1>,
     delivery_settlements: Arc<BoundedDeliverySettlementRecorderV1>,
     /// The single release token: `Some` exactly while this alias is counted
-    /// by its store entry. It is taken once — by the consuming [`Self::shutdown`]
-    /// or by drop — so the registry's alias count is derived from exactly one
+    /// by its store entry. It is taken once, by the consuming [`Self::shutdown`]
+    /// or by drop, so the registry's alias count is derived from exactly one
     /// release per handle, with no separate released flag to keep consistent.
     release: Option<Arc<StoreObservabilityCoreV1>>,
 }
@@ -590,8 +590,8 @@ impl Drop for RegisteredObservabilityProducerV1 {
         // A drop without a runtime cannot await the drain, and retained
         // mount frontends may still hold the shared producer core open, so
         // inability to drain is never a confirmed close. The entry stays
-        // retiring — refusing replacement mounts that would start a
-        // duplicate producer — until the deferred drain, started by the next
+        // retiring, refusing replacement mounts that would start a
+        // duplicate producer, until the deferred drain, started by the next
         // mount attempt on a live runtime, confirms the close.
         let runtime = tokio::runtime::Handle::try_current().ok();
         let drain = if runtime.is_some() {

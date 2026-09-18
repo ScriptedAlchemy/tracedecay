@@ -5,7 +5,7 @@ import { rgb, rgba, type ThemeBox } from './palette.ts';
  * The hover pass, drawn in the field's own palette.
  *
  * Sigma's default (`drawDiscNodeHover`) paints an opaque white shadowed disc
- * fused with a white label backdrop over the hovered body — on the dark
+ * fused with a white label backdrop over the hovered body, on the dark
  * instrument field that read as the node "going white" and growing a blob,
  * and on the light field it erased the body against the paper. The reducers
  * already carry the hover response (the body recolours to the hot accent and
@@ -13,7 +13,7 @@ import { rgb, rgba, type ThemeBox } from './palette.ts';
  * and a substrate-backed label that stay in the theme.
  *
  * Reads the {@link ThemeBox} per draw rather than capturing its colors, so a
- * theme flip re-lights hovers without rebuilding the renderer — the same
+ * theme flip re-lights hovers without rebuilding the renderer, the same
  * contract every other drawing pass on this canvas holds.
  */
 export function createNodeHoverDrawer(theme: ThemeBox): NodeHoverDrawingFunction {

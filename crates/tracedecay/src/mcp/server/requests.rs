@@ -500,7 +500,7 @@ impl McpServer {
             }
         };
         dispatch_server.record_request_accounting("tracedecay/hookEvent", false);
-        // R4: one branch resolution for this notification — the drift check
+        // R4: one branch resolution for this notification, the drift check
         // below and the hook-plan branch label both read it.
         let (cg, live_branch) = dispatch_server.reopen_if_branch_drifted_memoized().await;
         let root = cg.project_root().to_path_buf();
@@ -533,7 +533,7 @@ impl McpServer {
             && let Some(sink) = &dispatch_server.code_index_hook_sink
         {
             // An accepted admission means the paths really entered a mounted
-            // worktree's incremental queue — the exact moment indexing work is
+            // worktree's incremental queue, the exact moment indexing work is
             // created for this project, and the only condition worth lighting.
             if sink(root.clone(), event.rel_paths.clone())
                 .await
@@ -600,7 +600,7 @@ impl McpServer {
     /// `"claude-code"`, `"codex"`, `"cursor"`) so subsequent `tools/call`
     /// analytics events can attribute per-host adoption instead of every
     /// call recording the same opaque `provider="mcp"`. Only the short
-    /// name field is retained — never the full `clientInfo` payload.
+    /// name field is retained, never the full `clientInfo` payload.
     #[hotpath::measure(label = "mcp.server.initialize")]
     pub(crate) fn handle_initialize(
         &self,
@@ -1045,7 +1045,7 @@ impl McpServer {
         // ("after"), before any banners/metrics lines are appended.
         let response_tokens = Self::response_token_count(result);
         // "Before" counterfactual: reading every referenced file raw,
-        // in full. Counters credit only the net saving per call —
+        // in full. Counters credit only the net saving per call,
         // before minus what this response actually delivered.
         let raw_file_tokens = self
             .raw_file_tokens(cg.project_root(), &result.touched_files)
@@ -1099,7 +1099,7 @@ impl McpServer {
         };
 
         // Persist to the cross-project savings ledger (best-effort, non-blocking).
-        // Clone the Arc — no new connection is opened. The counters
+        // Clone the Arc, no new connection is opened. The counters
         // and notify make the write's completion observable to
         // [`Self::ledger_writes_settled`] without making it awaited
         // anywhere on the request path.
@@ -1224,7 +1224,7 @@ impl McpServer {
         result: &mut ToolResult,
     ) {
         // Borrowed-worktree heads-up (#312). Inserted LAST so it
-        // appears FIRST in the response — the index serving the
+        // appears FIRST in the response, the index serving the
         // wrong branch is the most serious of these warnings to
         // surface to the agent.
         if include_connection_worktree_warning && let Some(ref m) = self.worktree_mismatch {

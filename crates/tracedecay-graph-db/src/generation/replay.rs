@@ -322,7 +322,7 @@ pub(crate) fn checked_decode_replay_source(
     // exactly one byte per `Read::read` call through `io::Bytes` (measured:
     // 2.9M one-byte reads and ~21x the slice-mode wall time for a 2.9MB
     // payload), and `io::Bytes` retries `ErrorKind::Interrupted`, so the old
-    // checked reader's per-interval cancellation never aborted the parse —
+    // checked reader's per-interval cancellation never aborted the parse,
     // its failure only surfaced after the full slow parse finished. Checks at
     // the decode boundaries bound the work between two cancellation checks by
     // one slice parse of a payload capped at

@@ -137,7 +137,7 @@ async fn tracedecay_dashboard_tool_starts_and_returns_url_and_serves_capabilitie
             let body: Value = serde_json::from_str(&raw).unwrap_or(json!({}));
             assert_eq!(body.get("name"), Some(&json!("tracedecay-dashboard")));
             assert!(body.get("features").is_some());
-            // success — now stop it via tool for cleanup
+            // success, now stop it via tool for cleanup
             let _stop = handle_real_server_tool_call(
                 &server,
                 "tracedecay_dashboard",

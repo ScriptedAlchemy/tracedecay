@@ -157,7 +157,7 @@ fn cursor_subagent_lineage_sets_native_agent_relations() {
 /// (`cursor_tool_use_blocks_populate_tool_event_metadata`). Provider-parser
 /// evidence is the native `role`/`message.content[]` Cursor transcript
 /// record; the expected output is the canonical envelope projection with
-/// explicit Cursor provider provenance — not a generic hand-built record.
+/// explicit Cursor provider provenance, not a generic hand-built record.
 #[test]
 fn fixture_backed_cursor_jsonl_tool_use_reaches_canonical_envelope() {
     let native: Value = serde_json::from_str(include_str!(

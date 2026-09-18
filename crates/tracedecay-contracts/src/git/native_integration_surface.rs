@@ -131,7 +131,7 @@ pub struct NativeIntegrationPreflightSurfaceRequest {
 /// The caller names one unexpired preview by exact identity *and* digest;
 /// approving an identity without its content digest is unrepresentable. The
 /// daemon mints the one-use approval bound to the requesting principal, the
-/// apply capability, the current grant lineage, and a bounded expiry — none
+/// apply capability, the current grant lineage, and a bounded expiry, none
 /// of which the caller can choose.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

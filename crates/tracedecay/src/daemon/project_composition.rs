@@ -364,7 +364,7 @@ pub(super) async fn production_project_server(
 /// is checked out on the *same* branch as its primary.
 ///
 /// `ProjectServerKey` is root-bound so distinct linked worktrees keep exact
-/// root-bound servers over one shared `StoreOwnerKey` — a worktree on another
+/// root-bound servers over one shared `StoreOwnerKey`, a worktree on another
 /// branch (or detached) serves a different generation and must not be answered
 /// from the primary's graph. A worktree on the same branch serves the same
 /// branch content from the same store owner and the same graph database, so a

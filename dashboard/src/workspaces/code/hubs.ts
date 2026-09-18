@@ -2,13 +2,13 @@
  * Two captions the Code workspace was missing, as pure functions.
  *
  * The graph canvas drew eighty nodes out of 118,672 and said nothing about how
- * those eighty were chosen — which makes the picture unreadable, because
+ * those eighty were chosen, which makes the picture unreadable, because
  * "eighty highest-degree symbols" and "eighty neighbours of one symbol" are
  * completely different claims about the same drawing. `describeSubgraph`
  * states the endpoint's actual rule for whichever mode it answered in.
  *
  * And the hub field ranked twelve symbols by connectivity whose names were
- * `path`, `json`, `u64`, `Value`, `trim`, `as_str`, `kind` and `i64` — two of
+ * `path`, `json`, `u64`, `Value`, `trim`, `as_str`, `kind` and `i64`, two of
  * them literally the same word. The endpoint does not serve `qualified_name`
  * for these rows, so the only thing that can tell them apart is the file they
  * live in, and that was set three type steps down at the far right of the card
@@ -41,7 +41,7 @@ export interface AnnotatedHub<T extends HubRow> {
  * `name` first: `qualified_name` is not served by the hub endpoint at all, so
  * the chain is honest about what the payload actually carries. The em dash is
  * the end of the chain rather than a separate absent case, so a row with no
- * name and a row that is not there read the same way — which they should,
+ * name and a row that is not there read the same way, which they should,
  * because neither can be named. `AnnotatedHub.display` is this same string
  * precomputed; call sites holding an annotated row should read it from there
  * rather than recompute it. */
@@ -94,7 +94,7 @@ export function ambiguityNote<T extends HubRow>(
     .map(([name, count]) => `${count}×${name}`)
     .join(', ');
   const rows = [...repeated.values()].reduce((sum, count) => sum + count, 0);
-  return `${rows} of these ${annotated.length} share a name (${names}) — the file under each one is what tells them apart.`;
+  return `${rows} of these ${annotated.length} share a name (${names}), the file under each one is what tells them apart.`;
 }
 
 export interface SubgraphMeta {
@@ -125,7 +125,7 @@ export interface SubgraphCaption {
  *             preferring a candidate that touches something already chosen and
  *             falling back to the next highest-degree node when none does. So
  *             the slice is the busiest region of the graph, grown to stay
- *             connected — NOT simply the top 80 by degree, which is a
+ *             connected, NOT simply the top 80 by degree, which is a
  *             different and disconnected set.
  *
  *   seeded    A node id (or the first hit for a query). The slice is that node
@@ -157,7 +157,7 @@ export function describeSubgraph(
   const capped = Boolean(payload.capped?.nodes || payload.capped?.edges);
   const rule =
     payload.mode === 'seeded'
-      ? `${seedLabel ? `${seedLabel} and its` : 'The selected symbol and its'} direct neighbours — everything one edge away, in-edges first, cut at ${payload.limits?.nodes ?? nodes}.`
-      : `Unseeded: the graph's busiest region, grown by adjacency from the highest-degree symbols so the slice stays connected — not the top ${nodes} by degree, which would not be.`;
+      ? `${seedLabel ? `${seedLabel} and its` : 'The selected symbol and its'} direct neighbours, everything one edge away, in-edges first, cut at ${payload.limits?.nodes ?? nodes}.`
+      : `Unseeded: the graph's busiest region, grown by adjacency from the highest-degree symbols so the slice stays connected, not the top ${nodes} by degree, which would not be.`;
   return { scale, rule, capped };
 }

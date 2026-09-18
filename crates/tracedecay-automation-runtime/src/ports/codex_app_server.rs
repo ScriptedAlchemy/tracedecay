@@ -2,10 +2,10 @@
 //!
 //! A **registered port**. `automation::backend`'s `CodexAppServerBackend`
 //! drives one-shot prompts through a spawned `codex app-server` JSON-RPC
-//! session. That transport — process spawn, handshake, thread lifecycle,
-//! cancellation — lives in `tracedecay-sessions`, which sits beside this crate
-//! rather than beneath it, so the backend states its request and takes the
-//! execution as an injected capability.
+//! session. Process spawn, handshake, thread lifecycle, and cancellation live
+//! in `tracedecay-sessions`, which sits beside this crate rather than beneath
+//! it, so the backend states its request and takes the execution as an
+//! injected capability.
 //!
 //! Root wiring: the root registers [`register`] with an adapter over
 //! `sessions::codex_app_server::run_prompt_with_codex_app_server`, converting

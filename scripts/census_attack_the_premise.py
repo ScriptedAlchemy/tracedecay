@@ -8,14 +8,14 @@ counts actors (presence), not magnitudes. Rerun from the repo root:
     python3 scripts/census_attack_the_premise.py --check
     python3 scripts/census_attack_the_premise.py --self-test
 
-Premise A — nested chunk admission.
+Premise A, nested chunk admission.
     "A parent that already holds a background-CPU unit must return that unit
     to the global FIFO around every nested chunk join."
 Failed the wedge/merge gate as call-site yield wraps (dropped in integration),
 restored wraps, then a welded yield inside chunks::fan_out. The return path
 left the parent holding the role on every large batch.
 
-Premise B — terminal publication admission.
+Premise B, terminal publication admission.
     "The worker task that observed publication corruption holds terminal
     suppress, so a local bool is the admission authority."
 Review passes on the same tip both rejected that bool beside the typed park.

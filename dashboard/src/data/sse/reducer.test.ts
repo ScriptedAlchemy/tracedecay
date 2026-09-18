@@ -36,7 +36,7 @@ function ev(
   };
 }
 
-describe("SSE reducer — ordering", () => {
+describe("SSE reducer, ordering", () => {
   it("preserves monotone acceptance order in the batch", () => {
     const r = createSseReducer<Body>();
     r.ingest(ev({ event_revision: 1 }));
@@ -57,7 +57,7 @@ describe("SSE reducer — ordering", () => {
   });
 });
 
-describe("SSE reducer — dedupe by stream/event/revision", () => {
+describe("SSE reducer, dedupe by stream/event/revision", () => {
   it("drops a duplicate (same stream/event/revision) event", () => {
     const r = createSseReducer<Body>();
     expect(r.ingest(ev({ event_revision: 1, event_id: "e1" }))).toBe(true);
@@ -74,7 +74,7 @@ describe("SSE reducer — dedupe by stream/event/revision", () => {
   });
 });
 
-describe("SSE reducer — stale-generation rejection", () => {
+describe("SSE reducer, stale-generation rejection", () => {
   it("rejects events from an older generation and accepts newer ones", () => {
     const r = createSseReducer<Body>();
     r.ingest(ev({ generation: 2, event_revision: 1, event_id: "e1" }));
@@ -106,7 +106,7 @@ describe("SSE reducer — stale-generation rejection", () => {
   });
 });
 
-describe("SSE reducer — revision gap => refetch once", () => {
+describe("SSE reducer, revision gap => refetch once", () => {
   it("emits exactly one refetch signal for a gap and coalesces multiple gaps", () => {
     const r = createSseReducer<Body>();
     r.ingest(ev({ event_revision: 1, event_id: "e1" }));
@@ -126,7 +126,7 @@ describe("SSE reducer — revision gap => refetch once", () => {
   });
 });
 
-describe("SSE reducer — overflow => stale + single invalidation", () => {
+describe("SSE reducer, overflow => stale + single invalidation", () => {
   it("marks stale and emits one invalidation on event-count overflow", () => {
     const r = createSseReducer<Body>({ maxEvents: 3, sizeOf: () => 1 });
     r.ingest(ev({ event_revision: 1, event_id: "e1" }));
@@ -174,7 +174,7 @@ describe("SSE reducer — overflow => stale + single invalidation", () => {
   });
 });
 
-describe("SSE reducer — canonical refresh transaction", () => {
+describe("SSE reducer, canonical refresh transaction", () => {
   it("detects a gap that spans the reseed boundary", () => {
     const r = createSseReducer<Body>();
     r.ingest(ev({ event_revision: 1, event_id: "e1" }));
@@ -277,7 +277,7 @@ describe("SSE reducer — canonical refresh transaction", () => {
   });
 });
 
-describe("SSE reducer — housekeeping", () => {
+describe("SSE reducer, housekeeping", () => {
   it("reports pending state for the coalescing scheduler", () => {
     const r = createSseReducer<Body>();
     expect(r.hasPending()).toBe(false);
@@ -300,8 +300,8 @@ describe("SSE reducer — housekeeping", () => {
     const stats = r.stats();
     expect(stats.observedEvents).toBe(MAX_OBSERVED_IDENTITIES + 1);
     expect(stats.observedIdentities).toBe(MAX_OBSERVED_IDENTITIES);
-    // The evicted identity is still refused, because the per-stream watermark —
-    // which a reseed no longer clears — is the primary guard.
+    // The evicted identity is still refused, because the per-stream watermark,
+    // which a reseed no longer clears, is the primary guard.
     expect(r.ingest(ev({ event_revision: 1, event_id: "e1" }))).toBe(false);
     expect(r.takeBatch().events).toHaveLength(0);
   });

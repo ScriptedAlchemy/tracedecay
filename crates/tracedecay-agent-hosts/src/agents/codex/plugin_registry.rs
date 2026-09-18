@@ -16,7 +16,7 @@
 //! --json` exits 0 without a TTY, writes `[plugins."tracedecay@personal"]
 //! enabled = true` into `~/.codex/config.toml`, and copies the staged source
 //! into `~/.codex/plugins/cache/personal/tracedecay/<version>`. It does **not**
-//! write `[hooks.state]` — TraceDecay records trust for its own managed hooks
+//! write `[hooks.state]`. TraceDecay records trust for its own managed hooks
 //! separately (see [`super::sync_codex_hook_trust`] and its safety valve).
 //!
 //! That is the same host-capability shape already adopted for `codex mcp add`

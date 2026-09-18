@@ -90,7 +90,7 @@ pub struct QueryContext {
 
 impl QueryContext {
     /// Pick the i-th id with wrap-around. Returns `"missing"` if no samples
-    /// exist — the tool handler will report a not-found error, which is still
+    /// exist, the tool handler will report a not-found error, which is still
     /// useful timing data (and the bench label keeps the case obvious).
     fn pick(slice: &[String], i: usize) -> String {
         if slice.is_empty() {

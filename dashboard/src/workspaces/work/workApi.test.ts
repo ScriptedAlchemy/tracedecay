@@ -11,7 +11,7 @@
  * for the application envelope, so these fixtures are written to match
  * `HttpJsonEnvelope` in `crates/tracedecay-api/src/lib.rs` field for field. If
  * the daemon's wrapper moves, the walk must miss and report
- * `unsupported_schema` — never reach a stale field and call it a value.
+ * `unsupported_schema`, never reach a stale field and call it a value.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -85,8 +85,8 @@ describe('the Work problem taxonomy', () => {
   /**
    * Each status the daemon's `application_problem_status` can produce, mapped
    * to the state the page will render. The mapping is asserted whole because a
-   * single wrong entry is invisible in the UI — it just reads as the wrong
-   * reason — and 409 in particular has to be distinguishable from 503, since
+   * single wrong entry is invisible in the UI, it just reads as the wrong
+   * reason, and 409 in particular has to be distinguishable from 503, since
    * one means read again and the other means nothing is running.
    */
   it('gives every daemon problem status its own reading', () => {
@@ -134,7 +134,7 @@ describe('the application envelope walk', () => {
   });
 
   /** `null` is the daemon saying the operation carried no value. That is found
-   * — the envelope was well-formed — and is refused a step later, so it can
+   *, the envelope was well-formed, and is refused a step later, so it can
    * never be confused with a missing envelope. */
   it('separates an absent payload from an absent envelope', () => {
     expect(workPayload(success(null))).toEqual({ found: true, payload: null });
@@ -172,7 +172,7 @@ describe('callWork', () => {
   });
 
   it('reports a version conflict as conflicting rather than as an error', async () => {
-    // A product mutation preparation conflict says the graph head moved — a
+    // A product mutation preparation conflict says the graph head moved, a
     // reason to read again, not a transport fault to retry blindly.
     stub(409, { kind: 'problem', value: { problem: { kind: 'conflict' } } });
     const result = await callWork(

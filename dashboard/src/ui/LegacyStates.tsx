@@ -37,8 +37,8 @@ export function ReadFailure({
 }
 
 /** Compact readout tile. Kept as a named export because a dozen workspaces
- * call it; the presentation is now the instrument readout — engraved legend,
- * monospaced tabular value, quiet annotation — inside a hairline cell. */
+ * call it; the presentation is now the instrument readout, engraved legend,
+ * monospaced tabular value, quiet annotation, inside a hairline cell. */
 export function StatTile({
   label,
   value,

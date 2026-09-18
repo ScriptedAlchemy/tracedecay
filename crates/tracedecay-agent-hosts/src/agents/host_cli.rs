@@ -2,7 +2,7 @@
 //!
 //! Some hosts own their plugin registration, cache, and enabled state
 //! outright. For those, the canonical way to install or remove TraceDecay is
-//! the host's own command — not config surgery on state the host considers
+//! the host's own command, not config surgery on state the host considers
 //! private. This module is the single boundary through which TraceDecay
 //! invokes such a command.
 //!
@@ -57,8 +57,8 @@ pub(crate) struct HostCliOutcomeV1 {
 }
 
 impl HostCliOutcomeV1 {
-    /// A clean exit is the only success. Anything else — non-zero, signalled,
-    /// or timed out — leaves host state unproven and must not be reported as a
+    /// A clean exit is the only success. Anything else, non-zero, signalled,
+    /// or timed out, leaves host state unproven and must not be reported as a
     /// completed lifecycle step.
     pub(crate) fn succeeded(&self) -> bool {
         !self.timed_out && self.status == Some(0)
@@ -127,15 +127,15 @@ fn require_host_cli_from(
 /// a fresh write of the executable.
 ///
 /// Linux refuses `execve` with `ETXTBSY` while *any* process holds the image
-/// open for writing — including a process that merely inherited the descriptor
+/// open for writing, including a process that merely inherited the descriptor
 /// across a `fork` and has not reached its own `exec` yet. A lifecycle that
 /// drives a host CLI shortly after something installed or updated that binary
 /// can therefore be refused for a reason that has nothing to do with the host,
 /// and reporting it would blame the host for a race in its installer.
 ///
 /// The retry is deliberately tiny and bounded: the condition clears as soon as
-/// the writer's descriptor closes. Every other spawn failure — including a
-/// missing or non-executable file — is returned on the first attempt, so no
+/// the writer's descriptor closes. Every other spawn failure, including a
+/// missing or non-executable file, is returned on the first attempt, so no
 /// real refusal is delayed or masked.
 fn spawn_admitting_recent_writes(command: &mut Command) -> std::io::Result<std::process::Child> {
     const ATTEMPTS: u32 = 5;
@@ -676,7 +676,7 @@ printf '%s' "$HOME" > "$HOME/home"
         // shell assigns itself a default `PATH` when it starts without one, so
         // a `#!/bin/sh` probe reports that synthesized default rather than
         // `<unset>` even though `env_clear` did remove the variable. What the
-        // admission actually promises — and what this asserts — is that the
+        // admission actually promises, and what this asserts, is that the
         // *ambient* value did not reach the child.
         let observed = std::fs::read_to_string(home.path().join("path")).unwrap();
         let ambient = std::env::var("PATH").unwrap_or_default();
@@ -755,7 +755,7 @@ exit 0
         );
         // As above, `<unset>` is not observable through a `#!/bin/sh` probe:
         // the shell synthesizes a default `PATH` when it inherits none. The
-        // guarantee under test is that neither ambient entry survived — not
+        // guarantee under test is that neither ambient entry survived, not
         // the attacker directory, and not even the directory the interpreter
         // itself was resolved from, because the parent resolves it once and
         // passes an absolute path rather than letting the child re-resolve.

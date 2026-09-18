@@ -4,8 +4,8 @@
 //! and keeps that resolution honest while a request is in flight: the
 //! [`DaemonLivenessProbe`] handed to the protocol crate re-reads the record so
 //! a restarted daemon (rotated epoch and token) surfaces as a typed error
-//! instead of silence. Transport — connects, retries, tool calls — stays with
-//! the caller; nothing here opens a stream.
+//! instead of silence. Transport stays with the caller, including connects,
+//! retries, and tool calls; nothing here opens a stream.
 
 use std::net::SocketAddr;
 use std::path::Path;

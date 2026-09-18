@@ -519,8 +519,8 @@ fn a_corrupt_sealed_generation_fails_closed_on_every_request() {
     }
 
     // Tamper with one content-addressed component while leaving the manifest
-    // and pointer intact. The component digest — never a cached failure
-    // verdict — must reject every attempted activation.
+    // and pointer intact. The component digest, never a cached failure
+    // verdict, must reject every attempted activation.
     let generations_root = store.path().join("code-generations-v1");
     let sealed_path = fs::read_dir(&generations_root)
         .expect("read generations root")

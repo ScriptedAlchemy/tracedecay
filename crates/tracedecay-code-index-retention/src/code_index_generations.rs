@@ -275,7 +275,7 @@ pub fn retain_bounded_generation_index_with_text_head(
 
 /// Receipt of one bounded-history sweep: how many entries it evicted and how
 /// many entry visits its byte accounting performed. The visit count is the
-/// falsifiable cost contract — after the canonical sort it is linear in the
+/// falsifiable cost contract, after the canonical sort it is linear in the
 /// entry count, never proportional to entries × evictions.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct GenerationIndexRetentionSweepV1 {
@@ -291,8 +291,8 @@ pub(crate) struct GenerationIndexRetentionSweepV1 {
 /// (active generation and active text head) plus the newest removable suffix.
 /// Rather than recomputing the whole vector's bytes after every eviction, this
 /// accumulates the byte total of each candidate suffix once, newest to oldest,
-/// with shared text artifacts counted the first time they are seen — exactly
-/// the deduped saturating total the whole-vector recomputation produced — and
+/// with shared text artifacts counted the first time they are seen, exactly
+/// the deduped saturating total the whole-vector recomputation produced, and
 /// then compacts the vector once.
 pub(crate) fn retain_bounded_generation_index_accounted(
     entries: &mut Vec<DurableGenerationIndexEntryV1>,
@@ -330,7 +330,7 @@ pub(crate) fn retain_bounded_generation_index_accounted(
             }
         }
         // `suffix_bytes[i]` is the deduped byte total of the protected entries
-        // plus the removable entries from removable ordinal `i` onward — the
+        // plus the removable entries from removable ordinal `i` onward, the
         // exact set that survives once the `i` oldest removable entries are
         // evicted.
         let mut suffix_bytes = vec![protected_bytes; removable.len() + 1];
@@ -442,7 +442,7 @@ pub enum CodeGenerationRetentionModeV1 {
 /// content digest encoded in its name.
 ///
 /// A single generation is routinely ~1 GiB, so [`Self::Full`] costs a whole-file
-/// SHA-256 per generation. That is correct — and mandatory — before unlinking
+/// SHA-256 per generation. That is correct, and mandatory, before unlinking
 /// anything, but it is far too expensive for an observability read, which is why
 /// every byte-budget gate in front of Doctor and the storage report used to fail
 /// closed on real profiles and report nothing at all. [`Self::MetadataOnly`]
@@ -460,7 +460,7 @@ pub enum GenerationDigestVerificationV1 {
 
 /// What a census learned about content-addressed generation segments.
 ///
-/// Marking live segments means streaming every retained manifest end to end —
+/// Marking live segments means streaming every retained manifest end to end,
 /// the same multi-gigabyte read [`GenerationDigestVerificationV1::MetadataOnly`]
 /// exists to avoid, and one that fails closed when a manifest no longer matches
 /// its content-addressed file name. A metadata-only census therefore refuses to
@@ -739,7 +739,7 @@ pub fn code_text_artifact_path(
 ///
 /// Scope-root reconciliation compares directory names against this exact
 /// derivation, so it must never diverge from
-/// [`scoped_code_index_store_root`] — a divergence would classify a live scope
+/// [`scoped_code_index_store_root`], a divergence would classify a live scope
 /// as stranded.
 #[must_use]
 pub fn code_index_scope_hash(canonical_project_root: &Path) -> String {
@@ -913,7 +913,7 @@ fn plan_code_generation_retention_with_verification_cancellable(
         }
         // Retention plans a file's lifetime from its identity and size, not
         // from a decoded graph, so a revision the readers have retired is
-        // ordinary collectable history — the daemon rebuilds past it, and
+        // ordinary collectable history, the daemon rebuilds past it, and
         // refusing the whole plan here would leave a store that holds one
         // permanently uncollectable. Only a revision from a newer build is
         // unsafe: those bytes were written by a writer this one cannot

@@ -4,7 +4,7 @@
 //! through the same two layers a product surface uses: the fixed read-only
 //! adapter (`NativeGitIntelligence`) and the generation-aware query engine
 //! (`GitQueryEngine`). Nothing is mocked, and no daemon, store, or project
-//! runtime is mounted — these are application/use-case reads only.
+//! runtime is mounted. These are application/use-case reads only.
 //!
 //! The matrix covers the Git-query acceptance listed in
 //! `docs/plans/tracedecay-v2/05-query-crate.md`: working-tree, staged, and
@@ -424,7 +424,7 @@ fn binary_content_is_classified_instead_of_text_diffed() {
 }
 
 /// A real merge commit must be traversable: both parents are reported, and a
-/// first-parent walk answers a different — and smaller — question than the
+/// first-parent walk answers a different, and smaller, question than the
 /// full walk.
 #[test]
 fn merge_history_traversal_reports_both_parents() {
@@ -679,7 +679,7 @@ fn hunk_references_replay_identically_after_the_ref_moves() {
 
 /// Dual provenance: Git-side revision evidence and a code-generation's claimed
 /// revision are separate watermarks. When they disagree the join reports the
-/// exact disagreement as typed staleness — it never returns `Current`, and it
+/// exact disagreement as typed staleness, it never returns `Current`, and it
 /// never merges the two provenances into one clean answer.
 #[test]
 fn generation_join_reports_watermark_disagreement_instead_of_merging() {

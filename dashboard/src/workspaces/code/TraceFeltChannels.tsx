@@ -6,7 +6,7 @@
  * on this route and three are inert, and a surface that animates two channels
  * while saying nothing about the other three is quietly claiming five
  * measurements it does not have. Each row therefore prints its state and its
- * static equivalent — the reading that survives when motion is reduced.
+ * static equivalent, the reading that survives when motion is reduced.
  *
  * It is its own module because that claim is about the ROUTE, not about the
  * picture: which channels a payload can drive changes when the payload changes,

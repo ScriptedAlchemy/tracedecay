@@ -681,7 +681,7 @@ impl ProjectionOutputOwnership {
 /// The audit is a read-only convergence check over a page it has already
 /// scanned: the authority every row would have read for itself, row by row, is
 /// the same authority read here in one batched statement per table. What stays
-/// strictly per observation is the *derivation* each row is audited against —
+/// strictly per observation is the *derivation* each row is audited against,
 /// only the stored side it is compared to is shared.
 ///
 /// `ProjectionAuthorityState` deliberately stays a per-observation read. It

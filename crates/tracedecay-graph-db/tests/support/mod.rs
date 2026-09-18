@@ -128,7 +128,7 @@ impl RegisteredGraph {
     /// After the first publish / snapshot opens the engine, dropping every
     /// [`GraphDbLeaseV1`], verified snapshot, and `VerifiedGraphCommit`
     /// hibernates it. Confirm with `GraphDb::staging_engine_is_open` on a
-    /// freshly resolved lease — `resolve` does not reopen a hibernated lazy
+    /// freshly resolved lease, `resolve` does not reopen a hibernated lazy
     /// engine; `snapshot`, publish, and `staging_generation_row_counts` do.
     pub fn new_mounted_lazy(root: &Path) -> Result<Self, GraphDbError> {
         let registered = Self::new(root)?;

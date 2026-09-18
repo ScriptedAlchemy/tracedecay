@@ -142,7 +142,7 @@ pub fn daemon_response_stalled(elapsed: Duration) -> TraceDecayError {
         DAEMON_RESPONSE_STALLED,
         true,
         format!(
-            "daemon did not answer after {}s; stalled or saturated — run `tracedecay daemon status`",
+            "daemon did not answer after {}s; stalled or saturated. Run `tracedecay daemon status`",
             elapsed.as_secs()
         ),
     )
@@ -159,7 +159,7 @@ pub fn daemon_response_stalled_during(
         DAEMON_RESPONSE_STALLED,
         true,
         format!(
-            "daemon did not answer after {}s ({stage} stage of '{request_label}'); stalled or saturated — run `tracedecay daemon status`",
+            "daemon did not answer after {}s ({stage} stage of '{request_label}'); stalled or saturated. Run `tracedecay daemon status`",
             elapsed.as_secs()
         ),
     )
@@ -241,9 +241,9 @@ pub fn is_saturated_daemon_connect_error(kind: std::io::ErrorKind) -> bool {
 
 pub fn daemon_connect_failure_advice(kind: std::io::ErrorKind) -> &'static str {
     if is_saturated_daemon_connect_error(kind) {
-        "The daemon is up but not accepting connections — likely overloaded. Retry shortly, or check `tracedecay daemon status`."
+        "The daemon is up but not accepting connections, likely overloaded. Retry shortly, or check `tracedecay daemon status`."
     } else {
-        "The daemon may be restarting (e.g. after `tracedecay update`) — retry shortly, or check `tracedecay daemon status`."
+        "The daemon may be restarting (e.g. after `tracedecay update`). Retry shortly, or check `tracedecay daemon status`."
     }
 }
 

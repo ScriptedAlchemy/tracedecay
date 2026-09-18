@@ -13,7 +13,7 @@ import { facetCounts, LANES, SOURCE_LANE_IDS, type Hit, type LaneId } from './mo
 import { RunRegister } from './panels.tsx';
 
 /**
- * Explorer — one query, four independent authorities.
+ * Explorer, one query, four independent authorities.
  *
  * TraceDecay remembers a repository several separate ways, and the honest
  * consequence is that a search is a *fan-out*, not a single ranked list: the
@@ -23,7 +23,7 @@ import { RunRegister } from './panels.tsx';
  * Each authority is a lane with its own lifecycle, count, rows and typed
  * absence; a ready lane can never make its neighbour look ready; and because
  * the daemon returns hits but no relevance score, "why this is here" is told
- * with things that are true — the source's own order, the fields whose text
+ * with things that are true, the source's own order, the fields whose text
  * really contains the term, and measured quantities that name their field.
  *
  * Before a query, the lanes browse what each memory holds right now, from
@@ -79,7 +79,7 @@ export function ExplorerPage() {
 
   // The inspector shows the row under inspection first, the selection
   // otherwise. A peek is transient and fetches nothing; the selection
-  // persists. Resting on the selected row itself is not a peek — the row a
+  // persists. Resting on the selected row itself is not a peek, the row a
   // keyboard reader just selected still has focus, and it is selected.
   const inspected = peeked ?? selected;
   const mode: InspectMode =
@@ -97,8 +97,8 @@ export function ExplorerPage() {
       />
 
       {/* The query register: the field, the run's own state, and the lane and
-        * pivot controls. Every control here is real — it changes what is
-        * asked or what loaded rows are shown — and none changes project scope,
+        * pivot controls. Every control here is real, it changes what is
+        * asked or what loaded rows are shown, and none changes project scope,
         * which the shell register owns. */}
       <div className="flex shrink-0 flex-col gap-2 border-b border-edge-subtle bg-surface-1 px-3 py-2">
         <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:gap-4">
@@ -114,7 +114,7 @@ export function ExplorerPage() {
               explorer.searching ? (
                 <>
                   hits for{' '}
-                  <span className="font-medium text-text-secondary">“{explorer.submitted}”</span>{' '}
+                  <span className="font-medium text-text-secondary">"{explorer.submitted}"</span>{' '}
                   in each source&rsquo;s own order · terms are marked where they occur in the
                   payload
                 </>

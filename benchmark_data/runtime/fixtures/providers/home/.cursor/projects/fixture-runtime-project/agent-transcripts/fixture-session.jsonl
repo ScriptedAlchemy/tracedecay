@@ -1,0 +1,2 @@
+{"role":"user","session_id":"fixture-cursor-session","timestamp":"2026-07-01T00:00:00Z","message":{"content":[{"type":"text","text":"Explain the code-retrieval journey for fixtureGraph."}]}}
+{"role":"assistant","session_id":"fixture-cursor-session","timestamp":"2026-07-01T00:00:01Z","message":{"content":[{"type":"text","text":"fixtureGraph feeds buildFixtureReport through dependencyCount."}]}}

@@ -30,7 +30,7 @@ const CONNECTION_STATE: Record<
   offline: {
     kind: 'offline',
     detail: 'event stream closed',
-    sentence: 'Disconnected — the readings below are frozen, not idle.',
+    sentence: 'Disconnected, the readings below are frozen, not idle.',
   },
 };
 
@@ -42,7 +42,7 @@ const CONNECTION_STATE: Record<
  *
  *   idle     the stream is open and nothing is happening. The chip reads
  *            READY, the rate is a truthful zero, and the age of the last event
- *            climbs steadily — which is information, and true.
+ *            climbs steadily, which is information, and true.
  *   offline  the stream is dead. The chip carries a different icon, label and
  *            token, the sentence says so in words, and the rate stops being
  *            reported at all, because nothing is measuring it.
@@ -170,7 +170,7 @@ export function SignalPanel({
  * This is not motion and not a heartbeat: nothing here invents activity or
  * draws a frame. It re-reads `Date.now()` so that the printed age of a real,
  * already-received event does not sit frozen at the value it had when the last
- * render happened — which is precisely what would happen during silence, since
+ * render happened, which is precisely what would happen during silence, since
  * silence produces no renders. A stale "4s" pinned on screen ten minutes later
  * would be a lie about exactly the condition the viewer most needs to see.
  *

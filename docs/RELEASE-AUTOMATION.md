@@ -1,14 +1,23 @@
 # Release Automation
 
-TraceDecay uses two workflows with one publication authority:
+TraceDecay releases from `master` on two channels with one publication
+authority:
 
-1. `Release Please` runs on pushes to `master`.
-   - Opens or updates a release PR.
+1. `Release Please` runs on pushes to `master` and proposes the next **beta
+   prerelease** (`release-please-config.json`, versioning `prerelease`).
+   - Opens or updates a draft release PR, then marks it ready once the
+     lockfile matches the bumped manifests.
    - Bumps `.release-please-manifest.json`, `version.txt`, `Cargo.toml`,
-     `server.json`, and `Cargo.lock`.
-   - Updates `CHANGELOG.md`.
-   - Creates the `vX.Y.Z` tag and GitHub Release.
-2. `Release` runs after a GitHub Release is published.
+     `server.json`, and `Cargo.lock`; updates `CHANGELOG.md`.
+   - Merging the PR creates the `vX.Y.Z-beta.N` tag and a GitHub prerelease,
+     which `Release (Beta)` turns into `tracedecay-beta-<tag>-<platform>`
+     assets.
+   - A **stable** release is a deliberate act: dispatch `Release Please` with
+     `channel=stable` and the exact `version`. That run uses
+     `release-please-config-stable.json` (which also bumps the TypeScript
+     SDK) and opens a `chore(release): release X.Y.Z` PR; merging it publishes
+     a full release for `Release`.
+2. `Release` runs after a stable GitHub Release is published.
    - Builds platform binaries.
    - Uploads release assets, checksums, and `install.sh`.
    - Updates the in-repository `server.json` MCP registry manifest.
@@ -41,7 +50,7 @@ Add these repository secrets:
   trigger the follow-up `release.yml` workflow.
 npm publication is tokenless: no npm secret exists anywhere in the repository
 or its workflows. The publish job authenticates through npm trusted publishing
-(OIDC) — it holds `id-token: write`, and the pinned npm CLI (12.0.2, above the
+(OIDC), it holds `id-token: write`, and the pinned npm CLI (12.0.2, above the
 11.5.1 trusted-publishing floor; Node 22.23.2, above the 22.14.0 floor)
 exchanges the GitHub OIDC token for a short-lived publish credential itself.
 Provenance is attached automatically by trusted publishing. No
@@ -64,7 +73,7 @@ exactly:
 - Allowed actions: `npm publish`
 
 All fields are case-sensitive and unvalidated at save time; mismatches only
-surface as `ENEEDAUTH`/404 at publish time — the publish job names this
+surface as `ENEEDAUTH`/404 at publish time, the publish job names this
 configuration in its failure message. Only GitHub-hosted runners are
 supported (the job uses `ubuntu-latest`). After the first successful OIDC
 publish, set Package → Settings → Publishing access to "Require two-factor
@@ -82,22 +91,23 @@ files that are also ignored remain forbidden.
 
 ## Release artifact acceptance
 
-Release acceptance exercises the produced archive and installed binary, never
-a source-tree file inventory or a release-PR path policy. The archive must
-contain a self-contained Rust package graph and the embedded dashboard and
-first-party host assets required by the binary.
+The ship path (`release-beta.yml`, `release.yml`) stamps GitHub-release
+assets. It builds the production binary, smokes `--version`/`--help`, and
+packages the MCPB and archive from that same file. A source-tree inventory
+or a release-PR path policy is not acceptance.
 
-The installed binary is exercised with a fresh isolated host profile for every
-supported host. Each official host operation must install, update, and
-uninstall only its owned files while preserving unrelated profile content; the
-same embedded artifact identity must be observed throughout. A supported host
-that defers or cannot complete one of those operations blocks acceptance. A
-host without an evidenced native registration remains a typed unavailable
-result, rather than a successful empty install.
+`scripts/check-distribution-acceptance.sh` proves the unpublished crate
+graph (`cargo package`, extracted-crate rebuilds, nextest, MCP inspector).
+That is not required to stamp the binary assets. The battery runs daily on
+one free `ubuntu-latest` runner
+(`.github/workflows/distribution-acceptance.yml`) and on
+`workflow_dispatch`. It reuses the just-built production binary
+(`--reuse-release-binary`) so it does not compile a second workspace into
+implicit `target/release`.
 
-Recorded native host events remain historical-ingestion evidence: they pass
-through the production decoder and ingestion path, not a synthetic packaging
-fixture. They do not substitute for the installed host lifecycle journey.
+Host install, update, and uninstall journeys, and recorded native host
+events as historical-ingestion evidence, stay product contracts. They do
+not block a beta or stable asset upload.
 
 ## SDK release boundary
 
@@ -127,35 +137,44 @@ byte-verified no-op; identical version with different bytes fails and
 requires an SDK version bump. The `scripts/check-sdk-publish-workflow.py`
 gate (run by SDK conformance CI) enforces this job isolation.
 
-## Normal Release Flow
+## Normal Release Flow (beta)
 
 1. Merge feature/fix PRs into `master`.
-2. `Release Please` opens or updates a release PR.
-3. Review the generated version and changelog.
-4. Merge the release PR.
-5. `Release Please` creates the tag and GitHub Release.
-6. The GitHub Release triggers `release.yml`, which builds and uploads
-   checksummed GitHub Release assets, refreshes `server.json`, and publishes
-   `@tracedecay/sdk` to npm once release verification passes.
+2. `Release Please` opens or updates the `chore(release): release
+   X.Y.Z-beta.N` PR.
+3. Review the generated version and changelog, then merge.
+4. `Release Please` tags `vX.Y.Z-beta.N` and publishes a GitHub prerelease
+   (never marked `latest`).
+5. The prerelease triggers `release-beta.yml`, which builds, attests, and
+   uploads `tracedecay-beta-<tag>-<platform>` archives plus `SHA256SUMS`,
+   exactly the names the CLI beta upgrade channel (`src/cloud.rs::asset_name`)
+   resolves. Where that single build job spends its time, and which cuts do
+   not add jobs, is in
+   [Release build job speed](release-beta-single-job-speed.md).
 
-## Beta Channel
-
-The `codex/tracedecay-total-redesign-plan-reopened` branch runs its own release-please
-channel: `beta-release-please.yml` with `release-please-config-beta.json` and
-`.release-please-manifest-beta.json` (versioning strategy `prerelease`,
-prerelease type `beta`). Every push to the branch opens or updates a release
-PR; merging it tags `vX.Y.Z-beta.N` and publishes a GitHub prerelease, which
-triggers `release-beta.yml` to build, attest, and upload
-`tracedecay-beta-<tag>-<platform>` archives plus `SHA256SUMS`. Prereleases are
-never marked `latest`, and the CLI's beta upgrade channel
-(`src/cloud.rs::asset_name`) resolves exactly these asset names. Manual
-install (macOS arm64):
+Manual install of a published beta (macOS arm64):
 
 ```sh
 gh release download <tag> -p "tracedecay-beta-<tag>-aarch64-macos.tar.gz"
 tar xzf "tracedecay-beta-<tag>-aarch64-macos.tar.gz"
 install -m 755 tracedecay ~/.cargo/bin/tracedecay
 ```
+
+## Stable Release (manual)
+
+Stable versions are never proposed automatically. When the current beta is
+ready to ship:
+
+```sh
+gh workflow run release-please.yml --ref master -f channel=stable -f version=X.Y.Z
+```
+
+`Release Please` then opens `chore(release): release X.Y.Z` from
+`release-please-config-stable.json`. Merging it publishes a full GitHub
+Release, and `release.yml` builds and uploads the assets, refreshes
+`server.json`, marks the release `latest`, and publishes `@tracedecay/sdk` to
+npm once release verification passes. The next push to `master` resumes
+proposing betas above the new stable version.
 
 ## Manual Recovery
 

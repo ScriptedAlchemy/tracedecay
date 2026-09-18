@@ -11,7 +11,7 @@
 //! `atx_heading` / `setext_heading` nodes become `Module` nodes; `inline_link`
 //! and reference-style links whose destination is a project-local source file
 //! emit `Uses` edges. Frontmatter (`(minus_metadata)`, `(plus_metadata)`) is
-//! skipped — the grammar makes it opaque, so we don't recurse into it.
+//! skipped. The grammar makes it opaque, so we don't recurse into it.
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -57,7 +57,7 @@ struct ExtractionState<'s> {
     file_path: String,
     source: &'s [u8],
     timestamp: u64,
-    /// (heading title, node id, level) — heading levels strictly increase
+    /// (heading title, node id, level). Heading levels strictly increase
     /// going *down* the stack. Headings of equal or shallower level pop
     /// the stack so we always parent to the nearest ancestor heading.
     node_stack: Vec<(String, String, usize)>,
@@ -66,7 +66,7 @@ struct ExtractionState<'s> {
     inline_parser: Option<Parser>,
     /// `(index into nodes, heading level, heading start line)` in document
     /// order. Section end lines are resolved in one post-pass once every
-    /// heading is known — a heading owns everything up to the next heading of
+    /// heading is known. A heading owns everything up to the next heading of
     /// the same or shallower level.
     headings: Vec<(usize, usize, u32)>,
     /// The supplied block tree cannot represent the inline grammar. Retained
@@ -289,12 +289,12 @@ impl MarkdownExtractor {
     /// Walks the block tree. `atx_heading` / `setext_heading` produce `Module`
     /// nodes; `(inline)` nodes are re-parsed with the inline grammar to find
     /// links. Frontmatter (`(minus_metadata)`, `(plus_metadata)`) is opaque
-    /// per the grammar — we never descend into it.
+    /// per the grammar. We never descend into it.
     fn visit(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "atx_heading" | "setext_heading" => Self::visit_heading(state, node),
             "minus_metadata" | "plus_metadata" => {
-                // Opaque YAML/TOML frontmatter — don't descend.
+                // Opaque YAML/TOML frontmatter. Don't descend.
             }
             "link_reference_definition" => Self::visit_reference_definition(state, node),
             "inline" => Self::visit_inline(state, node),
@@ -342,7 +342,7 @@ impl MarkdownExtractor {
 
         let kind = NodeKind::Module;
         // Heading-path qualified name: the file path, then every enclosing
-        // heading, then this heading — "docs/plans/x.md > H1 > H2". The stack
+        // heading, then this heading. "docs/plans/x.md > H1 > H2". The stack
         // was popped to this heading's parent above, so it is exactly the
         // ancestor path. Duplicate titles under different parents therefore
         // stay distinguishable, and duplicate titles under the *same* parent

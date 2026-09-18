@@ -12,9 +12,9 @@
 pub(crate) enum LeadingKind {
     /// Empty (after trimming leading whitespace).
     Blank,
-    /// Inner doc comment (`//!`) — documents the *enclosing* item/module.
+    /// Inner doc comment (`//!`), documents the *enclosing* item/module.
     InnerDoc,
-    /// Outer doc comment (`///` or `/**`) — documents the *next* item.
+    /// Outer doc comment (`///` or `/**`), documents the *next* item.
     OuterDoc,
     /// Plain line comment (`//`, but not `///`/`//!`).
     LineComment,
@@ -68,7 +68,7 @@ pub(crate) const MAX_PREVIEW_DIFF_LINES: usize = 200;
 /// was produced.
 pub(crate) fn edit_success_message(dry_run: bool, base: &str) -> String {
     if dry_run {
-        format!("dry run — nothing written; preview only ({base})")
+        format!("dry run. Nothing written; preview only ({base})")
     } else {
         base.to_string()
     }
@@ -77,7 +77,7 @@ pub(crate) fn edit_success_message(dry_run: bool, base: &str) -> String {
 /// Builds a bounded, unified-style diff of the single changed region between
 /// `original` and `modified`. The two texts are compared line-by-line: the
 /// common leading and trailing lines are trimmed and only the differing middle
-/// band — plus `context` unchanged lines on each side — is rendered, capped at
+/// band is rendered, plus `context` unchanged lines on each side, capped at
 /// `max_lines` (excess is noted as truncated). This is a cheap single-hunk
 /// preview for a localized edit, not a minimal multi-hunk LCS diff; a widely
 /// scattered set of changes collapses into one hunk spanning them.

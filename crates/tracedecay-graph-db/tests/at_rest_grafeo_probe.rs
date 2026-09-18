@@ -15,9 +15,9 @@
 //!
 //! That failure is a property of *TraceDecay's schema*, not of the columnar
 //! format. This probe removes the schema from the question: it builds the same
-//! order of magnitude of nodes and edges under a handful of shared labels —
+//! order of magnitude of nodes and edges under a handful of shared labels,
 //! the shape TraceDecay would have if entity identity were a property with an
-//! index rather than a label — and measures the same close/reopen cycle.
+//! index rather than a label, and measures the same close/reopen cycle.
 //!
 //! The point is to price the schema change. If the columnar form is not
 //! materially faster to reopen even under a sane label count, then rewriting
@@ -54,7 +54,7 @@ const DEFAULT_ROWS: usize = 500_000;
 /// Edges per node, as a divisor, matching `at_rest_snapshot.rs`.
 const EDGE_DIVISOR: usize = 4;
 
-/// Distinct node labels. A realistic small set, not one per entity — that is
+/// Distinct node labels. A realistic small set, not one per entity, that is
 /// the whole point of this probe.
 const LABELS: [&str; 4] = ["Symbol", "File", "Module", "Chunk"];
 

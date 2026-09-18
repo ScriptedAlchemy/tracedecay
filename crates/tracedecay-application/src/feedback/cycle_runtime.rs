@@ -723,7 +723,7 @@ struct DirectFeedbackImpactAdapter {
     authorization: ProjectFeedbackRouteAuthorization,
     graph_operation: ApplicationOperation,
     tests_operation: ApplicationOperation,
-    /// The code-index generation authority — the single mint for
+    /// The code-index generation authority, the single mint for
     /// `file.daemon.<digest>` file identity. Absent for runtimes opened outside
     /// the daemon, where the adapter reports no affected files rather than
     /// minting raw-path identities the rest of the system cannot match.
@@ -1098,8 +1098,8 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
                 // The impact is complete only when both the graph and the
                 // affected-test evidence report complete coverage.
                 // `evidence_anchors` stays empty because this runtime binds no
-                // anchor authority — the graph traversal yields nodes, not
-                // retrieval anchors — and an invented anchor would be worse than
+                // anchor authority, the graph traversal yields nodes, not
+                // retrieval anchors, and an invented anchor would be worse than
                 // none.
                 let state = if graph_state == FeedbackImpactStateV1::Complete
                     && affected_tests_state == FeedbackImpactStateV1::Complete

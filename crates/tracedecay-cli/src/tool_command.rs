@@ -1,4 +1,4 @@
-//! `tracedecay tool <name> [args...]` — invoke any MCP tool from the CLI.
+//! `tracedecay tool <name> [args...]`. Invoke any MCP tool from the CLI.
 //!
 //! The CLI surface is **dynamic**: tool names and parameters come from the MCP
 //! tool definitions in [`crate::mcp::tools`]. Each MCP tool's JSON Schema is
@@ -7,18 +7,18 @@
 //!
 //! Reserved flags (handled by this module, never forwarded to the tool):
 //!
-//! - `-h` / `--help` — print the tool's parameters and exit.
-//! - `--json` — print the raw JSON-RPC `result.value`; default is the
+//! - `-h` / `--help`, print the tool's parameters and exit.
+//! - `--json`, print the raw JSON-RPC `result.value`; default is the
 //!   human-readable text inside `content[0].text`.
-//! - `--dry-run` — for tools without their own `dry_run` property, parse and
+//! - `--dry-run`, for tools without their own `dry_run` property, parse and
 //!   validate the arguments, print the resolved arguments object as pretty
 //!   JSON, and exit without dispatching the tool. Otherwise it is forwarded as
 //!   the tool's boolean argument.
-//! - `--project <path>` — project root to target. Defaults to the nearest
+//! - `--project <path>`, project root to target. Defaults to the nearest
 //!   initialised project walking up from cwd. We use
 //!   `--project` (not `-p`) because several MCP tools have a `path` argument
 //!   that filters files within the project.
-//! - `--args <json|file|->` — escape hatch. Treats the value as the entire
+//! - `--args <json|file|->`, escape hatch. Treats the value as the entire
 //!   argument object; mutually exclusive with `--key value` flags. Use for
 //!   complex shapes like `tracedecay_multi_str_replace`'s array-of-pairs.
 //!   A whole payload accepts inline JSON, `-` for stdin, or a file path
@@ -27,7 +27,7 @@
 //!   per-argv-string cap for large payloads.
 //!
 //! For per-`--key` values, a leading `@` opts into file/stdin reading
-//! (`--key @path`, `--key @-`) — the sigil is required there because a bare
+//! (`--key @path`, `--key @-`), the sigil is required there because a bare
 //! value is a literal. This makes multi-line strings (replacements, ast-grep
 //! patterns, decision text) ergonomic. stdin is read once and memoized, so it
 //! can be referenced by more than one field in a single invocation.
@@ -362,7 +362,7 @@ fn cli_surface_invocation(
 
 /// Every application-surface operation is project-scoped on the daemon side
 /// (`DaemonInvocationRequest::requires_project`), so `project` must already be
-/// the resolved project route — not just an explicit `--project`. A handshake
+/// the resolved project route, not just an explicit `--project`. A handshake
 /// without a project reaches the profile-scoped projectless route, where those
 /// operations can only answer `application.surface.unavailable` /
 /// `not_found_or_not_authorized`.
@@ -476,7 +476,7 @@ fn dispatch_cli_application_surface_inner(
             .await
             .map_err(|error| match error {
                 // The same typed connect failure the compatibility tool path
-                // returns: one restart grace, then fail fast — never another
+                // returns: one restart grace, then fail fast, never another
                 // dispatch attempt against a dead socket.
                 ApplicationSurfaceAdapterError::DaemonUnreachable {
                     reason_code,
@@ -722,12 +722,12 @@ async fn dispatch_compatibility_tool(
     hotpath::val!("cli.compatibility_tool.name").set(&tool_name);
     // `deadline` is the caller's *request* deadline: it now travels to the
     // daemon, which enforces it. The local wait exists only to bound a dead or
-    // wedged daemon, so it runs on the transport's response bound — that same
+    // wedged daemon, so it runs on the transport's response bound, that same
     // deadline plus a bounded grace. Waiting strictly to the request deadline
     // made every deadline-elapsed typed terminal unobservable through this
     // transport: the daemon's PartialEffect (committed receipt, Reconcile-only
     // legal action) or typed timeout envelope arrived moments after the local
-    // abort had already printed "outcome may be unknown" — untruthful, since
+    // abort had already printed "outcome may be unknown", untruthful, since
     // the outcome was in flight. Never discard an envelope that was received.
     let response_bound = tracedecay::daemon::daemon_tool_response_bound(deadline)?;
     let result_value = match timeout_at(
@@ -745,7 +745,7 @@ async fn dispatch_compatibility_tool(
     // The payload above is the tool's answer and callers parse it, so it is
     // printed byte-for-byte either way; only the process status changes here.
     // A tool result the daemon classified as an application failure must not
-    // exit 0 — that made every script and CI gate shelling out to
+    // exit 0, that made every script and CI gate shelling out to
     // `tracedecay tool` silently blind to a failing tool.
     tool_result_process_outcome(&result_value, tool_name)
 }
@@ -754,9 +754,9 @@ async fn dispatch_compatibility_tool(
 /// successful call, `Err` (nonzero exit) for one the daemon classified as an
 /// application failure.
 ///
-/// `isError` is the daemon's own authoritative classification — set by
+/// `isError` is the daemon's own authoritative classification, set by
 /// `mark_semantic_tool_error` from either a handler's structural
-/// `with_semantic_error` marker or the rendered-payload failure heuristic — and
+/// `with_semantic_error` marker or the rendered-payload failure heuristic, and
 /// is the same field an MCP client reads, so the CLI and MCP transports agree
 /// on what "this tool failed" means.
 ///
@@ -859,7 +859,7 @@ fn print_tool_list(defs: &[ToolDefinition]) {
     }
 
     println!(
-        "Available tools ({}; TraceDecay {}) — run `tracedecay tool <name> --help` for parameters, then",
+        "Available tools ({}; TraceDecay {}), run `tracedecay tool <name> --help` for parameters, then",
         defs.len(),
         crate::product_runtime::PRODUCT_BUILD_VERSION
     );

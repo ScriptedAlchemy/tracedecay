@@ -619,7 +619,7 @@ fn add_branch_at_payload(root: PathBuf, branch: &str) -> Vec<u8> {
 fn linked_worktree_on(project: &std::path::Path) -> PathBuf {
     use super::writer_test_support::git;
 
-    // Sibling of the unique TempDir root — never a shared /tmp fixed name.
+    // Sibling of the unique TempDir root, never a shared /tmp fixed name.
     let worktree = project.with_file_name(format!(
         "{}-admission-wt",
         project

@@ -1,6 +1,6 @@
 # Multi-Language Support Design: Go & Java
 
-> **Archived record — not implementation authority.** This document preserves
+> **Archived record, not implementation authority.** This document preserves
 > historical intent and evidence. Current requirements come only from the
 > `docs/plans/tracedecay-v2/` hierarchy. Exact tests and counts, source-string
 > checks, branch/commit/worktree choreography, snapshots, receipts,
@@ -52,29 +52,29 @@ impl LanguageRegistry {
 ## 2. Expanded NodeKind Enum
 
 ### New Java variants:
-- `Class` — class declarations
-- `Interface` — interface declarations
-- `Constructor` — constructor methods
-- `Annotation` — annotation types (`@interface`)
-- `AnnotationUsage` — annotation applications (`@Override`)
-- `Package` — package declarations
-- `InnerClass` — nested/inner classes
-- `InitBlock` — static/instance initializer blocks
-- `AbstractMethod` — abstract method declarations
+- `Class`, class declarations
+- `Interface`, interface declarations
+- `Constructor`, constructor methods
+- `Annotation`, annotation types (`@interface`)
+- `AnnotationUsage`, annotation applications (`@Override`)
+- `Package`, package declarations
+- `InnerClass`, nested/inner classes
+- `InitBlock`, static/instance initializer blocks
+- `AbstractMethod`, abstract method declarations
 
 ### New Go variants:
-- `InterfaceType` — Go interface type definitions
-- `StructMethod` — methods with receivers
-- `GoPackage` — Go package declaration
-- `StructTag` — struct field tags
+- `InterfaceType`. Go interface type definitions
+- `StructMethod`, methods with receivers
+- `GoPackage`. Go package declaration
+- `StructTag`, struct field tags
 
 ### Shared:
-- `GenericParam` — type parameters
+- `GenericParam`, type parameters
 
 ### New EdgeKind variants:
-- `Extends` — Java class inheritance, Go interface embedding
-- `Annotates` — annotation → target
-- `Receives` — Go method receiver type link
+- `Extends`. Java class inheritance, Go interface embedding
+- `Annotates`, annotation → target
+- `Receives`. Go method receiver type link
 
 ## 3. Go Extractor (`src/extraction/go_extractor.rs`)
 
@@ -91,11 +91,11 @@ Uses `tree-sitter-go`.
 - `import_declaration` → `Use` nodes
 
 ### Edges:
-- `Contains` — package → types → methods/fields
-- `Calls` — scan bodies for `call_expression`, `selector_expression`
-- `Receives` — method → receiver type
-- `Uses` — import references
-- `Extends` — interface embedding
+- `Contains`, package → types → methods/fields
+- `Calls`, scan bodies for `call_expression`, `selector_expression`
+- `Receives`, method → receiver type
+- `Uses`, import references
+- `Extends`, interface embedding
 
 ### Deep features:
 - Generic type params → `GenericParam` nodes
@@ -121,15 +121,15 @@ Uses `tree-sitter-java`.
 - `static_initializer` / `instance_initializer` → `InitBlock`
 
 ### Edges:
-- `Contains` — package → class → method/field, class → inner class
-- `Calls` — scan bodies for `method_invocation`, `object_creation_expression`
-- `Implements` — from `implements` clause
-- `Extends` — from `extends` clause
-- `Annotates` — `AnnotationUsage` → annotated element
-- `Uses` — import references
+- `Contains`, package → class → method/field, class → inner class
+- `Calls`, scan bodies for `method_invocation`, `object_creation_expression`
+- `Implements`, from `implements` clause
+- `Extends`, from `extends` clause
+- `Annotates`, `AnnotationUsage` → annotated element
+- `Uses`, import references
 
 ### Deep features:
-- `GenericParam` — type parameters on classes/methods
+- `GenericParam`, type parameters on classes/methods
 - Annotations: `marker_annotation`, `annotation` → `AnnotationUsage`
 - Visibility: `public` → `Pub`, `protected` → `PubCrate`, `private` → `Private`
 - Doc comments: Javadoc `/** */`
@@ -155,4 +155,4 @@ Uses `tree-sitter-java`.
 - Qualified name separator stays `::` across all languages
 
 ### DB Schema:
-- No changes needed — NodeKind/EdgeKind stored as strings
+- No changes needed. NodeKind/EdgeKind stored as strings

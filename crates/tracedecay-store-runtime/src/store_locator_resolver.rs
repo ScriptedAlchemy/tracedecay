@@ -906,7 +906,7 @@ type LocalStoreLocatorResult<T> = Result<T, LocalStoreLocatorUnavailableReasonV1
 /// the typed [`LocalProjectEnrollmentAuthorityV1`] itself is the enrollment
 /// authority, registered by the daemon after registry-backed identity
 /// resolution, and every store path is still derived from the typed project
-/// id — never from the root.
+/// id, never from the root.
 fn require_matching_repository_identity(
     canonical_project_root: &Path,
     expected_project_id: &ProjectId,
@@ -943,15 +943,15 @@ fn filesystem_probe_failure(
     }
 }
 
-/// Resolves an authority anchor — a profile root or an enrollment root — to
+/// Resolves an authority anchor, a profile root or an enrollment root, to
 /// the canonical directory it names.
 ///
 /// The anchor is the boundary every later path is confined to, so it is the
 /// one path that must be *resolved* rather than accepted as spelled. Its own
 /// final component still may not be a symlink: a root reached by an alias
 /// would let a second alias claim the same profile under a different name.
-/// Its ancestors are a different matter — they belong to the host, not to the
-/// caller — and are resolved by `fs::canonicalize` below.
+/// Its ancestors are a different matter. They belong to the host, not to the
+/// caller, and are resolved by `fs::canonicalize` below.
 fn canonical_existing_directory(path: &Path) -> LocalStoreLocatorResult<PathBuf> {
     reject_traversal_or_relative(path)?;
     let metadata =
@@ -1010,9 +1010,9 @@ fn canonical_or_prospective_regular_file(
 /// relative path, and any `.` or `..` component.
 ///
 /// The check is purely lexical, so it never probes a path prefix. A prefix
-/// never names a filesystem object on its own — a bare drive (`C:`) resolves
+/// never names a filesystem object on its own. A bare drive (`C:`) resolves
 /// against that drive's current directory, and a verbatim drive (`\\?\C:`)
-/// names the volume *device* rather than the volume's root directory — and
+/// names the volume *device* rather than the volume's root directory.
 /// `Path::is_absolute` cannot express that, because `std` grants every prefix
 /// except `Prefix::Disk` an implicit root. `fs::canonicalize` returns the
 /// verbatim form for every Windows path, so a probe of the leading component
@@ -1035,8 +1035,8 @@ fn reject_traversal_or_relative(path: &Path) -> LocalStoreLocatorResult<()> {
 /// `boundary` is always an `fs::canonicalize` result, so nothing at or above
 /// it can be a symlink and probing those ancestors can never find a redirect.
 /// It can only find the host's own layout: macOS reaches `/tmp` and `/var`
-/// through symlinks, so every profile rooted under `TMPDIR` — and any home
-/// directory reached through a symlinked ancestor — was refused outright even
+/// through symlinks, so every profile rooted under `TMPDIR`, and any home
+/// directory reached through a symlinked ancestor, was refused outright even
 /// though it resolves to a directory squarely inside the profile. Walking
 /// from the boundary keeps the guarantee that matters, because confinement is
 /// decided by the canonical identity the callers compute; the walk only has
@@ -2254,8 +2254,8 @@ mod tests {
 
     /// A root reached through a symlinked ancestor is the host's own layout,
     /// not a redirect. macOS reaches `/tmp` and `/var` through symlinks, so a
-    /// profile rooted under `TMPDIR` — and any home directory reached through
-    /// a symlinked ancestor — arrives spelled through one. Refusing the
+    /// profile rooted under `TMPDIR`, and any home directory reached through
+    /// a symlinked ancestor, arrives spelled through one. Refusing the
     /// spelling denied the entire profile on that host; resolving it yields
     /// exactly the canonical root the same directory named directly yields.
     #[cfg(unix)]

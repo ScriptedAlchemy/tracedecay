@@ -46,7 +46,7 @@ import {
 // Imports live at the top of a module; a `lazy` dynamic import is the
 // documented exception, because the point is that the module is NOT fetched
 // until it is needed. The trace drill-in is a thousand lines plus the whole of
-// `viz/trace` — canvas renderer, spring integrator, palette — and most visits
+// `viz/trace`, canvas renderer, spring integrator, palette, and most visits
 // to this workspace never open it, so it is its own chunk rather than dead
 // weight in the spine's. The `TraceFocus` import above stays a normal
 // top-level type import: types are erased, so it costs nothing at runtime.
@@ -58,7 +58,7 @@ const BASE = '/api/plugins/graph';
 
 /** What the inspector is previewing, if anything: a row the pointer or focus
  * is on. The row itself rides along when the source had one, so a caller
- * listed in the inspector — a symbol the drawn slice may not contain — can be
+ * listed in the inspector, a symbol the drawn slice may not contain, can be
  * previewed without another read. */
 interface Inspection {
   readonly id: string;
@@ -72,7 +72,7 @@ type LedgerTab = 'symbols' | 'relief';
  * Code: the indexed graph as one semantic cortex.
  *
  * The register across the top states the whole index; the aperture draws one
- * slice of it — the busiest connected region unseeded, the pinned symbol's
+ * slice of it, the busiest connected region unseeded, the pinned symbol's
  * neighbourhood when one is pinned; the ledger beneath is the slice's exact
  * keyboard equivalent; the inspector reads the pinned or previewed symbol
  * against every independent authority. Hover inspects, click pins, and the

@@ -1,18 +1,18 @@
 /**
- * CORTEX — the macro end of the structure LENS: modules as relief terrain
+ * CORTEX. The macro end of the structure LENS: modules as relief terrain
  * (depth-strata placement, area = file mass, contour lines = coupling ratio).
  * Far = CORTEX.
  *
  * This module is the honesty boundary the plan's "Rendering strategy" (`:196`)
- * demands: it turns ONE wire reading — `GET /api/plugins/graph/strata`,
- * `StrataMeasurementV1` — into positions, areas and contour counts, and the
+ * demands: it turns ONE wire reading, `GET /api/plugins/graph/strata`,
+ * `StrataMeasurementV1`, into positions, areas and contour counts, and the
  * renderer beside it draws whatever comes out and decides nothing. Every
  * quantity below is traceable to a field on that measurement.
  *
  * WHAT THE WIRE ACTUALLY CARRIES, and what this therefore does NOT draw.
  * The strata read is FILE-granular by its own `granularity` field. So:
  *
- *   elevation  `files[].depth` — file-level dependency depth (Tarjan SCC then
+ *   elevation  `files[].depth`, file-level dependency depth (Tarjan SCC then
  *              longest path). A directory spans several strata, so a region is
  *              placed at the MEDIAN depth of its own files and the full range
  *              is printed in the table. Not an average of anything.
@@ -25,7 +25,7 @@
  *   contours   internal ÷ boundary (`incoming + outgoing`). Area already
  *              carries file mass, so rings are coupling, not edges per file.
  *              That rate stays in the table. A zero boundary with internal
- *              edges is sealed — one heavy ring, not a fabricated ratio.
+ *              edges is sealed, one heavy ring, not a fabricated ratio.
  *              Compared in `cortexContours.ts`; edges-per-file and
  *              boundary-per-file were the rejected sketches.
  *   x          `clusters[].order`, whose rule is the measurement's own
@@ -36,7 +36,7 @@
  * from a total that is not a pair, or a heat drawn from no churn read, would be
  * exactly the falsified surface this console exists to refuse.
  *
- * PERFORMANCE (plan `:175`, "the cortex aggregates regions — dozens of bodies,
+ * PERFORMANCE (plan `:175`, "the cortex aggregates regions, dozens of bodies,
  * not thousands"): the drawing is capped at `MAX_DRAWN_REGIONS`, the cap is a
  * counted figure on the plate, and every region the cap folds out stays in the
  * accessible table. A visual cap is never silent data loss.
@@ -141,11 +141,11 @@ export function maxRegionsWithoutOverlap(
 }
 
 export interface CortexRegion {
-  /** `clusters[].directory` — the exact dirname the producer clustered on. */
+  /** `clusters[].directory`, the exact dirname the producer clustered on. */
   readonly directory: string;
   /** Last path segment with a trailing slash, for the on-field label. */
   readonly label: string;
-  /** `clusters[].order` — position in the measurement's own cluster ordering. */
+  /** `clusters[].order`, position in the measurement's own cluster ordering. */
   readonly order: number;
   readonly fileCount: number;
   readonly internalEdges: number;
@@ -165,7 +165,7 @@ export interface CortexRegion {
    * exist. Null when the region is sealed or has no internal edges. */
   readonly coupling: number | null;
   /** `none` is measured-zero internal edges. `sealed` is internal edges with
-   * a measured-zero boundary — unbounded, not a line count. `open` is a
+   * a measured-zero boundary, unbounded, not a line count. `open` is a
    * finite ratio; `contours` may still be zero when the ratio is below one
    * interval, and that is not absence. */
   readonly contour: 'none' | 'sealed' | 'open';
@@ -504,7 +504,7 @@ export function cortexLegendPanels(model: CortexModel): readonly CortexPanel[] {
     {
       label: 'contours',
       reading: `${CONTOUR_INTERVAL.toFixed(2)} i / boundary`,
-      teach: `one line per ${CONTOUR_INTERVAL} internal dependency edges per boundary edge. Area already carries file mass, so rings are coupling and not edges per file — that rate stays in the table. Every ${CONTOUR_INDEX_EVERY}th ring is an index contour.${
+      teach: `one line per ${CONTOUR_INTERVAL} internal dependency edges per boundary edge. Area already carries file mass, so rings are coupling and not edges per file, that rate stays in the table. Every ${CONTOUR_INDEX_EVERY}th ring is an index contour.${
         model.tightestCoupling
           ? ` ${model.tightestCoupling.label} is most closed at ${model.tightestCoupling.ratio.toFixed(2)} i/b.`
           : ''
@@ -554,7 +554,7 @@ export function cortexAbsences(model: CortexModel): readonly CortexPanel[] {
         .reduce((total, region) => total + region.outgoingEdges, 0)
         .toLocaleString()} boundary edges, unrouted`,
       teach:
-        'the strata read serves each region its own boundary totals, not region-pair edge counts, so no channel is drawn between two regions. Each region’s in and out totals are columns in the table.',
+        'the strata read serves each region its own boundary totals, not region-pair edge counts, so no channel is drawn between two regions. Each region\'s in and out totals are columns in the table.',
     },
     {
       label: 'weather',

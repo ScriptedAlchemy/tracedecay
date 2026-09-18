@@ -1,9 +1,9 @@
 /**
- * ANALYTICS CONTROLS — the Plan 26 control surface for optional adoption
+ * ANALYTICS CONTROLS. The Plan 26 control surface for optional adoption
  * analytics: local mode, share staging age, retention/deletion, and egress
  * failures.
  *
- * Two real reads back parts of this surface — `GET /api/settings` for the
+ * Two real reads back parts of this surface, `GET /api/settings` for the
  * `user.upload_enabled.v1` profile setting, and `GET /api/storage/findings` for
  * the typed `retention_backlog` status. They are read independently: a failed
  * settings read must not blank the retention evidence, and neither may stand in
@@ -156,7 +156,7 @@ export function AnalyticsControls({ reads }: { reads: ObservatoryAccountingReads
             ))}
           </dl>
           <p className="text-3xs leading-snug text-text-muted">
-            Those four lifetimes are declared policy, not measurements — no observed age is
+            Those four lifetimes are declared policy, not measurements, no observed age is
             published for any of them. Product receipts and run history keep their own lifecycles
             and are never exported as adoption analytics, so their retention is not reported here.
           </p>

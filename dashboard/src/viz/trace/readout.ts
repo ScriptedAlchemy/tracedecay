@@ -4,7 +4,7 @@
  *
  * Why this is a module and not JSX
  * --------------------------------
- * Sheet 02 of the approved design carries two plates around its field — a
+ * Sheet 02 of the approved design carries two plates around its field, a
  * seven-cell readout strip above and a six-panel key below. A legend is the
  * one place in an instrument where a *second* source of truth can grow: the
  * picture is drawn from the payload, the legend is typed by hand, and the day
@@ -14,8 +14,8 @@
  * from `model`, the same record `render.ts` draws. Nothing on either plate is
  * a literal that a payload change could falsify.
  *
- * The house rule from the design note — "every position, size, elevation and
- * width encodes a stated measurement" — has a corollary this file exists to
+ * The house rule from the design note, "every position, size, elevation and
+ * width encodes a stated measurement", has a corollary this file exists to
  * enforce: a measurement that did not arrive is *printed as absent*, never
  * blanked and never defaulted to zero. `ReadoutValue` has no third state for
  * that reason. A caller cannot render a cell without having decided what it
@@ -44,7 +44,7 @@ export interface ReadoutCell {
   readonly label: string;
   readonly value: ReadoutValue;
   /**
-   * Disclosure that the reading is a floor rather than a total — a list that
+   * Disclosure that the reading is a floor rather than a total, a list that
    * came back at the endpoint's limit, or a neighbour that was never expanded.
    * `null` when the number is complete as far as this frame can know.
    */
@@ -102,7 +102,7 @@ function range(values: readonly number[]): string | null {
  * The module a symbol belongs to: the directory of its `file_path`.
  *
  * A symbol whose row carried no path has no module *on this wire*, which is
- * not the same as belonging to none — so it returns null and is counted as
+ * not the same as belonging to none, so it returns null and is counted as
  * unattributed rather than folded into a root bucket.
  */
 function moduleOf(node: TraceNode): string | null {
@@ -121,7 +121,7 @@ function moduleOf(node: TraceNode): string | null {
 function cappedQualifier(model: TraceModel): string | null {
   const { capped, cappedAt } = model.coverage;
   if (!capped) return null;
-  return `a list hit the ${cappedAt ?? 'row'} limit — a floor, not a total`;
+  return `a list hit the ${cappedAt ?? 'row'} limit, a floor, not a total`;
 }
 
 /* ---- the header readout strip ------------------------------------------- */
@@ -175,7 +175,7 @@ export function readoutCells(model: TraceModel): readonly ReadoutCell[] {
       value: measured(`${coverage.hopsFetched} ↑ / ${coverage.hopsFetched} ↓`, 'hops fetched'),
       qualifier:
         coverage.unexpandedNeighbors > 0
-          ? `${coverage.unexpandedNeighbors} ${plural(coverage.unexpandedNeighbors, 'neighbour', 'neighbours')} unexpanded — past them is unknown, not zero`
+          ? `${coverage.unexpandedNeighbors} ${plural(coverage.unexpandedNeighbors, 'neighbour', 'neighbours')} unexpanded, past them is unknown, not zero`
           : null,
     },
     {
@@ -244,7 +244,7 @@ function countCrossings(model: TraceModel): number {
  * The six channels this field actually draws, each with what it is carrying
  * right now.
  *
- * The approved sheet's sixth panel is `Underlay` — sheet 01's module relief,
+ * The approved sheet's sixth panel is `Underlay`, sheet 01's module relief,
  * dimmed behind the flow. This surface draws no relief, so that panel is not
  * here: a legend panel for a channel the renderer does not paint would be the
  * exact drift this module exists to prevent. Its slot goes to `Sill`, which
@@ -289,7 +289,7 @@ export function legendPanels(model: TraceModel): readonly LegendPanel[] {
           : measured(degreeRange, `over ${degrees.length} ${plural(degrees.length, 'symbol', 'symbols')}`),
       qualifier:
         unmeasuredDegrees > 0
-          ? `${unmeasuredDegrees} without a degree — hollow sill at the floor width`
+          ? `${unmeasuredDegrees} without a degree, hollow sill at the floor width`
           : null,
       sample: 'sill',
     },
@@ -297,7 +297,7 @@ export function legendPanels(model: TraceModel): readonly LegendPanel[] {
       label: 'Row',
       // Named in the sheet's own words. Sheet 01 spends height on dependency
       // depth; this one does not, and says so rather than borrowing that axis.
-      teach: 'hop distance from the focus — not elevation, not importance',
+      teach: 'hop distance from the focus, not elevation, not importance',
       reading: measured(`${up} ↑ / ${down} ↓`, `${model.coverage.drawn} drawn`),
       qualifier: null,
       sample: 'rows',

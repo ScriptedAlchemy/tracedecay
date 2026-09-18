@@ -960,8 +960,8 @@ mod tests {
     }
 
     /// Envelope in the legacy file-bytes ordering domain, so identity material
-    /// built by `ObservationIdentityMaterialV1::new` — the only constructor that
-    /// omits a native record id — agrees with it.
+    /// built by `ObservationIdentityMaterialV1::new`, the only constructor that
+    /// omits a native record id, agrees with it.
     fn provider_envelope(
         provider: &str,
         facts: Vec<CanonicalObservationFactV1>,

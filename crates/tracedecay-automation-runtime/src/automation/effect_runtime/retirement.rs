@@ -374,7 +374,7 @@ fn complete_after_pending_removal_with(
             )),
         }
     })();
-    let unlock = fs2::FileExt::unlock(&lock).map_err(|error| {
+    let unlock = lock.unlock().map_err(|error| {
         contract_error(format!(
             "shipped proposal retirement unlock failed: {error}"
         ))
@@ -661,7 +661,7 @@ fn restore_existing_capture(source_path: &Path, captured_path: &Path) -> Result<
         })?;
         restore_captured_source(&parent, captured_name, source_name, source_path)
     })();
-    let unlock = fs2::FileExt::unlock(&lock).map_err(|error| {
+    let unlock = lock.unlock().map_err(|error| {
         contract_error(format!(
             "shipped proposal retirement unlock failed: {error}"
         ))
@@ -746,7 +746,7 @@ fn capture_exact_source_with_capture(
         }
         Ok(Some(tombstone_path))
     })();
-    let unlock = fs2::FileExt::unlock(&lock).map_err(|error| {
+    let unlock = lock.unlock().map_err(|error| {
         contract_error(format!(
             "shipped proposal retirement unlock failed: {error}"
         ))

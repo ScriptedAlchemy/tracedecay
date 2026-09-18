@@ -118,8 +118,8 @@ impl IndexingIdentityV1 {
     /// resolved to `self`.
     ///
     /// Reuse authorization is **structural only**: the repository and the
-    /// worktree must be the same identity. A different worktree — even one whose
-    /// path or branch label looks identical, or whose blobs are byte-identical —
+    /// worktree must be the same identity. A different worktree, even one whose
+    /// path or branch label looks identical, or whose blobs are byte-identical,
     /// is never authorized to reuse another's generation, occurrence, or lineage
     /// identity. Content-addressed *bytes* may still be physically shared by the
     /// byte pool; this guard governs *identity* reuse, not byte deduplication.
@@ -220,7 +220,7 @@ fn mtime(path: &Path) -> Option<SystemTime> {
 /// content (the target object id). Loose refs are a handful of ~41-byte files,
 /// so this is O(number of loose refs) and independent of repository size.
 ///
-/// Content — not the parent directory's mtime — is the signal: an in-place
+/// Content, not the parent directory's mtime, is the signal: an in-place
 /// loose-ref rewrite (`git update-ref` on an existing branch) rewrites the ref
 /// file's bytes without changing the directory mtime, and often without
 /// changing the file's size (object ids are fixed width) or its mtime beyond

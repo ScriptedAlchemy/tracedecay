@@ -12,8 +12,8 @@
 //! Every field is **required**: a hook that reaches this module in production
 //! needs all of them, so there is no partial handle and no per-capability
 //! default. Because the handle is a parameter rather than a slot, a hook path
-//! cannot run without one — the compiler, not a runtime probe, is the
-//! composition check — and two fixtures can hold two different handles in the
+//! cannot run without one, the compiler, not a runtime probe, is the
+//! composition check, and two fixtures can hold two different handles in the
 //! same process without a first-registration-wins race.
 //!
 //! Two former slots are gone rather than moved. The memory-injection gate and

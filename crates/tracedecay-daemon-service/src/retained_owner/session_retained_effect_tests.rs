@@ -272,7 +272,7 @@ fn assert_partial_effect(
     assert_eq!(receipt.outcome, EffectTermination::Partial);
     // `PreparedRetainedEffect::material_committed_state_digest` binds four
     // elements: the domain tag, the retained operation, the prepared effect's
-    // durable operation id, and the committed-state material — the serialized
+    // durable operation id, and the committed-state material, the serialized
     // state the effect actually committed. `session_refresh_effect_outcome`
     // hands the durable operation id itself as that material, because the
     // durable refresh row keyed by that id *is* what committed before the

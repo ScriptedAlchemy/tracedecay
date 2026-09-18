@@ -397,7 +397,7 @@ pub(super) async fn http_operation_events(
     };
     // Same owner rule as cancellation: this authority answers for the
     // operations it began, and only an operation it does not own is delegated
-    // to the daemon executor. A resume token is always redeemed locally — the
+    // to the daemon executor. A resume token is always redeemed locally, the
     // token names this authority's own retained frontier.
     let context = match resolve_authenticated_http_request_context(
         &state,
@@ -676,7 +676,7 @@ pub(super) async fn http_operation_cancel(
     // daemon mounts these routes with its *own* process-global authority and an
     // invocation client pointed back at its own socket, so delegating first
     // sent every cancel on a round trip out of the process and back to reach
-    // in-memory state this handler already holds — and reported the typed
+    // in-memory state this handler already holds, and reported the typed
     // `operation_event.unavailable` whenever that socket was momentarily
     // unreachable. Resolve locally first; delegate only for an operation this
     // authority does not own.

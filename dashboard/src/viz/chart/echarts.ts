@@ -1,8 +1,8 @@
 /**
  * The dashboard's ECharts build: only the pieces the product draws.
  *
- * `import('echarts')` pulls the whole distribution — every series type, both
- * renderers, the map/geo stack — which measured 1,080 KiB raw and 288 KiB
+ * `import('echarts')` pulls the whole distribution, every series type, both
+ * renderers, the map/geo stack, which measured 1,080 KiB raw and 288 KiB
  * Brotli in one async chunk, against the 200 KiB per-chunk ceiling. The
  * product draws line series on a cartesian grid with a tooltip, so that is what
  * gets registered.

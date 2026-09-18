@@ -298,7 +298,7 @@ impl WorkCausalProjectionV1 {
 
     /// The DECLARED causal candidates, as edges.
     ///
-    /// These come from `WorkItemV1::causal_candidates` — relations a caller
+    /// These come from `WorkItemV1::causal_candidates`, relations a caller
     /// stated, never an order inferred from when attempts happened to finish.
     /// An empty slice therefore means "no candidate was declared", which is a
     /// true reading and not a missing one.

@@ -1,9 +1,9 @@
 //! The shared fixture authority: one isolated environment, one profile, and
 //! project identities resolved and registered through the production paths.
 //!
-//! Test setup used to reimplement identity resolution — synthesizing a profile
+//! Test setup used to reimplement identity resolution, synthesizing a profile
 //! root, re-deriving a store layout, writing an enrollment marker by hand,
-//! running a fresh `git init` per fixture — and each reimplementation got some
+//! running a fresh `git init` per fixture, and each reimplementation got some
 //! part of it subtly wrong in a different way. The pieces here compose instead,
 //! and every one of them delegates to the authority production uses:
 //!
@@ -601,7 +601,7 @@ impl GitFixture {
     /// built once per target directory.
     ///
     /// The template carries the `git init`, the branch rename, and the initial
-    /// commit — including a `.gitignore` for `.tracedecay/`, so a fixture that
+    /// commit, including a `.gitignore` for `.tracedecay/`, so a fixture that
     /// stages its working tree can never commit enrollment state. Falls back to
     /// building in place when the template is unavailable, so a template
     /// failure can never change what a test exercises.
@@ -762,11 +762,11 @@ fn ensure_git_template() -> Option<PathBuf> {
         .write(true)
         .open(&lock_path)
         .ok()?;
-    fs2::FileExt::lock_exclusive(&lock_file).ok()?;
+    lock_file.lock().ok()?;
 
     // Another process may have finished the build while we waited.
     if shared.join("READY").is_file() {
-        let _ = fs2::FileExt::unlock(&lock_file);
+        let _ = lock_file.unlock();
         return Some(shared);
     }
 
@@ -791,7 +791,7 @@ fn ensure_git_template() -> Option<PathBuf> {
             None
         }
     };
-    let _ = fs2::FileExt::unlock(&lock_file);
+    let _ = lock_file.unlock();
     result
 }
 

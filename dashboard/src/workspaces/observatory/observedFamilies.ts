@@ -10,7 +10,7 @@
  * as JSON. `GET /api/plugins/analytics/diagnostics` groups that table by
  * `event_kind` and publishes the per-kind row counts as `by_event_kind`. So the
  * *count of records in a family* is landed and readable. Nothing inside the
- * envelope is — the diagnostics projector never opens `metadata_json`, so the
+ * envelope is, the diagnostics projector never opens `metadata_json`, so the
  * eligible/enabled/available denominators on `AdoptionEligibilityObservedV1`,
  * the invoked/terminal/useful counts on `AdoptionOutcomeLinkedV1`, and every
  * retrieval budget, rank, and contribution figure stay unread.
@@ -32,7 +32,7 @@
  * Suppression is applied against the *observed* count, which is the
  * conservative direction: a family with three observed rows cannot be shown to
  * have five eligible units, so it is withheld. A family absent from the window
- * is worse than three — under a capped or partial read it cannot even be told
+ * is worse than three, under a capped or partial read it cannot even be told
  * apart from a family whose rows fell outside the window, so it is reported as
  * censored by the window rather than as zero.
  *
@@ -228,9 +228,9 @@ export interface FunnelStageCount {
 /**
  * Whether a set of funnel stage counts can be believed as a funnel.
  *
- * A funnel is monotone by construction — `AdoptionOutcomeLinkedV1::validate`
+ * A funnel is monotone by construction, `AdoptionOutcomeLinkedV1::validate`
  * refuses a record where `terminal > invoked` or `repeat_useful >
- * independently_useful` — so a projection that produced a rising stage is
+ * independently_useful`, so a projection that produced a rising stage is
  * reporting something other than the funnel it is labelled as. That is a
  * contradiction to state, not a bar to draw shorter.
  *

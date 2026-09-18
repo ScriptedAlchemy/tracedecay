@@ -664,8 +664,8 @@ pub fn existing_payload_dir(storage_root: &Path) -> Result<PathBuf, LcmError> {
 
 /// Like `existing_payload_dir`, but a payload directory that was never
 /// created (it is made lazily on first externalization) or has been removed
-/// reports as `None` instead of an I/O error. Invalid configurations —
-/// symlinked dir, wrong file type, dir escaping the storage root — still
+/// reports as `None` instead of an I/O error. Invalid configurations,
+/// symlinked dir, wrong file type, dir escaping the storage root, still
 /// error.
 #[hotpath::measure(label = "sessions.lcm_fs_authority.existing_dir")]
 pub fn existing_payload_dir_opt(storage_root: &Path) -> Result<Option<PathBuf>, LcmError> {

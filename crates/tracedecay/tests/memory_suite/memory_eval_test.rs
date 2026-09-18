@@ -758,7 +758,7 @@ fn format_outcomes(outcomes: &[AssertionOutcome]) -> String {
         .iter()
         .map(|outcome| {
             format!(
-                "  [{}] {} — {}",
+                "  [{}] {}, {}",
                 if outcome.passed { "pass" } else { "FAIL" },
                 outcome.name,
                 outcome.detail

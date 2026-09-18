@@ -445,7 +445,7 @@ pub async fn execute_application_surface(
             // An unreachable daemon is a dispatch failure, not an answer:
             // wrapping it in a retryable problem envelope made every CLI
             // surface re-dispatch (and re-pay the connect grace) until its
-            // deadline — 128 s against a dead socket — while sibling
+            // deadline, 128 s against a dead socket, while sibling
             // compatibility tools failed typed in one grace. The feedback
             // observation below rides the same dead transport, so it is
             // skipped too: it would pay one more full connect grace to

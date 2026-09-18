@@ -74,7 +74,7 @@ fn idle_transaction_expires_and_releases_writer() {
 
 /// A statement that consumed its whole execution deadline and then failed is
 /// writer work, not caller idleness. Charging it to the idle limit tore the
-/// transaction down before the caller — still holding the statement's error —
+/// transaction down before the caller, still holding the statement's error,
 /// could roll it back, and the caller's own rollback then reported the lease
 /// expiry. The operator saw `execute batch failed: interrupted; rollback
 /// failed: … lease expired`, which claims durability is in doubt.
@@ -115,7 +115,7 @@ fn an_interrupted_statement_leaves_the_rollback_to_its_caller() {
 }
 
 /// Lease expiry stays reachable, and when it fires the writer is the side
-/// holding the transaction — so it rolls back and publishes that receipt
+/// holding the transaction, so it rolls back and publishes that receipt
 /// before releasing. A caller's later rollback learns its work was discarded
 /// instead of being told the rollback failed; only its commit is refused.
 #[test]
@@ -199,7 +199,7 @@ fn seed_migration_source(channel: &ExactSqlHandle, rows: i64) {
 
 /// Rows the store-sized fixture seeds.
 ///
-/// Sized from this move's measured cost on this shape — about 1.6 µs a row —
+/// Sized from this move's measured cost on this shape, about 1.6 µs a row,
 /// so the whole-table form needs several times the shortened test execution
 /// limit. A slower host only widens the overrun, so the refusal cannot stop
 /// firing; the fixture would have to get faster than the limit to go quiet.
@@ -209,14 +209,14 @@ const STORE_SIZED_ROWS: i64 = 3_000_000;
 /// leased transaction, which is what took a daemon down on a large store: a
 /// schema stage rewrote whole tables and rebuilt an index on every open, each
 /// as a single statement. On a real store each one outran its execution
-/// deadline, `SQLite` interrupted it, and the open failed — every open, since
+/// deadline, `SQLite` interrupted it, and the open failed, every open, since
 /// the rewrite never got far enough to retire anything.
 ///
 /// The same move is driven both ways over one fixture. As one statement the
 /// limit must refuse it, which is what makes chunking a migration load
 /// bearing rather than decorative. At the chunk size a migration actually
-/// writes, that same statement must finish with the limit far from reach —
-/// the progress guard bounds statement work, not the later commit/fsync —
+/// writes, that same statement must finish with the limit far from reach,
+/// the progress guard bounds statement work, not the later commit/fsync,
 /// and the chunk must still commit so the durable move is proven. Headroom
 /// is timed on the statement alone so an unpaid WAL from the store-sized
 /// seed cannot masquerade as chunk cost. Whether the chunk loop then

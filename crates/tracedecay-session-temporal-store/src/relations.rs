@@ -8,8 +8,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::{
     AgentInstanceId, CopyProofV1, MessageOccurrenceIdV1, ProjectId, RetrievalAnchorId, SessionId,
     TemporalValidityV1, ThreadId, UserProfileId, UtcMicros,
@@ -405,11 +405,8 @@ pub(crate) fn projection_watermark(
             .then_with(|| left.agent_label.cmp(&right.agent_label))
     });
     let encoded = serde_json::to_vec(&canonical).map_err(|_| SessionRelationError::Invalid)?;
-    GraphWatermark::new(format!(
-        "session-relations:{}",
-        hex::encode(Sha256::digest(encoded))
-    ))
-    .map_err(map_graph_error)
+    GraphWatermark::new(format!("session-relations:{}", sha256_hex(&encoded)))
+        .map_err(map_graph_error)
 }
 
 fn build_graph(

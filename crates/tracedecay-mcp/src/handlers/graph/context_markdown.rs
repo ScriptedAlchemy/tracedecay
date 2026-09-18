@@ -30,7 +30,7 @@ pub(super) fn verified_context_markdown(
         for symbol in symbols {
             let _ = writeln!(
                 output,
-                "- **{}** ({}) — {}:{}",
+                "- **{}** ({}), {}:{}",
                 field_str(symbol, "name")?,
                 field_str(symbol, "kind")?,
                 field_str(symbol, "file")?,
@@ -54,7 +54,7 @@ pub(super) fn verified_context_markdown(
     for symbol in related {
         let _ = writeln!(
             output,
-            "- **{}** ({}) — {}:{}",
+            "- **{}** ({}), {}:{}",
             field_str(symbol, "name")?,
             field_str(symbol, "kind")?,
             field_str(symbol, "file")?,

@@ -157,7 +157,7 @@ pub fn snapshot_cursor_after(
 /// Every snapshot provider drives the same loop: bound discovery, defer when
 /// discovery truncated, then charge each discovered path against the sweep
 /// budget before loading and admitting its records. Providers supply only what
-/// actually differs — how paths are discovered, how a path's input bytes are
+/// actually differs, how paths are discovered, how a path's input bytes are
 /// charged, and how a path becomes complete source-generation batches.
 ///
 /// This deliberately re-reads complete snapshots and derives a new source

@@ -7,8 +7,8 @@
 //! `.claude/worktrees/<name>/` or `.worktrees/<name>/`), a command run from
 //! the worktree walks up and silently resolves the MAIN checkout's index.
 //!
-//! Every query then returns results from the main tree's code — usually a
-//! different branch — rather than the worktree the user is actually editing.
+//! Every query then returns results from the main tree's code, usually a
+//! different branch, rather than the worktree the user is actually editing.
 //! Symbols added or changed only in the worktree are invisible to the agent.
 //! This module detects that "borrowed index" situation so callers can warn.
 //!
@@ -86,7 +86,7 @@ pub fn locator_digest_for_project(project_root: &Path) -> Result<ManifestDigest,
 /// Canonicalize of `project_root` is best-effort. This helper's contract is
 /// "redirect to the derived primary when that checkout still exists", not a
 /// typed filesystem probe. A failed canonicalize must not return `None`
-/// ("already primary") — that would mint a second store for a linked
+/// ("already primary"). That would mint a second store for a linked
 /// worktree whose path could not be resolved. The unresolved path is
 /// compared instead, and `Some(primary)` is still returned when that
 /// directory exists.
@@ -121,7 +121,7 @@ pub fn primary_checkout_root(
 /// repository it belongs to. Keying identity off the worktree path instead
 /// mints a second store for a repository that already has one.
 ///
-/// Returns `None` — meaning "this path is its own identity" — when `dir` is
+/// Returns `None`, meaning "this path is its own identity", when `dir` is
 /// the primary checkout, is not a worktree root at all (a package directory
 /// inside a monorepo is its own project), is outside git, or has a repository
 /// shape whose primary checkout cannot be derived safely.
@@ -188,7 +188,7 @@ pub fn git_may_resolve_repo(dir: &Path) -> bool {
 /// Detect when `start_path` lives in one git working tree but the resolved
 /// tracedecay index (`index_root`) belongs to a *different* working tree.
 ///
-/// Returns `None` — meaning "nothing to warn about" — when:
+/// Returns `None`, meaning "nothing to warn about", when:
 ///   - `start_path` isn't in a git repo (or git is unavailable),
 ///   - the index already lives in `start_path`'s own working tree, or
 ///   - `index_root` isn't itself a working-tree root (an unrelated parent
@@ -238,8 +238,8 @@ pub fn worktree_mismatch_warning(m: &WorktreeIndexMismatch) -> String {
         "This tracedecay index belongs to a different git working tree.\n  \
          Running in: {}\n  \
          Index from: {}\n\
-         Results reflect that tree's code (often a different branch), not this worktree — \
-         symbols changed only here are missing. Run `tracedecay init` in this worktree for a \
+         Results reflect that tree's code (often a different branch), not this worktree. \
+         Symbols changed only here are missing. Run `tracedecay init` in this worktree for a \
          worktree-local index.",
         m.worktree_root.display(),
         m.index_root.display()
@@ -248,12 +248,12 @@ pub fn worktree_mismatch_warning(m: &WorktreeIndexMismatch) -> String {
 
 /// Compact, single-line variant for prefixing an MCP tool response. Read
 /// tools return their answer inline, so the heads-up has to ride on the
-/// same payload the agent is already reading — a multi-line block would
+/// same payload the agent is already reading. A multi-line block would
 /// bury the result.
 pub fn worktree_mismatch_notice(m: &WorktreeIndexMismatch) -> String {
     format!(
         "WARNING: tracedecay results below come from a different git worktree ({}), \
-         not where you're working ({}) — they may reflect another branch, and symbols \
+         not where you're working ({}). They may reflect another branch, and symbols \
          changed only here are missing. Run `tracedecay init` here for a worktree-local index.",
         m.index_root.display(),
         m.worktree_root.display()
@@ -306,7 +306,7 @@ mod tests {
             .args(args)
             .current_dir(cwd)
             .output()
-            .expect("git not on PATH — required for worktree tests");
+            .expect("git not on PATH, required for worktree tests");
         assert!(
             output.status.success(),
             "git {args:?} failed in {}: {}",
@@ -524,7 +524,7 @@ mod tests {
     fn primary_checkout_root_ignores_non_dot_git_common_dirs() {
         // Bare repos and submodule gitlinks resolve `git_common_dir` to a
         // path that isn't a plain `<repo>/.git`, so the parent directory
-        // isn't reliably a checkout root — leave registration alone rather
+        // isn't reliably a checkout root. Leave registration alone rather
         // than risk deriving a bogus "primary".
         let tmp = tempdir().unwrap();
         let worktree = tmp.path().join("checkout");

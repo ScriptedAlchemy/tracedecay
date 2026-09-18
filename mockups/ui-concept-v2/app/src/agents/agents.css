@@ -1,4 +1,4 @@
-/* Agents interior — night-glass delegation topology. HUD owns rail/register/status/stamp. */
+/* Agents interior, night-glass delegation topology. HUD owns rail/register/status/stamp. */
 
 .ag-root {
   position: absolute;
@@ -234,7 +234,7 @@
 
 .ag-tree { display: none; }
 
-/* generation column headers — two-line, unstacked from the panel title */
+/* generation column headers, two-line, unstacked from the panel title */
 .ag-col-h {
   font-family: var(--font-display);
   font-stretch: 112%;
@@ -472,7 +472,7 @@
 .ag-row span:first-child { color: #8b99a8; }
 .ag-row .r { text-align: right; color: #d7eaf4; }
 .ag-row .abs { color: var(--activity-amber); font-style: italic; font-weight: 400; }
-/* typed absence rows — absence is data, not an empty desert */
+/* typed absence rows, absence is data, not an empty desert */
 .ag-row.is-abs {
   margin: 3px 0;
 }
@@ -511,7 +511,7 @@
   line-height: 1.4;
 }
 
-/* Dense evidence fixture — mode-scoped and visibly synthetic. */
+/* Dense evidence fixture, mode-scoped and visibly synthetic. */
 .ag-dense-controls {
   display: flex;
   align-items: center;

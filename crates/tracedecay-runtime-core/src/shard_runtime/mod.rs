@@ -5,9 +5,9 @@
 //! attaches, retires, and closes those runtimes, and `telemetry` projects
 //! their inventory. It sits below every store and cannot move above them.
 //!
-//! It is not the store runtime. Project-store and session lifecycle — which
+//! It is not the store runtime. Project-store and session lifecycle, which
 //! shards a daemon opens, in what order, under which profile authority, and
-//! how they converge, retire, and shut down — is owned by
+//! how they converge, retire, and shut down, is owned by
 //! `tracedecay-store-runtime`, which drives this registry through its public
 //! ports (`registry::StoreRuntimeResolver`, `registry::ShardRuntimePublisher`).
 

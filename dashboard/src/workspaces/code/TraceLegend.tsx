@@ -2,7 +2,7 @@
  * The key below the field: the six panels that name what the picture encodes.
  *
  * `legendPanels` counts every figure on it from the model, so this module owns
- * only the marks — and each mark is the renderer's OWN geometry rather than a
+ * only the marks, and each mark is the renderer's OWN geometry rather than a
  * drawing of it: the ribbon runs through `taperAt`, the sills through the same
  * proportions the renderer uses, and the hue chips through the same
  * `kindColorVars` the list rows do. That is what keeps a sample from drifting
@@ -146,7 +146,7 @@ function SampleMark({ sample, model }: { sample: LegendSample; model: TraceModel
           viewBox="0 0 68 14"
           className="shrink-0 text-text-secondary"
         >
-          {/* Full width to the mouth, then it stops — the absence beat the
+          {/* Full width to the mouth, then it stops, the absence beat the
             * design note asks every sheet to carry exactly once. */}
           <path d="M2 4.6 H40 V9.4 H2 Z" fill="currentColor" fillOpacity={0.32} />
           <path d="M2 4.6 H40 M2 9.4 H40" stroke="currentColor" strokeWidth={0.7} />
@@ -170,7 +170,7 @@ function SampleMark({ sample, model }: { sample: LegendSample; model: TraceModel
  * The six-panel key below the field.
  *
  * The sheet's own sixth panel is sheet 01's module relief, dimmed behind the
- * flow. This surface draws no relief, so that slot goes to the sill — a
+ * flow. This surface draws no relief, so that slot goes to the sill, a
  * channel it does draw. See `legendPanels` for why that substitution is a
  * correctness requirement and not a preference.
  */

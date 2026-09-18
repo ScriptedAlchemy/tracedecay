@@ -725,7 +725,7 @@ async fn drops_carried_by_a_later_normal_event_remain_explicit_and_counted() {
     // The reopened slot is a wall-clock condition, not an iteration count:
     // the worker only frees the queued observation once its previously
     // blocked write actually lands. Retry under a real deadline and park
-    // between attempts — a `yield_now` spin keeps this runtime thread hot
+    // between attempts. A `yield_now` spin keeps this runtime thread hot
     // and starves the very write it is waiting for on a loaded host.
     let later_enqueued = tokio::time::timeout(Duration::from_secs(10), async {
         loop {

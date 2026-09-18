@@ -483,8 +483,8 @@ where
     /// Preparation is synchronous and unbounded: sanitization walks the record,
     /// and repository provenance opens the repository and reads loose refs and
     /// the Git index. Running that inline on a runtime worker starves every
-    /// other task sharing the worker — with enough concurrent ingest frames,
-    /// every worker at once — so the accept loop and unrelated requests stop
+    /// other task sharing the worker, with enough concurrent ingest frames,
+    /// every worker at once, so the accept loop and unrelated requests stop
     /// making progress. Awaiting a `spawn_blocking` join handle keeps the
     /// worker free, and the background-CPU permit bounds how many of these
     /// spans run at once.

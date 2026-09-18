@@ -669,7 +669,7 @@ fn fixture_backed_tool_use_name_reaches_canonical_facts() {
     );
     assert_eq!(
         provenance["unknown_version"]["emitted"], false,
-        "Cline-family protocol is unversioned — do not invent UnknownVersion"
+        "Cline-family protocol is unversioned. Do not invent UnknownVersion"
     );
 
     let entries = history.as_array().expect("history array");

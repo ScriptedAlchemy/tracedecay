@@ -916,8 +916,8 @@ impl GraphDb {
     /// is already current (empty WAL, no replay at open, no WAL-bypassing
     /// mutation, header watermarks matching the live store), so closing a
     /// store that was only read costs teardown, not a full container rewrite.
-    /// Any change — WAL records, sidecar replay, index builds, named-graph
-    /// management — still checkpoints in full before this returns.
+    /// Any change, WAL records, sidecar replay, index builds, named-graph
+    /// management, still checkpoints in full before this returns.
     #[hotpath::measure(label = "graph_db.runtime.close", impl_type = "GraphDb")]
     pub(crate) fn close(&self) -> Result<(), GraphDbError> {
         let engine_is_open = match self.inner.database.read() {
@@ -1171,7 +1171,7 @@ impl GraphDb {
     /// One shared snapshot-gate choreography for every batch that is derived
     /// from (or validated against) currently stored rows:
     ///
-    /// 1. `derive` runs behind an upgradable claim — snapshot readers proceed
+    /// 1. `derive` runs behind an upgradable claim, snapshot readers proceed
     ///    while writers queue, so the rows it reads and the bytes it hashes
     ///    stay exact without stalling reads.
     /// 2. An `Apply` plan upgrades atomically to the exclusive claim for the
@@ -1655,7 +1655,7 @@ impl GraphDb {
 /// How a hibernation attempt claims the exclusive snapshot gate.
 ///
 /// A retirement-driven hibernation must land, so it waits. A retained-set
-/// sweep must never wait on — or evict — a generation a reader is serving
+/// sweep must never wait on, or evict, a generation a reader is serving
 /// from, so it declines when the gate is busy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SnapshotGateClaim {

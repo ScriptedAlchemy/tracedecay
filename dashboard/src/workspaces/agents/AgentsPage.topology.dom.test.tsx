@@ -167,7 +167,7 @@ describe('AgentsPage delegation topology', () => {
     renderAgents();
     await settled();
     const child = mark('codex:session.codex.child');
-    // A pointer click is enter, focus, click — the mark stays inspected.
+    // A pointer click is enter, focus, click, the mark stays inspected.
     fireEvent.mouseEnter(child);
     fireEvent.focus(child);
     fireEvent.click(child);

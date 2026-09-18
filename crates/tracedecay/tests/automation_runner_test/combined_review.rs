@@ -910,7 +910,7 @@ async fn combined_review_records_noop_fallbacks_for_both_tasks_when_backend_fail
     .unwrap();
 
     // The backend failure is transient, but this test pins the noop-fallback
-    // record, not retry semantics (covered by backend.rs retry tests) —
+    // record, not retry semantics (covered by backend.rs retry tests),
     // timeout_secs: 1 short-circuits the backoff so the test stays fast.
     assert_eq!(backend.calls(), 1);
     let CombinedReviewDispatch::RecordedFailure(failure) = dispatch else {

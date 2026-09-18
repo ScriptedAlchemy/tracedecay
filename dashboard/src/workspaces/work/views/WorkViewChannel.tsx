@@ -16,7 +16,7 @@ import type { WorkChannel } from '../workChannel.ts';
  * `ChannelAbsence` is the one that matters. Absence must be drawn, and every
  * one of these views is missing at least one channel until the
  * product-graph read is mounted. Drawing that gap in the projection's own body
- * — rather than in a footnote — is what keeps a hollow weave from reading as a
+ *, rather than in a footnote, is what keeps a hollow weave from reading as a
  * weave of nothing.
  */
 
@@ -82,7 +82,7 @@ export function ChannelLedger({
  *
  * A view that does not state its population and window cannot be told
  * apart from a complete one. `population` is the
- * projection's own sentence — "18 of 312 tasks, capped at 100" — and the
+ * projection's own sentence, "18 of 312 tasks, capped at 100", and the
  * daemon's coverage reading is its only source.
  */
 export function ViewCaption({

@@ -1,5 +1,5 @@
 /**
- * EVIDENCE — what is known about the traced symbol beyond its call edges.
+ * EVIDENCE. What is known about the traced symbol beyond its call edges.
  *
  * Three node-scoped structure reads, side by side under the field:
  *
@@ -9,7 +9,7 @@
  *   sessions  `GET /api/plugins/graph/node/{id}/sessions`  agent sessions that
  *             touched it.
  *
- * All three answer in `StructureReadV1`, so absence arrives *typed* — see
+ * All three answer in `StructureReadV1`, so absence arrives *typed*, see
  * `data/query/structure.ts`. This surface's whole job is to keep that typing
  * intact all the way to the glass, because each of these three has a specific
  * way of being quietly wrong:
@@ -23,7 +23,7 @@
  *   TESTS carry `applicable`. A symbol the algorithm does not apply to is not
  *   a symbol with zero tests, and rendering "0 tests" for it would be a
  *   fabricated result. When `applicable` is false the count is not drawn at
- *   all — the reason takes its place.
+ *   all, the reason takes its place.
  *
  *   SESSIONS are the sharpest of the three. The route resolves session linkage
  *   at FILE granularity and states that in `symbol_granularity_available` and
@@ -112,7 +112,7 @@ export function NodeEvidence({ nodeId, nodeName }: { nodeId: string; nodeName: s
 
 /**
  * One card. Absence is a first-class rendering with the producer's own words
- * in it, not a blank and never a zero — the distinction this whole panel is
+ * in it, not a blank and never a zero, the distinction this whole panel is
  * built to preserve dies here if it dies anywhere.
  */
 function EvidenceCard<T>({
@@ -213,7 +213,7 @@ function FactsReading({ measurement }: { measurement: FactMatchesMeasurementV1 }
       {measurement.same_name_collision_possible ? (
         <p className="text-3xs leading-snug text-state-unknown">
           another symbol in this repository shares this name, so some of these facts may
-          belong to it — the match is by name, not identity
+          belong to it, the match is by name, not identity
         </p>
       ) : null}
       {measurement.arms.length > 0 ? (
@@ -252,7 +252,7 @@ function TestsReading({ measurement }: { measurement: TestMapMeasurementV1 }) {
     return (
       <p className="text-2xs leading-relaxed text-state-unknown">
         the {measurement.algorithm} test map does not apply to this symbol
-        {measurement.reason ? ` — ${measurement.reason}` : ''}. That is not a claim that no
+        {measurement.reason ? `, ${measurement.reason}` : ''}. That is not a claim that no
         test covers it.
       </p>
     );
@@ -303,7 +303,7 @@ function SessionsReading({ measurement }: { measurement: NodeSessionsMeasurement
       {!measurement.symbol_granularity_available ? (
         <p className="text-3xs leading-snug text-state-unknown">
           resolved at <strong className="font-medium">{linkage.granularity}</strong>{' '}
-          granularity, not per symbol — {measurement.symbol_granularity_reason}
+          granularity, not per symbol, {measurement.symbol_granularity_reason}
         </p>
       ) : null}
       <Count

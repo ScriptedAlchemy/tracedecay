@@ -240,7 +240,7 @@ fn deploy_escapes_special_chars_in_binary_path() {
     let deploy_dir = deploy_plugin_bundle(home.path(), weird_bin).unwrap();
 
     let hooks_raw = std::fs::read_to_string(deploy_dir.join("hooks/hooks.json")).unwrap();
-    // Must parse — a raw replace would have produced invalid JSON here.
+    // Must parse, a raw replace would have produced invalid JSON here.
     let hooks: serde_json::Value = serde_json::from_str(&hooks_raw)
         .expect("hooks.json must stay valid JSON after binary-path substitution");
     assert!(
@@ -307,7 +307,7 @@ fn deploy_refuses_to_replace_non_tracedecay_dir() {
 
 /// The managed-block range must extend across only its own owned
 /// sub-heading, not a user's own `## …tracedecay…` heading placed after
-/// the block — otherwise uninstall would swallow the user's section.
+/// the block, otherwise uninstall would swallow the user's section.
 #[test]
 fn uninstall_preserves_user_tracedecay_heading_after_block() {
     let home = tempfile::tempdir().unwrap();

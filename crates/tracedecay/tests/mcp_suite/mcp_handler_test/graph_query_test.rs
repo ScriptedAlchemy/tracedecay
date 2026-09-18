@@ -261,7 +261,7 @@ async fn search_limit_above_retrieval_budget_serves_full_candidate_set() {
     // Cold activation of the code-index query authority is deferred to
     // bounded background work, so a freshly opened project may serve the
     // typed `authority_unavailable` transition state. Poll through only that
-    // state — any other failure (notably `search_failed`) must surface
+    // state, any other failure (notably `search_failed`) must surface
     // immediately.
     let mut payload = Value::Null;
     for _ in 0..60 {
@@ -2177,7 +2177,7 @@ async fn test_callers_for_includes_unmatched_ids_as_empty() {
 async fn test_callers_for_respects_max_per_item() {
     let (cg, _dir) = production_graph_query_fixture().await;
     let helper_id = graph_node_id(&cg, "helper").await;
-    // Cap at 0 — every caller should be marked truncated.
+    // Cap at 0, every caller should be marked truncated.
     let result = call_production_tool(
         &cg,
         "tracedecay_callers_for",

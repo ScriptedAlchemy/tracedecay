@@ -137,13 +137,13 @@ pub(super) fn parse_whole_payload_invocation_with_stdin(
                 let value: Value =
                     serde_json::from_str(&json_str).map_err(|e| TraceDecayError::Config {
                         message: format!(
-                            "--args: invalid JSON: {e} — if the payload contains quotes or \
+                            "--args: invalid JSON: {e}, if the payload contains quotes or \
                              newlines, pipe it: tracedecay tool <name> --args - <<'JSON' … JSON"
                         ),
                     })?;
                 if !value.is_object() {
                     return Err(TraceDecayError::Config {
-                        message: "--args must be a JSON object — the same object you would \
+                        message: "--args must be a JSON object, the same object you would \
                                   pass as MCP arguments, e.g. {\"query\":\"…\"}"
                             .to_string(),
                     });
@@ -218,13 +218,13 @@ pub(super) fn parse_invocation_with_stdin(
                 let value: Value =
                     serde_json::from_str(&json_str).map_err(|e| TraceDecayError::Config {
                         message: format!(
-                            "--args: invalid JSON: {e} — if the payload contains quotes or \
+                            "--args: invalid JSON: {e}, if the payload contains quotes or \
                              newlines, pipe it: tracedecay tool <name> --args - <<'JSON' … JSON"
                         ),
                     })?;
                 if !value.is_object() {
                     return Err(TraceDecayError::Config {
-                        message: "--args must be a JSON object — the same object you would \
+                        message: "--args must be a JSON object, the same object you would \
                                   pass as MCP arguments, e.g. {\"query\":\"…\"}"
                             .to_string(),
                     });
@@ -262,7 +262,7 @@ pub(super) fn parse_invocation_with_stdin(
                 // a positional and the error would point at the wrong token.
                 if let Some(known) = single_dash_flag_typo(raw, &schema_properties) {
                     return Err(TraceDecayError::Config {
-                        message: format!("unknown argument `{raw}` — did you mean `--{known}`?"),
+                        message: format!("unknown argument `{raw}`, did you mean `--{known}`?"),
                     });
                 }
                 positionals.push(raw.clone());
@@ -273,7 +273,7 @@ pub(super) fn parse_invocation_with_stdin(
     if let Some(mut value) = explicit_args {
         if !collected.is_empty() || !positionals.is_empty() {
             return Err(TraceDecayError::Config {
-                message: "--args cannot be combined with other tool flags or positionals — \
+                message: "--args cannot be combined with other tool flags or positionals. \
                           either put everything in --args, or use only --key value flags"
                     .to_string(),
             });
@@ -304,9 +304,9 @@ pub(super) fn parse_invocation_with_stdin(
 /// by the dispatch layer (or the generated client itself) rather than being
 /// declared per-tool in the schemas:
 ///
-/// - `response_handle_project_root` — LCM response-handle storage root when
+/// - `response_handle_project_root`. LCM response-handle storage root when
 ///   the live project differs from the profile store.
-/// - `cwd` — read client-side by the generated Hermes plugin for project
+/// - `cwd`, read client-side by the generated Hermes plugin for project
 ///   resolution and may be left in the payload it forwards.
 ///
 /// The validation gate skips these so schema-exact integrations keep working;
@@ -314,9 +314,9 @@ pub(super) fn parse_invocation_with_stdin(
 const DISPATCH_ROUTING_KEYS: &[&str] = &["response_handle_project_root", "cwd"];
 
 /// One schema-driven validation pass over the *final* arguments object,
-/// shared by the `--args` and per-key paths. Turns the silent divergences —
+/// shared by the `--args` and per-key paths. Turns the silent divergences.
 /// unknown keys forwarded and ignored, invalid enum values accepted, wrong
-/// JSON types reaching handlers — into corrective errors that state the fix.
+/// JSON types reaching handlers, into corrective errors that state the fix.
 ///
 /// Schemas without `properties` are treated as opaque (no validation) so
 /// dynamic or profile-scoped tools cannot be bricked by a stale walker.
@@ -403,7 +403,7 @@ fn validate_tool_args(def: &ToolDefinition, args: &Map<String, Value>) -> Result
                 .collect();
             return Err(TraceDecayError::Config {
                 message: format!(
-                    "missing required parameter `--{}` for tool `{short}` — \
+                    "missing required parameter `--{}` for tool `{short}`. \
                      e.g. tracedecay tool {short}{usage}",
                     req.replace('_', "-"),
                 ),
@@ -438,7 +438,7 @@ fn check_array_elements(key: &str, short: &str, schema: &Value, value: &Value) -
         return Err(TraceDecayError::Config {
             message: format!(
                 "--{flag} expects a JSON array of {items_type}s, but an \
-                 element is a {}. Pass JSON: --{flag} '<json>' — {}",
+                 element is a {}. Pass JSON: --{flag} '<json>', {}",
                 json_type_name(bad),
                 heredoc_hint(short)
             ),
@@ -454,7 +454,7 @@ fn unknown_key_error(
     required: &[String],
 ) -> TraceDecayError {
     let suggestion = nearest_key(key, props)
-        .map(|k| format!(" — did you mean `--{}`?", k.replace('_', "-")))
+        .map(|k| format!(", did you mean `--{}`?", k.replace('_', "-")))
         .unwrap_or_default();
     let mut valid: Vec<String> = props
         .keys()
@@ -615,9 +615,9 @@ fn single_dash_flag_typo(raw: &str, props: &Map<String, Value>) -> Option<String
 fn missing_flag_value_error(flag: &str, prop_schema: Option<&Value>) -> TraceDecayError {
     let is_boolean = prop_schema.and_then(schema_primary_type) == Some("boolean");
     let message = if is_boolean {
-        format!("flag `{flag}` requires a value — pass `{flag} true` or `{flag} false`")
+        format!("flag `{flag}` requires a value, pass `{flag} true` or `{flag} false`")
     } else {
-        format!("flag `{flag}` requires a value — write `{flag} <value>` or `{flag}=<value>`")
+        format!("flag `{flag}` requires a value, write `{flag} <value>` or `{flag}=<value>`")
     };
     TraceDecayError::Config { message }
 }
@@ -651,7 +651,7 @@ fn bind_positionals(
     }
     Err(TraceDecayError::Config {
         message: format!(
-            "unexpected positional argument(s): {} — use --key value flags or \
+            "unexpected positional argument(s): {}, use --key value flags or \
              run `tracedecay tool {} --help`",
             leftover.join(" "),
             short_tool_name(&def.name)
@@ -703,7 +703,7 @@ fn coerce_value(key: &str, prop_schema: Option<&Value>, raw: &str) -> Result<Val
                     let flag = key.replace('_', "-");
                     Err(TraceDecayError::Config {
                         message: format!(
-                            "--{flag}: expected a boolean (true/false), got `{other}` — \
+                            "--{flag}: expected a boolean (true/false), got `{other}`. \
                              pass `--{flag} true` or `--{flag} false`"
                         ),
                     })
@@ -754,7 +754,7 @@ fn coerce_value(key: &str, prop_schema: Option<&Value>, raw: &str) -> Result<Val
 
 /// Insert `value` into `map` under `key`. If the key is already present and
 /// the schema-declared shape is an array, append the new value to a sibling
-/// array rather than overwriting — this is how repeated `--keywords foo
+/// array rather than overwriting, this is how repeated `--keywords foo
 /// --keywords bar` accumulates.
 ///
 /// Called after [`coerce_value`], so the value is already the right JSON type
@@ -839,7 +839,7 @@ fn resolve_at_file(raw: &str, read_stdin: &mut impl FnMut() -> Result<String>) -
         let buf = PathBuf::from(path);
         std::fs::read_to_string(&buf).map_err(|e| TraceDecayError::Config {
             message: format!(
-                "failed to read @{path}: {e} — the path is resolved relative to the current \
+                "failed to read @{path}: {e}, the path is resolved relative to the current \
                  directory; for a literal value that begins with `@`, use --args instead"
             ),
         })

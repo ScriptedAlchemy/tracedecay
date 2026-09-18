@@ -945,7 +945,7 @@ async fn dispatch_admitted(
                 .await;
             // A diagnostics read that reached no publishing authority has no
             // evidence to report. Returning the evidence envelope anyway made
-            // the surface answer `success` with an empty page — indistinguishable
+            // the surface answer `success` with an empty page, indistinguishable
             // from "this workspace is clean". The authority's own omission reason
             // is the actionable state, so it is surfaced as a typed problem.
             if let RetrievalPortOutcome::Unavailable(evidence) = &outcome

@@ -24,7 +24,7 @@ pub struct NativeIntegrationStatusQueryV1 {
     pub transaction_id: String,
 }
 
-/// `GET /api/native-integration/status` — read one transaction status.
+/// `GET /api/native-integration/status`, read one transaction status.
 #[hotpath::measure(label = "dashboard_api.native_integration.status", future = true)]
 pub async fn status(
     State(state): State<DashboardState>,

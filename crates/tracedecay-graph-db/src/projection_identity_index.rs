@@ -5,7 +5,7 @@
 //! covers, read each node twice (once to confirm the record label, once for
 //! the identity property), and threw away all but one page. Warming a large
 //! catalog therefore ran in O(N^2 / page) and was measured at 47 back-to-back
-//! `graph_db.projection.read` calls of ~21.7s each — 76% of a daemon lifetime.
+//! `graph_db.projection.read` calls of ~21.7s each, 76% of a daemon lifetime.
 //!
 //! This module builds the sorted identity list *once* per store epoch and
 //! answers each page from it with a binary search plus a `limit`-sized copy, so

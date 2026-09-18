@@ -4,7 +4,7 @@ use tempfile::TempDir;
 
 /// A retired legacy enrollment file is never an identity authority for the
 /// synchronous walk: discovery and initialization answer through the `.git/`
-/// marker, the profile store, or the registry — never a working-tree file.
+/// marker, the profile store, or the registry, never a working-tree file.
 #[test]
 fn legacy_enrollment_marker_alone_is_not_discovered() {
     let dir = TempDir::new().unwrap();

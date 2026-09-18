@@ -254,7 +254,7 @@ pub async fn hydrate_selected(
     // resulting payloads are also appended to `batch` in anchor order. Running
     // anchors concurrently would have to grant each read a budget computed
     // before its predecessors finished, changing truncation, the first
-    // over-budget anchor, and batch ordering — i.e. changing the output.
+    // over-budget anchor, and batch ordering, i.e. changing the output.
     // Bounded concurrency cannot preserve this running-budget semantics, so the
     // sequential walk is the correct implementation.
     for anchor_id in anchors {

@@ -4,7 +4,7 @@ import { PACK, type PackLoomEvent, type PackSession } from "../data/pack";
  * The profile pack has no planned Work graph (no tasks, no dependencies).
  * The only honest DAG in the snapshot is the observed delegation spine:
  * parent_session_id links between root threads and subagent threads.
- * Everything below is derived from those records — nothing is invented.
+ * Everything below is derived from those records, nothing is invented.
  */
 
 const SESSIONS = PACK.sessions;
@@ -23,7 +23,7 @@ export type ThreadNode = {
 export type Family = {
   key: string;
   project: string;
-  /** root node — a real session, or a ghost when the recorded parent was not copied */
+  /** root node. A real session, or a ghost when the recorded parent was not copied */
   root: ThreadNode;
   children: ThreadNode[];
   messages: number;
@@ -102,7 +102,7 @@ function topToolName(s: PackSession): string | null {
 /**
  * Card title in the plate's task-plate voice, still derived from records:
  * the thread kind plus the real dominant tool of its observed spine.
- * No invented task names — "Shell-heavy" is a tally, not a plan.
+ * No invented task names, "Shell-heavy" is a tally, not a plan.
  */
 export function cardTitle(n: ThreadNode): string {
   if (n.kind === "ghost") return "Recorded parent thread";

@@ -57,7 +57,7 @@ for knob in REPS PARALLEL; do
 done
 
 # Ablation matrix. Default is "full" only (all discovery channels on) to keep
-# cost bounded — each extra condition multiplies the number of live agent runs.
+# cost bounded, each extra condition multiplies the number of live agent runs.
 # Opt in with e.g. CHANNELS="full no-hints no-skills bare cli-only". See the README.
 CHANNELS="${CHANNELS:-full}"
 KNOWN_CONDITIONS="full no-hints no-skills bare cli-only"
@@ -109,8 +109,8 @@ fi
 TD="$(cd "$(dirname "$TD")" && pwd)/$(basename "$TD")"
 EVAL_PATH="$(dirname "$TD"):$PATH"
 
-# Neutrality lint (USER DOCTRINE): fail fast — before building fixtures or
-# spending a single token — if any scenario prompt names tracedecay/MCP/a
+# Neutrality lint (USER DOCTRINE): fail fast, before building fixtures or
+# spending a single token, if any scenario prompt names tracedecay/MCP/a
 # tool/a skill. Keeps future scenarios honest at the point of use.
 echo "linting scenario prompts for neutrality..."
 if ! python3 "$here/grade.py" --lint-only --scenarios "$EVAL_SCENARIOS_DIR"; then
@@ -121,7 +121,7 @@ fi
 # Hint-signature drift guard: channel attribution mirrors distinctive fragments
 # of crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs. If that wording
 # drifted and the mirror did not, a live run would silently misclassify
-# hint-driven adoptions as steering, so fail fast here — before building
+# hint-driven adoptions as steering, so fail fast here, before building
 # fixtures or spending a token. Skips cleanly when run from a published package
 # without the Rust source tree.
 echo "checking hint signatures against tool_hints.rs..."

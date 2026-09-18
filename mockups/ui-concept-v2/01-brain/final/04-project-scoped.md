@@ -33,7 +33,7 @@ truthful project-scoped results, not blank success.
 
 ## Acceptance gates
 
-Scope is conveyed through breadcrumb, text, position, and selection—not color
+Scope is conveyed through breadcrumb, text, position, and selection, not color
 alone. Reduced motion removes camera travel. At 200% zoom the scope register
 and exact table remain operable while the field reflows into a focus mode.
 Dense project internals aggregate by repository/workstream and expand on

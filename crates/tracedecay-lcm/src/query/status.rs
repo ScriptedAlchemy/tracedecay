@@ -11,7 +11,7 @@ const STORE_STATUS_TOKEN_SCAN_MAX_BYTES: i64 = 1024 * 1024;
 /// Message bodies summed for the replay token estimate in one status call.
 ///
 /// The estimate needs each message's text, so an unbounded scan reads the whole
-/// raw store — gigabytes on a long-lived profile — and the request is
+/// raw store, gigabytes on a long-lived profile, and the request is
 /// interrupted before it can answer. Past this many rows the status reports a
 /// typed partial estimate with a resume cursor instead.
 const STORE_STATUS_TOKEN_SCAN_BUDGET: i64 = 20_000;
@@ -180,7 +180,7 @@ async fn aggregate_provider_status_with_work(
 
 /// One-statement status count rollup.
 ///
-/// Every `lcm_raw_messages` term here must be answerable from an index —
+/// Every `lcm_raw_messages` term here must be answerable from an index,
 /// never the body-bearing table records. The plain counts cover through
 /// `idx_lcm_raw_session_order` when scoped, and through SQLite's bare
 /// `COUNT(*)` b-tree count when unbounded. The redaction counts' predicates
@@ -567,7 +567,7 @@ pub(super) fn empty_status(schema_version: i64, gc_config: &LcmGcConfig) -> LcmS
 }
 
 /// Store size and token estimate for one provider/session scope, using the
-/// same bounded scan the status query reports — the single token-estimate
+/// same bounded scan the status query reports, the single token-estimate
 /// authority for every surface that presents a session's size.
 pub async fn store_status(
     conn: &(impl QueryExecutor + ?Sized),
@@ -1262,7 +1262,7 @@ mod tests {
 
     /// The token estimate must not stream the whole raw store. Past the scan
     /// budget the status reports the exact message count with a typed partial
-    /// estimate and a resume cursor — never a truncated total presented as the
+    /// estimate and a resume cursor, never a truncated total presented as the
     /// whole store.
     #[tokio::test]
     async fn store_status_reports_a_partial_token_estimate_beyond_the_scan_budget() {
@@ -1471,7 +1471,7 @@ mod tests {
 
     /// The status probe must answer from indexes. A tautology-filtered scan
     /// over a body-bearing LCM table re-reads the whole store's message
-    /// content per probe — issue #767 measured 10.65 s daemon-side for one
+    /// content per probe, issue #767 measured 10.65 s daemon-side for one
     /// 1706-byte row on a 7.5 GB profile store. This holds the plan-shape
     /// contract between the rendered status SQL and
     /// [`schema::LCM_STATUS_PERFORMANCE_INDEX_SQL`].
@@ -1648,7 +1648,7 @@ mod tests {
     /// Times `runs` shallow all-provider status calls, printing each run and
     /// returning p50/p95 over the successful samples. A run that the engine
     /// interrupts (read deadline) is reported as its own truthful outcome
-    /// instead of aborting the harness — that outcome is exactly the
+    /// instead of aborting the harness, that outcome is exactly the
     /// production overrun being measured.
     async fn timed_aggregate_status(
         conn: &Connection,

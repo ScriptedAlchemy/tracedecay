@@ -44,8 +44,8 @@ fn daemon_client_admission_reports_saturation_and_recovers() {
 /// in ten minutes against a cap of 64 while the reader pool was completely idle
 /// (0 leased, 0 waiting). The slots were held by requests asleep on project
 /// warm-up, on the writer gate, and on the single-flight generation decode, so
-/// calls that needed no generation at all — `tracedecay_diff_context`, session,
-/// memory, and git tools — were rejected by work that was doing nothing.
+/// calls that needed no generation at all, `tracedecay_diff_context`, session,
+/// memory, and git tools, were rejected by work that was doing nothing.
 ///
 /// The acceptance property: while every general slot is held by a parked
 /// request, a fresh call still admits as `General` and completes; the parked
@@ -1188,7 +1188,7 @@ async fn draining_waits_for_one_bounded_in_flight_request() {
 /// different admission states:
 ///
 /// * a connection that panics while it still holds its slot, and
-/// * a connection that panics *while parked* — `park_admission` has already
+/// * a connection that panics *while parked*, `park_admission` has already
 ///   surrendered the slot and will never reach its re-acquire, so the unwind
 ///   must not double-release it or leave it unaccounted.
 ///

@@ -3,7 +3,7 @@
 //! Every macro here is a compile-time no-op until the binary selects the
 //! `hotpath/hotpath` backend, so the call sites need no crate feature.
 //! Labels are compile-time static strings. Error class is the typed
-//! [`ApplicationProblemKind`] name only — never an unbounded message.
+//! [`ApplicationProblemKind`] name only, never an unbounded message.
 
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};

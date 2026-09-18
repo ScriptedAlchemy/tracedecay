@@ -932,7 +932,7 @@ const SLUG_DECODE_PROBE_BUDGET: u32 = 4096;
 /// `~/.cursor/projects/<slug>/agent-transcripts/**.jsonl` for the slug that
 /// encodes `project_root`, feeding every file through the same
 /// [`parse_cursor_jsonl`] parser and (path-keyed) `parse_offsets` cursors as
-/// the hook path — files either path has already ingested are byte-offset
+/// the hook path, files either path has already ingested are byte-offset
 /// no-ops for the other, so sweep and hooks never double-ingest.
 pub struct CursorSweepSource {
     cursor_projects_dir: PathBuf,
@@ -1062,7 +1062,7 @@ impl TranscriptSource for CursorSweepSource {
         // Cursor materializes some subagent sessions twice: under their
         // parent's `subagents/` dir and again as a top-level
         // `<id>/<id>.jsonl` copy whose content drifts slightly (so byte
-        // offsets — and therefore message ids — diverge). Ingesting both
+        // offsets, and therefore message ids, diverge). Ingesting both
         // would duplicate messages and overwrite the parent linkage; keep
         // the subagent copy (it carries parentage, and it is the copy the
         // live hook path ingests) and skip the top-level duplicate.

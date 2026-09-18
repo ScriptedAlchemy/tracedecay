@@ -1,6 +1,6 @@
 /** Activation field for the synapse view: per-node heat that decays
  * exponentially toward dark, struck by real events (search hits, selection,
- * caller-edge traversal, SSE activity). Pure model — renderers sample it. */
+ * caller-edge traversal, SSE activity). Pure model, renderers sample it. */
 
 export interface ActivationOptions {
   /** Half-life of a strike, in milliseconds. */
@@ -26,7 +26,7 @@ export class ActivationField {
    * Notifies subscribers, because a field can be struck from outside whoever
    * draws it: the Brain's SSE effect calls this from a React effect that knows
    * nothing about the canvas's render loop. Without the notification that heat
-   * lands on the field while the loop is asleep, so nothing ever draws it —
+   * lands on the field while the loop is asleep, so nothing ever draws it,
    * and nothing ever decays it either, since {@link tick} only runs inside the
    * loop. The strike is the real event; this is how it reaches the renderer. */
   strike(ids: Iterable<string>, energy = 1): void {
@@ -39,7 +39,7 @@ export class ActivationField {
   }
 
   /** Subscribe to strikes on this field; returns an unsubscribe function. The
-   * field owns no clock of its own — this is purely the seam a renderer uses
+   * field owns no clock of its own, this is purely the seam a renderer uses
    * to hear about strikes it did not itself cause. Nothing here fires on a
    * timer, so a subscriber is woken by real events and by nothing else. */
   subscribe(listener: () => void): () => void {
@@ -81,7 +81,7 @@ export class ActivationField {
 }
 
 /**
- * Frame-rate-independent approach toward a target — the "settle" primitive.
+ * Frame-rate-independent approach toward a target, the "settle" primitive.
  *
  * Renderers use this so a state change propagates over ~a tenth of a second
  * instead of snapping between two frames. It is driven by elapsed time, so a

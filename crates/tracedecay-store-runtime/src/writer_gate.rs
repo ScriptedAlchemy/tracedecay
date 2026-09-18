@@ -33,9 +33,9 @@
 //!   concerns: `Owner` mutates in-memory owner/scheduler bookkeeping for a
 //!   store, `Content` writes index rows into a store that is already open.
 //!   They were only serialized before because there was one gate. Content
-//!   writes were never exclusive against the rest of the process anyway —
+//!   writes were never exclusive against the rest of the process anyway,
 //!   hook writes and memory writes go straight to the store without taking
-//!   this gate at all — so admitting an owner-bookkeeping mutation beside a
+//!   this gate at all, so admitting an owner-bookkeeping mutation beside a
 //!   sync adds no writer that did not already exist.
 
 use std::collections::HashMap;

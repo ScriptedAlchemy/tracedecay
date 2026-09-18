@@ -3,7 +3,7 @@
 //!
 //! NEXT.md requires provenance preservation, contradiction, supersession,
 //! as-of knowledge, denied payloads, redacted frontiers, and unknown
-//! denominators to be exercised through fact merge and hydration — end to end
+//! denominators to be exercised through fact merge and hydration, end to end
 //! through the real [`DatabaseFactStore`] over a real sqlite file, not domain
 //! unit tests or mock authorities.
 
@@ -428,7 +428,7 @@ async fn merge_and_hydration_preserve_source_and_privacy_identity() {
     .await;
 
     // Merge drop into keep: the winner records a correction that carries both
-    // evidence anchors, and the loser is curated as merged and then denied —
+    // evidence anchors, and the loser is curated as merged and then denied,
     // its retained assertions are never edited in place.
     let (merged_assertion, _) = commit_assertion(
         &store,

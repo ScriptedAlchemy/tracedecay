@@ -104,7 +104,7 @@ const MAX_RETAINED_CHECKOUT_TOPOLOGIES: usize = 64;
 ///
 /// Live defect this exists for: one daemon connection asked the same
 /// repository for its common directory, worktree root, and linked-worktree
-/// shape a dozen times, and each question ran a complete `gix` discovery —
+/// shape a dozen times, and each question ran a complete `gix` discovery,
 /// an upward walk to the filesystem root plus a repository open. On a slow
 /// volume that is seconds per question, paid again by every concurrent
 /// client, and it ran inline on the tokio workers that also poll the daemon's
@@ -113,8 +113,8 @@ const MAX_RETAINED_CHECKOUT_TOPOLOGIES: usize = 64;
 /// Only a path that **is** its own worktree root is retained. The checkout's
 /// `.git` marker and linked-worktree `commondir` are revalidated before reuse,
 /// so replacing or retargeting that root cannot inherit its old identity.
-/// Every other path — a subdirectory, a bare repository, an unresolvable
-/// directory — is discovered live, so a repository created below it is
+/// Every other path, a subdirectory, a bare repository, an unresolvable
+/// directory, is discovered live, so a repository created below it is
 /// observed immediately.
 pub fn repository_topology(
     path: &Path,
@@ -142,8 +142,8 @@ pub fn repository_topology(
         }
         // Discovered from a subdirectory, a bare repository's control dir, or
         // any other path the walk did not start at. The answer is not
-        // retainable *for this path* — a repository can appear between it and
-        // the root — but it is the complete, revalidatable answer for the root
+        // retainable *for this path*, a repository can appear between it and
+        // the root, but it is the complete, revalidatable answer for the root
         // it names, so the next question about that root is already paid for.
         Some(root) => publish_checkout_root_topology(root, &topology),
         None => {}
@@ -305,7 +305,7 @@ pub fn observe_repository_discovery_for_test(root: &Path) {
 
 /// Make every live discovery walk under `root` take `delay`, modelling a
 /// repository on a slow volume. A repository opened from a retained topology
-/// pays no walk and so is not delayed — which is exactly the convergence the
+/// pays no walk and so is not delayed, which is exactly the convergence the
 /// deferral tests assert. Implies [`observe_repository_discovery_for_test`].
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn delay_repository_discovery_for_test(root: &Path, delay: std::time::Duration) {
@@ -358,8 +358,8 @@ pub fn repository_discovery_count_for_test(root: &Path) -> u64 {
         .map_or(0, |observation| observation.discoveries)
 }
 
-/// Topology resolutions under `root` — the discoveries the retained authority
-/// could not answer — since observation began.
+/// Topology resolutions under `root`, the discoveries the retained authority
+/// could not answer, since observation began.
 #[cfg(any(test, feature = "test-helpers"))]
 #[must_use]
 pub fn repository_topology_resolution_count_for_test(root: &Path) -> u64 {
@@ -401,15 +401,15 @@ fn forget_retained_checkout_topology_for_test(root: &Path) {
 impl GitRepositoryAuthority {
     /// Open the repository `path` belongs to.
     ///
-    /// A retained topology answers the *where* half of a discovery — the
+    /// A retained topology answers the *where* half of a discovery, the
     /// upward walk for `.git` and the canonical form of each directory it
-    /// names — so this opens the repository directly at its own Git directory
+    /// names, so this opens the repository directly at its own Git directory
     /// instead of walking the volume again. Live reads (HEAD, refs, status)
     /// still come from a freshly opened repository.
     ///
     /// Live defect this exists for: the topology memo only short-circuited
-    /// `repository_topology`. Every HEAD read — one per route resolution, from
-    /// `current_branch` — still ran a complete `gix::discover`, so on a slow
+    /// `repository_topology`. Every HEAD read, one per route resolution, from
+    /// `current_branch`, still ran a complete `gix::discover`, so on a slow
     /// volume a deferred route never converged: the memo was warm and the next
     /// request paid the whole walk again anyway.
     pub fn discover(path: &Path) -> Result<Self, GitRepositoryError> {
