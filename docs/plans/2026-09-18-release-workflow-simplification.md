@@ -44,9 +44,10 @@ estimates.
 | x86_64 Windows | 5.1m | skipped | 55.7m | distribution acceptance failed after 0.5m |
 | x86_64 Linux | 4.3m | not reached | not reached | release distribution test 143.6m, then failed |
 
-The duplicate release-automation checkout took 0.15-0.25m. Rust cache restore
-took 0.03-0.10m. The profile resolver repeated two `cargo tree` traversals in
-every target job and took 3.9-5.1m again in the in-progress beta.41 run.
+The duplicate release-automation checkout took 0.15-0.25m. Rust cache lookup
+took 0.03-0.10m, but every target reported `No cache found`. The profile
+resolver repeated two `cargo tree` traversals before cache restore in every
+target job and took 3.9-5.1m again in the in-progress beta.41 run.
 
 Two static properties explain the largest opportunities:
 
@@ -64,16 +65,28 @@ purpose is to stop an unshippable release before release-please creates a tag.
 That is the correct lifecycle boundary for pre-release confidence work, though
 the beta and stable policies should differ.
 
-Draft PR
-[#1582](https://github.com/ScriptedAlchemy/tracedecay/pull/1582) supplies the
-first sibling result. It deletes the standalone beta all-feature CLI compile
-and leaves the production packaging build as the sole artifact compile. Its
-dependency comparison found that the production build recompiles all 499
-unique production crates because the all-feature graph intentionally differs.
-The preceding all-feature build therefore does not warm the production graph
-enough to justify its 24.9m Linux and 45.5m macOS cost. No other open PR title
-matched `CI speed` or `release speed` at the last refresh, so the remaining
-compiler and cache recommendations distinguish measurements from hypotheses.
+Sibling evidence:
+
+- Timing census
+  [#1583](https://github.com/ScriptedAlchemy/tracedecay/pull/1583) locates
+  126.7m of the x86_64 Linux step in the cold all-feature workspace test
+  compile and another 15.3m in two Hotpath helper builds. It also confirms
+  that packaging, upload, dashboard, and cache save are not the wall.
+- Single-compile draft
+  [#1582](https://github.com/ScriptedAlchemy/tracedecay/pull/1582) deletes the
+  standalone beta all-feature CLI compile and leaves the production packaging
+  build as the sole artifact compile. Its dependency comparison found that the
+  production build recompiles all 499 unique production crates because the
+  all-feature graph intentionally differs.
+- Cache/toolchain draft
+  [#1585](https://github.com/ScriptedAlchemy/tracedecay/pull/1585) finds that
+  all beta.40 release caches missed. Tag cache scope, a full 10 GiB repository
+  cache budget, a floating unused stable toolchain, cargo running before
+  restore, and the duplicate checkout all prevent reliable reuse.
+
+The preceding all-feature build does not warm the production graph enough to
+justify its 24.9m Linux and 45.5m macOS cost. Compiler-profile savings remain
+hypotheses until measured on the simplified single-build path.
 
 ## Target architecture
 
@@ -107,6 +120,11 @@ Delete from the beta target jobs:
 - `Verify all-feature release build compiles`;
 - `Run distribution acceptance`; and
 - the legacy-default historical smoke branch.
+
+Install only the toolchain pinned by `rust-toolchain.toml`, plus the matrix
+target. Build the dashboard once in the job, validate its digest, and pass the
+existing skip-build digest contract to the CLI build so `build.rs` embeds
+those bytes without running the dashboard build again.
 
 The ordinary beta path should accept only the current production release
 contract. If recovery of a legacy tag is still required, retain that policy in
@@ -162,7 +180,9 @@ periodic/stable-pre-tag battery.
 Estimated cut:
 
 - x86_64 Linux: 100-120m net. The removed test step consumed 143.6m before
-  failing; a cold production artifact build will replace part of that time.
+  failing: 15.3m in Hotpath helper builds and 126.7m before the first workspace
+  test suite started. A cold production artifact build will replace part of
+  that time.
 - aarch64 Linux: at least 24m from distribution acceptance.
 - aarch64 macOS: at least 40m from distribution acceptance.
 - x86_64 Windows: unquantified. The observed 0.5m was only an early failure,
@@ -216,6 +236,16 @@ Keep the dashboard build in beta for now. It costs seconds and its bytes are
 embedded into the binary. Centralizing it would add artifact ceremony for
 little critical-path gain.
 
+#### A5. Pin one Rust toolchain and embed the already-built dashboard
+
+Install the `rust-toolchain.toml` channel rather than an additional floating
+`stable`, and pass the validated dashboard digest to the CLI build's existing
+skip-build contract.
+
+Estimated cut: 0.5-1.0m per target from avoiding a second dashboard build.
+Toolchain installation itself saves approximately 0m, but removing unused
+rustc 1.98.1 from a rustc 1.97.1 build stops avoidable cache-key drift.
+
 ### B. Compile and link cuts
 
 #### B1. Measure the single production build before changing release profile
@@ -249,17 +279,27 @@ acceptance noise will obscure the treatment.
 
 ### C. Cache
 
-#### C1. Align the existing Rust cache with the one production build
+#### C1. Make the existing cache eligible to hit
 
-Keep one target/profile cache key and reassess it after feature-set
+Apply the key hygiene from PR #1585: use only the pinned toolchain, remove the
+duplicate checkout from the hash inputs, and restore before the first Cargo
+command. Keep one target/profile cache key and reassess it after feature-set
 consolidation. Do not cache final release binaries across tags; the binary
 embeds and reports the source SHA and must be produced from the tagged source.
 
-Estimated cut: 0-5m on a warm run. Beta.40 restored each Rust cache in 2-6
-seconds yet still spent 20-56m compiling, so cache work is not the first lever.
+Estimated direct cut: 0-1m after A removes the 4m pre-cache `cargo tree`
+operation. A compatible default-branch dependency cache could avoid an
+estimated 6-20m on Linux, and potentially more on macOS, but beta.40 provides
+no hit measurement. GitHub cannot restore a previous tag's cache into a new
+tag, and the current repository cache inventory already exceeds the 10 GiB
+budget before eviction.
 
-Do not add remote cache infrastructure, self-hosted runners, or paid cache
-services.
+Reuse a compatible cache written by existing required master work only if its
+profile and key already match. Do not add a cache-warming compile or another
+job merely to manufacture a hit.
+
+Do not add sccache, remote cache infrastructure, self-hosted runners, or paid
+cache services.
 
 ## What must stay
 
@@ -293,14 +333,17 @@ services.
 
 1. Land the focused one-compile beta deletion from PR #1582. It is the
    smallest ready part of A and removes 24.9-45.5m from affected target jobs.
-2. Land the rest of A as a coherent workflow cut: define the light beta path,
+2. Fold the no-second-checkout, pinned-toolchain, and dashboard-digest parts of
+   PR #1585 into the same target shape. Treat cache hits as unverified until a
+   compatible default-branch writer and a release restore are both observed.
+3. Land the rest of A as a coherent workflow cut: define the light beta path,
    keep the heavy battery periodic and stable-pre-tag, and remove post-tag
    general testing and repeated release-time validation.
-3. Run the next Release Beta and establish successful single-build timings for
+4. Run the next Release Beta and establish successful single-build timings for
    all four targets.
-4. Land measured B changes one at a time, starting with the Windows production
+5. Land measured B changes one at a time, starting with the Windows production
    graph because its single build was 55.7m.
-5. Re-evaluate C only after two comparable successful runs show persistent
+6. Re-evaluate C only after two comparable successful runs show persistent
    dependency recompilation.
 
 ## Verification on the next Release Beta
@@ -312,7 +355,8 @@ duration.
 Record for each build job:
 
 - queue time, job start, and job completion;
-- Rust cache restore result and duration;
+- Rust cache key, restore result, and duration;
+- rustc versions included in the cache environment;
 - start and completion of the sole production `cargo build`;
 - archive and MCPB package/verification duration;
 - artifact upload duration; and
@@ -336,7 +380,8 @@ Acceptance criteria:
    timing and product runtime evidence; architecture and compiler treatments
    are not combined in one timing claim.
 
-If the next run is cold while beta.40 was warm, report that difference and do
-not attribute the whole delta to the workflow cut. A successful end-to-end
-release with slower target compilation is still valid evidence for the
-architecture; compile/link savings require their own comparable treatment.
+Beta.40 was cold on every target. If the next run restores a cache, report that
+as a separate treatment and do not attribute its whole delta to the workflow
+cut. A successful end-to-end release with slower target compilation is still
+valid evidence for the architecture; compile/link and cache savings require
+their own comparable treatments.
