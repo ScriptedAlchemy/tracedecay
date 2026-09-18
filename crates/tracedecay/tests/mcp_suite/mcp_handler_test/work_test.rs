@@ -687,6 +687,33 @@ fn work_tool_text(result: &Value) -> Value {
         .unwrap_or_else(|error| panic!("Work tool text is not JSON ({error}): {result}"))
 }
 
+/// Drop the digest that covers per-call admission (deadline and cancellation).
+///
+/// Two calls with the same arguments are not byte-identical, because that
+/// digest is minted again on every `tools/call`. The route, reasons, sizing,
+/// and graph version are.
+fn without_admission_digest(mut value: Value) -> Value {
+    if let Some(object) = value.pointer_mut("/decision") {
+        object
+            .as_object_mut()
+            .expect("decision object")
+            .remove("input_digest");
+    }
+    if let Some(object) = value.pointer_mut("/proposal") {
+        object
+            .as_object_mut()
+            .expect("proposal object")
+            .remove("evidence_digest");
+    }
+    if let Some(object) = value.pointer_mut("/calibration/provenance") {
+        object
+            .as_object_mut()
+            .expect("provenance object")
+            .remove("input_digest");
+    }
+    value
+}
+
 /// The payload a host reads after a successful `tools/call`.
 ///
 /// `isError` is absent on success; a problem rides in the text as
@@ -730,6 +757,10 @@ async fn generate_proposal_allows_a_ready_task_on_the_configured_route_and_refus
     let selection = json!({ "selection": "profile_owned_no_git" });
     let occurred_at = now_micros();
     let created = create_ready_task(&server, &selection, occurred_at, "task.mcp-generate").await;
+    // The committed version is stamped when the mutation lands. A read whose
+    // observation instant is earlier than that stamp sees no graph, so every
+    // task — including the one just created — is not_found.
+    let observed_at = now_micros();
 
     let refused = handle_real_server_tool_call(
         &server,
@@ -738,7 +769,7 @@ async fn generate_proposal_allows_a_ready_task_on_the_configured_route_and_refus
             &selection,
             "task.mcp-generate.absent",
             "proposal.mcp-generate.absent",
-            occurred_at,
+            observed_at,
         ),
     )
     .await;
@@ -798,7 +829,7 @@ async fn generate_proposal_allows_a_ready_task_on_the_configured_route_and_refus
             &selection,
             "task.mcp-generate",
             "proposal.mcp-generate.ready",
-            occurred_at,
+            observed_at,
         ),
     )
     .await;
@@ -908,7 +939,7 @@ async fn generate_proposal_allows_a_ready_task_on_the_configured_route_and_refus
         "{generated}"
     );
     assert_eq!(
-        generated["decision"]["local_evidence"]["watermark"], occurred_at,
+        generated["decision"]["local_evidence"]["watermark"], observed_at,
         "{generated}"
     );
     assert_eq!(generated["decision"].get("sizing"), None, "{generated}");
@@ -970,7 +1001,7 @@ async fn generate_proposal_allows_a_ready_task_on_the_configured_route_and_refus
         "{generated}"
     );
     assert_eq!(provenance["evaluator_revision"], 3, "{generated}");
-    assert_eq!(provenance["evaluated_at"], occurred_at, "{generated}");
+    assert_eq!(provenance["evaluated_at"], observed_at, "{generated}");
     assert_eq!(
         provenance["input_digest"], generated["decision"]["input_digest"],
         "{generated}"
@@ -994,13 +1025,18 @@ async fn generate_proposal_allows_a_ready_task_on_the_configured_route_and_refus
             &selection,
             "task.mcp-generate",
             "proposal.mcp-generate.ready",
-            occurred_at,
+            observed_at,
         ),
     )
     .await;
     assert_eq!(
-        replayed, generated,
-        "the same request must return the same proposal"
+        replayed["proposal"]["evidence_digest"], replayed["decision"]["input_digest"],
+        "{replayed}"
+    );
+    assert_eq!(
+        without_admission_digest(replayed),
+        without_admission_digest(generated.clone()),
+        "the same arguments must select the same route"
     );
 
     let other = generate_proposal_success(
@@ -1009,22 +1045,23 @@ async fn generate_proposal_allows_a_ready_task_on_the_configured_route_and_refus
             &selection,
             "task.mcp-generate",
             "proposal.mcp-generate.other",
-            occurred_at,
+            observed_at,
         ),
     )
     .await;
-    assert_eq!(other["decision"], generated["decision"], "{other}");
-    assert_eq!(other["calibration"], generated["calibration"], "{other}");
     assert_eq!(
-        other["verified_graph_version"], generated["verified_graph_version"],
+        other["proposal"]["evidence_digest"], other["decision"]["input_digest"],
         "{other}"
     );
     assert_eq!(
         other["proposal"]["proposal_id"], "proposal.mcp-generate.other",
         "{other}"
     );
+    let mut other_stable = without_admission_digest(other);
+    let generated_stable = without_admission_digest(generated);
+    other_stable["proposal"]["proposal_id"] = generated_stable["proposal"]["proposal_id"].clone();
     assert_eq!(
-        other["proposal"]["evidence_digest"], generated["proposal"]["evidence_digest"],
-        "the caller-chosen proposal id is not part of the decision digest: {other}"
+        other_stable, generated_stable,
+        "the caller-chosen proposal id does not change the route"
     );
 }
