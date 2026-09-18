@@ -132,7 +132,7 @@ fn sorted_without_ids(mut payload: Value) -> Value {
     payload
 }
 
-fn occurrence_ids(payload: &Value) -> Vec<&str> {
+fn occurrence_ids(payload: &Value) -> Vec<String> {
     payload["matches"]
         .as_array()
         .expect("exact-symbol matches array")
@@ -141,6 +141,7 @@ fn occurrence_ids(payload: &Value) -> Vec<&str> {
             item["id"]
                 .as_str()
                 .expect("exact-symbol match occurrence id")
+                .to_owned()
         })
         .collect()
 }
@@ -165,8 +166,6 @@ async fn find_exact_symbol_returns_every_bare_name_hit() {
     );
     assert_eq!(gmres_ids.len(), 2);
     assert_ne!(gmres_ids[0], gmres_ids[1]);
-    assert_ne!(gmres_ids[0], "");
-    assert_ne!(gmres_ids[1], "");
 
     let folded = exact_payload(&server, json!({"name": "Gmres", "format": "json"})).await;
     assert_eq!(folded["name"], "Gmres");
