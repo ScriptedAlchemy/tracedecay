@@ -22,8 +22,7 @@ use tracedecay_sessions::runtime::store_access::find_preceding_codex_goal_respon
 
 use super::state::{
     canonicalize_session_project_paths, read_message, read_output_state, read_session,
-    reconcile_session_rows, reconcile_session_rows_detailed, storage, storage_message,
-    verify_output_state,
+    reconcile_session_rows_detailed, storage, storage_message, verify_output_state,
 };
 use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
@@ -837,6 +836,11 @@ pub(in super::super) async fn converge_released_output_rendering(
     conn: &impl Executor,
     projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<ConvergedRendering> {
+    // A beta-era partial projection may retain current provenance and message
+    // rows after losing their shared session row. The immutable projection is
+    // the canonical insert authority; `apply_session` also preserves richer
+    // compatible session metadata when the row already exists.
+    apply_session(conn, projection.session()).await?;
     let message = projection.message();
     supersede_projected_message(conn, message).await?;
     if message.provider != "hermes" {
@@ -2049,8 +2053,8 @@ mod tests {
             ..sparse.clone()
         };
 
-        let forward = reconcile_session_rows(&sparse, &rich).unwrap();
-        let reverse = reconcile_session_rows(&rich, &sparse).unwrap();
+        let forward = reconcile_session_rows_detailed(&sparse, &rich).unwrap();
+        let reverse = reconcile_session_rows_detailed(&rich, &sparse).unwrap();
         assert_eq!(forward, reverse);
         assert_eq!(forward.project_path, "/workspace/project");
         assert_eq!(forward.title.as_deref(), Some("Composer session"));
@@ -2064,11 +2068,11 @@ mod tests {
             project_key: "project.typed".to_owned(),
             ..legacy_path_key.clone()
         };
-        let enriched = reconcile_session_rows(&legacy_path_key, &typed_project).unwrap();
+        let enriched = reconcile_session_rows_detailed(&legacy_path_key, &typed_project).unwrap();
         assert_eq!(enriched.project_key, "project.typed");
         assert_eq!(
             enriched,
-            reconcile_session_rows(&typed_project, &legacy_path_key).unwrap()
+            reconcile_session_rows_detailed(&typed_project, &legacy_path_key).unwrap()
         );
 
         let runtime_owned = SessionRecord {
@@ -2081,7 +2085,7 @@ mod tests {
             metadata_json: Some(r#"{"source":"provider_projection"}"#.to_owned()),
             ..forward.clone()
         };
-        let preserved = reconcile_session_rows(&runtime_owned, &projected).unwrap();
+        let preserved = reconcile_session_rows_detailed(&runtime_owned, &projected).unwrap();
         assert_eq!(preserved.title.as_deref(), Some("Runtime-owned session"));
         assert_eq!(
             preserved.metadata_json.as_deref(),
@@ -2092,6 +2096,6 @@ mod tests {
             project_path: "/workspace/other".to_owned(),
             ..rich
         };
-        assert!(reconcile_session_rows(&forward, &conflicting).is_none());
+        assert!(reconcile_session_rows_detailed(&forward, &conflicting).is_err());
     }
 }
