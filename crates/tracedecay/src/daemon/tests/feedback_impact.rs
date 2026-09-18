@@ -1,0 +1,373 @@
+//! `tracedecay_feedback_impact` as an MCP client sees it.
+//!
+//! The tool is a handle-addressed read. A diagnostics handle minted by a
+//! published advisory cycle projects that cycle's identity and impact, and
+//! nothing else. A handle that was never issued, or that was issued for a
+//! different feedback read, is the same concealed refusal.
+
+use std::path::Path;
+use std::process::Command;
+use std::time::{Duration, Instant};
+
+use serde_json::{Value, json};
+use tracedecay_mcp::JsonRpcResponse;
+
+use crate::daemon::ProductionProjectCompositionHarnessV1;
+
+const IMPACT_TOOL: &str = "tracedecay_feedback_impact";
+const IMPACT_RESULT_SCHEMA: &str = "schema.application.feedback.impact.result";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn feedback_impact_projects_the_published_cycle_and_conceals_other_handles() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(project.join("src")).expect("source dir");
+    std::fs::write(
+        project.join("src/lib.rs"),
+        "pub fn feedback_impact_probe() -> i32 { 7 }\n",
+    )
+    .expect("source file");
+    commit_project(&project);
+    let head = git_head(&project);
+    let document_uri = url::Url::from_file_path(project.join("src/lib.rs"))
+        .expect("document file URI")
+        .to_string();
+
+    let harness = ProductionProjectCompositionHarnessV1::open(temp.path(), vec![project.clone()])
+        .await
+        .expect("production composition");
+
+    assert_invalid_request(
+        &harness
+            .call_tool(
+                &project,
+                IMPACT_TOOL,
+                json!({"request_handle": " not-a-handle", "format": "json"}),
+            )
+            .await
+            .expect("whitespace handle call"),
+        "application surface request handle is invalid",
+    );
+    assert_invalid_request(
+        &harness
+            .call_tool(&project, IMPACT_TOOL, json!({"format": "json"}))
+            .await
+            .expect("missing handle call"),
+        "application surface request does not match its reviewed schema: missing field `request_handle`",
+    );
+    assert_invalid_request(
+        &harness
+            .call_tool(
+                &project,
+                IMPACT_TOOL,
+                json!({
+                    "request_handle": "rh_0123456789abcdef01234567",
+                    "files": ["src/lib.rs"],
+                    "format": "json"
+                }),
+            )
+            .await
+            .expect("unknown field call"),
+        "application surface request does not match its reviewed schema: unknown field `files`, expected `request_handle`",
+    );
+
+    let absent = wait_for_feedback_owner(&harness, &project).await;
+    assert_concealed_impact(&absent);
+
+    let published = publish_advisory_cycle(&harness, &project, &document_uri).await;
+    let cycle = &published["cycle"];
+    let impact_handle = published["read_handles"]["impact_handle"]
+        .as_str()
+        .expect("published impact handle")
+        .to_owned();
+    let list_handle = published["read_handles"]["list_handle"]
+        .as_str()
+        .expect("published list handle")
+        .to_owned();
+    assert_ne!(
+        impact_handle, list_handle,
+        "a list handle must not be reusable as the impact handle"
+    );
+
+    let foreign = harness
+        .call_tool(
+            &project,
+            IMPACT_TOOL,
+            json!({"request_handle": list_handle, "format": "json"}),
+        )
+        .await
+        .expect("list handle used as impact");
+    assert_concealed_impact(&foreign);
+
+    let impact = harness
+        .call_tool(
+            &project,
+            IMPACT_TOOL,
+            json!({"request_handle": impact_handle, "format": "json"}),
+        )
+        .await
+        .expect("impact read");
+    let envelope = successful_envelope(&impact);
+    assert_eq!(
+        envelope["contract"],
+        json!({
+            "schema_id": IMPACT_RESULT_SCHEMA,
+            "schema_revision": 1
+        })
+    );
+    let payload = &envelope["outcome"]["value"]["payload"];
+    let expected = json!({
+        "result_id": cycle["result_id"],
+        "cycle_id": cycle["cycle_id"],
+        "scope": cycle["scope"],
+        "content_identity": cycle.get("content_identity").cloned().unwrap_or(Value::Null),
+        "impact": cycle["impact"].clone(),
+        "state": cycle["impact_state"].clone(),
+    });
+    assert_eq!(payload, &expected);
+    assert_eq!(payload["scope"]["branch_ref"], json!("refs/heads/master"));
+    assert_eq!(payload["scope"]["head_commit_id"], json!(head));
+    let mut keys = payload
+        .as_object()
+        .expect("impact payload object")
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec![
+            "content_identity",
+            "cycle_id",
+            "impact",
+            "result_id",
+            "scope",
+            "state"
+        ]
+    );
+
+    harness.shutdown().await;
+}
+
+fn assert_invalid_request(response: &JsonRpcResponse, detail: &str) {
+    assert!(
+        response.result.is_none(),
+        "an invalid impact request must not return a tool result: {response:?}"
+    );
+    let error = response
+        .error
+        .as_ref()
+        .expect("invalid impact request is a JSON-RPC error");
+    assert_eq!(response.id, json!(1));
+    assert_eq!(error.code, -32602);
+    assert_eq!(
+        error.message,
+        format!(
+            "tool project route failed: reason_code=application_surface_invalid_request retryable=false: {detail}"
+        )
+    );
+    assert_eq!(
+        error.data,
+        Some(json!({
+            "tool": IMPACT_TOOL,
+            "reason_code": "application_surface_invalid_request",
+            "retryable": false,
+            "detail": detail,
+            "kind": "invalid_request",
+            "code": "application_surface_invalid_request"
+        }))
+    );
+}
+
+fn assert_concealed_impact(response: &JsonRpcResponse) {
+    assert!(
+        response.error.is_none(),
+        "concealment is a tool result, not a JSON-RPC error: {response:?}"
+    );
+    let result = response.result.as_ref().expect("tool result");
+    assert_eq!(result["isError"], json!(true));
+    assert_eq!(result["content"][0]["type"], json!("text"));
+    let envelope: Value = serde_json::from_str(
+        result["content"][0]["text"]
+            .as_str()
+            .expect("concealed impact text"),
+    )
+    .expect("concealed impact envelope");
+    let request_id = envelope["request_id"]
+        .as_str()
+        .expect("request id")
+        .to_owned();
+    assert!(
+        request_id.starts_with("request."),
+        "daemon-minted request id: {request_id}"
+    );
+    assert_eq!(
+        envelope["contract"],
+        json!({
+            "schema_id": IMPACT_RESULT_SCHEMA,
+            "schema_revision": 1
+        })
+    );
+    let problem = json!({
+        "revision": 1,
+        "kind": "not_found_or_not_authorized",
+        "code": "not_found_or_not_authorized",
+        "message": "The requested resource was not found or is not authorized",
+        "diagnostic": null,
+        "committed_receipt": null,
+        "owning_layer": "application",
+        "terminality": "pre_admission",
+        "retryable": false,
+        "retry": "never",
+        "retry_scope": null,
+        "retry_after_millis": null,
+        "cancellation_stage": null,
+        "unavailable_classification": null,
+        "execution_failure_classification": null,
+        "request_id": request_id,
+        "trace_id": request_id,
+        "details": [],
+        "legal_actions": [],
+        "coverage": null
+    });
+    assert_eq!(result["problem"], problem);
+    assert_eq!(envelope["problem"], problem);
+}
+
+async fn wait_for_feedback_owner(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+) -> JsonRpcResponse {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let response = harness
+            .call_tool(
+                project,
+                IMPACT_TOOL,
+                json!({
+                    "request_handle": "rh_000000000000000000000000",
+                    "format": "json"
+                }),
+            )
+            .await
+            .expect("absent impact handle");
+        if response.error.is_none()
+            && response
+                .result
+                .as_ref()
+                .is_some_and(|result| result["problem"]["kind"] == "not_found_or_not_authorized")
+        {
+            return response;
+        }
+        let retryable_owner = response.result.as_ref().is_some_and(|result| {
+            result["problem"]["code"] == "feedback.owner_unavailable"
+                && result["problem"]["retryable"] == true
+        });
+        assert!(
+            retryable_owner,
+            "an unknown impact handle must stay concealed once the owner is mounted, or stay retryably unavailable before that: {response:?}"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "feedback owner stayed unavailable: {response:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+async fn publish_advisory_cycle(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    document_uri: &str,
+) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let response = harness
+            .call_tool(
+                project,
+                "tracedecay_feedback_advisory_cycle",
+                json!({"document_uri": document_uri, "format": "json"}),
+            )
+            .await
+            .expect("advisory cycle call");
+        if response.error.is_none()
+            && response
+                .result
+                .as_ref()
+                .is_some_and(|result| result.get("isError") != Some(&json!(true)))
+        {
+            let payload = &successful_envelope(&response)["outcome"]["value"]["payload"];
+            assert_eq!(
+                payload["cycle"]["published"],
+                json!(true),
+                "impact has nothing to project until the cycle publishes: {payload}"
+            );
+            return payload.clone();
+        }
+        let retryable = response.result.as_ref().is_some_and(|result| {
+            result["problem"]["code"] == "feedback.advisory-cycle.unavailable"
+                && result["problem"]["retryable"] == true
+        });
+        assert!(
+            retryable,
+            "advisory cycle must publish or stay retryably unavailable: {response:?}"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "advisory cycle stayed unavailable: {response:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn successful_envelope(response: &JsonRpcResponse) -> Value {
+    assert!(
+        response.error.is_none(),
+        "successful impact read must not be a JSON-RPC error: {response:?}"
+    );
+    let result = response.result.as_ref().expect("tool result");
+    assert_ne!(result["isError"], json!(true), "{result}");
+    assert_eq!(result["content"][0]["type"], json!("text"));
+    serde_json::from_str(
+        result["content"][0]["text"]
+            .as_str()
+            .expect("impact result text"),
+    )
+    .expect("impact result envelope")
+}
+
+fn commit_project(project: &Path) {
+    let git = |arguments: &[&str]| {
+        let status = Command::new("git")
+            .current_dir(project)
+            .args(arguments)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {arguments:?}");
+    };
+    git(&["init", "--quiet", "-b", "master"]);
+    git(&["add", "."]);
+    git(&[
+        "-c",
+        "user.name=TraceDecay Test",
+        "-c",
+        "user.email=tracedecay@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "test: seed feedback impact",
+    ]);
+}
+
+fn git_head(project: &Path) -> String {
+    let output = Command::new("git")
+        .current_dir(project)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("read HEAD");
+    assert!(output.status.success(), "git rev-parse HEAD");
+    String::from_utf8(output.stdout)
+        .expect("HEAD utf-8")
+        .trim()
+        .to_owned()
+}
