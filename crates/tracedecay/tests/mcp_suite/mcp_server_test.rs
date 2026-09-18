@@ -9,6 +9,7 @@
 mod analytics_test;
 mod hooks_branch_test;
 mod protocol_test;
+mod retrieve_behavior;
 pub(crate) mod support;
 
 // Backwards-compatible path for `crate::mcp_server_test::…` consumers.
