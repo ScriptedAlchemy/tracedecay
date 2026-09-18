@@ -15,6 +15,8 @@ mod branch_search_test;
 #[cfg(feature = "test-transport")]
 mod branch_sensitivity_test;
 mod circular_behavior_test;
+#[cfg(feature = "test-transport")]
+mod constructors_behavior_test;
 mod context_test;
 mod dependency_hint_test;
 #[cfg(feature = "test-transport")]
