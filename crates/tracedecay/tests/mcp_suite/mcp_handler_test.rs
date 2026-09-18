@@ -16,6 +16,8 @@ mod graph_analysis_test;
 mod graph_query_test;
 mod lcm_test;
 #[cfg(feature = "test-transport")]
+mod project_list_test;
+#[cfg(feature = "test-transport")]
 mod memory_contradiction_contract_test;
 #[cfg(feature = "test-transport")]
 mod memory_fact_assertions;
