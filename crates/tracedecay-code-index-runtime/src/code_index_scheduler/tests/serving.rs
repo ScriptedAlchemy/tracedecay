@@ -2750,7 +2750,11 @@ fn text_artifact_subdivision_yields_without_advancing_and_stops_at_one_chunk() {
                     Err(tracedecay_query::retrieval::RetrievalPortError::Cancelled)
                 );
             }
-            Err(tracedecay_query::retrieval::RetrievalPortError::BudgetExceeded) => break,
+            Err(tracedecay_query::retrieval::RetrievalPortError::Contract(detail))
+                if detail.contains("page batch exceeds") =>
+            {
+                break;
+            }
             other => panic!("unexpected projection outcome: {other:?}"),
         }
         let slot = latest.text_projection_build.lock_slot();
@@ -2783,8 +2787,13 @@ fn source_window_and_builder_share_one_memory_reservation() {
     );
     assert_eq!(
         super::super::text_artifact_builder_budget(ceiling, ceiling),
-        Err(tracedecay_query::retrieval::RetrievalPortError::BudgetExceeded),
-        "a source consuming the reservation must refuse before builder path access"
+        Err(tracedecay_query::retrieval::RetrievalPortError::Contract(
+            format!(
+                "text-artifact source window needs {ceiling} bytes, exhausting its \
+                 {ceiling}-byte build reservation"
+            )
+        )),
+        "a source consuming the reservation must refuse with the reproducible sizing evidence"
     );
 }
 
