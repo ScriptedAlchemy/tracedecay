@@ -186,14 +186,20 @@ fn matches_without_ids(payload: &Value) -> Vec<Value> {
         .iter()
         .map(|item| {
             let mut item = item.clone();
-            let object = item
-                .as_object_mut()
-                .unwrap_or_else(|| panic!("signature match is not an object: {item}"));
-            let id = object
-                .remove("id")
-                .and_then(|id| id.as_str().map(str::to_owned))
-                .unwrap_or_else(|| panic!("signature match is missing id: {item}"));
-            assert!(!id.is_empty(), "signature match id is empty: {item}");
+            {
+                let Some(object) = item.as_object_mut() else {
+                    panic!("signature match is not an object: {item}");
+                };
+                let Some(id) = object.remove("id") else {
+                    panic!("signature match is missing an id field");
+                };
+                let Value::String(id) = id else {
+                    panic!("signature match id is not a string: {id}");
+                };
+                if id.is_empty() {
+                    panic!("signature match id is empty");
+                }
+            }
             item
         })
         .collect::<Vec<_>>();
