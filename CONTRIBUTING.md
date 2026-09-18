@@ -257,16 +257,19 @@ integration branch waits behind, so a run spends only what its state earns:
 
 | State | Runs |
 |---|---|
-| Draft | Nothing. Mark it ready or add `ci-full` to run CI. |
-| Ready for review (or labelled `ci-full`) | Repository gates (commit lint, release guards, rustfmt), benchmark-harness self-tests, and the Linux lane: build, clippy, feature gates, dashboard, Linux test partitions, PR dogfood with the MCP conformance smoke. |
-| Labelled `ci-os` | Adds the macOS and Windows matrices. |
-| Labelled `ci-hosts` | Adds the stock Hermes / Claude Code / OpenCode integrations. |
-| Labelled `perf` | Adds hotpath parity and runs the hotpath profile, coverage, and runtime-core workflows. |
+| Pull request | Nothing automatically. Dispatch CI on its branch ref when the head is ready. |
+| `CI` dispatch | Repository gates, benchmark-harness self-tests, and the Linux lane: build, clippy, feature gates, dashboard, and Linux test partitions. |
+| `CI` with `run_os=true` | Adds the macOS and Windows matrices. |
+| `CI` with `run_hosts=true` | Adds stock host integrations. |
+| `CI` with `run_perf=true` | Adds hotpath parity. |
+| Hotpath workflow dispatch | Runs the selected profile, coverage, or runtime-core suite. |
 | Push to `master` | Everything. |
 
-Marking a PR ready or adding a label starts the run; a newer push cancels
-the one in flight, on every branch including `master`. Closing or merging a
-PR cancels its remaining runs and drops its Actions caches. Nothing runs on a
+Run `gh workflow run ci.yml --ref <branch>` when a PR head is ready. Add
+`-f run_os=true`, `-f run_hosts=true`, or `-f run_perf=true` only for those
+lanes. Opening, pushing, labeling, and marking ready create no run at all. A
+newer master push cancels the one in flight. Closing or merging a PR cancels
+its remaining runs and drops its Actions caches. Nothing runs on a
 timer: the packaged-crate distribution battery and the Hawk lint are
 `workflow_dispatch` only.
 

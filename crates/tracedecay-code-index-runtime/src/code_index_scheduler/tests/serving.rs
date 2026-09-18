@@ -2334,9 +2334,11 @@ fn reader_reservation_refusal_precedes_missing_artifact_access() {
         std::num::NonZeroU64::new(1024 * 1024).expect("tight memory limit"),
     )));
     let latest = scheduler.latest_complete().expect("restored generation");
-    assert_eq!(
-        latest.advance_text_serving(1),
-        Err(tracedecay_query::retrieval::RetrievalPortError::BudgetExceeded),
+    assert!(
+        matches!(
+            latest.advance_text_serving(1),
+            Err(tracedecay_query::retrieval::RetrievalPortError::AuthorityUnavailable(_))
+        ),
         "the reservation gate must win before the missing path is inspected"
     );
     assert!(
@@ -2390,6 +2392,48 @@ fn overlapping_text_builds_share_one_admission_watermark_headroom() {
     }
 }
 
+#[test]
+fn text_build_budget_shrinks_to_available_headroom_without_dropping_below_its_floor() {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+    let limit = 26 * GIB;
+    let preferred = limit / 8;
+    let minimum = 1536 * MIB;
+    let watermark_headroom = limit - (limit * 900 / 1000);
+    let observed = 21 * GIB;
+    let available = limit - observed - watermark_headroom;
+
+    assert_eq!(
+        super::super::text_artifact_admitted_build_budget(
+            preferred,
+            minimum,
+            limit,
+            0,
+            observed,
+            watermark_headroom,
+        ),
+        Ok(available),
+        "a replacement build must use the supported smaller budget instead of deadlocking behind the stale graph"
+    );
+    assert_eq!(
+        super::super::text_artifact_admitted_build_budget(
+            preferred,
+            minimum,
+            limit,
+            0,
+            22 * GIB,
+            watermark_headroom,
+        ),
+        Err(
+            tracedecay_query::retrieval::RetrievalPortError::AuthorityUnavailable(format!(
+                "text-artifact build needs at least {minimum} bytes; {} bytes are available below the resident-memory watermark",
+                limit - 22 * GIB - watermark_headroom
+            ))
+        ),
+        "less than the builder's supported floor must remain a typed capacity refusal"
+    );
+}
+
 /// The artifact build and reader ceilings must reserve through the process
 /// resident-memory authority: an authority too small for the advertised
 /// build ceiling refuses the build as a typed unavailability, and a serving
@@ -2416,9 +2460,9 @@ fn text_artifact_ceilings_reserve_through_process_resident_memory() {
         assert!(
             matches!(
                 denied,
-                Err(tracedecay_query::retrieval::RetrievalPortError::BudgetExceeded)
+                Err(tracedecay_query::retrieval::RetrievalPortError::AuthorityUnavailable(_))
             ),
-            "an unreservable build ceiling must refuse as a typed budget state: {denied:?}"
+            "an unreservable build ceiling must refuse as typed availability: {denied:?}"
         );
         assert_eq!(
             tight.snapshot().used_bytes,
@@ -2447,10 +2491,12 @@ fn text_artifact_ceilings_reserve_through_process_resident_memory() {
         let latest = scheduler
             .latest_complete()
             .expect("measured latest generation");
-        assert_eq!(
-            latest.advance_text_serving(1),
-            Err(tracedecay_query::retrieval::RetrievalPortError::BudgetExceeded),
-            "fresh RSS plus the requested build ceiling exceeds the process authority"
+        assert!(
+            matches!(
+                latest.advance_text_serving(1),
+                Err(tracedecay_query::retrieval::RetrievalPortError::AuthorityUnavailable(_))
+            ),
+            "fresh RSS plus the minimum build ceiling exceeds the process authority"
         );
         assert_eq!(
             measured.snapshot().used_bytes,
@@ -2750,7 +2796,11 @@ fn text_artifact_subdivision_yields_without_advancing_and_stops_at_one_chunk() {
                     Err(tracedecay_query::retrieval::RetrievalPortError::Cancelled)
                 );
             }
-            Err(tracedecay_query::retrieval::RetrievalPortError::BudgetExceeded) => break,
+            Err(tracedecay_query::retrieval::RetrievalPortError::Contract(detail))
+                if detail.contains("page batch exceeds") =>
+            {
+                break;
+            }
             other => panic!("unexpected projection outcome: {other:?}"),
         }
         let slot = latest.text_projection_build.lock_slot();
@@ -2783,8 +2833,13 @@ fn source_window_and_builder_share_one_memory_reservation() {
     );
     assert_eq!(
         super::super::text_artifact_builder_budget(ceiling, ceiling),
-        Err(tracedecay_query::retrieval::RetrievalPortError::BudgetExceeded),
-        "a source consuming the reservation must refuse before builder path access"
+        Err(tracedecay_query::retrieval::RetrievalPortError::Contract(
+            format!(
+                "text-artifact source window needs {ceiling} bytes, exhausting its \
+                 {ceiling}-byte build reservation"
+            )
+        )),
+        "a source consuming the reservation must refuse with the reproducible sizing evidence"
     );
 }
 

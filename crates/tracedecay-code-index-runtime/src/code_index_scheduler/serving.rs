@@ -950,8 +950,17 @@ fn map_text_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortEr
         CodeLexicalArtifactErrorV1::Incompatible(_) => RetrievalPortError::IncompatibleProjection,
         CodeLexicalArtifactErrorV1::Contract(detail) => RetrievalPortError::Contract(detail),
         CodeLexicalArtifactErrorV1::Corrupt(detail) => RetrievalPortError::Contract(detail),
-        CodeLexicalArtifactErrorV1::Unreserved(_)
-        | CodeLexicalArtifactErrorV1::BatchTooLarge { .. } => RetrievalPortError::BudgetExceeded,
+        CodeLexicalArtifactErrorV1::Unreserved(detail) => RetrievalPortError::AuthorityUnavailable(
+            format!("lexical artifact reservation is unavailable: {detail}"),
+        ),
+        error @ CodeLexicalArtifactErrorV1::BatchTooLarge { .. } => {
+            // The builder has already tightened the source to one record
+            // before this mapping. The same record and fixed budget reproduce
+            // this refusal forever; calling it a request budget timeout made
+            // the background worker retry it as transient work and discarded
+            // the required/maximum evidence.
+            RetrievalPortError::Contract(error.to_string())
+        }
         CodeLexicalArtifactErrorV1::Io(detail) | CodeLexicalArtifactErrorV1::Missing(detail) => {
             RetrievalPortError::AuthorityUnavailable(detail)
         }
@@ -1026,6 +1035,34 @@ pub(super) fn text_artifact_resident_memory_charges(
     Ok((accounted, retained))
 }
 
+pub(super) fn text_artifact_admitted_build_budget(
+    preferred_bytes: u64,
+    minimum_bytes: u64,
+    limit_bytes: u64,
+    used_bytes: u64,
+    observed_bytes: u64,
+    watermark_headroom: u64,
+) -> Result<u64, RetrievalPortError> {
+    if minimum_bytes == 0 || preferred_bytes < minimum_bytes {
+        return Err(RetrievalPortError::Contract(
+            "text-artifact build budget bounds are invalid".to_owned(),
+        ));
+    }
+    let unmodeled_live_bytes = observed_bytes.saturating_sub(used_bytes);
+    let available_for_growth = limit_bytes
+        .saturating_sub(used_bytes)
+        .saturating_sub(unmodeled_live_bytes)
+        .saturating_sub(watermark_headroom);
+    let admitted_bytes = preferred_bytes.min(available_for_growth);
+    if admitted_bytes < minimum_bytes {
+        return Err(RetrievalPortError::AuthorityUnavailable(format!(
+            "text-artifact build needs at least {minimum_bytes} bytes; \
+             {available_for_growth} bytes are available below the resident-memory watermark"
+        )));
+    }
+    Ok(admitted_bytes)
+}
+
 impl DaemonCodeTextArtifactStoreV1 {
     pub(super) fn bind(
         store_root: &Path,
@@ -1058,14 +1095,33 @@ impl DaemonCodeTextArtifactStoreV1 {
         component: &'static str,
         bytes: usize,
     ) -> Result<ResidentMemoryReservationV1, RetrievalPortError> {
+        self.reserve_resident_memory_up_to(generation_id, component, bytes, bytes)
+            .map(|(reservation, _)| reservation)
+    }
+
+    fn reserve_resident_memory_up_to(
+        &self,
+        generation_id: &CodeGenerationId,
+        component: &'static str,
+        preferred_bytes: usize,
+        minimum_bytes: usize,
+    ) -> Result<(ResidentMemoryReservationV1, usize), RetrievalPortError> {
         let component = ResidentMemoryComponentIdV1::new(component)
             .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
-        let requested = u64::try_from(bytes)
+        let preferred = u64::try_from(preferred_bytes)
             .ok()
             .and_then(std::num::NonZeroU64::new)
             .ok_or_else(|| {
                 RetrievalPortError::Contract(
                     "text-artifact resident-memory reservation must be nonzero".to_owned(),
+                )
+            })?;
+        let minimum = u64::try_from(minimum_bytes)
+            .ok()
+            .and_then(std::num::NonZeroU64::new)
+            .ok_or_else(|| {
+                RetrievalPortError::Contract(
+                    "text-artifact minimum resident-memory reservation must be nonzero".to_owned(),
                 )
             })?;
         let snapshot = self.resident_memory.snapshot();
@@ -1083,8 +1139,21 @@ impl DaemonCodeTextArtifactStoreV1 {
             .high_watermark_bytes()
             .min(snapshot.limit_bytes);
         let watermark_headroom = snapshot.limit_bytes.saturating_sub(admission_watermark);
+        let admitted_bytes = text_artifact_admitted_build_budget(
+            preferred.get(),
+            minimum.get(),
+            snapshot.limit_bytes,
+            snapshot.used_bytes,
+            observed_bytes,
+            watermark_headroom,
+        )?;
+        let admitted = NonZeroU64::new(admitted_bytes).ok_or_else(|| {
+            RetrievalPortError::Contract(
+                "text-artifact admitted resident-memory reservation must be nonzero".to_owned(),
+            )
+        })?;
         let (accounted, retained) = text_artifact_resident_memory_charges(
-            requested,
+            admitted,
             unmodeled_live_bytes,
             watermark_headroom,
         )?;
@@ -1093,7 +1162,9 @@ impl DaemonCodeTextArtifactStoreV1 {
         hotpath::gauge!("query.artifact.admission.unmodeled_live_bytes")
             .set(unmodeled_live_bytes as f64);
         hotpath::gauge!("query.artifact.admission.requested_growth_bytes")
-            .set(requested.get() as f64);
+            .set(preferred.get() as f64);
+        hotpath::gauge!("query.artifact.admission.admitted_growth_bytes")
+            .set(admitted.get() as f64);
         hotpath::gauge!("query.artifact.admission.accounted_bytes").set(accounted.get() as f64);
         hotpath::gauge!("query.artifact.admission.retained_bytes").set(retained.get() as f64);
         let mut reservation = self
@@ -1107,13 +1178,22 @@ impl DaemonCodeTextArtifactStoreV1 {
                 },
                 accounted,
             )
-            .map_err(|_| RetrievalPortError::BudgetExceeded)?;
+            .map_err(|error| {
+                RetrievalPortError::AuthorityUnavailable(format!(
+                    "text-artifact resident-memory admission was refused: {error}"
+                ))
+            })?;
         reservation.shrink_to(retained.get()).map_err(|error| {
             RetrievalPortError::Contract(format!(
                 "text-artifact resident-memory headroom release failed: {error}"
             ))
         })?;
-        Ok(reservation)
+        let admitted = usize::try_from(admitted.get()).map_err(|error| {
+            RetrievalPortError::Contract(format!(
+                "text-artifact admitted reservation exceeds the platform limit: {error}"
+            ))
+        })?;
+        Ok((reservation, admitted))
     }
 
     fn acquire_store_write_lock(&self) -> Result<CodeGenerationStoreLockV1, RetrievalPortError> {
@@ -2714,14 +2794,9 @@ impl LatestCodeTextGenerationV1 {
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<TextHeadOpenOutcomeV1, RetrievalPortError> {
         let store = &self.text_artifact_store;
-        let build_memory_budget = code_lexical_artifact_build_memory_budget_for(
+        let preferred_build_memory_budget = code_lexical_artifact_build_memory_budget_for(
             store.resident_memory.snapshot().limit_bytes,
         );
-        let (source_batch_pages, source_batch_bytes, _) =
-            text_artifact_source_batch_limits(build_memory_budget);
-        hotpath::gauge!("query.artifact.build_memory_budget_bytes").set(build_memory_budget);
-        hotpath::gauge!("query.artifact.source_batch_pages_max").set(source_batch_pages);
-        hotpath::gauge!("query.artifact.source_batch_bytes_max").set(source_batch_bytes);
         let generation_id = self.metadata.manifest().generation_id.clone();
         if let Some(descriptor) = store.published_descriptor(&generation_id)?
             && let Some(outcome) =
@@ -2730,12 +2805,24 @@ impl LatestCodeTextGenerationV1 {
             return Ok(outcome);
         }
         // The builder's advertised memory ceiling is reserved through the
-        // process resident-memory authority before the build allocates.
-        let build_reservation = store.reserve_resident_memory(
+        // process resident-memory authority before the build allocates. The
+        // host-scaled figure is a preferred ceiling, not a minimum: under a
+        // large stale serving graph, admit any supported budget down to the
+        // builder's established 1.5 GiB floor so the replacement can finish
+        // and release that graph.
+        let (build_reservation, build_memory_budget) = store.reserve_resident_memory_up_to(
             &generation_id,
             "code-text-artifact-build",
-            build_memory_budget,
+            preferred_build_memory_budget,
+            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
         )?;
+        let (source_batch_pages, source_batch_bytes, _) =
+            text_artifact_source_batch_limits(build_memory_budget);
+        hotpath::gauge!("query.artifact.preferred_build_memory_budget_bytes")
+            .set(preferred_build_memory_budget);
+        hotpath::gauge!("query.artifact.build_memory_budget_bytes").set(build_memory_budget);
+        hotpath::gauge!("query.artifact.source_batch_pages_max").set(source_batch_pages);
+        hotpath::gauge!("query.artifact.source_batch_bytes_max").set(source_batch_bytes);
         let sealed_identity = store.sealed_identity(&generation_id)?;
         let sealed_hex = sha256_hex_suffix(sealed_identity.digest.as_str()).ok_or_else(|| {
             RetrievalPortError::Contract(
@@ -3751,7 +3838,12 @@ pub(super) fn text_artifact_builder_budget(
     build_memory_budget
         .checked_sub(source_window_bytes)
         .filter(|remaining| *remaining > 0)
-        .ok_or(RetrievalPortError::BudgetExceeded)
+        .ok_or_else(|| {
+            RetrievalPortError::Contract(format!(
+                "text-artifact source window needs {source_window_bytes} bytes, exhausting its \
+                 {build_memory_budget}-byte build reservation"
+            ))
+        })
 }
 
 #[cfg(test)]
