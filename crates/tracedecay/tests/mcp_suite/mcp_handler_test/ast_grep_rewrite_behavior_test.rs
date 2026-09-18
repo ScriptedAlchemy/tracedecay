@@ -490,10 +490,16 @@ async fn ast_grep_rewrite_refuses_unmatched_patterns_paths_and_stale_previews() 
             "dry_run": true
         }),
     )
-    .await;
+    .await
+    .expect("path outside the worktree is a tool result");
+    assert_eq!(escaped.semantic_error(), Some(true), "{escaped:?}");
+    let escaped_json = edit_json(&escaped);
+    assert_eq!(escaped_json["success"], json!(false), "{escaped_json}");
+    assert_eq!(escaped_json["failed"], json!(true), "{escaped_json}");
     assert_eq!(
-        expect_tool_error(escaped),
-        "project route error (source_edit.execution_failed): config error: path is not within the project"
+        escaped_json["message"],
+        json!("source edit failed before the effect: config error: path is not within the project"),
+        "{escaped_json}"
     );
     assert_eq!(fs::read(&outside).unwrap(), b"fn secret() {}\n");
 
@@ -506,10 +512,18 @@ async fn ast_grep_rewrite_refuses_unmatched_patterns_paths_and_stale_previews() 
             "dry_run": true
         }),
     )
-    .await;
+    .await
+    .expect("missing file is a tool result");
+    assert_eq!(missing.semantic_error(), Some(true));
+    let missing_json = edit_json(&missing);
+    assert_eq!(missing_json["success"], json!(false), "{missing_json}");
+    assert_eq!(missing_json["failed"], json!(true), "{missing_json}");
     assert_eq!(
-        expect_tool_error(missing),
-        "project route error (source_edit.execution_failed): config error: failed to read src/missing.rs: file was not found"
+        missing_json["message"],
+        json!(
+            "source edit failed before the effect: config error: failed to read src/missing.rs: file was not found"
+        ),
+        "{missing_json}"
     );
 
     let directory = call_rewrite(
@@ -521,10 +535,18 @@ async fn ast_grep_rewrite_refuses_unmatched_patterns_paths_and_stale_previews() 
             "dry_run": true
         }),
     )
-    .await;
+    .await
+    .expect("directory is a tool result");
+    assert_eq!(directory.semantic_error(), Some(true));
+    let directory_json = edit_json(&directory);
+    assert_eq!(directory_json["success"], json!(false), "{directory_json}");
+    assert_eq!(directory_json["failed"], json!(true), "{directory_json}");
     assert_eq!(
-        expect_tool_error(directory),
-        "project route error (source_edit.execution_failed): config error: source edit path is not a regular file beneath the authorized worktree"
+        directory_json["message"],
+        json!(
+            "source edit failed before the effect: config error: source edit path is not a regular file beneath the authorized worktree"
+        ),
+        "{directory_json}"
     );
 
     let missing_arg = call_rewrite(
