@@ -714,8 +714,21 @@ async fn update_project_memory_fact_with_cas_tx(
         .patch()
         .source_label()
         .unwrap_or_else(|| previous_payload.source_label());
-    let Some(sanitized) =
-        sanitize_payload(content, category, tags, entities, metadata, source_label)?
+    // The operation digest above keeps the caller's label order so a retry is
+    // the same update. Stored payloads hash labels in canonical order; the
+    // sanitizer receipt must see that order or the write is rejected.
+    let mut canonical_tags = tags.to_vec();
+    let mut canonical_entities = entities.to_vec();
+    canonical_tags.sort_unstable();
+    canonical_entities.sort_unstable();
+    let Some(sanitized) = sanitize_payload(
+        content,
+        category,
+        &canonical_tags,
+        &canonical_entities,
+        metadata,
+        source_label,
+    )?
     else {
         return Err(storage_message(
             PROJECT_MEMORY_WRITE_OPERATION,

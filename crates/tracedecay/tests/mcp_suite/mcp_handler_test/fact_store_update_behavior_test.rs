@@ -77,6 +77,21 @@ fn success_text(response: &Value) -> Value {
     serde_json::from_str(text).unwrap_or_else(|error| panic!("invalid tool JSON: {error}: {text}"))
 }
 
+/// A well-formed id for this owner that was never stored. Flipping the last
+/// identity nibble keeps the owner binding and rejects a non-canonical token
+/// such as `fact.missing` before the store is consulted.
+fn unknown_fact_id(known: &Value) -> String {
+    let known = known
+        .as_str()
+        .unwrap_or_else(|| panic!("seeded fact id must be a string: {known}"));
+    let mut id = known.to_owned();
+    let last = id
+        .pop()
+        .unwrap_or_else(|| panic!("seeded fact id must be non-empty: {known}"));
+    id.push(if last == 'a' { 'b' } else { 'a' });
+    id
+}
+
 fn available_fact(projection: &Value) -> &Value {
     assert_eq!(projection["kind"], "available", "{projection}");
     projection
@@ -109,19 +124,36 @@ fn assert_fact_snapshot(projection: &Value, snapshot: &Value) {
     );
 }
 
-fn assert_committed_update(payload: &Value, fact_id: &Value, event_count: u64) {
+fn assert_committed_update(payload: &Value, fact_id: &Value, project_id: &Value, event_count: u64) {
     assert_eq!(payload["commit"]["disposition"], "committed", "{payload}");
     assert_eq!(payload["commit"]["fact_id"], *fact_id, "{payload}");
     assert_eq!(
-        payload["commit"]["owner"], payload["fact"]["fact"]["owner"],
+        payload["commit"]["owner"],
+        json!({"kind": "project", "project_id": project_id}),
         "{payload}"
     );
-    assert_eq!(
-        payload["commit"]["last_event_id"], payload["fact"]["fact"]["last_event_id"],
-        "{payload}"
+    let last_event_id = payload["commit"]["last_event_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("commit omitted last_event_id: {payload}"));
+    assert!(
+        !last_event_id.is_empty(),
+        "commit last_event_id must be a durable id: {payload}"
     );
     assert_eq!(
-        payload["commit"]["active_assertion_id"], payload["fact"]["fact"]["active_assertion_id"],
+        payload["fact"]["fact"]["last_event_id"],
+        json!(last_event_id),
+        "{payload}"
+    );
+    let active_assertion_id = payload["commit"]["active_assertion_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("commit omitted active_assertion_id: {payload}"));
+    assert!(
+        !active_assertion_id.is_empty(),
+        "commit active_assertion_id must be a durable id: {payload}"
+    );
+    assert_eq!(
+        payload["fact"]["fact"]["active_assertion_id"],
+        json!(active_assertion_id),
         "{payload}"
     );
     let events = payload["commit"]["committed_event_ids"]
@@ -229,7 +261,7 @@ async fn fact_store_update_preserves_identity_and_rejects_stale_or_empty_writes(
         "{updated}"
     );
     assert_fact_snapshot(&updated["fact"], &rewritten);
-    assert_committed_update(&updated, &fact_id, 2);
+    assert_committed_update(&updated, &fact_id, &project_id, 2);
     let rewritten_fact = available_fact(&updated["fact"]);
     assert_eq!(
         rewritten_fact["telemetry"]["created_at"], seeded_created_at,
@@ -317,7 +349,7 @@ async fn fact_store_update_preserves_identity_and_rejects_stale_or_empty_writes(
     );
     assert_eq!(narrowed["trust_delta_millionths"], json!(0), "{narrowed}");
     assert_fact_snapshot(&narrowed["fact"], &reviewed);
-    assert_committed_update(&narrowed, &fact_id, 1);
+    assert_committed_update(&narrowed, &fact_id, &project_id, 1);
     let reviewed_event_id = available_fact(&narrowed["fact"])["last_event_id"].clone();
 
     let cleared = json!({
@@ -351,7 +383,7 @@ async fn fact_store_update_preserves_identity_and_rejects_stale_or_empty_writes(
         "{cleared_payload}"
     );
     assert_fact_snapshot(&cleared_payload["fact"], &cleared);
-    assert_committed_update(&cleared_payload, &fact_id, 1);
+    assert_committed_update(&cleared_payload, &fact_id, &project_id, 1);
 
     let stale = handle_real_server_tool_call_raw(
         &server,
@@ -427,7 +459,7 @@ async fn fact_store_update_preserves_identity_and_rejects_stale_or_empty_writes(
         &server,
         "tracedecay_fact_store_update",
         json!({
-            "fact_id": "fact.missing",
+            "fact_id": unknown_fact_id(&fact_id),
             "content": "no such fact"
         }),
     )
