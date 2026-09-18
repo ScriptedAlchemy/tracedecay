@@ -127,10 +127,7 @@ fn conflict_problem() -> Value {
     })
 }
 
-fn assert_schema_refusal(response: &Value, detail: &str) {
-    let message = format!(
-        "tool execution failed: invalid retained application request for tracedecay_fact_feedback: {detail}"
-    );
+fn schema_refusal_message(response: &Value) -> String {
     assert!(
         response.get("result").is_none(),
         "schema refusals are JSON-RPC errors, not tool results: {response}"
@@ -138,11 +135,20 @@ fn assert_schema_refusal(response: &Value, detail: &str) {
     assert_eq!(response["jsonrpc"], "2.0", "{response}");
     assert_eq!(response["id"], json!(1), "{response}");
     assert_eq!(response["error"]["code"], json!(-32603), "{response}");
-    assert_eq!(response["error"]["message"], message, "{response}");
     assert_eq!(
         response["error"]["data"]["tool"], "tracedecay_fact_feedback",
         "{response}"
     );
+    response["error"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("schema refusal omitted its message: {response}"))
+        .to_owned()
+}
+
+fn schema_refusal(detail: &str) -> String {
+    format!(
+        "tool execution failed: config error: invalid retained application request for tracedecay_fact_feedback: {detail}"
+    )
 }
 
 fn assert_stored_identity(fact: &Value, fact_id: &Value, project_id: &Value, trust: u64) {
@@ -277,50 +283,65 @@ async fn fact_feedback_rates_trust_and_refuses_the_other_inputs() {
     let seeded_assertion_id = seeded["active_assertion_id"].clone();
     let seeded_created_at = seeded["telemetry"]["created_at"].clone();
 
-    assert_schema_refusal(
+    let missing_action = schema_refusal_message(
         &handle_real_server_tool_call_raw(
             &server,
             "tracedecay_fact_feedback",
             json!({"fact_id": fact_id}),
         )
         .await,
-        "missing field `action`",
     );
-    assert_schema_refusal(
+    let numeric_id = schema_refusal_message(
         &handle_real_server_tool_call_raw(
             &server,
             "tracedecay_fact_feedback",
             json!({"fact_id": 41, "action": "helpful"}),
         )
         .await,
-        "fact_id: invalid type: integer `41`, expected a string",
     );
-    assert_schema_refusal(
+    let legacy_helpful = schema_refusal_message(
         &handle_real_server_tool_call_raw(
             &server,
             "tracedecay_fact_feedback",
             json!({"fact_id": fact_id, "helpful": true}),
         )
         .await,
-        "unknown field `helpful`, expected `fact_id` or `expected_last_event_id` or `action` or `source_label` or `reason` or `memory_scope` or `project_selector`",
     );
-    assert_schema_refusal(
+    let legacy_source = schema_refusal_message(
         &handle_real_server_tool_call_raw(
             &server,
             "tracedecay_fact_feedback",
             json!({"fact_id": fact_id, "action": "helpful", "source": "legacy"}),
         )
         .await,
-        "unknown field `source`, expected `fact_id` or `expected_last_event_id` or `action` or `source_label` or `reason` or `memory_scope` or `project_selector`",
     );
-    assert_schema_refusal(
+    let unknown_action = schema_refusal_message(
         &handle_real_server_tool_call_raw(
             &server,
             "tracedecay_fact_feedback",
             json!({"fact_id": fact_id, "action": "maybe"}),
         )
         .await,
-        "action: unknown variant `maybe`, expected `helpful` or `unhelpful`",
+    );
+    assert_eq!(
+        [
+            missing_action,
+            numeric_id,
+            legacy_helpful,
+            legacy_source,
+            unknown_action
+        ],
+        [
+            schema_refusal("missing field `action`"),
+            schema_refusal("fact_id: invalid type: integer `41`, expected a string"),
+            schema_refusal(
+                "helpful: unknown field `helpful`, expected one of `fact_id`, `expected_last_event_id`, `action`, `source_label`, `reason`, `memory_scope`, `project_selector`"
+            ),
+            schema_refusal(
+                "source: unknown field `source`, expected one of `fact_id`, `expected_last_event_id`, `action`, `source_label`, `reason`, `memory_scope`, `project_selector`"
+            ),
+            schema_refusal("action: unknown variant `maybe`, expected `helpful` or `unhelpful`"),
+        ]
     );
 
     let untouched = retained_payload(
