@@ -9,7 +9,9 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use grafeo_engine::GrafeoDB;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracedecay_domain::canonical_text::{encode_lowercase_hex, encode_tagged_lowercase_hex};
+use tracedecay_domain::canonical_text::{
+    encode_lowercase_hex, encode_tagged_lowercase_hex, sha256_hex,
+};
 use tracedecay_store::runtime::{
     GraphDependencyGenerationClosureDigestV1, GraphDependencyGenerationIdentityV1,
     GraphGenerationIdV1, GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1,
@@ -885,10 +887,7 @@ pub(crate) fn physical_namespace(
             "failed to encode physical graph generation identity: {error}"
         ))
     })?;
-    GraphNamespace::new(format!(
-        "generation:{}",
-        hex::encode(Sha256::digest(encoded))
-    ))
+    GraphNamespace::new(format!("generation:{}", sha256_hex(&encoded)))
 }
 
 pub(crate) fn is_physical_generation_namespace(namespace: &GraphNamespace) -> bool {

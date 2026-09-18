@@ -64,14 +64,22 @@ pub fn estimate_tokens(s: &str) -> u32 {
     s.chars().count().div_ceil(4).min(u32::MAX as usize) as u32
 }
 pub fn render_lines(source: &str, range: LineRange) -> String {
-    let lines = source.lines().collect::<Vec<_>>();
     let start = range.start.saturating_sub(1) as usize;
-    let end = (range.end as usize).min(lines.len());
-    if start >= end {
-        String::new()
-    } else {
-        lines[start..end].join("\n")
+    let end_inclusive = range.end as usize;
+    if start >= end_inclusive {
+        return String::new();
     }
+    let mut selected = source.lines().skip(start).take(end_inclusive - start);
+    let Some(first) = selected.next() else {
+        return String::new();
+    };
+    let mut body = String::with_capacity(first.len());
+    body.push_str(first);
+    for line in selected {
+        body.push('\n');
+        body.push_str(line);
+    }
+    body
 }
 
 #[hotpath::measure(label = "usecases.context.render_map")]

@@ -42,7 +42,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write, sync_directory};
 
 use crate::{GraphDb, GraphDbError};
@@ -347,7 +347,7 @@ fn quarantine_durability_failure(
 }
 
 fn fault_fingerprint(fault: &str) -> String {
-    format!("sha256:{}", hex::encode(Sha256::digest(fault.as_bytes())))
+    format!("sha256:{}", sha256_hex(fault.as_bytes()))
 }
 
 /// `graph.grafeo` -> `graph.grafeo.wal`, matching Grafeo's sidecar layout.
