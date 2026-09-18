@@ -589,6 +589,12 @@ pub enum ProjectionStoreError {
         provider: String,
         message_id: String,
     },
+    #[error("projection session output collided at {provider}/{session_id}: {field} differs")]
+    SessionOutputCollision {
+        provider: String,
+        session_id: String,
+        field: &'static str,
+    },
     #[error("projection provenance collided with an existing output")]
     ProvenanceCollision,
     #[error("projection rebuild frontier {frontier} is past committed sequence {committed}")]

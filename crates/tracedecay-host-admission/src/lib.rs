@@ -905,6 +905,9 @@ const fn projection_error_outcome(error: &ProjectionStoreError) -> HostAdmission
         ProjectionStoreError::OutputCollision { .. } => {
             HostAdmissionOutcome::degraded("projection_output_collision")
         }
+        ProjectionStoreError::SessionOutputCollision { .. } => {
+            HostAdmissionOutcome::degraded("projection_session_collision")
+        }
         ProjectionStoreError::Contract(_) => {
             HostAdmissionOutcome::degraded("projection_contract_rejected")
         }
