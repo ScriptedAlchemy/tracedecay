@@ -1,3 +1,5 @@
+use super::Show;
+
 pub struct Badge;
 
 impl Show for Badge {

@@ -3,9 +3,9 @@
 //! `tracedecay_impls` through the production MCP `tools/call` path.
 //!
 //! The fixture is a small Rust crate with local trait impls, an inherent
-//! impl, a cross-file impl, and an impl whose trait (`std::fmt::Display`)
-//! is not a project symbol. Expected rows are the census a caller observes,
-//! not extractor internals.
+//! impl, a cross-file impl (`badge.rs` imports `Show`), and an impl whose
+//! trait (`std::fmt::Display`) is not a project symbol. Expected rows are
+//! the census a caller observes, not extractor internals.
 
 use crate::support::{
     ProductionCompositionFixture, extract_text, handle_real_server_tool_call_raw,
@@ -50,8 +50,8 @@ fn badge_show() -> Value {
         Some("Show"),
         Some("src/lib.rs::Show"),
         "src/badge.rs",
-        3,
-        7,
+        5,
+        9,
         "impl Show for Badge",
     )
 }
