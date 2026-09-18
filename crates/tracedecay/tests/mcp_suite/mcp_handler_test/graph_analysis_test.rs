@@ -1,6 +1,7 @@
 #![cfg(feature = "test-transport")]
 
 mod graph_readiness;
+mod hotspots;
 
 use crate::common::fixture::git_run;
 use crate::support::*;
