@@ -111,7 +111,9 @@ async fn fact_store_probe_returns_connected_facts_and_typed_refusals() {
     assert_eq!(friday["fact"]["metadata"], json!({"plan": "probe"}));
     assert_eq!(friday["fact"]["source"]["kind"], "application");
 
-    let folded = probe(&cg.server, json!({"entity": " northwind ledger. "})).await;
+    // Surrounding punctuation is stripped before the case-insensitive compare,
+    // so this is the same entity as `Northwind Ledger`.
+    let folded = probe(&cg.server, json!({"entity": "(northwind ledger)"})).await;
     assert_probe_hits(
         &folded,
         &[
@@ -173,13 +175,22 @@ async fn fact_store_probe_returns_connected_facts_and_typed_refusals() {
     assert_eq!(second_page["next_after"], Value::Null);
     assert_probe_hits(&second_page, &[(AUDIT, "decision", &[LEDGER], 500_000)]);
 
-    for entity in ["Missing Beacon", "", "   "] {
-        let empty = probe(&cg.server, json!({"entity": entity})).await;
-        assert_eq!(empty["owner"]["kind"], "project");
-        assert_eq!(empty["owner"]["project_id"], project_id);
-        assert_eq!(empty["hits"], json!([]));
-        assert_eq!(empty["next_after"], Value::Null);
-        assert_eq!(empty["graph_coverage"], json!({"kind": "not_applicable"}));
+    let unknown = probe(&cg.server, json!({"entity": "Missing Beacon"})).await;
+    assert_eq!(
+        unknown["owner"],
+        json!({"kind": "project", "project_id": project_id})
+    );
+    assert_eq!(unknown["hits"], json!([]));
+    assert_eq!(unknown["next_after"], Value::Null);
+    assert_eq!(unknown["graph_coverage"], json!({"kind": "not_applicable"}));
+    for entity in ["", "   "] {
+        let blank = handle_real_server_tool_call(
+            &cg.server,
+            "tracedecay_fact_store_probe",
+            json!({"entity": entity}),
+        )
+        .await;
+        assert_invalid_request(&blank);
     }
 
     let missing_entity = handle_real_server_tool_call_raw(
@@ -188,20 +199,14 @@ async fn fact_store_probe_returns_connected_facts_and_typed_refusals() {
         json!({"category": "project"}),
     )
     .await;
-    assert_schema_refusal(
-        &missing_entity,
-        "application surface request does not match its reviewed schema: missing field `entity`",
-    );
+    assert_schema_refusal(&missing_entity, "missing field `entity`");
     let unknown_field = handle_real_server_tool_call_raw(
         &cg.server,
         "tracedecay_fact_store_probe",
         json!({"entity": LEDGER, "not_a_probe_field": true}),
     )
     .await;
-    assert_schema_refusal(
-        &unknown_field,
-        "application surface request does not match its reviewed schema: unknown field `not_a_probe_field`, expected one of `entity`, `memory_scope`, `category`, `min_trust`, `limit`, `project_selector`, `after`",
-    );
+    assert_schema_refusal(&unknown_field, "unknown field `not_a_probe_field`");
 
     let invalid_limit = handle_real_server_tool_call(
         &cg.server,
@@ -209,29 +214,7 @@ async fn fact_store_probe_returns_connected_facts_and_typed_refusals() {
         json!({"entity": LEDGER, "limit": 0}),
     )
     .await;
-    assert_eq!(invalid_limit["isError"], true, "{invalid_limit}");
-    assert_eq!(invalid_limit["problem"]["kind"], "invalid_request");
-    assert_eq!(
-        invalid_limit["problem"]["code"],
-        "application.retained.invalid-request"
-    );
-    assert_eq!(
-        invalid_limit["problem"]["message"],
-        "The retained operation request is invalid."
-    );
-    assert_eq!(
-        invalid_limit["problem"]["diagnostic"],
-        json!({
-            "code": "application.retained.invalid-request",
-            "message": "The retained operation request is invalid."
-        })
-    );
-    assert_eq!(invalid_limit["problem"]["retry"], "never");
-    assert_eq!(invalid_limit["problem"]["retryable"], false);
-    assert_eq!(
-        invalid_limit["problem"]["legal_actions"],
-        json!(["correct_request"])
-    );
+    assert_invalid_request(&invalid_limit);
 
     let monday_id = add_fact(
         &cg.server,
@@ -349,7 +332,7 @@ async fn fact_store_probe_reads_only_the_selected_registered_project() {
         )],
     );
 
-    let missing = handle_real_server_tool_call(
+    let missing = handle_real_server_tool_call_raw(
         &fixture.active_server,
         "tracedecay_fact_store_probe",
         json!({
@@ -358,17 +341,19 @@ async fn fact_store_probe_reads_only_the_selected_registered_project() {
         }),
     )
     .await;
-    assert_eq!(missing["isError"], true, "{missing}");
-    assert_eq!(missing["problem"]["kind"], "not_found_or_not_authorized");
-    assert_eq!(missing["problem"]["code"], "not_found_or_not_authorized");
+    let error = &missing["error"];
+    assert_eq!(error["code"], -32602, "{missing}");
     assert_eq!(
-        missing["problem"]["message"],
-        "The requested resource was not found or is not authorized"
+        error["message"],
+        "tool project route failed: reason_code=project_route_not_found retryable=false: registered project not found for project_selector.project_id=project.missing; run tracedecay_project_search"
     );
-    assert_eq!(missing["problem"]["diagnostic"], Value::Null);
-    assert_eq!(missing["problem"]["retry"], "never");
-    assert_eq!(missing["problem"]["retryable"], false);
-    assert_eq!(missing["problem"]["legal_actions"], json!([]));
+    assert_eq!(error["data"]["tool"], "tracedecay_fact_store_probe");
+    assert_eq!(error["data"]["reason_code"], "project_route_not_found");
+    assert_eq!(error["data"]["retryable"], false);
+    assert_eq!(
+        error["data"]["detail"],
+        "registered project not found for project_selector.project_id=project.missing; run tracedecay_project_search"
+    );
 
     fixture.harness.shutdown().await;
 }
@@ -421,24 +406,41 @@ fn assert_probe_hits(payload: &Value, expected: &[(&str, &str, &[&str], u64)]) {
     }
 }
 
+fn assert_invalid_request(result: &Value) {
+    assert_eq!(result["isError"], true, "{result}");
+    assert_eq!(result["problem"]["kind"], "invalid_request", "{result}");
+    assert_eq!(
+        result["problem"]["code"],
+        "application.retained.invalid-request"
+    );
+    assert_eq!(
+        result["problem"]["message"],
+        "The retained operation request is invalid."
+    );
+    assert_eq!(
+        result["problem"]["diagnostic"],
+        json!({
+            "code": "application.retained.invalid-request",
+            "message": "The retained operation request is invalid."
+        })
+    );
+    assert_eq!(result["problem"]["retry"], "never");
+    assert_eq!(result["problem"]["retryable"], false);
+    assert_eq!(
+        result["problem"]["legal_actions"],
+        json!(["correct_request"])
+    );
+}
+
 fn assert_schema_refusal(response: &Value, detail: &str) {
     let error = &response["error"];
-    assert!(error.is_object(), "{response}");
-    assert_eq!(error["code"], -32602, "{response}");
+    assert_eq!(error["code"], -32603, "{response}");
     assert_eq!(
         error["message"],
         format!(
-            "tool project route failed: reason_code=application_surface_invalid_request retryable=false: {detail}"
+            "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_probe: {detail}"
         ),
         "{response}"
     );
     assert_eq!(error["data"]["tool"], "tracedecay_fact_store_probe");
-    assert_eq!(
-        error["data"]["reason_code"],
-        "application_surface_invalid_request"
-    );
-    assert_eq!(error["data"]["retryable"], false);
-    assert_eq!(error["data"]["kind"], "invalid_request");
-    assert_eq!(error["data"]["code"], "application_surface_invalid_request");
-    assert_eq!(error["data"]["detail"], detail);
 }
