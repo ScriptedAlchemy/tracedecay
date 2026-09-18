@@ -815,7 +815,28 @@ async fn validate_message_projection_row(
         resolved.released,
     )? == StoredProvenanceRendering::Current
     {
-        verify_owner_output_rows(conn, resolved, &owner_projection).await?;
+        match verify_owner_output_rows(conn, resolved, &owner_projection).await {
+            Ok(()) => {}
+            Err(ProjectionStoreError::OutputCollision {
+                provider,
+                message_id,
+            }) if provider == owner_projection.message().provider
+                && message_id == owner_projection.message().message_id =>
+            {
+                // Ownership was validated above, the immutable observation
+                // re-derived this projection, and its provenance already
+                // carries the projection's current digest. The mutable output
+                // row is the only stale member, an interrupted/older write
+                // shape observed in ProfileSessions. Finish that write in the
+                // same convergence ledger used for released renderings.
+                resolved.released.record(&owner_projection);
+            }
+            Err(error) => {
+                return Err(authority_violation(format!(
+                    "projection output rows disagree with deterministic output: {error}"
+                )));
+            }
+        }
     }
     Ok(true)
 }
@@ -826,7 +847,7 @@ async fn verify_owner_output_rows(
     conn: &impl QueryExecutor,
     resolved: &ResolvedOutputAuthority<'_>,
     owner: &SessionMessageProjection,
-) -> tracedecay_domain::errors::Result<()> {
+) -> std::result::Result<(), ProjectionStoreError> {
     let session = owner.session();
     let message = owner.message();
     crate::observation_projection::verify_projection_rows_from_records(
@@ -840,11 +861,6 @@ async fn verify_owner_output_rows(
             .message(&message.provider, &message.message_id),
     )
     .await
-    .map_err(|error| {
-        authority_violation(format!(
-            "projection output rows disagree with deterministic output: {error}"
-        ))
-    })
 }
 
 #[allow(clippy::too_many_arguments)]
