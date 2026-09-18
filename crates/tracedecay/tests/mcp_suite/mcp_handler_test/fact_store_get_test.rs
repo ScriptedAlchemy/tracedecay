@@ -20,12 +20,19 @@ async fn call_tool(server: &McpServer, tool_name: &str, arguments: Value) -> Val
     handle_real_server_tool_call_raw(server, tool_name, arguments).await
 }
 
-/// The document an MCP client reads: the JSON-RPC error, or the parsed tool text.
+/// The document an MCP client reads.
+///
+/// A JSON-RPC error is returned as-is. A retained evidence or effect envelope
+/// is reduced to its owner payload. A problem envelope stays intact so a
+/// refusal can be asserted by `problem.kind`.
 fn client_document(response: &Value) -> Value {
     if !response["error"].is_null() {
         return response["error"].clone();
     }
     let text = extract_real_server_text(&response["result"]);
+    if let Some(payload) = crate::support::retained_envelope_payload(text) {
+        return payload;
+    }
     serde_json::from_str(text).unwrap_or_else(|error| {
         panic!("tracedecay_fact_store_get returned non-JSON tool text: {error}: {text}")
     })
@@ -60,6 +67,15 @@ fn assert_problem(document: &Value, kind: &str) {
         document.pointer("/outcome/value/payload").is_none(),
         "a {kind} refusal must not carry a fact payload: {document}"
     );
+}
+
+fn assert_rejected_get(document: &Value, diagnostic: &str) {
+    let message = format!(
+        "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_get: {diagnostic}"
+    );
+    assert_eq!(document["code"], -32603, "{document}");
+    assert_eq!(document["data"]["tool"], "tracedecay_fact_store_get");
+    assert_eq!(document["message"], message);
 }
 
 async fn project_id(server: &McpServer) -> String {
@@ -414,7 +430,21 @@ async fn fact_store_get_reads_only_the_selected_registered_project() {
         )
         .await,
     );
-    assert_problem(&missing_project, "not_found_or_not_authorized");
+    assert_eq!(missing_project["code"], -32602, "{missing_project}");
+    assert_eq!(missing_project["data"]["tool"], "tracedecay_fact_store_get");
+    assert_eq!(
+        missing_project["data"]["reason_code"],
+        "project_route_not_found"
+    );
+    assert_eq!(missing_project["data"]["retryable"], false);
+    assert_eq!(
+        missing_project["data"]["detail"],
+        "registered project not found for project_selector.project_id=project.missing; run tracedecay_project_search"
+    );
+    assert_eq!(
+        missing_project["message"],
+        "tool project route failed: reason_code=project_route_not_found retryable=false: registered project not found for project_selector.project_id=project.missing; run tracedecay_project_search"
+    );
     assert!(
         !missing_project.to_string().contains(active_content),
         "an unresolved selector must not fall back to the active project: {missing_project}"
@@ -446,15 +476,24 @@ async fn fact_store_get_rejects_a_request_that_is_not_one_fact_id() {
     assert_eq!(stored["fact"]["fact"]["content"], content);
     assert_eq!(stored["fact"]["fact"]["category"], "tool");
 
-    for arguments in [
-        json!({}),
-        json!({"fact_id": 41}),
-        json!({"fact_id": "fact.never-stored", "category": "decision"}),
-        json!({"fact_id": "fact.never-stored", "min_trust": 0.5}),
+    for (arguments, diagnostic) in [
+        (json!({}), "missing field `fact_id`"),
+        (
+            json!({"fact_id": 41}),
+            "fact_id: invalid type: integer `41`, expected a string",
+        ),
+        (
+            json!({"fact_id": "fact.never-stored", "category": "decision"}),
+            "category: unknown field `category`, expected one of `fact_id`, `memory_scope`, `project_selector`",
+        ),
+        (
+            json!({"fact_id": "fact.never-stored", "min_trust": 0.5}),
+            "min_trust: unknown field `min_trust`, expected one of `fact_id`, `memory_scope`, `project_selector`",
+        ),
     ] {
         let refused =
             client_document(&call_tool(&server, "tracedecay_fact_store_get", arguments).await);
-        assert_problem(&refused, "invalid_request");
+        assert_rejected_get(&refused, diagnostic);
         assert!(
             !refused.to_string().contains(content),
             "a rejected get must not return the stored fact: {refused}"
