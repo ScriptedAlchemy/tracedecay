@@ -831,6 +831,19 @@ async fn validate_message_projection_row(
                 // same convergence ledger used for released renderings.
                 resolved.released.record(&owner_projection);
             }
+            Err(ProjectionStoreError::SessionOutputCollision {
+                provider,
+                session_id,
+                field: "row_missing",
+            }) if provider == owner_projection.session().provider
+                && session_id == owner_projection.session().session_id =>
+            {
+                // The uniquely owned current output has no session row. The
+                // immutable owner projection is the exact insert authority;
+                // defer it to the write transaction's convergence ledger.
+                // Conflicting session fields remain hard errors.
+                resolved.released.record(&owner_projection);
+            }
             Err(error) => {
                 return Err(authority_violation(format!(
                     "projection output rows disagree with deterministic output: {error}"

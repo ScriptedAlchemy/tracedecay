@@ -837,6 +837,11 @@ pub(in super::super) async fn converge_released_output_rendering(
     conn: &impl Executor,
     projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<ConvergedRendering> {
+    // A beta-era partial projection may retain current provenance and message
+    // rows after losing their shared session row. The immutable projection is
+    // the canonical insert authority; `apply_session` also preserves richer
+    // compatible session metadata when the row already exists.
+    apply_session(conn, projection.session()).await?;
     let message = projection.message();
     supersede_projected_message(conn, message).await?;
     if message.provider != "hermes" {
