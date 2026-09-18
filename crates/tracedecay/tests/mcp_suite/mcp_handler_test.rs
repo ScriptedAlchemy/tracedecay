@@ -33,6 +33,8 @@ mod health_behavior_test;
 mod impact_behavior_test;
 mod implementations_test;
 mod impls_behavior_test;
+#[cfg(feature = "test-transport")]
+mod insert_at_test;
 mod largest_test;
 mod lcm_doctor_test;
 #[cfg(feature = "test-transport")]
