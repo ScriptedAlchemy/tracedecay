@@ -31,6 +31,25 @@ pub(super) async fn setup_project() -> FactStoreMcpFixture {
     fact_store_mcp_fixture().await
 }
 
+pub(super) async fn active_project_id(fixture: &FactStoreMcpFixture) -> String {
+    fixture
+        .production
+        .harness
+        .project_id(&fixture.production.project_root)
+        .await
+        .expect("registered project id")
+}
+
+/// JSON-RPC `tools/call` response, including protocol errors that the payload
+/// helper collapses into `Err`.
+pub(super) async fn invoke_production_tool_response(
+    fixture: &FactStoreMcpFixture,
+    tool_name: &str,
+    arguments: Value,
+) -> Value {
+    handle_real_server_tool_call_raw(&fixture.server, tool_name, arguments).await
+}
+
 /// Invoke an exact MCP operation through the production daemon executor and
 /// project its typed operation payload for focused behavioral assertions.
 async fn invoke_exact_tool(

@@ -38,6 +38,8 @@ mod memory_fact_supersede_test;
 mod memory_facts_test;
 mod memory_feedback_test;
 #[cfg(feature = "test-transport")]
+mod memory_status_test;
+#[cfg(feature = "test-transport")]
 mod move_symbol_test;
 #[cfg(all(feature = "test-transport", unix))]
 mod release_placement_test;
