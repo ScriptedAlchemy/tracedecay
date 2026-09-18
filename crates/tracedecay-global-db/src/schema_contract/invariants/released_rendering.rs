@@ -662,6 +662,86 @@ mod tests {
         assert_eq!(stored_output(&snapshot, RECORD_ID).await, current);
     }
 
+    #[tokio::test]
+    async fn current_provenance_restores_its_missing_session_row() {
+        let directory = TempDir::new().unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .unwrap();
+        seed(&runtime, &observation()).await.unwrap();
+        let database = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        let snapshot = database.read_snapshot().await.unwrap();
+        let current = stored_output(&snapshot, RECORD_ID).await;
+        drop(snapshot);
+
+        let transaction = database
+            .runtime_database()
+            .begin_write_transaction("move the projected session row to a stale identity")
+            .await
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO sessions (
+                    provider, session_id, project_key, project_path, title,
+                    started_at, ended_at, transcript_path, metadata_json,
+                    parent_session_id, is_subagent, agent_id, parent_tool_use_id
+                 )
+                 SELECT provider, ?2, project_key, project_path, title,
+                    started_at, ended_at, transcript_path, metadata_json,
+                    parent_session_id, is_subagent, agent_id, parent_tool_use_id
+                 FROM sessions WHERE provider = 'codex' AND session_id = ?1",
+                tracedecay_runtime_core::params![SESSION, "stale-session-identity"],
+            )
+            .await
+            .expect("create stale session identity");
+        transaction
+            .execute(
+                "UPDATE session_messages SET session_id = ?2
+                 WHERE provider = 'codex' AND session_id = ?1",
+                tracedecay_runtime_core::params![SESSION, "stale-session-identity"],
+            )
+            .await
+            .expect("move projected message to stale session identity");
+        let removed = transaction
+            .execute(
+                "DELETE FROM sessions WHERE provider = 'codex' AND session_id = ?1",
+                tracedecay_runtime_core::params![SESSION],
+            )
+            .await
+            .expect("remove expected projected session");
+        assert_eq!(removed, 1);
+        transaction.commit().await.unwrap();
+        let snapshot = database.read_snapshot().await.unwrap();
+        let mut rows = snapshot
+            .query(
+                "SELECT COUNT(*) FROM sessions WHERE provider = 'codex' AND session_id = ?1",
+                tracedecay_runtime_core::params![SESSION],
+            )
+            .await
+            .expect("count missing session");
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            0
+        );
+        drop(rows);
+        drop(snapshot);
+
+        super::super::ensure_authority_invariants(database.runtime_database(), true, false)
+            .await
+            .expect("current provenance must restore its missing session row");
+
+        let restored = database
+            .get_session("codex", SESSION)
+            .await
+            .expect("session restored from immutable projection");
+        assert_eq!(restored.provider, "codex");
+        assert_eq!(restored.session_id, SESSION);
+        let snapshot = database.read_snapshot().await.unwrap();
+        assert_eq!(stored_output(&snapshot, RECORD_ID).await, current);
+    }
+
     /// One observation's projection authority: whether it still owns a served
     /// output, and what durable disposition stands in its place.
     #[derive(Debug, Eq, PartialEq)]
