@@ -97,7 +97,7 @@ async fn search_returns_the_named_symbol_and_rejects_a_missing_query() {
     );
     assert_eq!(hit["results"][0]["final_ordinal"], 0, "{hit}");
     assert_eq!(
-        hit["results"][0]["candidate"]["exact_class"], "approximate",
+        hit["results"][0]["candidate"]["exact_class"], "exact_message",
         "{hit}"
     );
     assert_eq!(
@@ -141,15 +141,18 @@ async fn search_returns_the_named_symbol_and_rejects_a_missing_query() {
         .unwrap_or_else(|| panic!("markdown bullet has no utility suffix: {bullet} in {rendered}"));
     assert_eq!(
         head,
-        "- **ledger_post_entry** (function, approximate), rank 1"
+        "- **ledger_post_entry** (function, exact_message), rank 1"
     );
     let via = rest
         .split_once(" · via ")
         .map(|(_, via)| via)
         .unwrap_or_else(|| panic!("markdown bullet has no route suffix: {bullet}"));
+    // Each matching chunk discloses the same three routes. The bullet lists
+    // every disclosure the host receives, in rank order, without collapsing
+    // them.
     assert_eq!(
         via,
-        "query, symbol:ledger_post_entry, split:ledger|post|entry"
+        "query, symbol:ledger_post_entry, split:ledger|post|entry, query, symbol:ledger_post_entry, split:ledger|post|entry"
     );
 
     let miss = handle_real_server_tool_call(
