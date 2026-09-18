@@ -26,6 +26,7 @@ mod move_symbol_test;
 #[cfg(feature = "test-transport")]
 mod rename_symbol_test;
 mod retrieve_truncation_test;
+mod runtime_behavior_test;
 mod schema_test;
 mod session_search_test;
 #[cfg(feature = "test-transport")]
