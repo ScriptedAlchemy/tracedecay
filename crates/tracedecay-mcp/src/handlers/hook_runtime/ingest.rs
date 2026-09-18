@@ -119,9 +119,10 @@ async fn admit_codex_project_rollouts(
     project_id: ProjectId,
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
-) -> Result<bool> {
+) -> Result<CodexRolloutAdmission> {
     let mut budget = max_new_bytes;
     let mut deferred = false;
+    let mut observations_committed = 0_u64;
     let mut paths = source.transcript_paths(project_root).into_iter().peekable();
     while let Some(path) = paths.next() {
         let progress =
@@ -136,6 +137,7 @@ async fn admit_codex_project_rollouts(
             .await
             .map_err(|error| map_transcript_ingest_error(&error))?;
         deferred |= progress.source_deferred;
+        observations_committed = observations_committed.saturating_add(progress.frames_persisted);
         if let Some(remaining) = budget.as_mut() {
             *remaining = remaining.saturating_sub(progress.bytes_consumed);
             if *remaining == 0 {
@@ -144,7 +146,18 @@ async fn admit_codex_project_rollouts(
             }
         }
     }
-    Ok(deferred)
+    Ok(CodexRolloutAdmission {
+        deferred,
+        observations_committed,
+    })
+}
+
+/// What one Codex rollout admission pass committed, apart from what its own
+/// projection drain later catches. The projection queue is shared per scope
+/// with the project catch-up sweep, which can consume these rows first.
+pub(super) struct CodexRolloutAdmission {
+    pub(super) deferred: bool,
+    pub(super) observations_committed: u64,
 }
 
 async fn drain_host_observation_projections(
@@ -642,18 +655,32 @@ pub async fn ingest_transcript_with_cancellation(
         source_deferred,
         lcm_receipt,
         route_admission,
+        observations_committed: route_observations_committed,
+        exact_duplicate: route_exact_duplicate,
     } = capture;
+    // Admission is the durable commit; projection is downstream materialization
+    // off a queue this scope shares with the project catch-up sweep. Counting
+    // only the projections this pass drained itself reports a pass whose rows a
+    // peer drainer took as though it had captured nothing.
     let authority_changed = messages_upserted > 0
+        || route_observations_committed > 0
         || snapshot_capture
             .as_ref()
             .is_some_and(|capture| capture.stats.messages_upserted > 0)
         || claude_observation_stats
             .as_ref()
             .is_some_and(|stats| stats.observations_committed > 0 || stats.cursor_advances > 0);
+    // A pass that changed nothing is only `accepted_for_replay` when it cannot
+    // prove the data is already there. Routes that can prove it say so: Claude
+    // through its duplicate counters, every other route through
+    // `exact_duplicate`. Without this a replay whose observations a peer
+    // drainer already projected reports a terminal, non-retryable status that
+    // neither proves a commit nor invites a retry.
     let exact_duplicate = !authority_changed
-        && claude_observation_stats
-            .as_ref()
-            .is_some_and(|stats| stats.observation_duplicates > 0 || stats.cursor_duplicates > 0);
+        && (route_exact_duplicate
+            || claude_observation_stats.as_ref().is_some_and(|stats| {
+                stats.observation_duplicates > 0 || stats.cursor_duplicates > 0
+            }));
     let deferred_by_byte_cap = source_deferred
         || snapshot_capture
             .as_ref()
@@ -709,6 +736,12 @@ pub async fn ingest_transcript_with_cancellation(
         )
         .await;
         output["hint_outcomes"] = settlement.as_json();
+    }
+    // Routes that admit observations directly report what they committed, so a
+    // `messages_upserted: 0` pass is readable without guessing which drainer
+    // won. The snapshot and Claude blocks below own the key for their routes.
+    if route_observations_committed > 0 {
+        output["observations_committed"] = json!(route_observations_committed);
     }
     if let Some(capture) = snapshot_capture {
         output["observations_committed"] = json!(capture.stats.messages_upserted);

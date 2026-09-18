@@ -276,6 +276,11 @@ pub(in crate::runtime) struct JsonlObservationAdmissionProgress {
     pub frames_rejected_before_decode: u64,
     pub frames_refused: u64,
     pub frames_persisted: u64,
+    /// This pass resumed from a durable source cursor rather than opening the
+    /// source for the first time. With `frames_persisted == 0` that is the
+    /// only evidence a caller has that the source was *already* admitted,
+    /// versus never carrying anything: both report zero new frames.
+    pub resumed: bool,
     pub io: crate::runtime::source::JsonlIoAccounting,
 }
 
@@ -2280,6 +2285,7 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
     let mut progress = JsonlObservationAdmissionProgress {
         bytes_consumed: raw.read_through.saturating_sub(raw.start_offset),
         source_deferred: raw.deferred.is_some(),
+        resumed: had_expected_cursor,
         io: if shared_page_hit {
             JsonlIoAccounting::default()
         } else {
