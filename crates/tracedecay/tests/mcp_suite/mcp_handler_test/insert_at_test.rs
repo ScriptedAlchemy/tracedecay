@@ -149,20 +149,33 @@ async fn insert_at_after_unique_anchor_previews_applies_replays_and_refuses_stal
     );
     assert_eq!(applied["effect"]["payload"]["line"], 2);
     assert_eq!(applied["effect"]["payload"]["before"], false);
+    assert_eq!(applied["effect"]["payload"]["durable_metadata_only"], true);
+    assert!(
+        applied["effect"]["receipt"]["committed_state"].is_string(),
+        "completed insert receipt names the committed bytes: {applied}"
+    );
     assert_eq!(project.read("src/main.rs"), AFTER_APPLIED);
 
     let replayed_result = project.call(apply_args).await;
     let replayed = body(&replayed_result);
     assert_eq!(replayed["success"], true);
+    assert_eq!(replayed["failed"], false);
     assert_eq!(replayed["replayed"], true);
-    assert_eq!(replayed["durable_metadata_only"], true);
     assert_eq!(
         replayed["message"],
         "source edit completed; detailed edit output was not retained"
     );
-    assert_eq!(replayed["files"], json!(["src/main.rs"]));
-    assert_eq!(replayed["line"], 2);
-    assert_eq!(replayed["before"], false);
+    assert_eq!(replayed["content"], Value::Null);
+    assert_eq!(replayed["diff"], Value::Null);
+    assert_eq!(replayed["file_path"], Value::Null);
+    assert_eq!(replayed["effect"]["payload"]["durable_metadata_only"], true);
+    assert_eq!(
+        replayed["effect"]["payload"]["files"],
+        json!(["src/main.rs"])
+    );
+    assert_eq!(replayed["effect"]["payload"]["line"], 2);
+    assert_eq!(replayed["effect"]["payload"]["before"], false);
+    assert_eq!(replayed["effect"]["payload"], applied["effect"]["payload"]);
     assert_eq!(
         replayed["effect"]["effect_id"],
         applied["effect"]["effect_id"]
@@ -441,22 +454,26 @@ async fn insert_at_refuses_unusable_anchors_missing_files_and_escaped_paths() {
     );
     assert_eq!(project.read("src/refuse.rs"), REFUSAL_ORIGINAL);
 
-    let absent = handle_real_server_tool_call_raw(
-        &project.server,
-        "tracedecay_insert_at",
-        json!({
+    let absent_result = project
+        .call(json!({
             "path": "src/missing.rs",
             "anchor": "anything",
             "content": "nope",
             "dry_run": true
-        }),
-    )
-    .await;
-    assert_rpc_error(
-        &absent,
-        -32602,
-        "failed to read src/missing.rs: file was not found",
+        }))
+        .await;
+    assert_eq!(absent_result["isError"], true);
+    let absent = body(&absent_result);
+    assert_eq!(absent["success"], false);
+    assert_eq!(absent["failed"], true);
+    assert_eq!(absent["replayed"], false);
+    assert_eq!(
+        absent["message"],
+        "source edit failed before the effect: config error: failed to read src/missing.rs: file was not found"
     );
+    assert_eq!(absent["effect"]["receipt"]["outcome"], "failed");
+    assert!(absent["effect"]["receipt"]["committed_state"].is_null());
+    assert!(!project.fixture.project_root.join("src/missing.rs").exists());
     assert_eq!(project.read("src/refuse.rs"), REFUSAL_ORIGINAL);
 
     let bare_apply = handle_real_server_tool_call_raw(
@@ -491,22 +508,25 @@ async fn insert_at_refuses_unusable_anchors_missing_files_and_escaped_paths() {
         "missing required parameter: anchor",
     );
 
-    let escaped = handle_real_server_tool_call_raw(
-        &project.server,
-        "tracedecay_insert_at",
-        json!({
+    let escaped_result = project
+        .call(json!({
             "path": "../outside.txt",
             "anchor": "DO NOT",
             "content": "leaked\n",
             "dry_run": true
-        }),
-    )
-    .await;
-    assert_rpc_error(
-        &escaped,
-        -32603,
-        "tool execution failed: config error: path is not within the project",
+        }))
+        .await;
+    assert_eq!(escaped_result["isError"], true);
+    let escaped = body(&escaped_result);
+    assert_eq!(escaped["success"], false);
+    assert_eq!(escaped["failed"], true);
+    assert_eq!(escaped["replayed"], false);
+    assert_eq!(
+        escaped["message"],
+        "source edit failed before the effect: config error: path is not within the project"
     );
+    assert_eq!(escaped["effect"]["receipt"]["outcome"], "failed");
+    assert!(escaped["effect"]["receipt"]["committed_state"].is_null());
     assert_eq!(fs::read_to_string(outside).unwrap(), "DO NOT TOUCH\n");
     assert_eq!(project.read("src/refuse.rs"), REFUSAL_ORIGINAL);
 
