@@ -62,7 +62,7 @@ async fn tracedecay_signature_returns_the_declared_signature() {
         !fetch_text.contains("FETCH_BODY_NOT_IN_SIGNATURE"),
         "signature lookup must not return the body: {fetch_text}"
     );
-    let fetch = parse_json(fetch_text);
+    let fetch = parse_json(&fetch_text);
     assert_one_surface(&fetch, &fetch_surface());
     let fetch_id = node_id(&fetch);
 
