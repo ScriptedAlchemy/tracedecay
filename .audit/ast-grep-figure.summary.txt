@@ -1,3 +1,0 @@
-command: REQUIRE_EXACT_TEST_COUNT=3 scripts/require-exact-test.sh cargo test -p tracedecay --test mcp_suite --features test-transport ast_grep_rewrite_behavior_test -- --test-threads=1
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 350 filtered out; finished in 4.63s
-EXIT:0
