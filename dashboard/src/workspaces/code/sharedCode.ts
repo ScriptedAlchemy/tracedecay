@@ -100,7 +100,7 @@ export function readSharedCodeCoverage(coverage: SimilarCoverageV1): SharedCodeC
       return {
         kind: 'excluded',
         title: 'Excluded from automatic discovery',
-        sentence: `This body is over the ${coverage.maximum_tokens.toLocaleString()}-token maximum, so no family was searched for it. That is an exclusion, not a finding of zero copies.`,
+        sentence: `This body is over the automatic ${coverage.maximum_tokens.toLocaleString()}-token or ${coverage.maximum_bytes.toLocaleString()}-byte maximum, so no family was searched for it. That is an exclusion, not a finding of zero copies.`,
       };
     case 'excluded_incomplete_tokenization':
       return {
