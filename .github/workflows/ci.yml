@@ -3,11 +3,13 @@ name: CI
 on:
   push:
     branches: [master, feature/holographic-memory]
+  # Pull-request CI is deliberately on demand. `opened`/`synchronize` would
+  # create a queued workflow run even when every job's `if` skips it; 173
+  # concurrently opened PRs produced 80 such runs ahead of release publish.
+  # Add (or remove and re-add) `ci-full` to test the current head.
   pull_request:
     branches: ['**']
-    # `ready_for_review` and `labeled` are what lift a pull request from the
-    # light gates into full CI, so they must start a run.
-    types: [opened, synchronize, reopened, ready_for_review, labeled]
+    types: [labeled]
 
 permissions:
   contents: read
@@ -39,8 +41,7 @@ jobs:
   #
   # * `run-heavy`: the Linux build/test/lint lane. Pushes always; pull
   #   requests only when trusted (this repository, or a fork targeting an
-  #   integration branch) and either ready for review or labelled `ci-full`.
-  #   A draft runs no job at all (see the `if` below).
+  #   integration branch) and explicitly dispatched with `ci-full`.
   # * `run-os`: the macOS and Windows matrices. Pushes, or a pull request
   #   labelled `ci-os`. macOS has its own 5-slot cap and Windows shards take
   #   7 jobs; both verify the same code the Linux lane already covers and
@@ -56,7 +57,7 @@ jobs:
     # and even three light gates apiece queued the release behind ~400 jobs;
     # a job that is skipped here costs no runner, and every guarded job reads
     # this job's outputs, so skipping it skips them. `ci-full` opts a draft in.
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft || contains(github.event.pull_request.labels.*.name, 'ci-full') }}
+    if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'ci-full' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -75,14 +76,13 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           TRUSTED: ${{ github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
-          DRAFT: ${{ github.event.pull_request.draft }}
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
         run: |
           has_label() { [[ " $LABELS " == *" $1 "* ]]; }
           heavy=false; os=false; hosts=false; perf=false
           if [[ $EVENT != pull_request ]]; then
             heavy=true; os=true; hosts=true; perf=true
-          elif [[ $TRUSTED == true ]] && { [[ $DRAFT != true ]] || has_label ci-full; }; then
+          elif [[ $TRUSTED == true ]] && has_label ci-full; then
             heavy=true
             has_label ci-os && os=true
             has_label ci-hosts && hosts=true
@@ -94,7 +94,7 @@ jobs:
             echo "run-hosts=$hosts"
             echo "run-perf=$perf"
           } >>"$GITHUB_OUTPUT"
-          echo "run-heavy=$heavy run-os=$os run-hosts=$hosts run-perf=$perf (event=$EVENT draft=${DRAFT:-n/a} labels='$LABELS')"
+          echo "run-heavy=$heavy run-os=$os run-hosts=$hosts run-perf=$perf (event=$EVENT labels='$LABELS')"
 
       # The Linux and macOS test matrices come from the same manifest the
       # partition jobs select their targets from, so a partition cannot exist
@@ -242,7 +242,7 @@ jobs:
 
   benchmark-harness:
     name: Benchmark harness self-tests
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft || contains(github.event.pull_request.labels.*.name, 'ci-full') }}
+    if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'ci-full' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -260,7 +260,7 @@ jobs:
   # queue entries per push doing what one does.
   gates:
     name: Repository gates
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft || contains(github.event.pull_request.labels.*.name, 'ci-full') }}
+    if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'ci-full' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
