@@ -41,7 +41,9 @@ impl Widget {
 
 /// `src/nested/extra.rs` lines (1-indexed):
 /// 1 the identifier `note` is a non-comment NOTE (any line, word boundary);
-/// 2 XXX, 3 lower-case todo, 4 TODO (same line also says FIXME, first kind wins);
+/// 2 XXX, 3 lower-case todo, 4 TODO (same line also says FIXME; the first
+/// requested kind wins, so an unfiltered scan keeps TODO and a FIXME-only
+/// scan keeps FIXME);
 /// 8 WIP and 9 UNIMPLEMENTED sit outside `note`.
 const EXTRA_RS: &str = "\
 pub fn note() {
@@ -298,14 +300,23 @@ async fn todos_reports_observed_marker_behavior() {
     assert_eq!(
         fixme_only,
         scan(
-            json!({"FIXME": 1}),
-            vec![marker(
-                "FIXME",
-                "src/lib.rs",
-                3,
-                "// FIXME: tighten the span",
-                Some("src/lib.rs::outer"),
-            )],
+            json!({"FIXME": 2}),
+            vec![
+                marker(
+                    "FIXME",
+                    "src/lib.rs",
+                    3,
+                    "// FIXME: tighten the span",
+                    Some("src/lib.rs::outer"),
+                ),
+                marker(
+                    "FIXME",
+                    "src/nested/extra.rs",
+                    4,
+                    "// TODO: first and FIXME: second",
+                    Some("src/nested/extra.rs::note"),
+                ),
+            ],
         )
     );
 
