@@ -252,6 +252,8 @@ async fn tracedecay_impls_lists_filters_and_truncates_impl_blocks() {
     assert_impls(&unresolved_display, 0, false, json!([]));
 
     let limited = call_impls(&fixture, json!({"trait": "Show", "limit": 1})).await;
+    // Occurrence order is not part of the tool contract, so the kept row is
+    // one of the Show impls rather than a particular catalog key.
     assert_eq!(limited["count"], json!(1), "limit payload: {limited}");
     assert_eq!(
         limited["truncated"],
