@@ -103,7 +103,7 @@ async fn fact_store_contradict_reports_the_opposing_fact_above_or_below_threshol
             &harbor,
             &owner,
         ),
-        other => panic!("limit 1 returned an unknown contradiction {other}: {limited}"),
+        other => panic!("limit 1 returned an unknown contradiction {other:?}: {limited}"),
     }
 
     // Same polarity is included only when the score meets the threshold.
@@ -169,7 +169,7 @@ async fn fact_store_contradict_rejects_noncanonical_arguments() {
         assert_eq!(
             body["message"],
             format!(
-                "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_contradict: unknown field `{field}`, expected one of `threshold_millionths`, `memory_scope`, `category`, `limit`, `project_selector`"
+                "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_contradict: {field}: unknown field `{field}`, expected one of `threshold_millionths`, `memory_scope`, `category`, `limit`, `project_selector`"
             ),
             "{body}"
         );
@@ -303,7 +303,7 @@ fn assert_same_polarity_contradiction(
 }
 
 fn assert_stored_fact_shape(fact: &Value, owner: &Value) {
-    assert_eq!(fact["owner"], owner);
+    assert_eq!(fact["owner"], *owner);
     assert_eq!(fact["tags"], json!([]));
     assert_eq!(fact["trust_score_millionths"], TRUST_MILLIONTHS);
     assert_eq!(fact["source"]["kind"], "application");
