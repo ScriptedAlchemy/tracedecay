@@ -13,6 +13,7 @@ mod branch_search_test;
 #[cfg(feature = "test-transport")]
 mod branch_sensitivity_test;
 mod context_test;
+mod dependency_depth_test;
 mod dependency_hint_test;
 #[cfg(feature = "test-transport")]
 mod edit_test;
