@@ -992,7 +992,23 @@ fn prepare_stages_the_source_and_returns_ready_for_cli_activation() {
     let outcome = CodexIntegration
         .prepare_non_interactive_install(&install_ctx(home.path()))
         .unwrap();
-    assert!(matches!(outcome, NonInteractiveInstallOutcome::Ready));
+    // Native activation is `codex plugin add`. Without that CLI the stage is
+    // still complete, but the typed outcome is the same deferral preflight
+    // returns rather than a false Ready.
+    if super::plugin_registry::require_codex_plugin_cli().is_ok() {
+        assert!(matches!(outcome, NonInteractiveInstallOutcome::Ready));
+    } else {
+        let NonInteractiveInstallOutcome::DeferredUserAction(deferred) = outcome else {
+            panic!("missing Codex CLI must defer native activation, not {outcome:?}");
+        };
+        assert!(
+            deferred
+                .remediation
+                .contains("codex plugin add tracedecay@"),
+            "deferred remediation must name the native plugin add: {}",
+            deferred.remediation
+        );
+    }
     assert!(codex_plugin_manifest_path(home.path()).is_file());
     assert!(codex_personal_marketplace_path(home.path()).is_file());
     assert_eq!(

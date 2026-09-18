@@ -2474,7 +2474,7 @@ mod tests {
             panic!("a gated mount must project as typed unavailable");
         };
         assert!(
-            reason.contains("configure a token"),
+            reason.contains("Configure a token"),
             "the credential gate must tell the reader what to do: {reason}"
         );
 
