@@ -217,20 +217,18 @@ fn assert_schema_rejection(response: &Value, detail: &str) {
 
 fn stable_problem(problem: &Value) -> Value {
     let mut problem = problem.clone();
-    let object = problem
-        .as_object_mut()
-        .unwrap_or_else(|| panic!("problem is not an object: {problem}"));
+    let object = problem.as_object_mut().expect("problem is not an object");
     let request_id = object
         .get("request_id")
         .and_then(Value::as_str)
-        .unwrap_or_else(|| panic!("problem request id missing: {problem}"))
+        .expect("problem request id")
         .to_owned();
     let trace_id = object
         .get("trace_id")
         .and_then(Value::as_str)
-        .unwrap_or_else(|| panic!("problem trace id missing: {problem}"))
+        .expect("problem trace id")
         .to_owned();
-    assert_eq!(request_id, trace_id, "{problem}");
+    assert_eq!(request_id, trace_id);
     object.insert("request_id".to_owned(), json!("request.stable"));
     object.insert("trace_id".to_owned(), json!("request.stable"));
     problem
