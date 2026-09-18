@@ -26,6 +26,11 @@ use super::{
     TraceDecayError, error_is_project_open_retryable,
 };
 
+/// Completed retryable problem results to observe before returning the typed
+/// state to an interactive caller. Transport-level project-open errors are not
+/// results and continue to use their explicit deadline.
+const MAX_COMPLETED_TOOL_RESULT_ATTEMPTS: usize = 3;
+
 /// Bounded grace a client keeps reading for *after* the caller's request
 /// deadline has elapsed.
 ///
@@ -512,10 +517,10 @@ fn tool_result_retry_after_delay(result: &serde_json::Value) -> Option<Duration>
 /// Two states are ridden out: the daemon's project-open refusal (a JSON-RPC
 /// error carrying the warming hint or a saturated open queue) on the client's
 /// own cadence, and a completed result whose typed problem directs an
-/// after-delay retry, on the delay the directive names. Neither is retried
-/// past `deadline`: when the budget cannot hold the wait, the daemon's own
-/// typed state, a warming project, a still-mounting authority, is the
-/// truthful answer, not the client's deadline bookkeeping.
+/// after-delay retry, on the delay the directive names. Project-open errors
+/// may wait to `deadline`; completed results are also capped by
+/// [`MAX_COMPLETED_TOOL_RESULT_ATTEMPTS`] so a persistent authority result is
+/// returned instead of hidden behind a reconnect loop.
 fn project_open_retry_wait(
     result: &Result<serde_json::Value>,
     deadline: Instant,
@@ -542,6 +547,7 @@ async fn call_tool_with_project_open_retry(
     tool_name: &str,
     arguments: serde_json::Value,
     deadline: Instant,
+    mut completed_result_attempts: usize,
 ) -> Result<serde_json::Value> {
     loop {
         let result = call_tool_within(
@@ -552,6 +558,12 @@ async fn call_tool_with_project_open_retry(
             deadline,
         )
         .await;
+        if result.is_ok() {
+            completed_result_attempts = completed_result_attempts.saturating_add(1);
+            if completed_result_attempts >= MAX_COMPLETED_TOOL_RESULT_ATTEMPTS {
+                return result;
+            }
+        }
         let Some(wait) = project_open_retry_wait(&result, deadline) else {
             return result;
         };
@@ -594,6 +606,7 @@ pub async fn call_default_tool(
         tool_name,
         arguments,
         retry_deadline,
+        usize::from(result.is_ok()),
     )
     .await
 }
@@ -615,13 +628,10 @@ pub async fn call_default_tool_within(
 /// mount behind its core publication, until `deadline`.
 ///
 /// Bootstrap callers deliberately trigger the cold open they are waiting for,
-/// so the warming hint is progress rather than an answer: `tracedecay init`
-/// asks for a status it can only get after the open completes, and
-/// `tracedecay tool` wants the retained owner's answer, not its still-mounting
-/// state. That is the opposite of [`call_default_tool_within`], whose callers
-/// want the typed warming state returned to them, and wider than
-/// [`call_default_tool`], whose grace is sized for an already-open project
-/// rather than a first index.
+/// so a transport-level warming hint is progress rather than an answer:
+/// `tracedecay init` asks for a status it can only get after the open completes.
+/// Completed application problems are different: after three identical
+/// results, `tracedecay tool` returns that typed state for the caller to decide.
 pub async fn call_default_tool_awaiting_project_open(
     handshake: &DaemonHandshake,
     tool_name: &str,
@@ -629,7 +639,8 @@ pub async fn call_default_tool_awaiting_project_open(
     deadline: Instant,
 ) -> Result<serde_json::Value> {
     let socket_path = default_available_socket_path()?;
-    call_tool_with_project_open_retry(&socket_path, handshake, tool_name, arguments, deadline).await
+    call_tool_with_project_open_retry(&socket_path, handshake, tool_name, arguments, deadline, 0)
+        .await
 }
 
 /// Extracts the single JSON payload from an MCP tool result while ignoring

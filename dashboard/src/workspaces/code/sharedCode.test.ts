@@ -49,6 +49,15 @@ describe('shared-code coverage wording', () => {
     expect(tooSmall.sentence).toMatch(/30-token minimum/);
     expect(tooSmall.sentence).toMatch(/not a finding of zero copies/);
 
+    const tooLarge = readSharedCodeCoverage({
+      status: 'excluded_too_large',
+      maximum_tokens: 4096,
+      maximum_bytes: 65536,
+    });
+    expect(tooLarge.kind).toBe('excluded');
+    if (tooLarge.kind !== 'excluded') throw new Error('unreachable');
+    expect(tooLarge.sentence).toMatch(/4,096-token or 65,536-byte maximum/);
+
     const incomplete = readSharedCodeCoverage({ status: 'excluded_incomplete_tokenization' });
     expect(incomplete.kind).toBe('excluded');
     if (incomplete.kind !== 'excluded') throw new Error('unreachable');
