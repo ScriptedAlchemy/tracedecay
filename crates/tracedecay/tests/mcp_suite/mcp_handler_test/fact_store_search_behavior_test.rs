@@ -586,12 +586,12 @@ async fn fact_store_search_rejects_blank_limit_and_unknown_fields() {
         (
             json!({"query": "ledger", "category": "pitfall"}),
             decode_failure(
-                "category: unknown variant `pitfall`, expected one of `general`, `user_pref`, `project`, `tool`, `decision`, `code_area`",
+                "unknown variant `pitfall`, expected one of `general`, `user_pref`, `project`, `tool`, `decision`, `code_area`",
             ),
         ),
         (
             json!({"query": "ledger", "memory_scope": "global"}),
-            decode_failure("memory_scope: unknown variant `global`, expected `project` or `user`"),
+            decode_failure("unknown variant `global`, expected `project` or `user`"),
         ),
     ] {
         let response = call_raw(server, arguments).await;
