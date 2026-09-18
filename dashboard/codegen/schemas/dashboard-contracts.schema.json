@@ -2334,7 +2334,7 @@
           ]
         },
         "excluded_too_large_bodies": {
-          "description": "Bodies excluded because they exceed the automatic-discovery byte bound.",
+          "description": "Bodies excluded because they exceed the automatic-discovery token maximum.",
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -21330,8 +21330,8 @@
         {
           "additionalProperties": false,
           "properties": {
-            "maximum_bytes": {
-              "format": "uint64",
+            "maximum_tokens": {
+              "format": "uint32",
               "minimum": 0,
               "type": "integer"
             },
@@ -21342,7 +21342,7 @@
           },
           "required": [
             "status",
-            "maximum_bytes"
+            "maximum_tokens"
           ],
           "type": "object"
         },

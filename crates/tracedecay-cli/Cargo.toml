@@ -74,7 +74,7 @@ hotpath-cpu = [
     "hotpath/hotpath-cpu",
 ]
 hotpath-mcp = ["hotpath", "hotpath/hotpath-mcp"]
-production = ["tracedecay/production"]
+production = ["tracedecay/production", "alloc-mimalloc"]
 # Opt-in tiered graph storage; not part of `production`.
 graph-disk-tier = ["tracedecay/graph-disk-tier"]
 token-counting = ["tracedecay/token-counting"]
@@ -119,10 +119,18 @@ lang-fsharp = ["tracedecay/lang-fsharp"]
 lang-quint = ["tracedecay/lang-quint"]
 lang-toml = ["tracedecay/lang-toml"]
 lang-lean = ["tracedecay/lang-lean"]
-# Opt-in global allocators for the shipped binary (daemon included). The
-# default stays glibc malloc; selecting an allocator is a deploy decision.
-# When several allocator features are enabled at once (e.g. `--all-features`),
-# main.rs resolves them by fixed precedence instead of failing the build:
+# Global allocators for the shipped binary (daemon included). `production`
+# ships mimalloc: glibc malloc has no setting that fits a daemon indexing on
+# dozens of worker threads. Measured on beta.41 on a 96-core host warming 12
+# projects: with MALLOC_ARENA_MAX=2, 60% of daemon CPU was the two arena
+# locks; with the cap removed, 747 arenas held 14 GB of freed-but-retained
+# heap out of 18 GB RSS, and because admission trusts measured RSS the graph
+# could never activate again after one peak. mimalloc has per-thread heaps
+# without the lock and purges freed segments, so RSS follows live data (peak
+# unchanged, ~18 GB during the warm; back to 8-13 GB between phases) and the
+# resident-memory refusal clears on its own. When several allocator features
+# are enabled at once (e.g. `--all-features`), main.rs resolves them by fixed
+# precedence instead of failing the build:
 # hotpath-alloc (measurement) > alloc-jemalloc > alloc-mimalloc > system.
 #
 # alloc-jemalloc turns jemalloc background purge threads on by default:
