@@ -4729,7 +4729,7 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         .iter()
         .find(|record| {
             record.simple_name == "process"
-                && record.qualified_name.contains("Processor")
+                && record.qualified_name.ends_with("::Processor::process")
                 && record.kind == "method"
         })
         .expect("trait method symbol")

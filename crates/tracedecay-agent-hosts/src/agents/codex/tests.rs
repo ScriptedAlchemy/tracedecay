@@ -992,7 +992,24 @@ fn prepare_stages_the_source_and_returns_ready_for_cli_activation() {
     let outcome = CodexIntegration
         .prepare_non_interactive_install(&install_ctx(home.path()))
         .unwrap();
-    assert!(matches!(outcome, NonInteractiveInstallOutcome::Ready));
+    // Staging always happens first. Activation is `Ready` only when `codex`
+    // is on PATH; otherwise prepare returns the same native command preflight
+    // would, instead of claiming the CLI can be driven.
+    match super::plugin_registry::require_codex_plugin_cli() {
+        Ok(_) => assert!(
+            matches!(outcome, NonInteractiveInstallOutcome::Ready),
+            "a present Codex CLI must leave activation ready"
+        ),
+        Err(_) => {
+            let NonInteractiveInstallOutcome::DeferredUserAction(deferred) = outcome else {
+                panic!("a missing Codex CLI must defer native activation");
+            };
+            assert_eq!(
+                deferred.remediation,
+                "Codex activates plugins through its native cache. Run `codex plugin add tracedecay@personal` after TraceDecay stages the source package."
+            );
+        }
+    }
     assert!(codex_plugin_manifest_path(home.path()).is_file());
     assert!(codex_personal_marketplace_path(home.path()).is_file());
     assert_eq!(
