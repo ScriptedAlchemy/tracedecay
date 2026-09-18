@@ -148,45 +148,15 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
     let root = project.project_root.display().to_string();
     let compact = sealed_json_status(&project).await;
     let markdown = call_status(&project, json!({})).await;
-    let detailed = parse_status(
-        &call_status(
-            &project,
-            json!({
-                "format": "json",
-                "include_branch_diagnostics": true,
-                "include_storage_health": true,
-                "include_session_ingest": true,
-                "include_staleness": true,
-            }),
-        )
-        .await,
-    );
-
-    let proof = json!({
-        "compact_keys": compact.as_object().map(|object| {
-            let mut keys: Vec<_> = object.keys().cloned().collect();
-            keys.sort();
-            keys
-        }),
-        "compact": compact,
-        "detailed_keys": detailed.as_object().map(|object| {
-            let mut keys: Vec<_> = object.keys().cloned().collect();
-            keys.sort();
-            keys
-        }),
-        "detailed": detailed,
-        "markdown": markdown,
-    });
-    std::fs::write(
-        "/tmp/tracedecay-status-proof.json",
-        serde_json::to_string_pretty(&proof).expect("proof json"),
-    )
-    .expect("write proof");
+    let detailed = opted_in_status(&project).await;
 
     assert_eq!(compact["project_root"], json!(root));
     assert_eq!(compact["active_branch"], json!(BRANCH));
     assert_eq!(compact["serving_branch"], json!(BRANCH));
     assert_eq!(compact["graph_statistics"]["state"], "observed");
+    assert_eq!(compact["graph_statistics"]["symbol_count"], 6);
+    assert_eq!(compact["graph_statistics"]["edge_count"], 4);
+    assert_eq!(compact["graph_statistics"]["source_total_bytes"], 365);
     assert_eq!(
         compact["graph_statistics"]["freshness"],
         json!({ "state": "current" })
@@ -268,50 +238,104 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
             "message": "the verified code generation does not publish a Git commit watermark",
         })
     );
-    assert_eq!(
-        detailed["session_ingest"],
-        json!({
-            "observed_providers": [],
-            "provider_coverage": [],
-            "tracked_transcripts": 0,
-            "pending_transcripts": 0,
-            "pending_bytes": 0,
-            "max_transcript_pending_bytes": 0,
-            "last_ingest_unix": null,
-        })
-    );
+    assert_eq!(detailed["session_ingest"], empty_cursor_session_ingest());
     assert_eq!(
         detailed["session_history_catch_up"],
-        json!({
-            "status": "unavailable",
-            "coverage": "partial",
-            "authority": "daemon",
-            "reason": "historical_sources_unobserved",
-            "providers": [],
-            "provider_coverage": [],
-            "unobserved_providers": [],
-            "max_transcript_pending_bytes": 0,
-            "pending_bytes": 0,
-            "pending_transcripts": 0,
-            "message": "No durable historical source rows or provider frontiers are currently observable.",
-        })
+        empty_host_session_history()
     );
+    assert_eq!(detailed["tracked_branch_count"], 1);
     assert_eq!(
         detailed["storage_health"]["daemon_owner_pid"],
         json!(u64::from(std::process::id()))
     );
-    assert!(detailed.get("branch_diagnostics").is_some());
-    assert!(detailed.get("storage_health").is_some());
+    assert_eq!(
+        detailed["storage_health"]["writer_owner"]["pid"],
+        json!(u64::from(std::process::id()))
+    );
 
-    assert!(markdown.starts_with("## Project Status\n"));
-    assert!(markdown.contains("**active_branch:** status-proof\n"));
-    assert!(markdown.contains("**serving_branch:** status-proof\n"));
-    assert!(markdown.contains(&format!("**project_root:** {root}\n")));
-    assert!(markdown.contains("**code_index_freshness.status:** current\n"));
-    assert!(markdown.contains("**retrieval_serving.status:** serving\n"));
-    assert!(markdown.contains("**schema_convergence.status:** completed\n"));
-    assert!(!markdown.contains("branch_diagnostics"));
-    assert!(!markdown.contains("git_staleness"));
-    assert!(!markdown.contains("storage_health"));
-    assert!(!markdown.contains("session_ingest"));
+    assert_eq!(
+        markdown,
+        format!(
+            "## Project Status\n\
+             **active_branch:** status-proof\n\
+             **code_index_freshness.status:** current\n\
+             **graph_statistics:** {{6 field(s)}}\n\
+             **project_root:** {root}\n\
+             **retrieval_serving.status:** serving\n\
+             **schema_convergence.status:** completed\n\
+             **server:** {{14 field(s)}}\n\
+             **serving_branch:** status-proof\n"
+        )
+    );
+}
+
+/// Opt-in diagnostics after the host sweeps on an empty isolated home.
+///
+/// Cursor coverage and the Kimi frontier land on a background sweep, so a
+/// single call during that sweep is not the client-visible settled reading.
+async fn opted_in_status(project: &StatusProject) -> Value {
+    let arguments = json!({
+        "format": "json",
+        "include_branch_diagnostics": true,
+        "include_storage_health": true,
+        "include_session_ingest": true,
+        "include_staleness": true,
+    });
+    let started = Instant::now();
+    let mut last = Value::Null;
+    while started.elapsed() < Duration::from_secs(20) {
+        let detailed = parse_status(&call_status(project, arguments.clone()).await);
+        if detailed["session_ingest"] == empty_cursor_session_ingest()
+            && detailed["session_history_catch_up"] == empty_host_session_history()
+        {
+            return detailed;
+        }
+        last = detailed;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("opt-in status did not settle on the empty-host session readings: {last}");
+}
+
+/// Cursor-scoped ingest for a home with no Cursor transcripts.
+fn empty_cursor_session_ingest() -> Value {
+    json!({
+        "observed_providers": [],
+        "provider_coverage": [{
+            "provider": "cursor",
+            "state": "complete",
+            "deferred_units": 0,
+        }],
+        "tracked_transcripts": 0,
+        "pending_transcripts": 0,
+        "pending_bytes": 0,
+        "max_transcript_pending_bytes": 0,
+        "last_ingest_unix": null,
+    })
+}
+
+/// Historical catch-up after every empty-home sweep has reported.
+///
+/// Kimi publishes a discovery frontier even when `~/.kimi-code` is absent, so
+/// it is the only observed provider. OpenCode has no database, so its coverage
+/// stays unavailable. The other admitted hosts finish with nothing pending.
+fn empty_host_session_history() -> Value {
+    json!({
+        "status": "warming",
+        "coverage": "partial",
+        "authority": "daemon",
+        "reason": "historical_provider_coverage_incomplete",
+        "providers": ["kimi"],
+        "provider_coverage": [
+            { "provider": "claude", "state": "complete", "deferred_units": 0 },
+            { "provider": "codex", "state": "complete", "deferred_units": 0 },
+            { "provider": "cursor", "state": "complete", "deferred_units": 0 },
+            { "provider": "kimi", "state": "complete", "deferred_units": 0 },
+            { "provider": "opencode", "state": "unavailable", "deferred_units": 1 },
+        ],
+        "unobserved_providers": ["claude", "codex", "cursor", "opencode"],
+        "max_transcript_pending_bytes": 0,
+        "pending_bytes": 0,
+        "pending_transcripts": 0,
+        "message": "Historical session recall is partially available while the daemon continues bounded background catch-up.",
+    })
 }
