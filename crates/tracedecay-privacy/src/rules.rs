@@ -657,7 +657,7 @@ fn compile_regex(
 ///   Expanding `\w` to its RE2 meaning fixes the semantics and the size at once
 ///  , every rule in the catalogue then compiles under the default limit, with
 ///   no memory headroom bought and no rule dropped.
-////// * **`\b` / `\B`.** RE2's word boundary is ASCII. Rust's is Unicode-aware,
+/// * **`\b` / `\B`.** RE2's word boundary is ASCII. Rust's is Unicode-aware,
 ///   and a Unicode boundary is the one construct the lazy DFA gives up on the
 ///   moment the haystack holds a non-ASCII byte: every file with an em-dash or
 ///   an emoji in a comment was then scanned by the PikeVM, the slowest engine,

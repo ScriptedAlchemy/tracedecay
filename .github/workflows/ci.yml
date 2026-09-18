@@ -3,6 +3,12 @@ name: CI
 on:
   push:
     branches: [master, feature/holographic-memory]
+  pull_request:
+    branches: ['**']
+    # `ready_for_review` and `labeled` are what lift a pull request from the
+    # light gates into full CI, so they must start a run. `ci-full` is the
+    # label that opts a draft into the Linux lane.
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
   workflow_dispatch:
     inputs:
       run_os:
@@ -42,12 +48,11 @@ env:
   AST_GREP_VERSION: "0.44.0"
 
 jobs:
-  # Manual dispatch is the only PR-head entry point. GitHub queues a
-  # pull_request workflow before evaluating job conditions, and automation
-  # applied every opt-in label to 173 PRs; only removing the trigger prevents
-  # that volume from occupying the account FIFO. A dispatch runs the Linux
-  # lane and may add OS, host, or perf work through explicit inputs. A master
-  # push runs the Linux lane only so release jobs retain runner slots.
+  # Pull requests run the Linux lane only when trusted and either ready or
+  # labelled `ci-full`. Drafts without that label stay on the light gates.
+  # A dispatch runs the Linux lane and may add OS, host, or perf work through
+  # explicit inputs. A master push runs the Linux lane only so release jobs
+  # retain runner slots.
   scope-gate:
     name: Scope gate
     runs-on: ubuntu-latest
@@ -64,18 +69,32 @@ jobs:
         id: decide
         env:
           EVENT: ${{ github.event_name }}
+          TRUSTED: ${{ github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+          DRAFT: ${{ github.event.pull_request.draft }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
           RUN_OS: ${{ inputs.run_os || false }}
           RUN_HOSTS: ${{ inputs.run_hosts || false }}
           RUN_PERF: ${{ inputs.run_perf || false }}
         run: |
-          heavy=true
+          has_label() { [[ " $LABELS " == *" $1 "* ]]; }
+          heavy=false
           os=false
           hosts=false
           perf=false
-          if [[ $EVENT == workflow_dispatch ]]; then
+          if [[ $EVENT == pull_request ]]; then
+            if [[ $TRUSTED == true ]] && { [[ $DRAFT != true ]] || has_label ci-full; }; then
+              heavy=true
+              has_label ci-os && os=true
+              has_label ci-hosts && hosts=true
+              has_label perf && perf=true
+            fi
+          elif [[ $EVENT == workflow_dispatch ]]; then
+            heavy=true
             [[ $RUN_OS == true ]] && os=true
             [[ $RUN_HOSTS == true ]] && hosts=true
             [[ $RUN_PERF == true ]] && perf=true
+          else
+            heavy=true
           fi
           {
             echo "run-heavy=$heavy"
