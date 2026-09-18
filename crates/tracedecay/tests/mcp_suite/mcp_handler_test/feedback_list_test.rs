@@ -102,15 +102,20 @@ async fn feedback_list_returns_the_published_compiler_finding_and_denies_other_h
         "{finding}"
     );
     assert_eq!(finding["cycle_id"], cycle["cycle"]["cycle_id"], "{finding}");
-    assert_eq!(
-        finding["get_handle"], cycle_finding["get_handle"],
-        "{finding}"
-    );
-    assert_eq!(
-        finding["expand_handle"], cycle_finding["expansion_handle"],
-        "{finding}"
-    );
-    assert_ne!(finding["get_handle"], list_handle);
+    // List mints a fresh get and expand handle for this page. Those are not
+    // the handles the advisory cycle minted, and neither may be reused as the
+    // list request.
+    let listed_get = finding["get_handle"]
+        .as_str()
+        .expect("list mints a get handle")
+        .to_owned();
+    let listed_expand = finding["expand_handle"]
+        .as_str()
+        .expect("anchored finding mints an expand handle")
+        .to_owned();
+    assert_ne!(listed_get, list_handle);
+    assert_ne!(listed_expand, list_handle);
+    assert_ne!(listed_get, listed_expand);
     assert_eq!(finding["finding"]["lifecycle"], "active", "{finding}");
     assert_eq!(finding["finding"]["classification"], "new", "{finding}");
     assert_eq!(
@@ -150,25 +155,24 @@ async fn feedback_list_returns_the_published_compiler_finding_and_denies_other_h
     assert_eq!(unknown["retryable"], false, "{unknown}");
 
     let get_handle = cycle_finding["get_handle"].as_str().expect("get handle");
-    let wrong_operation_response = mcp_call(
+    deny_list(
         &fixture,
-        "tracedecay_feedback_list",
-        json!({
-            "request_handle": get_handle,
-            "format": "json",
-        }),
+        get_handle,
+        "a cycle get handle must not list findings",
     )
     .await;
-    let wrong_operation = problem_record(&wrong_operation_response);
-    assert_eq!(
-        wrong_operation["kind"], "not_found_or_not_authorized",
-        "a get handle must not list findings: {wrong_operation}"
-    );
-    assert_eq!(
-        wrong_operation["code"], "not_found_or_not_authorized",
-        "{wrong_operation}"
-    );
-    assert_eq!(wrong_operation["retryable"], false, "{wrong_operation}");
+    deny_list(
+        &fixture,
+        &listed_get,
+        "the get handle on a list page must not list findings",
+    )
+    .await;
+    deny_list(
+        &fixture,
+        &listed_expand,
+        "the expand handle on a list page must not list findings",
+    )
+    .await;
 
     let malformed = mcp_call(
         &fixture,
@@ -349,6 +353,29 @@ fn evidence(envelope: &Value) -> (&Value, &Value) {
         .get("payload")
         .unwrap_or_else(|| panic!("evidence omitted its payload: {envelope}"));
     (packet, payload)
+}
+
+async fn deny_list(
+    fixture: &crate::support::ProductionCompositionFixture,
+    request_handle: &str,
+    reason: &str,
+) {
+    let response = mcp_call(
+        fixture,
+        "tracedecay_feedback_list",
+        json!({
+            "request_handle": request_handle,
+            "format": "json",
+        }),
+    )
+    .await;
+    let problem = problem_record(&response);
+    assert_eq!(
+        problem["kind"], "not_found_or_not_authorized",
+        "{reason}: {problem}"
+    );
+    assert_eq!(problem["code"], "not_found_or_not_authorized", "{problem}");
+    assert_eq!(problem["retryable"], false, "{problem}");
 }
 
 fn problem_record(response: &Value) -> &Value {
