@@ -40,9 +40,13 @@ pub enum Mode {
 }
 ";
 
-/// `target/biquad.ts`. Default-kind symbols: class `Biquad` line 1, method
+/// `ported/biquad.ts`. Default-kind symbols: class `Biquad` line 1, method
 /// `process` line 2, method `reset` line 6, class `Adaa` line 9, method `gain`
 /// line 10, function `Helper` line 15, function `extra` line 19.
+///
+/// The destination directory is `ported`, not `target`. `target` is a generated
+/// directory segment and the index never admits it, so a fixture that used it
+/// would report an empty port even when the file exists.
 const TARGET_BIQUAD: &str = "\
 export class Biquad {
   process(): number {
@@ -66,12 +70,11 @@ export function extra(): void {}
 ";
 
 async fn open_port_project() -> ProductionCompositionFixture {
-    let (_isolated_env, _) = crate::common::IsolatedEnv::acquire().await;
     let fixture = production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("source")).unwrap();
-        fs::create_dir_all(project.join("target")).unwrap();
+        fs::create_dir_all(project.join("ported")).unwrap();
         fs::write(project.join("source/biquad.rs"), SOURCE_BIQUAD).unwrap();
-        fs::write(project.join("target/biquad.ts"), TARGET_BIQUAD).unwrap();
+        fs::write(project.join("ported/biquad.ts"), TARGET_BIQUAD).unwrap();
     })
     .await;
     let server = fixture
@@ -106,11 +109,51 @@ async fn call_port_status(fixture: &ProductionCompositionFixture, mut arguments:
 
 fn assert_payload(actual: &Value, expected: Value) {
     assert_eq!(
-        actual,
-        &expected,
+        stable_symbols(actual),
+        stable_symbols(&expected),
         "tracedecay_port_status payload:\n{}",
         serde_json::to_string_pretty(actual).unwrap_or_else(|_| actual.to_string())
     );
+}
+
+/// Symbol lists follow catalog occurrence order. That id includes the
+/// repository and worktree, which a fresh fixture does not keep stable, so
+/// two correct calls can list the same records in different orders. Counts,
+/// coverage, and the records themselves are what a caller can rely on.
+fn stable_symbols(value: &Value) -> Value {
+    let mut value = value.clone();
+    sort_records(
+        &mut value["matched_symbols"],
+        &["name", "source_kind", "target_kind", "source_file", "target_file"],
+    );
+    sort_records(
+        &mut value["target_only_symbols"],
+        &["file", "kind", "line", "name"],
+    );
+    if let Some(files) = value
+        .get_mut("unmatched_by_file")
+        .and_then(Value::as_object_mut)
+    {
+        for symbols in files.values_mut() {
+            sort_records(symbols, &["kind", "line", "name"]);
+        }
+    }
+    value
+}
+
+fn sort_records(value: &mut Value, keys: &[&str]) {
+    let Some(items) = value.as_array_mut() else {
+        return;
+    };
+    items.sort_by(|left, right| {
+        let key = |item: &Value| {
+            keys.iter()
+                .map(|field| item[*field].to_string())
+                .collect::<Vec<_>>()
+                .join("\u{1f}")
+        };
+        key(left).cmp(&key(right))
+    });
 }
 
 #[tokio::test]
@@ -121,14 +164,14 @@ async fn port_status_reports_cross_language_partial_coverage() {
     // `Biquad::gain` does not match `Adaa::gain`. Coverage is 4/6 = 66.7.
     let partial = call_port_status(
         &fixture,
-        json!({"source_dir": "source", "target_dir": "target"}),
+        json!({"source_dir": "source", "target_dir": "ported"}),
     )
     .await;
     assert_payload(
         &partial,
         json!({
             "source_dir": "source",
-            "target_dir": "target",
+            "target_dir": "ported",
             "source_count": 6,
             "target_count": 7,
             "matched": 4,
@@ -143,38 +186,38 @@ async fn port_status_reports_cross_language_partial_coverage() {
             },
             "matched_symbols": [
                 {
-                    "name": "Biquad",
-                    "source_kind": "struct",
-                    "target_kind": "class",
-                    "source_file": "source/biquad.rs",
-                    "target_file": "target/biquad.ts"
-                },
-                {
                     "name": "process",
                     "source_kind": "method",
                     "target_kind": "method",
                     "source_file": "source/biquad.rs",
-                    "target_file": "target/biquad.ts"
+                    "target_file": "ported/biquad.ts"
+                },
+                {
+                    "name": "Biquad",
+                    "source_kind": "struct",
+                    "target_kind": "class",
+                    "source_file": "source/biquad.rs",
+                    "target_file": "ported/biquad.ts"
                 },
                 {
                     "name": "reset",
                     "source_kind": "method",
                     "target_kind": "method",
                     "source_file": "source/biquad.rs",
-                    "target_file": "target/biquad.ts"
+                    "target_file": "ported/biquad.ts"
                 },
                 {
                     "name": "helper",
                     "source_kind": "function",
                     "target_kind": "function",
                     "source_file": "source/biquad.rs",
-                    "target_file": "target/biquad.ts"
+                    "target_file": "ported/biquad.ts"
                 }
             ],
             "target_only_symbols": [
-                {"name": "Adaa", "kind": "class", "file": "target/biquad.ts", "line": 9},
-                {"name": "gain", "kind": "method", "file": "target/biquad.ts", "line": 10},
-                {"name": "extra", "kind": "function", "file": "target/biquad.ts", "line": 19}
+                {"name": "gain", "kind": "method", "file": "ported/biquad.ts", "line": 10},
+                {"name": "extra", "kind": "function", "file": "ported/biquad.ts", "line": 19},
+                {"name": "Adaa", "kind": "class", "file": "ported/biquad.ts", "line": 9}
             ]
         }),
     );
@@ -185,7 +228,7 @@ async fn port_status_reports_cross_language_partial_coverage() {
         &fixture,
         json!({
             "source_dir": "source",
-            "target_dir": "target",
+            "target_dir": "ported",
             "kinds": ["method", "not_a_kind"]
         }),
     )
@@ -194,7 +237,7 @@ async fn port_status_reports_cross_language_partial_coverage() {
         &methods,
         json!({
             "source_dir": "source",
-            "target_dir": "target",
+            "target_dir": "ported",
             "source_count": 3,
             "target_count": 3,
             "matched": 2,
@@ -212,18 +255,18 @@ async fn port_status_reports_cross_language_partial_coverage() {
                     "source_kind": "method",
                     "target_kind": "method",
                     "source_file": "source/biquad.rs",
-                    "target_file": "target/biquad.ts"
+                    "target_file": "ported/biquad.ts"
                 },
                 {
                     "name": "reset",
                     "source_kind": "method",
                     "target_kind": "method",
                     "source_file": "source/biquad.rs",
-                    "target_file": "target/biquad.ts"
+                    "target_file": "ported/biquad.ts"
                 }
             ],
             "target_only_symbols": [
-                {"name": "gain", "kind": "method", "file": "target/biquad.ts", "line": 10}
+                {"name": "gain", "kind": "method", "file": "ported/biquad.ts", "line": 10}
             ]
         }),
     );
@@ -232,14 +275,14 @@ async fn port_status_reports_cross_language_partial_coverage() {
     // every symbol that exists only in the target.
     let missing_source = call_port_status(
         &fixture,
-        json!({"source_dir": "nowhere", "target_dir": "target"}),
+        json!({"source_dir": "nowhere", "target_dir": "ported"}),
     )
     .await;
     assert_payload(
         &missing_source,
         json!({
             "source_dir": "nowhere",
-            "target_dir": "target",
+            "target_dir": "ported",
             "source_count": 0,
             "target_count": 7,
             "matched": 0,
@@ -249,13 +292,13 @@ async fn port_status_reports_cross_language_partial_coverage() {
             "unmatched_by_file": {},
             "matched_symbols": [],
             "target_only_symbols": [
-                {"name": "Biquad", "kind": "class", "file": "target/biquad.ts", "line": 1},
-                {"name": "process", "kind": "method", "file": "target/biquad.ts", "line": 2},
-                {"name": "reset", "kind": "method", "file": "target/biquad.ts", "line": 6},
-                {"name": "Adaa", "kind": "class", "file": "target/biquad.ts", "line": 9},
-                {"name": "gain", "kind": "method", "file": "target/biquad.ts", "line": 10},
-                {"name": "Helper", "kind": "function", "file": "target/biquad.ts", "line": 15},
-                {"name": "extra", "kind": "function", "file": "target/biquad.ts", "line": 19}
+                {"name": "Biquad", "kind": "class", "file": "ported/biquad.ts", "line": 1},
+                {"name": "process", "kind": "method", "file": "ported/biquad.ts", "line": 2},
+                {"name": "reset", "kind": "method", "file": "ported/biquad.ts", "line": 6},
+                {"name": "Adaa", "kind": "class", "file": "ported/biquad.ts", "line": 9},
+                {"name": "gain", "kind": "method", "file": "ported/biquad.ts", "line": 10},
+                {"name": "Helper", "kind": "function", "file": "ported/biquad.ts", "line": 15},
+                {"name": "extra", "kind": "function", "file": "ported/biquad.ts", "line": 19}
             ]
         }),
     );
@@ -269,7 +312,7 @@ async fn port_status_rejects_unknown_kinds_and_missing_source_dir() {
 
     let unknown_kind = tool_error(
         &fixture,
-        json!({"source_dir": "source", "target_dir": "target", "kinds": ["not_a_kind"]}),
+        json!({"source_dir": "source", "target_dir": "ported", "kinds": ["not_a_kind"]}),
     )
     .await;
     assert_eq!(unknown_kind.0, -32603);
@@ -279,7 +322,7 @@ async fn port_status_rejects_unknown_kinds_and_missing_source_dir() {
     );
     assert_eq!(unknown_kind.2, "tracedecay_port_status");
 
-    let missing_source_dir = tool_error(&fixture, json!({"target_dir": "target"})).await;
+    let missing_source_dir = tool_error(&fixture, json!({"target_dir": "ported"})).await;
     assert_eq!(missing_source_dir.0, -32603);
     assert_eq!(
         missing_source_dir.1,
