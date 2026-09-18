@@ -913,6 +913,9 @@ fn clone_status_distinguishes_unavailable_backfill_partial_ready_and_stale() {
 }
 
 #[tokio::test]
+// The projection lock is held across the dashboard read on purpose: this is
+// the contention the read must not join.
+#[allow(clippy::await_holding_lock)]
 async fn dashboard_freshness_does_not_join_a_clone_backfill_slice() {
     let fixture = GitFixture::new(&[(
         "src/lib.rs",
