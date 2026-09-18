@@ -766,11 +766,14 @@ async fn completed_session_import_immediately_searches_canonical_message() {
     harness.shutdown().await;
 }
 
-/// `tracedecay_message_search` is a read of already-admitted session evidence.
-/// The same MCP `tools/call` must return the exact stored message for a query
-/// that names it, an empty complete answer for a query that does not, the
-/// other provider's message only when that provider is selected, and a typed
-/// invalid-request refusal when `query` is omitted outside goals mode.
+/// `tracedecay_message_search` reads already-admitted messages through MCP
+/// `tools/call`. A query that names a seeded message returns that message's
+/// text, id, session, provider, and role. Those observations carry an unknown
+/// valid time, so the hit is partial: one omitted record, coverage `unknown`
+/// 1 and `visible` 0, not a complete answer. A query that matches nothing, the
+/// wrong provider, an assistant message filtered as a tool result, and goals
+/// with no goals are empty complete answers. Omitting `query` outside goals
+/// mode, and naming an unknown provider, are typed invalid-request refusals.
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn message_search_returns_literal_seeded_messages() {
@@ -828,9 +831,10 @@ async fn message_search_returns_literal_seeded_messages() {
     )
     .await;
     assert_eq!(plum["query"], "plum quartz regulator");
-    assert_eq!(plum["outcome"], "complete");
-    assert_eq!(plum["status"], "ok");
+    assert_eq!(plum["outcome"], "partial");
+    assert_eq!(plum["status"], "partial");
     assert_eq!(plum["count"], 1);
+    assert_eq!(plum["omitted"], 1);
     assert_eq!(plum["provider"], "all");
     assert_eq!(plum["requested_provider"], Value::Null);
     assert_eq!(plum["scope"], "all");
@@ -842,6 +846,11 @@ async fn message_search_returns_literal_seeded_messages() {
     assert_eq!(plum["include_subagents"], true);
     assert_eq!(plum["refresh_required"], false);
     assert_eq!(plum["store_scope"], "project");
+    assert_eq!(
+        plum["temporal"]["coverage"],
+        json!({"hidden": 0, "redacted": 0, "unknown": 1, "visible": 0})
+    );
+    assert_eq!(plum["temporal"]["freshness"], json!({"state": "fresh"}));
     assert_eq!(plum["results"].as_array().map(Vec::len), Some(1));
     let plum_hit = &plum["results"][0];
     assert_eq!(
@@ -865,8 +874,10 @@ async fn message_search_returns_literal_seeded_messages() {
         }),
     )
     .await;
-    assert_eq!(amber["outcome"], "complete");
+    assert_eq!(amber["outcome"], "partial");
+    assert_eq!(amber["status"], "partial");
     assert_eq!(amber["count"], 1);
+    assert_eq!(amber["omitted"], 1);
     assert_eq!(
         amber["results"][0]["message"]["text"],
         "The amber lattice stays closed"
@@ -879,6 +890,8 @@ async fn message_search_returns_literal_seeded_messages() {
         amber["results"][0]["message"]["session_id"],
         "proof-amber-session"
     );
+    assert_eq!(amber["results"][0]["message"]["provider"], "cursor");
+    assert_eq!(amber["results"][0]["message"]["role"], "assistant");
 
     let miss = message_search_payload(
         &cg,
@@ -895,6 +908,10 @@ async fn message_search_returns_literal_seeded_messages() {
     assert_eq!(miss["results"], json!([]));
     assert_eq!(miss["provider"], "all");
     assert_eq!(miss["refresh_required"], false);
+    assert_eq!(
+        miss["temporal"]["coverage"],
+        json!({"hidden": 0, "redacted": 0, "unknown": 0, "visible": 0})
+    );
 
     let cursor_only = message_search_payload(
         &cg,
@@ -922,8 +939,10 @@ async fn message_search_returns_literal_seeded_messages() {
     .await;
     assert_eq!(codex_only["provider"], "codex");
     assert_eq!(codex_only["requested_provider"], "codex");
-    assert_eq!(codex_only["outcome"], "complete");
+    assert_eq!(codex_only["outcome"], "partial");
+    assert_eq!(codex_only["status"], "partial");
     assert_eq!(codex_only["count"], 1);
+    assert_eq!(codex_only["omitted"], 1);
     assert_eq!(
         codex_only["results"][0]["message"]["text"],
         "The orchid spool tension is 12 newtons"
@@ -933,6 +952,7 @@ async fn message_search_returns_literal_seeded_messages() {
         "proof-orchid-message"
     );
     assert_eq!(codex_only["results"][0]["message"]["provider"], "codex");
+    assert_eq!(codex_only["results"][0]["message"]["role"], "assistant");
     assert_eq!(
         codex_only["results"][0]["message"]["session_id"],
         "proof-orchid-session"
@@ -963,8 +983,10 @@ async fn message_search_returns_literal_seeded_messages() {
     )
     .await;
     assert_eq!(tool_hit["message_type"], "tool_result");
-    assert_eq!(tool_hit["outcome"], "complete");
+    assert_eq!(tool_hit["outcome"], "partial");
+    assert_eq!(tool_hit["status"], "partial");
     assert_eq!(tool_hit["count"], 1);
+    assert_eq!(tool_hit["omitted"], 1);
     assert_eq!(
         tool_hit["results"][0]["message"]["text"],
         "zinc spindle torque reading 17"
@@ -974,6 +996,7 @@ async fn message_search_returns_literal_seeded_messages() {
         "proof-zinc-message"
     );
     assert_eq!(tool_hit["results"][0]["message"]["role"], "tool");
+    assert_eq!(tool_hit["results"][0]["message"]["model"], Value::Null);
     assert_eq!(tool_hit["results"][0]["message"]["provider"], "cursor");
     assert_eq!(
         tool_hit["results"][0]["message"]["session_id"],
