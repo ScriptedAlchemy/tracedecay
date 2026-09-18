@@ -139,7 +139,7 @@ fn assert_refusal(
 
 fn assert_created_task(receipt: &Value, command_id: &Value) {
     assert_eq!(receipt["replayed"], false, "{receipt}");
-    assert_eq!(receipt["event"]["command_id"], command_id, "{receipt}");
+    assert_eq!(&receipt["event"]["command_id"], command_id, "{receipt}");
     assert_eq!(receipt["event"]["sequence"], 1, "{receipt}");
     assert_eq!(
         receipt["event"]["expected_graph_version"],
