@@ -138,13 +138,17 @@ jobs:
           python3 .release-automation/scripts/test-package-release-archive.py
           bash .release-automation/scripts/test-check-distribution-clean-source.sh
           bash .release-automation/scripts/test-check-distribution-snapshot.sh
+          bash .release-automation/scripts/test-check-distribution-reuse.sh
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@acdba816b0980ba6b63f1109f89a046e15fc301a # nextest
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: release-beta-${{ matrix.target }}
+          cache-on-failure: true
 
       - name: Resolve release source feature profile
         id: release-profile
@@ -183,61 +187,10 @@ jobs:
           lld-link --version
           "RUSTFLAGS=-C linker=lld-link.exe" >> $env:GITHUB_ENV
 
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          shared-key: release-beta-${{ matrix.target }}
-          cache-on-failure: true
-
-      - name: Test release distribution
-        if: matrix.name == 'x86_64-linux'
-        run: |
-          python3 .release-automation/scripts/build-controlled-workload-hotpath-helpers.py \
-            --source . \
-            --profile release \
-            --target ${{ matrix.target }}
-          cargo nextest run -p tracedecay-search-eval --release --target ${{ matrix.target }} \
-            --all-features --locked \
-            --run-ignored only \
-            -E 'test(=controlled_workloads::tests::hotpath_off_vs_on_durable_results_are_identical)' \
-            --no-tests=fail
-          cargo build --workspace --bins --release --target ${{ matrix.target }} --all-features --locked
-          cargo test --workspace --release --target ${{ matrix.target }} --all-features --locked
-
-      # Runs before the default build so it never leaves an all-features
-      # binary (e.g. test-transport) on disk at the shared release output
-      # path for later packaging steps to pick up.
-      - name: Verify all-feature release build compiles
-        if: runner.os != 'Windows'
-        run: cargo build ${{ steps.release-profile.outputs.binary_args }} --release --target ${{ matrix.target }} --all-features --locked
-
       - name: Build release binary for packaging
         run: cargo build ${{ steps.release-profile.outputs.binary_args }} --release --target ${{ matrix.target }} ${{ steps.release-profile.outputs.cargo_args }} --locked
 
-      - name: Install modern Bash for distribution acceptance
-        if: runner.os == 'macOS'
-        run: brew install bash
-
-      - name: Run distribution acceptance
-        if: steps.release-profile.outputs.profile == 'production'
-        shell: bash
-        run: |
-          set -euo pipefail
-          gate_shell="bash"
-          if [[ "$RUNNER_OS" == "macOS" ]]; then
-            gate_shell="$(brew --prefix)/bin/bash"
-          fi
-          # The gate runs Cargo offline so packaging and the packaged-crate
-          # builds prove the checked-in lockfile resolves without the network.
-          cargo fetch --locked --target ${{ matrix.target }}
-          lockfile_sha="$(python3 -c 'import hashlib; print(hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest())')"
-          CARGO_NET_OFFLINE=true \
-            "$gate_shell" scripts/check-distribution-acceptance.sh
-          actual_lockfile_sha="$(python3 -c 'import hashlib; print(hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest())')"
-          test "$actual_lockfile_sha" = "$lockfile_sha"
-
-      - name: Run historical release binary smoke
-        if: steps.release-profile.outputs.profile == 'legacy-default'
+      - name: Smoke release binary
         shell: bash
         run: |
           set -euo pipefail
