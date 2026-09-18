@@ -21,13 +21,9 @@ const SCHEMA_ID: &str = "schema.application.retained.fact-store-add.result";
 const USE_CASE: &str = "use-case.application.retained.fact-store-add";
 const GENERATED: &str = "<generated>";
 
-/// Write-time similarity reported for a one-character punctuation variant of
-/// the same sentence. Token sets are identical, so the score is exact.
-const PUNCTUATION_NEAR_DUPLICATE_SIMILARITY: u64 = 1_000_000;
-
-/// Write-time similarity reported for the Redis negation pair below.
-/// Updated from the production MCP response; not a configured threshold.
-const REDIS_CONFLICT_SIMILARITY: u64 = 833_333;
+/// Similarity the production add call reports for the Redis negation pair.
+/// Holographic similarity outranks the token Jaccard of those two sentences.
+const REDIS_CONFLICT_SIMILARITY: u64 = 907_172;
 
 struct AddFixture {
     production: ProductionCompositionFixture,
@@ -90,19 +86,33 @@ fn assert_fresh_fact(fact: &Value) {
         fact_id.starts_with("fact.v1."),
         "fact id must use the canonical namespace: {fact_id}"
     );
+    // The projection clock and the telemetry clock are independent, so these
+    // stamps are not a single literal. Require a real instant before blanking.
     let created_at = fact["telemetry"]["created_at"]
         .as_i64()
         .unwrap_or_else(|| panic!("created_at: {fact}"));
+    let projected_as_of = fact["projected_as_of"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("projected_as_of: {fact}"));
     assert!(
         created_at > 1_000_000_000_000,
         "created_at must be a real timestamp, not a placeholder: {created_at}"
     );
-    assert_eq!(fact["telemetry"]["updated_at"], json!(created_at));
-    assert_eq!(fact["projected_as_of"], json!(created_at));
+    assert!(
+        projected_as_of > 1_000_000_000_000,
+        "projected_as_of must be a real timestamp, not a placeholder: {projected_as_of}"
+    );
+    let updated_at = fact["telemetry"]["updated_at"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("updated_at: {fact}"));
+    assert!(
+        updated_at > 1_000_000_000_000,
+        "updated_at must be a real timestamp, not a placeholder: {updated_at}"
+    );
     assert_eq!(fact["source"]["kind"], "application");
 }
 
-fn assert_commit_binds_fact(payload: &Value) {
+fn assert_commit_binds_fact(payload: &Value, event_count: usize) {
     let fact = &payload["result"]["fact"]["fact"];
     let commit = &payload["result"]["commit"];
     assert_fresh_fact(fact);
@@ -111,10 +121,16 @@ fn assert_commit_binds_fact(payload: &Value) {
     assert_eq!(commit["owner"], fact["owner"]);
     assert_eq!(commit["active_assertion_id"], fact["active_assertion_id"]);
     assert_eq!(commit["last_event_id"], fact["last_event_id"]);
+    let events = commit["committed_event_ids"]
+        .as_array()
+        .unwrap_or_else(|| panic!("committed events: {commit}"));
     assert_eq!(
-        commit["committed_event_ids"],
-        json!([fact["last_event_id"]])
+        events.len(),
+        event_count,
+        "content {}: {commit}",
+        fact["content"]
     );
+    assert_eq!(events.last(), Some(&fact["last_event_id"]));
 }
 
 fn scrub(value: &Value) -> Value {
@@ -191,12 +207,12 @@ fn literal_fact(
     })
 }
 
-fn literal_commit(disposition: &str, owner: Value) -> Value {
+fn literal_commit(disposition: &str, owner: Value, event_count: usize) -> Value {
     json!({
         "disposition": disposition,
         "fact_id": GENERATED,
         "owner": owner,
-        "committed_event_ids": [GENERATED],
+        "committed_event_ids": vec![json!(GENERATED); event_count],
         "last_event_id": GENERATED,
         "active_assertion_id": GENERATED
     })
@@ -213,8 +229,9 @@ fn assert_added(
     metadata: Value,
     owner: Value,
     commit_disposition: &str,
+    event_count: usize,
 ) {
-    assert_commit_binds_fact(payload);
+    assert_commit_binds_fact(payload, event_count);
     assert_eq!(
         scrub(payload),
         json!({
@@ -234,7 +251,7 @@ fn assert_added(
                         owner.clone(),
                     )
                 },
-                "commit": literal_commit(commit_disposition, owner)
+                "commit": literal_commit(commit_disposition, owner, event_count)
             }
         })
     );
@@ -265,6 +282,7 @@ async fn fact_store_add_commits_supplied_fields_and_replays_the_same_request() {
         json!({"lane": "workspace"}),
         project_owner(),
         "committed",
+        2,
     );
     let fact_id = added["result"]["fact"]["fact"]["fact_id"].clone();
 
@@ -281,6 +299,7 @@ async fn fact_store_add_commits_supplied_fields_and_replays_the_same_request() {
         json!({"lane": "workspace"}),
         project_owner(),
         "idempotent_replay",
+        2,
     );
 
     let defaults = effect_payload(
@@ -301,6 +320,7 @@ async fn fact_store_add_commits_supplied_fields_and_replays_the_same_request() {
         json!({}),
         project_owner(),
         "committed",
+        1,
     );
 
     let zero_trust = effect_payload(
@@ -325,6 +345,7 @@ async fn fact_store_add_commits_supplied_fields_and_replays_the_same_request() {
         json!({}),
         project_owner(),
         "committed",
+        2,
     );
 
     close_fixture(fixture).await;
@@ -390,7 +411,7 @@ async fn fact_store_add_reports_a_normalized_duplicate_without_a_second_fact() {
 }
 
 #[tokio::test]
-async fn fact_store_add_reports_a_punctuation_near_duplicate() {
+async fn fact_store_add_keeps_a_trailing_period_as_its_own_fact() {
     let fixture = open_fixture().await;
     let base = "The deployment uses PostgreSQL for durable state in production";
     let variant = "The deployment uses PostgreSQL for durable state in production.";
@@ -403,40 +424,26 @@ async fn fact_store_add_reports_a_punctuation_near_duplicate() {
     );
     let fact_id = added["result"]["fact"]["fact"]["fact_id"].clone();
 
-    let near = effect_payload(
+    let punctuated = effect_payload(
         &call_add(
             &fixture.server,
             json!({"content": variant, "category": "decision"}),
         )
         .await,
     );
-    assert_eq!(near["result"]["closest_fact_id"], fact_id);
-    assert_ne!(near["result"]["fact"]["fact"]["fact_id"], fact_id);
-    assert_commit_binds_fact(&near);
-    assert_eq!(
-        scrub(&near),
-        json!({
-            "outcome": "committed",
-            "result": {
-                "disposition": "near_duplicate",
-                "fact": {
-                    "kind": "available",
-                    "fact": literal_fact(
-                        variant,
-                        "decision",
-                        json!([]),
-                        json!([]),
-                        500_000,
-                        Value::Null,
-                        json!({}),
-                        project_owner(),
-                    )
-                },
-                "closest_fact_id": GENERATED,
-                "similarity_millionths": PUNCTUATION_NEAR_DUPLICATE_SIMILARITY,
-                "commit": literal_commit("committed", project_owner())
-            }
-        })
+    assert_ne!(punctuated["result"]["fact"]["fact"]["fact_id"], fact_id);
+    assert_added(
+        &punctuated,
+        variant,
+        "decision",
+        json!([]),
+        json!([]),
+        500_000,
+        Value::Null,
+        json!({}),
+        project_owner(),
+        "committed",
+        1,
     );
 
     close_fixture(fixture).await;
@@ -466,7 +473,7 @@ async fn fact_store_add_reports_a_possible_conflict_for_a_negated_fact() {
     assert_eq!(conflict["result"]["closest_fact_id"], fact_id);
     assert_ne!(conflict["result"]["fact"]["fact"]["fact_id"], fact_id);
     assert_eq!(conflict["result"]["fact"]["fact"]["content"], negated);
-    assert_commit_binds_fact(&conflict);
+    assert_commit_binds_fact(&conflict, 1);
     assert_eq!(
         scrub(&conflict),
         json!({
@@ -488,7 +495,7 @@ async fn fact_store_add_reports_a_possible_conflict_for_a_negated_fact() {
                 },
                 "closest_fact_id": GENERATED,
                 "similarity_millionths": REDIS_CONFLICT_SIMILARITY,
-                "commit": literal_commit("committed", project_owner())
+                "commit": literal_commit("committed", project_owner(), 1)
             }
         })
     );
@@ -562,6 +569,7 @@ async fn fact_store_add_user_scope_stores_a_profile_owned_fact() {
         json!({}),
         json!({"kind": "profile"}),
         "committed",
+        2,
     );
 
     close_fixture(fixture).await;
@@ -605,11 +613,11 @@ fn assert_invalid_request(response: &Value) {
         json!({
             "revision": 1,
             "kind": "invalid_request",
-            "code": "application.surface.invalid_request",
-            "message": "The daemon rejected the retained application request",
+            "code": "application.retained.invalid-request",
+            "message": "The retained operation request is invalid.",
             "diagnostic": {
-                "code": "application.surface.invalid_request",
-                "message": "The daemon rejected the retained application request"
+                "code": "application.retained.invalid-request",
+                "message": "The retained operation request is invalid."
             },
             "committed_receipt": null,
             "owning_layer": "application",
@@ -624,7 +632,7 @@ fn assert_invalid_request(response: &Value) {
             "request_id": GENERATED,
             "trace_id": GENERATED,
             "details": [],
-            "legal_actions": [],
+            "legal_actions": ["correct_request"],
             "coverage": null
         })
     );
@@ -643,7 +651,7 @@ async fn fact_store_add_rejects_unknown_fields_categories_and_out_of_range_trust
             }),
         )
         .await,
-        "tool execution failed: invalid arguments for tracedecay_fact_store_add: unknown variant `pitfall`, expected one of `general`, `user_pref`, `project`, `tool`, `decision`, `code_area` at line 1 column 0",
+        "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_add: category: unknown variant `pitfall`, expected one of `general`, `user_pref`, `project`, `tool`, `decision`, `code_area`",
     );
     assert_argument_error(
         &call_add(
@@ -654,11 +662,11 @@ async fn fact_store_add_rejects_unknown_fields_categories_and_out_of_range_trust
             }),
         )
         .await,
-        "tool execution failed: invalid arguments for tracedecay_fact_store_add: unknown field `action`, expected one of `content`, `memory_scope`, `category`, `tags`, `entities`, `trust`, `source_label`, `metadata` at line 1 column 0",
+        "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_add: action: unknown field `action`, expected one of `content`, `memory_scope`, `category`, `tags`, `entities`, `trust`, `source_label`, `metadata`, `project_selector`",
     );
     assert_argument_error(
         &call_add(&fixture.server, json!({"category": "decision"})).await,
-        "tool execution failed: invalid arguments for tracedecay_fact_store_add: missing field `content` at line 1 column 0",
+        "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_add: missing field `content`",
     );
 
     for trust in [1.5, -0.1] {
