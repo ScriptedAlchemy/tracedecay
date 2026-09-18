@@ -1,20 +1,14 @@
-//! Behavior of `tracedecay_stack_snapshot` through the MCP tool dispatcher.
+//! `tracedecay_stack_snapshot` as an MCP client sees it.
 //!
-//! The call is the production handler path: argument adaptation, daemon
-//! invocation, the project-open native-integration owner, and the enrolled
-//! repository. Expected values are the refs, epoch, and typed outcomes a
-//! caller observes, not schema text or a digest recomputed by the subject.
+//! The call is `tools/call` on the server the production project composition
+//! mounts. Argument adaptation, the daemon invocation service, and the
+//! project-open native-integration owner all run. Expected values are the
+//! refs, epoch, and typed outcomes a caller observes.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
-use std::sync::Arc;
 
 use serde_json::{Value, json};
-use tokio::sync::Mutex;
-use tracedecay_agent_hosts::native_integration::{
-    DaemonNativeIntegrationOwner, DaemonNativeIntegrationServiceRegistry, NativeIntegrationTargetV1,
-};
-use tracedecay_code_index_runtime::code_index_scheduler::identity::IndexingIdentityV1;
 use tracedecay_code_index_runtime::resolved_scope_for_project;
 use tracedecay_contracts::{
     AuthorizedScopeSet, AuthorizedScopeSetAuthority, CancellationContext, CapabilityGrantId,
@@ -22,134 +16,40 @@ use tracedecay_contracts::{
     NativeIntegrationStackSnapshotSurfaceRequest, RequestContext, RequestId, ResolvedScope,
     native_integration_surface_operation,
 };
-use tracedecay_daemon_service::{DaemonConfigurationRuntimeRegistrar, DaemonInvocationService};
 use tracedecay_domain::{
     ActorId, CapabilityId, ManifestDigest, ProjectId, RefId, RepositoryId, ScopeSetId,
     ScopeSetRevision, UseCaseId, UtcMicros, WorktreeId, WorktreeInventoryEpoch,
     WorktreeInventorySnapshotId,
 };
-use tracedecay_runtime_core::config::PinnedUserDataDir;
+use tracedecay_mcp::McpTransport;
 use tracedecay_runtime_core::git::try_git_program;
-use tracedecay_sessions::admission::HostAdmissionScope;
 
-use super::{ToolCallRegistryOptions, handle_tool_call_with_registry_options};
-use crate::project::TraceDecay;
+use crate::daemon::ProductionProjectCompositionHarnessV1;
+use crate::mcp::McpServer;
 
-const PROJECT_ID: &str = "project.stack-snapshot.proof";
 const SOURCE_REF: &str = "refs/heads/source";
 const DESTINATION_REF: &str = "refs/heads/destination";
 const INVENTORY_SNAPSHOT_ID: &str = "inventory.snapshot.proof";
 const INVENTORY_EPOCH: u64 = 7;
 const PROPOSAL_DIGEST_BYTE: char = 'c';
 
-struct IdleAnalysis;
-
-impl tracedecay_application::native_integration::NativeIntegrationAnalysisPort for IdleAnalysis {
-    fn analyze(
-        &self,
-        _selection: &tracedecay_domain::NativeIntegrationSelectionV1,
-        _native: &tracedecay_runtime_core::git_repository::GitNativePreflight,
-        _candidate: &tracedecay_runtime_core::git_repository::GitNativeCandidateTreeV1<'_>,
-        _deadline: &tracedecay_contracts::Deadline,
-        _cancellation_signal: &tracedecay_contracts::CancellationSignal,
-        _cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
-    ) -> Result<
-        tracedecay_domain::NativeIntegrationAnalysisReportV1,
-        tracedecay_contracts::NativeIntegrationPortError,
-    > {
-        Err(tracedecay_contracts::NativeIntegrationPortError::Unavailable)
-    }
-
-    fn revalidate(
-        &self,
-        _report: &tracedecay_domain::NativeIntegrationAnalysisReportV1,
-        _deadline: &tracedecay_contracts::Deadline,
-        _cancellation: &tracedecay_contracts::CancellationSignal,
-    ) -> Result<
-        tracedecay_application::native_integration::NativeIntegrationAnalysisRevalidationV1,
-        tracedecay_contracts::NativeIntegrationPortError,
-    > {
-        Err(tracedecay_contracts::NativeIntegrationPortError::Unavailable)
-    }
+struct CaptureTransport {
+    incoming: Option<String>,
+    output: String,
 }
 
-struct MountedStackSnapshotExecutor {
-    service: DaemonInvocationService,
-    owner: DaemonNativeIntegrationOwner,
-    project_root: PathBuf,
-    lsp_registry: Arc<Mutex<tracedecay_lsp::LspSessionRegistry>>,
-}
-
-impl tracedecay_contracts::ApplicationInvocationExecutor for MountedStackSnapshotExecutor {
-    fn invoke(
-        &self,
-        _invocation: tracedecay_contracts::ApplicationInvocation,
-    ) -> tracedecay_contracts::ApplicationInvocationFuture<
-        '_,
-        std::result::Result<
-            tracedecay_contracts::ApplicationResponse,
-            tracedecay_contracts::InvocationError,
-        >,
-    > {
-        Box::pin(async { Err(tracedecay_contracts::InvocationError::Unavailable) })
-    }
-}
-
-impl tracedecay_daemon_protocol::DaemonInvocationExecutor for MountedStackSnapshotExecutor {
-    fn invoke_controlled(
-        &self,
-        request: tracedecay_daemon_protocol::DaemonInvocationRequest,
-        deadline: tracedecay_contracts::Deadline,
-        cancellation: tracedecay_contracts::CancellationSignal,
-        _policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
-        '_,
-        std::result::Result<
-            tracedecay_daemon_protocol::DaemonInvocationResponse,
-            tracedecay_daemon_protocol::DaemonInvocationError,
-        >,
-    > {
-        let owner = self.owner.clone();
-        Box::pin(async move {
-            if cancellation.is_cancelled() {
-                return Err(
-                    tracedecay_daemon_protocol::DaemonInvocationError::Cancelled {
-                        stage: tracedecay_contracts::CancellationStage::BeforeAdmission,
-                    },
-                );
-            }
-            if tracedecay_daemon_protocol::deadline_remaining(&deadline).is_none() {
-                return Err(
-                    tracedecay_daemon_protocol::DaemonInvocationError::TimedOut {
-                        stage: tracedecay_contracts::CancellationStage::BeforeAdmission,
-                    },
-                );
-            }
-            Ok(self
-                .service
-                .invoke_with_cancellation(
-                    &self.lsp_registry,
-                    Some(&self.project_root),
-                    None,
-                    None,
-                    Some(owner),
-                    request,
-                    None,
-                )
-                .await)
-        })
+impl McpTransport for CaptureTransport {
+    async fn read_line(&mut self) -> std::io::Result<Option<String>> {
+        Ok(self.incoming.take())
     }
 
-    fn observe_feedback(
-        &self,
-        _subject_digest: ManifestDigest,
-        _observed_at: UtcMicros,
-        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
-        '_,
-        tracedecay_domain::errors::Result<()>,
-    > {
-        Box::pin(async { Ok(()) })
+    async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
+        self.output.push_str(line);
+        Ok(())
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -284,15 +184,13 @@ fn snapshot_arguments(
         grant_digest: digest('a'),
         policy_digest: digest('d'),
     };
-    let mut arguments = serde_json::to_value(request).expect("snapshot arguments");
-    arguments["format"] = json!("json");
-    arguments
+    serde_json::to_value(request).expect("snapshot arguments")
 }
 
-fn persist_scope_set(
-    database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    scope_set: &AuthorizedScopeSet,
-) {
+fn persist_scope_set(server: &McpServer, scope_set: &AuthorizedScopeSet) {
+    let database = server
+        .project_session_db()
+        .expect("production project session database");
     let storage = database
         .authorized_scope_set_storage()
         .expect("scope-set storage");
@@ -305,8 +203,12 @@ fn persist_scope_set(
     );
 }
 
-fn tool_payload(result: &tracedecay_mcp::ToolResult) -> Value {
-    let text = result.value["content"]
+fn evidence_payload(response: &Value) -> Value {
+    assert!(
+        response["error"].is_null(),
+        "stack snapshot call failed: {response}"
+    );
+    let text = response["result"]["content"]
         .as_array()
         .and_then(|items| {
             items.iter().find_map(|item| {
@@ -315,7 +217,7 @@ fn tool_payload(result: &tracedecay_mcp::ToolResult) -> Value {
                 Some(text[start..].to_owned())
             })
         })
-        .unwrap_or_else(|| panic!("tool result has no JSON content: {}", result.value));
+        .unwrap_or_else(|| panic!("tool result has no JSON content: {response}"));
     let envelope: Value = serde_json::from_str(&text)
         .unwrap_or_else(|error| panic!("tool result is not JSON: {error}\n{text}"));
     envelope
@@ -324,35 +226,33 @@ fn tool_payload(result: &tracedecay_mcp::ToolResult) -> Value {
         .unwrap_or_else(|| panic!("tool result has no evidence payload: {envelope}"))
 }
 
-async fn call_stack_snapshot(
-    graph: &TraceDecay,
-    executor: &MountedStackSnapshotExecutor,
-    arguments: Value,
-) -> tracedecay_domain::errors::Result<tracedecay_mcp::ToolResult> {
-    let mut options = ToolCallRegistryOptions::default().admit_opened_project(graph)?;
-    options.application_invocation_executor = Some(executor);
-    handle_tool_call_with_registry_options(
-        graph,
-        "tracedecay_stack_snapshot",
-        arguments,
-        None,
-        None,
-        options,
-    )
-    .await
+async fn call_stack_snapshot(server: &McpServer, mut arguments: Value) -> Value {
+    if let Some(object) = arguments.as_object_mut() {
+        object
+            .entry("format".to_string())
+            .or_insert_with(|| json!("json"));
+    }
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "tracedecay_stack_snapshot",
+            "arguments": arguments,
+        }
+    });
+    let mut transport = CaptureTransport {
+        incoming: Some(request.to_string()),
+        output: String::new(),
+    };
+    Box::pin(server.run_connection(&mut transport))
+        .await
+        .expect("production MCP server tools/call");
+    serde_json::from_str(transport.output.trim()).expect("JSON-RPC response")
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn stack_snapshot_freezes_enrolled_refs_and_refuses_the_other_inputs() {
-    let _profile = PinnedUserDataDir::new();
-    if tracedecay_code_index::parallelism::installed_worker_status().is_none() {
-        tracedecay_code_index::parallelism::install_worker_plan(
-            tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::Automatic {},
-            8 * 1024 * 1024 * 1024,
-        )
-        .expect("worker plan");
-    }
-
     let directory = tempfile::tempdir().expect("temporary repository");
     let repository_root = directory.path().join("repo");
     std::fs::create_dir_all(&repository_root).expect("repository directory");
@@ -361,13 +261,25 @@ async fn stack_snapshot_freezes_enrolled_refs_and_refuses_the_other_inputs() {
         .canonicalize()
         .expect("canonical repository");
 
-    let (graph, runtime) =
-        TraceDecay::init_test_fixture_with_registered_runtime(&repository_root, PROJECT_ID)
+    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+        directory.path(),
+        [repository_root.clone()],
+    )
+    .await
+    .expect("production composition");
+    let server = harness
+        .server(&repository_root)
+        .expect("mounted project server");
+    let project_id = ProjectId::new(
+        harness
+            .project_id(&repository_root)
             .await
-            .expect("registered project");
-    let identity = IndexingIdentityV1::resolve(graph.project_root()).expect("indexing identity");
-    let project_id = ProjectId::new(PROJECT_ID).expect("project id");
-    let repository_id = identity.repository_id().clone();
+            .expect("enrolled project id"),
+    )
+    .expect("project id");
+    let enrolled_scope = resolved_scope_for_project(&repository_root, &project_id)
+        .expect("enrolled repository scope");
+    let repository_id = enrolled_scope.repository_id().clone();
     let source_scope = scope(
         &project_id,
         &repository_id,
@@ -377,7 +289,7 @@ async fn stack_snapshot_freezes_enrolled_refs_and_refuses_the_other_inputs() {
     let destination_scope = scope(
         &project_id,
         &repository_id,
-        identity.worktree_id().clone(),
+        enrolled_scope.worktree_id().clone(),
         DESTINATION_REF,
     );
     let enrolled = authorized_scope_set(
@@ -395,7 +307,7 @@ async fn stack_snapshot_freezes_enrolled_refs_and_refuses_the_other_inputs() {
     let foreign_destination = scope(
         &foreign_project,
         &repository_id,
-        identity.worktree_id().clone(),
+        enrolled_scope.worktree_id().clone(),
         DESTINATION_REF,
     );
     let foreign = authorized_scope_set(
@@ -403,82 +315,33 @@ async fn stack_snapshot_freezes_enrolled_refs_and_refuses_the_other_inputs() {
         foreign_source.clone(),
         foreign_destination.clone(),
     );
+    persist_scope_set(&server, &enrolled);
+    persist_scope_set(&server, &foreign);
 
-    let database = runtime
-        .registered_database_lease(HostAdmissionScope::Project)
-        .expect("project sessions")
-        .clone();
-    persist_scope_set(&database, &enrolled);
-    persist_scope_set(&database, &foreign);
-
-    let policy_digest = digest('d');
-    let owner = DaemonNativeIntegrationServiceRegistry::default()
-        .ensure(
-            database,
-            NativeIntegrationTargetV1 {
-                repository_root: repository_root.clone(),
-                project_id: project_id.clone(),
-                repository_id: repository_id.clone(),
-                policy_digest: policy_digest.clone(),
-            },
-            UtcMicros(100),
-            Arc::new(IdleAnalysis),
+    let proposal_digest = format!("sha256:{}", PROPOSAL_DIGEST_BYTE.to_string().repeat(64));
+    let frozen = evidence_payload(
+        &call_stack_snapshot(
+            &server,
+            snapshot_arguments(
+                &source_scope,
+                &destination_scope,
+                &enrolled,
+                SOURCE_REF,
+                DESTINATION_REF,
+            ),
         )
-        .await
-        .expect("native integration owner");
-
-    let profile_root =
-        tracedecay_runtime_core::storage::default_profile_root().expect("profile root");
-    let profile_identity =
-        tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
-            .expect("profile identity");
-    let observed_at = tracedecay_contracts::clock::now_micros();
-    let service = DaemonInvocationService::default();
-    DaemonConfigurationRuntimeRegistrar::new(&service)
-        .register(
-            graph.project_root().to_path_buf(),
-            Arc::clone(graph.configuration_runtime()),
-            resolved_scope_for_project(graph.project_root(), &project_id)
-                .expect("configuration scope"),
-            profile_identity.profile_id().clone(),
-            ActorId::new("actor.stack-snapshot.mcp").expect("configuration actor"),
-            UtcMicros(observed_at.0.saturating_add(3_600_000_000)),
-            None,
-            policy_digest,
-        )
-        .await
-        .expect("configuration runtime");
-
-    let executor = MountedStackSnapshotExecutor {
-        service,
-        owner,
-        project_root: graph.project_root().to_path_buf(),
-        lsp_registry: Arc::new(Mutex::new(tracedecay_lsp::LspSessionRegistry::default())),
-    };
-
-    let frozen = call_stack_snapshot(
-        &graph,
-        &executor,
-        snapshot_arguments(
-            &source_scope,
-            &destination_scope,
-            &enrolled,
-            SOURCE_REF,
-            DESTINATION_REF,
-        ),
-    )
-    .await
-    .expect("enrolled snapshot call");
-    let frozen = tool_payload(&frozen);
-    assert_eq!(frozen["outcome"], "stack_snapshot");
-    assert_eq!(frozen["selection"]["project_id"], PROJECT_ID);
-    assert_eq!(
-        frozen["selection"]["repository_id"],
-        identity.repository_id().as_str()
+        .await,
     );
+    assert_eq!(frozen["outcome"], "stack_snapshot");
+    assert_eq!(frozen["selection"]["project_id"], project_id.as_str());
+    assert_eq!(frozen["selection"]["repository_id"], repository_id.as_str());
     assert_eq!(frozen["selection"]["source_ref"], SOURCE_REF);
     assert_eq!(frozen["selection"]["destination_ref"], DESTINATION_REF);
     assert_eq!(frozen["selection"]["inventory_epoch"], INVENTORY_EPOCH);
+    assert_ne!(
+        frozen["selection"]["selection_digest"], proposal_digest,
+        "the frozen selection digest must be the daemon's, not the proposal echoed back"
+    );
     assert_eq!(
         frozen["sealed_snapshot"]["selection"]["kind"],
         "independent_branch"
@@ -493,7 +356,7 @@ async fn stack_snapshot_freezes_enrolled_refs_and_refuses_the_other_inputs() {
     );
     assert_eq!(
         frozen["sealed_snapshot"]["selection"]["binding"]["proposal_digest"],
-        format!("sha256:{}", PROPOSAL_DIGEST_BYTE.to_string().repeat(64))
+        proposal_digest
     );
     assert_eq!(
         frozen["sealed_snapshot"]["inventory_snapshot_id"],
@@ -512,27 +375,23 @@ async fn stack_snapshot_freezes_enrolled_refs_and_refuses_the_other_inputs() {
         DESTINATION_REF,
     );
     missing_ref["selection"]["binding"]["source_ref"] = json!("refs/heads/absent");
-    let missing = call_stack_snapshot(&graph, &executor, missing_ref)
-        .await
-        .expect("missing ref call");
-    let missing = tool_payload(&missing);
+    let missing = evidence_payload(&call_stack_snapshot(&server, missing_ref).await);
     assert_eq!(missing["outcome"], "unavailable");
     assert_eq!(missing["reason"], "partial");
 
-    let foreign_result = call_stack_snapshot(
-        &graph,
-        &executor,
-        snapshot_arguments(
-            &foreign_source,
-            &foreign_destination,
-            &foreign,
-            SOURCE_REF,
-            DESTINATION_REF,
-        ),
-    )
-    .await
-    .expect("foreign project call");
-    let foreign_result = tool_payload(&foreign_result);
+    let foreign_result = evidence_payload(
+        &call_stack_snapshot(
+            &server,
+            snapshot_arguments(
+                &foreign_source,
+                &foreign_destination,
+                &foreign,
+                SOURCE_REF,
+                DESTINATION_REF,
+            ),
+        )
+        .await,
+    );
     assert_eq!(foreign_result["outcome"], "unavailable");
     assert_eq!(foreign_result["reason"], "denied");
 
@@ -544,16 +403,15 @@ async fn stack_snapshot_freezes_enrolled_refs_and_refuses_the_other_inputs() {
         DESTINATION_REF,
     );
     path_bearing["repository_path"] = json!("/tmp/not-a-repository");
-    let rejected = call_stack_snapshot(&graph, &executor, path_bearing)
-        .await
-        .expect_err("a path field must be rejected before a snapshot is minted");
-    let rejected = rejected.to_string();
-    assert!(
-        rejected.contains("application_surface_invalid_request"),
-        "{rejected}"
+    let rejected = call_stack_snapshot(&server, path_bearing).await;
+    assert_eq!(
+        rejected["error"]["data"]["reason_code"],
+        "application_surface_invalid_request"
     );
     assert!(
-        !rejected.contains("stack_snapshot"),
-        "rejection must not look like a frozen snapshot: {rejected}"
+        rejected.get("result").is_none() || rejected["result"].is_null(),
+        "a path-bearing request must not return a frozen snapshot: {rejected}"
     );
+
+    harness.shutdown().await;
 }
