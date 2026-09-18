@@ -80,10 +80,11 @@ async fn affected_tests_projects_the_tests_that_call_the_edited_symbol() {
     let document_uri = Url::from_file_path(fixture.project_root.join("src/lib.rs"))
         .expect("advisory document URI")
         .to_string();
-    let cycle = published_cycle(&fixture, &document_uri).await;
-    let handle = cycle["read_handles"]["affected_tests_handle"]
+    let published = published_cycle(&fixture, &document_uri).await;
+    let cycle = &published["cycle"];
+    let handle = published["read_handles"]["affected_tests_handle"]
         .as_str()
-        .unwrap_or_else(|| panic!("cycle did not mint an affected-tests handle: {cycle}"))
+        .unwrap_or_else(|| panic!("cycle did not mint an affected-tests handle: {published}"))
         .to_owned();
 
     let unknown = call(
