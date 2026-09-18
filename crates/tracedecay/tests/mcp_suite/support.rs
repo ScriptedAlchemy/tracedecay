@@ -87,7 +87,7 @@ const SOURCE_EDIT_TOOL_NAMES: &[&str] = &[
 #[cfg(feature = "test-transport")]
 #[derive(Default)]
 pub(crate) struct CaptureTransport {
-    incoming: Option<String>,
+    pub(crate) incoming: Option<String>,
     pub(crate) output: String,
 }
 
