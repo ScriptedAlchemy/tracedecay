@@ -147,7 +147,17 @@ async fn configure_attempt_provider(production: &ProductionCompositionFixture) {
 
 /// A fresh provider attempt has no session association yet. The public Work
 /// reads must still project it from the authority that committed the attempt.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+///
+/// The journey deliberately leaves the second attempt in flight and then reads
+/// it, so the runtime has to carry the reader and the attempt worker at once.
+/// The Work read handlers are synchronous: `load_effect_dispatch` occupies its
+/// worker thread while it waits for the exact-SQL transaction slot the in-flight
+/// attempt holds. With two worker threads the reader and the attempt worker
+/// deadlock until the 30s transaction-idle reclaim frees the slot, which is
+/// within milliseconds of this operation's own 30s deadline, so the journey
+/// passed or failed by a race rather than by its contract. Provision the
+/// threads the journey's own concurrency needs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn work_attempt_consumers_read_the_public_start_attempt_effect() {
     let production = production_composition_fixture().await;
     let project_root = production.project_root.clone();
@@ -390,7 +400,6 @@ async fn work_attempt_consumers_read_the_public_start_attempt_effect() {
         second_started["identity"]["attempt_id"], "attempt.mcp-attempt-read.second",
         "{second_started}"
     );
-
     let attempts = call(
         &server,
         "tracedecay_work_list_attempts",

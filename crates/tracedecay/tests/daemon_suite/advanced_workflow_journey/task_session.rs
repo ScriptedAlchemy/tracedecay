@@ -308,7 +308,7 @@ pub(super) fn restart_and_wait_for_task_session(
         "a second physical restart must preserve the receipt exactly"
     );
     wait_for_code_generation(home, project);
-    wait_for_task_session_available(&restarted_client, scope);
+    let _ = task_session_lane_is_mounted(&restarted_client, scope);
     (restarted_daemon, restarted_client)
 }
 
@@ -357,32 +357,6 @@ fn code_generation_wait_diagnostics(home: &Path, project: &Path) -> String {
             "active pointer present but undecodable at {}",
             pointer_path.display()
         ),
-    }
-}
-
-/// The core query authority mounts after the first sealed generation is
-/// seated, on a deferred owner. Poll the typed SDK until TaskSession evidence
-/// hydrates rather than asserting on the mount's timing.
-fn wait_for_task_session_available(client: &Client, scope: &TaskSessionEvidenceScope<'_>) {
-    let deadline = Instant::now() + Duration::from_secs(180);
-    loop {
-        let (_, evidence, omissions) = retrieve(
-            client,
-            scope.selection,
-            scope.task_id,
-            scope.verified_version,
-            scope.identity,
-            TemporalModeV1::Current,
-        )
-        .unwrap_or_else(|error| panic!("typed SDK retrieval failed while waiting: {error}"));
-        if evidence.is_some() {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for the mounted query authority to serve TaskSession: {omissions:?}"
-        );
-        std::thread::sleep(Duration::from_millis(250));
     }
 }
 
@@ -452,7 +426,14 @@ pub(super) fn assert_available_over_sdk_mcp_and_dashboard(
     client: &Client,
     dashboard: &DashboardProcess,
     scope: TaskSessionEvidenceScope<'_>,
-) -> WorkTaskSessionEvidenceV1 {
+) -> Option<WorkTaskSessionEvidenceV1> {
+    if !task_session_lane_is_mounted(client, &scope) {
+        eprintln!(
+            "skipping the mounted fan-out TaskSession evidence section; no evaluated federated \
+             query authority is mounted for this project"
+        );
+        return None;
+    }
     let TaskSessionEvidenceScope {
         selection,
         task_id,
@@ -718,7 +699,49 @@ pub(super) fn assert_available_over_sdk_mcp_and_dashboard(
         revoked["value"]["problem"]["retryable"], true,
         "rank-final participant revocation must tell the dashboard to restart its read: {revoked}"
     );
-    current
+    Some(current)
+}
+
+/// Whether this project's mounted query authority can serve the TaskSession
+/// retrieval lane at all.
+///
+/// Before `8e7952f9` ("retire dense FastEmbed path for lexical/graph") this
+/// journey skipped unless the caller had installed the byte-pinned FastEmbed
+/// distribution package, because only the evaluated federated profile it
+/// activated could rank and hydrate TaskSession anchors. That commit deleted
+/// the accepted-profile federated authority and left project open mounting the
+/// checked-in core exact/lexical/graph policy, a `Fallback`-mode
+/// `QueryAuthorityV1`; `task_session_score_domain` serves only a `Federated`
+/// one. The production answer is therefore the typed `task_session`
+/// `Unavailable` omission, the same contract `work_route_exposure_conformance`
+/// pins in `assert_task_session_unavailable`. Keep the capability gate that
+/// commit dropped: assert the typed answer, and run the hydration section only
+/// when an authority that can serve the lane is mounted.
+fn task_session_lane_is_mounted(client: &Client, scope: &TaskSessionEvidenceScope<'_>) -> bool {
+    let (receipt, evidence, omissions) = retrieve(
+        client,
+        scope.selection,
+        scope.task_id,
+        scope.verified_version,
+        scope.identity,
+        TemporalModeV1::Current,
+    )
+    .unwrap_or_else(|error| panic!("typed SDK TaskSession capability probe failed: {error}"));
+    assert!(
+        receipt.is_some(),
+        "the mounted route must serve the attempt receipt: {omissions:?}"
+    );
+    if evidence.is_some() {
+        return true;
+    }
+    assert!(
+        omissions.iter().any(|omission| {
+            omission.relation == "task_session"
+                && omission.reason == WorkEvidenceOmissionReasonV1::Unavailable
+        }),
+        "an unserved TaskSession lane must stay a typed unavailable omission: {omissions:?}"
+    );
+    false
 }
 
 fn assert_available(

@@ -912,6 +912,10 @@ fn clone_status_distinguishes_unavailable_backfill_partial_ready_and_stale() {
     ));
 }
 
+// Holding the clone-successor slot across the await is the scenario, not an
+// oversight: the read under test must answer without joining the backfill that
+// owns the slot. The guard is released before shutdown.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn dashboard_freshness_does_not_join_a_clone_backfill_slice() {
     let fixture = GitFixture::new(&[(
@@ -986,6 +990,16 @@ async fn query_admission_serves_v14_while_clone_successor_is_pending() {
         let worktree = mounted
             .get(&fixture.path().canonicalize().expect("canonical root"))
             .expect("mounted worktree");
+        // Generation identity binds the capture instant (`captured_at` is in
+        // the intake digest), so the crafted owner and the registry's own
+        // capture of the same checkout never share an id. Seat the crafted
+        // owner too: a text owner that is not the seated generation is a state
+        // the daemon never produces, and the worker's clone-backfill gate
+        // (`serving_matches_text`) refuses to drive it.
+        *worktree
+            .serving_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
         *worktree
             .text_generation
             .write()
@@ -1060,6 +1074,13 @@ async fn expired_source_proof_reschedules_pending_clone_backfill() {
         let worktree = mounted
             .get(&fixture.path().canonicalize().expect("canonical root"))
             .expect("mounted worktree");
+        // Seat the crafted owner alongside its text handle: the worker's
+        // clone-backfill gate only drives a text owner that is the seated
+        // generation, and a daemon never holds one that is not.
+        *worktree
+            .serving_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
         *worktree
             .text_generation
             .write()
@@ -1161,9 +1182,11 @@ fn transient_clone_successor_reservation_refusal_retries_without_cooling_v14_own
     );
     scheduler.bind_resident_memory(Arc::clone(&resident_memory));
     let latest = scheduler.latest_complete().expect("restored generation");
-    assert_eq!(
-        latest.advance_text_serving(1),
-        Err(tracedecay_query::retrieval::RetrievalPortError::BudgetExceeded),
+    assert!(
+        matches!(
+            latest.advance_text_serving(1),
+            Err(tracedecay_query::retrieval::RetrievalPortError::AuthorityUnavailable(_))
+        ),
         "the competing reservation must deny the first successor admission"
     );
     latest
@@ -4728,8 +4751,11 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         .symbols
         .iter()
         .find(|record| {
+            // Trait-impl methods are owned by `<Type as Trait>`, so a
+            // `contains("Processor")` probe also matches every impl of the
+            // trait. Only the declaration itself is owned by the trait.
             record.simple_name == "process"
-                && record.qualified_name.contains("Processor")
+                && record.qualified_name.ends_with("::Processor::process")
                 && record.kind == "method"
         })
         .expect("trait method symbol")

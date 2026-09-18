@@ -398,6 +398,14 @@ impl CodeIndexSchedulerErrorV1 {
             }
             Self::SnapshotMemoryCapacityUnavailable => true,
             Self::GraphProjection(CodeGraphProjectionError::BudgetExhausted { .. }) => true,
+            // The code-generation store lock is bounded shared capacity: a
+            // concurrent publication in the same store root already holds it,
+            // and it releases on its own without waking this worktree. Every
+            // other `Unavailable` detail names a fault in this store, so only
+            // this one refusal is retried.
+            Self::Production(CodeIndexProductionErrorV1::Publication(
+                CodeIndexPublicationStoreErrorV1::Unavailable(detail),
+            )) => detail == super::publication_store::CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1,
             _ => false,
         }
     }

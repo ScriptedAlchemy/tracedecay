@@ -7,7 +7,7 @@ use super::candidate_output::{
 use super::evaluate::SearchEvalError;
 
 const WORKLOAD_PATH: &str = "tests/fixtures/search_quality/query-lexical-graph-workload-v1.json";
-const WORKLOAD_SHA256: &str = "20322067510f57f5fa75f68674b18290a65d0535af7da363b6b6f29384042ca4";
+const WORKLOAD_SHA256: &str = "267e2bd2e9b90d258cbeed829920ab735f6af0ebc2a6e870d59eeef29b1cdb93";
 
 const FILES: &[(&str, &[u8])] = &[
     (
