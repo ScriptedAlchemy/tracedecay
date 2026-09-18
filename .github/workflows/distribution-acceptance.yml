@@ -1,40 +1,37 @@
-# Run the Linux release battery on the release PR itself.
+# Packaged-crate distribution battery. Visibility only; not a ship gate.
 #
-# Twelve beta tags in a row published with zero assets because the first run
-# of `scripts/check-distribution-acceptance.sh` happened after release-please
-# had already tagged and published the prerelease. PR CI never exercises the
-# release-only steps, so a green PR said nothing about whether the tree could
-# ship. This workflow runs the same x86_64-linux steps as
-# `.github/workflows/release-beta.yml` and `release.yml` on the
-# `chore(release)` PR, so a tree that cannot ship never gets a tag.
-
-name: Release PR distribution acceptance
+# GitHub release assets are the just-built production binary, its archive,
+# and the MCPB that wraps that same binary. `cargo package`, extracted-crate
+# rebuilds, nextest, and MCP inspector dogfood prove the unpublished crate
+# graph, not those assets. Beta.40 run 35271070760 spent ~24m of the aarch64
+# ship job on that battery and then failed before MCPB. This workflow runs
+# the battery once a day on one free ubuntu-latest runner.
+name: Distribution acceptance
 
 on:
-  pull_request:
-    branches: [master]
+  schedule:
+    # Daily 08:00 UTC. Visibility only; not a merge or release gate.
+    - cron: "0 8 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-pr-distribution-acceptance-${{ github.event.pull_request.number }}
+  group: distribution-acceptance-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   distribution-acceptance:
-    name: Release PR distribution acceptance (x86_64-linux)
-    if: >-
-      startsWith(github.head_ref, 'release-please--') &&
-      github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-22.04
+    name: Distribution acceptance (x86_64-linux)
+    if: github.repository == 'ScriptedAlchemy/tracedecay'
+    runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
       TARGET: x86_64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -84,23 +81,6 @@ jobs:
         with:
           shared-key: release-beta-${{ env.TARGET }}
           cache-on-failure: true
-
-      - name: Test release distribution
-        run: |
-          python3 scripts/build-controlled-workload-hotpath-helpers.py \
-            --source . \
-            --profile release \
-            --target ${{ env.TARGET }}
-          cargo nextest run -p tracedecay-search-eval --release --target ${{ env.TARGET }} \
-            --all-features --locked \
-            --run-ignored only \
-            -E 'test(=controlled_workloads::tests::hotpath_off_vs_on_durable_results_are_identical)' \
-            --no-tests=fail
-          cargo build --workspace --bins --release --target ${{ env.TARGET }} --all-features --locked
-          cargo test --workspace --release --target ${{ env.TARGET }} --all-features --locked
-
-      - name: Verify all-feature release build compiles
-        run: cargo build --package tracedecay-cli --bin tracedecay --release --target ${{ env.TARGET }} --all-features --locked
 
       - name: Build release binary for packaging
         run: cargo build --package tracedecay-cli --bin tracedecay --release --target ${{ env.TARGET }} --no-default-features --features production --locked
