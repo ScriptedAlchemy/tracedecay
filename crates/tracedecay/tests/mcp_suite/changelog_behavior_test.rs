@@ -1,17 +1,9 @@
-//! Production `tools/call` behavior of `tracedecay_changelog`.
-//!
-//! Each call goes through [`ProductionProjectCompositionHarnessV1::call_tool`],
-//! the JSON-RPC entry the daemon serves. Assertions name the text or fields a
-//! caller observes for one concrete repository.
-
-use std::path::Path;
-use std::process::Command;
-
 use serde_json::{Value, json};
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay_mcp::JsonRpcResponse;
 
 use super::support::{TestTempDir, test_temp_dir};
+use crate::common::fixture::GitFixture;
 
 struct ChangelogRepo {
     harness: ProductionProjectCompositionHarnessV1,
@@ -19,44 +11,11 @@ struct ChangelogRepo {
     _isolation: TestTempDir,
 }
 
-fn git(root: &Path, args: &[&str]) {
-    let output = Command::new(crate::common::git_program())
-        .args(args)
-        .current_dir(root)
-        .env("GIT_AUTHOR_NAME", "TraceDecay Test")
-        .env("GIT_AUTHOR_EMAIL", "test@tracedecay.invalid")
-        .env("GIT_COMMITTER_NAME", "TraceDecay Test")
-        .env("GIT_COMMITTER_EMAIL", "test@tracedecay.invalid")
-        .output()
-        .unwrap_or_else(|error| panic!("git {args:?} should spawn: {error}"));
-    assert!(
-        output.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-fn commit(root: &Path, message: &str) {
-    git(root, &["add", "-A"]);
-    git(
-        root,
-        &[
-            "-c",
-            "user.name=TraceDecay Test",
-            "-c",
-            "user.email=test@tracedecay.invalid",
-            "commit",
-            "-qm",
-            message,
-        ],
-    );
-}
-
-async fn open_repo(prepare: impl FnOnce(&Path)) -> ChangelogRepo {
+async fn open_repo(prepare: impl FnOnce(&GitFixture)) -> ChangelogRepo {
     let isolation = test_temp_dir();
     let project_root = isolation.path().join("project");
-    std::fs::create_dir_all(&project_root).expect("changelog fixture directory");
-    prepare(&project_root);
+    let fixture = GitFixture::primary(&project_root);
+    prepare(&fixture);
     let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
         isolation.path(),
         vec![project_root.clone()],
@@ -68,10 +27,6 @@ async fn open_repo(prepare: impl FnOnce(&Path)) -> ChangelogRepo {
         project_root,
         _isolation: isolation,
     }
-}
-
-fn init_main(root: &Path) {
-    git(root, &["init", "-b", "main"]);
 }
 
 async fn call_changelog(repo: &ChangelogRepo, arguments: Value) -> JsonRpcResponse {
@@ -114,35 +69,36 @@ fn payload(result: &Value) -> Value {
     })
 }
 
-/// `(kind, qualified_name, name, file, content_digest)` in the order a caller
-/// can sort without reading occurrence ids. The digest is the body the index
-/// sealed for that symbol, so a modification is a different digest, not a rename.
-fn observable_symbols(body: &Value, key: &str) -> Vec<(String, String, String, String, String)> {
+fn observable_symbols(body: &Value, key: &str) -> Vec<Value> {
     let mut rows = body[key]
         .as_array()
         .unwrap_or_else(|| panic!("{key} must be an array in {body}"))
         .iter()
         .map(|symbol| {
-            (
-                symbol["kind"].as_str().unwrap_or("").to_owned(),
-                symbol["qualified_name"].as_str().unwrap_or("").to_owned(),
-                symbol["name"].as_str().unwrap_or("").to_owned(),
-                symbol["file"].as_str().unwrap_or("").to_owned(),
-                symbol["content_digest"].as_str().unwrap_or("").to_owned(),
-            )
+            json!({
+                "kind": symbol["kind"],
+                "qualified_name": symbol["qualified_name"],
+                "name": symbol["name"],
+                "file": symbol["file"],
+                "content_digest": symbol["content_digest"],
+            })
         })
         .collect::<Vec<_>>();
-    rows.sort();
+    rows.sort_by(|left, right| {
+        left["qualified_name"]
+            .as_str()
+            .cmp(&right["qualified_name"].as_str())
+    });
     rows
 }
 
 #[tokio::test]
 async fn changelog_rejects_missing_and_non_object_arguments() {
-    let repo = open_repo(|root| {
-        init_main(root);
+    let repo = open_repo(|fixture| {
+        let root = fixture.root();
         std::fs::create_dir_all(root.join("src")).expect("src");
         std::fs::write(root.join("src/lib.rs"), "pub fn kept() {}\n").expect("source");
-        commit(root, "initial");
+        fixture.commit_all("initial");
     })
     .await;
 
@@ -198,11 +154,11 @@ async fn changelog_rejects_missing_and_non_object_arguments() {
 
 #[tokio::test]
 async fn changelog_unknown_ref_is_a_typed_git_error() {
-    let repo = open_repo(|root| {
-        init_main(root);
+    let repo = open_repo(|fixture| {
+        let root = fixture.root();
         std::fs::create_dir_all(root.join("src")).expect("src");
         std::fs::write(root.join("src/lib.rs"), "pub fn kept() {}\n").expect("source");
-        commit(root, "initial");
+        fixture.commit_all("initial");
     })
     .await;
 
@@ -231,17 +187,17 @@ async fn changelog_unknown_ref_is_a_typed_git_error() {
 
 #[tokio::test]
 async fn changelog_between_commits_lists_the_file_and_withholds_branch_symbols() {
-    let repo = open_repo(|root| {
-        init_main(root);
+    let repo = open_repo(|fixture| {
+        let root = fixture.root();
         std::fs::create_dir_all(root.join("src")).expect("src");
         std::fs::write(root.join("src/lib.rs"), "pub fn original() {}\n").expect("source");
-        commit(root, "initial");
+        fixture.commit_all("initial");
         std::fs::write(
             root.join("src/lib.rs"),
             "pub fn original() {}\npub fn added() {}\n",
         )
         .expect("source");
-        commit(root, "add function");
+        fixture.commit_all("add function");
     })
     .await;
 
@@ -289,14 +245,14 @@ symbols_removed: none
 
 #[tokio::test]
 async fn changelog_deleted_subtree_lists_only_the_removed_file() {
-    let repo = open_repo(|root| {
-        init_main(root);
+    let repo = open_repo(|fixture| {
+        let root = fixture.root();
         std::fs::create_dir_all(root.join("crates/sub")).expect("subtree");
         std::fs::write(root.join("crates/sub/keep.rs"), "pub fn k() {}\n").expect("source");
         std::fs::write(root.join("main.rs"), "fn main() {}\n").expect("source");
-        commit(root, "initial");
+        fixture.commit_all("initial");
         std::fs::remove_dir_all(root.join("crates")).expect("drop subtree");
-        commit(root, "drop crates");
+        fixture.commit_all("drop crates");
     })
     .await;
 
@@ -314,11 +270,11 @@ async fn changelog_deleted_subtree_lists_only_the_removed_file() {
 
 #[tokio::test]
 async fn changelog_same_branch_tip_reports_no_changes() {
-    let repo = open_repo(|root| {
-        init_main(root);
+    let repo = open_repo(|fixture| {
+        let root = fixture.root();
         std::fs::create_dir_all(root.join("src")).expect("src");
         std::fs::write(root.join("src/lib.rs"), "pub fn kept() {}\n").expect("source");
-        commit(root, "initial");
+        fixture.commit_all("initial");
     })
     .await;
 
@@ -356,23 +312,23 @@ async fn changelog_same_branch_tip_reports_no_changes() {
 
 #[tokio::test]
 async fn changelog_between_local_branches_names_added_removed_and_modified_symbols() {
-    let repo = open_repo(|root| {
-        init_main(root);
+    let repo = open_repo(|fixture| {
+        let root = fixture.root();
         std::fs::create_dir_all(root.join("src")).expect("src");
         std::fs::write(
             root.join("src/lib.rs"),
             "pub fn kept() {}\npub fn removed_fn() {}\npub fn changed_fn() { let _ = 1; }\n",
         )
         .expect("base source");
-        commit(root, "initial");
-        git(root, &["switch", "-c", "feature"]);
+        fixture.commit_all("initial");
+        fixture.run(&["switch", "-c", "feature"]);
         std::fs::write(
             root.join("src/lib.rs"),
             "pub fn kept() {}\npub fn changed_fn() { let _ = 2; }\npub fn added_fn() {}\n",
         )
         .expect("feature source");
-        commit(root, "revise symbols");
-        git(root, &["switch", "main"]);
+        fixture.commit_all("revise symbols");
+        fixture.run(&["switch", "main"]);
     })
     .await;
 
@@ -397,41 +353,41 @@ async fn changelog_between_local_branches_names_added_removed_and_modified_symbo
         json!({"status": "complete"})
     );
     assert_ne!(
-        body["base_generation"].as_str(),
-        body["head_generation"].as_str(),
+        body["base_generation"].as_str().expect("base generation"),
+        body["head_generation"].as_str().expect("head generation"),
         "different tips must not share a generation: {body}"
     );
     assert_eq!(
         observable_symbols(&body, "symbols_added"),
-        vec![(
-            "function".to_owned(),
-            "src/lib.rs::added_fn".to_owned(),
-            "added_fn".to_owned(),
-            "src/lib.rs".to_owned(),
-            "sha256:19b08a1214d48a2af703ce3ef9538939a8e5d08a55bd9a568e30263d2d8ae9a6".to_owned(),
-        )],
+        vec![json!({
+            "kind": "function",
+            "qualified_name": "src/lib.rs::added_fn",
+            "name": "added_fn",
+            "file": "src/lib.rs",
+            "content_digest": "sha256:19b08a1214d48a2af703ce3ef9538939a8e5d08a55bd9a568e30263d2d8ae9a6",
+        })],
         "{body}"
     );
     assert_eq!(
         observable_symbols(&body, "symbols_removed"),
-        vec![(
-            "function".to_owned(),
-            "src/lib.rs::removed_fn".to_owned(),
-            "removed_fn".to_owned(),
-            "src/lib.rs".to_owned(),
-            "sha256:d2609bdc15fd11af59b21c574e6c7a560b6ff1963e73c606b7df32e021a5a135".to_owned(),
-        )],
+        vec![json!({
+            "kind": "function",
+            "qualified_name": "src/lib.rs::removed_fn",
+            "name": "removed_fn",
+            "file": "src/lib.rs",
+            "content_digest": "sha256:d2609bdc15fd11af59b21c574e6c7a560b6ff1963e73c606b7df32e021a5a135",
+        })],
         "{body}"
     );
     assert_eq!(
         observable_symbols(&body, "symbols_modified"),
-        vec![(
-            "function".to_owned(),
-            "src/lib.rs::changed_fn".to_owned(),
-            "changed_fn".to_owned(),
-            "src/lib.rs".to_owned(),
-            "sha256:faa06ddf52ace2f77e20545f60cbf1af7ca9325f216d43cee9206803af884ff3".to_owned(),
-        )],
+        vec![json!({
+            "kind": "function",
+            "qualified_name": "src/lib.rs::changed_fn",
+            "name": "changed_fn",
+            "file": "src/lib.rs",
+            "content_digest": "sha256:faa06ddf52ace2f77e20545f60cbf1af7ca9325f216d43cee9206803af884ff3",
+        })],
         "{body}"
     );
 }
