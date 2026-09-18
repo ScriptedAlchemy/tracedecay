@@ -20,6 +20,7 @@ mod dependency_hint_test;
 mod derives_test;
 #[cfg(feature = "test-transport")]
 mod edit_test;
+mod find_exact_symbol_test;
 mod graph_analysis_test;
 mod graph_query_test;
 mod lcm_test;
