@@ -26,6 +26,7 @@ mod expand_query_behavior;
 mod fact_store_remove_behavior_test;
 mod feedback_diagnostics_test;
 mod feedback_expand_test;
+mod feedback_get_test;
 mod god_class_test;
 mod graph_analysis_test;
 mod graph_query_test;
