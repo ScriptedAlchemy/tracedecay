@@ -490,7 +490,7 @@ _Scanned {FILES_SCANNED} files._
     assert_eq!(
         invalid_braces,
         execution_failed(
-            "tool execution failed: config error: invalid regex pattern 'Hello, {}!': regex parse error:\n    Hello, {}!\n           ^\nerror: repetition quantifier expects a valid decimal"
+            "tool execution failed: config error: invalid regex pattern 'Hello, {}!': regex parse error:\n    Hello, {}!\n            ^\nerror: repetition quantifier expects a valid decimal"
         )
     );
     let invalid_glob = grep(
