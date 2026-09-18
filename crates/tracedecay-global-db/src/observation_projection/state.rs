@@ -1411,7 +1411,7 @@ mod reconcile_tests {
     use tracedecay_store::SessionRecord;
 
     use super::canonicalize_session_project_paths;
-    use super::{reconcile_session_rows, reconcile_session_rows_detailed};
+    use super::reconcile_session_rows_detailed;
 
     fn record(project_path: &str) -> SessionRecord {
         SessionRecord {
@@ -1454,23 +1454,24 @@ mod reconcile_tests {
             "user symlink families must converge away from the alias spelling"
         );
 
-        let merged = reconcile_session_rows(&normalized_alias, &normalized_real)
+        let merged = reconcile_session_rows_detailed(&normalized_alias, &normalized_real)
             .expect("normalized symlink families naming one directory must reconcile");
         assert_eq!(merged.project_path, normalized_real.project_path);
         assert_eq!(merged.project_key, normalized_real.project_key);
 
         // Symmetric: order must not change the merged identity.
-        let merged_reversed = reconcile_session_rows(&normalized_real, &normalized_alias).unwrap();
+        let merged_reversed =
+            reconcile_session_rows_detailed(&normalized_real, &normalized_alias).unwrap();
         assert_eq!(merged_reversed.project_path, merged.project_path);
 
         // The audit path stays pure: two live family spellings that were never
         // normalized at ingest do not silently merge via filesystem probing.
         assert!(
-            reconcile_session_rows(
+            reconcile_session_rows_detailed(
                 &record(&aliased.to_string_lossy()),
                 &record(&real.to_string_lossy()),
             )
-            .is_none(),
+            .is_err(),
             "reconcile must not canonicalize; family identity is an ingest concern"
         );
     }
@@ -1594,11 +1595,11 @@ mod reconcile_tests {
         std::fs::create_dir_all(&first).unwrap();
         std::fs::create_dir_all(&second).unwrap();
         assert!(
-            reconcile_session_rows(
+            reconcile_session_rows_detailed(
                 &record(&first.to_string_lossy()),
                 &record(&second.to_string_lossy()),
             )
-            .is_none(),
+            .is_err(),
             "distinct directories must never merge"
         );
     }
