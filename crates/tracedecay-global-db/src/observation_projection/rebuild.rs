@@ -27,8 +27,8 @@ use super::state::{
     canonicalize_session_project_paths, consume_projection_queue_item, decode_observation_row,
     decode_sequence, ensure_projection_output_state_cache, projection_retry_state, queued_sequence,
     read_checkpoint, read_message, read_observation, read_session,
-    reaggregate_output_state_for_output, reconcile_session_rows, schedule_projection_retry,
-    storage, storage_message, write_checkpoint,
+    reaggregate_output_state_for_output, reconcile_session_rows_detailed,
+    schedule_projection_retry, storage, storage_message, write_checkpoint,
 };
 use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
@@ -1565,10 +1565,11 @@ async fn stage_rebuild_session(
         };
     let session = match actual {
         Some(actual) => {
-            reconcile_session_rows(&canonicalize_session_project_paths(&actual), &expected)
-                .ok_or_else(|| ProjectionStoreError::OutputCollision {
+            reconcile_session_rows_detailed(&canonicalize_session_project_paths(&actual), &expected)
+                .map_err(|conflict| ProjectionStoreError::SessionOutputCollision {
                     provider: expected.provider.clone(),
-                    message_id: format!("session:{}", expected.session_id),
+                    session_id: expected.session_id.clone(),
+                    field: conflict.field(),
                 })?
         }
         None => expected,

@@ -517,6 +517,9 @@ pub fn classify_claude_observation_failure(
         Projection::RetryDeferred { .. } => contended("observation_projection_retry_deferred"),
         Projection::Gap { .. } => permanent("observation_projection_checkpoint_gap"),
         Projection::OutputCollision { .. } => permanent("observation_projection_output_collision"),
+        Projection::SessionOutputCollision { .. } => {
+            permanent("observation_projection_session_collision")
+        }
         Projection::ProvenanceCollision => permanent("observation_projection_provenance_collision"),
         Projection::Contract(_) => permanent("observation_projection_contract_invalid"),
         Projection::Anchor(_) => permanent("observation_projection_anchor_invalid"),
