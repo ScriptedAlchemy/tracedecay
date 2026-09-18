@@ -178,8 +178,12 @@ for marker in external_publication_markers:
 # extracted crate graph unproven with no failing check to say so.
 battery_path = ".github/workflows/distribution-acceptance.yml"
 battery = open(battery_path, encoding="utf-8").read()
-if "schedule:" not in battery or "workflow_dispatch:" not in battery:
-    raise SystemExit(f"{battery_path} must run on a schedule and on dispatch")
+if "workflow_dispatch:" not in battery:
+    raise SystemExit(f"{battery_path} must be dispatchable")
+import glob
+for workflow in sorted(glob.glob(".github/workflows/*.yml")):
+    if re.search(r"^\s+schedule:\s*$", open(workflow, encoding="utf-8").read(), re.MULTILINE):
+        raise SystemExit(f"{workflow} runs on a timer; every workflow here is on demand")
 if "scripts/check-distribution-acceptance.sh" not in battery:
     raise SystemExit(f"{battery_path} must run scripts/check-distribution-acceptance.sh")
 if "x86_64-unknown-linux-gnu" not in battery:
