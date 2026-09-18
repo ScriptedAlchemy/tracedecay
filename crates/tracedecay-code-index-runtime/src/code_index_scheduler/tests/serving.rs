@@ -5875,18 +5875,34 @@ async fn unpinned_cursor_continues_on_its_immutable_generation() {
         ),
     )
     .expect("continuation request");
-    let continuation = registry
-        .exact_occurrence(
-            RetrievalPortContext {
-                request: &context,
-                operation: &operation,
-            },
-            &continuation_request,
-        )
-        .await;
-    let continuation_page = match continuation {
-        RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("continuation page"),
-        other => panic!("expected continuation page, got {other:?}"),
+    // The text successor can be queryable before the cursor's generation is
+    // bound again. Unavailable with no source generation is that gap, not a
+    // wrong page; a settled miss still fails.
+    let continuation_page = {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let continuation = registry
+                .exact_occurrence(
+                    RetrievalPortContext {
+                        request: &context,
+                        operation: &operation,
+                    },
+                    &continuation_request,
+                )
+                .await;
+            match continuation {
+                RetrievalPortOutcome::Completed(evidence) => {
+                    break evidence.payload.expect("continuation page");
+                }
+                RetrievalPortOutcome::Unavailable(evidence)
+                    if evidence.temporal.source_generation.is_none()
+                        && Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                other => panic!("expected continuation page, got {other:?}"),
+            }
+        }
     };
     assert_eq!(continuation_page.generation, original_generation);
     assert_eq!(continuation_page.items.len(), 1);
