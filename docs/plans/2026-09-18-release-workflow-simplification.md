@@ -69,11 +69,10 @@ Two static properties explain the largest opportunities:
   consumer builds, MCP smoke, and LSP smoke. It does not test the matrix target
   archive that the surrounding job eventually uploads.
 
-The repository already has a pre-tag
-`Release PR distribution acceptance (x86_64-linux)` workflow. Its stated
-purpose is to stop an unshippable release before release-please creates a tag.
-That is the correct lifecycle boundary for pre-release confidence work, though
-the beta and stable policies should differ.
+At baseline the repository had a pre-tag
+`Release PR distribution acceptance (x86_64-linux)` workflow. PR #1587 renamed
+that authority into the periodic crate-extract battery because the work does
+not stamp the release artifact.
 
 Sibling evidence:
 
@@ -90,9 +89,11 @@ Sibling evidence:
   all-feature graph intentionally differs.
 - Cache/toolchain draft
   [#1585](https://github.com/ScriptedAlchemy/tracedecay/pull/1585) finds that
-  all beta.40 release caches missed. Tag cache scope, a full 10 GiB repository
-  cache budget, a floating unused stable toolchain, cargo running before
-  restore, and the duplicate checkout all prevent reliable reuse.
+  all beta.40 release caches missed. A new tag cannot restore a cache written
+  by a previous tag. The only cross-tag restore path is a cache seeded from
+  `master` under the same shared key and environment hash. A full 10 GiB
+  repository cache budget, a floating unused stable toolchain, cargo running
+  before restore, and the duplicate checkout further prevent reliable reuse.
 - Lead architecture, merged
   [#1584](https://github.com/ScriptedAlchemy/tracedecay/pull/1584) defines the
   one-production-compile beta pipeline and estimates slim cold jobs at 25-35m
@@ -310,7 +311,7 @@ acceptance noise will obscure the treatment.
 
 ### C. Cache
 
-#### C1. Make the existing cache eligible to hit
+#### C1. Secondary only: make the existing cache eligible to hit
 
 Apply the key hygiene from PR #1585: use only the pinned toolchain, remove the
 duplicate checkout from the hash inputs, and restore before the first Cargo
@@ -322,12 +323,15 @@ Estimated direct cut: 0-1m after A removes the 4m pre-cache `cargo tree`
 operation. A compatible default-branch dependency cache could avoid an
 estimated 6-20m on Linux, and potentially more on macOS, but beta.40 provides
 no hit measurement. GitHub cannot restore a previous tag's cache into a new
-tag, and the current repository cache inventory already exceeds the 10 GiB
+tag. A `master` writer using the exact release shared key is the only restore
+path, and the current repository cache inventory already exceeds the 10 GiB
 budget before eviction.
 
-Reuse a compatible cache written by existing required master work only if its
-profile and key already match. Do not add a cache-warming compile or another
-job merely to manufacture a hit.
+Cache is not the hour fix: it cannot delete the measured 126.7m workspace test,
+15.3m Hotpath helpers, or duplicate release graphs. Reuse a compatible cache
+written by existing required `master` work only if its profile, shared key,
+toolchain, and environment hash match. Do not add a cache-warming compile or
+another job merely to manufacture a hit.
 
 Do not add sccache, remote cache infrastructure, self-hosted runners, or paid
 cache services.
@@ -367,10 +371,11 @@ cache services.
    triple-compile path; do not optimize the old shape.
 2. Do not land PR #1582 after #1587; both delete the beta
    all-feature verify step.
-3. Reconcile the non-overlapping no-second-checkout, pinned-toolchain,
-   dashboard-digest, and cache-order parts of PR #1585 onto the simplified
-   target shape. Treat cache hits as unverified until a compatible
-   default-branch writer and a release restore are both observed.
+3. Treat PR #1585 as secondary C work after the #1584 architecture and #1583
+   census. Its rebased head preserves #1587 while adding the non-overlapping
+   no-second-checkout, pinned-toolchain, dashboard-digest, and cache-order
+   changes. Treat cache hits as unverified until a same-key `master` writer
+   and a release restore are both observed.
 4. Do not land the sibling timing and architecture docs as parallel plan
    authorities. This document consolidates #1583 and #1584.
 5. Run the next Release Beta and establish successful single-build timings for
