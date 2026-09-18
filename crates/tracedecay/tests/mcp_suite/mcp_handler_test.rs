@@ -12,6 +12,8 @@ mod bounded_analysis_test;
 mod branch_search_test;
 #[cfg(feature = "test-transport")]
 mod branch_sensitivity_test;
+#[cfg(feature = "test-transport")]
+mod config_behavior_test;
 mod context_test;
 mod dependency_hint_test;
 #[cfg(feature = "test-transport")]
