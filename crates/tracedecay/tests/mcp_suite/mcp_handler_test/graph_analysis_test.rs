@@ -1392,6 +1392,10 @@ async fn test_dsm_reports_authored_file_dependencies() {
     wait_for_current_graph(&host).await;
 
     let stats_markdown = call_dsm(&host, json!({})).await;
+    // Density is a JSON number. The markdown renderer reads it with
+    // `field_str`, which only accepts strings, so the default line is
+    // `**density:** ` with an empty value. The JSON assertion below is the
+    // one that checks the rounded number.
     assert_eq!(
         stats_markdown,
         "\
