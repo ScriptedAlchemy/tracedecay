@@ -8,7 +8,7 @@
 //! `tests/fixtures/context_eval_project/` (a small purpose-built crate, not
 //! a copy of the real tracedecay repo, so the corpus can't drift as the
 //! codebase changes) and drives real `tracedecay_context` calls through
-//! `handle_tool_call` — the same dispatch path an agent's MCP client uses —
+//! `handle_tool_call`, the same dispatch path an agent's MCP client uses,
 //! against `tests/fixtures/context_eval_labeled.json`. Metrics
 //! (recall@5, required-anchor hit rate) are recomputed from the live
 //! `ContextResultV1.search_matches` ranking by the test itself, mirroring the redundancy
@@ -143,7 +143,7 @@ async fn context_eval_fixture_scores_real_queries() {
         .as_f64()
         .expect("anchor_hit_rate");
     // Ratchet, not equality. These are retrieval-quality metrics, so the
-    // fixture value is a floor the ranking must not fall below — not a number
+    // fixture value is a floor the ranking must not fall below, not a number
     // it must reproduce exactly. Pinned to 1e-9 the assertion failed on any
     // genuine *improvement*, and the only way to green it was to regenerate
     // the fixture, which is how a golden stops being reviewed and starts being

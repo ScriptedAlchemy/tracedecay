@@ -5,35 +5,35 @@
 //! agent format.
 //!
 //! Layout of `plugin/`:
-//! - `plugin/skills/*/SKILL.md` — the shared model-invocable skills (every
+//! - `plugin/skills/*/SKILL.md`, the shared model-invocable skills (every
 //!   `SKILL.md` directory under `plugin/skills/`). All five hosts deploy the
 //!   full set; the workflow dispatcher skills were removed (their behavior
 //!   lives in the native slash commands below), so no host filters the skill
 //!   set today. The `cursor_skill_files` filter is kept as a guard against a
 //!   dispatcher skill being reintroduced.
-//! - `plugin/overlays/cursor/commands/tracedecay-*.md` — Cursor 1.6+ native
+//! - `plugin/overlays/cursor/commands/tracedecay-*.md`, Cursor 1.6+ native
 //!   slash commands, one per workflow slug, deployed to `commands/<slug>.md`.
 //!   These provide the explicit workflow dispatch (no dispatcher *skills*).
-//! - `plugin/agents/*.md` — canonical subagents. Claude deploys them verbatim;
+//! - `plugin/agents/*.md`, canonical subagents. Claude deploys them verbatim;
 //!   build.rs derives Cursor markdown and Codex TOML adapters from them.
-//! - `plugin/commands/*.md` — Claude slash commands. `build.rs` embeds every
+//! - `plugin/commands/*.md`, Claude slash commands. `build.rs` embeds every
 //!   file in that directory and the paired Cursor overlay. Adding a command is
 //!   adding the two Markdown files; there is no second list in this module.
-//! - `plugin/rules/*.mdc` — Cursor rules.
-//! - `plugin/hooks/hooks-<host>.json` — per-host hook wiring; each deploys to
+//! - `plugin/rules/*.mdc`, Cursor rules.
+//! - `plugin/hooks/hooks-<host>.json`, per-host hook wiring; each deploys to
 //!   `hooks/hooks.json`.
 //! - `plugin/.claude-plugin/{plugin,marketplace}.json`,
 //!   `plugin/.cursor-plugin/plugin.json`, `plugin/.codex-plugin/plugin.json`,
-//!   `plugin/.kimi-plugin/plugin.json` — host manifests (deploy to the same
+//!   `plugin/.kimi-plugin/plugin.json`, host manifests (deploy to the same
 //!   dot-dir path). Kimi's manifest carries hooks inline (`PostToolUse`/
 //!   `Stop`) and omits MCP: the installer registers `mcpServers.tracedecay`
 //!   in Kimi's session/user `mcp.json` so the host launches from the workspace.
-//! - `plugin/opencode/{tracedecay.ts,tracedecay-mcp.ts,opencode.registration.json}`
-//!   — OpenCode native plugin, MCP companion, and MCP/LSP registration.
+//! - `plugin/opencode/{tracedecay.ts,tracedecay-mcp.ts,opencode.registration.json}`,
+//!   OpenCode native plugin, MCP companion, and MCP/LSP registration.
 //!   OpenCode has no `plugin.json`.
-//! - `plugin/.mcp.json` — shared Claude/Codex MCP config (byte-identical);
-//!   `plugin/mcp-cursor.json` — Cursor MCP config (deploys to `mcp.json`).
-//! - `plugin/README-<host>.md` — per-host README (Claude/Cursor/Codex/Kimi
+//! - `plugin/.mcp.json`, shared Claude/Codex MCP config (byte-identical);
+//!   `plugin/mcp-cursor.json`, Cursor MCP config (deploys to `mcp.json`).
+//! - `plugin/README-<host>.md`, per-host README (Claude/Cursor/Codex/Kimi
 //!   deploy to `README.md`; OpenCode's README is source documentation).
 //!
 //! Composed per-host view = `GENERATED_SKILL_FILES` (recursively embedded from
@@ -49,7 +49,7 @@ pub(crate) fn stamp_manifest_version(raw: &str) -> Result<String> {
 }
 
 /// Stamp the version and let the host apply manifest edits on the parsed
-/// `Value` before the single serialize — hosts that post-process the manifest
+/// `Value` before the single serialize, hosts that post-process the manifest
 /// (e.g. Codex stripping `hooks` from repo-local bundles) avoid a second
 /// parse/pretty-print round-trip and cannot drift from this output contract.
 pub(crate) fn stamp_manifest_version_with(
@@ -309,7 +309,7 @@ pub fn cursor_native_extension_files() -> Vec<(&'static str, &'static str)> {
 /// Files Codex deploys: manifest + every file under `plugin/skills/`
 /// (`SKILL.md` plus support files). Codex ships no agents/commands/rules.
 /// The host-bundle catalog deploys the rendered variants of this inventory via
-/// `agents::codex::rendered_global_plugin_files` — the raw templates here are
+/// `agents::codex::rendered_global_plugin_files`, the raw templates here are
 /// not directly installable (`hooks/hooks.json` is an empty scaffold).
 pub fn codex_files() -> Vec<(&'static str, &'static str)> {
     compose(&[CODEX_MANIFEST_FILES], all_skill_files())

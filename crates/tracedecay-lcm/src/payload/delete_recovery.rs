@@ -57,7 +57,7 @@ pub enum CommittedPayloadRemoval {
 /// * `tombstone_residual_placeholders` rewrites a bracket placeholder only when
 ///   [`gc::tombstone_placeholder_in_text`] finds that placeholder's `ref=` equal
 ///   to the ref being deleted, and `extract_payload_refs_from_text` yields at
-///   most one ref per bracket — so tombstoning `Y` cannot drop a reference to
+///   most one ref per bracket, so tombstoning `Y` cannot drop a reference to
 ///   any `X != Y`.
 /// * The `payload_ref` column is only nulled on rows whose column already equals
 ///   the ref being deleted.
@@ -191,7 +191,7 @@ pub(super) async fn prepare_external_payload_delete_in_transaction_with_cache(
 ) -> Result<PreparedPayloadDelete, LcmError> {
     validate_payload_ref(payload_ref)?;
     // The DB-side cleanup below must still run for a store whose payload
-    // directory is gone — the file simply counts as already removed.
+    // directory is gone, the file simply counts as already removed.
     let dir = existing_payload_dir_opt(storage_root)?;
     let path = match dir.as_deref() {
         Some(dir) => {
@@ -451,9 +451,9 @@ async fn tombstone_residual_placeholders(
     // `payload_ref = ?` is the indexable arm and covers every row whose stored
     // ref must be cleared. The `LIKE` arm is only reachable for text that embeds
     // a placeholder, which no index can answer; narrowing it from a bare
-    // `%ref%` to `%live-prefix%ref%` keeps the arm exact — a rewrite only ever
+    // `%ref%` to `%live-prefix%ref%` keeps the arm exact, a rewrite only ever
     // changes a bracket that starts with a live prefix and carries `ref=<ref>`
-    // after it — while dropping inline bodies and already-tombstoned rows that
+    // after it, while dropping inline bodies and already-tombstoned rows that
     // the bare pattern dragged back for no change.
     let like_patterns = gc::live_prefix_ref_like_patterns(payload_ref);
     let like_sql = gc::placeholder_text_like_sql(like_patterns.len());

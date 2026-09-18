@@ -10,7 +10,7 @@ and transcript review distinguish helpful graph evidence from unnecessary calls.
 
 ```
 evals/agent_adoption/
-  scenarios/*.json     # labeled scenarios (neutral prompts — see "Doctrine")
+  scenarios/*.json     # labeled scenarios (neutral prompts, see "Doctrine")
   fixture/             # the orders_fixture crate (copied to a temp dir per run)
   fixture_broken/      # orders.rs with a planted type error (diagnostics scenario)
   run.sh               # runner: build+index fixtures, seed facts, drive agents, grade
@@ -24,8 +24,8 @@ evals/agent_adoption/
 **Scenario prompts must never name `tracedecay`, `mcp`, a specific tool, or a
 skill.** They are neutral, natural task prompts ("How does stock reservation
 work?"). Whether an agent reaches for a tracedecay tool must be *earned* by the
-discovery machinery under test — the MCP tool descriptions, the plugin
-description, skill triggering, and the hint engine — not begged for in the
+discovery machinery under test, the MCP tool descriptions, the plugin
+description, skill triggering, and the hint engine, not begged for in the
 prompt. A prompt that says "use tracedecay_context" would measure obedience, not
 discovery.
 
@@ -139,7 +139,7 @@ logic) are unmistakable. Beyond the order-flow modules it carries, `run.sh`
 enriches the copied fixture at setup so more scenario tiers are gradable:
 
 * **Git history (main fixture).** `build_fixture` seeds a real multi-branch
-  history — `init` on the default branch, a `feature/pricing-notes` branch with
+  history. `init` on the default branch, a `feature/pricing-notes` branch with
   two commits, a divergent commit on the default branch, and a `--no-ff` merge.
   This gives `commit_context` / `diff_context` / branch tooling genuine commits
   and a merge to reason about. **Note:** tracedecay only *tracks* the checked-out
@@ -156,7 +156,7 @@ enriches the copied fixture at setup so more scenario tiers are gradable:
       `analysis_unsafe_panic_audit`.
     * `tracedecay_todos` surfaces the `TODO`. Anchored by `diag_todo_inventory`.
 
-### Seeding prior sessions — a gap
+### Seeding prior sessions: a gap
 
 Scenarios like `session_recovery` want prior host sessions bound to the fixture
 path (for `message_search` / `sessions_for`). The `tracedecay sessions import`
@@ -164,7 +164,7 @@ CLI **sweeps provider directories under `HOME`** (`~/.claude/projects/...`,
 `~/.codex/...`); it has **no file-input mode**. Seeding a hermetic session would
 mean writing a synthetic transcript into the operator's real `~/.claude` (which
 the harness deliberately leaves untouched for auth) at the exact cwd-encoded
-path, then ingesting — not hermetic and not cheap. So session-recovery packs stay
+path, then ingesting, not hermetic and not cheap. So session-recovery packs stay
 **deferred**. A future `tracedecay sessions import --from-file <jsonl>`
 affordance; until then this tier is a documented gap.
 
@@ -200,7 +200,7 @@ Weighted, applicable-subscore-normalized:
 
 | subscore | weight | pass condition |
 |----------|--------|----------------|
-| `first_tool_choice` | 0.30 | first meaningful tool belongs to the scenario’s `required_first` choices |
+| `first_tool_choice` | 0.30 | first meaningful tool belongs to the scenario's `required_first` choices |
 | `not_forbidden_first` | 0.25 | no scenario-forbidden tool before the first TraceDecay tool (legacy preference, not a universal native-tool ban) |
 | `outcome` | 0.25 | fraction of `ground_truth` fragments present in the final answer |
 | `efficiency` | 0.10 | meaningful tool-call count ≤ `max_tool_calls` |
@@ -215,7 +215,7 @@ the specialist.
 Aggregated per host into `scoreboard.json` (mean score plus each rate) and a
 compact `report.md`.
 
-## Channel attribution — which channel drove adoption
+## Channel attribution: which channel drove adoption
 
 Passing `first_tool_choice` tells you the agent adopted a tracedecay tool. It
 does **not** tell you *why*. The grader attributes a discovery **channel** to
@@ -224,10 +224,10 @@ tracedecay call**:
 
 | channel | attributed when… |
 |---------|------------------|
-| `hint-driven` | a hook-injected tool hint appears before the first tracedecay call. Matched on distinctive hint phrasing mirrored from `crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs` `CATEGORY_SPECS` (e.g. "route by what you're matching", "before reading whole files, consider…"), not the bare word "tracedecay" — so the system tool listing never false-positives. |
+| `hint-driven` | a hook-injected tool hint appears before the first tracedecay call. Matched on distinctive hint phrasing mirrored from `crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs` `CATEGORY_SPECS` (e.g. "route by what you're matching", "before reading whole files, consider…"), not the bare word "tracedecay", so the system tool listing never false-positives. |
 | `skill-driven` | a `tracedecay:*` skill invocation (a `Skill` tool call) precedes the first tracedecay call. |
 | `steering-or-description` | nothing fired before the call: the session-start CLAUDE.md steering block or the MCP tool descriptions are the only prior mention that could have driven it. |
-| `unprompted` | the `bare` ablation adopted a tracedecay tool with hints + skills + steering all removed — pure tool-description pull. |
+| `unprompted` | the `bare` ablation adopted a tracedecay tool with hints + skills + steering all removed, pure tool-description pull. |
 | `cli-only` | the supported `tracedecay tool ...` shell fallback was used with plugin MCP configuration removed. |
 | `none` | no tracedecay tool fired at all. |
 
@@ -249,14 +249,14 @@ without any error.
 
 `grade.py --check-hints` enforces the mirror: it locates `tool_hints.rs`, lowers
 it, and fails (non-zero, listing each offender) if any signature is no longer a
-substring. `run.sh` runs it right after the neutrality lint — **before building
-fixtures or spending a token** — so a drifted signature aborts the run. When the
+substring. `run.sh` runs it right after the neutrality lint. **before building
+fixtures or spending a token**, so a drifted signature aborts the run. When the
 harness is run from a published package without the Rust source tree, the check
 skips cleanly (exit 0). `selftest.py` covers both the pure drift logic and the
 live check against the real source, so `make`-free CI catches drift offline.
 When a hook message changes, update `HINT_SIGNATURES` and re-run `selftest.py`.
 
-## Ablation matrix — isolating each channel
+## Ablation matrix: isolating each channel
 
 `CHANNELS` runs the same scenarios under different discovery conditions so you
 can measure each channel in isolation. **Ablations multiply live runs, so the
@@ -276,8 +276,8 @@ hermetic, componentized plugin. For every condition `run.sh`:
 
 * copies `plugin/` into `$work/plugins/<condition>` and strips the ablated part
   (`hooks/*.json` for `no-hints`/`bare`/`cli-only`, `skills/` plus
-  `commands/` for `no-skills`/`bare` — Claude exposes plugin commands as
-  `tracedecay:*` skills too — and MCP manifests for `cli-only`),
+  `commands/` for `no-skills`/`bare`. Claude exposes plugin commands as
+  `tracedecay:*` skills too, and MCP manifests for `cli-only`),
   substituting the hook binary path;
 * launches `claude` with a throwaway `HOME` whose user settings hold only the
   carried endpoint/auth env (the ambient user config, global plugin, and user
@@ -296,8 +296,8 @@ candidate under test, never whichever release happens to be installed globally.
 > The ablation flag wiring is implemented to the documented Claude Code 2.1.x
 > flag semantics (`--setting-sources`, `--strict-mcp-config`, `--plugin-dir`,
 > `--append-system-prompt`). Confirm the isolation against one live ablation run
-> — eyeball that a `no-hints` transcript carries no hint text and a `no-skills`
-> transcript exposes no `tracedecay:*` skills — before trusting ablation
+>, eyeball that a `no-hints` transcript carries no hint text and a `no-skills`
+> transcript exposes no `tracedecay:*` skills, before trusting ablation
 > aggregates.
 
 **Codex.** Ablation conditions are Claude-only. Codex runs only `full`: the
@@ -365,9 +365,9 @@ Claude Code (2.1.x) defers MCP tool schemas behind `ToolSearch` once a server's
 definitions exceed its context budget; only tools the server marks
 `anthropic/alwaysLoad` are in the prompt from turn one. For TraceDecay that is
 a small core (`search`, `grep`, `context`, `callers`, `status`,
-`active_project`, `storage_status`). Every other graph tool — `impact`,
+`active_project`, `storage_status`). Every other graph tool. `impact`,
 `health`, `redundancy`, `affected_tests`, `body`, `outline`, `rename_preview`
-— is a name the model must load first. Read `bare`/`no-skills` adoption with
+, is a name the model must load first. Read `bare`/`no-skills` adoption with
 that in mind: "pure MCP-description pull" only applies to the always-loaded
 core, and a `ToolSearch` call in a transcript marks the model discovering a
 deferred tool, not an unnecessary detour.

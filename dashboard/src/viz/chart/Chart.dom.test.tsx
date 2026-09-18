@@ -11,7 +11,7 @@ import { Chart } from './Chart.tsx';
  * The font one mattered more than it looks. `textStyle.fontFamily` was the only
  * hard-coded family in the tree, so every ECharts axis label, tooltip and legend
  * in the product kept typing in the old body face after the design system moved
- * to a new one — a token layer that a component is free to bypass is not a token
+ * to a new one, a token layer that a component is free to bypass is not a token
  * layer. The assertion below is deliberately about the SOURCE of the family
  * rather than its value: naming the new face here would just re-create the bug
  * one face later.
@@ -29,7 +29,7 @@ const applied: EChartsOption[] = [];
 
 // The narrow registered build, not the full distribution: `Chart` imports
 // `./echarts.ts` so the bundle carries only the series the product draws.
-// `isRegisteredSeries` is the real one — mocking it would make the
+// `isRegisteredSeries` is the real one, mocking it would make the
 // unsupported-series case unable to fail.
 vi.mock('./echarts.ts', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./echarts.ts')>()),
@@ -124,7 +124,7 @@ describe('Chart theming and motion', () => {
     localStorage.setItem('td.motion-preference', 'reduced');
     render(<Chart option={OPTION} ariaLabel="tokens per day" />);
 
-    // `false`, never a shortened duration — the intermediate values are numbers
+    // `false`, never a shortened duration, the intermediate values are numbers
     // that were never measured, so they must not be drawn at any speed.
     expect((await lastOption()).animation).toBe(false);
   });

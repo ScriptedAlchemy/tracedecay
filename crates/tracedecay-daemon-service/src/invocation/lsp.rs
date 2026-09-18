@@ -63,7 +63,7 @@ impl DaemonInvocationService {
     /// that does not need an await to close.
     ///
     /// Kept separate so the daemon shutdown coordinator can run it during
-    /// `prepare_shutdown_owner_phases` — before *any* owner join is polled —
+    /// `prepare_shutdown_owner_phases`, before *any* owner join is polled,
     /// instead of only when the invocation owner's own phase is reached.
     /// Every call here is idempotent.
     pub fn cancel_admissions(&self) {
@@ -767,7 +767,7 @@ impl DaemonInvocationService {
         // Detach is idempotent over every state that already satisfies it.
         // `LspSessionControl::detach` is a transition, so it refuses
         // `Detached -> Detached`, and `Exited`/`Expired` are already past it.
-        // Only a still-attached actor needs the transition — and needs it for
+        // Only a still-attached actor needs the transition, and needs it for
         // the in-flight reset it carries. Reporting the other three as a
         // failed detach is what made a session the daemon's own connection
         // teardown (`disconnect_lsp_session`) had already detached come back

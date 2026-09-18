@@ -911,7 +911,7 @@ impl NixExtractor {
                 Some(state.node_text(node).to_string())
             }
             "apply_expression" => {
-                // Curried call: (f x) y — extract the innermost function name
+                // Curried call: (f x) y. Extract the innermost function name
                 node.child_by_field_name("function")
                     .and_then(|f| Self::extract_callee_name(state, f))
             }

@@ -7,7 +7,7 @@ import { LoomPage } from './LoomPage.tsx';
 import { useScope } from '../../data/scope/store.ts';
 
 /**
- * What this suite guards is not layout — it is the surface's claims.
+ * What this suite guards is not layout, it is the surface's claims.
  *
  * The Loom draws a real quantity (session start times) beside several absent
  * ones (durations, commits, edits, PRs). Every one of those absences is stated

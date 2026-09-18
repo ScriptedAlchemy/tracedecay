@@ -79,7 +79,7 @@ impl DaemonProcessProofV1 {
 /// Whether the default socket's process completed initialize as `TraceDecay`.
 ///
 /// A listening socket is not enough: installers and `tracedecay init` use this
-/// to decide that a daemon can admit work. Version mismatch still counts —
+/// to decide that a daemon can admit work. Version mismatch still counts,
 /// an older process is running and still owns the profile.
 pub fn daemon_reachable() -> bool {
     default_socket_path().is_ok_and(|path| {

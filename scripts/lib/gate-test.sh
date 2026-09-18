@@ -7,7 +7,7 @@
 # It defines GATE_REPO_ROOT, creates a self-cleaning scratch directory in
 # GATE_SCRATCH, and replaces the `set +e` / command-substitution dance every
 # one of these gates was open-coding. That pattern is easy to get subtly wrong
-# — a forgotten `set -e` leaves the rest of the file unguarded — so it lives
+#, a forgotten `set -e` leaves the rest of the file unguarded, so it lives
 # here once.
 #
 # Usage:

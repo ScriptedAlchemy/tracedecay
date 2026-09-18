@@ -306,7 +306,7 @@ fn systemd_exec_tokens(exec_start: &str) -> Result<Vec<String>> {
 /// Reads the `--socket` argument back from an `ExecStart=` line with the same
 /// quote-aware tokenizer the renderer's escaping targets, so quoted paths
 /// (whitespace, `%%`, `$$`) round-trip exactly. A line the tokenizer rejects
-/// yields `None` — callers fall back to the default socket path, and the
+/// yields `None`, callers fall back to the default socket path, and the
 /// refresh journey surfaces the typed parse error through
 /// [`remote_tls_from_service_unit`] on the same line.
 pub(super) fn socket_path_from_service_unit(unit: &str) -> Option<PathBuf> {

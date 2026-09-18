@@ -326,7 +326,7 @@ function drawScoped(
 ) {
   starfield(ctx, w, h);
   // hover isolates: the hovered identity and its evidenced relations stay
-  // lit while the rest recedes — inspection only, nothing fires or scopes
+  // lit while the rest recedes. Inspection only, nothing fires or scopes
   const hover = hoverId && layout.byId.has(hoverId) ? hoverId : null;
   const near = new Set<string>();
   if (hover) {
@@ -388,7 +388,7 @@ function drawScoped(
   for (const n of layout.nodes) {
     const iso = keepA(n.id);
     if (n.dim) {
-      // typed absence: a hollow, unlit identity — present, sealed, honest
+      // typed absence: a hollow, unlit identity. Present, sealed, honest
       ctx.globalAlpha = 0.75 * iso;
       ctx.strokeStyle = "rgba(148,163,178,0.55)";
       ctx.lineWidth = 1;
@@ -574,7 +574,7 @@ export function BrainCanvas(props: {
         if (props.view === "repo-zoom") return;
         const r = (e.target as HTMLCanvasElement).getBoundingClientRect();
         if (props.view === "scoped") {
-          // hover isolates within the constellation — local inspection only,
+          // hover isolates within the constellation, local inspection only,
           // never global project focus, never a synapse
           const sl = scopedLayoutRef.current;
           if (!sl) return;

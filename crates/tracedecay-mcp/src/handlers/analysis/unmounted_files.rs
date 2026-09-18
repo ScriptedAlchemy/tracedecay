@@ -1,4 +1,4 @@
-//! `tracedecay_unmounted_files` — source files on disk that nothing declares.
+//! `tracedecay_unmounted_files`, source files on disk that nothing declares.
 //!
 //! The reachability audit itself is
 //! [`tracedecay_code_index::unmounted_files`]; this handler only reads the

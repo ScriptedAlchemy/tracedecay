@@ -13,7 +13,7 @@ import type { Tone } from './ledger.ts';
  *
  *   LedgerTable  a semantic table with engraved column legends; it is the
  *                exact text fallback as well as the primary view
- *   InspectRow   hover or focus inspects, click or Enter selects — the
+ *   InspectRow   hover or focus inspects, click or Enter selects, the
  *                design system's one interaction language, in a table row
  *   ToneWord     a typed-state word beside its lamp; the word is always
  *                printed, the lamp only says which family it is in
@@ -32,7 +32,7 @@ export function LedgerTable({
   caption: string;
   children: ReactNode;
   className?: string;
-  /** Fired when the pointer leaves the table body — the moment a hover
+  /** Fired when the pointer leaves the table body, the moment a hover
    * preview should yield back to the pinned selection. */
   onPointerLeave?: () => void;
 }) {

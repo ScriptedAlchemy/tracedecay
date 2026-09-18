@@ -49,7 +49,7 @@ impl HintCategory {
     }
 
     /// Human-readable name used in the escalation message prefix
-    /// ("Repeated native <label> usage this session — ...").
+    /// ("Repeated native <label> usage this session, ...").
     fn label(self) -> &'static str {
         self.spec().label
     }
@@ -194,7 +194,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         label: "file read",
         skill: "exploring-code",
         message: "Before reading whole files, consider tracedecay_outline, tracedecay_body, or tracedecay_read.",
-        context: "tracedecay_outline gives a file's table of contents, tracedecay_body returns one symbol's source, and tracedecay_read (mode: \"lines\") slices a range — usually far cheaper than a full-file read. If you are opening the file only to find a string in it, tracedecay_grep locates the literal or regex match with its enclosing symbol instead.",
+        context: "tracedecay_outline gives a file's table of contents, tracedecay_body returns one symbol's source, and tracedecay_read (mode: \"lines\") slices a range, usually far cheaper than a full-file read. If you are opening the file only to find a string in it, tracedecay_grep locates the literal or regex match with its enclosing symbol instead.",
         expected_tools: &[
             "tracedecay_outline",
             "tracedecay_body",
@@ -481,7 +481,7 @@ impl ToolHint {
         ToolHint {
             category: self.category,
             message: format!(
-                "Repeated native {} usage this session — {}",
+                "Repeated native {} usage this session. {}",
                 self.category.label(),
                 self.message
             ),
@@ -498,7 +498,7 @@ const MAX_PERSISTED_HINT_ENTRIES: usize = 4096;
 
 /// At most this many hints surface across all categories in one session. A
 /// session that trips many native patterns still gets only a few nudges before
-/// the budget silences the rest — the historical model gave a pathological
+/// the budget silences the rest, the historical model gave a pathological
 /// session up to one hint per category (15) with no cap.
 pub const MAX_HINTS_PER_SESSION: usize = 3;
 
@@ -584,7 +584,7 @@ impl ToolHintDedupe {
         }
     }
 
-    /// Number of persisted (session, category) rows this state serializes to —
+    /// Number of persisted (session, category) rows this state serializes to,
     /// the bound [`load_or_default`] enforces against stale-history growth.
     fn persisted_len(&self) -> usize {
         self.categories.len()

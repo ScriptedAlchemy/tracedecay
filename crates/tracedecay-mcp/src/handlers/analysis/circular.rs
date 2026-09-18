@@ -1,4 +1,4 @@
-//! `tracedecay_circular` — bounded cyclic-dependency reporting.
+//! `tracedecay_circular`, bounded cyclic-dependency reporting.
 
 use super::*;
 

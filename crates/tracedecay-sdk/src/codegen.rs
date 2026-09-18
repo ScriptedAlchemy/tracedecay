@@ -31,7 +31,7 @@ const HEADER: &str = concat!(
 ///
 /// Formatting into a `String` cannot fail, so every generator write site would
 /// otherwise carry the same unreachable error handling. Naming it once keeps
-/// the generator's real fallibility — schema resolution — visible.
+/// the generator's real fallibility, schema resolution, visible.
 macro_rules! emit {
     ($out:expr, $($argument:tt)*) => {
         writeln!($out, $($argument)*).expect("String writes cannot fail")

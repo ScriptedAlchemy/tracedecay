@@ -577,7 +577,7 @@ pub fn indexing_workers() -> usize {
 /// Width is sizing policy, never semantics: the same inputs must produce the
 /// same generation bytes at any width. This exists so one test process can
 /// build a fixture at width 1 and at full width and compare the sealed
-/// digests directly. It is not a supported runtime control — production sizing
+/// digests directly. It is not a supported runtime control, production sizing
 /// comes from [`indexing_workers`].
 #[doc(hidden)]
 pub fn force_indexing_workers_for_test(workers: usize) {

@@ -1,6 +1,6 @@
 import { UMBRELLA_SAMPLE, UMBRELLA_SAMPLE_COUNT } from "./data";
 import { useState } from "react";
-/** Umbrella / inbox delivery constellations — luminous cluster meshes, beaded umbrella ring. */
+/** Umbrella / inbox delivery constellations, luminous cluster meshes, beaded umbrella ring. */
 
 function hash32(s: string): number {
   let h = 2166136261;
@@ -337,7 +337,7 @@ function fanCurves(
   return paths;
 }
 
-/* State 01 — umbrella center, clusters orbiting (square field). */
+/* State 01, umbrella center, clusters orbiting (square field). */
 const GLOBAL_MESHES: MeshSpec[] = [
   { id: "rspack", label: "Rspack", sub: "13 PRs", color: "#38cfe8", x: 95, y: 310, rx: 92, ry: 78, n: 13, ids: ["#18337", "#18315", "#18291"], idsSide: "right" },
   { id: "rspress", label: "Rspress", sub: "7 PRs", color: "#c084fc", x: 150, y: 540, rx: 72, ry: 58, n: 7, ids: ["#5628", "#5612"], idsSide: "left" },
@@ -349,7 +349,7 @@ const GLOBAL_MESHES: MeshSpec[] = [
   { id: "unrelated", label: "Unrelated Activity", sub: "23 PRs", color: "#6b7784", x: 728, y: 870, rx: 86, ry: 54, n: 23, dim: true },
 ];
 
-/* State 03 — umbrella at top, clusters ranked below. */
+/* State 03, umbrella at top, clusters ranked below. */
 const DENSE_MESHES: MeshSpec[] = [
   { id: "rspack", label: "Rspack", sub: "13 PRs", color: "#38cfe8", x: 108, y: 448, rx: 69, ry: 78, n: 13, ids: ["#18337", "#18315", "#18291"], idsBelow: true, more: "+10 more" },
   { id: "rslib", label: "Rsbuild / Rslib", sub: "9 PRs", color: "#f0b429", x: 288, y: 420, rx: 61, ry: 73, n: 9, ids: ["#8187", "#8162", "#8139"], idsBelow: true },
@@ -412,7 +412,7 @@ export function GlobalConstellation(props: { dense?: boolean; selectedRepository
       {props.dense ? null : (
         <div className="dl-graphlegend">
           <div className="k">GRAPH LEGEND</div>
-          <div>— Horizontal = Recent activity</div>
+          <div>, Horizontal = Recent activity</div>
           <div>‖ Vertical = Review &amp; evidence</div>
           <div>◉ Node size = Changed surface</div>
           <div>☀ Brightness = Freshness</div>
@@ -523,7 +523,7 @@ export function ProjectConstellation() {
         <div className="k">Authored layout:</div>
         <div>Position does not encode measured recency</div>
         <div>Size does not encode measured review exposure</div>
-        <div>— Connections = authored visual grouping</div>
+        <div>, Connections = authored visual grouping</div>
         <div className="ind">No recorded dependency or handoff source</div>
         <div className="ind"></div>
         <div className="ind"></div>

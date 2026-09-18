@@ -4,6 +4,8 @@ set -euo pipefail
 script_path=${BASH_SOURCE[0]}
 repo=$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)
 keep_temp=false
+reuse_release_binary=""
+skip_packaged_runtime_battery=false
 
 usage() {
   cat <<'EOF'
@@ -14,9 +16,14 @@ The gate packages every workspace crate, extracts the produced .crate archives
 into an isolated temporary directory, and tests the packaged library and CLI.
 
 Options:
-  --repo PATH   Repository root (default: parent of this script)
-  --keep-temp   Preserve the isolated package/install directory
-  -h, --help    Show this help
+  --repo PATH                      Repository root (default: parent of this script)
+  --keep-temp                      Preserve the isolated package/install directory
+  --reuse-release-binary PATH      Skip the workspace release rebuild; prove this
+                                   already-built production binary instead
+  --skip-packaged-runtime-battery  After packaging and manifest checks, skip
+                                   extracted-crate rebuilds, nextest, cargo
+                                   install, and MCP inspector dogfood
+  -h, --help                       Show this help
 EOF
 }
 
@@ -156,6 +163,11 @@ verify_feature_wiring() {
   local cli_source_manifest=$7
   local cli_packaged_manifest=$8
   local cargo_config=$9
+  # Manifest and layering rules only. Per-language `cargo check` isolation is
+  # a source-graph property, not a packaging proof: it does not use the
+  # just-built release binary, and on the extracted tree it serializes one
+  # compile per `lang-*` feature (37 today). The feature-wiring script still
+  # exposes `--check-extraction-manifest` for dedicated CI.
   python3 "$repo/scripts/check-distribution-feature-wiring.py" \
     --root-source "$source_manifest" \
     --root-packaged "$packaged_manifest" \
@@ -165,9 +177,33 @@ verify_feature_wiring() {
     --extraction-packaged "$extraction_packaged_manifest" \
     --cli-source "$cli_source_manifest" \
     --cli-packaged "$cli_packaged_manifest" \
-    --check-extraction-manifest "$extraction_packaged_manifest" \
     --cargo-config "$cargo_config" \
     --offline
+}
+
+read_workspace_product_version() {
+  python3 - "$1" <<'PY'
+import sys
+
+# Same rule the build script applies: the one literal `version` inside
+# `[workspace.package]`. An inherited or absent value is not a product version.
+in_table = False
+value = None
+with open(sys.argv[1], encoding="utf-8") as handle:
+    for line in handle:
+        line = line.strip()
+        if line.startswith("#"):
+            continue
+        if line.startswith("["):
+            in_table = line == "[workspace.package]"
+            continue
+        if in_table and line.startswith("version"):
+            _, _, raw = line.partition("=")
+            raw = raw.strip()
+            if raw.startswith('"') and raw.endswith('"'):
+                value = raw[1:-1]
+print(value or "")
+PY
 }
 
 while (($#)); do
@@ -179,6 +215,15 @@ while (($#)); do
       ;;
     --keep-temp)
       keep_temp=true
+      shift
+      ;;
+    --reuse-release-binary)
+      [[ $# -ge 2 ]] || die "--reuse-release-binary requires a path"
+      reuse_release_binary=$2
+      shift 2
+      ;;
+    --skip-packaged-runtime-battery)
+      skip_packaged_runtime_battery=true
       shift
       ;;
     -h|--help)
@@ -201,6 +246,16 @@ require_command tar
 
 repo=$(cd -- "$repo" && pwd -P)
 [[ -f "$repo/Cargo.toml" ]] || die "Cargo.toml not found under $repo"
+if [[ -n $reuse_release_binary ]]; then
+  [[ -e $reuse_release_binary ]] ||
+    die "reuse-release-binary is missing: $reuse_release_binary"
+  reuse_release_binary=$(cd -- "$(dirname -- "$reuse_release_binary")" && pwd -P)/$(basename -- "$reuse_release_binary")
+  [[ -f $reuse_release_binary ]] ||
+    die "reuse-release-binary is not a file: $reuse_release_binary"
+fi
+if [[ $skip_packaged_runtime_battery == true && -z $reuse_release_binary ]]; then
+  die "--skip-packaged-runtime-battery requires --reuse-release-binary"
+fi
 source_git_sha=$(resolve_clean_source_head "$repo")
 for fixture in \
   claude.json \
@@ -220,6 +275,9 @@ for fixture in \
     "$repo/tests/fixtures/packaged_host_events/$fixture" ||
     die "packaged host-event fixture copy differs from its authority: $fixture"
 done
+product_version=$(read_workspace_product_version "$repo/Cargo.toml")
+[[ -n $product_version ]] ||
+  die "$repo/Cargo.toml must declare a literal version in [workspace.package]"
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/tracedecay-distribution.XXXXXX")
 cleanup() {
@@ -261,19 +319,28 @@ release_cli_cargo_args=(
   --features "$release_cargo_features"
 )
 
-echo "distribution acceptance: release-building the production feature set"
-cargo build \
-  --manifest-path "$repo/Cargo.toml" \
-  --workspace \
-  --release \
-  --no-default-features \
-  --features tracedecay/production \
-  --lib \
-  --bins
+if [[ -n $reuse_release_binary ]]; then
+  echo "distribution acceptance: reusing the just-built production binary"
+  assert_binary_source_sha \
+    "$reuse_release_binary" \
+    "$product_version" \
+    "$source_git_sha" \
+    "reused-release"
+else
+  echo "distribution acceptance: release-building the production feature set"
+  cargo build \
+    --manifest-path "$repo/Cargo.toml" \
+    --workspace \
+    --release \
+    --no-default-features \
+    --features tracedecay/production \
+    --lib \
+    --bins
+fi
 
 echo "distribution acceptance: staging the product package tree"
-# `tracedecay` is `crates/tracedecay`, but the assets it ships — host plugins,
-# vendored payloads, benchmark corpora, and the packaged fixtures — are
+# `tracedecay` is `crates/tracedecay`, but the assets it ships, host plugins,
+# vendored payloads, benchmark corpora, and the packaged fixtures, are
 # repository-root directories shared with the whole workspace. Cargo packs
 # only what lives inside the package directory, so packaging the checkout
 # as-is yields a `tracedecay` archive with none of them, and the `include`
@@ -405,7 +472,7 @@ echo "distribution acceptance: packaging every workspace crate"
 # the per-crate source trees the acceptance battery runs against, so skip the
 # per-package lockfile: generating it would resolve the unpublished internal
 # dependencies against crates.io and fail. Nothing downstream reads the
-# embedded lock — every extracted tree resolves through the [patch.crates-io]
+# embedded lock, every extracted tree resolves through the [patch.crates-io]
 # path overlay below, and the install step builds from a path, not an archive.
 cargo package \
   --manifest-path "$staged/Cargo.toml" \
@@ -443,7 +510,7 @@ for package in metadata["packages"]:
 PY
 
 # `tracedecay-agent-hosts` stamps the product version, and that value now lives
-# in `[workspace.package]` at the workspace root — two directories above each
+# in `[workspace.package]` at the workspace root, two directories above each
 # crate. The sibling symlinks below already reproduce the `crates/<name>` shape
 # a build script sees in the repository; this reproduces the workspace root
 # that sits above it, so the battery resolves the same version the repository
@@ -452,31 +519,6 @@ PY
 package_root="$work/packages"
 packages="$package_root/crates"
 mkdir -p -- "$packages"
-product_version=$(python3 - "$repo/Cargo.toml" <<'PY'
-import sys
-
-# Same rule the build script applies: the one literal `version` inside
-# `[workspace.package]`. An inherited or absent value is not a product version.
-in_table = False
-value = None
-with open(sys.argv[1], encoding="utf-8") as handle:
-    for line in handle:
-        line = line.strip()
-        if line.startswith("#"):
-            continue
-        if line.startswith("["):
-            in_table = line == "[workspace.package]"
-            continue
-        if in_table and line.startswith("version"):
-            _, _, raw = line.partition("=")
-            raw = raw.strip()
-            if raw.startswith('"') and raw.endswith('"'):
-                value = raw[1:-1]
-print(value or "")
-PY
-)
-[[ -n "$product_version" ]] ||
-  die "$repo/Cargo.toml must declare a literal version in [workspace.package]"
 cat >"$package_root/Cargo.toml" <<TOML
 [workspace]
 members = []
@@ -487,8 +529,8 @@ version = "$product_version"
 TOML
 
 # Twenty-five `include_str!`/`include_bytes!` sites across `tracedecay-agent-hosts`
-# and `tracedecay-application` embed repository-root assets — `plugin/`, `tests/`,
-# `dashboard/hermes-wrapper/` and `benchmark_data/` — that `cargo package` cannot carry into an archive
+# and `tracedecay-application` embed repository-root assets. `plugin/`, `tests/`,
+# `dashboard/hermes-wrapper/` and `benchmark_data/`, that `cargo package` cannot carry into an archive
 # because they sit outside the package directory. The repository build resolves
 # them two directories above `crates/<name>`, so the stub root has to present
 # the same trees. They are linked from the staged copy rather than the live
@@ -516,8 +558,8 @@ while IFS=$'\t' read -r name version; do
   cp -- "$staged/Cargo.lock" "$directory/Cargo.lock"
   # Extracted archives are named `<name>-<version>`, but in the workspace every
   # crate sits at `crates/<name>`. Sources that reach a sibling crate by
-  # relative `#[path]` — e.g. `tracedecay/src/daemon.rs` includes scheduler
-  # test modules from `tracedecay-code-index-runtime` — resolve against that
+  # relative `#[path]`, e.g. `tracedecay/src/daemon.rs` includes scheduler
+  # test modules from `tracedecay-code-index-runtime`, resolve against that
   # unversioned shape. `cargo package` cannot carry a file from outside the
   # package, so give the battery the same sibling layout the workspace has
   # rather than a copy that could drift from it.
@@ -608,6 +650,14 @@ verify_feature_wiring \
   "$cli_package/Cargo.toml" \
   "$patch_config"
 
+if [[ $skip_packaged_runtime_battery == true ]]; then
+  echo "distribution acceptance: skipping packaged runtime battery"
+  "$reuse_release_binary" --help >/dev/null ||
+    die "reused release binary failed --help: $reuse_release_binary"
+  echo "distribution acceptance passed"
+  exit 0
+fi
+
 echo "distribution acceptance: compiling packaged CLI with release facilities"
 TRACEDECAY_RELEASE_GIT_SHA="$source_git_sha" cargo build \
   --manifest-path "$cli_package/Cargo.toml" \
@@ -686,12 +736,14 @@ TRACEDECAY_TEST_BIN="$packaged_cli_bin" \
   --no-tests=fail
 
 install_root="$work/install"
-echo "distribution acceptance: installing packaged CLI with release facilities"
-TRACEDECAY_RELEASE_GIT_SHA="$source_git_sha" cargo install \
-  --path "$cli_package" \
-  --root "$install_root" \
-  "${release_cli_cargo_args[@]}" \
-  --config "$patch_config"
+echo "distribution acceptance: staging the packaged CLI as the installed binary"
+# `cargo install --path` rebuilds the same extracted CLI we just compiled.
+# Copy that artifact into the cargo-install layout so later MCP/LSP checks
+# exercise the packaged binary without a third release compile.
+mkdir -p -- "$install_root/bin"
+cp -- "$packaged_cli_bin" \
+  "$install_root/bin/tracedecay${executable_suffix}"
+chmod +x "$install_root/bin/tracedecay${executable_suffix}"
 
 consumer="$work/library-consumer"
 mkdir -p -- "$consumer/src"

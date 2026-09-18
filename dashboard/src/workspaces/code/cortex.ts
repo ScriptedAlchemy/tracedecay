@@ -169,7 +169,7 @@ export interface RelationSide {
   readonly sites: number;
   /**
    * The wire filled its row budget, so both counts above are floors: more
-   * sites — and possibly more neighbours — may exist beyond the cut.
+   * sites, and possibly more neighbours, may exist beyond the cut.
    */
   readonly capped: boolean;
   readonly limit: number;
@@ -179,7 +179,7 @@ export interface RelationSide {
  * `neighbors_payload` emits ONE ROW PER CALL EDGE: a caller with four call
  * sites appears four times with the same node columns and a different
  * `edge_line`. The inspector lists each neighbour once and counts its sites,
- * and never prints a decimal beside the pair — the count of sites is the
+ * and never prints a decimal beside the pair, the count of sites is the
  * whole of what the wire knows about the strength of the relation.
  */
 export function groupNeighbors(rows: readonly GraphNodeV1[], limit: number): RelationSide {
@@ -304,7 +304,7 @@ export interface FileDiagnostics {
 }
 
 /** The broker's diagnostics that sit in one file. Matched on the path the
- * broker reported, by equality or by the graph path ending the broker's —
+ * broker reported, by equality or by the graph path ending the broker's,
  * the broker may report an absolute path where the index holds a relative one. */
 export function diagnosticsForFile(
   snapshot: DiagnosticsSnapshot,

@@ -12,7 +12,7 @@
  *
  * What "renders/s/view" counts here: every invocation of a component function
  * that subscribes to the live event stream through `useLiveActivity` and
- * `useEventStreamState` — the exact pair `BrainPage` uses. React re-invokes it
+ * `useEventStreamState`, the exact pair `BrainPage` uses. React re-invokes it
  * whenever a subscribed external store notifies with a changed snapshot, so
  * counting invocations counts renders.
  *
@@ -20,7 +20,7 @@
  * frame to the page as a separate task, so React cannot auto-batch across them.
  * Emitting a whole second's frames inside one `act()` would collapse them into
  * a single render and the ceiling would pass vacuously. One `act()` per frame,
- * with fake timers advanced between frames, models the real arrival pattern —
+ * with fake timers advanced between frames, models the real arrival pattern,
  * and is still deterministic, because the clock is simulated end to end.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -146,7 +146,7 @@ afterEach(() => {
   FakeEventSource.instances = [];
 });
 
-describe('SSE render coalescing — at most ten renders/s/view', () => {
+describe('SSE render coalescing, at most ten renders/s/view', () => {
   const rates = [
     { label: '100 events/s', perSecond: 100 },
     { label: '1,000 events/s', perSecond: 1_000 },
@@ -171,7 +171,7 @@ describe('SSE render coalescing — at most ten renders/s/view', () => {
 
       const rendersInSecond = renders - rendersAtMount;
       expect(rendersInSecond).toBeGreaterThan(0); // the view did update
-      // Measured: exactly 10 at both rates — the coalescing clock is the only
+      // Measured: exactly 10 at both rates, the coalescing clock is the only
       // thing setting this number, so the bound is tight, not slack.
       expect(rendersInSecond).toBeLessThanOrEqual(10);
       // Coalescing is not sampling: the view still ends the second showing the
@@ -216,7 +216,7 @@ describe('SSE render coalescing — at most ten renders/s/view', () => {
     const rendersAtMount = renders;
 
     // Twenty duplicate frames: one real occurrence, so at most one tick's worth
-    // of render work — and the reducer must not queue them twice.
+    // of render work, and the reducer must not queue them twice.
     for (let i = 0; i < 20; i += 1) {
       act(() => {
         source.emit('code_index_activity', frame(1));
@@ -231,7 +231,7 @@ describe('SSE render coalescing — at most ten renders/s/view', () => {
   });
 });
 
-describe('SSE overflow — exactly one canonical invalidation', () => {
+describe('SSE overflow, exactly one canonical invalidation', () => {
   it('invalidates once for a 5,000-event overflow, not once per dropped event', async () => {
     const client = newClient();
     // The canonical invalidation awaits the refetch of every active query, so in

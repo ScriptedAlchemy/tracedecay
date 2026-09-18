@@ -10,7 +10,7 @@ describe('buildAdjacency', () => {
 
   it('stops one hop short of siblings that did nothing', () => {
     // The Brain's shape: two checkouts of one repository. An event in `p1`
-    // reaches the hub and must stop there — `p2` is two hops away and nothing
+    // reaches the hub and must stop there, `p2` is two hops away and nothing
     // happened in it.
     const adjacency = buildAdjacency([
       { source: 'repo:r', target: 'p1' },

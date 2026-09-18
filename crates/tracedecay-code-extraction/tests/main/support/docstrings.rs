@@ -12,7 +12,7 @@ use tracedecay_domain::{ExtractionResult, NodeKind};
 /// expected docstring fragment.
 ///
 /// `name` selects the node. `None` requires that exactly one node of `kind`
-/// exists — the "this snippet declares a single function" shape, which also
+/// exists, the "this snippet declares a single function" shape, which also
 /// keeps the extractor honest about not inventing extra nodes. `Some(name)`
 /// looks the node up by name instead, for snippets that necessarily declare
 /// more than one node of that kind (a Pascal program body, for instance).

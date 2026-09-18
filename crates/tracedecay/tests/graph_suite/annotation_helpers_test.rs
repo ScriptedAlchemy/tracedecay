@@ -7,8 +7,8 @@
 //! `crates/tracedecay-code-extraction/src/annotations.rs` into this test
 //! binary (with a `crate::types` shim in `main.rs` to make the copy compile).
 //! The two extractors are the only production callers of those helpers, so
-//! driving the extractors covers the same emission logic — node kind, name,
-//! signature, `attrs_start_line`, `Annotates` edge, and the unresolved ref —
+//! driving the extractors covers the same emission logic, node kind, name,
+//! signature, `attrs_start_line`, `Annotates` edge, and the unresolved ref,
 //! without the mock, and without a source copy that can silently drift from
 //! the crate it was copied out of.
 

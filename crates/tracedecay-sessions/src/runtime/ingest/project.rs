@@ -208,8 +208,8 @@ async fn ingest_project_sources_for_provider_inner<A: SessionIngestAuthority>(
 /// Plans which providers one bounded pass may attempt.
 ///
 /// The full catch-up sweep (`provider == None`) rotates through the provider
-/// ring from the durable frontier so consecutive passes — including passes
-/// separated by a daemon restart — cover every provider without restarting at
+/// ring from the durable frontier so consecutive passes, including passes
+/// separated by a daemon restart, cover every provider without restarting at
 /// the first one. Single-provider calls are hook-driven and run directly.
 #[hotpath::measure(label = "sessions.ingest.project.rotation_plan", future = true)]
 async fn plan_project_provider_rotation<S: crate::runtime::store_port::TranscriptIngestStore>(
@@ -441,8 +441,8 @@ async fn ingest_project_sources_for_provider_bounded_inner<A: SessionIngestAutho
     if !cancelled {
         ingest_project_workflow_runs(registered, &canonical_project_id, project_root).await;
     }
-    // A bounded partial pass persists the rotation cursor so the next pass —
-    // in this process or after a daemon restart — resumes at the provider
+    // A bounded partial pass persists the rotation cursor so the next pass,
+    // in this process or after a daemon restart, resumes at the provider
     // after the last one attempted instead of restarting the sweep.
     if let Some(frontier) = rotation_frontier
         && scheduling_write_required(source_outcome.coverage, attempted, cancelled)

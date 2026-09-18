@@ -1,9 +1,9 @@
 # V2 current outcomes
 
 `00-plan-set-index.md` remains sole roadmap/acceptance authority.
-This file records outcomes only. Last reconciled: 2026-08-30.
+This file records outcomes only. Last reconciled: 2026-09-17 (post-#707 merge to master).
 
-Branch: `codex/tracedecay-total-redesign-plan-reopened` (PR #707).
+Branch: `master` (PR #707 merged 2026-09-17 as `e13a35319f1c5de99e310a32d180dab3f54a802a`; tip has moved further).
 Workspace: 38 crates under `crates/` (virtual root; counted from workspace
 `members` in the root `Cargo.toml`).
 
@@ -34,13 +34,13 @@ Workspace: 38 crates under `crates/` (virtual root; counted from workspace
   (`crates/tracedecay/src/doctor.rs`).
 - Domain move-ups: file-document / extraction / lineage records left domain
   for code-index; root-only graph shapes moved to the root crate.
-  `review_labels` is deleted — no current vocabulary; Plan 26 archival
+  `review_labels` is deleted, no current vocabulary; Plan 26 archival
   mentions only.
 - Machine compile cache is kache, not sccache.
 
-## 2026-08-29 landing wave
+## 2026-08-29 Landing wave
 
-Already on `codex/tracedecay-total-redesign-plan-reopened` when this file was
+Already landed on the redesign tip (now merged to `master` via PR #707) when this file was
 reconciled:
 
 - Scheduler cluster repair: early publish with serving-seat wait, lock-park
@@ -57,7 +57,7 @@ reconciled:
 - Status reads serve the cached background process sample.
 - Transport phases are spanned (daemon wire, LSP outbound, automation/MCP).
 
-## 2026-08-30 landing wave
+## 2026-08-30 Landing wave
 
 - Retention convergence landed with a binary handoff; the store was growing
   64.9→83.3 GiB per 2 h on the old binary.

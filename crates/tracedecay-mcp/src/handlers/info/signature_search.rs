@@ -1,4 +1,4 @@
-//! `tracedecay_signature_search` — substring search over cached function/method signatures.
+//! `tracedecay_signature_search`, substring search over cached function/method signatures.
 
 use crate::ToolResult;
 use crate::generic_tool_result;

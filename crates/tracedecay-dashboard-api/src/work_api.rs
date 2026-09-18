@@ -1,7 +1,7 @@
 //! The dashboard's public Work contract.
 //!
 //! The routes themselves are built by [`tracedecay_api::work_dashboard_router`] from
-//! the canonical [`WorkOperation`] descriptor — this module only restates that
+//! the canonical [`WorkOperation`] descriptor, this module only restates that
 //! descriptor as the route document the dashboard contract schema publishes.
 //! There is no second route table and no forwarding hop: a dashboard Work
 //! request enters the same handler, owner, and dispatch as an application Work

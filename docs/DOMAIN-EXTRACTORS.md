@@ -2,8 +2,8 @@
 
 > **Status: design, not implemented.** No code reads
 > `.tracedecay/domain-symbols.toml` or `~/.tracedecay/domain-packs/`, and there
-> is no `tracedecay domain` subcommand. Writing a rules file today is a no-op —
-> nothing parses it and no domain nodes appear in the graph — but it is no
+> is no `tracedecay domain` subcommand. Writing a rules file today is a no-op,
+> nothing parses it and no domain nodes appear in the graph, but it is no
 > longer a silent one: `tracedecay doctor` warns when the file is present and
 > points back here. Everything below describes the intended design.
 
@@ -36,14 +36,14 @@ In all of these cases, asking tracedecay "where is X implemented?" or "what call
 
 Most domain-symbol patterns fall into one of three shapes, regardless of host language:
 
-**Form 1 — Call-site registration**
+**Form 1. Call-site registration**
 ```rust
 interp.define("transpose-regions", LispObject::primitive("transpose-regions"));
 router.get("/api/users/:id", handle_user);
 ```
 A function or method call where one argument is the domain symbol name.
 
-**Form 2 — Match / switch arm dispatch**
+**Form 2. Match / switch arm dispatch**
 ```rust
 match name {
     "transpose-regions" => { ... }
@@ -52,7 +52,7 @@ match name {
 ```
 A match or switch statement where string literal patterns are domain symbol names.
 
-**Form 3 — Array / slice declaration**
+**Form 3. Array / slice declaration**
 ```rust
 let stub_names = ["foo", "bar", "baz"];
 const COMMANDS: &[&str] = &["build", "test", "deploy"];
@@ -91,7 +91,7 @@ Rules live in `.tracedecay/domain-symbols.toml` at the project root. Each `[[rul
 
 [layer]
 name  = "elisp-primitive"  # unique identifier for this set of rules
-files = ["src/**/*.rs"]    # glob — only these files are scanned
+files = ["src/**/*.rs"]    # glob, only these files are scanned
 
 [[rule]]
 name        = "interp-define"
@@ -143,7 +143,7 @@ emit_edges  = [
 
 ## Pattern matching: three approaches and their tradeoffs
 
-### Option A — Tree-sitter query language (`.scm` syntax)
+### Option A, tree-sitter query language (`.scm` syntax)
 
 Tree-sitter ships with a structured query language used by Neovim, Helix, and GitHub for syntax highlighting and navigation. Queries are S-expressions that match the concrete syntax tree:
 
@@ -161,7 +161,7 @@ Tree-sitter ships with a structured query language used by Neovim, Helix, and Gi
 | **Con** | Each rule must be written per language (a Rust query does not match Go code for the same conceptual pattern) |
 | **Con** | Capturing nested or optional structure is verbose |
 
-### Option B — ast-grep pattern language
+### Option B, ast-grep pattern language
 
 ast-grep uses a pattern language based on concrete code templates, where `$NAME` captures any matching node:
 
@@ -176,10 +176,10 @@ tracedecay already shells out to `ast-grep` for `tracedecay_ast_grep_rewrite`. a
 | **Pro** | Familiar to anyone who has written a code pattern; the pattern looks like the code it matches |
 | **Pro** | Cross-language: the same template works across languages that share call-site syntax |
 | **Con** | External binary required; subprocess per file during sync is slow at scale |
-| **Con** | Optional dependency — users without ast-grep installed get silent no-ops |
+| **Con** | Optional dependency, users without ast-grep installed get silent no-ops |
 | **Con** | Less precise than tree-sitter queries: `$NAME` matches any expression, not just string literals |
 
-### Option C — Regex with structural scope
+### Option C, regex with structural scope
 
 Simple regex anchored to a structural context (e.g., "this regex must match inside a function call argument"):
 
@@ -284,7 +284,7 @@ Candidate built-in packs: Express/Fastify routes, Rails routes, Click CLI comman
 
 - **File filter first.** The glob from `[layer].files` is evaluated before any parsing; non-matching files are skipped entirely.
 - **Shared parse tree.** The primary extractor already parses each file with tree-sitter. The domain extractor should reuse the same `Tree` rather than re-parsing. This requires threading the parse tree through `ExtractionResult` or running domain extraction inside the primary extractor's call.
-- **Incremental.** Domain extraction re-runs only when a file's content hash changes — the same condition that triggers primary re-extraction. No separate staleness tracking is needed.
+- **Incremental.** Domain extraction re-runs only when a file's content hash changes, the same condition that triggers primary re-extraction. No separate staleness tracking is needed.
 - **In-process for tree-sitter rules.** No subprocess, no IPC. Expected overhead: < 5 % on top of primary extraction for typical rule sets.
 - **ast-grep rules are batched.** If ast-grep rules are present, tracedecay runs one `ast-grep` invocation per changed file rather than one per rule, passing all patterns as a YAML config file via `--config`.
 
@@ -294,7 +294,7 @@ Candidate built-in packs: Express/Fastify routes, Rails routes, Click CLI comman
 
 1. **Dead code semantics.** Should a domain symbol registered via `interp.define("foo", ...)` suppress a dead-code warning for `foo` even when no Rust function named `foo` exists? The domain layer is the only "caller." This requires `tracedecay_dead_code` to understand that a `domain_symbol` node with incoming `registers` edges is not dead.
 
-2. **Parametric names.** How to handle `/api/users/:id` — is the pattern itself the symbol, or should tracedecay normalise it to `/api/users/{id}` for matching purposes? Route matching is inherently parametric; symbol identity is not obvious.
+2. **Parametric names.** How to handle `/api/users/:id`, is the pattern itself the symbol, or should tracedecay normalise it to `/api/users/{id}` for matching purposes? Route matching is inherently parametric; symbol identity is not obvious.
 
 3. **Cross-layer edges.** Can a domain symbol in one layer reference a symbol in another? For example, an HTTP route pointing to a CLI command name. The ID scheme supports this (`domain:http-route:/build` → `domain:cli-command:build`) but the rule schema has no syntax for it yet.
 

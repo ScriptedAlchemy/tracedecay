@@ -287,7 +287,7 @@ pub struct McpServer {
     /// The served code graph. Guarded so a mid-session `git checkout` can
     /// hot-swap the instance onto the new branch's DB
     /// ([`Self::reopen_if_branch_drifted`]). Readers clone the `Arc` out and
-    /// drop the lock immediately — no read guard is ever held across a
+    /// drop the lock immediately, no read guard is ever held across a
     /// handler await, so a swap never contends with in-flight calls. Calls
     /// already running when a swap lands finish against the old snapshot;
     /// each call is internally consistent.
@@ -462,7 +462,7 @@ pub struct McpServer {
     /// UNIX timestamp (secs) of the most recent sync-on-read background
     /// refresh spawn. Gates the read-refresh cooldown independently of
     /// [`last_staleness_check_at`](Self::last_staleness_check_at), which
-    /// gates the *blocking* edit-tool path — the two cooldowns must not
+    /// gates the *blocking* edit-tool path, the two cooldowns must not
     /// share a stamp or one path would starve the other.
     last_background_refresh_at: AtomicI64,
     /// UNIX timestamp (secs) at which the most recent background refresh
@@ -502,7 +502,7 @@ pub struct McpServer {
     /// connection establishment fails instead of reusing a timestamp fallback.
     ///
     /// The MCP transport negotiates only `clientInfo` (host name) at
-    /// `initialize` — never a session/conversation id — and no session env var
+    /// `initialize`, never a session/conversation id, and no session env var
     /// is passed to the server process, so a call's `session_id` column is
     /// populated only when the client happens to thread `session_id`/`sessionId`
     /// through the tool arguments (rare; historically ~97.6% of events had a
@@ -603,7 +603,7 @@ impl McpServer {
 
     /// Index freshness for source-editing tools is maintained by a lazy
     /// staleness check ([`maybe_sync_if_stale`](Self::maybe_sync_if_stale))
-    /// gated by a 30 s cooldown — there is no background watcher task.
+    /// gated by a 30 s cooldown, there is no background watcher task.
     /// A standing watcher was the source of severe CPU and memory pressure
     /// on large monorepos where nested ignored directories
     /// (`apps/*/node_modules`, `packages/*/target`) drove unbounded event
@@ -697,8 +697,8 @@ impl McpServer {
     /// Mounts the daemon-equivalent retained project-server resolver on an
     /// already-assembled registered test context, then constructs the server.
     ///
-    /// Path-selector reads — including the hook workspace route resolved
-    /// before durable host admission — need both the registry database the
+    /// Path-selector reads, including the hook workspace route resolved
+    /// before durable host admission, need both the registry database the
     /// test runtime supplies and a resolver for the selected server. A context
     /// without the resolver makes every
     /// hook notification fail closed as `project_registry_route_unavailable`
@@ -722,7 +722,7 @@ impl McpServer {
         // The retained session port mounts only when the project refresh
         // service exists, and that service requires a refresh wake. Test
         // runtimes have no daemon refresh scheduler, so install the typed
-        // worker-absent wake — every gate treats it exactly like an absent
+        // worker-absent wake, every gate treats it exactly like an absent
         // wake, while the session read authorities still mount.
         if context.project_session_refresh_wake.is_none() && context.project_session_db.is_some() {
             context.project_session_refresh_wake = Some(Arc::new(
@@ -734,8 +734,8 @@ impl McpServer {
         // and workflow reads) execute against the real in-process owner
         // instead of reporting the daemon transport as unavailable. Mirror
         // that mount for registered test servers. A graph without a
-        // registered project identity has no owner to mount — production
-        // refuses to open such a project — so those direct fixtures keep the
+        // registered project identity has no owner to mount, production
+        // refuses to open such a project, so those direct fixtures keep the
         // typed unavailable envelope.
         let retained_owner_transport = if context.application_invocation_executor.is_none()
             && context.cg.store_layout().identity.project_id.is_some()
@@ -753,7 +753,7 @@ impl McpServer {
         // a late-bound weak slot: the server is only available after
         // construction, and retaining it strongly in its own resolver would
         // create a lifecycle cycle. Without this fallback a repo-local fixture makes
-        // every path-selector read — including hook route resolution — report
+        // every path-selector read, including hook route resolution, report
         // the active project as unmounted.
         let active_server_slot: Arc<std::sync::OnceLock<std::sync::Weak<McpServer>>> =
             Arc::new(std::sync::OnceLock::new());
@@ -880,7 +880,7 @@ impl McpServer {
         };
         // Register this project in the global DB with its current tokens.
         // A failed read must not upsert 0 as if the project saved nothing,
-        // and a failed write is named here instead of dissolving silently —
+        // and a failed write is named here instead of dissolving silently,
         // the server still starts, since the ledger is an optional sink.
         if let Some(gdb) = accounting_db.as_ref() {
             if let Some(persisted) = persisted_tokens_saved
@@ -1242,7 +1242,7 @@ impl McpServer {
     /// `tools/call` response gains a `_meta.duration_us` field with the
     /// handler's pure execution time in microseconds. Useful for profiling
     /// where time is spent inside the index vs. on the JSON-RPC/stdio
-    /// transport. Safe to flip at any time — the next call observes the
+    /// transport. Safe to flip at any time, the next call observes the
     /// new setting.
     pub fn set_timings_enabled(&self, enabled: bool) {
         self.timings_enabled
@@ -1453,7 +1453,7 @@ impl McpServer {
         });
 
         // Status stays available when the optional global ledger read fails,
-        // but the failure is reported in place of the number — an unreadable
+        // but the failure is reported in place of the number, an unreadable
         // ledger is not "no global savings".
         let local_tokens_saved = self
             .tokens_saved

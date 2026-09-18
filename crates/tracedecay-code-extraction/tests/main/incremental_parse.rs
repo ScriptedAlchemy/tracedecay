@@ -555,7 +555,7 @@ fn file_root_end_line(result: &ExtractionResult) -> u32 {
 /// through the changed-region path, and after a line-changing edit that takes
 /// the multiline reset path. The last shape moves the terminating newline
 /// without changing the row delta, so the file root's `end_line` changes on a
-/// same-line edit — reusing the prior span would be wrong there.
+/// same-line edit. Reusing the prior span would be wrong there.
 #[test]
 fn file_root_span_matches_cold_extraction_for_every_line_ending_shape() {
     let shapes = [

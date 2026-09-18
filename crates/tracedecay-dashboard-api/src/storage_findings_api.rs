@@ -1,4 +1,4 @@
-//! `GET /api/storage/findings` — compatibility projection of the canonical
+//! `GET /api/storage/findings`, compatibility projection of the canonical
 //! Doctor storage family.
 //!
 //! The admitted daemon Doctor reader owns finding production and health

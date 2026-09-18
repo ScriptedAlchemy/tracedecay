@@ -494,7 +494,7 @@ pub enum ObservationReadResultV1 {
 /// [`DiagnosticStore`](crate::DiagnosticStore) so a storage cutover cannot
 /// silently drop a lane: `Stale` answers `stale_diagnostics` and
 /// `SupersessionChain` answers `diagnostic_supersession_chain`. Both are
-/// history lanes — they read records that active publication excludes — and
+/// history lanes, they read records that active publication excludes, and
 /// neither may re-admit a stale record into the current set.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -593,7 +593,7 @@ pub struct CodeRecoveryRepositoriesPageV1 {
 /// Point lookups mirror the ledger's `outbox_entry`/inbox receipt reads; the
 /// page walks are keyset-paginated because both ledger tables grow without
 /// bound. Outbox pages walk `(source_sequence, effect_id)` and inbox pages walk
-/// `(target_sequence, effect_id)` — the exact orderings the ledger indexes.
+/// `(target_sequence, effect_id)`, the exact orderings the ledger indexes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EffectsReadOperationV1 {

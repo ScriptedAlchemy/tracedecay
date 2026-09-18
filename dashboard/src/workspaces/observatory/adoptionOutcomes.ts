@@ -63,7 +63,7 @@ export function funnelDimensions(model: ObservatoryReadModelV1): PlanDimension[]
   return ADOPTION_FUNNEL_STAGES.map((stage, index) => ({
     id: `funnel_${stage.toLowerCase()}`,
     label: `${index + 1}. ${stage}`,
-    requirement: `${stage} count with its explicit denominator, unknown/censored counts, and interval — from ${STAGE_SOURCE[stage].field}`,
+    requirement: `${stage} count with its explicit denominator, unknown/censored counts, and interval, from ${STAGE_SOURCE[stage].field}`,
     reading: readMetric(model.metrics, STAGE_METRIC[stage], STAGE_SOURCE[stage].reason),
   }));
 }
@@ -97,7 +97,7 @@ export function outcomeQualityDimensions(model: ObservatoryReadModelV1): PlanDim
       id: 'independently_useful',
       label: 'independently useful',
       requirement:
-        'use whose usefulness was observed independently of the surface that produced it — never acceptance or a self-report',
+        'use whose usefulness was observed independently of the surface that produced it, never acceptance or a self-report',
       reading: readMetric(model.metrics, 'adoption_independently_useful', NO_OUTCOME_PROJECTION),
     },
     {

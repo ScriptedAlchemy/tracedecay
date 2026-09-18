@@ -511,8 +511,8 @@ mod tests {
 
     /// The legacy raw JSON-RPC transport must stay byte-for-byte what it was
     /// before the typed envelope: the envelope is an internal representation,
-    /// never a wire change. These are the shapes a host actually parses —
-    /// method refusals, param refusals, the trivial ack, and a resource body —
+    /// never a wire change. These are the shapes a host actually parses,
+    /// method refusals, param refusals, the trivial ack, and a resource body,
     /// pinned as exact serialized frames rather than as structural matches.
     #[tokio::test]
     async fn legacy_json_rpc_wire_frames_are_unchanged_by_the_typed_envelope() {
@@ -563,8 +563,8 @@ mod tests {
             );
         }
 
-        // A resource body is too large to pin whole; its frame *shape* — field
-        // order included — is the part hosts depend on.
+        // A resource body is too large to pin whole; its frame *shape*, field
+        // order included, is the part hosts depend on.
         let schema_request: JsonRpcRequest = serde_json::from_str(
             r#"{"jsonrpc":"2.0","id":6,"method":"resources/read","params":{"uri":"tracedecay://schema"}}"#,
         )

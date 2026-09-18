@@ -12,7 +12,7 @@ import type { GraphCanvasEdge, GraphCanvasNode } from './types.ts';
  * Layout preparation runs in the plain `node` project: it takes the canvas box
  * as a number and its kind hues as an injected resolver, so none of the
  * arithmetic below needs a document, a canvas context or a WebGL renderer to
- * be checked. That is the point of the module — the geometry the reader ends
+ * be checked. That is the point of the module, the geometry the reader ends
  * up looking at is decided here, and it is now decidable in isolation.
  */
 

@@ -5,7 +5,7 @@ pub struct RemoteStorageStatusSnapshotV1 {
     pub pending_spool_items: u64,
     pub quarantined_spool_items: u64,
     /// True when any enrollment's retained spool frames are no longer
-    /// sequence-contiguous — a truthful recoverable state, never silently
+    /// sequence-contiguous, a truthful recoverable state, never silently
     /// collapsed into an empty spool.
     pub has_sequence_gap: bool,
     pub authority: CurrentRemoteAuthorityStateV1,

@@ -2,8 +2,8 @@
  * The multi-root scope set, as the daemon reports it.
  *
  * `/api/capabilities` has carried a typed `MultiRootCapabilityV1` since the
- * route existed and nothing read it, so a mounted scope set — its id, its
- * revision, the digest that seals it and how many roots it holds — was
+ * route existed and nothing read it, so a mounted scope set, its id, its
+ * revision, the digest that seals it and how many roots it holds, was
  * answered on every page load and shown nowhere.
  *
  * This panel is deliberately a reading and not a control. There is no route
@@ -87,7 +87,7 @@ function CapabilityRefusal({
 function MultiRootBody({ reading }: { reading: MultiRootReading }) {
   switch (reading.state) {
     // Older daemon: the bundle never mentioned the capability. Distinct from
-    // a daemon that mentioned it in order to decline, which has a reason.
+    // a daemon that mentioned it to decline, which has a reason.
     case 'absent':
       return (
         <p className="td-value text-3xs text-text-muted" data-multi-root="absent">
@@ -120,8 +120,8 @@ function MultiRootBody({ reading }: { reading: MultiRootReading }) {
           </dl>
           {!reading.federatedQueryMounted ? (
             <p className="td-value text-3xs text-text-muted">
-              A scope set is mounted, but no route runs a query across it — this build serves no
-              federated read model — so every reading on this dashboard is still one root.
+              A scope set is mounted, but no route runs a query across it, this build serves no
+              federated read model, so every reading on this dashboard is still one root.
             </p>
           ) : null}
         </div>

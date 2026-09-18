@@ -66,8 +66,8 @@ type ProfileSessionRefreshServices = Arc<
 
 /// Resolves the writer scope for one store family.
 ///
-/// The key is the canonical `data_root` — the exact value
-/// [`StoreOwnerKey::store_root`](super::StoreOwnerKey) carries — so every lane
+/// The key is the canonical `data_root`, the exact value
+/// [`StoreOwnerKey::store_root`](super::StoreOwnerKey) carries, so every lane
 /// naming the same store lands on the same gate. A path that cannot be
 /// canonicalized degrades to daemon-wide, which is strictly *more* exclusive and
 /// therefore can never split one store's gate into two.
@@ -442,7 +442,7 @@ impl ProfileHostAdmissionBootstrapContext {
 /// database owner. There is one copy of each shared registry so branch
 /// administration cannot prove ownership against stale daemon state.
 ///
-/// Writer admission itself is *per store* — see
+/// Writer admission itself is *per store*, see
 /// [`tracedecay_store_runtime::writer_gate`] for the hierarchy and the
 /// exclusivity argument. The proof branch administration performs is computed
 /// from one store family's database paths, so a writer on another store can
@@ -903,7 +903,7 @@ impl StoreAdministration {
     /// Subscribe to the durable account-tombstone persist receipt.
     ///
     /// The receipt settles when remote account deletion records or replays a
-    /// tombstone — before admitted project opens are joined. If the
+    /// tombstone, before admitted project opens are joined. If the
     /// administration is dropped without settling, wait fails closed.
     #[cfg(test)]
     pub(super) fn remote_account_deletion_tombstone_persist_receipt(

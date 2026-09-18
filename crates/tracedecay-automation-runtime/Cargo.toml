@@ -28,7 +28,6 @@ test-helpers = [
 [dependencies]
 cap-fs-ext = "4.0.2"
 cap-std = "4.0.2"
-fs2 = "0.4"
 getrandom = "0.2"
 hex = "0.4"
 hotpath.workspace = true

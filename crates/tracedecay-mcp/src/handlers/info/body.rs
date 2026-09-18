@@ -1,4 +1,4 @@
-//! `tracedecay_body` — source bodies for symbols matched by name.
+//! `tracedecay_body`, source bodies for symbols matched by name.
 
 use crate::ToolResult;
 use crate::rendered_tool_result;
@@ -19,13 +19,22 @@ use super::verified::{
 /// raw tree-sitter row index, so the caller passes them through unchanged.
 /// Returns the empty string if the range is out of bounds.
 pub fn extract_lines(source: &str, start_line: u32, end_line: u32) -> String {
-    let lines: Vec<&str> = source.lines().collect();
     let start = start_line as usize;
-    let end = (end_line as usize).saturating_add(1).min(lines.len());
-    if start >= lines.len() || start >= end {
+    let end_exclusive = (end_line as usize).saturating_add(1);
+    if start >= end_exclusive {
         return String::new();
     }
-    lines[start..end].join("\n")
+    let mut selected = source.lines().skip(start).take(end_exclusive - start);
+    let Some(first) = selected.next() else {
+        return String::new();
+    };
+    let mut body = String::with_capacity(first.len());
+    body.push_str(first);
+    for line in selected {
+        body.push('\n');
+        body.push_str(line);
+    }
+    body
 }
 
 #[hotpath::measure(label = "mcp.info.body.total")]

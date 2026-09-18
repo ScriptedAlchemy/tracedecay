@@ -48,8 +48,8 @@ clean source commit, performs that same real measurement without accepting
 caller-supplied values, and publishes the result before pointing the evidence
 index at it. The workload manifest is static configuration and is never
 rewritten by runs. The published result records the clean source commit and
-mode — the commit is the content authority for every tracked artifact, so no
-per-file hashes are maintained — plus warmups, measured repetitions, and
+mode, the commit is the content authority for every tracked artifact, so no
+per-file hashes are maintained, plus warmups, measured repetitions, and
 record counts.
 
 ## Observed focused tests

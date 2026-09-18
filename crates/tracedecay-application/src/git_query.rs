@@ -16,8 +16,8 @@
 //!   classifies drift as typed [`GenerationStalenessV1`]
 //!   (`GenerationBehindHead`, `WorktreeDiverged`, `HistoryRewritten`) instead
 //!   of silently mismatching.
-//! - **Cancellation and bounding**: every query takes [`GitQueryBounds`] —
-//!   max entries, max bytes, an optional deadline, and an optional
+//! - **Cancellation and bounding**: every query takes [`GitQueryBounds`].
+//!   Max entries, max bytes, an optional deadline, and an optional
 //!   cooperative cancellation token. Entry bounds truncate truthfully (never
 //!   silently), byte bounds fail truthfully, and no query performs an
 //!   unbounded history walk.
@@ -53,7 +53,7 @@ use crate::git_intelligence::{
 pub const GIT_QUERY_SCHEMA_VERSION_V1: &str = "tracedecay.git-query.v1";
 
 /// Domain separator for the query-layer worktree digest. This digest is
-/// query-layer evidence over typed status and worktree-diff identity — it is
+/// query-layer evidence over typed status and worktree-diff identity, it is
 /// not a native Git tree id and never authorizes object reconstruction.
 pub const WORKTREE_DIGEST_DOMAIN: &str = "tracedecay.git-query.worktree.v1";
 

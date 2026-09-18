@@ -9,7 +9,7 @@
 //!
 //! Cancel already exists as an attempt-level authority
 //! ([`crate::WorkAttemptService::request_cancellation`]); this module adds the
-//! run-level half — pause, resume, and the read that lets a caller see the
+//! run-level half, pause, resume, and the read that lets a caller see the
 //! published control state without guessing it from attempt rows.
 //!
 //! The service owns three decisions the surfaces must not re-make:
@@ -18,7 +18,7 @@
 //!   row to create, so pausing a run nobody ever leased an attempt for is
 //!   `not_found_or_not_authorized`, not an empty success. The admitted deadline
 //!   the aggregate is measured against is read from the attempt's own pinned
-//!   execution snapshot, never supplied by the caller — a caller-supplied
+//!   execution snapshot, never supplied by the caller, a caller-supplied
 //!   deadline would be a way to buy budget.
 //! * **Reconciliation before publication.** A pause records the exact live
 //!   attempt frontier it fenced. Attempts already running are not killed by a
@@ -481,7 +481,7 @@ where
     ///
     /// This is the fence Plan 32 requires: "pause and cancellation fence new
     /// reservations". A run with no control row has never been paused, so it
-    /// admits — the absence of a control row is not a denial.
+    /// admits. The absence of a control row is not a denial.
     pub fn admit_reservation(
         &self,
         context: &RequestContext,

@@ -9,7 +9,7 @@
 //!
 //! The hook runtime handle ([`HookRuntimeV1`]) is composed here from this
 //! crate's adapters plus the one capability this crate cannot build: the
-//! daemon client ([`DaemonClientPortsV1`] — the tool invoker and the hook
+//! daemon client ([`DaemonClientPortsV1`], the tool invoker and the hook
 //! event notifier that talk to the daemon over its socket). The composition
 //! root owns that client and hands it to [`register_runtime_ports`]; a root
 //! that wants an explicit handle for a hook entry point builds it with
@@ -127,7 +127,7 @@ pub fn hook_runtime() -> Result<HookRuntimeV1> {
 ///
 /// Built wherever a hook entry point starts rather than stored: the struct is
 /// plain function pointers, so constructing it is free and there is no slot
-/// for a second composition to lose. Two former slots are absent by design —
+/// for a second composition to lose. Two former slots are absent by design:
 /// the memory-injection gate and the Cursor ingest ceiling were agent-hosts'
 /// own function and constant round-tripped through the root, and their
 /// readers now call them directly.

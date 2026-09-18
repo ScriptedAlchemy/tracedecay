@@ -72,7 +72,7 @@ pub(super) async fn query_has_rows(
     conn: &impl QueryExecutor,
     query: &str,
 ) -> tracedecay_domain::errors::Result<bool> {
-    // Existence only — but the exact SQL channel materializes a whole
+    // Existence only, but the exact SQL channel materializes a whole
     // result set before handing back the first row, and caps that at
     // MAX_QUERY_ROWS. An audit query matching more violations than the cap
     // therefore failed the entire invariant pass with a materialization-limit
@@ -556,7 +556,7 @@ mod tests {
 
     /// A store whose `source_cursor_advances` table outgrew one SQL-channel
     /// page must still be audited end to end. The scan pages by rowid, so the
-    /// audit has to keep reading past the first page — both to finish clean and
+    /// audit has to keep reading past the first page, both to finish clean and
     /// to see a violation that lives beyond it.
     #[tokio::test]
     async fn source_cursor_advance_audit_reads_past_the_first_page() {
@@ -663,7 +663,7 @@ mod tests {
 
     /// `is_fresh` skips the row audits on the creating open, but a reopen
     /// (`is_fresh = false`) still runs the exhaustive audit and rejects
-    /// corruption — the freshness fast path must be invisible on reopen.
+    /// corruption, the freshness fast path must be invisible on reopen.
     #[tokio::test]
     async fn fresh_open_skips_row_audits_but_reopen_audits_exhaustively() {
         let harness = open_db().await;

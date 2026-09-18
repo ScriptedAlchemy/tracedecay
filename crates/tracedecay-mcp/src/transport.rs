@@ -124,7 +124,7 @@ type ProfiledStdout = tokio::io::Stdout;
 
 type StdinLineReader = tracedecay_framing::BoundedLineReader<tokio::io::BufReader<ProfiledStdin>>;
 
-/// Real stdio transport — reads from stdin, writes to stdout.
+/// Real stdio transport, reads from stdin, writes to stdout.
 pub struct StdioTransport {
     reader: StdinLineReader,
     writer: ProfiledStdout,
@@ -196,7 +196,7 @@ impl McpDuplexTransport for StdioTransport {
     }
 }
 
-/// In-memory transport for tests — backed by tokio mpsc channels.
+/// In-memory transport for tests, backed by tokio mpsc channels.
 #[cfg(any(test, feature = "test-transport"))]
 pub struct ChannelTransport {
     rx: tokio::sync::mpsc::UnboundedReceiver<String>,

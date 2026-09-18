@@ -10,7 +10,7 @@
 //! incomplete: path dependencies outside the workspace, fixture crates with
 //! their own `[workspace]`, and vendored sub-projects all compile as real
 //! packages while appearing in no member glob. Walking to every `Cargo.toml`
-//! finds those, and — this is the part that removes false verdicts — makes
+//! finds those, and, this is the part that removes false verdicts, makes
 //! every manifest directory a *claim boundary*, so an outer package can never
 //! be blamed for a file that belongs to an inner one.
 
@@ -41,7 +41,7 @@ const fn is_ident_byte(b: u8) -> bool {
 /// counted as unclaimed rather than unmounted.
 const CARGO_SOURCE_DIRS: [&str; 4] = ["src", "tests", "benches", "examples"];
 
-const RUST_VERDICT: &str = "no `mod` declaration reaches this file from any cargo target root — \
+const RUST_VERDICT: &str = "no `mod` declaration reaches this file from any cargo target root, \
                             the compiler never parses it";
 
 /// Reachability this walk genuinely cannot see, stated rather than guessed at.
@@ -49,7 +49,7 @@ const RUST_BLIND_SPOTS: [&str; 4] = [
     "`include!` with a computed path (`concat!(env!(\"OUT_DIR\"), …)`) is not resolved; a \
      build-script module included that way is reported as unmounted only if it also lives in the \
      working tree, which generated code does not",
-    "a `mod` produced by macro expansion is invisible — the scan reads declarations, not expanded \
+    "a `mod` produced by macro expansion is invisible, the scan reads declarations, not expanded \
      token trees",
     "`#[cfg(…)]` and `#[cfg_attr(…)]` predicates are not evaluated: every declared path counts as \
      mounted, so a module gated to a platform you never build still reads as reachable",
@@ -64,7 +64,7 @@ struct ModuleDeclaration {
     /// An unconditional `#[path = "…"]`, which replaces convention entirely.
     explicit_path: Option<String>,
     /// Paths from `#[cfg_attr(predicate, path = "…")]`. Predicates are not
-    /// evaluated, so each one is an *additional* file that may be the module —
+    /// evaluated, so each one is an *additional* file that may be the module,
     /// convention still applies alongside them.
     conditional_paths: Vec<String>,
     /// Where `mod name;` resolves: the *module* directory, one level deeper for
@@ -74,7 +74,7 @@ struct ModuleDeclaration {
     /// single subtlety most worth getting right here.
     ///
     /// A path attribute on a module that is *not* inside an inline module block
-    /// is relative to the directory holding the source file — so in
+    /// is relative to the directory holding the source file, so in
     /// `src/profile_backup.rs`, `#[path = "profile_backup/error.rs"]` means
     /// `src/profile_backup/error.rs`, not `src/profile_backup/profile_backup/`.
     /// Resolving it against the module directory instead reports every such
@@ -121,7 +121,7 @@ struct CratePackage {
     manifest: String,
     /// Every target entry point, paired with the directory its own `mod`
     /// declarations resolve against. Roots resolve against their parent
-    /// directory — `src/lib.rs` declares `src/foo.rs`, not `src/lib/foo.rs`.
+    /// directory, `src/lib.rs` declares `src/foo.rs`, not `src/lib/foo.rs`.
     roots: Vec<(PathBuf, PathBuf)>,
     /// Absolute source directories owned by this package.
     source_dirs: Vec<PathBuf>,
@@ -247,7 +247,7 @@ pub(super) fn audit(files: &ProjectFiles) -> Result<EcosystemAudit> {
 ///
 /// `[workspace.metadata.cargo-shear] ignored-paths` is the existing, reviewed
 /// answer to "which `.rs` files under a source directory are deliberately not
-/// linked" — fixture corpora, distribution acceptance sources built only by a
+/// linked", fixture corpora, distribution acceptance sources built only by a
 /// script. Re-deriving that judgement here would create a second list to keep
 /// in sync and would report the same false positives the workspace already
 /// wrote down.
@@ -279,7 +279,7 @@ fn workspace_declarations(project_root: &Path) -> Result<(Vec<String>, Vec<PathB
         })
         .unwrap_or_default();
 
-    // `exclude` names a directory, and cargo excludes everything under it —
+    // `exclude` names a directory, and cargo excludes everything under it,
     // comparing for equality would keep auditing every member below an
     // excluded tree.
     let excluded_dirs = manifest
@@ -317,7 +317,7 @@ fn build_excluded_matcher(
 /// Reads one package manifest into the target roots and source directories the
 /// audit walks. Returns `None` for a manifest with no `[package]` (a virtual
 /// workspace root owns no targets) and for one whose declared targets do not
-/// exist on disk — both are claim boundaries with nothing to audit.
+/// exist on disk, both are claim boundaries with nothing to audit.
 fn cargo_package(project_root: &Path, dir: &Path) -> Option<CratePackage> {
     let manifest_path = dir.join("Cargo.toml");
     let manifest_text = std::fs::read_to_string(&manifest_path).ok()?;
@@ -358,7 +358,7 @@ fn cargo_package(project_root: &Path, dir: &Path) -> Option<CratePackage> {
             roots.push(dir.join("src/main.rs"));
         }
         // Explicit target entries always count, even when auto-discovery is
-        // switched off — that switch disables convention, not declaration. A
+        // switched off, that switch disables convention, not declaration. A
         // declared `path` may point outside the package directory, which is how
         // a thin manifest re-targets a binary owned by another crate.
         if let Some(entries) = manifest.get(table).and_then(toml::Value::as_array) {
@@ -447,7 +447,7 @@ fn auto_discovered_roots(directory: &Path) -> Vec<PathBuf> {
 ///
 /// On a case-insensitive filesystem `mod Config;` opens `config.rs`, and a set
 /// keyed on the declaration's spelling would never match the walker's. The
-/// filesystem still decides whether the file exists — the index only answers
+/// filesystem still decides whether the file exists, the index only answers
 /// "under what name?", so nothing here invents a match a case-sensitive
 /// filesystem would refuse.
 #[derive(Default)]
@@ -491,7 +491,7 @@ fn read_dir_index(directory: &Path) -> HashMap<String, Vec<OsString>> {
 /// The on-disk name for `wanted`: itself when the directory really holds that
 /// spelling, the single case-variant when it holds exactly one, and `None` when
 /// the directory holds several (a case-sensitive filesystem with both `Foo.rs`
-/// and `foo.rs` — guessing there would mount the wrong file).
+/// and `foo.rs`, guessing there would mount the wrong file).
 fn on_disk_spelling(listing: &HashMap<String, Vec<OsString>>, wanted: &OsStr) -> Option<OsString> {
     let lowered = wanted.to_string_lossy().to_ascii_lowercase();
     let names = listing.get(&lowered)?;
@@ -626,7 +626,7 @@ fn module_child_directory(file: &Path) -> PathBuf {
 /// `module_scope` is false once the walk descends into anything that is not a
 /// module body. Rust refuses a non-inline `mod` inside a block unless it
 /// carries `#[path]`, so outside module scope only path-carrying declarations
-/// are believed — a bare `mod x;` down there does not compile and must not be
+/// are believed, a bare `mod x;` down there does not compile and must not be
 /// allowed to mount `x.rs` and hide it.
 ///
 /// `attribute_directory` starts as the directory holding the source file and
@@ -671,7 +671,7 @@ fn collect_module_declarations(
                 };
                 match child.child_by_field_name("body") {
                     // An inline module declares no file of its own, but its
-                    // children resolve under a directory named for it — and
+                    // children resolve under a directory named for it, and
                     // inside that block a `#[path]` resolves against the same
                     // directory, not against the file's own.
                     Some(body) => {
@@ -764,9 +764,9 @@ fn string_literal_value(text: &str) -> Option<String> {
 
 /// What a `#[…]` attribute says about where a module's file lives.
 enum PathAttribute {
-    /// `#[path = "…"]` — replaces convention outright.
+    /// `#[path = "…"]`, replaces convention outright.
     Unconditional(String),
-    /// `#[cfg_attr(predicate, path = "…")]` — one more file the module may be.
+    /// `#[cfg_attr(predicate, path = "…")]`, one more file the module may be.
     Conditional(Vec<String>),
 }
 
@@ -1214,7 +1214,7 @@ mod tests {
     }
 
     /// A `mod` line that only ever exists inside a macro *definition* is not a
-    /// declaration — nothing expands it here, and believing it would hide the
+    /// declaration, nothing expands it here, and believing it would hide the
     /// orphan. A `#[path]` module inside a function body is the one block-scoped
     /// form Rust accepts, and it does mount its file.
     #[test]
@@ -1314,7 +1314,7 @@ mod tests {
         assert_eq!(audit.unmounted[0].manifest, "crates/member/Cargo.toml");
     }
 
-    /// `workspace.exclude` names a directory, and everything under it is out —
+    /// `workspace.exclude` names a directory, and everything under it is out,
     /// an equality check would keep auditing every crate below the excluded
     /// tree.
     #[test]
@@ -1466,7 +1466,7 @@ mod tests {
 
     /// The walker does not follow links, so neither does the audit. A module
     /// reached *through* a symlinked directory is mounted under the path the
-    /// declaration names, and the files behind the link are never walked — so
+    /// declaration names, and the files behind the link are never walked, so
     /// nothing on either side of the link is reported as an orphan of the
     /// other.
     #[cfg(unix)]
@@ -1510,7 +1510,7 @@ mod tests {
     }
 
     /// A file whose name is not valid UTF-8 must be answered, not panicked on.
-    /// Nothing can declare it, so it is a finding — with a repair line that
+    /// Nothing can declare it, so it is a finding, with a repair line that
     /// admits it cannot spell the module name.
     #[cfg(unix)]
     #[test]

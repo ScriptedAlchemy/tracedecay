@@ -4,7 +4,7 @@
  * `thousandsAt` is the magnitude at which `k` takes over from the full number.
  * It defaults to 10,000 because a four-figure count still reads exactly and
  * "9,842" beats "9.8k" in a column; a ledger whose small end is already four
- * figures — token counts — abbreviates from 1,000 instead. */
+ * figures, token counts, abbreviates from 1,000 instead. */
 export function formatCount(value: number | null | undefined, thousandsAt = 10_000): string {
   if (value == null || !Number.isFinite(value)) return '—';
   const abs = Math.abs(value);
@@ -20,7 +20,7 @@ function trim(value: number): string {
 }
 
 /** The same magnitude language, split so the instrument can set the unit small
- * and quiet beside the number. `null` in, em dash out — never a zero.
+ * and quiet beside the number. `null` in, em dash out, never a zero.
  * `thousandsAt` means what it does in `formatCount`. */
 export function splitCount(
   value: number | null | undefined,
@@ -39,14 +39,14 @@ export function splitCount(
 
 /** A wall-clock stamp trimmed to what a dense row can actually carry.
  *
- * `toLocaleString()` prints "7/24/2026, 9:07:20 PM" — twenty-one glyphs of
+ * `toLocaleString()` prints "7/24/2026, 9:07:20 PM", twenty-one glyphs of
  * which the seconds are noise in a list you scan for ordering, and the width
  * forces the row's real content to truncate. This keeps the full calendar date
  * and the minute and drops only the seconds, in a fixed-width ISO-ish form
  * that sorts and aligns as a column. Absolute, not relative: a screenshot of a
  * fixture has to render identically tomorrow.
  *
- * The unabbreviated value stays available — every row that uses this also
+ * The unabbreviated value stays available, every row that uses this also
  * exposes the raw record in its inspector. */
 export function formatStamp(epochSeconds: number | null | undefined): string {
   if (epochSeconds == null || !Number.isFinite(epochSeconds)) return '—';

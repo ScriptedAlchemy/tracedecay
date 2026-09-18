@@ -1,4 +1,4 @@
-//! `tracedecay_outline` — flat symbol map for a file, enriched with ast-grep structure.
+//! `tracedecay_outline`, flat symbol map for a file, enriched with ast-grep structure.
 
 use std::path::Path;
 
@@ -112,7 +112,7 @@ fn render_outline_md(value: &Value) -> String {
     let mut md = Md::new();
     let file = render::field_str(value, "file");
     let count = render::field_i64(value, "symbol_count");
-    md.heading(2, &format!("Outline — {file}"));
+    md.heading(2, &format!("Outline, {file}"));
     md.field("symbols", &count.to_string());
     md.blank();
     match value.get("symbols").and_then(Value::as_array) {

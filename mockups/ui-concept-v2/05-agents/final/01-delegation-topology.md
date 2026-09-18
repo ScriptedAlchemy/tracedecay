@@ -10,7 +10,7 @@ evidence_class: concept_synthetic
 
 ## User job
 
-Understand who delegated work to whom, which agents and subagents are active, ended, failed, or ambiguous, what each branch produced, and where handoffs, tasks, Sessions, code, and Deliveries connect—without reducing a large collaboration to a flat agent list.
+Understand who delegated work to whom, which agents and subagents are active, ended, failed, or ambiguous, what each branch produced, and where handoffs, tasks, Sessions, code, and Deliveries connect, without reducing a large collaboration to a flat agent list.
 
 ## Product behavior
 

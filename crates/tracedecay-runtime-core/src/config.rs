@@ -179,7 +179,7 @@ fn canonicalize_data_dir(path: PathBuf) -> PathBuf {
 /// # Canonical local project-root resolution order
 ///
 /// This walk-up is the heart of project-root resolution. Every entry point
-/// that needs a project root should resolve it in this order — new code must
+/// that needs a project root should resolve it in this order. New code must
 /// converge on this chain instead of inventing its own:
 ///
 /// 0. **Template pre-filter** (`serve` only, `sanitize_serve_path_arg`): an
@@ -188,7 +188,7 @@ fn canonicalize_data_dir(path: PathBuf) -> PathBuf {
 ///    it) is discarded with a warning and resolution continues as if no path
 ///    was given.
 /// 1. **Explicit path** (`--path`/`-p`, tool `path` argument): used verbatim,
-///    no discovery, and failure to open is fatal — never silently fall back.
+///    no discovery, and failure to open is fatal, never silently fall back.
 /// 2. **CWD walk-up** (this function via `resolve_path_with_discovery`):
 ///    nearest ancestor of the working directory containing an initialised
 ///    project database (see [`get_project_db_path`]).
@@ -257,7 +257,7 @@ pub use tracedecay_domain::source_path_policy::{GENERATED_DIR_SEGMENTS, is_gener
 
 // Deliberately unconditional (not gated behind `cfg(test)` /
 // `feature = "test-helpers"`): some call sites reach it from a non-test build
-// — e.g. the root crate's `session_temporal_benchmark`, which backs
+// e.g. the root crate's `session_temporal_benchmark`, which backs
 // `cargo bench` and compiles as an optimized bench profile, not under
 // `cfg(test)`. The mutex and accessor are trivial and side-effect free, so
 // keeping them unconditional costs nothing while guaranteeing every consumer,

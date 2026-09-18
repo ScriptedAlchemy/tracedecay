@@ -2,8 +2,8 @@
  * Token sampling for the TRACE canvas.
  *
  * Canvas2D cannot read CSS custom properties, so the resolved strings have to
- * be handed to the renderer. Sampling happens here — once at mount and once per
- * theme flip — rather than inside the draw loop, which keeps `tokens.css` the
+ * be handed to the renderer. Sampling happens here, once at mount and once per
+ * theme flip, rather than inside the draw loop, which keeps `tokens.css` the
  * single source of the instrument's colour at 60 Hz.
  */
 import type { TracePalette } from './types.ts';

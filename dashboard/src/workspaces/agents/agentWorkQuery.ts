@@ -8,7 +8,7 @@ import { workGraphReadRequest } from '../work/workViewsQueries.ts';
 /**
  * The one work-product graph read the Agents page makes.
  *
- * `operation.work.views` in `current` mode — the same request the Work
+ * `operation.work.views` in `current` mode, the same request the Work
  * workspace issues, through the same `callWork` wire and the same generated
  * contracts, because it is the same question asked from a different page.
  * Nothing about the request is restated here: `workGraphReadRequest` owns the
@@ -16,8 +16,8 @@ import { workGraphReadRequest } from '../work/workViewsQueries.ts';
  * build asks the daemon for a graph version cannot leave two callers asking
  * differently.
  *
- * Two readings come off this one response — the handoff frontier and the
- * attempt failures — rather than two reads, so both describe the same graph
+ * Two readings come off this one response, the handoff frontier and the
+ * attempt failures, rather than two reads, so both describe the same graph
  * version. A second request would let the page draw a frontier from one version
  * beside failures from another and caption them as one picture.
  *

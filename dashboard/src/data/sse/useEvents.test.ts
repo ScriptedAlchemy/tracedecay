@@ -134,12 +134,12 @@ describe("SSE query invalidation", () => {
   });
 
   /**
-   * Every Work read part, not just the projection pair. The attempt list and
-   * canonical topology page are scoped like the snapshot they are drawn beside,
-   * so either surviving a project switch would put one project's execution
-   * structure under another project's snapshot. Adding a read part to
-   * `workScopeInvalidationKeys` is expected to widen these lists — a part
-   * missing from them is a stale read, not a saved refetch.
+   * Every Work read part, including those beyond the projection pair. The
+   * attempt list and canonical topology page are scoped like the snapshot they
+   * are drawn beside, so either surviving a project switch would put one
+   * project's execution structure under another project's snapshot. Adding a
+   * read part to `workScopeInvalidationKeys` is expected to widen these lists.
+   * A part missing from them is a stale read, not a saved refetch.
    */
   it("targets exact Work keys and the default alias for active-project activity", () => {
     expect(

@@ -50,7 +50,7 @@ struct ProjectlessConnectionStateV1 {
 /// carries whatever path the host process derived from its own environment,
 /// which is never canonicalized on the wire. A byte comparison therefore
 /// refuses a connection that is in fact addressing the very same directory
-/// whenever any component of the client's profile root is a symlink — the
+/// whenever any component of the client's profile root is a symlink, the
 /// default on macOS, where the per-user temporary root and anything under
 /// `/var` resolve through `/var -> /private/var`. Project routing already
 /// canonicalizes this exact field before it compares

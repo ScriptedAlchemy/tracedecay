@@ -131,8 +131,8 @@ impl ShutdownCoordinatorV1 {
     ///
     /// This awaits the `JoinHandle` rather than re-checking `is_finished()`
     /// behind `changed`, because no notification ever follows the task becoming
-    /// finished. Both notifications a coordinator sends — `finish` and
-    /// `ShutdownCoordinatorCompletion::drop` — run while its future is still
+    /// finished. Both notifications a coordinator sends, `finish` and
+    /// `ShutdownCoordinatorCompletion::drop`, run while its future is still
     /// being polled, and tokio marks the task complete only after that poll
     /// returns. A waiter that registered on `changed` after the last
     /// notification and observed `is_finished() == false` therefore had nothing

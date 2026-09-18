@@ -187,8 +187,8 @@ struct GhPr {
 
 /// Builds the `git` invocation these PR commands run in `repo_root`.
 ///
-/// The arguments carry resolved paths — the worktree `git worktree add`/`remove`
-/// operate on descends from a canonicalized data root — and Git for Windows
+/// The arguments carry resolved paths, the worktree `git worktree add`/`remove`
+/// operate on descends from a canonicalized data root, and Git for Windows
 /// rewrites a `\\?\` path *argument* to `//?/D:/...` and then fails with
 /// "could not create leading directories". `plain_git_args` spells those
 /// plainly for the child process, exactly as `bounded_git_output` does; every

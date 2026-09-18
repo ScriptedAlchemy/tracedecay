@@ -26,7 +26,7 @@ import {
 /**
  * Daemon-validated compare-and-swap. Three commands, one expected revision,
  * one explicit confirmation surface that states exactly what will be sent and
- * what the daemon — not this page — decides. The result region is populated
+ * what the daemon, not this page, decides. The result region is populated
  * only by the daemon's receipt or its typed refusal; nothing here turns green
  * before the answer arrives.
  */
@@ -225,7 +225,7 @@ function LifecycleResult({
       {pending && lastSent !== null ? (
         <StateChip
           kind="loading"
-          detail={`sending ${lastSent.action} · expected revision ${lastSent.expectedRevision} · awaiting the daemon’s compare-and-swap`}
+          detail={`sending ${lastSent.action} · expected revision ${lastSent.expectedRevision} · awaiting the daemon's compare-and-swap`}
         />
       ) : result === undefined ? (
         <p className="text-3xs text-text-muted">

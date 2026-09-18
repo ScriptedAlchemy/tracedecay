@@ -307,8 +307,8 @@ pub async fn resolve_runtime_configuration_for_registered_database(
     }
     // Cold cache: adopt the durable current revision through the canonical
     // open path and publish it. A fresh store mints the canonical initial
-    // revision — the daemon owns this store, and branch administration must
-    // run for a registered project it has not opened yet — while an
+    // revision, the daemon owns this store, and branch administration must
+    // run for a registered project it has not opened yet, while an
     // initialized-but-unreadable store surfaces a typed authority error.
     Ok(
         open_runtime_configuration_for_registered_database(project_root, layout, database)
@@ -569,8 +569,8 @@ async fn open_runtime_configuration_from_store(
             SourceBindingCheck::Verified => break,
             // Exactly one daemon-owned binding for this registry-verified
             // project whose only drift is the path-derived locator digest:
-            // the checkout moved or was renamed. The registry — not the
-            // path — owns identity and has already resolved this exact
+            // the checkout moved or was renamed. The registry owns identity,
+            // not the path, and has already resolved this exact
             // registered project for the current root, so republish the
             // binding with the new derived digest under compare-and-swap
             // instead of demanding a reset.

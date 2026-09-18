@@ -696,7 +696,7 @@ async fn cached_project_reconciles_cli_enabled_automation_without_cache_probe() 
     // settles in: the project's default automation already has schedulable
     // work, so activation registers this exact owner. The wait above returns
     // as soon as `automation_config_probe_attempts` moves, and that counter
-    // increments when the probe starts — before the configuration read and
+    // increments when the probe starts, before the configuration read and
     // well before registration. Settle on the registered owner instead of
     // sampling the window before it appears.
     wait_for_automation_scheduler_state(

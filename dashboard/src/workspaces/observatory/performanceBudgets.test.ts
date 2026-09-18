@@ -7,7 +7,7 @@ import { budgetAnchors, budgetCoverage, latencyDimensions, outcomeDimensions, pe
  * `performance-budgets` binds to `/api/observatory`, which carries two of the
  * budget dimensions Plan 26 requires. The tests pin both halves: that the two
  * measured ones read from the wire, and that the eleven unprojected ones stay
- * explicitly unavailable rather than collapsing into zeroes — which is the
+ * explicitly unavailable rather than collapsing into zeroes, which is the
  * failure the plan's "unavailable rather than zero" rule names.
  */
 
@@ -85,7 +85,7 @@ describe('budget bands and coverage', () => {
   it('reports nothing measured when the read model carries no measurements', () => {
     const bands = performanceBudgetBands(model([]));
     expect(budgetCoverage(bands).measured).toBe(0);
-    // Thirteen requirements, none answered — stated as such, not as a page of
+    // Thirteen requirements, none answered, stated as such, not as a page of
     // zeroes.
     expect(budgetCoverage(bands).unprojected).toBe(13);
   });

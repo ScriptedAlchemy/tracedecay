@@ -9,7 +9,7 @@
 //! and total byte length so 1-based line indexing stays valid.
 //!
 //! ## Format-capture carry-over
-//! Rust's formatting macros accept implicit captures — `println!("{name}")`
+//! Rust's formatting macros accept implicit captures. `println!("{name}")`
 //! references the binding `name`, so `name` is a real use of that identifier.
 //! When `preserve_format_captures` is set, the contents of the format-string
 //! argument of a standard formatting macro are blanked *except* for those
@@ -57,7 +57,7 @@ pub fn masked_rust_source(source: &str) -> String {
 /// preserved so line/byte indexing over the result stays valid.
 ///
 /// If the source cannot be parsed (grammar unavailable), the original source is
-/// returned unmasked — a defensive fallback that only trades masking for the
+/// returned unmasked, a defensive fallback that only trades masking for the
 /// pre-existing false-positive risk on that one file.
 pub fn masked_rust_source_with(source: &str, opts: MaskOptions) -> String {
     let Some(tree) = parse(source) else {
@@ -201,7 +201,7 @@ fn parse(source: &str) -> Option<tree_sitter::Tree> {
 struct MaskSpan {
     start: usize,
     end: usize,
-    /// A string/raw-string literal that is not byte-prefixed — the only kind
+    /// A string/raw-string literal that is not byte-prefixed. The only kind
     /// that can be a formatting macro's format-string argument. Char literals
     /// and byte strings are `false`.
     format_string_candidate: bool,

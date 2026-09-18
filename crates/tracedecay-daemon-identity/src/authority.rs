@@ -7,7 +7,6 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use fs2::FileExt;
 use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_domain::{BrainId, UserProfileId};
 use tracedecay_runtime_core::path_safety::{
@@ -124,7 +123,7 @@ impl DaemonAuthority {
 
         let lock_path = authority_root.join(LOCK_FILE);
         let mut lock = open_private_lock(&lock_path)?;
-        if let Err(error) = lock.try_lock_exclusive() {
+        if let Err(error) = lock.try_lock().map_err(std::io::Error::from) {
             if !tracedecay_private_fs::is_lock_contended(&error) {
                 return Err(config_io("lock", &lock_path, &error));
             }

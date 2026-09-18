@@ -10,7 +10,6 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use fs2::FileExt;
 use serde::Serialize;
 
 use super::{SkillUsageLedger, SkillUsageRecord, config_error, skill_usage_ledger_path};
@@ -164,7 +163,7 @@ fn with_skill_lock(
                 lock_path.display()
             ))
         })?;
-    lock.lock_exclusive().map_err(|error| {
+    lock.lock().map_err(|error| {
         config_error(format!(
             "failed to lock skill usage record '{skill_id}': {error}"
         ))
@@ -211,7 +210,7 @@ fn migrate_legacy(profile_root: &Path) -> Result<()> {
                 lock_path.display()
             ))
         })?;
-    lock.lock_exclusive()
+    lock.lock()
         .map_err(|error| config_error(format!("failed to lock skill usage migration: {error}")))?;
     let result = migrate_legacy_locked(profile_root, &legacy_path);
     let _ = lock.unlock();

@@ -2,7 +2,7 @@
  * The Code Diagnostics broker: its snapshot, and the four controls over it.
  *
  * `code_diagnostics_api.rs` mounts a read and three writes on one resource, and
- * every one of the four answers with the SAME body — the broker's snapshot plus
+ * every one of the four answers with the SAME body, the broker's snapshot plus
  * the compare-and-set token for the settings it just reported. That is what
  * makes an honest control possible here, exactly as it does for the automation
  * scheduler: a route replying `{"ok":true}` would leave this module to assume
@@ -18,8 +18,8 @@
  * daemon dropped would be precisely a state asserted rather than measured.
  *
  * The settings write is compare-and-set. `expected_revision` is required by the
- * route — without it the broker cannot tell an edit of the settings this
- * browser read from one that would silently overwrite a writer it never saw —
+ * route, without it the broker cannot tell an edit of the settings this
+ * browser read from one that would silently overwrite a writer it never saw,
  * so every mutation that touches settings carries the revision from the reading
  * it was issued against, not one re-read at dispatch time.
  */
@@ -77,7 +77,7 @@ const EngineRow = z
 
 /** `LanguageDiagnosticsSettings` (`analyzer/settings.rs`): both fields carry
  * `#[serde(default)]`, and a language the operator has never configured has no
- * entry at all — so an absent map entry means "the built-in default", which is
+ * entry at all, so an absent map entry means "the built-in default", which is
  * a different fact from an entry that says `enabled: false`. */
 const LanguageSettings = z
   .object({
@@ -141,7 +141,7 @@ export function useCodeDiagnostics() {
  * against. Held on the command rather than read inside `mutationFn` because the
  * two moments can disagree: the 30-second poll can land a newer snapshot
  * between the click and the dispatch, and a write that silently adopted THAT
- * revision would be a compare-and-set against a state the operator never saw —
+ * revision would be a compare-and-set against a state the operator never saw,
  * which is the exact overwrite `expected_revision` exists to prevent.
  */
 export type DiagnosticsCommand =
@@ -206,7 +206,7 @@ function patch(body: Record<string, unknown>): RequestInit {
 }
 
 /** What a control attempt produced, including the case where there was no
- * attempt — kept apart for the same reason the scheduler control keeps it:
+ * attempt, kept apart for the same reason the scheduler control keeps it:
  * nothing was sent, so nothing changed, and the panel must not imply the broker
  * was asked and refused. */
 export type DiagnosticsControlResult =
@@ -214,7 +214,7 @@ export type DiagnosticsControlResult =
   | { outcome: 'not_dispatched'; writability: ScopeWritability };
 
 /** The scope a control attempt was issued under, captured when it was issued.
- * See `useSchedulerControl` — settlement callbacks run from the CURRENT
+ * See `useSchedulerControl`, settlement callbacks run from the CURRENT
  * options, so a refresh dispatched against project A that is still in flight
  * when the reader switches to project B would otherwise settle into B's entry. */
 interface DiagnosticsDispatch {
@@ -226,7 +226,7 @@ interface DiagnosticsDispatch {
  *
  * One mutation rather than four because all four write the same cache entry
  * with the same body, and because a reader may only ever have one control in
- * flight per panel — the commands are not independent (a refresh and a settings
+ * flight per panel, the commands are not independent (a refresh and a settings
  * write both re-derive the snapshot), so serialising them through a single
  * mutation is the truthful model rather than a convenience.
  */
@@ -246,7 +246,7 @@ export function useDiagnosticsControl() {
     mutationFn: async (command: DiagnosticsCommand) => {
       // Nothing leaves the browser unless the scope is known to accept it. The
       // buttons are disabled on this same reading, so arriving here means the
-      // disable was bypassed — and dispatching anyway would trade a stated
+      // disable was bypassed, and dispatching anyway would trade a stated
       // reason for a 405 this layer cannot tell from a route that has gone.
       if (writability.state !== 'writable') {
         return { outcome: 'not_dispatched', writability };

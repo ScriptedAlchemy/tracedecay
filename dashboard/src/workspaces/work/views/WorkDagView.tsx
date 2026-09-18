@@ -9,7 +9,7 @@ import { WorkDagBoard } from './WorkDagBoard.tsx';
 import { ChannelLedger, EmptyReading } from './WorkViewChannel.tsx';
 
 /**
- * DAG / critical path — the task dependency board over the declared graph.
+ * DAG / critical path, the task dependency board over the declared graph.
  *
  * Strata are the longest path over the Tarjan condensation, the same discipline
  * the Code workspace layers imports with: a task sits one stratum below the
@@ -180,7 +180,7 @@ function GatingEdges({ reading }: { reading: WorkDagReading }) {
         <p className="text-3xs leading-snug text-text-muted">{gating.detail}</p>
       ) : gating.value.length === 0 ? (
         <EmptyReading>
-          The work-product graph declares no gating edge at all. Nobody wrote one down — this is
+          The work-product graph declares no gating edge at all. Nobody wrote one down, this is
           the authority answering the question, not the question going unasked.
         </EmptyReading>
       ) : (
@@ -227,8 +227,8 @@ function ClimbAndCycles({
         <div className="flex min-w-0 flex-col gap-2">
           <p className="text-3xs leading-snug text-text-muted">
             These edges join tasks that already depend on each other, so the condensation
-            holds them in one stratum. That is an observation about the plan — a cycle the
-            task graph declares — and not an error in this drawing.
+            holds them in one stratum. That is an observation about the plan, a cycle the
+            task graph declares, and not an error in this drawing.
           </p>
           <ul className="flex min-w-0 flex-col gap-1">
             {climbs.map((edge) => (

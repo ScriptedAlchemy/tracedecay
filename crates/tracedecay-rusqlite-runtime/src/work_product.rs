@@ -67,7 +67,7 @@ pub(crate) struct WorkProductJournalEntryV1 {
 
 /// One published, verified graph version and the two instants that place it.
 ///
-/// `valid_at` is the event's own `occurred_at` — when the change became true.
+/// `valid_at` is the event's own `occurred_at`, when the change became true.
 /// `observed_at` is when this authority verified and published it. They are
 /// distinct on purpose: a forensic read asks about the second, an as-of read
 /// about the first.
@@ -88,7 +88,7 @@ pub(crate) fn owner_params(scope: &AuthorizedWorkProductScopeV1) -> Vec<ExactSql
 }
 
 /// Whether this selection authorizes every relation scope the event was
-/// admitted under — that is, whether this one event is inside the slice of work
+/// admitted under, that is, whether this one event is inside the slice of work
 /// the selection names.
 ///
 /// `ProfileOwnedNoGit` is an explicit no-Git selection, so it covers exactly
@@ -118,7 +118,7 @@ pub(crate) fn selection_covers(
 ///
 /// A selection names a slice of the owner's work. Events outside it fall
 /// outside the slice; they do not poison it. So the read is answered over the
-/// covered slice rather than refused outright — with the caveat that a silent
+/// covered slice rather than refused outright, with the caveat that a silent
 /// covered slice would be worse than a refusal, which is why the coverage comes
 /// back with it and every mounted read carries it through.
 ///
@@ -159,8 +159,8 @@ pub(crate) fn covered_prefix(
 /// One owner's journal and published versions, both bounded to the slice the
 /// selection covers.
 ///
-/// Every read that folds a graph needs the same three things — the covered
-/// events, the versions folded from them alone, and the coverage disclosure —
+/// Every read that folds a graph needs the same three things, the covered
+/// events, the versions folded from them alone, and the coverage disclosure,
 /// so they are resolved once here rather than re-derived at each reader.
 pub(crate) struct CoveredJournalV1 {
     pub(crate) journal: Vec<WorkProductJournalEntryV1>,
@@ -283,7 +283,7 @@ pub(crate) fn load_published_versions(
 
 /// Fold the journal into the graph at `through_sequence`.
 ///
-/// Returns `None` when the stored chain is not one canonical progression — a
+/// Returns `None` when the stored chain is not one canonical progression, a
 /// missing `Created` head, a gap, or a change whose folded result version does
 /// not match the version the event recorded. A broken chain is never repaired
 /// here and never partially folded: the caller turns it into a typed

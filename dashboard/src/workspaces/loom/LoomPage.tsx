@@ -55,7 +55,7 @@ import {
 } from '../../contracts/generated.ts';
 
 /**
- * Loom — the temporal execution field.
+ * Loom, the temporal execution field.
  *
  * Time runs left to right. Hierarchy runs down: provider rail, root session,
  * then subagents under their recorded parent. Every coordinate is produced by
@@ -725,7 +725,7 @@ function freshnessKind(
 
 /** The field, printed. A reader cannot infer from the picture what each axis
  * and line style encodes, so both are stated in the same words the layout
- * uses — and the counts come from the same model, not a second tally. */
+ * uses, and the counts come from the same model, not a second tally. */
 function FieldCaption({
   projection,
   model,
@@ -757,13 +757,13 @@ function FieldCaption({
         sits under its recorded parent in preorder. Thickness is the session&apos;s
         message count on a log scale. A lane drawn solid to its right edge has a
         served end; a lane ending in a dashed segment ends at its last message
-        observation; a lane ending in a dotted stub has no measured extent —{' '}
+        observation; a lane ending in a dotted stub has no measured extent, {' '}
         <span className="text-text-secondary">
           {stats.openEnded} of {stats.lanes} sessions have no recorded end or later
           message observation.
         </span>{' '}
         {stats.hollow > 0
-          ? `${stats.hollow} ${stats.hollow === 1 ? 'is a session the store reports' : 'are sessions the store reports'} at zero messages — a reading, not a gap. `
+          ? `${stats.hollow} ${stats.hollow === 1 ? 'is a session the store reports' : 'are sessions the store reports'} at zero messages, a reading, not a gap. `
           : ''}
         {stats.undated > 0
           ? `${stats.undated} ${stats.undated === 1 ? 'row' : 'rows'} carried no usable start time and ${stats.undated === 1 ? 'is' : 'are'} not on the field at all. `
@@ -802,7 +802,7 @@ function EmptyField({ undated, rows }: { undated: number; rows: number }) {
         <p className="text-xs leading-relaxed text-text-muted">
           {rows === 0
             ? 'The session store answered and holds no sessions in this scope.'
-            : `The store returned ${rows} ${rows === 1 ? 'session' : 'sessions'}, but ${undated} carried no usable start time — there is no honest position on the time axis for a session that never recorded when it began.`}{' '}
+            : `The store returned ${rows} ${rows === 1 ? 'session' : 'sessions'}, but ${undated} carried no usable start time, there is no honest position on the time axis for a session that never recorded when it began.`}{' '}
           <span className="text-text-secondary">
             Lanes appear as soon as the store records a start time.
           </span>

@@ -875,7 +875,7 @@ impl JobRunContext<'_> {
     }
 
     /// `effectful_anchor_run_id` must come from the same ledger snapshot that
-    /// minted `self.run_id`'s occurrence identity — never from a summary
+    /// minted `self.run_id`'s occurrence identity, never from a summary
     /// loaded at append time. See
     /// `scheduler_gate::evaluate_and_record_scheduler_skip` for why a fresher
     /// anchor can silently duplicate this diagnostic.

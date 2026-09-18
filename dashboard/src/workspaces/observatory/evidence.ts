@@ -6,9 +6,9 @@
  * Every function here is pure and total. It never averages two authorities,
  * never promotes a weaker evidence rung to a stronger one, and never turns a
  * missing read into a zero, a green lamp, or the word "nominal". A summary's
- * `state` is derived from what the daemon said — its envelope domain state,
+ * `state` is derived from what the daemon said, its envelope domain state,
  * its coverage statement, and a handful of payload facts that name an
- * in-flight build — and the daemon's own word travels beside it as
+ * in-flight build, and the daemon's own word travels beside it as
  * `stateDetail` whenever the grade is coarser than the wire.
  */
 import type {
@@ -58,11 +58,11 @@ export function isEvidenceSourceId(value: string | null | undefined): value is E
 
 /**
  * The typed evidence grades a panel can wear. Coarser than the nineteen-state
- * domain taxonomy on purpose — the overview is read at a glance — but never
+ * domain taxonomy on purpose, the overview is read at a glance, but never
  * lossy: the daemon's exact word rides in `stateDetail` when the two differ.
  *
  *   measured     served, complete, current
- *   empty        served and complete with nothing in it — a measured zero
+ *   empty        served and complete with nothing in it, a measured zero
  *   partial      served with less than everything the authority knows exists
  *   stale        served earlier; the source has moved past it
  *   building     a real build or convergence is in flight
@@ -175,13 +175,13 @@ export const SOURCE_IDENTITY: Record<EvidenceSourceId, SourceIdentity> = {
     title: 'Canonical observations',
     route: '/api/observatory',
     authority:
-      'Plan 26 canonical read model — the horizon, watermark, and metrics the CLI and MCP serve',
+      'Plan 26 canonical read model, the horizon, watermark, and metrics the CLI and MCP serve',
   },
   doctor: {
     id: 'doctor',
     title: 'Doctor inspection',
     route: '/api/doctor/findings',
-    authority: 'canonical Doctor report — finding families, evidence states, report coverage',
+    authority: 'canonical Doctor report, finding families, evidence states, report coverage',
   },
   adoption: {
     id: 'adoption',
@@ -199,7 +199,7 @@ export const SOURCE_IDENTITY: Record<EvidenceSourceId, SourceIdentity> = {
     id: 'pipeline',
     title: 'Code-index pipeline',
     route: '/api/code-index/freshness',
-    authority: 'daemon scheduler state — sealed generations, live build progress, clone index',
+    authority: 'daemon scheduler state, sealed generations, live build progress, clone index',
   },
   hooks: {
     id: 'hooks',
@@ -217,7 +217,7 @@ export const SOURCE_IDENTITY: Record<EvidenceSourceId, SourceIdentity> = {
     id: 'topology',
     title: 'Execution topology',
     route: '/api/work/topology-metrics',
-    authority: 'Work-owned execution-topology projection — measurement cells with typed omissions',
+    authority: 'Work-owned execution-topology projection, measurement cells with typed omissions',
   },
   analytics: {
     id: 'analytics',
@@ -229,7 +229,7 @@ export const SOURCE_IDENTITY: Record<EvidenceSourceId, SourceIdentity> = {
     id: 'telemetry',
     title: 'Storage telemetry',
     route: '/api/storage/telemetry',
-    authority: 'store telemetry — measured sizes, budgets, growth, per-table growth',
+    authority: 'store telemetry, measured sizes, budgets, growth, per-table growth',
   },
   findings: {
     id: 'findings',
@@ -306,7 +306,7 @@ export function evidenceStateLabel(state: EvidenceState): string {
 
 /** Lamp and ink per grade. Spelled out literally because Tailwind scans source
  * text for utilities; a computed class would never be built. Colour is never
- * the only carrier — the word is always printed beside the lamp. */
+ * the only carrier, the word is always printed beside the lamp. */
 export function evidenceTone(state: EvidenceState): { lamp: string; ink: string } {
   switch (state) {
     case 'measured':
@@ -360,7 +360,7 @@ export function coverageSentence(coverage: EvidenceCoverage | null): string {
  * The blocked outcomes each become their own grade with the daemon's reason;
  * a decoded envelope contributes its truth header and then hands the payload
  * to `refine`, which may only narrow the grade with facts the payload carries
- * (an in-flight build, a served-empty body) — never widen it toward healthy.
+ * (an in-flight build, a served-empty body), never widen it toward healthy.
  */
 function envelopeSummary<T>(
   identity: SourceIdentity,
@@ -439,7 +439,7 @@ function envelopeSummary<T>(
 }
 
 /** The daemon's word rides beside the grade only where the grade is coarser
- * than the wire — a served grade already says everything its wire state does,
+ * than the wire, a served grade already says everything its wire state does,
  * while a refusal or absence has several causes worth naming. */
 function gradeDetail(grade: EvidenceState, wire: DashboardDomainStateV1): string | null {
   switch (grade) {
@@ -816,7 +816,7 @@ export interface TimelineModel {
  * time.
  *
  * Most authorities stamp their observation at request time, so a page's reads
- * usually land within milliseconds of one another — one pixel on a rail that
+ * usually land within milliseconds of one another, one pixel on a rail that
  * spans hours. Marks closer than `clusterEpsilon` (a fraction of the rail,
  * chosen by the caller from the rail's measured width and the minimum hit
  * target) therefore fold into one cluster that opens into its members, so

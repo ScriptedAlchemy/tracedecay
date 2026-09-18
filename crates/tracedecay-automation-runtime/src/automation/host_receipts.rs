@@ -3,7 +3,6 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use super::config_error;
@@ -114,7 +113,7 @@ fn with_locked_state<T>(
         .truncate(false)
         .open(&lock_path)
         .map_err(|error| config_error(format!("failed to open host receipt lock: {error}")))?;
-    lock.lock_exclusive()
+    lock.lock()
         .map_err(|error| config_error(format!("failed to lock host receipts: {error}")))?;
     let mut state = std::fs::read(&state_path)
         .ok()

@@ -3,7 +3,7 @@
  *
  * Everything here draws a literal the read model already found in the payload:
  * a typed value, a matched substring, a path, an origin glyph. It decides
- * nothing about what a value means — the kind it renders by is the kind
+ * nothing about what a value means, the kind it renders by is the kind
  * `settingsModel` classified it as.
  */
 
@@ -22,7 +22,7 @@ import {
 import { isWorkerSelection, type ApplyRequirement, type WriteCapability } from './settingsRows.ts';
 
 /** The provenance column's vocabulary: what the wire served, plus the one
- * client-side state — a proposal not yet applied — that is never confused
+ * client-side state, a proposal not yet applied, that is never confused
  * with it. */
 export type RowProvenance = ServedProvenance | 'edited';
 
@@ -57,7 +57,7 @@ export const ORIGIN_WORD: Readonly<Record<OriginKind, string>> = {
   resolved: 'daemon-resolved',
 };
 
-/** Origin as an engraved initial. Decorative — every use sits beside the word. */
+/** Origin as an engraved initial. Decorative, every use sits beside the word. */
 export function OriginMark({ origin }: { origin: OriginKind }) {
   return (
     <span
@@ -74,7 +74,7 @@ export function OriginMark({ origin }: { origin: OriginKind }) {
   );
 }
 
-/** Typed at render, by the kind the read model classified — never re-guessed. */
+/** Typed at render, by the kind the read model classified, never re-guessed. */
 export function ValueCell({ row, query }: { row: ConfigRow; query: string }) {
   switch (row.kind) {
     case 'boolean': {

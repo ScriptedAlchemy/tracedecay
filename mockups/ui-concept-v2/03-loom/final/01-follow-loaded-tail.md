@@ -2,7 +2,7 @@
 design_status: current
 ---
 
-# Loom 01 — Follow loaded tail
+# Loom 01, Follow loaded tail
 
 - **Asset:** `01-follow-loaded-tail.png`
 - **Lifecycle:** `current`

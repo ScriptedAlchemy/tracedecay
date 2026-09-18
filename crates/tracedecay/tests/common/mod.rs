@@ -64,7 +64,7 @@ static EMPTY_GRAPH_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
 /// `Config { "no product runtime provider is registered; the generating binary
 /// must register one at process start" }` when the entry point never registered
 /// one. Only `tracedecay-cli`'s `main` performs that registration in production,
-/// and no test binary runs it — nextest gives every test its own process, so a
+/// and no test binary runs it, nextest gives every test its own process, so a
 /// suite fixture that builds a handshake must register the fixture provider
 /// itself.
 ///
@@ -231,8 +231,8 @@ impl IsolatedEnv {
         let global_db_env_lock = lock_global_db_env();
         // Every fixture built on top of this guard eventually asks the shipped
         // daemon for a handshake, which reads the registered product runtime.
-        // Registering here — the single choke point both `acquire` paths share
-        // — keeps that out of every individual suite fixture. The runtime
+        // Registering here, the single choke point both `acquire` paths share,
+        // keeps that out of every individual suite fixture. The runtime
         // ports follow for the same reason: a standalone project open in this
         // environment needs them registered first.
         register_process_product_runtime();
@@ -290,7 +290,7 @@ impl IsolatedEnv {
     /// Sync counterpart of [`IsolatedEnv::acquire`] for plain `#[test]` fns.
     ///
     /// Warning: this uses `blocking_lock`, which panics if called from within
-    /// an async context — use [`IsolatedEnv::acquire`] there instead.
+    /// an async context, use [`IsolatedEnv::acquire`] there instead.
     pub fn acquire_blocking() -> (Self, PathBuf) {
         Self::build(ISOLATED_ENV_LOCK.blocking_lock())
     }
@@ -425,8 +425,8 @@ impl TraceDecayStorageEnvGuard {
             // reaches. An ambient `TRACEDECAY_DAEMON_SOCKET` (an operator's
             // shell, another lane's private daemon) would route this fixture's
             // requests to a daemon running under a *different* profile, which
-            // then materializes the fixture's project — hook configs, session
-            // and graph databases, a manifest naming /tmp roots — under its own
+            // then materializes the fixture's project, hook configs, session
+            // and graph databases, a manifest naming /tmp roots, under its own
             // home. One operator profile accumulated 111 such stores. Pin the
             // socket inside the isolated profile so a fixture can only ever
             // talk to a daemon it started itself.
@@ -1271,7 +1271,7 @@ pub fn poll_until<T>(
 pub async fn wait_for_dashboard(agent: &ureq::Agent, base_url: &str) {
     let probe = format!("{base_url}/api/capabilities");
     // Poll until the server both accepts the connection AND returns a real
-    // HTTP response (2xx). A bare connect success is not enough — the server
+    // HTTP response (2xx). A bare connect success is not enough, the server
     // can accept then drop the socket during startup ("Peer disconnected").
     for _ in 0..160 {
         let probe_agent = agent.clone();
@@ -1511,7 +1511,7 @@ pub async fn open_lcm_db(tmp: &TempDir) -> LcmTestRuntime {
 
 /// Writes an empty registered-global-schema store at `db_path` from the cached
 /// per-process template, so later opens (fixture seeding, dashboard server
-/// startup) find an existing DB and skip the full schema creation — a large
+/// startup) find an existing DB and skip the full schema creation, a large
 /// fixed cost on Windows. The first call in a process pays one real schema
 /// creation to build the template; every further store is a file copy.
 pub async fn write_empty_global_db_schema(db_path: &Path) {
@@ -1564,7 +1564,7 @@ async fn seed_database_from_template(db_path: &Path, bytes: &[u8], label: &str) 
 }
 
 /// Opens a fresh graph-schema [`Database`] at `db_path` from a cached
-/// per-process template, skipping the full `create_schema` DDL run — a large
+/// per-process template, skipping the full `create_schema` DDL run, a large
 /// fixed cost on Windows when a suite creates one store per test. The first
 /// call in a process pays one real `Database::initialize` to build the
 /// template; every further store is a file copy plus `Database::open`.

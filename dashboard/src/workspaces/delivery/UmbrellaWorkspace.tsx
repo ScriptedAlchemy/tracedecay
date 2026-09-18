@@ -24,7 +24,7 @@ const TABLE_HEADINGS = [
  * the admitted inbox, never a provider object: the selected umbrella is the
  * root, every member PR stays separately drillable, every edge shows its
  * basis and grade, and an inferred grouping says so. When the authority served
- * no correlating edge the workspace prints that typed absence — never an
+ * no correlating edge the workspace prints that typed absence, never an
  * empty graph.
  */
 export function UmbrellaWorkspace({ context }: { context: DeliveryContext }) {

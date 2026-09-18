@@ -62,7 +62,7 @@ pub async fn run_list(
 }
 
 /// One ledger record as the run-history row: identity, outcome, review tallies,
-/// typed failure class and backend attempt count, and which artifacts exist —
+/// typed failure class and backend attempt count, and which artifacts exist,
 /// every field measured from the record itself. `task_key` is the exact
 /// per-job identity (`user_job:<id>`) the ledger writer recorded; rows written
 /// before it existed carry `null` and cannot be joined to a job.

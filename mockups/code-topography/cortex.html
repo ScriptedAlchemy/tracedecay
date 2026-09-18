@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>CORTEX — the codebase as relief</title>
+<title>CORTEX. The codebase as relief</title>
 <link rel="stylesheet" href="topography.css" />
 <style>
   .body { display: grid; grid-template-columns: 1fr 306px; gap: 0; }
@@ -53,7 +53,7 @@
         <svg viewBox="0 0 272 70" width="100%" height="70" id="lg-contour"></svg>
         <div class="legend-body"><b>0.50 internal edges per symbol.</b> One line per half-edge of internal
           connectivity; every 5th is an index contour, drawn heavier and labelled with its value. A region ringed
-          seven times is seven times half an edge per symbol dense — <span class="mono">retrieval/</span> at 3.22.</div>
+          seven times is seven times half an edge per symbol dense, <span class="mono">retrieval/</span> at 3.22.</div>
       </div>
 
       <div class="legend-block">
@@ -89,7 +89,7 @@
       <div class="legend-block">
         <div class="legend-head"><span class="td-legend">Absence</span><span class="td-rule"></span></div>
         <svg viewBox="0 0 272 44" width="100%" height="44" id="lg-absent"></svg>
-        <div class="legend-body">A region with <b>no relief</b> is not missing from the sheet — it is drawn at its
+        <div class="legend-body">A region with <b>no relief</b> is not missing from the sheet. It is drawn at its
           true position and area with its outline dashed and its interior empty. Blank means unmeasured, never zero.</div>
       </div>
 
@@ -107,7 +107,7 @@
   <div class="note">
     <section>
       <h2>What this is</h2>
-      <p class="td-caption">A topographic sheet of the repository. Modules are not boxes on a canvas — they are
+      <p class="td-caption">A topographic sheet of the repository. Modules are not boxes on a canvas. They are
       <b>landforms</b> with an elevation, an area, a shoreline and a contour density, and the reader navigates them
       the way they navigate a map: by shape, by height, by where the water runs.</p>
       <p class="td-caption">The point of the form is that <b>structure is continuous</b>. A dependency graph drawn as
@@ -130,10 +130,10 @@
     </section>
     <section>
       <h2>Open question</h2>
-      <p class="td-caption">Contour density and area are computed on the <i>same</i> quantity family — a big module
-      tends to have more internal edges — so the two channels are correlated and a reader may double-count. Should
+      <p class="td-caption">Contour density and area are computed on the <i>same</i> quantity family. A big module
+      tends to have more internal edges. So the two channels are correlated and a reader may double-count. Should
       contours encode <b>edges per symbol</b> (as drawn: a shape measure, roughly area-independent) or <b>coupling
-      ratio</b> — internal edges ÷ external edges — which is what actually predicts whether a module can be moved?
+      ratio</b>. Internal edges ÷ external edges. Which is what actually predicts whether a module can be moved?
       The second is more useful and less correlated, but it is no longer a "how crowded is it here" reading, and the
       map metaphor may not survive it.</p>
       <p class="td-caption">Second-order: the strata are drawn evenly spaced, but dependency depth is an integer with
@@ -184,7 +184,7 @@
     { path: 'crates/tracedecay-hooks/src/dispatch',            depth: 6, c: 1, sym: 41,  int: 55,  churn: 13 },
     // The absence beat: present in the tree, absent from the index.
     { path: 'crates/tracedecay-hooks/src/vendor', depth: 6, c: 4, sym: 74, int: null, churn: null,
-      unindexed: 'vendored — 0 of 11 files parsed' },
+      unindexed: 'vendored, 0 of 11 files parsed' },
   ];
 
   // Six macro channels. `calls` is the summed call-site count on the bundled
@@ -388,7 +388,7 @@
     el('rect', { x: wx + s * 17.3, y: 1176 - h, width: 3, height: h,
       fill: 'var(--raw-accent)', opacity: 0.34 }, gWeather);
   }
-  var wt = text(gWeather, 82, 1100, 'WEATHER — PROJECT-LEVEL INGEST, LAST 60 MIN. NOT PER-REGION: LIVE ACTIVITY IS PROJECT-GRANULAR TODAY.', 'lbl');
+  var wt = text(gWeather, 82, 1100, 'WEATHER, PROJECT-LEVEL INGEST, LAST 60 MIN. NOT PER-REGION: LIVE ACTIVITY IS PROJECT-GRANULAR TODAY.', 'lbl');
   wt.setAttribute('fill', 'var(--raw-text-muted)');
   text(gWeather, 1122, 1100, '4.2 ev/min', 'num', { 'text-anchor': 'end' });
 

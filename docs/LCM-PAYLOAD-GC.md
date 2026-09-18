@@ -1,4 +1,4 @@
-# LCM external payload garbage collection — design
+# LCM external payload garbage collection, design
 
 Status: **design / actionable algorithm**. This is the implementation-and-test
 spec for payload GC. It is normative for `delete_external_payload`, the reaper,
@@ -15,14 +15,14 @@ It is a child of the **lifetime & retention contract**
 ([`docs/LCM-PAYLOAD-LIFECYCLE.md`](LCM-PAYLOAD-LIFECYCLE.md)) and the
 storage/deletion audit (Kanban `t_c2443a7f`, comment 34). The contract defines
 *what* a payload's lifetime is and *why*; this document defines *how* GC
-reaps safely. Where the two disagree, **the contract wins** — this doc fills in
+reaps safely. Where the two disagree, **the contract wins**, this doc fills in
 the algorithm the contract deliberately left open (§10) and must not contradict
 its decisions (OM-1/2, D-1..D-4, SD-1/2, GP-1..4, MF-1).
 
 Out of scope here (owned by siblings):
-- **Dashboard/doctor visibility fields** (`t_0ab1c041`) — this doc specifies the
+- **Dashboard/doctor visibility fields** (`t_0ab1c041`), this doc specifies the
   values the reaper *produces*; that task specifies where they render.
-- **Test cases** (`t_f0e07c5c`) — this doc specifies the invariants and
+- **Test cases** (`t_f0e07c5c`), this doc specifies the invariants and
   deterministic hooks tests assert against; that task enumerates the cases.
 
 All `file:line` references are anchors against the tree at design time, not
@@ -37,9 +37,9 @@ invariants.
 1. Introduce the **only** payload-file deletion primitive
    (`delete_external_payload`) and a **daemon-owned reaper** (`run_payload_gc`)
    that reconciles filesystem and DB state toward the lifecycle contract.
-2. Reap exactly the contract's collectable states — orphan files,
+2. Reap exactly the contract's collectable states, orphan files,
    unreferenced metadata, missing metadata (after the long window), and
-   dangling placeholders — and **never** live or corrupted payloads.
+   dangling placeholders, and **never** live or corrupted payloads.
 3. Be crash-safe and idempotent: any re-run after any crash converges to a
    clean state with no data loss and no duplicate work.
 4. Default owner runs to **dry-run / report**; destruction is opt-in
@@ -57,7 +57,7 @@ dedup, reaping summary nodes / lifecycle state / maintenance debt.
 GC adds a *destructive* capability to a module that today has none. Every
 non-destructive building block already exists and is battle-tested by the read
 path and the doctor diagnostics. Reusing them is a hard requirement, not a
-convenience — they encode the path/ref/symlink safety the contract §13 demands.
+convenience, they encode the path/ref/symlink safety the contract §13 demands.
 
 | Need | Primitive | Location | Notes for GC |
 |---|---|---|---|
@@ -84,7 +84,7 @@ tables, and `LcmError::PayloadGc'd`.
 
 ---
 
-## 3. The deletion primitive — `delete_external_payload`
+## 3. The deletion primitive, `delete_external_payload`
 
 Synchronous, payload-aware, the **only** code permitted to `remove_file` a
 payload. Implements contract §6.1 (D-1..D-4) and is reused by the reaper, by any
@@ -121,7 +121,7 @@ pub(crate) struct DeleteOutcome {
 a no-op success (D-3). `DeleteOutcome` lets the caller distinguish "nothing to
 do" from "reaped N bytes" without an error.
 
-### 3.2 Algorithm (D-2 safe order — critical)
+### 3.2 Algorithm (D-2 safe order, critical)
 
 ```
 delete_external_payload(conn, root, ref, opts):
@@ -130,7 +130,7 @@ delete_external_payload(conn, root, ref, opts):
     path = dir.join(ref); ensure_contained(dir, path)   # re-contain
 
     # 1. Read pre-deletion metadata (for hash gate + bookkeeping). Do NOT hold
-    #    it across the txn as truth — re-read under the txn.
+    #    it across the txn as truth, re-read under the txn.
     meta = load_payload_metadata(conn, ref).await  # Ok | Err(PayloadNotFound)
 
     # 2. Hash gate (D-4): if a file exists AND metadata exists, the on-disk
@@ -183,13 +183,13 @@ For every `lcm_raw_messages` row whose `content`/`snippet_text`/`index_text`/
 `tombstone_placeholder_in_text` (§8). Idempotent: an already-`[gc'd …]` bracket
 is left untouched. Per-row `UPDATE` inside the same txn. Whole-message external
 refs (`storage_kind='external' AND payload_ref=ref`) are handled by the caller
-clearing/nulling the column as appropriate — for GC the raw row is *not* deleted
+clearing/nulling the column as appropriate, for GC the raw row is *not* deleted
 (messages persist), so the column is set to the tombstone text form consistent
 with the placeholder grammar.
 
 ---
 
-## 4. The reaper — `run_payload_gc`
+## 4. The reaper, `run_payload_gc`
 
 The daemon-owned reconciliation pass. Default `apply = false` (dry-run/report,
 contract §10.6). An apply run requires an explicitly authorized owner write
@@ -208,17 +208,17 @@ run_payload_gc(conn, root, provider, session_id, cfg) -> LcmGcReport:
     referenced   = referenced_payload_refs(conn, provider, session_id)  # OM-2
     now = current_timestamp()
 
-    # PHASE A — orphan files (no metadata row). mtime-based grace (GP-2).
+    # PHASE A, orphan files (no metadata row). mtime-based grace (GP-2).
     report.orphans = reap_orphan_files(dir, metadata_refs, now, cfg, cfg.apply)
 
-    # PHASE B — unreferenced metadata (row, no live ref). two-scan grace (GP-2).
+    # PHASE B, unreferenced metadata (row, no live ref). two-scan grace (GP-2).
     report.unreferenced = reap_unreferenced_metadata(
         conn, root, metadata_refs, referenced, now, cfg, cfg.apply)
 
-    # PHASE C — missing metadata (row+ref, file gone). long window (GP-4).
+    # PHASE C, missing metadata (row+ref, file gone). long window (GP-4).
     report.missing = reap_missing_metadata(conn, root, now, cfg, cfg.apply)
 
-    # PHASE D — dangling placeholders (placeholder, no row, no file). tombstone.
+    # PHASE D, dangling placeholders (placeholder, no row, no file). tombstone.
     report.dangling = rewrite_dangling_placeholders(conn, provider, session_id, cfg.apply)
 
     if cfg.apply:
@@ -276,7 +276,7 @@ CREATE TABLE IF NOT EXISTS lcm_gc_meta (
 
 Monotonic safety (contract §11, §13): the schema guard skips DBs written by a
 newer release, and the `IF NOT EXISTS` DDL is idempotent. **No existing column or
-row is altered** — payloads without a mark are `live` until the first observed-
+row is altered**, payloads without a mark are `live` until the first observed-
 unreferenced scan. This honors GP-2 ("no new column" on the payload table) while
 giving owner GC a crash-safe marker store.
 
@@ -299,7 +299,7 @@ on each GC run, for unreferenced metadata (Phase B):
           INSERT lcm_gc_marks(ref, 'unreferenced', now)        # pass N: mark
           continue                                             # do NOT reap this run
       if mark.state == 'unreferenced' and now - mark.first_seen_at >= grace:
-          # pass N+1: eligible — but RE-CHECK referenced-ness at reap time (§10.3)
+          # pass N+1: eligible, but RE-CHECK referenced-ness at reap time (§10.3)
           reap_unreferenced_ref(ref)                           # via delete_external_payload
           # delete_external_payload clears the mark inside its txn
       else:
@@ -317,7 +317,7 @@ converges (contract §8).
 
 **Re-referenced recovery.** If a ref gains a live reference again before reaping,
 its mark is cleared (last `for` above), so a *new* unreferenced period restarts
-the grace clock — matching the lifecycle state machine's `live ← unreferenced`
+the grace clock, matching the lifecycle state machine's `live ← unreferenced`
 edge (contract §5). This is why GC re-checks referenced-ness at reap time, not
 at mark time.
 
@@ -325,7 +325,7 @@ at mark time.
 
 ## 6. Phase algorithms
 
-### 6.1 Phase A — `reap_orphan_files` (mtime grace, no row)
+### 6.1 Phase A, `reap_orphan_files` (mtime grace, no row)
 
 ```
 reap_orphan_files(dir, metadata_refs, now, cfg, apply) -> OrphanReport:
@@ -333,13 +333,13 @@ reap_orphan_files(dir, metadata_refs, now, cfg, apply) -> OrphanReport:
     for entry in fs::read_dir(dir):
         name = entry.file_name()                       # NEVER use a caller path
         if validate_payload_ref(name).is_err(): skip   # name shape (§7.1)
-        m = fs::symlink_metadata(entry.path())         # lstat — do NOT follow
+        m = fs::symlink_metadata(entry.path())         # lstat, do NOT follow
         if m.is_symlink() or not m.is_file(): skip     # reject symlink/odd (§7.2)
         if name in metadata_refs: skip                 # has an owner row -> not orphan
         age = now - m.mtime()
         if age < cfg.grace_seconds: skip               # GP-2 mtime grace
         candidates.push((name, m.len(), age))
-    # reap (or report) — containment re-checked per file in safe_remove_payload_file
+    # reap (or report), containment re-checked per file in safe_remove_payload_file
     for (name, bytes, _) in candidates:
         if apply: safe_remove_payload_file(dir, name)
     return OrphanReport { refs: names, bytes_total, count }
@@ -352,16 +352,16 @@ can *write* under `lcm-payloads/` already owns that directory; the invariant we
 uphold is that reap **cannot escape** the canonical dir or follow a symlink
 (§7, §13).
 
-### 6.2 Phase B — `reap_unreferenced_metadata` (two-scan, §5.3)
+### 6.2 Phase B, `reap_unreferenced_metadata` (two-scan, §5.3)
 
 For each eligible ref (marked ≥ grace, still unreferenced at reap time), call
 `delete_external_payload(conn, root, ref, {rewrite_placeholders:true,
 remove_file:true, verify_hash:true})`. On `StillReferenced`: clear mark, skip
-(race lost to concurrent ingest — safe). On `PayloadIntegrityMismatch`: report
+(race lost to concurrent ingest, safe). On `PayloadIntegrityMismatch`: report
 anomaly, **do not** reap, leave row+file (§9). The hash gate (D-4) runs inside
 `delete_external_payload`.
 
-### 6.3 Phase C — `reap_missing_metadata` (long window, GP-4)
+### 6.3 Phase C, `reap_missing_metadata` (long window, GP-4)
 
 A *missing* payload = metadata row + live reference, file absent. Per contract
 §9 these are **reported as errors first**; automatic reap is gated on the longer
@@ -387,11 +387,11 @@ file reappears (FS remount/recovery) the mark is cleared by the recovery edge in
 §5.3 (a present file with a reference is `live`).
 
 **Default caution:** `reap_missing_metadata_enabled` defaults to `false` so
-missing payloads are reported indefinitely unless an operator opts in — matching
+missing payloads are reported indefinitely unless an operator opts in, matching
 the contract's "may indicate an FS problem worth investigating." Operators who
 want automatic convergence set it `true` with a long `reap_missing_after`.
 
-### 6.4 Phase D — `rewrite_dangling_placeholders`
+### 6.4 Phase D, `rewrite_dangling_placeholders`
 
 A *dangling placeholder* = a raw row's text cites `ref`, but there is no metadata
 row and no file (contract §3). GC rewrites the placeholder prefix to `[gc'd …]`
@@ -416,7 +416,7 @@ files (e.g. editor swaps, `.tmp`) are ignored, never reaped.
 
 ### 7.2 Symlink / type gate (lstat, never stat)
 
-Use `fs::symlink_metadata` (`payload.rs:345` pattern) — the lstat equivalent —
+Use `fs::symlink_metadata` (`payload.rs:345` pattern), the lstat equivalent,
 and **reject** any entry whose metadata is a symlink or not a regular file.
 `entry.metadata()`/`is_file()` follow symlinks on some platforms and MUST NOT be
 used for the safety decision. This mirrors `canonical_storage_root` (rejects a
@@ -456,7 +456,7 @@ outside root reached via a symlinked dir, and a dir masquerading as `*.payload`.
 **Containment is re-checked immediately before `remove_file`** (contract §10.2:
 "never delete by caller-supplied path; refs only; resolve under canonical dir
 and re-validate containment immediately before remove"). GC never accepts a path
-from a caller — only a validated `name` joined to the canonical dir.
+from a caller, only a validated `name` joined to the canonical dir.
 
 ---
 
@@ -472,7 +472,7 @@ tombstone_placeholder_in_text(text, ref) -> text:
 ```
 
 `is_external_payload_placeholder` (`payload.rs:104`) already accepts all five
-prefixes including the two `[gc'd …]` forms, so the parser needs no change —
+prefixes including the two `[gc'd …]` forms, so the parser needs no change,
 only the writer. The rewriter must: (a) handle all live prefixes
 (`[externalized payload:`, `[externalized lcm ingest payload:`,
 `[externalized tool output:`); (b) be idempotent on already-tombstoned text;
@@ -539,7 +539,7 @@ concurrent ingest. `grace_seconds` clamps up to 300.
 
 Dry-run (`apply = false`) is the **default** and is mandatory before any
 destructive view in the dashboard (contract §10.6). The report enumerates
-exactly what *would* be removed — refs, counts, byte totals, ages — and **never**
+exactly what *would* be removed, refs, counts, byte totals, ages, and **never**
 body bytes, snippet text, or message content (contract §13). Hashes shown are
 the `content_hash` already stored in `lcm_external_payloads`, never re-derived
 body digests in a way that implies we read bodies into reports.
@@ -611,7 +611,7 @@ own DB (contract §14). There is no cross-store coordination.
 Mapped to the contract §13 and this doc. Implementation and tests assert each.
 
 1. **Never log/preview/report/stream body bytes.** Reports carry refs, counts,
-   byte totals, and the `content_hash` already in the DB — nothing more (§11).
+   byte totals, and the `content_hash` already in the DB, nothing more (§11).
 2. **Enumerate only** `^payload_[0-9a-f]{64}\.payload$` directly under the
    canonical payload dir; reject every other name (§7.1).
 3. **Never follow a symlink** during enumerate or delete (lstat gate §7.2;
@@ -627,7 +627,7 @@ Mapped to the contract §13 and this doc. Implementation and tests assert each.
    `content_hash`; abort + report `PayloadIntegrityMismatch`, remove nothing
    (§3.2, §9). Corrupted files are **never** auto-deleted.
 7. **Re-check referenced-ness at reap time under `BEGIN IMMEDIATE`** (§3.2 3a,
-   §5.3) — the race guard for concurrent ingest/replay/carry-over.
+   §5.3), the race guard for concurrent ingest/replay/carry-over.
 8. **Honor grace:** mtime for orphan files, two-scan (marker) for unreferenced
    metadata, `reap_missing_after` (opt-in) for missing metadata (§5, §6, §9).
    300 s floor enforced (§9).
@@ -707,7 +707,7 @@ To make GC deterministic and assertable without sleeping for grace periods:
 - **Fixtures** in `tempdir`: plant orphan files, symlinks (in-dir, swap,
    symlinked dir), `..`/absolute-path names, corrupted (hash-mismatch) files,
    missing files, dangling placeholders, and concurrent-write files (open fd
-   held during reap) — covering every invariant in §13.
+   held during reap), covering every invariant in §13.
 
 See the contract §16 test handoff for the state-transition and crash-order cases
 these hooks support.

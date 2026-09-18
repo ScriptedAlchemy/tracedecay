@@ -203,7 +203,7 @@ fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface
 }
 
 /// Similar and redundancy expose one current family schema. Callers already
-/// use that schema, so the binding is the current protocol revision only —
+/// use that schema, so the binding is the current protocol revision only,
 /// not a revision window for a retired request shape. Do not mint a second
 /// binding for the same spelling; `index_bindings` rejects duplicate
 /// surface-operation keys.

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Serving-path performance gate.
 #
-# Enforces the invariant in docs/SERVING-PATH-PERFORMANCE.md — "a serving-path
-# operation performs O(result) work, never O(store)" — end to end, against
+# Enforces the invariant in docs/SERVING-PATH-PERFORMANCE.md. "a serving-path
+# operation performs O(result) work, never O(store)", end to end, against
 # TraceDecay's own codebase:
 #
 #   PHASE BUILD   build (or accept) a tracedecay binary
@@ -13,14 +13,14 @@
 #
 # The regression class this catches is the one profiled on 2026-08-01: a read
 # that went from milliseconds to minutes because per-request work scaled with
-# store size. The budgets are therefore deliberately loose — they are tripwires
+# store size. The budgets are therefore deliberately loose, they are tripwires
 # for order-of-magnitude regressions, not a microbenchmark. A run that is 3x
 # slower than yesterday still passes; a run that is 100x slower does not.
 #
 # Isolation: the run NEVER touches the operator's real profile. HOME, XDG, and
 # every TRACEDECAY_* storage variable are redirected into one throwaway
 # directory that is removed on exit, and the daemon is a private foreground
-# process on a private socket — no user service is installed, started, stopped,
+# process on a private socket, no user service is installed, started, stopped,
 # or signalled.
 #
 # Usage:
@@ -35,7 +35,7 @@
 set -uo pipefail
 
 # ─────────────────────────────────────────────────────────────────────────────
-# BUDGETS — the entire pass/fail contract of this gate lives in this block.
+# BUDGETS, the entire pass/fail contract of this gate lives in this block.
 #
 # Sized for a 2-4 core GitHub runner building in release mode. Raise one only
 # with a recorded reason; a budget that has to grow to stay green is usually
@@ -52,7 +52,7 @@ PERF_BUDGET_MIN_THROUGHPUT_RPS="${PERF_BUDGET_MIN_THROUGHPUT_RPS:-0.5}" # calls/
 
 # Reindex-under-load. When > 0, that many private clones of the target repo are
 # mounted into the SAME daemon during the load window, so the read battery is
-# measured while the daemon is running full cold code-index builds — the
+# measured while the daemon is running full cold code-index builds, the
 # "agent worktrees reindexing while a live tool battery runs" shape. This is
 # the probe for docs/SERVING-PATH-PERFORMANCE.md Principle 2: indexing races to
 # idle at machine width, and interactive reads stay fast because of the
@@ -68,7 +68,7 @@ PERF_INDEX_TIMEOUT="${PERF_INDEX_TIMEOUT:-$((PERF_BUDGET_INDEX_SECONDS + 120))}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# The repo under test. Defaults to this checkout — indexing TraceDecay with
+# The repo under test. Defaults to this checkout, indexing TraceDecay with
 # TraceDecay is the point of the gate. Overridable so the harness itself can be
 # smoke-tested against a tiny fixture in seconds, and so a bigger corpus can be
 # substituted without editing the script.
@@ -128,7 +128,7 @@ signal_tree() {
 }
 
 # Stop a process and everything it spawned. Never blocks on `wait` for a
-# process that is still running — that is how a teardown turns into a hang.
+# process that is still running, that is how a teardown turns into a hang.
 stop_tree() {
   local pid="$1" label="$2" deadline
   [[ -n "$pid" ]] || return 0
@@ -324,7 +324,7 @@ CONTEXT_TASKS=(
   "how does storage retention work"
 )
 
-# One call. Records `tool,milliseconds,ok|err` — the raw sample stream the
+# One call. Records `tool,milliseconds,ok|err`, the raw sample stream the
 # verdict phase aggregates.
 timed_call() {
   local record="$1" tool="$2" args="$3" start status
@@ -388,7 +388,7 @@ SAMPLER_PID=$!
 
 # Reindex driver: keeps a full cold index running for the whole load window,
 # so the read battery is measured against a daemon on a box that indexing is
-# saturating. Each cycle is a real `tracedecay init` over a private clone —
+# saturating. Each cycle is a real `tracedecay init` over a private clone,
 # the same pipeline (read, sanitize, extract, chunk, digest) at the same width
 # a worktree reconcile uses.
 REINDEX_PID=""
@@ -609,7 +609,7 @@ with open(metrics_path, "w") as handle:
 lines = [
     f"## Serving-path perf gate: {metrics['verdict']}",
     "",
-    f"`{metrics['binary_version']}` — {metrics['cargo_profile']} profile, "
+    f"`{metrics['binary_version']}`, {metrics['cargo_profile']} profile, "
     f"{metrics['workers']} workers x {load_seconds:.0f}s",
     "",
     "### Index",
@@ -668,6 +668,6 @@ log "perf-gate: metrics written to $METRICS_JSON"
 if ((VERDICT_STATUS == 0)); then
   log "perf-gate: PASS"
 else
-  log "perf-gate: FAIL — see the budget table above"
+  log "perf-gate: FAIL, see the budget table above"
 fi
 exit "$VERDICT_STATUS"

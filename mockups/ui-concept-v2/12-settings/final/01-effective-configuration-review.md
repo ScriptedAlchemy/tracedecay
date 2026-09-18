@@ -3,7 +3,7 @@ design_status: current
 evidence_class: concept_synthetic
 ---
 
-# Settings — effective configuration review
+# Settings, effective configuration review
 
 - **Asset:** `01-effective-configuration-review.png`
 - **Route:** `/settings`

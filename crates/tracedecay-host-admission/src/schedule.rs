@@ -5,7 +5,7 @@
 //! spool, which the runtime reads by sequence after a pop.
 //!
 //! Queues are strictly bounded (per source and globally). Overflow is an explicit
-//! backpressure outcome — never an unbounded buffer.
+//! backpressure outcome, never an unbounded buffer.
 
 use std::collections::VecDeque;
 

@@ -86,7 +86,7 @@ try {
   await inspector.waitFor();
   const inspectorText = await inspector.innerText();
   assert.match(inspectorText, new RegExp(target.id));
-  assert.match(inspectorText, /Lifecycle\s+unavailable — not recorded[\s\S]*Source status\s+bodies unavailable/);
+  assert.match(inspectorText, /Lifecycle\s+unavailable, not recorded[\s\S]*Source status\s+bodies unavailable/);
   assert.equal(await page.locator(`tr[aria-selected=true] [title="${target.id}"]`).count(), 1);
 
   await page.getByRole("button", { name: "7D", exact: true }).click();

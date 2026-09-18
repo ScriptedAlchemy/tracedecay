@@ -1034,7 +1034,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // Source reconciliation is complete: release the background
                 // admission permit before HeadOpening / graph work so sibling
                 // stores can start. Keep `reconcile_pass` through text
-                // seating — dropping it made `reconcile_in_progress` lie while
+                // seating, dropping it made `reconcile_in_progress` lie while
                 // this worker still owned graph try_lock, which deadlocked
                 // tests that hold the scheduler mutex and wait for that flag.
                 drop(_background_reconcile_admission);
@@ -1186,7 +1186,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // An arrival that landed during this retained pass is
                 // exact/lexical work waiting for the worker. The optional
                 // graph prepare parks this worker on an O(store) sealed
-                // decode — tens of seconds on a cold large repository — and
+                // decode, tens of seconds on a cold large repository, and
                 // serving that arrival must never queue behind it. The
                 // arrival's own notify re-runs this worker and the follow-up
                 // pass re-gates Prepare from its own terminal outcome, so
@@ -1378,7 +1378,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         }
                     }
                     // Hold a test-installed successor gate after every reserved
-                    // recovery attempt — including Memory authorities that
+                    // recovery attempt, including Memory authorities that
                     // abstain (`Ok(false)`) and degraded recoveries. Quiet
                     // Persistent recoveries already pause here so observers can
                     // see the retained text owner before the dirty successor
@@ -1503,7 +1503,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 };
                                 // A refused ignored-source roster clears
                                 // itself, so the very next pass can publish
-                                // the successor — but this pass consumed the
+                                // the successor, but this pass consumed the
                                 // wake that would have run it.
                                 let roster_refusal_rebuild = latest.is_none()
                                     && Self::lock_scheduler_for_graph_step(
@@ -1898,7 +1898,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             // serves and this pass re-observed the checkout it
                             // was sealed from. Arming only on a publication
                             // left a restored, retired, or withdrawn seat
-                            // permanently unproven — busy verified reads then
+                            // permanently unproven, busy verified reads then
                             // refused a generation whose source was current.
                             match outcome {
                                 ServingSwapOutcomeV1::Seated | ServingSwapOutcomeV1::Offered => {

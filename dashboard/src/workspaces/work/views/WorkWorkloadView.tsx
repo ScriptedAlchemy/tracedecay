@@ -20,12 +20,12 @@ import { TaskChip } from './TaskChip.tsx';
 import { ChannelAbsence, ChannelLedger, EmptyReading, ViewCaption } from './WorkViewChannel.tsx';
 
 /**
- * Workload / executor / model — the cortex aggregation over runs.
+ * Workload / executor / model, the cortex aggregation over runs.
  *
  * A cortex draws regions whose area is mass, whose contours are concurrency and
- * whose heat is recent churn. This build now has all three — the work-product
+ * whose heat is recent churn. This build now has all three, the work-product
  * graph read carries declared effort, both concurrency figures and the per-task
- * change instants — and it still does not draw them ONTO the regions, which is
+ * change instants, and it still does not draw them ONTO the regions, which is
  * the decision worth stating.
  *
  * The regions are the exact graph's run/task attempt incidence, so a region's length stays
@@ -46,7 +46,7 @@ import { ChannelAbsence, ChannelLedger, EmptyReading, ViewCaption } from './Work
  * A run is not an executor. `WorkProjection` names no provider, model or
  * agent, so a region is labelled by its run id and says the executor behind it
  * is unnamed. Tasks the store attaches to no run keep their own band and are
- * drawn hollow — folding them into a region would invent the attribution the
+ * drawn hollow, folding them into a region would invent the attribution the
  * store declined to make.
  *
  * Accessibility. The aggregation is a ranked list of lists of buttons, so the
@@ -70,7 +70,7 @@ interface RegionMember {
  * exactly the incidence those counts were taken over: a task falls in a run's
  * region when the exact graph attributes an attempt to that run. One task can fall in
  * several regions, so the region counts are a reading per run and not a
- * partition of the board — which is why the bars are ranked against the
+ * partition of the board, which is why the bars are ranked against the
  * largest region rather than drawn as shares of a whole.
  */
 function regionMembers(
@@ -231,7 +231,7 @@ function EffortMass({ reading }: { reading: WorkloadReading }) {
         <div className="flex min-w-0 flex-col gap-2" data-work-effort={mass.value.total}>
           <p className="text-3xs leading-snug text-text-muted">
             {mass.value.total} declared effort across the whole work-product graph version. This
-            is not the mass of the regions above — those are the tasks this snapshot page
+            is not the mass of the regions above, those are the tasks this snapshot page
             returned, and the two reads need not cover the same set.
           </p>
           {mass.value.split.available ? (
@@ -314,7 +314,7 @@ function Concurrency({ reading }: { reading: WorkloadReading }) {
           {concurrency.value.actual > concurrency.value.requested ? (
             <p className="text-3xs leading-snug text-text-muted">
               More is running than was asked for. Both figures come off one graph version and
-              disagreeing is the reading — neither is corrected against the other.
+              disagreeing is the reading, neither is corrected against the other.
             </p>
           ) : null}
         </div>
@@ -368,7 +368,7 @@ function Churn({ reading }: { reading: WorkloadReading }) {
           {churn.value.recent.length === 0 ? (
             <EmptyReading>
               No task changed inside the window. The graph was read and its tasks were compared
-              against the instant of the read — this is a measured quiet, not an unmeasured one.
+              against the instant of the read, this is a measured quiet, not an unmeasured one.
             </EmptyReading>
           ) : (
             <ul className="flex min-w-0 flex-col gap-1">
@@ -609,7 +609,7 @@ function TaskMark({
  *
  * The exact graph attributes no runtime attempt to these tasks, so no region can hold them
  * without the drawing choosing an executor for them. They keep their own band
- * and are drawn hollow — outlined, unfilled — which is what "the executor the
+ * and are drawn hollow, outlined, unfilled, which is what "the executor the
  * store cannot name is not guessed" looks like on the page.
  */
 function Unattributed({

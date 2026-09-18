@@ -118,7 +118,7 @@ where
         .map_err(|error| product_problem(WorkProductApplicationErrorV1::from(error)))?;
     crate::work_product::validate_result(&request, product_context.authorized_scope(), &read)
         .map_err(product_problem)?;
-    // Admission appends to the journal, so it needs the journal's head — not
+    // Admission appends to the journal, so it needs the journal's head, not
     // the head of whatever slice this selection covers.
     if read.selection_coverage().is_partial() {
         return Err(product_problem(

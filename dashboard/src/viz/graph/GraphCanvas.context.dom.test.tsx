@@ -7,8 +7,8 @@ import { ActivationField } from './activation.ts';
 /**
  * The failure that arrives AFTER a successful draw.
  *
- * Every other way this canvas can fail is decided before a pixel exists — no
- * WebGL at all, a graph past the tier, a layout engine that never loaded — and
+ * Every other way this canvas can fail is decided before a pixel exists, no
+ * WebGL at all, a graph past the tier, a layout engine that never loaded, and
  * each of those is stated instead of drawn. A context the GPU takes back is the
  * exception: the field was real, and then the canvas either freezes on its last
  * frame or clears to nothing while the caption goes on describing a live graph.
@@ -161,8 +161,8 @@ describe('GraphCanvas WebGL context loss', () => {
     // Without this the browser abandons the context for good and no restore is
     // ever attempted, so it is the first thing the handler does.
     expect(lost.defaultPrevented).toBe(true);
-    // The reader is told the renderer was lost — not that the neighbourhood is
-    // empty, which is the sentence an undrawn field would otherwise imply — and
+    // The reader is told the renderer was lost, not that the neighbourhood is
+    // empty, which is the sentence an undrawn field would otherwise imply, and
     // is pointed at the same equivalent the no-context path names.
     const stated = screen.getByText(/lost its WebGL context/i);
     expect(stated.textContent).toMatch(/no longer being drawn/i);
@@ -175,7 +175,7 @@ describe('GraphCanvas WebGL context loss', () => {
     expect(screen.queryByRole('img')).toBeNull();
     expect(document.querySelector('canvas')).toBeNull();
 
-    // The loop stopped, and the field is still warm — so it stopped because the
+    // The loop stopped, and the field is still warm, so it stopped because the
     // renderer died, not because there was nothing left to animate.
     expect(frames).toHaveLength(0);
     expect(field.warm).toBe(true);

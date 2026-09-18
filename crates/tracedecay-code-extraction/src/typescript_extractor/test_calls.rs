@@ -33,7 +33,7 @@ fn test_call_root_callee<'s>(state: &ExtractionState<'s>, call: TsNode<'_>) -> O
     loop {
         match callee.kind() {
             "identifier" => return Some(state.node_text(callee)),
-            // `describe.only`, `it.each`, `test.skip` — recurse into the
+            // `describe.only`, `it.each`, `test.skip`. Recurse into the
             // object side of the member access. Curried calls like
             // `test.each([...])(...)` are their own `call_expression`, so we
             // descend into that callee the same way.
@@ -217,7 +217,7 @@ pub(super) fn visit_test_call(state: &mut ExtractionState<'_>, call: TsNode<'_>)
 /// Whether a statement is a named function declaration whose body owns its
 /// own call sites. `extract_call_sites` only skips nested arrow/function
 /// *children*, so a top-level `function_declaration` statement would have
-/// its body walked and double-attributed to the enclosing test — guard it.
+/// its body walked and double-attributed to the enclosing test. Guard it.
 /// Arrow/function-expression assignments (`const f = () => {}`) are already
 /// skipped by `extract_call_sites` and need no guard here.
 fn defines_own_callable(stmt: TsNode<'_>) -> bool {
@@ -242,7 +242,7 @@ fn visit_test_body(state: &mut ExtractionState<'_>, body: TsNode<'_>, test_id: &
             && let Some(call) = find_direct_child_by_kind(stmt, "call_expression")
             && is_test_framework_call(state, call)
         {
-            // Nested describe/it — recurse as its own test node.
+            // Nested describe/it. Recurse as its own test node.
             visit_test_call(state, call);
             handled = true;
         }

@@ -9,7 +9,6 @@ use std::path::Path;
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
-use fs2::FileExt;
 use same_file::Handle;
 use tracedecay_domain::canonical_text::sha256_hex;
 
@@ -46,7 +45,7 @@ impl Drop for HostFileWriteLock {
                 "host config lock file could not be unlinked while held"
             );
         }
-        if let Err(error) = FileExt::unlock(self.handle.as_file()) {
+        if let Err(error) = self.handle.as_file().unlock() {
             tracing::warn!(
                 lock_name = %self.lock_name,
                 error = %error,
@@ -141,10 +140,9 @@ pub(super) fn lock_host_file_write(path: &Path) -> Result<HostFileWriteLock> {
                 ),
             });
         }
-        lock.lock_exclusive()
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("failed to lock host config {}: {error}", path.display()),
-            })?;
+        lock.lock().map_err(|error| TraceDecayError::Config {
+            message: format!("failed to lock host config {}: {error}", path.display()),
+        })?;
         let locked = Handle::from_file(lock).map_err(|error| TraceDecayError::Config {
             message: format!(
                 "failed to identify host config lock {}: {error}",

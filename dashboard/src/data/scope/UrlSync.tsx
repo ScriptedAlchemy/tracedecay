@@ -4,7 +4,7 @@ import { useScope } from './store.ts';
 
 /** Bidirectional URL <-> scope binding (plan 11: deep links capture opaque
  * scope; plan 11a: narrowing updates the URL). The URL carries only the
- * opaque project id and display label — never paths or payloads. A missing
+ * opaque project id and display label, never paths or payloads. A missing
  * param is the all-projects default; an unknown id still renders as a chip
  * whose reads resolve truthfully server-side. */
 export function ScopeUrlSync() {
@@ -27,7 +27,7 @@ export function ScopeUrlSync() {
       // runs on every search-param change, including params that belong to a
       // workspace and have nothing to do with scope, and reselecting would
       // reset a project whose activation the registry had already resolved
-      // back to `unresolved` — withdrawing a legitimately enabled write
+      // back to `unresolved`, withdrawing a legitimately enabled write
       // control on an unrelated filter change.
       //
       // The id alone decides that, deliberately. Comparing the label too used
@@ -35,12 +35,12 @@ export function ScopeUrlSync() {
       // once the registry replaced a stale `scopeLabel` with the canonical
       // name, the store's label no longer matched the URL's, so the next
       // unrelated param change re-applied the URL's claim and dropped the
-      // scope back to `unresolved`. A label is not identity — it is the thing
-      // being corrected — so it cannot be a reason to reselect.
+      // scope back to `unresolved`. A label is not identity, it is the thing
+      // being corrected, so it cannot be a reason to reselect.
       if (current.kind !== 'project' || current.projectId !== id) {
         // A deep link carries an opaque id and a display label, and neither
         // says whether this is the active project. The scope therefore arrives
-        // unresolved, and stays that way until something reads the registry —
+        // unresolved, and stays that way until something reads the registry,
         // it must not present as writable on the strength of a URL.
         selectProject(id, label, 'unresolved');
       }
@@ -56,7 +56,7 @@ export function ScopeUrlSync() {
   useEffect(() => {
     if (applyingFromUrl.current) return;
     // Stale-render guard: on mount (and any lagging render) this closure can
-    // hold a scope older than the store — echoing it would erase the deep
+    // hold a scope older than the store, echoing it would erase the deep
     // link the first effect just applied.
     if (scope !== useScope.getState().scope) return;
     const current = searchParams.get('scope');

@@ -2,7 +2,7 @@
 //!
 //! Literal/regex search over UTF-8 text sources in the project working tree
 //! (respecting `.gitignore`). This closes the gap that made agents fall back
-//! to raw `rg` —
+//! to raw `rg`.
 //! `tracedecay_search` only matches symbol *names*, not file *content*.
 
 use std::collections::{HashMap, HashSet};
@@ -391,7 +391,7 @@ fn render_grep_md(
     if truncated {
         let _ = write!(
             summary,
-            " Results capped — narrow with `path_glob` or a more specific pattern."
+            " Results capped. Narrow with `path_glob` or a more specific pattern."
         );
     }
     md.line(&summary);

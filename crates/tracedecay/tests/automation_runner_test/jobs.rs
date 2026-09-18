@@ -793,7 +793,7 @@ async fn user_job_backend_failure_records_failed_ledger_entry() {
     .unwrap();
 
     // The backend failure is transient, but this test pins the failed-ledger
-    // record, not retry semantics (covered by backend.rs retry tests) —
+    // record, not retry semantics (covered by backend.rs retry tests),
     // timeout_secs: 1 short-circuits the backoff so the test stays fast.
     assert_eq!(backend.calls(), 1);
     assert_eq!(run.report["status"], json!("failed"));

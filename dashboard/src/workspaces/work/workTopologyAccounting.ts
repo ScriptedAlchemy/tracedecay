@@ -73,7 +73,7 @@ import {
  *                      test and CI reruns are a different population with no
  *                      read model, and the three are never summed.
  *   duplicate effects  the same page's `WorkEffectStateV1` census. The
- *                      adjudication itself — was one effect committed twice —
+ *                      adjudication itself, was one effect committed twice,
  *                      is unavailable, but `compound_non_repeatable` is a real
  *                      ELIGIBLE DENOMINATOR for it, so that card carries a
  *                      denominator under an unavailable reading. That

@@ -8,7 +8,7 @@
  *      bands, and loaded rows are only a bounded fallback when neither
  *      store-wide reading carries facts.
  *
- *   2. Every visible fact reads trust 1.00 — not because trust is uniform, but
+ *   2. Every visible fact reads trust 1.00, not because trust is uniform, but
  *      because the fact list is a top-100 slice ordered so the high-trust
  *      facts fill it. The slice's own spread is stated instead of drawn, and
  *      the part of the store the slice cannot reach is stated with it.
@@ -121,7 +121,7 @@ export function composeTrustDistribution(
 }
 
 /** What the counts in a distribution actually cover, for the plate's caption.
- * Never guessed — each source has one true answer. */
+ * Never guessed, each source has one true answer. */
 export function trustSourceNote(source: TrustSource): string {
   switch (source) {
     case 'histogram':
@@ -129,7 +129,7 @@ export function trustSourceNote(source: TrustSource): string {
     case 'status_bands':
       return 'every fact in the store, in the four bands the status route serves';
     case 'loaded_facts':
-      return 'only the facts loaded below — the store reported no distribution';
+      return 'only the facts loaded below, the store reported no distribution';
     case 'none':
       return 'no source reported a distribution';
     default:

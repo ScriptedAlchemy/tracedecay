@@ -38,8 +38,8 @@ const TASK_FAMILY = 'task_activity';
  *
  * Two figures rather than one, because a project-scoped count cannot answer for
  * a frame that named no project and must not silently drop it either. The
- * stream is one connection shared by the whole dashboard — `/api/events` is not
- * per-project, and inventing a scoped subscription is not this row's business —
+ * stream is one connection shared by the whole dashboard, `/api/events` is not
+ * per-project, and inventing a scoped subscription is not this row's business,
  * so the scoping happens here, over what the buffer already holds.
  */
 export interface TaskActivityWindow {
@@ -50,7 +50,7 @@ export interface TaskActivityWindow {
    *
    * Always zero under the all-projects scope, which claims them: the aggregate
    * is answering for every project, so a frame that named none is still a frame
-   * it received. Under a selected project they are counted separately — folding
+   * it received. Under a selected project they are counted separately, folding
    * them in would attribute another project's work to this one, and dropping
    * them unmentioned would report an absence of work caused by an absence of
    * attribution.
@@ -128,7 +128,7 @@ export function taskActivityReading(
  * The link alone, without the count.
  *
  * Announced rather than only drawn. The chip's reading changes with no user
- * action, and the transition that matters — a live stream going unreachable —
+ * action, and the transition that matters, a live stream going unreachable,
  * is the difference between "quiet" and "blind" this component exists to state.
  * A sighted reader sees that flip; without a status region nobody else does.
  *
@@ -219,8 +219,8 @@ export function taskActivityRows(
  * Every row is one admitted `task_activity` frame the connection still holds,
  * printed with exactly what the frame carried: its observation instant, the
  * project it named, and the daemon's bounded detail word when the mutation
- * emitted one. The frame does not carry a task identity or title — the
- * daemon coalesces task mutations per project — so those columns are not
+ * emitted one. The frame does not carry a task identity or title, the
+ * daemon coalesces task mutations per project, so those columns are not
  * drawn, and the caption says why. Mounted reads refetch the canonical graph
  * on every frame; this ledger is a window on the stream, not the graph.
  */

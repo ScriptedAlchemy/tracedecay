@@ -321,7 +321,7 @@ describe('ExplorerPage independent lane lifecycle', () => {
     expect(lane('Knowledge').getAttribute('data-lane-state')).toBe('unavailable');
     expect(lane('Semantic').getAttribute('data-lane-state')).toBe('unregistered');
 
-    // The unavailable lane prints the source's own reason and no count —
+    // The unavailable lane prints the source's own reason and no count , 
     // a dash, never a zero, because zero is what a source that looked says.
     const knowledge = within(lane('Knowledge'));
     expect(knowledge.getAllByText(/the fact authority is not mounted/).length).toBeGreaterThan(0);
@@ -380,8 +380,8 @@ describe('ExplorerPage independent lane lifecycle', () => {
     expect(lane('Code').getAttribute('data-lane-state')).toBe('ready');
     expect(lane('Sessions').getAttribute('data-lane-state')).toBe('pending');
     expect(within(lane('Sessions')).getByText('Reading')).toBeTruthy();
-    // Progress is counted in sources concluded — the only figure with a real
-    // denominator — and the explicit cancel is offered while the run is live.
+    // Progress is counted in sources concluded, the only figure with a real
+    // denominator, and the explicit cancel is offered while the run is live.
     expect(screen.getByRole('img', { name: '1 of 3 sources concluded' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Cancel' })).toBeTruthy();
   });

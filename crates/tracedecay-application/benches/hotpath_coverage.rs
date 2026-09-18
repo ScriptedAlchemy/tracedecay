@@ -6,7 +6,7 @@
 //! - feature off (`default`): every hotpath macro in the workload is a
 //!   no-op. [`init`] records a fingerprint of any operator-named
 //!   `HOTPATH_OUTPUT_PATH` and [`finish`] asserts the run never created or
-//!   modified a report there — profiling must not leak into default builds.
+//!   modified a report there, profiling must not leak into default builds.
 //!   The fingerprint is a length plus digest; prior report bytes are not
 //!   retained across the workload (they would corrupt peak-memory samples).
 //! - feature on (`--features hotpath`): [`init`] forces the metrics server

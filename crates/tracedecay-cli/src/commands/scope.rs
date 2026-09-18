@@ -4,7 +4,7 @@
 //! daemon-brokered project registry, into the transport-neutral
 //! `tracedecay_contracts::ResolvedScope`. Every failure state is explicit:
 //! an unregistered exact root, an unusable selector, a malformed registry
-//! response, or a sibling-root resolution fails closed — the CLI never
+//! response, or a sibling-root resolution fails closed, the CLI never
 //! substitutes another project (no CWD or sibling fallback).
 //!
 //! This module owns only the CLI-specific brokering: the daemon handshake,

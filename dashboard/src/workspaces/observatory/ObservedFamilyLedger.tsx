@@ -4,16 +4,16 @@
  * Deliberately a table and not a grid of `PlanDimensionCard`s. The cards are
  * for canonical `MetricValueV1` measurements, which carry a descriptor
  * revision, an eligible denominator, coverage counts, and a projector
- * attribution. A row here has none of those — it is the number of records the
- * diagnostics projector counted in one family — and dressing it in the same
+ * attribution. A row here has none of those, it is the number of records the
+ * diagnostics projector counted in one family, and dressing it in the same
  * chrome would let a record count pass for a measurement.
  *
  * Every row therefore states the two things it lacks, on the row and not in a
  * footnote: `denominator` is `not published` on all of them, and a cell with no
  * figure prints the daemon's own reason where the number would be.
  *
- * The visual state of a row is a `StateChip` — icon plus label plus
- * `data-state` — beside the reason, never a hue on its own, and the count
+ * The visual state of a row is a `StateChip`, icon plus label plus
+ * `data-state`, beside the reason, never a hue on its own, and the count
  * column carries its state in `data-family-state` so an assertion does not have
  * to read colour either.
  */

@@ -397,7 +397,7 @@ impl HlslExtractor {
     }
 
     fn visit_declaration(state: &mut ExtractionState, node: TsNode<'_>) {
-        // Skip function prototypes — handled by function_definition.
+        // Skip function prototypes. Handled by function_definition.
         if find_descendant_by_kind(node, "function_declarator").is_some() {
             return;
         }

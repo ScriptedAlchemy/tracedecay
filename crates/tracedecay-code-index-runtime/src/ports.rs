@@ -86,8 +86,8 @@ tokio::task_local! {
 /// How long a park may keep its admission permit before surrendering it.
 ///
 /// A request that finishes inside this grace never touches the semaphore.
-/// Only a request that is genuinely parked — waiting on a project open, on the
-/// writer gate, or on a single-flight generation decode — gives its slot back.
+/// Only a request that is genuinely parked, waiting on a project open, on the
+/// writer gate, or on a single-flight generation decode, gives its slot back.
 pub const ADMISSION_PARK_GRACE: Duration = Duration::from_millis(50);
 
 /// Park a future without holding a connection admission slot across a long wait.

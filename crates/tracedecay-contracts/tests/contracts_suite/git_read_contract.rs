@@ -38,7 +38,7 @@ impl ExternalGitReader {
     }
 
     /// A typed refusal an external adapter is allowed to return. Constructing it
-    /// here also proves the error variants are reachable, not just the enum.
+    /// here also proves the error variants are reachable.
     fn unsupported(operation: &str) -> GitIntelligenceError {
         GitIntelligenceError::ReadOnlyViolation(operation.to_owned())
     }
