@@ -669,6 +669,38 @@ async fn registry_feeds_publications_and_bounded_freshness_reads() {
     assert_ne!(changed.generation_id, initial.generation_id);
 }
 
+/// Poll a mounted worktree's dashboard clone-index status until it reports
+/// ready coverage.
+///
+/// `clone_index_status` reads the clone-successor slot with `try_lock` so a
+/// freshness read never joins a running backfill. A single sample therefore
+/// reports `Unavailable { "clone-index status is being updated" }` whenever a
+/// freshly published generation's successor still holds the slot, which is a
+/// truthful transient, not the settled answer a caller is asking for.
+async fn wait_for_ready_clone_index(
+    registry: &CodeIndexSchedulerRegistryV1,
+    path: &Path,
+) -> tracedecay_contracts::code_index_freshness::CodeCloneIndexObservationV1 {
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    loop {
+        let status = registry
+            .dashboard_freshness(path)
+            .await
+            .expect("mounted dashboard freshness")
+            .clone_index;
+        match status {
+            Some(tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Ready {
+                observation,
+            }) => return observation,
+            transient => assert!(
+                Instant::now() <= deadline,
+                "the V16 artifact never reported ready clone coverage: {transient:?}"
+            ),
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 #[tokio::test]
 async fn registry_clone_freshness_reports_coverage_and_update_accounting() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
@@ -684,16 +716,7 @@ async fn registry_clone_freshness_reports_coverage_and_update_accounting() {
         .expect("mount worktree");
     let initial = wait_for_initial_generation(&registry, fixture.path()).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
-    let initial_status = registry
-        .dashboard_freshness(fixture.path())
-        .await
-        .expect("initial clone freshness");
-    let Some(tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Ready {
-        observation,
-    }) = initial_status.clone_index
-    else {
-        panic!("a complete V16 artifact must report ready clone coverage");
-    };
+    let observation = wait_for_ready_clone_index(&registry, fixture.path()).await;
     assert_eq!(observation.coverage.source_bodies, Some(1));
     assert_eq!(observation.coverage.eligible_source_bodies, Some(0));
     assert_eq!(observation.coverage.conservative_normalized_bodies, Some(0));
@@ -711,16 +734,7 @@ async fn registry_clone_freshness_reports_coverage_and_update_accounting() {
     ));
     let _ = wait_for_generation_change(&registry, fixture.path(), &initial).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
-    let changed = registry
-        .dashboard_freshness(fixture.path())
-        .await
-        .expect("changed clone freshness");
-    let Some(tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Ready {
-        observation,
-    }) = changed.clone_index
-    else {
-        panic!("the changed V16 artifact must return to ready");
-    };
+    let observation = wait_for_ready_clone_index(&registry, fixture.path()).await;
     assert_eq!(observation.coverage.payloads_reused, Some(0));
     assert_eq!(observation.resources.stale_invalidations, Some(1));
     assert!(observation.resources.changed_symbol_update_micros.is_some());
