@@ -48,6 +48,9 @@ pub fn noise_caller() {
 ";
 
 /// Circle implements Draw and Paint. Square implements only Draw.
+///
+/// The published `implements` edge starts at the `impl` node, not the struct,
+/// so an outgoing struct ranking cannot see those edges.
 const SHAPE_TRAITS: &str = "\
 pub trait Draw {}
 pub trait Paint {}
@@ -120,12 +123,12 @@ fn ranking_rows(payload: &Value) -> Vec<Value> {
         .collect()
 }
 
-fn assert_rank(
+fn assert_rank_envelope(
     payload: &Value,
     edge_kind: &str,
     direction: &str,
     node_kind: Option<&str>,
-    rows: &[Value],
+    row_count: usize,
 ) {
     assert_eq!(payload["edge_kind"], edge_kind, "{payload}");
     assert_eq!(payload["direction"], direction, "{payload}");
@@ -133,8 +136,48 @@ fn assert_rank(
         Some(kind) => assert_eq!(payload["node_kind_filter"], kind, "{payload}"),
         None => assert_eq!(payload["node_kind_filter"], Value::Null, "{payload}"),
     }
-    assert_eq!(payload["result_count"], rows.len(), "{payload}");
+    assert_eq!(payload["result_count"], row_count, "{payload}");
+}
+
+fn assert_rank(
+    payload: &Value,
+    edge_kind: &str,
+    direction: &str,
+    node_kind: Option<&str>,
+    rows: &[Value],
+) {
+    assert_rank_envelope(payload, edge_kind, direction, node_kind, rows.len());
     assert_eq!(ranking_rows(payload), rows, "{payload}");
+}
+
+fn rank_identity(row: &Value) -> (String, String, String, u64, u64) {
+    (
+        row["name"].as_str().expect("rank row name").to_owned(),
+        row["kind"].as_str().expect("rank row kind").to_owned(),
+        row["file"].as_str().expect("rank row file").to_owned(),
+        row["line"].as_u64().expect("rank row line"),
+        row["count"].as_u64().expect("rank row count"),
+    )
+}
+
+/// Same envelope as [`assert_rank`], but equal counts are not pinned to an
+/// occurrence-id order the caller did not ask for.
+fn assert_rank_multiset(
+    payload: &Value,
+    edge_kind: &str,
+    direction: &str,
+    node_kind: Option<&str>,
+    rows: &[Value],
+) {
+    assert_rank_envelope(payload, edge_kind, direction, node_kind, rows.len());
+    let mut actual = ranking_rows(payload)
+        .iter()
+        .map(rank_identity)
+        .collect::<Vec<_>>();
+    let mut expected = rows.iter().map(rank_identity).collect::<Vec<_>>();
+    actual.sort();
+    expected.sort();
+    assert_eq!(actual, expected, "{payload}");
 }
 
 fn assert_counts_and_descending_order(payload: &Value, expected: &[(&str, u64)]) {
@@ -346,7 +389,7 @@ async fn rank_orders_relationship_counts_for_calls_and_implements() {
         ],
     );
 
-    let implementors = rank_payload(
+    let struct_sources = rank_payload(
         &call_rank(
             server,
             json!({
@@ -358,15 +401,39 @@ async fn rank_orders_relationship_counts_for_calls_and_implements() {
         )
         .await,
     );
-    assert_rank(
-        &implementors,
+    assert_rank_multiset(
+        &struct_sources,
         "implements",
         "outgoing",
         Some("struct"),
         &[
-            json!({"name": "Circle", "kind": "struct", "file": "src/shapes/traits.rs", "line": 4, "count": 2}),
-            json!({"name": "Square", "kind": "struct", "file": "src/shapes/traits.rs", "line": 8, "count": 1}),
+            json!({"name": "Circle", "kind": "struct", "file": "src/shapes/traits.rs", "line": 4, "count": 0}),
+            json!({"name": "Square", "kind": "struct", "file": "src/shapes/traits.rs", "line": 8, "count": 0}),
             json!({"name": "Ignored", "kind": "struct", "file": "src/scoped/calls.rs", "line": 12, "count": 0}),
+        ],
+    );
+
+    let implementors = rank_payload(
+        &call_rank(
+            server,
+            json!({
+                "edge_kind": "implements",
+                "direction": "outgoing",
+                "node_kind": "impl",
+                "format": "json"
+            }),
+        )
+        .await,
+    );
+    assert_rank_multiset(
+        &implementors,
+        "implements",
+        "outgoing",
+        Some("impl"),
+        &[
+            json!({"name": "Circle", "kind": "impl", "file": "src/shapes/traits.rs", "line": 5, "count": 1}),
+            json!({"name": "Circle", "kind": "impl", "file": "src/shapes/traits.rs", "line": 6, "count": 1}),
+            json!({"name": "Square", "kind": "impl", "file": "src/shapes/traits.rs", "line": 9, "count": 1}),
         ],
     );
 
