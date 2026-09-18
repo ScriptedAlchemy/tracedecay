@@ -2,9 +2,11 @@
 //!
 //! Every case is one `tools/call` on the production server the daemon
 //! composition mounts. The test reads the file bytes and the JSON-RPC answer
-//! the host receives. `format: json` is the public argument a host sends when
-//! it wants the structured payload; digest fields are used only as the preview
-//! token an apply must present, never as an expected result.
+//! the host receives. A missing parameter is `-32602`; a config refusal is
+//! `-32603`. A span miss is a tool result with `isError`, not a protocol
+//! error. `format: json` is the public argument a host sends when it wants
+//! the structured payload; digest fields are used only as the preview token
+//! an apply must present, never as an expected result.
 
 use crate::support::{
     ProductionSourceEditFixture, TestTempDir, extract_first_json_content,
