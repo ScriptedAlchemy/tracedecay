@@ -91,22 +91,23 @@ files that are also ignored remain forbidden.
 
 ## Release artifact acceptance
 
-Release acceptance exercises the produced archive and installed binary, never
-a source-tree file inventory or a release-PR path policy. The archive must
-contain a self-contained Rust package graph and the embedded dashboard and
-first-party host assets required by the binary.
+The ship path (`release-beta.yml`, `release.yml`) stamps GitHub-release
+assets. It builds the production binary, smokes `--version`/`--help`, and
+packages the MCPB and archive from that same file. A source-tree inventory
+or a release-PR path policy is not acceptance.
 
-The installed binary is exercised with a fresh isolated host profile for every
-supported host. Each official host operation must install, update, and
-uninstall only its owned files while preserving unrelated profile content; the
-same embedded artifact identity must be observed throughout. A supported host
-that defers or cannot complete one of those operations blocks acceptance. A
-host without an evidenced native registration remains a typed unavailable
-result, rather than a successful empty install.
+`scripts/check-distribution-acceptance.sh` proves the unpublished crate
+graph (`cargo package`, extracted-crate rebuilds, nextest, MCP inspector).
+That is not required to stamp the binary assets. The battery runs daily on
+one free `ubuntu-latest` runner
+(`.github/workflows/distribution-acceptance.yml`) and on
+`workflow_dispatch`. It reuses the just-built production binary
+(`--reuse-release-binary`) so it does not compile a second workspace into
+implicit `target/release`.
 
-Recorded native host events remain historical-ingestion evidence: they pass
-through the production decoder and ingestion path, not a synthetic packaging
-fixture. They do not substitute for the installed host lifecycle journey.
+Host install, update, and uninstall journeys, and recorded native host
+events as historical-ingestion evidence, stay product contracts. They do
+not block a beta or stable asset upload.
 
 ## SDK release boundary
 
@@ -140,15 +141,16 @@ gate (run by SDK conformance CI) enforces this job isolation.
 
 1. Merge feature/fix PRs into `master`.
 2. `Release Please` opens or updates the `chore(release): release
-   X.Y.Z-beta.N` PR. `Release PR distribution acceptance` runs the Linux
-   release battery on it.
+   X.Y.Z-beta.N` PR.
 3. Review the generated version and changelog, then merge.
 4. `Release Please` tags `vX.Y.Z-beta.N` and publishes a GitHub prerelease
    (never marked `latest`).
 5. The prerelease triggers `release-beta.yml`, which builds, attests, and
    uploads `tracedecay-beta-<tag>-<platform>` archives plus `SHA256SUMS`,
    exactly the names the CLI beta upgrade channel (`src/cloud.rs::asset_name`)
-   resolves.
+   resolves. Where that single build job spends its time, and which cuts do
+   not add jobs, is in
+   [Release build job speed](release-beta-single-job-speed.md).
 
 Manual install of a published beta (macOS arm64):
 
