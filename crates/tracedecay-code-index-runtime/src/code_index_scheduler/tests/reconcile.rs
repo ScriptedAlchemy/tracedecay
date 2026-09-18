@@ -34,7 +34,7 @@ use super::{
     wait_for_initial_generation, wait_for_live_complete_generation,
     wait_for_live_complete_generation_by_polling, wait_for_queryable_text_generation,
     wait_for_queryable_text_generation_change, wait_for_queryable_text_generation_id,
-    wait_for_quiescent_owner_pass, wait_until_serving_seat, write,
+    wait_for_quiescent_owner_pass, wait_for_settled_owner, wait_until_serving_seat, write,
 };
 use crate::{
     code_index::{
@@ -667,30 +667,6 @@ async fn registry_feeds_publications_and_bounded_freshness_reads() {
         .expect("changed publication timeout")
         .expect("changed publication event");
     assert_ne!(changed.generation_id, initial.generation_id);
-}
-
-/// Wait until the mounted worker for `path` is idle with nothing queued.
-///
-/// [`wait_for_quiescent_owner_pass`] only reports that no pass is *running*.
-/// A pass that ends while a wake is already pending re-arms a busy follow-up
-/// whose receipt lands later, so a test pinning receipt accounting has to wait
-/// for the pending-wake slot as well.
-async fn wait_for_settled_owner(registry: &CodeIndexSchedulerRegistryV1, path: &Path) {
-    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
-    loop {
-        wait_for_quiescent_owner_pass(registry, path).await;
-        if registry.pending_wake_micros_for_root(path).await == Some(0)
-            && !registry.reconcile_in_progress_for_test(path).await
-        {
-            return;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "the owner for {} never settled",
-            path.display()
-        );
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
 }
 
 /// Poll a mounted worktree's dashboard clone-index status until it reports
