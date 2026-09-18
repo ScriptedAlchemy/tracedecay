@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.43](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.42...v0.1.0-beta.43) (2026-09-18)
+
+
+### Bug Fixes
+
+* **release:** publish every target that built instead of none ([de16f23](https://github.com/ScriptedAlchemy/tracedecay/commit/de16f2339080da5f6b17ac941d9414237b882b24))
+* **release:** publish every target that built instead of none ([2c66895](https://github.com/ScriptedAlchemy/tracedecay/commit/2c66895288706d2c1f60cc5f0b7e5de130da9f5a))
+* **release:** verify the MCPB with unzip so the recorded mode survives ([5a032b3](https://github.com/ScriptedAlchemy/tracedecay/commit/5a032b3cfbd9fbd6440f9bc05dcda6f5a735f400))
+* **release:** verify the MCPB with unzip so the recorded mode survives ([8d145b4](https://github.com/ScriptedAlchemy/tracedecay/commit/8d145b4675164c285753a10516126b9562a4e8ee))
+
 ## [0.1.0-beta.42](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.41...v0.1.0-beta.42) (2026-09-18)
 
 
