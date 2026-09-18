@@ -4,6 +4,8 @@
 //! fixtures and helpers live in the suite-level `support` module.
 
 mod admin_test;
+#[cfg(feature = "test-transport")]
+mod affected_tests_behavior_test;
 mod automation_runs_test;
 mod bounded_analysis_test;
 #[cfg(feature = "test-transport")]
