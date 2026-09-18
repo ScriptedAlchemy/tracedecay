@@ -143,6 +143,15 @@ impl SharedCodeIndexBytePoolV1 {
 /// every unpinned query and must not be evictable by cursor traffic over
 /// superseded generations.
 pub(super) const DECODED_GENERATION_CACHE_CAPACITY: usize = 4;
+/// The exact detail a `try_acquire_code_generation_store_lock` refusal carries.
+///
+/// The store lock is a bounded shared resource: a concurrent publication in
+/// the same store root holds it and releases it on its own. Both the producer
+/// below and
+/// [`CodeIndexSchedulerErrorV1::is_transient_capacity_failure`] read this one
+/// token, so the retry classification cannot drift from the refusal it names.
+pub(super) const CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1: &str =
+    "code-generation store has an active owner";
 
 /// Whether one generation resolution may enter the single-flight sealed-decode.
 ///
@@ -2150,7 +2159,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         };
         let _store_lock = try_acquire_code_generation_store_lock(store_root)
             .map_err(Self::unavailable)?
-            .ok_or_else(|| Self::unavailable("code-generation store has an active owner"))?;
+            .ok_or_else(|| Self::unavailable(CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1))?;
         let prior_pointer = if let Some(expected) = undecoded_expectation.as_ref() {
             if expected_active_generation.is_some() {
                 return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
