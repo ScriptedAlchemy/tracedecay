@@ -933,7 +933,18 @@ async fn dashboard_freshness_does_not_join_a_clone_backfill_slice() {
         latest.advance_text_serving(1).expect("advance text build");
     }
 
-    let held_slot = latest.text_projection_build.lock_slot();
+    // Hold the backfill slot on another thread. A std mutex must not cross
+    // this task's await, and freshness must still answer without taking it.
+    let build = Arc::clone(&latest.text_projection_build);
+    let (acquired_tx, acquired_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let holder = thread::spawn(move || {
+        let held_slot = build.lock_slot();
+        acquired_tx.send(()).expect("notify slot hold");
+        let _release = release_rx.recv();
+        drop(held_slot);
+    });
+    acquired_rx.recv().expect("clone backfill slot is held");
     let freshness = tokio::time::timeout(
         Duration::from_millis(100),
         registry.dashboard_freshness(fixture.path()),
@@ -941,6 +952,8 @@ async fn dashboard_freshness_does_not_join_a_clone_backfill_slice() {
     .await
     .expect("dashboard freshness must not wait for the clone backfill slice")
     .expect("mounted dashboard freshness");
+    let _ = release_tx.send(());
+    holder.join().expect("slot holder");
     assert!(matches!(
         freshness.clone_index,
         Some(
@@ -950,7 +963,6 @@ async fn dashboard_freshness_does_not_join_a_clone_backfill_slice() {
         ) if reason == "clone-index status is being updated"
     ));
 
-    drop(held_slot);
     registry.shutdown().await;
 }
 
