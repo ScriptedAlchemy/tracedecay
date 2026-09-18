@@ -96,7 +96,7 @@ Sibling evidence:
   arrives at the one-production-compile beta pipeline and estimates slim cold
   jobs at 25-35m for aarch64 Linux, 25-40m for x86_64 Linux, 40-55m for
   aarch64 macOS, and 55-65m for Windows.
-- Broader ship-path implementation
+- Broader ship-path implementation, merged
   [#1587](https://github.com/ScriptedAlchemy/tracedecay/pull/1587) proves the
   first 23m34s of aarch64 Linux acceptance was a cold production workspace
   rebuild into implicit `target/release`, while the shipping binary already
@@ -221,9 +221,9 @@ Estimated cut:
 - x86_64 Windows: unquantified. The observed 0.5m was only an early failure,
   not a healthy acceptance run.
 
-PR #1587 is the preferred A implementation because it makes this cut
-coherently across beta, stable, and release-PR workflows while preserving one
-periodic crate-extract authority. Its nightly has not yet run, so the move is
+Merged PR #1587 is the A implementation because it makes this cut coherently
+across beta, stable, and release-PR workflows while preserving one periodic
+crate-extract authority. Its nightly has not yet run, so the move is
 implemented but the periodic production journey remains unverified.
 
 #### A2. Compile exactly one shipping feature set per target
@@ -241,7 +241,7 @@ comparison:
 - x86_64 Linux: unquantified until A1 lets the shipping build complete.
 
 PR #1587 subsumes PR #1582's beta all-feature deletion and applies the same
-rule to stable. Do not land #1582 separately if #1587 is selected.
+rule to stable. Do not land #1582 separately.
 
 #### A3. Remove release-time feature-graph resolution
 
@@ -369,10 +369,11 @@ cache services.
 
 ## Landing order
 
-1. Prefer PR #1587 as the coherent A slice. It subsumes #1582, removes the
-   largest measured sinks from beta and stable, and moves the crate-extract
-   journey to one daily free runner without adding release shards.
-2. Do not land PR #1582 separately after #1587; both delete the beta
+1. Treat merged PR #1587 as the coherent A baseline. It subsumes #1582,
+   removes the largest measured sinks from beta and stable, and moves the
+   crate-extract journey to one daily free runner without adding release
+   shards.
+2. Do not land PR #1582 after #1587; both delete the beta
    all-feature verify step.
 3. Reconcile the non-overlapping no-second-checkout, pinned-toolchain,
    dashboard-digest, and cache-order parts of PR #1585 onto the simplified
