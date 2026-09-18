@@ -48,6 +48,8 @@ mod memory_feedback_test;
 #[cfg(feature = "test-transport")]
 mod move_symbol_test;
 #[cfg(feature = "test-transport")]
+mod port_order_test;
+#[cfg(feature = "test-transport")]
 mod project_context_test;
 #[cfg(feature = "test-transport")]
 mod project_list_test;
