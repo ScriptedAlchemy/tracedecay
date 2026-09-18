@@ -59,6 +59,7 @@ mod retrieve_truncation_test;
 mod schema_test;
 mod search_behavior_test;
 mod session_refresh_begin_test;
+mod session_refresh_cancel_test;
 mod session_refresh_status_test;
 mod session_search_test;
 #[cfg(feature = "test-transport")]
