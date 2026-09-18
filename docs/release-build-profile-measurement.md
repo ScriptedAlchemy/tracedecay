@@ -35,8 +35,9 @@ crate whose `bench` and `release` opt-levels differ.
 ## Method
 
 Measured on a 4 vCPU / 16 GiB Linux host, the same shape as a free
-GitHub-hosted `ubuntu-latest` runner, with mold 2.41.0 as the default `ld` (as
-`.github/actions` configures on Linux) and a cold `target/`. The command is the
+GitHub-hosted `ubuntu-latest` runner, with mold 2.41.0 as the default `ld` (the
+version and `make-default` the beta job's `rui314/setup-mold` step installs on
+Linux) and a cold `target/`. The command is the
 one the beta job runs, from `scripts/resolve-release-source-profile.py`:
 
 ```
