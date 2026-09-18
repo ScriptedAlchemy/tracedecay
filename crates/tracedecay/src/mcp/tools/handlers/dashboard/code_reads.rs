@@ -278,8 +278,8 @@ fn shared_family_result(
             minimum_tokens,
         } => SimilarCoverageV1::ExcludedTooSmall { minimum_tokens },
         tracedecay_code_index::clones::CloneBodyEligibilityV1::ExcludedTooLarge {
-            maximum_bytes,
-        } => SimilarCoverageV1::ExcludedTooLarge { maximum_bytes },
+            maximum_tokens,
+        } => SimilarCoverageV1::ExcludedTooLarge { maximum_tokens },
         tracedecay_code_index::clones::CloneBodyEligibilityV1::ExcludedIncompleteTokenization => {
             SimilarCoverageV1::ExcludedIncompleteTokenization
         }

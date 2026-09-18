@@ -867,9 +867,19 @@ fn systemd_unit_does_not_cap_malloc_arenas() {
 
     let unit = spec.render_systemd_user_unit().expect("systemd unit");
 
+    let environment: Vec<&str> = unit
+        .lines()
+        .filter_map(|line| line.strip_prefix("Environment="))
+        .collect();
+    assert_eq!(
+        environment.len(),
+        1,
+        "the daemon's environment is PATH and nothing else; a malloc arena cap serialized the index workers, got:\n{unit}"
+    );
     assert!(
-        !unit.contains("MALLOC_ARENA_MAX"),
-        "the service unit must not serialize the index workers on a malloc arena cap, got:\n{unit}"
+        environment[0].starts_with("\"PATH=") && environment[0].contains("/usr/local/bin"),
+        "the one environment entry is a PATH that reaches the daemon binary, got: {}",
+        environment[0]
     );
 }
 

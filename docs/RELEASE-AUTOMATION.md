@@ -16,8 +16,8 @@ authority:
      `channel=stable` and the exact `version`. That run uses
      `release-please-config-stable.json` (which also bumps the TypeScript
      SDK) and opens a `chore(release): release X.Y.Z` PR; merging it publishes
-     a full release for `Release`.
-2. `Release` runs after a stable GitHub Release is published.
+     a full release, then dispatches `Release` on the `master` run ref.
+2. `Release` runs when `Release Please` dispatches it for the stable tag.
    - Builds platform binaries.
    - Uploads release assets, checksums, and `install.sh`.
    - Updates the in-repository `server.json` MCP registry manifest.
@@ -46,8 +46,9 @@ Add these repository secrets:
 
 - `RELEASE_PLZ_TOKEN`: fine-grained PAT or GitHub App token with read/write
   `Contents` and `Pull requests` access. The existing secret name is retained
-  for compatibility. Releases created with the default `GITHUB_TOKEN` do not
-  trigger the follow-up `release.yml` workflow.
+  for compatibility. `Release Please` uses its job-scoped `actions: write`
+  `GITHUB_TOKEN` only to dispatch the asset workflow on `master` after that
+  release exists.
 npm publication is tokenless: no npm secret exists anywhere in the repository
 or its workflows. The publish job authenticates through npm trusted publishing
 (OIDC), it holds `id-token: write`, and the pinned npm CLI (12.0.2, above the
@@ -145,8 +146,8 @@ gate (run by SDK conformance CI) enforces this job isolation.
 3. Review the generated version and changelog, then merge.
 4. `Release Please` tags `vX.Y.Z-beta.N` and publishes a GitHub prerelease
    (never marked `latest`).
-5. The prerelease triggers `release-beta.yml`, which builds, attests, and
-   uploads `tracedecay-beta-<tag>-<platform>` archives plus `SHA256SUMS`,
+5. `Release Please` dispatches `release-beta.yml` on `master` for that
+   immutable tag; it builds, attests, and uploads `tracedecay-beta-<tag>-<platform>` archives plus `SHA256SUMS`,
    exactly the names the CLI beta upgrade channel (`src/cloud.rs::asset_name`)
    resolves. Where that single build job spends its time, and which cuts do
    not add jobs, is in
@@ -179,8 +180,14 @@ proposing betas above the new stable version.
 ## Manual Recovery
 
 If the GitHub Release is created but the binary artifact workflow does not run,
-check whether `RELEASE_PLZ_TOKEN` was configured. For recovery, dispatch the
-workflow from the release tag ref and pass that same tag as `release_tag`.
+check whether `RELEASE_PLZ_TOKEN` and the `actions: write` job permission are
+configured. For recovery, dispatch the workflow from `master` and pass the
+immutable tag as `release_tag`:
+
+```sh
+gh workflow run release-beta.yml --ref master -f release_tag=vX.Y.Z-beta.N
+gh workflow run release.yml --ref master -f release_tag=vX.Y.Z
+```
 Recovery verifies every retained archive or MCPB against its GitHub attestation,
 exact tag SHA, and signer workflow, then builds only targets with missing
 assets. It never rebuilds an uploaded binary to compare bytes from a later
