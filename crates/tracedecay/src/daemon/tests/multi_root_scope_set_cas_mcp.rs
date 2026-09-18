@@ -3,7 +3,9 @@
 //! The tool is daemon-owned. A recording executor only shows that the name
 //! was forwarded. These calls use the same socket and `tools/call` framing
 //! a host uses, and they assert the revision, frozen roots, and refusals
-//! the caller can read back.
+//! the caller can read back. Both roots are registered on the daemon before
+//! the socket opens; an unmounted selector answers `unavailable` and never
+//! reaches compare-and-swap.
 
 #![cfg(unix)]
 
