@@ -155,9 +155,9 @@ async fn fact_store_list_pages_current_facts_by_identity_and_filters() {
         }),
     )
     .await;
-    let project_fact_id = project["fact"]["fact_id"]
+    let project_fact_id = project["fact"]["fact"]["fact_id"]
         .as_str()
-        .expect("added project fact id")
+        .unwrap_or_else(|| panic!("added project fact id: {project}"))
         .to_owned();
 
     let listed = list(&fixture, json!({})).await;
@@ -446,7 +446,7 @@ async fn fact_store_list_rejects_malformed_selectors_and_out_of_range_limits() {
     .await;
     assert_eq!(
         unknown_field["error"]["message"],
-        "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_list: unknown field `query`, expected one of `memory_scope`, `category`, `min_trust`, `limit`, `project_selector`, `after_fact_id`"
+        "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_list: unknown field `query`"
     );
     assert_eq!(
         unknown_field["error"]["data"]["tool"],
