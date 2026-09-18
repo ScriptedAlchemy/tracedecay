@@ -643,7 +643,7 @@ fn compile_regex(
 ///
 /// Gitleaks rules are authored for Go's RE2. RE2 and Rust's `regex` share the
 /// important restrictions, no backreferences, no lookaround, which is why the
-/// catalogue transfers at all. They disagree in exactly two places, and both
+/// catalogue transfers at all. They disagree in exactly three places, and all
 /// are mechanical:
 ///
 /// * **A literal `{`.** RE2 reads a brace that opens no valid repetition as a
@@ -654,10 +654,10 @@ fn compile_regex(
 ///   so it is *both* a different match and vastly larger to compile: three
 ///   upstream rules that repeat `\w` over a wide bound
 ///   (`pypi-...[\w-]{50,1000}`) blow past the compiler's 10 MB program limit.
-///   Expanding `\w` to its RE2 meaning fixes the semantics and the size at once
-///  , every rule in the catalogue then compiles under the default limit, with
+///   Expanding `\w` to its RE2 meaning fixes the semantics and the size at once,
+///   every rule in the catalogue then compiles under the default limit, with
 ///   no memory headroom bought and no rule dropped.
-////// * **`\b` / `\B`.** RE2's word boundary is ASCII. Rust's is Unicode-aware,
+/// * **`\b` / `\B`.** RE2's word boundary is ASCII. Rust's is Unicode-aware,
 ///   and a Unicode boundary is the one construct the lazy DFA gives up on the
 ///   moment the haystack holds a non-ASCII byte: every file with an em-dash or
 ///   an emoji in a comment was then scanned by the PikeVM, the slowest engine,
