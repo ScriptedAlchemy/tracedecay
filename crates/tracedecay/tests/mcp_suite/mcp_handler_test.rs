@@ -28,6 +28,7 @@ mod feedback_list_test;
 mod find_exact_symbol_test;
 mod graph_analysis_test;
 mod graph_query_test;
+mod grep_behavior_test;
 #[cfg(feature = "test-transport")]
 mod hermes_skill_bridge_test;
 mod lcm_test;
