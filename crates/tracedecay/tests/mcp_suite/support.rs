@@ -87,7 +87,7 @@ const SOURCE_EDIT_TOOL_NAMES: &[&str] = &[
 #[cfg(feature = "test-transport")]
 #[derive(Default)]
 pub(crate) struct CaptureTransport {
-    pub(crate) incoming: Option<String>,
+    incoming: Option<String>,
     pub(crate) output: String,
 }
 
@@ -211,6 +211,18 @@ pub(crate) async fn handle_real_server_tool_call_raw(
             .entry("format".to_string())
             .or_insert_with(|| json!("json"));
     }
+    handle_real_server_tool_call_raw_exact(server, tool_name, arguments).await
+}
+
+/// Same dispatch as [`handle_real_server_tool_call_raw`] without the default
+/// `format` injection, for tests that assert the server's own default and its
+/// argument-validation errors on the exact arguments a host would send.
+#[cfg(feature = "test-transport")]
+pub(crate) async fn handle_real_server_tool_call_raw_exact(
+    server: &McpServer,
+    tool_name: &str,
+    arguments: Value,
+) -> Value {
     let request = json!({
         "jsonrpc": "2.0",
         "id": 1,

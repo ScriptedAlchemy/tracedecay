@@ -6,8 +6,8 @@
 //! the only runtime identity; every other field is a literal of the fixture.
 
 use crate::support::{
-    CaptureTransport, ProductionCompositionFixture, production_composition_fixture_with_sources,
-    warm_code_index_search,
+    ProductionCompositionFixture, handle_real_server_tool_call_raw_exact,
+    production_composition_fixture_with_sources, warm_code_index_search,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -301,23 +301,8 @@ async fn call_derives(
         .harness
         .server(&fixture.project_root)
         .expect("derives fixture server");
-    let request = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {
-            "name": "tracedecay_derives",
-            "arguments": arguments,
-        }
-    });
-    let mut transport = CaptureTransport {
-        incoming: Some(request.to_string()),
-        output: String::new(),
-    };
-    Box::pin(server.run_connection(&mut transport))
-        .await
-        .expect("real MCP server tool call");
-    let response: Value = serde_json::from_str(transport.output.trim()).expect("JSON-RPC response");
+    let response =
+        handle_real_server_tool_call_raw_exact(&server, "tracedecay_derives", arguments).await;
     if !response["error"].is_null() {
         return Err(response["error"].clone());
     }
