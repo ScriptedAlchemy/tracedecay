@@ -67,7 +67,10 @@ Two static properties explain the largest opportunities:
 - `scripts/check-distribution-acceptance.sh` discovers the runner host with
   `rustc -vV` and performs host builds, packaged-crate tests, an install,
   consumer builds, MCP smoke, and LSP smoke. It does not test the matrix target
-  archive that the surrounding job eventually uploads.
+  archive that the surrounding job eventually uploads. Its opening
+  `cargo build --workspace --release` writes to implicit `target/release`;
+  nothing reads that result, while the packaging binary already exists under
+  `target/<triple>/release`.
 
 At baseline the repository had a pre-tag
 `Release PR distribution acceptance (x86_64-linux)` workflow. PR #1587 renamed
@@ -81,6 +84,12 @@ Sibling evidence:
   126.7m of the x86_64 Linux step in the cold all-feature workspace test
   compile and another 15.3m in two Hotpath helper builds. It also confirms
   that packaging, upload, dashboard, and cache save are not the wall.
+- Acceptance analysis, merged
+  [#1588](https://github.com/ScriptedAlchemy/tracedecay/pull/1588) confirms
+  that the acceptance opening build never supplies the packaging binary. It
+  consumed 23m34s on aarch64 Linux and 39m30s on macOS. It also decomposes the
+  x86_64 Linux 127m sink into a 33m17s all-feature workspace-bin build and a
+  93m23s workspace release-test harness compile.
 - Migration step 1, closed after broader implementation
   [#1582](https://github.com/ScriptedAlchemy/tracedecay/pull/1582) deletes the
   standalone beta all-feature CLI compile and leaves the production packaging
@@ -239,6 +248,11 @@ Deleting A1 alone leaves the largest sink intact. Census PR #1583 measured
 `cargo test --workspace --release --all-features` suite started. Existing CI
 already owns those tests and Hotpath parity.
 
+Acceptance analysis PR #1588 independently locates the 127m inside
+`Test release distribution`: 33m17s in the all-feature workspace-bin build and
+93m23s compiling the workspace release-test harness before tests ran. This is
+not distribution packaging time.
+
 Required cut: remove `Test release distribution` from the x86_64 Linux ship
 job. Merged PR #1587 has done so; current `master` contains neither that step
 nor the workspace release-test command. The next Release Beta must confirm the
@@ -249,6 +263,13 @@ nor the workspace release-test command. The next Release Beta must confirm the
 Merged PR #1587 removes distribution acceptance, nextest setup, and macOS
 acceptance Bash from beta and stable ship jobs. It replaces the release-PR
 battery with one periodic stock Linux crate-extract authority.
+
+PR #1588 confirms why this is an architecture cut rather than a cache tweak:
+the acceptance script's opening workspace build writes to
+`target/release`, the target packaging build writes to
+`target/<triple>/release`, and the later extracted CLI uses a third target
+directory. The opening result is never read. Removing it cuts 23m34s on
+aarch64 Linux and 39m30s on macOS before any unmeasured acceptance tail.
 
 This architecture cut has the following measured components:
 
@@ -399,10 +420,11 @@ cache services.
 2. Record PR #1582 as migration step 1: delete the all-feature verify compile.
    Do not land its closed branch after #1587, which already applied the cut.
 3. Require migration step 2 in the same architecture wave: delete the x86_64
-   Linux workspace release test measured at 127m by #1583. PR #1587 applied
-   the deletion; verify it on the next Release Beta.
+   Linux workspace release test measured at 127m by #1583 and decomposed by
+   #1588. PR #1587 applied the deletion; verify it on the next Release Beta.
 4. Keep migration step 3 on one periodic stock runner: crate-extract
-   acceptance is visibility, not a release shard or artifact gate.
+   acceptance is visibility, not a release shard or artifact gate. #1588
+   proves its opening 24-40m build never supplied the packaging binary.
 5. Treat PR #1585 as secondary C work after the #1584 architecture and #1583
    census. Its rebased head preserves #1587 while adding the non-overlapping
    no-second-checkout, pinned-toolchain, dashboard-digest, and cache-order
