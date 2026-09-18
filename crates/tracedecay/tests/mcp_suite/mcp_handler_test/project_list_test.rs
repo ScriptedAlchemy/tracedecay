@@ -16,7 +16,7 @@ use tracedecay_domain::ProjectId;
 use tracedecay_global_db::{GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert};
 use tracedecay_mcp::McpTransport;
 
-use crate::support::{self, CaptureTransport};
+use crate::support;
 
 const SECRET_REMOTE: &str = "https://user:s3cret-token@git.example/alpha.git";
 const ALPHA_CREATED_AT: i64 = 1_700_000_001;
@@ -356,7 +356,7 @@ async fn project_list_reports_a_broken_registry_as_a_tool_error() {
             "id": 1,
             "error": {
                 "code": -32603,
-                "message": "tool execution failed: database error: SQLite prepare query failed: no such table: project_aliases (operation: read project aliases)",
+                "message": "tool execution failed: database error: SQLite prepare query failed: no such table: project_aliases (operation: resolve project identity alias)",
                 "data": {
                     "tool": "tracedecay_project_list",
                     "cli_fallback": "This tool is also available from the shell: `tracedecay tool project_list ...` (`tracedecay tool project_list --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly."
@@ -511,6 +511,28 @@ fn pin_registration_times(registry_path: &Path, active_id: &str) {
     }
 }
 
+/// One request in, one response out, the same line framing `McpServer::run_connection`
+/// serves to a client. Arguments are not rewritten: an omitted `format` stays omitted.
+struct ClientCall {
+    request: Option<String>,
+    response: String,
+}
+
+impl McpTransport for ClientCall {
+    async fn read_line(&mut self) -> std::io::Result<Option<String>> {
+        Ok(self.request.take())
+    }
+
+    async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
+        self.response.push_str(line);
+        Ok(())
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 async fn tools_call(server: &McpServer, arguments: Value) -> Value {
     let request = json!({
         "jsonrpc": "2.0",
@@ -521,14 +543,14 @@ async fn tools_call(server: &McpServer, arguments: Value) -> Value {
             "arguments": arguments,
         }
     });
-    let mut transport = CaptureTransport {
-        incoming: Some(request.to_string()),
-        output: String::new(),
+    let mut transport = ClientCall {
+        request: Some(request.to_string()),
+        response: String::new(),
     };
     Box::pin(server.run_connection(&mut transport))
         .await
         .expect("mcp tools/call");
-    serde_json::from_str(transport.output.trim()).expect("json-rpc response")
+    serde_json::from_str(transport.response.trim()).expect("json-rpc response")
 }
 
 fn tool_text(response: Value) -> String {
