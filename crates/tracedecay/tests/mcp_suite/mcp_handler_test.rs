@@ -23,6 +23,7 @@ mod edit_test;
 mod expand_query_behavior;
 mod feedback_diagnostics_test;
 mod feedback_expand_test;
+mod god_class_test;
 mod graph_analysis_test;
 mod graph_query_test;
 mod health_behavior_test;
