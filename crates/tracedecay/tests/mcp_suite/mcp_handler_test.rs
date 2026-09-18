@@ -16,6 +16,8 @@ mod context_test;
 mod dependency_hint_test;
 #[cfg(feature = "test-transport")]
 mod edit_test;
+#[cfg(feature = "test-transport")]
+mod files_behavior_test;
 mod graph_analysis_test;
 mod graph_query_test;
 mod lcm_test;
