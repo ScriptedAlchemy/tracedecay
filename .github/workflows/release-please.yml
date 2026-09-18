@@ -13,8 +13,8 @@
 # and merging that publishes a full release for release.yml.
 #
 # Recover assets for an existing tag:
-#   gh workflow run release-beta.yml --ref vX.Y.Z-beta.N -f release_tag=vX.Y.Z-beta.N
-#   gh workflow run release.yml      --ref vX.Y.Z        -f release_tag=vX.Y.Z
+#   gh workflow run release-beta.yml --ref master -f release_tag=vX.Y.Z-beta.N
+#   gh workflow run release.yml      --ref master -f release_tag=vX.Y.Z
 
 name: Release Please
 
@@ -46,6 +46,7 @@ jobs:
     if: github.repository == 'ScriptedAlchemy/tracedecay'
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
       issues: write
       pull-requests: write
@@ -56,6 +57,7 @@ jobs:
           CHANNEL: ${{ inputs.channel || 'beta' }}
           VERSION: ${{ inputs.version }}
         run: |
+          echo "channel=$CHANNEL" >>"$GITHUB_OUTPUT"
           case "$CHANNEL" in
             beta)
               [[ -z "$VERSION" ]] ||
@@ -84,6 +86,23 @@ jobs:
           config-file: ${{ steps.channel.outputs.config }}
           manifest-file: .release-please-manifest.json
           release-as: ${{ steps.channel.outputs.release_as }}
+
+      # Build on the default-branch run ref, not the unique tag ref. The build
+      # still checks out and validates the immutable tag, but GitHub permits
+      # this run to restore the previous release's dependency cache.
+      - name: Dispatch beta asset build on master
+        if: steps.release.outputs.release_created == 'true' && steps.channel.outputs.channel == 'beta'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
+        run: gh workflow run release-beta.yml --repo "$GITHUB_REPOSITORY" --ref master --field "release_tag=$RELEASE_TAG"
+
+      - name: Dispatch stable asset build on master
+        if: steps.release.outputs.release_created == 'true' && steps.channel.outputs.channel == 'stable'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
+        run: gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref master --field "release_tag=$RELEASE_TAG"
 
       - name: Checkout release PR
         if: steps.release.outputs.prs_created == 'true'
