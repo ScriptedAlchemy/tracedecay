@@ -4163,45 +4163,6 @@ pub fn real_symbol() {}
         ));
     }
 
-    /// Independent top-level functions remain searchable symbols without
-    /// fabricating semantic relations between them. The extractor observes
-    /// file containment, but file nodes are not symbol rows, so those
-    /// observations abstain instead of entering the canonical edge census.
-    #[test]
-    fn independent_top_level_functions_have_symbols_without_relations() {
-        let source = "pub fn refresh_probe_0000_000(input: u32) -> u32 { input + 0 }\n\
-                      pub fn refresh_probe_0000_001(input: u32) -> u32 { input + 1 }\n";
-        let file = validated_file("src/refresh_batch/file_0000.rs", source.as_bytes());
-        let batch = batch_for(&file, ParseOutcomeV1::Complete);
-        let artifacts = chunker()
-            .index_file(&file, &batch, &rust_descriptor(), &NeverCancelled)
-            .expect("indexing succeeds");
-
-        assert_eq!(artifacts.symbols.len(), 2);
-        assert!(
-            artifacts.edges.is_empty(),
-            "independent functions must not fabricate canonical relations: {:?}",
-            artifacts.edges
-        );
-        assert_eq!(
-            artifacts
-                .edge_abstentions
-                .iter()
-                .filter(|abstention| {
-                    abstention.source_node_id.starts_with("file:")
-                        && abstention.legacy_kind == EdgeKind::Contains.as_str()
-                        && matches!(
-                            &abstention.reason,
-                            CodeIndexEdgeAbstentionReasonV1::MissingSymbolEndpoint
-                        )
-                })
-                .count(),
-            2,
-            "each file-root Contains observation must abstain: {:?}",
-            artifacts.edge_abstentions
-        );
-    }
-
     /// Two same-line methods share kind, name, and start line; the parser must
     /// still hand this path distinct endpoints so each `Contains`/`Calls`
     /// relation binds to its own symbol instead of abstaining or cross-binding.

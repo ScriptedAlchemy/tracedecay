@@ -11,7 +11,10 @@ use sha2::{Digest, Sha256};
 use tracedecay_code_extraction::incremental::ParseLimits;
 use tracedecay_code_index::{
     capabilities::expected_seal_digest,
-    chunks::{CodeIndexImportEvidenceV1, ExtractionAdmittedCodeSearchChunkV1, content_digest},
+    chunks::{
+        CodeIndexEdgeAbstentionReasonV1, CodeIndexImportEvidenceV1,
+        ExtractionAdmittedCodeSearchChunkV1, content_digest,
+    },
     clones::{CloneBodyEligibilityV1, CloneBodyOccurrenceV1},
     graph_projection::{
         CODE_GRAPH_PROJECTOR_REVISION, CodeGraphProjectionError,
@@ -37,7 +40,7 @@ use tracedecay_code_index::{
 };
 use tracedecay_domain::{
     ChunkerRevision, CodeGenerationId, CodeGenerationManifestV1, CodeSearchChunkGrainV1, CommitId,
-    EdgeAuthorityV1, ExtractorRevision, FileOccurrenceId, LanguageId, ManifestDigest,
+    EdgeAuthorityV1, EdgeKind, ExtractorRevision, FileOccurrenceId, LanguageId, ManifestDigest,
     PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1,
     ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1, ProviderEvaluationStateV1, RefId,
     RelationEdgeKindV1, RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId,
@@ -374,6 +377,59 @@ pub(super) fn request_with_source(
     request.repository_parse_identity.tree = Some(id::<TreeId>(tree));
     request.changed_files.insert("src/lib.rs".to_owned());
     request
+}
+
+#[test]
+fn relation_free_function_batch_seals_without_canonical_edges() {
+    let source = (0..128_u32)
+        .map(|symbol_index| {
+            format!(
+                "pub fn refresh_probe_0000_{symbol_index:03}(input: u32) -> u32 {{ input + {symbol_index} }}\n"
+            )
+        })
+        .collect::<String>();
+    let generation = CodeIndexProductionOwnerV1::new(
+        config(),
+        SharedPublicationStore::default(),
+        ApplyingProjectionSink,
+    )
+    .expect("production owner")
+    .build_and_publish(
+        request_with_source(
+            "file.relation-free",
+            1_100_000,
+            "commit.relation-free",
+            "tree.relation-free",
+            &source,
+        ),
+        &ActiveControl,
+    )
+    .expect("relation-free generation publishes");
+
+    let statistics = generation
+        .generation_statistics()
+        .expect("generation census");
+    assert_eq!(statistics.symbol_count, 128);
+    assert_eq!(statistics.edge_count, 0);
+    assert!(
+        generation.edges().is_empty(),
+        "independent functions must not fabricate canonical relations: {:?}",
+        generation.edges()
+    );
+    assert_eq!(
+        generation
+            .edge_abstentions()
+            .iter()
+            .filter(|abstention| {
+                abstention.source_node_id.starts_with("file:")
+                    && abstention.legacy_kind == EdgeKind::Contains.as_str()
+                    && abstention.reason == CodeIndexEdgeAbstentionReasonV1::MissingSymbolEndpoint
+            })
+            .count(),
+        128,
+        "each file-root Contains observation must abstain: {:?}",
+        generation.edge_abstentions()
+    );
 }
 
 #[test]
