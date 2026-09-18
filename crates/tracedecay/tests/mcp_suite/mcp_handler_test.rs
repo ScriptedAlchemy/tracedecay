@@ -35,6 +35,8 @@ mod implementations_test;
 mod impls_behavior_test;
 mod largest_test;
 mod lcm_doctor_test;
+#[cfg(feature = "test-transport")]
+mod lcm_expand_behavior_test;
 mod lcm_test;
 #[cfg(feature = "test-transport")]
 mod memory_contradiction_contract_test;
