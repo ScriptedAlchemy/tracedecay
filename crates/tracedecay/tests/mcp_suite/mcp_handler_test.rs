@@ -23,6 +23,7 @@ mod context_test;
 mod dependency_depth_test;
 mod dependency_hint_test;
 mod derives_test;
+mod diagnose_test;
 #[cfg(feature = "test-transport")]
 mod edit_test;
 #[cfg(feature = "test-transport")]
