@@ -78,12 +78,13 @@ fn metric<'a>(metrics: &'a Value, name: &str) -> &'a Value {
 }
 
 #[cfg(feature = "test-transport")]
-fn ledger_row(run_id: &str, task: &str, status: &str, started_at: &str) -> String {
+fn ledger_row(run_id: &str, task: &str, status: &str, started_at: i64) -> String {
     format!(
         "{{\"schema_version\":2,\"run_id\":\"{run_id}\",\"trigger\":\"scheduler\",\
          \"task\":\"{task}\",\"backend\":\"codex_app_server\",\"status\":\"{status}\",\
          \"accepted_count\":0,\"rejected_count\":0,\"started_at\":\"{started_at}\",\
-         \"completed_at\":\"{started_at}\",\"completed_at_micros\":0}}"
+         \"completed_at\":\"{started_at}\",\"completed_at_micros\":{}}}",
+        started_at.saturating_mul(1_000_000)
     )
 }
 
@@ -334,10 +335,7 @@ async fn analytics_degrades_gracefully_for_a_zero_data_project() {
     assert_eq!(observed_events["value"].as_f64(), Some(0.0));
     assert_eq!(observed_events["coverage"]["state"], "known");
     assert_eq!(observed_events["coverage"]["observed"].as_u64(), Some(0));
-    assert_eq!(
-        payload["costs"]["watermark"],
-        "provider-usage:unknown;savings:0"
-    );
+    assert_eq!(payload["costs"]["watermark"], "provider-usage:0;savings:0");
     assert_eq!(payload["costs"]["current"], false);
     let saved_tokens = metric(&payload["costs"]["usage"], "saved_tokens");
     assert_eq!(saved_tokens["value"].as_f64(), Some(0.0));
@@ -407,6 +405,10 @@ async fn analytics_degrades_gracefully_for_a_zero_data_project() {
     assert_eq!(payload["automation"]["records_in_window"].as_i64(), Some(0));
     assert_eq!(payload["automation"]["records_truncated"], false);
     assert_eq!(payload["automation"]["by_job"], json!([]));
+    let dashboard_root = payload["automation"]["dashboard_root"]
+        .as_str()
+        .expect("enrolled dashboard root")
+        .to_string();
 
     let fact_content = "Analytics fact funnel records one committed fact.";
     let added = handle_real_server_tool_call(
@@ -426,38 +428,32 @@ async fn analytics_degrades_gracefully_for_a_zero_data_project() {
     assert_eq!(added["result"]["disposition"], "added");
     assert_eq!(added["result"]["fact"]["fact"]["content"], fact_content);
 
-    let cg = server.cg().await;
-    let dashboard_root = cg.store_layout().dashboard_root.clone();
-    drop(cg);
-    std::fs::create_dir_all(&dashboard_root).expect("dashboard root");
+    let dashboard_path = std::path::PathBuf::from(&dashboard_root);
+    std::fs::create_dir_all(&dashboard_path).expect("dashboard root");
+    let now = current_timestamp();
     let ledger = format!(
         "{}\n{}\n{}\n{}\n",
         ledger_row(
             "analytics-recent-success",
             "memory_curator",
             "succeeded",
-            "2026-09-17T00:00:00Z"
+            now - 60
         ),
         ledger_row(
             "analytics-recent-failure",
             "skill_writer",
             "failed",
-            "2026-09-17T01:00:00Z"
+            now - 120
         ),
-        ledger_row(
-            "analytics-recent-queued",
-            "user_job",
-            "queued",
-            "2026-09-17T02:00:00Z"
-        ),
+        ledger_row("analytics-recent-queued", "user_job", "queued", now - 180),
         ledger_row(
             "analytics-stale-success",
             "session_reflector",
             "succeeded",
-            "2020-01-01T00:00:00Z"
+            now - 20 * 86_400
         ),
     );
-    std::fs::write(dashboard_root.join("automation_runs.jsonl"), ledger)
+    std::fs::write(dashboard_path.join("automation_runs.jsonl"), ledger)
         .expect("automation ledger");
 
     let facts = extract_json(
@@ -494,7 +490,7 @@ async fn analytics_degrades_gracefully_for_a_zero_data_project() {
         automation["automation"],
         json!({
             "available": true,
-            "dashboard_root": dashboard_root.display().to_string(),
+            "dashboard_root": dashboard_root,
             "records_considered": 4,
             "records_in_window": 3,
             "records_truncated": false,
@@ -698,6 +694,7 @@ async fn analytics_reconciles_public_catalog_with_alias_internal_and_unknown_or_
         ])
     );
 
+    server.ledger_writes_settled().await;
     let markdown = handle_real_server_tool_call(
         &server,
         "tracedecay_analytics",
@@ -706,11 +703,14 @@ async fn analytics_reconciles_public_catalog_with_alias_internal_and_unknown_or_
     .await;
     let text = extract_text(&markdown);
     for line in [
-        "**raw distinct event names:** 5",
-        "**called available defined tools:** 2",
+        "**event_count:** 6",
+        "**raw distinct event names:** 6",
+        "**called available defined tools:** 3",
         "- **navigation** - 3 calls, 1 errors",
+        "- **admin** - 1 calls, 0 errors",
         "- **other** - 2 calls, 1 errors",
         "- **tracedecay_grep** (navigation) - 2 calls, 1 errors",
+        "- **tracedecay_analytics** (admin) - 1 calls, 0 errors",
         "- **tracedecay_admin_cli** (other) - 1 calls, 0 errors",
         "- **tracedecay_context** (navigation) - 1 calls, 0 errors",
         "- **tracedecay_removed_tool** (other) - 1 calls, 1 errors",
