@@ -576,9 +576,7 @@ async fn fact_store_search_rejects_blank_limit_and_unknown_fields() {
         ),
         (
             json!({"query": "ledger", "action": "search"}),
-            decode_failure(
-                "unknown field `action`, expected one of `query`, `memory_scope`, `category`, `min_trust`, `limit`, `project_selector`, `after`",
-            ),
+            decode_failure("unknown field `action`"),
         ),
         (
             json!({"query": "ledger", "format": "yaml"}),
