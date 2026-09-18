@@ -3,6 +3,8 @@
 //! Split into per-domain modules under `mcp_handler_test/`; shared
 //! fixtures and helpers live in the suite-level `support` module.
 
+#[cfg(feature = "test-transport")]
+mod active_project_test;
 mod admin_test;
 mod automation_runs_test;
 mod bounded_analysis_test;
