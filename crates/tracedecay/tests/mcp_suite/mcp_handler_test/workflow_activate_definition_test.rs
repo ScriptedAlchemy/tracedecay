@@ -4,7 +4,9 @@
 //! registered candidate starts at revision 1; activation walks
 //! candidate → validated → active, so the published disposition is revision 3.
 //! An identical request replays that disposition, including the clock the
-//! first activation committed, instead of minting a new one.
+//! first activation committed, instead of minting a new one. A stale revision
+//! and a later activation from `active` are journaled conflicts: both return
+//! the same runtime refusal, and neither replaces the committed disposition.
 
 #![cfg(feature = "test-transport")]
 
@@ -263,6 +265,29 @@ fn assert_application_refusal(result: &Value, envelope: &Value, code: &str, mess
     );
 }
 
+/// Compare-and-swap conflicts that occur inside the effect journal are not the
+/// pre-journal catalog diagnostics. Both a stale `expected_revision` and an
+/// activation that is illegal from `active` come back as this runtime refusal.
+fn assert_journaled_lifecycle_refusal(result: &Value, envelope: &Value) {
+    assert_refusal(
+        result,
+        envelope,
+        ACTIVATE_SCHEMA,
+        Some(ACTIVATE_BINDING),
+        problem_record(
+            "invalid_request",
+            "workflow.invalid_request",
+            "The Workflow application request is invalid",
+            json!({
+                "code": "workflow.invalid_request",
+                "message": "The Workflow application request is invalid"
+            }),
+            "runtime",
+            json!(["correct_request"]),
+        ),
+    );
+}
+
 fn disposition_without_clock(payload: &Value) -> Value {
     let mut value = payload.clone();
     value
@@ -414,12 +439,7 @@ async fn activate_definition_publishes_active_revision_three() {
     )
     .await;
     let (conflict_result, conflict) = activate(&server, ACTIVE_ID, 1, 99).await;
-    assert_application_refusal(
-        &conflict_result,
-        &conflict,
-        "workflow.lifecycle.revision_conflict",
-        "expected_revision does not match the observed definition disposition revision",
-    );
+    assert_journaled_lifecycle_refusal(&conflict_result, &conflict);
 
     let (activated_result, activated) = activate(&server, ACTIVE_ID, 1, 1).await;
     assert_eq!(activated_result.get("isError"), None, "{activated}");
@@ -505,10 +525,18 @@ async fn activate_definition_publishes_active_revision_three() {
     );
 
     let (illegal_result, illegal) = activate(&server, ACTIVE_ID, 1, 3).await;
-    assert_application_refusal(
-        &illegal_result,
-        &illegal,
-        "workflow.lifecycle.illegal_transition",
-        "lifecycle operation is not legal from the observed definition state",
+    assert_journaled_lifecycle_refusal(&illegal_result, &illegal);
+
+    let (still_active_result, still_active) = activate(&server, ACTIVE_ID, 1, 1).await;
+    assert_eq!(still_active_result.get("isError"), None, "{still_active}");
+    assert_eq!(
+        still_active.pointer("/value/outcome/value/payload"),
+        Some(&payload),
+        "{still_active}"
+    );
+    assert_eq!(
+        still_active.pointer("/value/outcome/value/effect_id"),
+        Some(&json!(effect_id)),
+        "{still_active}"
     );
 }
