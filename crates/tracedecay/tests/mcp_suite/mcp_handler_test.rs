@@ -14,6 +14,7 @@ mod branch_search_test;
 mod branch_sensitivity_test;
 #[cfg(feature = "test-transport")]
 mod configuration_unset_test;
+mod context_behavior_test;
 mod context_test;
 mod dependency_depth_test;
 mod dependency_hint_test;
