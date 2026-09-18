@@ -24,7 +24,7 @@ const REMOVE_RESULT_SCHEMA: &str = "schema.application.retained.fact-store-remov
 
 const MISSING_FACT_ID_MESSAGE: &str = "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_remove: missing field `fact_id`";
 const NUMERIC_FACT_ID_MESSAGE: &str = "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_remove: fact_id: invalid type: integer `41`, expected a string";
-const UNKNOWN_FIELD_MESSAGE: &str = "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_remove: unknown field `action`, expected `fact_id` or `expected_last_event_id` or `memory_scope` or `project_selector`";
+const UNKNOWN_FIELD_MESSAGE: &str = "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_remove: action: unknown field `action`, expected one of `fact_id`, `expected_last_event_id`, `memory_scope`, `project_selector`";
 
 struct AddedFact {
     fact_id: String,
@@ -209,6 +209,28 @@ fn missing_sibling_id(fact_id: &str) -> String {
     let last = identity.pop().expect("identity nibble");
     identity.push(if last == '0' { '1' } else { '0' });
     format!("fact.v1.{owner}.{identity}")
+}
+
+fn search_values(search: &Value, field: &str) -> Vec<String> {
+    search["hits"]
+        .as_array()
+        .unwrap_or_else(|| panic!("search hits: {search}"))
+        .iter()
+        .map(|hit| {
+            hit["fact"][field]
+                .as_str()
+                .unwrap_or_else(|| panic!("search hit {field}: {hit}"))
+                .to_owned()
+        })
+        .collect()
+}
+
+fn search_contents(search: &Value) -> Vec<String> {
+    search_values(search, "content")
+}
+
+fn search_fact_ids(search: &Value) -> Vec<String> {
+    search_values(search, "fact_id")
 }
 
 fn listed_contents(list: &Value) -> Vec<String> {
@@ -460,32 +482,45 @@ async fn fact_store_remove_deletes_only_the_named_fact() {
         call_tool(
             &server,
             "tracedecay_fact_store_search",
-            json!({"query": REMOVED_CONTENT, "min_trust": 0}),
+            json!({"query": "Cerulean quay invoice", "min_trust": 0}),
         )
         .await,
     );
-    assert_eq!(gone["hits"], json!([]), "{gone}");
-    assert!(gone["next_after"].is_null(), "{gone}");
-    assert_eq!(
-        gone["retrieval_telemetry"],
-        json!({"kind": "not_applicable"}),
-        "{gone}"
+    assert!(
+        !search_fact_ids(&gone)
+            .iter()
+            .any(|id| id == &removed.fact_id),
+        "the removed fact must leave search: {gone}"
+    );
+    assert!(
+        !search_contents(&gone)
+            .iter()
+            .any(|content| content == REMOVED_CONTENT),
+        "search must not return the removed content: {gone}"
     );
 
     let kept = payload(
         call_tool(
             &server,
             "tracedecay_fact_store_search",
-            json!({"query": SURVIVOR_CONTENT, "min_trust": 0}),
+            json!({"query": "Amber kiln glaze recipe", "min_trust": 0}),
         )
         .await,
     );
-    let hits = kept["hits"].as_array().expect("survivor hits");
-    assert_eq!(hits.len(), 1, "{kept}");
-    assert_eq!(hits[0]["fact"]["content"], SURVIVOR_CONTENT);
-    assert_eq!(hits[0]["fact"]["fact_id"], survivor.fact_id);
-    assert_eq!(hits[0]["fact"]["category"], "project");
-    assert_eq!(hits[0]["fact"]["source_label"], SOURCE_LABEL);
+    assert_eq!(
+        search_contents(&kept),
+        vec![SURVIVOR_CONTENT.to_owned()],
+        "{kept}"
+    );
+    assert_eq!(
+        search_fact_ids(&kept),
+        vec![survivor.fact_id.clone()],
+        "{kept}"
+    );
+    assert_eq!(kept["hits"][0]["fact"]["category"], "project");
+    assert_eq!(kept["hits"][0]["fact"]["source_label"], SOURCE_LABEL);
+    assert_eq!(kept["retrieval_telemetry"]["kind"], "recorded", "{kept}");
+    assert_eq!(kept["retrieval_telemetry"]["fact_count"], 1, "{kept}");
 
     let again = payload(call_tool(&server, TOOL, json!({"fact_id": removed.fact_id})).await);
     assert_eq!(again["outcome"], "already_removed", "{again}");
