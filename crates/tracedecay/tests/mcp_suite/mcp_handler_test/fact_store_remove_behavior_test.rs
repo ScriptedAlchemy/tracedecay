@@ -605,13 +605,20 @@ async fn fact_store_remove_deletes_only_the_named_fact() {
         )
         .await,
     );
-    assert_eq!(survivor_gone["hits"], json!([]), "{survivor_gone}");
     assert_eq!(
-        survivor_gone["retrieval_telemetry"]["kind"], "recorded",
-        "{survivor_gone}"
-    );
-    assert_eq!(
-        survivor_gone["retrieval_telemetry"]["fact_count"], 0,
+        survivor_gone,
+        json!({
+            "graph_coverage": {
+                "expanded_fact_count": 0,
+                "kind": "complete",
+                "relation_count": 0,
+                "root_count": 0
+            },
+            "hits": [],
+            "next_after": null,
+            "owner": {"kind": "project", "project_id": survivor.project_id},
+            "retrieval_telemetry": {"kind": "not_applicable"}
+        }),
         "{survivor_gone}"
     );
 
