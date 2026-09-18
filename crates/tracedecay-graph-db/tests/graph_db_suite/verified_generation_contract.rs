@@ -841,7 +841,7 @@ fn sealed_code_generation_publishes_with_its_supplied_manifest() {
 /// A publication interrupted between its journal append and the verified
 /// head CAS leaves an orphan pending replay its dead publisher can never
 /// complete. Discarding the exact observed row reopens the journal position
-/// so a fresh publication of the same generation lands — instead of every
+/// so a fresh publication of the same generation lands, instead of every
 /// later attempt refusing with the same deterministic Conflict forever
 /// (issue #765). The compare-and-swap shape refuses stale evidence.
 #[test]
@@ -2029,7 +2029,7 @@ fn superseded_journaled_publication_seats_historically_on_retry() {
 /// the producer's own publication (the durable CAS already advanced). The
 /// attach must wait out the close and remount, and the publish must
 /// recompute the recovered generation digest from actual rows, match the
-/// journaled expectation, and seat the verified head that serves reads —
+/// journaled expectation, and seat the verified head that serves reads,
 /// never loop `Conflict` or leave the projection without an installed head.
 #[test]
 fn recovered_digest_seats_under_closing_and_superseded_head_conflict() {
@@ -2283,7 +2283,7 @@ fn cancellation_before_relational_cas_keeps_the_prior_head_current() {
 
 /// Cancellation mid-publication is typed and leaves no serveable partial
 /// generation. The retry adopts the journaled replay and converges to that
-/// exact head — the production interrupt-then-retry journey.
+/// exact head, the production interrupt-then-retry journey.
 #[test]
 fn interrupted_publish_retry_converges_to_the_journaled_head() {
     let temp = TempDir::new().unwrap();
@@ -2647,8 +2647,8 @@ fn labeled_byte_record_entities_reach_a_verified_head() {
 
 /// A registration may spell the database file through a symlinked ancestor
 /// (macOS reaches `/var` and `/tmp` through `/private/...`). The registry
-/// collapses every spelling to the file's one canonical name — while still
-/// refusing a store directory that is itself a symlink — so an operation
+/// collapses every spelling to the file's one canonical name, while still
+/// refusing a store directory that is itself a symlink, so an operation
 /// whose lease carries the aliased spelling must publish rather than be
 /// refused as a foreign database.
 #[cfg(unix)]

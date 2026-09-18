@@ -2,7 +2,7 @@
  * The FACT CONSTELLATION aperture: the memory graph the overview served, drawn
  * on the night glass with its axes printed.
  *
- * Everything drawn here is a reading of `composeConstellation` — angle is
+ * Everything drawn here is a reading of `composeConstellation`, angle is
  * category, radius is trust, satellites sit where their relations put them.
  * The SVG is one `role="img"` whose label is the model's own description; the
  * fact ledger beside it is the exact accessible equivalent and the keyboard
@@ -11,7 +11,7 @@
  * neither changes a measured value or fires activity.
  *
  * Two things this surface refuses to do. It never draws a relation to a node
- * the payload did not include — a dangling edge is counted in the footer, not
+ * the payload did not include, a dangling edge is counted in the footer, not
  * drawn to the centre. And a fact whose trust the store did not report sits
  * hollow, past the outer ring, rather than being given a radius that reads as
  * a low score.
@@ -57,7 +57,7 @@ const TONE_OPACITY: Record<ReturnType<typeof relationStyle>['tone'], number> = {
   quiet: 0.5,
 };
 
-/** Fill per trust band for the legend swatches — luminance steps of the one
+/** Fill per trust band for the legend swatches, luminance steps of the one
  * signal hue, paired with the printed range so the band is never colour alone. */
 const BAND_SWATCH_OPACITY: Record<TrustBandId, number> = {
   b80: 1,
@@ -138,8 +138,8 @@ export function FactConstellation({
           <p className="max-w-md text-center text-xs leading-relaxed text-text-muted">
             The memory graph returned no roots to draw
             {model.coverage.completeness === 'complete'
-              ? ' — the complete read holds no fact roots.'
-              : ` — this ${model.coverage.completeness} read carried none; whole-store topology is not known from it.`}
+              ? ', the complete read holds no fact roots.'
+              : `, this ${model.coverage.completeness} read carried none; whole-store topology is not known from it.`}
           </p>
         </div>
       ) : (

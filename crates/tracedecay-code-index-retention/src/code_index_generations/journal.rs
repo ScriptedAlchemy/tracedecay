@@ -57,7 +57,7 @@ pub(super) fn persist_journal<T: Serialize>(
 /// On unix the file is opened once with `O_NOFOLLOW`, type and size are taken
 /// from that handle (`fstat`), and bytes are read from the same handle. A
 /// planted symlink at the journal path is refused at open (`ELOOP`) instead of
-/// being followed. Intermediate path components can still be symlinks — this
+/// being followed. Intermediate path components can still be symlinks, this
 /// is the same final-component guarantee as `O_NOFOLLOW`, not a full
 /// no-follow walk. `tracedecay_private_fs::open_private_file` is not reused:
 /// it requires a writable owner-private `0o600` handle, which would reject a

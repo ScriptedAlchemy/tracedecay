@@ -52,8 +52,8 @@ pub(super) fn configuration_binding_has_schema(
 }
 
 /// The application invocation payload for a configuration operation is the
-/// operation's own request body — the same shape
-/// `parse_application_surface_request` accepts from every caller surface — not
+/// operation's own request body, the same shape
+/// `parse_application_surface_request` accepts from every caller surface, not
 /// the `operation`/`request` envelope `ConfigurationWireRequestV1` uses to
 /// carry it across the daemon contract. Sending the envelope made the executor
 /// re-parse a tagged wrapper against a `deny_unknown_fields` request struct,

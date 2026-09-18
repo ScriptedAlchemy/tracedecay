@@ -31,8 +31,8 @@ static TRACING_CALLSITE_KEEPALIVE: OnceLock<[tracing::Dispatch; 2]> = OnceLock::
 /// registered, that rebuilder takes the `Rebuilder::JustOne` fast path, which
 /// asks *the current thread's* default subscriber. Callsites register lazily on
 /// first execution, so under `--test-threads=N` an unrelated test that reaches
-/// `tracedecay::observation_admission_work` first — on a thread with no scoped
-/// dispatcher, i.e. `NoSubscriber` — permanently caches `Interest::never()` for
+/// `tracedecay::observation_admission_work` first, on a thread with no scoped
+/// dispatcher, i.e. `NoSubscriber`, permanently caches `Interest::never()` for
 /// that callsite. Every later census then observes zero events and reports work
 /// that did happen as work that did not: `persist_observations_dispatches_one_
 /// runtime_command_independent_of_batch_size` saw `runtime_commands == 0`, and
@@ -42,7 +42,7 @@ static TRACING_CALLSITE_KEEPALIVE: OnceLock<[tracing::Dispatch; 2]> = OnceLock::
 /// the life of the process, so interest is always folded over the real
 /// registry instead of one arbitrary thread's default. Both keepalives claim
 /// `Interest::sometimes()` for every callsite, which folds to `sometimes`
-/// against any other subscriber — meaning enablement is decided per event by
+/// against any other subscriber, meaning enablement is decided per event by
 /// the *calling thread's* dispatcher, exactly the isolation these censuses
 /// assume. Constructing them also rebuilds the interest cache, repairing any
 /// callsite already poisoned before the first census ran.
@@ -1363,8 +1363,8 @@ async fn open_registered_test_database_with_identity(
     }
     // The exact test-runtime resolver refuses `Initialize` for a store that is
     // already on disk (and `Existing` for one that is not). Fixtures reach this
-    // helper both ways — a fresh profile root, and a shard some earlier stage of
-    // the same test already materialised — so pick the mode from the file.
+    // helper both ways, a fresh profile root, and a shard some earlier stage of
+    // the same test already materialised, so pick the mode from the file.
     let mode = if path.try_exists()? {
         tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Existing
     } else {

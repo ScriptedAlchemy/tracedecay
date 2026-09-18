@@ -1,6 +1,6 @@
 # PR20 Measured Performance and Cleanup Plan
 
-> **Archived provenance — not current requirements.** This document records
+> **Archived provenance, not current requirements.** This document records
 > historical planning and execution evidence. Current scope and acceptance come
 > only from [`00-plan-set-index.md`](../../../plans/tracedecay-v2/00-plan-set-index.md),
 > [`NEXT.md`](../../../plans/tracedecay-v2/NEXT.md), and the applicable numbered
@@ -32,7 +32,7 @@ are not prerequisites and must not be recreated.
 
 ## Product outcome contributed
 
-The enduring outcome is measured event-to-ready improvement with equivalent
+The outcome is measured event-to-ready improvement with equivalent
 behavior. Current representative journeys, equivalence criteria, storage
 bounds, and acceptance are defined by the applicable numbered V2 plans.
 

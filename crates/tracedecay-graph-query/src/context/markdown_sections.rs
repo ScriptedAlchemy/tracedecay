@@ -8,17 +8,17 @@
 //!
 //! So each markdown section symbol carries a `section` lane with:
 //!
-//! - the **title** and the section's **1-based line span**, so
+//! - the title and the section's 1-based line span, so
 //!   `tracedecay_read mode=lines` is always the zero-magic alternative;
-//! - a **truncated body preview** bounded by [`SECTION_PREVIEW_CHARS`];
-//! - a **retrieval handle** for the *full* body, minted through the same
+//! - a truncated body preview bounded by [`SECTION_PREVIEW_CHARS`];
+//! - a retrieval handle for the *full* body, minted through the same
 //!   response-handle cache that reversible MCP truncation uses
 //!   ([`tracedecay_session_memory::response_handles::store_response_handle`]), so the reader
 //!   dereferences it with the existing `tracedecay_retrieve` tool and no
 //!   parallel mechanism exists;
-//! - the section's load-bearing **structure** — task-list checkboxes with their
+//! - the section's load-bearing structure, task-list checkboxes with their
 //!   checked state, nested bullets, ordered steps, tables, block quotes and
-//!   fenced code — parsed by
+//!   fenced code, parsed by
 //!   [`tracedecay_code_extraction::markdown_structure`], so "which checklist
 //!   items under 'Remaining work' are unchecked" is answerable from the
 //!   retrieval payload instead of by re-reading the file.

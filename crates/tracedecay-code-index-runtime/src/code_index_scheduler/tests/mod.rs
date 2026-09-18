@@ -1081,7 +1081,7 @@ async fn mount_core_query_authority(
 }
 
 /// The same repository and worktree under a reference the admitted scope has
-/// already moved past — the shape every restored generation has after the
+/// already moved past, the shape every restored generation has after the
 /// ordinary commit/branch-then-restart cycle.
 fn moved_reference_scope(scope: &ResolvedScope) -> ResolvedScope {
     ResolvedScope::new(
@@ -1184,7 +1184,7 @@ fn served_lexical_texts(scheduler: &CodeIndexWorktreeSchedulerV1, needle: &str) 
 ///
 /// A serving seat is published from inside a pass, so every seat wait returns
 /// while the worker still owns `reconcile_in_progress` and has post-seat work
-/// left — receipts, graph steps. A test that samples one
+/// left, receipts, graph steps. A test that samples one
 /// of those effects immediately after a seat wait races the pass that produces
 /// it. This is the barrier for "the pass that seated is finished", and it is a
 /// failure bound only: a worker that never finishes panics with a diagnostic.

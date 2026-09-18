@@ -15,7 +15,7 @@ const CommandPalette = lazy(() =>
   import('./CommandPalette').then((m) => ({ default: m.CommandPalette })),
 );
 
-/** Global Cmd/Ctrl-K binding — kept out of CommandPalette so the dialog chunk
+/** Global Cmd/Ctrl-K binding, kept out of CommandPalette so the dialog chunk
  * stays out of the initial shell payload until the palette is first opened.
  * The only global shortcut (NAVIGATION.md "Behavior"): no numeric or arrow
  * keys are bound shell-wide. */
@@ -34,7 +34,7 @@ function usePaletteHotkey(setOpen: (open: boolean) => void) {
 
 /**
  * The persistent shell (NAVIGATION.md "Persistent regions"): one framed
- * night-glass instrument set into the chassis — navigation rail | (scope
+ * night-glass instrument set into the chassis, navigation rail | (scope
  * register / main aperture / status strip). The frame is the one place
  * outside a hero aperture that carries a bezel: a cyan-gray hairline and four
  * corner marks, and nothing else.

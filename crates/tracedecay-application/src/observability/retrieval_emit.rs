@@ -11,7 +11,7 @@
 //! * **Telemetry never changes the product path.** The retrieval families are
 //!   emitted on the query hot path, so they route through
 //!   [`BoundedObservabilityProducerV1::try_emit`]: a bounded queue, a
-//!   non-blocking reservation, and — when the queue is full — an accounted
+//!   non-blocking reservation, and, when the queue is full, an accounted
 //!   drop that the producer later publishes as a `TelemetryDropObservedV1`
 //!   lower bound rather than a silent hole. Nothing here retries, blocks, or
 //!   cancels product work.

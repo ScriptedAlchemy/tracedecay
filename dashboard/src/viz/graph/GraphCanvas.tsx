@@ -21,7 +21,7 @@ import { cn } from '../../ui/cn';
 
 export type { GraphCanvasEdge, GraphCanvasEncoding, GraphCanvasNode } from './types.ts';
 
-/** Sigma over Graphology — default connected-graph renderer.
+/** Sigma over Graphology, default connected-graph renderer.
  *
  * Deterministic ForceAtlas2 settle (laid out once, never animated), nodes
  * sized by degree and lit by their real vitality, relations drawn as curved
@@ -31,7 +31,7 @@ export type { GraphCanvasEdge, GraphCanvasEncoding, GraphCanvasNode } from './ty
  * asleep. The synchronized list next to the canvas remains the accessible
  * surface.
  *
- * This component owns the React side only — the props, the container's
+ * This component owns the React side only, the props, the container's
  * measured box, and when a scene may exist. Preparing the layout, drawing it
  * and animating it live in `layout.ts`, `renderer.ts` and
  * `activationOverlay.ts`; `scene.ts` composes the three into one thing with
@@ -79,7 +79,7 @@ export function GraphCanvas({
   /** What this particular field means. The default sentence describes a
    * force-laid symbol graph; any caller composing a different field MUST
    * replace it, because the caption is the only place the reader is told what
-   * position, size and brightness encode — leaving the default on a measured
+   * position, size and brightness encode, leaving the default on a measured
    * layout would state something untrue about the picture. */
   caption?: ReactNode;
   /** Compact visible key for the canvas's four visual channels. Callers with
@@ -93,12 +93,12 @@ export function GraphCanvas({
   fallbackDescription?: string;
   /** The frame a measured field is drawn in, in the caller's own coordinates.
    * Only meaningful alongside placed nodes. Without it the camera frames the
-   * bodies that happen to exist, so a field with an empty region — no dormant
-   * projects, say — silently loses that region and the reader is never shown
+   * bodies that happen to exist, so a field with an empty region, no dormant
+   * projects, say, silently loses that region and the reader is never shown
    * the absence. With it, an empty part of the axis stays empty on screen,
    * which is the finding. */
   extent?: FieldExtent;
-  /** HUD drawn over the canvas box and nothing else — legends, scale, the
+  /** HUD drawn over the canvas box and nothing else, legends, scale, the
    * rule that chose the slice. Pointer-transparent so it never steals a drag;
    * a child that must be operable re-enables its own pointer events. Rendered
    * only while a field is drawn, so a failure state is never decorated. */
@@ -106,8 +106,8 @@ export function GraphCanvas({
 }) {
   const unknownDegreeCount = nodes.filter((node) => node.degree == null).length;
   const containerRef = useRef<HTMLDivElement | null>(null);
-  /** The live scene, or nothing. Every out-of-band poke at the renderer —
-   * a selection repaint, a resize, a theme flip, a strike — goes through this,
+  /** The live scene, or nothing. Every out-of-band poke at the renderer,
+   * a selection repaint, a resize, a theme flip, a strike, goes through this,
    * so none of them can reach a renderer that has already been killed. */
   const sceneRef = useRef<GraphScene | null>(null);
   /**
@@ -125,14 +125,14 @@ export function GraphCanvas({
    * the renderer's lifetime is bound to a real measured box rather than
    * merely started once one appears: it is built when the container has been
    * measured non-zero, and torn down the moment the measurement says it has
-   * none. That is why this is observed state and not a mount-time retry — a
+   * none. That is why this is observed state and not a mount-time retry, a
    * retry answers "has it arrived yet", and the error we were getting came
    * from the other direction, a container that had a box and then lost it as
    * its workspace was navigated away from.
    */
   const [box, setBox] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
   /**
-   * Whether the container has a box at all — the only distinction the renderer's
+   * Whether the container has a box at all, the only distinction the renderer's
    * lifetime turns on.
    *
    * Sigma reads `offsetWidth` in `resize()` and throws on a 0×0 or detached
@@ -150,8 +150,8 @@ export function GraphCanvas({
    *
    * An emergent field fetches ForceAtlas2 on demand, so for the first time
    * this canvas has a way to fail that is neither "no context" nor "too
-   * large". Drawing the seed circle instead would be a lie — a ring of nodes
-   * is a composition, and the reader would read meaning into it — so the
+   * large". Drawing the seed circle instead would be a lie, a ring of nodes
+   * is a composition, and the reader would read meaning into it, so the
    * failure is stated. Held as the topology it happened to rather than a
    * boolean, so a caller handing over different nodes gets a fresh attempt
    * without any reset of its own.
@@ -167,7 +167,7 @@ export function GraphCanvas({
    * the one with no symptom of its own: a lost context leaves the last drawn
    * pixels frozen, or clears them to nothing, and either reading is false. So
    * it is stated, and held as the topology it happened to for the same reason
-   * the engine failure is — different nodes are a different attempt.
+   * the engine failure is, different nodes are a different attempt.
    */
   const [contextLostFor, setContextLostFor] = useState<readonly GraphCanvasNode[] | null>(
     null,
@@ -240,7 +240,7 @@ export function GraphCanvas({
   // Selection and the select handler are read through refs rather than closed
   // over, so they can change without re-running the mount effect. They used to
   // sit in its dependency list, and `onSelect` is an inline arrow at every call
-  // site: every parent render — including one per live SSE pulse — tore the
+  // site: every parent render, including one per live SSE pulse, tore the
   // renderer down and re-ran a 200-iteration ForceAtlas2 layout. That both
   // burned a layout per event and hid the sleeping render loop behind a
   // remount. The effect now depends on topology alone.
@@ -255,7 +255,7 @@ export function GraphCanvas({
   // The app's persisted three-state motion control, not the bare OS query this
   // used to read: pinning "Reduced" had no effect on the field, which is the one
   // surface in the product where motion is actually the point. Held in a ref for
-  // the same reason selection is — the renderer costs a 200-iteration
+  // the same reason selection is, the renderer costs a 200-iteration
   // ForceAtlas2 layout to build, so a preference flip must reach the live render
   // loop without tearing the field down and re-laying it out.
   const { reduced } = useReducedMotion();
@@ -280,7 +280,7 @@ export function GraphCanvas({
   // no knowledge of any render loop. If the loop is asleep (which, correctly,
   // it is whenever the field is cold) that heat would sit undrawn and
   // undecayed forever. Subscribing turns every real strike, wherever it
-  // originates, into exactly one wake — and nothing else can produce one,
+  // originates, into exactly one wake, and nothing else can produce one,
   // because the field has no clock. The subscription belongs to the FIELD, not
   // to any one scene: a strike that arrives while no scene exists finds
   // nothing to wake, which is the same nothing the unsubscribed version did.
@@ -288,7 +288,7 @@ export function GraphCanvas({
 
   // A theme flip is a property of the document, not of any one renderer, so
   // the observer lives as long as this canvas does and re-samples whichever
-  // scene is live at the time — or nothing, if none is.
+  // scene is live at the time, or nothing, if none is.
   useEffect(() => {
     const observer = new MutationObserver(() => sceneRef.current?.retheme());
     observer.observe(document.documentElement, {
@@ -307,8 +307,8 @@ export function GraphCanvas({
   // The scene's own lifetime. The dependency list is deliberately exactly the
   // set that invalidates a composed field: its topology, the axis it is framed
   // in, whether the container has a box at all, and any teardown that happened
-  // out of band. Everything else the scene needs — selection, the select
-  // handler, the motion preference, the activation field — is read through a
+  // out of band. Everything else the scene needs, selection, the select
+  // handler, the motion preference, the activation field, is read through a
   // ref precisely so it can change without costing a layout.
   useEffect(() => {
     const container = containerRef.current;
@@ -411,7 +411,7 @@ export function GraphCanvas({
    * The renderer's lifetime is bound to `hasBox` above rather than to the
    * measured numbers, because depending on the numbers made every drag of a
    * window edge or opening of a side panel kill the renderer, rebuild the whole
-   * graphology graph and re-run the 200-iteration ForceAtlas2 settle — a
+   * graphology graph and re-run the 200-iteration ForceAtlas2 settle, a
    * layout per resize frame. Only the zero/non-zero transition changes what
    * Sigma can legally do; every other change is something Sigma resizes itself
    * into. `resize()` is also what Sigma's own window listener would call.
@@ -423,7 +423,7 @@ export function GraphCanvas({
 
   // Turning motion off has to take effect on the field the reader is looking at,
   // not merely on the next one they open: a loop already running keeps running
-  // until something stops it. Turning it back on needs no counterpart — the next
+  // until something stops it. Turning it back on needs no counterpart, the next
   // real event wakes the loop through `wake`.
   useEffect(() => {
     if (reduced) sceneRef.current?.settle();
@@ -443,7 +443,7 @@ export function GraphCanvas({
     return (
       <GraphUnavailable>
         this browser has no WebGL context, so the {nodes.length.toLocaleString()}-symbol
-        graph canvas cannot draw — {fallbackDescription ?? 'read the field description below'}
+        graph canvas cannot draw, {fallbackDescription ?? 'read the field description below'}
       </GraphUnavailable>
     );
   }
@@ -462,7 +462,7 @@ export function GraphCanvas({
       <GraphUnavailable>
         the force layout could not be completed, so the{' '}
         {nodes.length.toLocaleString()}-symbol graph canvas has no positions to
-        draw — {fallbackDescription ?? 'read the field description below'}
+        draw, {fallbackDescription ?? 'read the field description below'}
       </GraphUnavailable>
     );
   }
@@ -474,7 +474,7 @@ export function GraphCanvas({
     return (
       <GraphUnavailable>
         the graph canvas lost its WebGL context, so the{' '}
-        {nodes.length.toLocaleString()}-symbol field is no longer being drawn —
+        {nodes.length.toLocaleString()}-symbol field is no longer being drawn,
         {fallbackDescription ?? 'read the field description below'}, and the field
         returns if the browser restores the context
       </GraphUnavailable>
@@ -589,7 +589,7 @@ export function GraphCanvas({
   );
 }
 
-/** A field that is NOT being drawn — no WebGL context, no layout engine, a
+/** A field that is NOT being drawn, no WebGL context, no layout engine, a
  * graph past this renderer's tier, or a context the GPU took back after the
  * field had been composed.
  *

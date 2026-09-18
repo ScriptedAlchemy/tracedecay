@@ -2,8 +2,8 @@
 //!
 //! Ingest sanitizes every raw message before persistence, but rows written
 //! under older detector rules can hold values the current detector would
-//! redact or refuse. This owner re-evaluates every at-rest raw-message body —
-//! inline `content` and whole-message external payload bytes — and re-ingests
+//! redact or refuse. This owner re-evaluates every at-rest raw-message body,
+//! inline `content` and whole-message external payload bytes, and re-ingests
 //! each hit through the same staging and commit path new ingest uses, so
 //! redaction, externalization, quarantine, receipts, and FTS maintenance all
 //! follow the one canonical sanitizer. A replaced external payload file is
@@ -14,8 +14,8 @@
 //! [`lcm_payload_detector_revision`], so the sweep runs once per rule refresh
 //! instead of on every project open. An interrupted pass leaves the watermark
 //! unset and reruns from the start; sanitization is idempotent. A row the
-//! sanitizer cannot re-evaluate fails the run with a typed error — never a
-//! silent skip — and the watermark stays unset until a pass covers every row.
+//! sanitizer cannot re-evaluate fails the run with a typed error, never a
+//! silent skip, and the watermark stays unset until a pass covers every row.
 //!
 //! Media-span payload files are byte ranges the ingest scan already evaluated
 //! inside their owning message text before externalizing them; the rescan
@@ -446,7 +446,7 @@ fn requires_remediation(text: &str, provider_metadata: Option<&str>) -> Result<b
 ///
 /// Whole-message external rows never persisted provider metadata (their
 /// stored metadata is the payload envelope ingest builds fresh), so they
-/// re-ingest with none — exactly what ingest produced the first time.
+/// re-ingest with none, exactly what ingest produced the first time.
 fn stored_provider_metadata(row: &RescanRow) -> Result<Option<String>, LcmError> {
     if row.storage_kind == LcmStorageKind::External {
         return Ok(None);

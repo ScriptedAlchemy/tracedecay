@@ -229,7 +229,7 @@ async fn opencode_install_prevents_a_second_analyzer_and_uninstall_restores_it()
     assert_eq!(
         workspace.starts(),
         2,
-        "after uninstall exactly one analyzer owns the language again — TraceDecay's"
+        "after uninstall exactly one analyzer owns the language again, TraceDecay's"
     );
     assert_engine_state(
         &after_uninstall.snapshot(),

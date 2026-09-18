@@ -6,19 +6,19 @@
  * `stories/audit.ts` captures each of the twelve workspaces in its INITIAL
  * render, which is the right shape for a shipped-state gallery and the wrong
  * shape for TRACE: the drill-in does not exist until a symbol is touched, and
- * the two things it is judged on — the atmosphere and the motion contract — are
+ * the two things it is judged on, the atmosphere and the motion contract, are
  * only observable after a gesture. So this walks a scripted journey instead of a
  * route list, screenshots every step in both themes at 320/768/1440, and runs
  * a screenshot of each one.
  *
  * The journey is the real navigation model, clicked rather than deep-linked:
  *
- *   spine          /code as it arrives — the connectivity spine
+ *   spine          /code as it arrives. The connectivity spine
  *   trace          a hub card touched, which selects the symbol AND floods its
  *                  topography in one gesture (the hero state)
  *   trace-hover    the pointer resting on the field, so the hover bloom, whose
  *                  latency is scaled by degree, is in the frame
- *   trace-reduced  the same field with Motion pinned to Reduced — the static
+ *   trace-reduced  the same field with Motion pinned to Reduced. The static
  *                  composition, captured as a peer of the animated one because
  *                  it is a rendering mode and not a degradation
  *   spine-return   back out, proving the drill-in is reversible
@@ -94,7 +94,7 @@ async function waitForServer(baseURL: string, timeoutMs = 90_000): Promise<void>
  * with `factory is undefined (GraphCanvas.tsx)` and rendered the router's error
  * boundary, which a screenshot pass is perfectly happy to photograph and
  * call clean. Auditing the production bundle removes that class of false green
- * outright and has the better property anyway — the artifact under test is the
+ * outright and has the better property anyway. The artifact under test is the
  * one `build.rs` embeds in the binary.
  */
 function buildApp(): Promise<void> {
@@ -156,7 +156,7 @@ async function setTheme(page: Page, theme: Theme): Promise<void> {
     try {
       localStorage.setItem('td-theme', t);
     } catch {
-      /* storage disabled — the dataset alone still themes */
+      /* storage disabled. The dataset alone still themes */
     }
     document.documentElement.dataset['theme'] = t;
   }, theme);
@@ -217,7 +217,7 @@ async function ensureSpine(page: Page): Promise<void> {
 async function openTrace(page: Page): Promise<boolean> {
   const card = page.locator('main#td-main button[aria-pressed]');
   // Waited for, not sampled: the ranked hubs arrive with the overview query, so
-  // a fixed sleep raced them and reported "no cards" — indistinguishable from a
+  // a fixed sleep raced them and reported "no cards". Indistinguishable from a
   // missing entry point.
   try {
     await card.first().waitFor({ state: 'visible', timeout: 20_000 });
@@ -228,7 +228,7 @@ async function openTrace(page: Page): Promise<boolean> {
   try {
     // Keyed on the back-out control, NOT on the canvas. Below the field's
     // legibility floor the canvas is deliberately `hidden` and the symbol list
-    // is the rendering — so waiting for a visible canvas declared the narrow
+    // is the rendering, so waiting for a visible canvas declared the narrow
     // mode broken when it was in fact working as designed.
     await backToSpine(page).first().waitFor({ state: 'visible', timeout: 15_000 });
   } catch {
@@ -348,7 +348,7 @@ async function main(): Promise<void> {
   const externalRequests = new Set<string>();
   /**
    * Uncaught page errors. A surface that throws still screenshots and still
-   * renders as valid markup — the router's error boundary is real markup — so a clean
+   * renders as valid markup, the router's error boundary is real markup, so a clean
    * gate over a crashed route is the exact false green this run has to refuse.
    */
   const pageErrors: string[] = [];
@@ -373,11 +373,11 @@ async function main(): Promise<void> {
     // Init script as a source string for the same `__name` reason as
     // `readTypography`: a closure with a nested helper is rewritten by esbuild
     // into something the page realm cannot evaluate, and an init script that
-    // throws does so silently unless `pageerror` is being watched — which is how
+    // throws does so silently unless `pageerror` is being watched, which is how
     // this reset came to look installed while never running.
     // `animation: none`, NOT `animation-duration: 0s`. The entrance primitives
     // fill `both`, and a zero-duration animation with `both` fill holds its
-    // from-state forever — which is `opacity: 0`. Collapsing the duration
+    // from-state forever, which is `opacity: 0`. Collapsing the duration
     // therefore does not still the surface, it erases it: every staggered region
     // stayed invisible, Playwright reported the hub cards as not visible, and the
     // screenshots were of blank panels that a scan was happy to pass. `tokens.css`
@@ -415,7 +415,7 @@ async function main(): Promise<void> {
       try {
         // A screenshot of a surface that has been scrolled is evidence of the
         // scroll, not of the surface. Opening TRACE means clicking a row inside
-        // a scrolling panel, and the browser keeps that row in view — which had
+        // a scrolling panel, and the browser keeps that row in view, which had
         // been carrying the whole header plate out of frame and quietly turning
         // every `trace__*` capture into a picture of the middle of the page.
         // Reset every scroller so each capture starts where a reader does.
@@ -537,13 +537,13 @@ async function main(): Promise<void> {
     process.exitCode = 1;
   }
   if (manifest.pageErrors.length > 0) {
-    console.error('[topo] a surface threw during the walk — the gate is not clean');
+    console.error('[topo] a surface threw during the walk. The gate is not clean');
     process.exitCode = 1;
   }
   // A remote font or script is a product defect on an offline install, so it
   // fails the run rather than being noted in a manifest nobody reads.
   if (externalRequests.size > 0) {
-    console.error('[topo] non-local requests detected — offline posture broken');
+    console.error('[topo] non-local requests detected. Offline posture broken');
     process.exitCode = 1;
   }
 }

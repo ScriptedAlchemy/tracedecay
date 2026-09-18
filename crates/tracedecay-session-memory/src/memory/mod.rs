@@ -115,7 +115,7 @@ pub fn is_memory_application_cancellation(error: &TraceDecayError) -> bool {
 
 /// Builds a [`MemoryApplication`] directly over a database handle's
 /// [`DatabaseFactStore`]. The shared resolver for every route that already
-/// holds an open [`Database`] rather than a higher-level fact-store handle —
+/// holds an open [`Database`] rather than a higher-level fact-store handle,
 /// used by the root crate's daemon scheduler and MCP lifecycle paths as well
 /// as the dashboard API.
 pub fn memory_application_for_db(

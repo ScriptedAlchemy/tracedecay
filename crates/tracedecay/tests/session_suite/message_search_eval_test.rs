@@ -16,7 +16,7 @@
 //! forming a known-gap ledger that a later ranking fix must consciously flip.
 //!
 //! Set `TD_MSG_EVAL_RECORD=1` to print the live ranking of every query and
-//! skip assertions — the calibration path used to author/refresh the fixture.
+//! skip assertions, the calibration path used to author/refresh the fixture.
 
 use serde_json::Value;
 use tempfile::TempDir;

@@ -3,9 +3,9 @@
 //! Whether a compacted store survives being written to afterwards.
 //!
 //! Ignored by default, and pure grafeo: no TraceDecay schema, no registry, no
-//! generation runtime. It exists because "seal implies compact" — freezing a
+//! generation runtime. It exists because "seal implies compact", freezing a
 //! sealed generation into a columnar base at the end of
-//! `finalize_staged_generation` — cannot ship until this answers cleanly.
+//! `finalize_staged_generation`, cannot ship until this answers cleanly.
 //!
 //! # What it found
 //!
@@ -26,8 +26,8 @@
 //! freshly allocated id collides with a base id. The next open is down a node
 //! for good.
 //!
-//! This is not reachable today — nothing in the crate calls `compact()` outside
-//! the bench lane — but it is exactly what seal-time compaction would do: the
+//! This is not reachable today, nothing in the crate calls `compact()` outside
+//! the bench lane, but it is exactly what seal-time compaction would do: the
 //! generation lifecycle deletes rows after a seal (whole-generation retirement,
 //! `generation_runtime.rs`), and quarantine markers are created and cleared on
 //! the recovery path.

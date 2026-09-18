@@ -1,4 +1,4 @@
-//! `tracedecay_recursion` — self-recursive and mutually recursive symbol detection.
+//! `tracedecay_recursion`, self-recursive and mutually recursive symbol detection.
 
 use super::*;
 

@@ -326,7 +326,7 @@ fn start_replays_an_identical_admission_after_the_projection_moves() {
 /// Excluding the server-derived binding generation and sequence from the
 /// replay comparison must not weaken conflict detection: the same attempt
 /// identity carrying different caller-supplied admission content is still
-/// refused as a conflict — including after the projection has moved past the
+/// refused as a conflict, including after the projection has moved past the
 /// admission snapshot, so the refusal below can only come from the divergent
 /// content and never from binding drift.
 #[test]

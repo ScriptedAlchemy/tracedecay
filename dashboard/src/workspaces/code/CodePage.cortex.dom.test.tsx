@@ -164,7 +164,7 @@ describe('hover inspects, click pins', () => {
       expect(callers.getAttribute('data-relation-state')).toBe('measured');
     });
     expect(neighborReads(fetchMock)).toBe(1);
-    // One row per distinct caller, with its call-site count — never a decimal.
+    // One row per distinct caller, with its call-site count, never a decimal.
     const rows = callers.querySelectorAll('[data-neighbor]');
     expect(rows.length).toBeGreaterThan(0);
     expect(within(callers).getAllByText(/sites?$/).length).toBe(rows.length);
@@ -287,12 +287,12 @@ describe('typed absences on the inspector', () => {
     expect(strata.textContent).toMatch(/src\/dashboard/);
   });
 
-  it('names a file the layering scan never laid out, with the scan’s own extent', async () => {
+  it('names a file the layering scan never laid out, with the scan\'s own extent', async () => {
     vi.stubGlobal('fetch', serve());
     const user = userEvent.setup();
     renderCode();
 
-    // This hub fixture lives in a file — and a directory — the strata scan
+    // This hub fixture lives in a file, and a directory, the strata scan
     // never laid out, so the reading is the absence and the scan's extent.
     await user.click(await screen.findByRole('button', { name: /find_direct_child_by_kind/ }));
     const inspector = screen.getByRole('complementary', { name: 'Inspector' });

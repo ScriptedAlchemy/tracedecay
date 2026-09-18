@@ -6,7 +6,7 @@ status matrix that flags tools needing investigation (errors, timeouts,
 empty results, performance regressions).
 
 Used as both:
-- **Bug probe.** New language support, new tool, or refactor — re-run the
+- **Bug probe.** New language support, new tool, or refactor, re-run the
   matrix and any regression shows up as a flagged cell.
 - **Benchmark.** Timings per call are logged; the same repos serve as a
   fixed corpus for cross-version perf comparison.

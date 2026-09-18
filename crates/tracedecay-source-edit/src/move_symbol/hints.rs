@@ -27,7 +27,7 @@ pub(super) fn cfg_context_hints(moved_text: &str, dest_rel: &str) -> Vec<MoveHin
         let t = raw.trim();
         if t.starts_with("#[cfg(") || t.starts_with("#[cfg_attr(") {
             // The gate's offset is within the moved snippet, not a real line in
-            // the destination file — reporting it as `line` (which every other
+            // the destination file, reporting it as `line` (which every other
             // hint uses for a concrete file site) points at nothing. Leave `line`
             // unset and describe the moved-span offset in the detail instead.
             out.push(MoveHint {
@@ -49,9 +49,9 @@ pub(super) fn cfg_context_hints(moved_text: &str, dest_rel: &str) -> Vec<MoveHin
 }
 
 /// File-level cycle-risk heuristic: if the destination already imports from the
-/// source module, moving a symbol here — while the source module's former call
-/// sites will now import it back from the destination — can form a two-way
-/// module dependency. Evidence is the destination's own `use` lines. Skipped
+/// source module, moving a symbol here can form a two-way module dependency,
+/// because the source module's former call sites will now import it back from
+/// the destination. Evidence is the destination's own `use` lines. Skipped
 /// when the source lives at the crate root (`crate`), where the signal is noise.
 pub(super) fn cycle_risk_hints(
     dest_original: &str,
@@ -111,7 +111,7 @@ mod tests {
         let hints = cfg_context_hints(moved, "src/dest.rs");
         assert_eq!(hints.len(), 1);
         assert_eq!(hints[0].kind, "cfg_context");
-        // `line` must be unset — the offset is within the snippet, not a real
+        // `line` must be unset, the offset is within the snippet, not a real
         // destination line.
         assert_eq!(hints[0].line, None, "hint: {:?}", hints[0]);
         assert!(

@@ -122,7 +122,7 @@ describe('composeRegistryField', () => {
       'shared-main',
       'shared-wt',
     ]);
-    // The hub sits at its checkouts' centroid — the honest position for a node
+    // The hub sits at its checkouts' centroid, the honest position for a node
     // that means "these ones".
     const hub = field.nodes.find((node) => node.id.startsWith('repo:'))!;
     const kids = field.nodes.filter((node) => node.id.startsWith('shared-'));
@@ -215,7 +215,7 @@ describe('composeRegistryField', () => {
       [...field.nodes]
         .sort((l, r) => l.id.localeCompare(r.id))
         .map((node) => `${node.id}@${node.x.toFixed(6)},${node.y.toFixed(6)}`);
-    // Independent of the order repositories arrive in, too — the registry is
+    // Independent of the order repositories arrive in, too, the registry is
     // re-sorted on every render and the picture must not jump.
     expect(key(a)).toEqual(key(b));
   });
@@ -275,7 +275,7 @@ describe('recencyVitality horizon', () => {
       ),
       // Last seen in 2019. Taking the maximum would set the horizon at ~94
       // years and push every other body back to indistinguishable full
-      // brightness — the exact compression this parameter removes.
+      // brightness, the exact compression this parameter removes.
       project('ancient', 34_000, { stores: 1, artifacts: 1 }),
     ];
     const horizon = vitalityHorizon(projects, NOW);

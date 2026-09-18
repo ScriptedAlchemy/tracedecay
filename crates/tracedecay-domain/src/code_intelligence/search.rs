@@ -1090,7 +1090,7 @@ impl ChangedCodeChunkSetV1 {
 
     /// Structural request checks only. `reused_count` / `reused_digest` are
     /// sealed into `manifest_digest`, but this does not reconstruct the
-    /// complement — call [`Self::validate_reused_complement`] at the
+    /// complement, call [`Self::validate_reused_complement`] at the
     /// publication or restore boundary that holds the current corpus.
     pub fn validate(&self) -> Result<(), DomainError> {
         self.to_generation.validate()?;
@@ -1480,7 +1480,7 @@ pub struct CodeIndexCapabilityManifestV1 {
 /// a checkout that reseals the same commit must not be refused as
 /// capability-incompatible. The manifest still carries its `generation_id`,
 /// and `CodeIndexPublishedGenerationV1` still refuses a capability manifest
-/// naming a different generation than its own, so the pairing stays bound —
+/// naming a different generation than its own, so the pairing stays bound,
 /// by that invariant rather than by this digest.
 #[derive(Serialize)]
 struct CodeIndexCapabilityManifestDigestInput<'a> {
@@ -2207,7 +2207,7 @@ mod tests {
     #[test]
     fn capability_identity_survives_a_new_generation_but_not_a_new_capability() {
         let sealed = capability_manifest();
-        // The same source resealed under a new generation id — a checkout, a
+        // The same source resealed under a new generation id, a checkout, a
         // detached HEAD, a rollback that mints a fresh generation.
         let mut resealed = sealed.clone();
         resealed.generation_id = id("generation.v1.0cbc773a.00000002.resealed");

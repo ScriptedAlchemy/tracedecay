@@ -3,7 +3,7 @@
 //! Two layers with different authority. The stat signature over every
 //! candidate's `(logical path, len, mtime)` is a negative cache: unequal
 //! metadata proves the worktree moved without reading a byte, but equal
-//! metadata proves nothing — a same-length rewrite whose mtime was preserved
+//! metadata proves nothing, a same-length rewrite whose mtime was preserved
 //! (`rsync -a`, `cp --preserve`, `touch -d`, restore tools, a timestamp
 //! collision) leaves it unchanged. Source currency is therefore only ever
 //! settled against the sealed generation's own per-file content digests
@@ -249,8 +249,8 @@ fn candidate_matches_manifest(
 /// be exactly what the generation sealed: a clean-tree generation captures
 /// HEAD's blobs, and git's clean filters (`core.autocrlf`, `eol`, `ident`,
 /// filter drivers) are what separate those blobs from the checkout. Running
-/// the disk bytes through the repository's own filter pipeline — the same
-/// conversion gix status applies before it compares content — settles whether
+/// the disk bytes through the repository's own filter pipeline, the same
+/// conversion gix status applies before it compares content, settles whether
 /// the file is current. Untracked and explicitly admitted sources have no
 /// blob to be sealed from, so their raw mismatch is final.
 fn tracked_files_match_after_clean_filters(

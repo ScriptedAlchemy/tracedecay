@@ -290,7 +290,7 @@ async fn fact_search_ranks_exact_operational_evidence_and_tracks_once() {
         Some(first_results.len() as i64 + rare_results.len() as i64)
     );
     // Every fact the two searches returned must be counted exactly once, so
-    // the distinct-fact tally is the size of the returned id set — not the
+    // the distinct-fact tally is the size of the returned id set, not the
     // number of stored facts, which would also assert how many weak matches
     // the ranker chooses to return.
     let retrieved_ids: BTreeSet<String> = first_results

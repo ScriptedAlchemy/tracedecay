@@ -12,7 +12,7 @@
 //! another's. Where an authority knows its own identity, [`McpToolContext::bind`]
 //! checks that identity rather than the caller's word: a registered store
 //! lease reports the logical shard it was opened for, and a lease that is not
-//! this project's session shard is refused however it was presented — a
+//! this project's session shard is refused however it was presented, a
 //! `Project` or `Code` shard for the same project included, since those are
 //! different stores and not project-session authority.
 //!
@@ -130,7 +130,7 @@ impl<'a> AdmittedProjectStore<'a> {
 /// The authority is required, not optional: an executor admitted without the
 /// admission envelope it authenticates is an empty capability claim that would
 /// report the index as mounted while nothing can answer. The executors carry
-/// no scope of their own — they are admitted under the request's one scope,
+/// no scope of their own, they are admitted under the request's one scope,
 /// and each one re-authorizes its embedded route admission against the request
 /// root when it runs.
 #[derive(Clone, Copy)]
@@ -208,8 +208,8 @@ impl McpAdmittedProjectV1 {
     /// Validates one request-scoped snapshot and freezes it.
     ///
     /// The root must be absolute, the admitted scope self-consistent, the
-    /// store layout must name that same project, and a session lease — when
-    /// present — must be a `ProjectSessions` shard for that project. Nothing
+    /// store layout must name that same project, and a session lease, when
+    /// present, must be a `ProjectSessions` shard for that project. Nothing
     /// is defaulted or repaired.
     pub fn new(
         identity: McpProjectIdentityV1,
@@ -371,7 +371,7 @@ pub struct McpRequestAuthoritiesV1<'a> {
 /// Everything the composition root admits for one MCP tool call.
 ///
 /// One serving shape: the route published a project snapshot, and root,
-/// scope, branch, and session store live only on that snapshot — there is
+/// scope, branch, and session store live only on that snapshot, there is
 /// no second label a caller can set beside it. A call that never published
 /// a checkout is a typed root failure, not a second binding shape.
 #[derive(Clone, Copy)]
@@ -989,7 +989,7 @@ pub(crate) mod tests {
     }
 
     /// Test-only admitted snapshot for a worktree root. Git family tests use
-    /// this instead of a production `Unprojected` binding — every served
+    /// this instead of a production `Unprojected` binding, every served
     /// route is admitted.
     pub(crate) fn fixture_project(
         root: &Path,
@@ -1116,7 +1116,7 @@ pub(crate) mod tests {
     /// The family gate fires on a real registered lease, not just on a shard
     /// identity in isolation. The lease below is genuinely published through
     /// the production registration route and is a real store this daemon
-    /// opens — it is simply the profile's session store rather than the
+    /// opens, it is simply the profile's session store rather than the
     /// admitted project's, so it carries no project-session authority here.
     #[tokio::test]
     async fn a_real_non_session_shard_lease_is_refused_at_the_binding() {
@@ -1232,7 +1232,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// A checkout differs from another by project, repository, or worktree —
+    /// A checkout differs from another by project, repository, or worktree,
     /// never by the branch reference HEAD happens to carry. Two scopes for the
     /// same checkout on different branches must isolate identically.
     #[test]

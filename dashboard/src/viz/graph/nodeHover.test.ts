@@ -9,7 +9,7 @@ import type { Settings } from 'sigma/settings';
  * The regression this guards: Sigma's default hover drawer paints an opaque
  * white shadowed disc and a white label backdrop, which read as the hovered
  * body "going white" and growing a blob on the dark field. Every paint this
- * drawer makes must come from the theme box it was handed — and from the box's
+ * drawer makes must come from the theme box it was handed, and from the box's
  * CURRENT colors, so a theme flip re-lights hovers without a rebuild.
  */
 

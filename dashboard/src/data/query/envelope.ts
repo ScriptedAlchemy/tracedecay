@@ -37,8 +37,8 @@ export async function fetchEnvelope<T>(
   // `error`: the request was well-formed and the daemon healthy, and the
   // remedy is to change scope rather than to retry. This result type is keyed
   // by domain state rather than by a transport outcome, so the refusal is
-  // reported in that vocabulary — `locked` is the taxonomy's word for a
-  // surface that will not accept a change — and carries the daemon's sentence.
+  // reported in that vocabulary, `locked` is the taxonomy's word for a
+  // surface that will not accept a change, and carries the daemon's sentence.
   if (response.status === 405) {
     const refusal = readOnlyScopeRefusal(await decodeJsonBody(response, init?.signal));
     if (refusal) {
@@ -49,8 +49,8 @@ export async function fetchEnvelope<T>(
   if (!response.ok) {
     // Some routes answer an unready read with a non-2xx status AND a complete
     // typed envelope body (the graph-structure routes return 503 while the
-    // verified graph is warming). The body is the daemon's typed truth —
-    // reason included — so it must not be flattened into a raw `HTTP 503`.
+    // verified graph is warming). The body is the daemon's typed truth,
+    // reason included, so it must not be flattened into a raw `HTTP 503`.
     // Only a non-2xx without a decodable envelope stays a bare transport
     // error.
     const decoded = decodeEnvelopeBody<T>(payloadSchema, await decodeJsonBody(response, init?.signal));
@@ -64,7 +64,7 @@ export async function fetchEnvelope<T>(
   );
 }
 
-/** Decodes one envelope body, or `null` when it is not an envelope — which
+/** Decodes one envelope body, or `null` when it is not an envelope, which
  * includes the {@link decodeJsonBody} sentinel for a body that was not JSON.
  *
  * Envelope routes use a `null` payload only when the domain state says no safe

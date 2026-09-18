@@ -904,7 +904,7 @@ pub struct Config {
         annot_names
     );
 
-    // derive should NOT be in AnnotationUsage — it's handled separately by DerivesMacro
+    // derive should NOT be in AnnotationUsage. It's handled separately by DerivesMacro
     assert!(
         !annot_names.contains(&"derive"),
         "derive should not appear as AnnotationUsage, got: {:?}",
@@ -981,7 +981,7 @@ pub fn no_attrs(y: i32) -> i32 {
         "expected attrs_start_line to walk back over 2 doc + 2 attribute lines"
     );
 
-    // `no_attrs` has nothing leading it that should count — its blank gap means
+    // `no_attrs` has nothing leading it that should count. Its blank gap means
     // the walk stops, so attrs_start_line == start_line.
     assert_eq!(no_attrs.attrs_start_line, no_attrs.start_line);
 }
@@ -1126,7 +1126,7 @@ fn use_foo() {
         .map(|r| r.reference_name.as_str())
         .collect();
 
-    // Foo::new() produces "Foo::new" — should resolve via qualified match.
+    // Foo::new() produces "Foo::new". Should resolve via qualified match.
     assert!(
         ref_names.contains(&"Foo::new"),
         "expected Foo::new call, got: {ref_names:?}"

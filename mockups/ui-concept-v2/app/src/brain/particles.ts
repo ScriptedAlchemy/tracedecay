@@ -1,5 +1,5 @@
 /**
- * Brain particle bakes — plate species:
+ * Brain particle bakes, plate species:
  *  - bakeBody: one project body. Branched dendrites, a particulate crown,
  *    a basal dust knot, and selective emission bloom. Size = indexed mass (named measure). Brightness = recency.
  *  - geodesicBall: repo-neighborhood checkout orb (wireframe constellation).

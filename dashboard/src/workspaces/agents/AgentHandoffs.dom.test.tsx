@@ -12,7 +12,7 @@ import { readHandoffFrontier } from './handoff.ts';
  *
  * Everything below drives the component through `readHandoffFrontier` over a
  * fixture the generated contract has already accepted, rather than through a
- * hand-shaped reading — so a test cannot pass against a frontier the daemon
+ * hand-shaped reading, so a test cannot pass against a frontier the daemon
  * could never send.
  */
 

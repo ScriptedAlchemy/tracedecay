@@ -193,7 +193,7 @@ export interface VersionTrackRow {
   readonly configuration: PinDelta;
   readonly catalog: PinDelta;
   /** Steps added or removed relative to the previous version; `null` for the
-   * first. A count of steps, not a diff of their contents — the daemon's
+   * first. A count of steps, not a diff of their contents, the daemon's
    * `diff_definition` owns which steps changed. */
   readonly stepsDelta: number | null;
 }
@@ -225,7 +225,7 @@ export type WorkflowLifecycleAction = 'activate' | 'retire' | 'reject';
 
 /** A disposition the daemon answered during this session, kept beside the
  * instant it was answered. The registry serves no disposition read, so this is
- * the only lifecycle state the page can show — and it is shown as what it is:
+ * the only lifecycle state the page can show, and it is shown as what it is:
  * the daemon's answer to one compare-and-swap, at one time. */
 export interface LifecycleReceipt {
   readonly action: WorkflowLifecycleAction;
@@ -416,7 +416,7 @@ export function formatDurationMicros(micros: number | null): string {
 }
 
 /* --------------------------------------------------------------------------
- * State tones — text carries the state; these only pick the lamp hue.
+ * State tones, text carries the state; these only pick the lamp hue.
  * ----------------------------------------------------------------------- */
 
 export function runStatusTone(status: WorkflowRunStatus): string {

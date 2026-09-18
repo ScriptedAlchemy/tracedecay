@@ -73,7 +73,7 @@ fn try_lock_scheduler(
 /// allow.
 ///
 /// Callers already hold the build-publication fence, and every long-lived
-/// scheduler owner — the reconcile worker above all — takes that fence before
+/// scheduler owner, the reconcile worker above all, takes that fence before
 /// the scheduler, so a contended scheduler here is a short-lived status probe,
 /// not a rebuild in flight. Losing that race used to be refused outright with
 /// `CapacityUnavailable`, the same reason a genuinely oversized generation is
@@ -81,7 +81,7 @@ fn try_lock_scheduler(
 /// user its generation exceeded the bounded-read limits. The wait ends with the
 /// request's own terminal state, exactly as the fence wait above it does.
 ///
-/// A control with no wait budget — neither deadline nor cancellation — keeps
+/// A control with no wait budget, neither deadline nor cancellation, keeps
 /// the immediate `CapacityUnavailable` refusal: nothing would ever end its
 /// wait, and this runs on a blocking thread while the async parent holds the
 /// build-publication fence, so a stuck holder would pin both indefinitely.
@@ -154,8 +154,8 @@ impl BranchGenerationCardinalityBoundsV1 {
 /// Which half of a requested exact revision pair the durable index could not
 /// serve. Carrying both sides separately is the whole point: the mint path used
 /// to rebuild *base* whenever anything was missing, so a request whose base was
-/// already sealed and whose head was not paid for a redundant full-tree capture
-/// — and failed outright whenever that redundant base capture could not be
+/// already sealed and whose head was not paid for a redundant full-tree capture,
+/// and failed outright whenever that redundant base capture could not be
 /// performed.
 #[derive(Clone, Copy, Debug)]
 struct ExactGenerationMissV1 {
@@ -165,9 +165,9 @@ struct ExactGenerationMissV1 {
 
 /// Outcome of resolving one exact revision pair against the durable generation
 /// index. A miss is deliberately *not* an error: sealing a generation from an
-/// immutable commit tree is idempotent, so every shape of absence — never
+/// immutable commit tree is idempotent, so every shape of absence, never
 /// indexed, pruned out of the bounded index, or named by an entry whose sealed
-/// bytes are gone — is answered the same way, by minting it.
+/// bytes are gone, is answered the same way, by minting it.
 enum ExactGenerationPairV1 {
     Sealed(
         Arc<CodeIndexPublishedGenerationV1>,
@@ -217,7 +217,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         // `generation_index_truncated` says only that the absence of an entry no
         // longer proves the revision was never indexed. It used to be reported
         // here as `CapacityUnavailable`, which callers read as a transient
-        // "retry later" — but the flag latches on the first eviction and never
+        // "retry later", but the flag latches on the first eviction and never
         // clears, so once the bounded index had evicted anything, every
         // unindexed revision became permanently, and falsely, transient. The
         // truthful answer is the same one an untruncated miss gets: we do not
@@ -459,7 +459,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let task = tokio::task::spawn_blocking(move || {
             // The fence travels with the work it fences. The settle loop below
             // never answers before this closure returns, but the caller may drop
-            // that future — a request timeout, a closed connection — which
+            // that future, a request timeout, a closed connection, which
             // detaches the blocking task and would otherwise release the fence
             // while a mint could still be waiting on the scheduler. Owned by
             // the closure, the fence outlives every scheduler acquisition here.
@@ -492,7 +492,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 ExactGenerationPairV1::Sealed(base, head) => (base, head),
                 // Mint only the side the index could not serve. Capturing a
                 // whole commit tree is the expensive part of this path, and a
-                // base that is already sealed is evidence we already hold — the
+                // base that is already sealed is evidence we already hold, the
                 // unconditional base capture that used to run here charged every
                 // head-only miss for a second full tree, and turned any base the
                 // working repository could no longer capture into a hard failure
@@ -1140,7 +1140,7 @@ mod tests {
 
         // The exact pair is no longer unavailable: the registry mints sealed
         // exact generations straight from the commit's ODB tree on demand.
-        // The invariant this test guards is unchanged — the dirty sealed
+        // The invariant this test guards is unchanged, the dirty sealed
         // generation itself must never serve as exact-commit evidence.
         let control = BranchGenerationReadControlV1 {
             deadline: None,
@@ -1281,7 +1281,7 @@ mod tests {
         .expect("bounded exact-generation read")
     }
 
-    /// A revision the branch has already moved past is an ordinary request — a
+    /// A revision the branch has already moved past is an ordinary request, a
     /// base whose ref advanced between the caller's rev-parse and this read, a
     /// merge-base, a deliberately pinned commit. The capture used to peel the
     /// reference and refuse anything that was not its current tip, which made
@@ -1306,7 +1306,7 @@ mod tests {
         let canonical_project = project.path().canonicalize().expect("canonical project");
         let scoped_store = scoped_code_index_store_root(store.path(), &canonical_project);
         // Only the current tip is indexed, so the pair's head is served from the
-        // index and its base — a commit the branch has already left behind — is
+        // index and its base, a commit the branch has already left behind, is
         // the single half that has to be captured from the object database.
         let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
             project_id.clone(),
@@ -1400,7 +1400,7 @@ mod tests {
     /// merely collided with a probe told the user its generation exceeded the
     /// bounded-read limits.
     /// A mounted worktree whose tip is sealed and whose base commit is not, so
-    /// an exact compare read has to mint the base — the step that needs the
+    /// an exact compare read has to mint the base, the step that needs the
     /// scheduler.
     struct HeldSchedulerFixtureV1 {
         _project: TempDir,
@@ -1595,7 +1595,7 @@ mod tests {
     /// build-publication fence held for as long as the holder stayed. Such a
     /// read keeps the immediate typed `CapacityUnavailable` refusal on both the
     /// blocking compare path and the native candidate producer, and the same
-    /// read succeeds once the scheduler is free — the refusal named the race,
+    /// read succeeds once the scheduler is free, the refusal named the race,
     /// not the generation.
     #[tokio::test]
     async fn an_exact_read_without_a_wait_budget_is_refused_at_once() {
@@ -1672,8 +1672,8 @@ mod tests {
     }
 
     /// Once the bounded index evicts anything its truncation flag latches on
-    /// forever, and a missing entry used to be reported as `CapacityUnavailable`
-    /// — a transient answer callers retry until their deadline, for a generation
+    /// forever, and a missing entry used to be reported as `CapacityUnavailable`,
+    /// a transient answer callers retry until their deadline, for a generation
     /// that was never going to appear. A truncated miss is mint-eligible like
     /// any other, and only the missing half is minted: the base here is served
     /// from the index alone, since its reference no longer exists to capture.

@@ -1292,7 +1292,7 @@ fn map_provider_state(state: ProjectDeliveryProviderStateV1) -> DeliveryProvider
 /// Next steps, not completed Code readings.
 ///
 /// `RequiresSelection` means this row does not name a symbol or a base
-/// revision. Shared Code must link to `/code`, where selection starts — not
+/// revision. Shared Code must link to `/code`, where selection starts, not
 /// `/code?view=shared-code`, which blocks with no symbol. Compare carries the
 /// indexed head so the operator only names the base.
 fn code_navigation_refs(
@@ -1612,7 +1612,7 @@ fn provider_mount_gate_reason(gate: ProjectDeliveryProviderMountGateV1) -> &'sta
             "the admitted checkout has no recognizable GitHub remote, so no provider read can be mounted"
         }
         ProjectDeliveryProviderMountGateV1::GitHubCredentialNotConfigured => {
-            "no GitHub read-only credential is configured for this profile and repository — configure a token (or register the repository as public) to mount provider reads"
+            "no GitHub read-only credential is configured for this profile and repository. Configure a token (or register the repository as public) to mount provider reads"
         }
         ProjectDeliveryProviderMountGateV1::GitHubAccessRefused => {
             "the configured GitHub credential was refused for this repository (missing, rejected, or write-capable), so provider reads stay unmounted"
@@ -1817,7 +1817,7 @@ fn map_pull_request(item: ProjectDeliveryPullRequestV1) -> DeliveryPullRequestV1
     DeliveryPullRequestV1 {
         id: format!("{provider}:{pull_request_id}"),
         label: match item.identity.as_ref() {
-            Some(identity) => format!("Pull request #{pull_request_id} — {}", identity.title),
+            Some(identity) => format!("Pull request #{pull_request_id}, {}", identity.title),
             None => format!("Pull request #{pull_request_id}"),
         },
         provider,

@@ -6,7 +6,7 @@ use tracedecay_global_db::RegisteredGlobalDb;
 /// Upper bound for [`McpServer::ledger_writes_settled`]. Savings-ledger writes
 /// are fire-and-forget `SQLite` appends that finish in well under a second on a
 /// healthy machine, so 10 s is generous headroom; the point is that the wait
-/// is *finite* — a wedged recorder task can never hang the caller (tests,
+/// is *finite*, a wedged recorder task can never hang the caller (tests,
 /// shutdown drains) indefinitely as the previous unbounded loop allowed.
 const LEDGER_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_SPAN_IDENTIFIER_BYTES: usize = 256;
@@ -92,8 +92,8 @@ fn upload_enabled_from_desired_configuration(
 /// *silent*: each recorder independently checked both handles and returned
 /// early, so a fixture that forgot to mount a database failed later as a
 /// missing row in an assertion far from the construction that caused it.
-/// Naming the state makes the absence observable at construction — see
-/// [`McpServer::ledger_sink_is_mounted`] — and collapses three copies of
+/// Naming the state makes the absence observable at construction, see
+/// [`McpServer::ledger_sink_is_mounted`], and collapses three copies of
 /// the same fallback into one resolution.
 pub(crate) enum LedgerSink {
     Mounted(tracedecay_global_db::RegisteredGlobalDbLeaseV1),
@@ -152,7 +152,7 @@ impl McpServer {
 
     /// Estimates the raw-file token cost ("before") for the given file
     /// paths from the cached file-token map (indexed file bytes / 4).
-    /// Pure lookup — persists nothing.
+    /// Pure lookup, persists nothing.
     #[hotpath::measure(label = "mcp.ledger.estimate_raw_tokens")]
     pub(crate) fn estimate_raw_file_tokens(&self, file_paths: &[String]) -> u64 {
         if file_paths.is_empty() {
@@ -239,7 +239,7 @@ impl McpServer {
     }
 
     /// Resolves once every savings-ledger write spawned so far has
-    /// completed (immediately when none are pending — including when global
+    /// completed (immediately when none are pending, including when global
     /// accounting is disabled and no writes are ever spawned).
     ///
     /// Test-only observability for the fire-and-forget ledger recorder:
@@ -249,7 +249,7 @@ impl McpServer {
     ///
     /// Bounded by [`LEDGER_SETTLE_TIMEOUT`] so a spawned write that wedges
     /// (a stuck DB handle, a task that never resolves) can never hang the
-    /// caller forever — the earlier unbounded loop made a wedged write
+    /// caller forever, the earlier unbounded loop made a wedged write
     /// manifest as an un-observable, indefinitely-hung integration test.
     #[hotpath::skip]
     pub async fn ledger_writes_settled(&self) {
@@ -419,7 +419,7 @@ impl McpServer {
 
     /// Best-effort hook-route analytics after authoritative admission commit.
     ///
-    /// Insert failures are logged only — they never alter
+    /// Insert failures are logged only, they never alter
     /// [`HostAdmissionOutcome`]. The durable admission sequence is carried as
     /// the event idempotency identity, so identical but distinct admissions
     /// remain distinct analytics rows.
@@ -459,7 +459,7 @@ impl McpServer {
     /// project, this folds one [`SpanObservation`] into that project's
     /// `sessions.db` span table (see [`tracedecay_sessions::runtime::git_correlation`]).
     /// Mid-session branch/worktree switches are handled by the span table
-    /// itself — the observation always carries the *current* branch.
+    /// itself, the observation always carries the *current* branch.
     ///
     /// This analytics side write is intentionally fail-open: any resolution
     /// or DB error is dropped. Graph snapshots, git derivation, debounce, and

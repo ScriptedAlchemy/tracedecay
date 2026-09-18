@@ -289,7 +289,7 @@ pub fn normalize_prepared_observation_record_v1(
 /// through a byte-limit writer that refuses mid-serialization and tallies the
 /// structure the same way `serde_json::to_value` builds it, so nothing here
 /// encodes the envelope to bytes only to parse them back. The `Value` is the
-/// token's payload — the sanitizer walks and rewrites it — and the structure
+/// token's payload, the sanitizer walks and rewrites it, and the structure
 /// walk over it records the exact depth and value count that stricter
 /// per-policy limits are verified against later.
 fn finish_canonical_envelope(
@@ -362,7 +362,7 @@ fn record_decode_outcome(decoded: bool) {
 
 fn record_digest(record: &[u8]) -> [u8; 32] {
     // Cumulative decoded bytes across every host pipeline, not a last-record
-    // sample — corpus-scale throughput is the quantity being compared.
+    // sample, corpus-scale throughput is the quantity being compared.
     hotpath::gauge!("capture.parse.record_bytes").inc(record.len());
     hotpath::measure_block!("capture.parse.record_digest", Sha256::digest(record).into())
 }

@@ -382,8 +382,8 @@ mod rustup_proxy {
 
     /// Nested analyzer roots may pin different toolchains. rustup resolves the
     /// override from the directory it runs in, so the launch must be resolved
-    /// from each batch's own workspace root — never the project root's
-    /// answer reused for every batch — and retained per root.
+    /// from each batch's own workspace root, never the project root's
+    /// answer reused for every batch, and retained per root.
     #[test]
     fn nested_root_with_its_own_toolchain_override_launches_its_own_binary() {
         let rustup = fake_rustup::install_per_root();

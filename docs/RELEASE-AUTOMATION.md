@@ -146,7 +146,7 @@ gate (run by SDK conformance CI) enforces this job isolation.
 4. `Release Please` tags `vX.Y.Z-beta.N` and publishes a GitHub prerelease
    (never marked `latest`).
 5. The prerelease triggers `release-beta.yml`, which builds, attests, and
-   uploads `tracedecay-beta-<tag>-<platform>` archives plus `SHA256SUMS` —
+   uploads `tracedecay-beta-<tag>-<platform>` archives plus `SHA256SUMS`,
    exactly the names the CLI beta upgrade channel (`src/cloud.rs::asset_name`)
    resolves.
 

@@ -10,7 +10,7 @@ import type { WorkChannel } from './workChannel.ts';
  * dimensions, gives each one its title and the persisted event kind that would
  * feed it, declares the seven provenance facets every card must carry, and
  * builds the absence a card wears when the projection behind it is not
- * published. It reads no data and derives no figure — `workAccountingCensus.ts`
+ * published. It reads no data and derives no figure, `workAccountingCensus.ts`
  * walks the attempt page, `workAccountingCards.ts` builds the sourced cards,
  * and `workTopologyAccounting.ts` assembles the twelve.
  *
@@ -139,7 +139,7 @@ export function accountingEventKind(dimension: WorkAccountingDimension): string 
 export interface WorkAccountingFigure {
   readonly value: number;
   readonly unit: 'width' | 'attempts' | 'effort' | 'tasks' | 'cases';
-  /** A sentence the row prints beside the figure when the figure needs one —
+  /** A sentence the row prints beside the figure when the figure needs one,
    * most often that it is a floor rather than a total. */
   readonly note?: string;
 }
@@ -157,7 +157,7 @@ export interface WorkAccountingRow {
  * Cells are carried individually and never reduced. Plan 26 keeps mechanical
  * and semantic prediction separate and keeps every cell of each matrix
  * separate; an accuracy scalar computed over them would be a dashboard formula
- * twice over — a metric the plan prohibits the UI from deriving, and a
+ * twice over, a metric the plan prohibits the UI from deriving, and a
  * collapse the plan prohibits outright.
  */
 export interface WorkAccountingMatrixCell {
@@ -198,7 +198,7 @@ export interface WorkAccountingCensoring {
 /**
  * What a measurement is pinned to.
  *
- * `metric_descriptor` is what Plan 26 means by descriptor revision — the
+ * `metric_descriptor` is what Plan 26 means by descriptor revision, the
  * `EXECUTION_TOPOLOGY_DESCRIPTOR_REVISION_V1` a stored value carries so it can
  * never be compared against a differently derived one. No card can carry that
  * today, because the descriptor is not published to this build.

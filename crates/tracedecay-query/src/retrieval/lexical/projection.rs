@@ -394,8 +394,8 @@ fn exact_matches(
 
 /// Per-request lazily admitted proofs, one slot per request literal.
 ///
-/// An admission proof depends only on the literal and the request — never on
-/// the matched document — while one `admit` costs four canonical-JSON SHA-256
+/// An admission proof depends only on the literal and the request, never on
+/// the matched document, while one `admit` costs four canonical-JSON SHA-256
 /// digests. Both posting adapters previously re-admitted per matching
 /// document, which dominated exact retrieval for high-cardinality literals.
 /// Laziness preserves the original failure surface: a literal no document
@@ -412,7 +412,7 @@ impl LiteralProofCacheV1 {
     }
 
     /// The first matched literal ordinal the central authority admits, with
-    /// its proof — the same first-admitting-literal selection the per-document
+    /// its proof. The same first-admitting-literal selection the per-document
     /// `find_map` performed, at most one `admit` per literal per request.
     fn first_admitted<A>(
         &mut self,
@@ -833,9 +833,9 @@ fn fixed_ln_ratio_micros(numerator: u64, denominator: u64) -> u64 {
 }
 
 /// Upper byte-length caps that keep the fst Levenshtein automaton inside its
-/// fixed 10_000-state capacity. The DFA size is content-dependent — repeated
+/// fixed 10_000-state capacity. The DFA size is content-dependent, repeated
 /// characters collapse states, so uniform strings are the automaton's best
-/// case — and the caps are anchored to the measured worst case on fst 0.4
+/// case, and the caps are anchored to the measured worst case on fst 0.4
 /// (all-distinct bytes: distance 1 builds up to 416 bytes, distance 2 only up
 /// to 49) with headroom below those ceilings. Queries beyond a cap skip fuzzy
 /// expansion the same way sub-5-character queries do; the exact and phrase

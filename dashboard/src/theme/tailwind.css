@@ -69,11 +69,11 @@
   --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', monospace;
   /* The engraved tier: the design system's display face, Archivo Variable,
    * whose width axis is what lets `--display-width` (112%) actually expand
-   * the wordmark and legends. Only ever reached through this token — never a
+   * the wordmark and legends. Only ever reached through this token, never a
    * hard-coded family in a component. */
   --font-display: 'Archivo Variable', 'IBM Plex Sans Variable', system-ui, sans-serif;
 
-  /* Instrument type scale. `3xs` is the annotation size — used only for
+  /* Instrument type scale. `3xs` is the annotation size, used only for
    * letterspaced uppercase legends and units, never for prose.
    *
    * The scale runs 10 → 60px on purpose. The old ceiling was 26px, which meant
@@ -110,7 +110,7 @@
   /* The named-region tier. Workspace pages set their own size and weight on
    * these; the face is the one thing the design system owns centrally, so a
    * page never has to know which family the display tier is. Sentence-case
-   * headings stay at normal width — the expansion is specific to the uppercase
+   * headings stay at normal width. The expansion is specific to the uppercase
    * letterspaced tiers, and `.td-title` (a class) outranks this for the
    * headings that are both. */
   h1,
@@ -130,7 +130,7 @@
 
 @layer components {
   /* The engraved legend: every panel, region and column header in the app
-   * wears this — small, letterspaced, uppercase, quiet.
+   * wears this, small, letterspaced, uppercase, quiet.
    *
    * This is where the display face earns its keep. At 10px uppercase almost
    * nothing of a face's personality survives except weight and WIDTH, and
@@ -160,7 +160,7 @@
     font-feature-settings: 'tnum' 1;
     color: var(--raw-text-primary);
   }
-  /* The unit that sits beside a value — small, quiet, never bold. */
+  /* The unit that sits beside a value, small, quiet, never bold. */
   .td-unit {
     font-size: var(--text-3xs);
     letter-spacing: 0.1em;
@@ -177,7 +177,7 @@
   }
 
   /* The display numeral. A monospaced face set large keeps its default wide
-   * sidebearings and goes limp — at 34px and above the figures need to be
+   * sidebearings and goes limp. At 34px and above the figures need to be
    * pulled together and given a little more weight, or the headline number
    * reads as a terminal echo instead of a gauge. The tight tracking here plus
    * the 0.16em tracking on `.td-legend` is the whole typographic idea: the two
@@ -229,8 +229,8 @@
    * How a deliberately small bezel reaches the 44px touch minimum without
    * being redrawn at 44px.
    *
-   * Several controls here are compact by design — a 24px `Refresh` in a panel
-   * header, a 17px scheduler chip, a 20px order toggle — because this console
+   * Several controls here are compact by design, a 24px `Refresh` in a panel
+   * header, a 17px scheduler chip, a 20px order toggle, because this console
    * is a dense instrument and a row of 44px slabs is a different product. The
    * minimum is about what a finger can land on, not about how large the chrome
    * looks, so the two are separated: the ELEMENT becomes a transparent 44x44
@@ -240,7 +240,7 @@
    *
    * Deliberately NOT a pseudo-element on the small box. The gate measures the
    * element's own border box, and an `::after` that merely overlaps a larger
-   * area would report 24px while claiming 44 — a hit area the harness cannot
+   * area would report 24px while claiming 44. A hit area the harness cannot
    * see is indistinguishable from one that does not exist. */
   .td-hit {
     display: inline-flex;
@@ -252,7 +252,7 @@
 
   /* ---- the checkbox ----
    * `.td-hit` for a control that cannot hold an inner span. A native checkbox
-   * paints at 13x13 and does not grow with padding — the box is UA-drawn, so
+   * paints at 13x13 and does not grow with padding. The box is UA-drawn, so
    * padding pushes the LABEL away and leaves the target exactly as small as it
    * was. The element therefore becomes the 44x44 target itself and draws its
    * bezel in `::before` at the size it was designed, which is the same
@@ -263,7 +263,7 @@
    * colors forces `background-color` to `Canvas` and `box-shadow` to `none`,
    * so a checkmark drawn either way disappears into its own box in exactly the
    * mode a reader is relying on it most. `border-color` is forced to
-   * `CanvasText`, so a bordered tick survives the forced palette — and it
+   * `CanvasText`, so a bordered tick survives the forced palette, and it
    * survives it without `forced-color-adjust`, which no element in this app
    * sets and the gate's forced-colors probe measures. */
   .td-check {
@@ -332,13 +332,13 @@
    * of numbers in this console wears one of these under or beside its value,
    * which is what turns thirty identical rows into a distribution.
    *
-   * The fill is SEGMENTED — 5px cells on a 7px pitch — because a continuous
+   * The fill is SEGMENTED, 5px cells on a 7px pitch, because a continuous
    * pill is paint and a row of cells is an instrument register: the same
    * length now also reads as a count of lit segments, and a wall of meters
    * stops looking like a bar chart smeared across the page. The mask keeps
    * the segmentation on whatever hue a call site's `tone` sets. Hairline
    * (1px) meters are below the cell size and drop the mask via the
-   * height-conditional below — a 1px rule diced into 5px dashes reads as a
+   * height-conditional below. A 1px rule diced into 5px dashes reads as a
    * dotted border, not a measurement. */
   .td-meter {
     position: relative;

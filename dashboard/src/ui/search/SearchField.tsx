@@ -65,7 +65,7 @@ export function SearchField({
       <div
         className={cn(
           // The field is meant to be the largest control on the page and its
-          // input measured 18.6px tall — the shell was 35px (`h-10` at a 14px
+          // input measured 18.6px tall, the shell was 35px (`h-10` at a 14px
           // root) and the input only claimed its own line box inside it. The
           // shell now clears the touch minimum with its two hairlines counted,
           // and the input stretches into it rather than floating in the middle.

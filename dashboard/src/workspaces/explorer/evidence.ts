@@ -42,8 +42,8 @@ export interface HitEvidence {
  * Identity is `EXACT` for every lane: each row is a record the owning
  * authority returned under its own stable key. Text differs. A code row's
  * signature and path are source facts read from the index, so they stay
- * `EXACT`. A transcript message or a memory fact is persisted language — what
- * a person or agent wrote, or what the curator recorded — and is presented as
+ * `EXACT`. A transcript message or a memory fact is persisted language, what
+ * a person or agent wrote, or what the curator recorded, and is presented as
  * a claim, `EXPLICIT`, not as repository truth.
  */
 export function hitEvidence(hit: Hit): HitEvidence {

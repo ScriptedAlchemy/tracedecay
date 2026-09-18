@@ -62,7 +62,7 @@ pub(super) struct BatchTiming {
 
 /// The writer actor's shared reporting handles.
 ///
-/// None of these varies per batch — they are the actor's, not the batch's —
+/// None of these varies per batch. They are the actor's, not the batch's,
 /// and every batch reports through all three, so passing them as one borrow
 /// keeps the per-batch arguments to the things that actually differ per batch.
 #[derive(Clone, Copy)]
@@ -490,8 +490,8 @@ fn settle_prepared(
 /// is missing. Their peers were fully authorized and merely had their work
 /// rolled back with the shared transaction, so reporting `MissingAuthority` to
 /// them blames them for an unrelated request's revocation and reads as a
-/// non-retryable outcome. They get `Faulted` instead — the same "rolled back,
-/// safe to resubmit" shape the fatal path above uses — and a member that had
+/// non-retryable outcome. They get `Faulted` instead, the same "rolled back,
+/// safe to resubmit" shape the fatal path above uses, and a member that had
 /// already reached a `Final` outcome keeps it.
 fn settle_authority_denied(
     prepared: Vec<PreparedRequest>,

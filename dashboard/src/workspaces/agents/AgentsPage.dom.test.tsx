@@ -141,7 +141,7 @@ describe('AgentsPage read coverage', () => {
    * The three measures beside the delegation rollup. The stub
    * `fetch` below answers `/api/work/views` with a dashboard envelope rather
    * than the application envelope that route actually carries, so the graph
-   * read is refused as a shape this build cannot decode — which is exactly the
+   * read is refused as a shape this build cannot decode, which is exactly the
    * case the two graph-fed surfaces must render as a refusal rather than as a
    * frontier of nothing and a failure count of zero.
    */
@@ -191,7 +191,7 @@ describe('AgentsPage read coverage', () => {
 
     expect(await screen.findByText('Handoff frontier')).toBeTruthy();
     // Tool activity lives on the demoted telemetry register, which renders
-    // once its own usage read lands — awaited rather than assumed.
+    // once its own usage read lands, awaited rather than assumed.
     expect(await screen.findByText('Tool activity')).toBeTruthy();
     expect(screen.getByText('Failure context')).toBeTruthy();
 

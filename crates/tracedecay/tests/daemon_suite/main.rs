@@ -1,7 +1,7 @@
 //! Consolidated daemon test suite.
 //!
 //! Covers the git-metadata watcher (design D3), the backstop scheduler (D5),
-//! the concurrency governor, and branch-store GC (D6) — the freshness path the
+//! the concurrency governor, and branch-store GC (D6), the freshness path the
 //! daemon drives when git operations happen outside a hooked session.
 //!
 //! The `GitWatcher` type itself is a crate-private daemon component, so these

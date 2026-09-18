@@ -154,8 +154,8 @@ pub struct WindowBranchSegment {
 
 /// Intersects an activity window `[win_start, win_end]` with a worktree's
 /// branch `timeline` (oldest-first, from [`branch_timeline_from_reflog`]),
-/// yielding the branch segments the session overlapped. The leading stretch —
-/// before the first timeline entry that lands after `win_start` — is
+/// yielding the branch segments the session overlapped. The leading stretch,
+/// before the first timeline entry that lands after `win_start`, is
 /// attributed to `initial_branch` (callers pass the branch `HEAD` currently
 /// points at as the floor).
 ///
@@ -448,8 +448,8 @@ pub fn parse_commit_log(log_text: &str, max: usize) -> Vec<(String, i64)> {
 
 /// Runs the historical backfill against one project's session store.
 ///
-/// `session_store` is the per-project sessions authority (already open, and —
-/// for a real run — writable). `analytics_events` contribute only
+/// `session_store` is the per-project sessions authority (already open, and,
+/// for a real run, writable). `analytics_events` contribute only
 /// provider/session timestamps (via [`AnalyticsSessionTimestampSource`]);
 /// branch data is never assumed present. `git` supplies the reflog/log
 /// subprocess surface. Fail-open: a broken repo or session is counted and

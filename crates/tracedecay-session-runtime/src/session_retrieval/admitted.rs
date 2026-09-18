@@ -183,8 +183,8 @@ pub trait SessionApplicationRetrievalPortV1: Send + Sync {
         Box::pin(async { Ok(BTreeMap::new()) })
     }
 
-    /// The refresh worker's serving state for this root — current, still
-    /// converging history, or without a worker — so diagnostics can name the
+    /// The refresh worker's serving state for this root, current, still
+    /// converging history, or without a worker, so diagnostics can name the
     /// state a pending projection is in. `None` when no worker serves the
     /// root at all.
     fn projection_serving_status(&self) -> Option<SessionProjectionServingStatus> {
@@ -518,7 +518,7 @@ fn admitted_session_binding(
 
 /// As [`admitted_session_binding`], but carrying the canonical daemon LCM
 /// budgets. LCM describe and expand verify content hashes over whole payloads
-/// before slicing, so their read budget is the LCM authority's — the response
+/// before slicing, so their read budget is the LCM authority's, the response
 /// stays bounded by the query's context budget and the MCP response cap.
 fn admitted_lcm_session_binding(
     root: &DaemonSessionRetrievalRoot,

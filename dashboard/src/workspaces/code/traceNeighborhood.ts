@@ -1,18 +1,18 @@
 /**
- * How a two-hop neighbourhood is fetched — the trace surface's only knowledge
+ * How a two-hop neighbourhood is fetched, the trace surface's only knowledge
  * of it, and provisional on purpose.
  *
  * DEPTH. `GET /api/plugins/graph/node/{id}/neighbors` serves ONE hop. The field
  * draws two, so hop 2 is assembled on the client: hop 1 for the focus, then hop
  * 1 for as many of its drawn hop-1 neighbours as `TRACE_BUDGET.expand` allows,
  * deduped in `buildTraceModel` and counted in its `coverage`. Whatever the
- * bound leaves out is printed rather than dropped — see `coverageCaption`.
+ * bound leaves out is printed rather than dropped, see `coverageCaption`.
  *
  * WHY THIS IS ITS OWN MODULE. The backend does not yet expose a bounded
  * two-hop neighbourhood operation, so that fan-out is a stand-in for a query
  * that does not exist yet. A stand-in left inline spreads: a `limit=` beside
  * one component, a second wave of reads inside another, a list of neighbour ids
- * threaded through props — and the day the generated operation lands, adopting
+ * threaded through props, and the day the generated operation lands, adopting
  * it becomes a rewrite of the surface instead of a rewrite of one file. So the
  * route, the limit, the fan-out and its bound live here and nowhere else, and
  * what leaves is `TraceNeighborhood`: payloads and states, never queries.
@@ -47,7 +47,7 @@ function neighborsUrl(id: string): string {
  * The hop-1 neighbours whose own neighbourhoods are read to assemble hop 2.
  *
  * Ordered by first appearance, which is the endpoint's own
- * `ORDER BY n.qualified_name` — stable across reloads, so the same
+ * `ORDER BY n.qualified_name`, stable across reloads, so the same
  * neighbourhood expands the same way twice. The focus is excluded because its
  * own payload is already in hand, and the cap is `TRACE_BUDGET.expand` because
  * this is one read per id.
@@ -124,7 +124,7 @@ export function useTraceNeighborhood(focusId: string): TraceNeighborhood {
   });
 
   // `useQueries` returns a fresh array every render, so memoising on it would
-  // rebuild the model — and therefore tear down and re-seed the simulation —
+  // rebuild the model, and therefore tear down and re-seed the simulation,
   // sixty times a second. The identity that actually matters is which ids have
   // settled, which is exactly what this signature carries.
   const signature = hop1.map((id, i) => `${id}:${expansions[i]?.status ?? 'idle'}`).join('|');

@@ -22,7 +22,7 @@ import type { WorkProductView, WorkTaskView } from './workProductView.ts';
 import type { WorkDagReading } from './workViewsModel.ts';
 
 /**
- * The Work inspector — the workspace-owned column that opens on selection.
+ * The Work inspector, the workspace-owned column that opens on selection.
  *
  * Selection opens it without mutating the graph. It keeps task definition,
  * admission, placement, attempts, and evidence in separate registers so no
@@ -31,7 +31,7 @@ import type { WorkDagReading } from './workViewsModel.ts';
  * not prepared is not a command.
  *
  * Every row names its grade. Fields the concept plate pictures but no Work
- * authority publishes — priority, an owner field — are printed as the typed
+ * authority publishes, priority, an owner field, are printed as the typed
  * absences they are rather than filled from a neighbouring field.
  */
 
@@ -106,7 +106,7 @@ export function WorkInspector({
 }
 
 /** One inspector row: an engraved term, its value, and the grade the value
- * carries. Values wrap rather than truncate — an identity a reader cannot
+ * carries. Values wrap rather than truncate, an identity a reader cannot
  * read in full is not an identity. */
 function Row({
   term,
@@ -419,7 +419,7 @@ function selectionScope(graph: WorkResult<WorkGraphReadV1> | undefined): {
 /**
  * The counts the concept plate lists under WORK EVIDENCE, each bound to the
  * read that supplied it. A count that no mounted read supplied under this
- * camera is stated as not read — never as zero.
+ * camera is stated as not read, never as zero.
  */
 function WorkEvidenceSummary({
   task,

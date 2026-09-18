@@ -1,7 +1,7 @@
 //! RAII ownership of one checked-out pool worker.
 //!
-//! Every exit path — normal drop, retirement, or a snapshot end that outran its
-//! grace period — returns or retires the worker in its lane, so pool capacity
+//! Every exit path, normal drop, retirement, or a snapshot end that outran its
+//! grace period, returns or retires the worker in its lane, so pool capacity
 //! cannot leak.
 
 use std::{
@@ -350,7 +350,7 @@ fn finish_deferred_return<E: ReaderQueryExecutor>(
     let reader_id = worker.id;
     // Bounded, not open-ended. An unbounded `recv()` here parks this thread
     // for the life of the process against a worker that never answers, and the
-    // limbo slot it holds never clears — so the lane runs one worker short and
+    // limbo slot it holds never clears, so the lane runs one worker short and
     // shutdown cannot converge. Past the bound the worker is written off.
     let returned = matches!(
         receive.recv_timeout(DEFERRED_SNAPSHOT_END_LIMIT),

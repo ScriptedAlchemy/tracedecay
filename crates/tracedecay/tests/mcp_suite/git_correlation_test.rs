@@ -175,7 +175,7 @@ async fn sessions_for_distinguishes_empty_correlation_index_from_no_match() {
 
     // Seed sessions and messages but record NO git spans: the correlation
     // index exists (schema is ensured on open) yet holds nothing.
-    // Reuse the runtime retained by init — opening a second daemon-scoped
+    // Reuse the runtime retained by init, opening a second daemon-scoped
     // HostAdmissionTestRuntimeV1 against the same profile overlaps the
     // maintenance/daemon scope maps under default features and is redundant
     // under test-transport (init already mounted the project sessions).

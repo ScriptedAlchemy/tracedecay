@@ -877,9 +877,9 @@ fn post_seal_conflicting_restage_gets_typed_immutable_refusal() {
 
     // Same (projection, generation) identity, different source generation and
     // rows: an inadmissible rewrite of sealed content. The relational
-    // authority is rolled back to its pre-publication state — the restored-
+    // authority is rolled back to its pre-publication state, the restored-
     // from-backup divergence that used to reach sealed rows as a stage-page
-    // write — so the store itself is the last line refusing the rewrite.
+    // write, so the store itself is the last line refusing the rewrite.
     authority.heads.remove(&record.publication.key.projection);
     let foreign = GraphGenerationManifest::new(
         identity.clone(),
@@ -1385,7 +1385,7 @@ fn retirement_waits_for_a_live_direct_sealed_reader() {
         .expect("direct-sealed recovery of the g1 head");
     assert_eq!(reader.generation(), &g1.generation);
 
-    // The staging runtime comes back while the direct-sealed reader is live —
+    // The staging runtime comes back while the direct-sealed reader is live,
     // the successor generation publishes through it.
     registered.mount().unwrap();
     let g2 = rich_manifest(identity.clone(), "gate-g2", "new");

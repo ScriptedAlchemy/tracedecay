@@ -45,7 +45,7 @@ pub fn read_source_file(path: &Path) -> std::io::Result<String> {
 /// window fails with a sharing violation or "Access is denied" (os error 5)
 /// even though the file is readable milliseconds later. Callers treat read
 /// errors as "skip this file" or fail the whole sync, so a genuinely
-/// readable file must not be lost to that window — retry briefly before
+/// readable file must not be lost to that window, retry briefly before
 /// giving up. Other platforms read directly: `PermissionDenied` there is a
 /// real ACL problem that retrying cannot fix.
 fn read_file_bytes(path: &Path) -> std::io::Result<Vec<u8>> {

@@ -26,8 +26,8 @@ use super::lexical_page_source::scan_layout;
 use super::*;
 
 /// The monolithic sealed-generation envelope revision. Every reader that
-/// gates on the monolithic format — the publication store, the worker probe,
-/// and code-generation retention — must gate on this one value.
+/// gates on the monolithic format, the publication store, the worker probe,
+/// and code-generation retention, must gate on this one value.
 pub(super) const MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION: u32 = 9;
 /// The partitioned generation manifest revision, which the daemon publishes.
 ///
@@ -46,7 +46,7 @@ pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 12;
 /// The oldest sealed envelope revision this build decodes. Anything below it,
 /// and any retired revision between it and
 /// [`SEALED_GENERATION_FORMAT_REVISION_V1`], is refused by
-/// [`superseded_sealed_generation_revision`] instead of being migrated — a
+/// [`superseded_sealed_generation_revision`] instead of being migrated, a
 /// generation is re-derivable from its source tree, so the daemon rebuilds
 /// rather than carrying a decoder per retired shape.
 pub const MINIMUM_SEALED_GENERATION_FORMAT_REVISION: u32 =
@@ -61,7 +61,7 @@ pub fn superseded_sealed_generation_revision(revision: u32) -> CodeIndexProducti
 /// publish a generation larger than this, and decoding refuses to admit one.
 /// The bound previously applied only to reads while publication happily wrote
 /// larger envelopes, so a large repository sealed generations (~1.5 GB here)
-/// that every later load refused as "corrupt" — permanently denying its own
+/// that every later load refused as "corrupt", permanently denying its own
 /// graph. Two GiB admits those real generations while keeping decode memory
 /// bounded.
 pub const MAX_SEALED_CODE_GENERATION_BYTES_V1: u64 = 2 * 1024 * 1024 * 1024;
@@ -575,7 +575,7 @@ struct StreamingSealedEnvelopeV1 {
 ///
 /// The digest remints are by-ref and independent per file, so the fan-out
 /// keeps the sequential failure semantics (lowest-index error) while the
-/// pages themselves move — the persist corpus is never copied.
+/// pages themselves move, the persist corpus is never copied.
 pub(super) fn restore_file_pages(
     pages: Vec<PersistedFileGenerationArtifactsV1>,
 ) -> Result<Vec<Arc<FileGenerationArtifactsV1>>, CodeIndexProductionErrorV1> {
@@ -788,8 +788,8 @@ fn materialize_compatible_envelope(
         json_generation_digest(raw.generation.get().as_bytes())
     )?;
     if payload_digest != raw.state_digest {
-        // Corrupt under the monolithic raw-bytes rule, but the probe — never
-        // the digest — decides which revision owns these bytes, so the
+        // Corrupt under the monolithic raw-bytes rule, but the probe, never
+        // the digest, decides which revision owns these bytes, so the
         // format-revision gate stays authoritative.
         return classify_unaccepted_envelope(
             bytes,
@@ -1540,7 +1540,7 @@ mod tests {
     }
 
     /// A superseded revision is refused with the typed rebuild error on every
-    /// classification path — never silently abstained like a revision this
+    /// classification path, never silently abstained like a revision this
     /// decoder simply does not own, because abstention would hand the bytes to
     /// the partitioned decoder and surface them as corruption.
     #[test]

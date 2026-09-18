@@ -1119,8 +1119,8 @@ pub(super) fn canonicalize_session_project_paths(session: &SessionRecord) -> Ses
 /// Reconcile two stored session rows into one merged row using pure
 /// string/shape logic only. Project-path family identity is resolved earlier,
 /// at the apply-side ingest boundary ([`canonicalize_session_project_paths`]),
-/// so this function — reached from the verify/audit and rebuild paths as well
-/// as apply — never touches the filesystem and stays reproducible from stored
+/// so this function, reached from the verify/audit and rebuild paths as well
+/// as apply, never touches the filesystem and stays reproducible from stored
 /// evidence.
 pub(super) fn reconcile_session_rows(
     actual: &SessionRecord,

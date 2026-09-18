@@ -4,9 +4,9 @@
 //! "instrumentation remains on the canonical application retrieval pipeline
 //! and its existing retriever and temporal adapters rather than a parallel
 //! measurement path". This module is that instrumentation: every count below
-//! is read out of values the pipeline already produced — the admitted
+//! is read out of values the pipeline already produced, the admitted
 //! [`CompositionLaneInput`] lanes and the [`CompositionOutputV1`] the
-//! composition kernel returned — and nothing here re-runs, re-ranks, or
+//! composition kernel returned, and nothing here re-runs, re-ranks, or
 //! re-queries.
 //!
 //! Three disciplines are load-bearing:
@@ -18,8 +18,8 @@
 //!   or exhausted its budget contributes an *unknown* source, never an
 //!   observed zero-match one.
 //! * **Unmeasured is not zero.** Where a dimension genuinely is not available
-//!   at the composition boundary — context tokens are only countable after
-//!   hydration — the projection reports the weaker
+//!   at the composition boundary, context tokens are only countable after
+//!   hydration, the projection reports the weaker
 //!   [`CoverageStateV1::Partial`] beside the payload instead of publishing a
 //!   fabricated zero as fact.
 //! * **Counts are clamped to their own denominators, never inflated.** The

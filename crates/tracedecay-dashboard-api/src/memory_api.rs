@@ -284,7 +284,7 @@ async fn fact_trust_history_payload(
     })))
 }
 
-/// `GET /api/plugins/holographic/` — overview + facts + entities + graph.
+/// `GET /api/plugins/holographic/`, overview + facts + entities + graph.
 pub async fn overview(
     State(state): State<DashboardState>,
     RequestControl(control): RequestControl,
@@ -596,7 +596,7 @@ pub async fn overview(
     .await
 }
 
-/// `GET /api/plugins/holographic/status` — canonical facts and derived-algebra health.
+/// `GET /api/plugins/holographic/status`, canonical facts and derived-algebra health.
 pub async fn status(
     State(state): State<DashboardState>,
     RequestControl(control): RequestControl,
@@ -631,11 +631,11 @@ pub async fn status(
     .await
 }
 
-/// `GET /api/plugins/holographic/fact/{fact_id}` — full fact detail.
+/// `GET /api/plugins/holographic/fact/{fact_id}`, full fact detail.
 ///
 /// List and projection payloads truncate `content` to 200 chars to keep them
 /// light; detail panels (e.g. the Semantic Map's pinned card) fetch the
-/// complete row — plus linked entities — from here.
+/// complete row, plus linked entities, from here.
 pub async fn fact_detail(
     State(state): State<DashboardState>,
     RequestControl(control): RequestControl,
@@ -697,7 +697,7 @@ pub async fn fact_detail(
     .await
 }
 
-/// `GET /api/plugins/holographic/fact/{fact_id}/trust-history` — append-only
+/// `GET /api/plugins/holographic/fact/{fact_id}/trust-history`, append-only
 /// feedback audit rows explaining how a fact's trust changed over time.
 pub async fn fact_trust_history(
     State(state): State<DashboardState>,
@@ -748,7 +748,7 @@ pub async fn fact_trust_history(
     .await
 }
 
-/// `GET /api/plugins/holographic/projection` — 2D PCA of phase vectors,
+/// `GET /api/plugins/holographic/projection`, 2D PCA of phase vectors,
 /// embedded as `[cos(p), sin(p)]` so wrapped phases compare correctly.
 pub async fn projection(
     State(state): State<DashboardState>,
@@ -785,7 +785,7 @@ pub async fn projection(
     .await
 }
 
-/// `GET /api/plugins/holographic/similarity` — pairwise phase-cosine
+/// `GET /api/plugins/holographic/similarity`, pairwise phase-cosine
 /// similarity (`mean(cos(p_i − p_j))`) over query-time derived vectors.
 pub async fn similarity(
     State(state): State<DashboardState>,
@@ -829,7 +829,7 @@ pub async fn similarity(
     .await
 }
 
-/// `GET /api/plugins/holographic/oplog` — recent canonical memory operations,
+/// `GET /api/plugins/holographic/oplog`, recent canonical memory operations,
 /// newest first, with optional canonical fact identity.
 pub async fn oplog(
     State(state): State<DashboardState>,

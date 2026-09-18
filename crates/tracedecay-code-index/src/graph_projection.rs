@@ -394,7 +394,7 @@ impl InMemoryCodeGraphProjectionBuilder {
     /// symbol index, so the interactive reader can resolve qualified names and
     /// kinds. [`Self::publish_with_cancellation`] publishes edges and chunks
     /// alone, which leaves every symbol without metadata and therefore
-    /// unresolvable by name — the shape integration fixtures need.
+    /// unresolvable by name, the shape integration fixtures need.
     #[cfg(feature = "test-helpers")]
     pub fn publish_indexed_with_cancellation(
         &self,
@@ -628,8 +628,8 @@ pub fn code_graph_projection_identity(
     Ok(GraphProjectionIdentity::new(namespace, projection()?))
 }
 
-/// The code-graph generation's manifest identity — the metadata half a
-/// sealed-read-bundle binding digest hashes — reconstructed without touching
+/// The code-graph generation's manifest identity, the metadata half a
+/// sealed-read-bundle binding digest hashes, reconstructed without touching
 /// any bulk row. Every field is a pure function of the namespace, the sealed
 /// code generation, and the projector revision, exactly as
 /// [`build_code_graph_manifest_checked`] would set them.

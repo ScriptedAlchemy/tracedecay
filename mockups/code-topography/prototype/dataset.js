@@ -7,8 +7,8 @@
  * source. `deg` is on the node payload; `calls` is the per-edge call-site count;
  * `membranes` are `contains` edges from an impl/trait node to its methods;
  * `regions` are the module rollups the cortex sheet aggregates. `unresolved` is
- * the absence the extractor already records — a `calls` edge whose target did
- * not resolve — and it is drawn, never dropped.
+ * the absence the extractor already records. A `calls` edge whose target did
+ * not resolve, and it is drawn, never dropped.
  *
  * Coordinates are the static sheet's 1440x1160 world. They are LAYOUT ANCHORS,
  * not physics state: the simulation holds every node to its anchor, so the live
@@ -17,7 +17,7 @@
  * @module dataset
  */
 
-/** Hop rings. Hop distance from the focus, NOT elevation — see the legend. */
+/** Hop rings. Hop distance from the focus, NOT elevation. See the legend. */
 export const ROW = Object.freeze({
   u3: 118,
   u2: 268,
@@ -44,7 +44,7 @@ export const NODES = [
   { id: 'ctxroute', name: 'context_route', kind: 'method', deg: 24, mod: 'api/routes', x0: 300, y0: ROW.u2, row: 'u2' },
   { id: 'schroute', name: 'search_route', kind: 'method', deg: 17, mod: 'api/routes', x0: 545, y0: ROW.u2, row: 'u2' },
   { id: 'profile', name: 'build_profile', kind: 'function', deg: 22, mod: 'tool-catalog/snapshot', x0: 880, y0: ROW.u2, row: 'u2' },
-  { id: 'bind', name: 'bind_surfaces', kind: 'method', deg: 15, mod: 'application/git', x0: 1180, y0: ROW.u2, row: 'u2', source: 'no callers ≤3 hops — public surface' },
+  { id: 'bind', name: 'bind_surfaces', kind: 'method', deg: 15, mod: 'application/git', x0: 1180, y0: ROW.u2, row: 'u2', source: 'no callers ≤3 hops, public surface' },
 
   { id: 'hctx', name: 'handle_context_request', kind: 'function', deg: 46, mod: 'application/handlers', x0: 405, y0: ROW.u1, row: 'u1' },
   { id: 'hsearch', name: 'handle_search_request', kind: 'function', deg: 28, mod: 'application/handlers', x0: 680, y0: ROW.u1, row: 'u1' },
@@ -84,7 +84,7 @@ export const NODES = [
  * Every channel carries its own call-site count. Volume is NOT conserved: a
  * function reached 58 times may call the next one 34 times.
  *
- * `dir` is drawing direction only — `up` tributary, `down` delta, `in` a move
+ * `dir` is drawing direction only, `up` tributary, `down` delta, `in` a move
  * between two methods of the same type, `lost` a channel whose target left the
  * graph. The simulation treats all four as the same undirected spring.
  *
@@ -149,8 +149,8 @@ export const MEMBRANES = [
 
 /**
  * The dimmed relief underlay: the cortex sheet's regions filtered to the
- * modules this trace lands in. Simplified for round two — two contours instead
- * of the sheet's full interval stack — because the point of this page is motion,
+ * modules this trace lands in. Simplified for round two, two contours instead
+ * of the sheet's full interval stack. Because the point of this page is motion,
  * and a shoreline that moves with its members is the part that had to be proven.
  */
 export const REGIONS = [
@@ -170,8 +170,8 @@ export const REGIONS = [
  *
  * The plain channel count does NOT reproduce the static sheet's rows, and
  * chasing that discrepancy turned up the sheet's real rule rather than a bug in
- * it: an `in` channel — a call that entered a type and moves between that
- * type's methods — is a LATERAL move inside a membrane, not a step down the
+ * it: an `in` channel. A call that entered a type and moves between that
+ * type's methods. Is a LATERAL move inside a membrane, not a step down the
  * call graph, so it costs zero hops. Under that rule every one of the 26 nodes
  * lands on exactly the row the sheet drew it on, `sim.test.mjs` asserts it, and
  * the row caption ("hop distance from the focus, not elevation") stays true.
@@ -233,7 +233,7 @@ export const DATASET = Object.freeze({
 /**
  * Translate the dataset into the simulation's vocabulary: mass IS degree,
  * stiffness IS the call-site count, and the anchor IS the layout position.
- * No shaping, no normalisation that would launder the measurement — the
+ * No shaping, no normalisation that would launder the measurement, the
  * simulation's own parameters do the scaling, in one place, where they can be
  * read off a table.
  */

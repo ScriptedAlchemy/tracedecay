@@ -780,7 +780,7 @@ async fn duplicate_concurrent_ignored_dependency_requests_publish_one_generation
     // broadcasts before returning, and coalesced followers settle only from
     // the owner's finished flight. Both admissions above have returned, so
     // the receiver subscribed before the join already holds every publication
-    // these requests could produce — read it without a wall-clock bound.
+    // these requests could produce, read it without a wall-clock bound.
     let publication = publications
         .try_recv()
         .expect("one generation publication is sealed before admission returns");
@@ -841,7 +841,7 @@ async fn ordinary_reconcile_retains_the_exact_ignored_source_roster() {
 /// The durable pointer moves before either serving swap installs the
 /// generation it sealed. While the id was fed from that publication
 /// broadcast, a caller that polled for a change and then asked for the
-/// generation was handed the *previous* one — the id had advanced, the
+/// generation was handed the *previous* one, the id had advanced, the
 /// serving slot had not. This asserts the seat with no retry window at all:
 /// any gap between the two reads is exactly that defect.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -420,7 +420,7 @@ impl ExactSqlHandle {
     /// Reader caches are released through the reader pool. A writer, when
     /// present, is released on the writer actor. A handle that cannot release
     /// anything reports a typed no-op instead of [`ExactSqlError::WriterUnavailable`];
-    /// a reader release that *errored* is never a no-op — it propagates so
+    /// a reader release that *errored* is never a no-op, it propagates so
     /// the maintenance caller's degraded log fires.
     pub fn release_connection_memory(&self) -> Result<MemoryReleaseOutcome, ExactSqlError> {
         let readers = (self.release_reader_memory)()?;
@@ -523,7 +523,7 @@ impl ExactSqlHandle {
     ///
     /// The span covers dispatching to the exact-SQL worker, waiting for that
     /// single thread to reach this command, and the lock acquisition it then
-    /// performs — not the lock alone. Long-running commands on the same worker
+    /// performs, not the lock alone. Long-running commands on the same worker
     /// (vacuum, WAL truncation, a long-lease transaction) are therefore visible
     /// here as begin latency even when SQLite was never contended, which is the
     /// distinction `rusqlite.exact_sql.write_lock` exists to make.
@@ -551,7 +551,7 @@ impl ExactSqlHandle {
 
     /// Begins the only transaction mode whose lease renews on progress.
     ///
-    /// Reserved for schema installation and full-index bulk replacement — work
+    /// Reserved for schema installation and full-index bulk replacement, work
     /// that legitimately outlives one lease while continuously committing
     /// progress. The mode is intentionally not configurable: callers must
     /// attach a live write authority and opt into the long-lease transaction
@@ -1383,7 +1383,7 @@ fn transaction_terminal_error(lease: &TransactionLeaseState) -> ExactSqlError {
 /// Answers a caller's rollback for a transaction the writer already released.
 ///
 /// Every writer-side release rolls back and publishes its receipt before
-/// dropping the command channel, so the honest answer here is that rollback —
+/// dropping the command channel, so the honest answer here is that rollback,
 /// not a rollback failure. Only a genuinely failed `SQLite` rollback, or a
 /// release that published nothing, surfaces as an error.
 fn settled_rollback_or_terminal_error(

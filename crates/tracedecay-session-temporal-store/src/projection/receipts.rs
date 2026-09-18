@@ -390,8 +390,8 @@ pub async fn record_canonical_observation_effect(
     // table is insert-only (immutable update/delete triggers plus an authority
     // guard on insert), so reading it back could only echo these very
     // parameters. Only the conflict branch can hide a durable row that
-    // disagrees with this derivation, so the read-back comparison — the actual
-    // provenance contract for replayed observations — is confined to it.
+    // disagrees with this derivation, so the read-back comparison, the actual
+    // provenance contract for replayed observations, is confined to it.
     if inserted == 1 {
         return Ok(());
     }

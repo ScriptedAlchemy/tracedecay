@@ -236,7 +236,7 @@ pub fn make_private_file(path: &Path) -> io::Result<File> {
 ///
 /// The directory analogue of [`make_private_file`]: it converges a legacy
 /// directory an older binary created without the protected private ACL. The
-/// `WRITE_DAC | WRITE_OWNER` open is the authorization proof — a caller that
+/// `WRITE_DAC | WRITE_OWNER` open is the authorization proof, a caller that
 /// cannot take ownership of the object is refused by the open itself.
 #[hotpath::measure(label = "private_fs.make_private_directory")]
 pub fn make_private_directory(path: &Path) -> io::Result<crate::MadePrivateDirectory> {
@@ -299,7 +299,7 @@ pub fn create_private_file_retained(
 /// published file handle.
 ///
 /// The rename is issued on the opened source handle with a null
-/// `RootDirectory` and an absolute destination — see [`posix_rename_payload`]
+/// `RootDirectory` and an absolute destination, see [`posix_rename_payload`]
 /// for why a parent handle in `RootDirectory` is not an option. No
 /// parent-directory handle therefore participates in the rename itself.
 ///

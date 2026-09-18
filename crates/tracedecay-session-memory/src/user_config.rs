@@ -160,7 +160,7 @@ pub fn config_path() -> Option<PathBuf> {
 /// Distinguishes the ways a save can fail so callers can surface an actionable
 /// message instead of a bare boolean. The corrupt-existing-file case carries
 /// the path and the TOML parse error (whose message includes the line/column),
-/// so a user can find and fix — or delete — the offending file.
+/// so a user can find and fix, or delete, the offending file.
 #[derive(Debug)]
 pub enum ConfigSaveError {
     /// The user data directory could not be resolved, so there is no path to
@@ -221,14 +221,14 @@ impl std::fmt::Display for ConfigSaveError {
             } => match line {
                 Some(line) => write!(
                     f,
-                    "config file {} is corrupt at line {line}: {message} \
-                     — back it up or delete it to regenerate",
+                    "config file {} is corrupt at line {line}: {message}. \
+                     Back it up or delete it to regenerate",
                     path.display()
                 ),
                 None => write!(
                     f,
-                    "config file {} is corrupt: {message} \
-                     — back it up or delete it to regenerate",
+                    "config file {} is corrupt: {message}. \
+                     Back it up or delete it to regenerate",
                     path.display()
                 ),
             },
@@ -415,7 +415,7 @@ impl UserConfig {
     /// touches the existing file. Writers are serialized across threads and
     /// processes (daemon, MCP servers, CLI all write this file) with a sidecar
     /// `<config>.lock`, mirroring the append lock in `src/storage.rs`: the lock
-    /// is taken on a dedicated read/write handle, never on the target file — see
+    /// is taken on a dedicated read/write handle, never on the target file, see
     /// the `LockFileEx` note there. The fresh config is written to a temp file
     /// in the same directory and renamed over `config.toml`, so a concurrent
     /// reader never observes a torn write.

@@ -190,7 +190,7 @@ impl DashboardDeliveryReadAdapter {
     /// Folds the registered project's canonical feedback-proximity read into
     /// Delivery's join input. Same invocation service as provider reads.
     /// This is the production authority for `overlapping_edit` /
-    /// `confirmed_conflict` / `divergent_shared_implementation` — the
+    /// `confirmed_conflict` / `divergent_shared_implementation`, the
     /// dashboard never re-joins `/api/feedback/proximity` client-side.
     #[hotpath::measure(label = "mcp.dashboard.delivery.proximity.total")]
     async fn read_proximity(
@@ -208,8 +208,8 @@ impl DashboardDeliveryReadAdapter {
             .advisory_cycle_owner(Some(&project.project_root))
             .await
         else {
-            // No advisory/proximity owner registered for this project —
-            // leave proximity sources Unsupported rather than Clear.
+            // No advisory/proximity owner registered for this project.
+            // Leave proximity sources Unsupported rather than Clear.
             return ProjectDeliveryProximityAttentionSourceV1::Unsupported;
         };
         if project.project_id != owner.project_id().as_str() {

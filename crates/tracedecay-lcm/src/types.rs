@@ -3,7 +3,7 @@
 //! The DB-free retrieval and rendering contracts live in
 //! [`crate::contracts`] and are re-exported here so this module remains the
 //! single import surface for the session engine.
-//! Only infrastructure-facing conversions — notably the SQL error mapping —
+//! Only infrastructure-facing conversions, notably the SQL error mapping,
 //! stay in this module.
 
 pub use crate::contracts::{

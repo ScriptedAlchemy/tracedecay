@@ -157,7 +157,7 @@ impl HostAdmissionFacade<'_> {
                     // queue item (`persist_projection_rejection_on_database` via
                     // `apply_skip_disposition` + `consume_projection_queue_item`).
                     // Breaking here would stall later healthy items until the
-                    // next 60s host tick — a stall, not a cheaper path. Keep
+                    // next 60s host tick, a stall, not a cheaper path. Keep
                     // draining. The typed skip count is the durable signal;
                     // keep per-item detail below WARN so invalid input cannot
                     // become a repeated alert loop.

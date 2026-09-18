@@ -78,7 +78,7 @@ pub mod session_review {
     }
 }
 
-/// Builds an *unregistered* admission facade — one with no durable authority
+/// Builds an *unregistered* admission facade, one with no durable authority
 /// behind it, which fails closed on every capture.
 ///
 /// Standalone callers (a CLI invocation with no daemon-owned registry mount)

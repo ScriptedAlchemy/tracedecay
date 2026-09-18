@@ -58,7 +58,7 @@ pub enum RetainedSurfaceExecutionErrorV1 {
     /// The authority cannot serve the request right now. `detail` names the
     /// exact cause (the underlying error or the absent authority) so every
     /// dispatch surface can hand the caller a corrective message instead of a
-    /// blank terminal — mirroring the decode-request diagnostic contract.
+    /// blank terminal, mirroring the decode-request diagnostic contract.
     Unavailable {
         detail: String,
     },
@@ -1165,7 +1165,7 @@ mod tests {
     #[test]
     fn unavailable_detail_is_sanitized_for_the_safe_diagnostic() {
         // Control characters, surrounding whitespace, and oversized text must
-        // never invalidate the diagnostic — the caller would then lose the
+        // never invalidate the diagnostic. The caller would then lose the
         // problem entirely instead of just the tail of the detail.
         for detail in [
             "  multi\nline\tcause  ".to_owned(),

@@ -210,7 +210,7 @@ fn named_section_still_emits_module() {
 #[test]
 fn anonymous_section_inside_namespace_parents_defs_to_namespace() {
     // The body of an anonymous section should re-attach to whatever
-    // scope contains the section — here, namespace `N`.
+    // scope contains the section. Here, namespace `N`.
     let source = "namespace N\n\
                   section\n\
                   def inSection : Nat := 1\n\

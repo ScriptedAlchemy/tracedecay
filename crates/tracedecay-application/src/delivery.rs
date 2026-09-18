@@ -448,7 +448,7 @@ pub struct ProjectDeliveryInboxSourceV1 {
     /// Attention join input from the daemon's proximity read authority.
     /// Callers mount a real `FeedbackProximityReadResultV1` (via
     /// [`project_delivery_proximity_attention_source_from_read_v1`]) so the
-    /// server-owned inbox is the one join authority — never a client re-join.
+    /// server-owned inbox is the one join authority, never a client re-join.
     pub proximity: ProjectDeliveryProximityAttentionSourceV1,
 }
 
@@ -480,7 +480,7 @@ impl From<&FeedbackProximityRelationV1> for ProjectDeliveryProximityRelationV1 {
 impl ProjectDeliveryProximityRelationV1 {
     /// The Delivery attention source this relation can settle, if any.
     /// Neighborhood and shared-code candidates carry clone/neighborhood
-    /// evidence only — they do not prove divergence — so they leave
+    /// evidence only, they do not prove divergence, so they leave
     /// `DivergentSharedImplementation` unsettled.
     pub fn attention_source(self) -> Option<ProjectDeliveryAttentionSourceV1> {
         match self {
@@ -2860,7 +2860,7 @@ mod tests {
             "commit.delivery.proximity",
         );
         // Shared-code candidates name the indexed head but must not promote
-        // to DivergentSharedImplementation — clone evidence alone is not
+        // to DivergentSharedImplementation, clone evidence alone is not
         // divergence proof.
         let shared_candidate = proximity_encounter(
             "c",

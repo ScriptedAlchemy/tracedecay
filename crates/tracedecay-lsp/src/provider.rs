@@ -30,8 +30,8 @@ pub const ANALYZER_REQUESTS_PROVING_STABILITY: u8 = 3;
 /// How long an incarnation must have been `Ready` before the requests it
 /// served forgive its restart budget. Served count alone bounds nothing:
 /// `start → answer three requests in a millisecond → crash` reset the counter
-/// on every restart, so an analyzer dying continuously was respawned forever —
-/// a slower crash loop than the one reaching `Ready` forgave, but still not a
+/// on every restart, so an analyzer dying continuously was respawned forever.
+/// A slower crash loop than the one reaching `Ready` forgave, but still not a
 /// restart *rate* bound. Survival is what the budget is about, so the reset
 /// needs both. Measured from the `Ready` event's timestamp to the served
 /// request's, on the events this lane already raises: no timer, no poll.
@@ -219,7 +219,7 @@ impl AnalyzerSupervisor {
             // A start in flight has exactly one owner, serialized by the
             // analyzer client lock. A second `StartRequested` therefore means
             // that owner went away without concluding, and this caller is
-            // taking the start over — not that two are racing. The new
+            // taking the start over, not that two are racing. The new
             // generation fences the abandoned owner out of the start it no
             // longer owns.
             (
@@ -245,7 +245,7 @@ impl AnalyzerSupervisor {
             // One request served by this incarnation. Useful service across a
             // healthy interval is the only demonstrated stability observable
             // from the events this lane already raises, and it is the only
-            // thing that forgives the budget — so a transient failure years
+            // thing that forgives the budget, so a transient failure years
             // into a healthy daemon does not land on a counter left over from
             // a recovered one, while a process that keeps dying still
             // exhausts, however many requests it answers on the way down.

@@ -523,8 +523,8 @@ where
     /// This deliberately shadows [`rmcp::ServiceExt::serve`]: `rmcp` moves the
     /// transport into its initialization state machine, so a caller can no
     /// longer reach the wire once that machine fails. Installing the guard
-    /// here is what keeps every call site — daemon routing, benchmarks,
-    /// tests — on the same typed-refusal behavior.
+    /// here is what keeps every call site, daemon routing, benchmarks,
+    /// tests, on the same typed-refusal behavior.
     pub async fn serve<T>(
         self,
         transport: T,
@@ -573,7 +573,7 @@ const MALFORMED_INITIALIZE_MESSAGE: &str = "initialize params are missing or mal
 /// anything to the wire* (rmcp 3.1.1, `service/server.rs`). Daemon routing maps
 /// that failure to a config error and drops the socket, so the client only sees
 /// "the daemon closed the connection after the request was sent but before
-/// returning a matching response" — a transport mystery for what is a
+/// returning a matching response", a transport mystery for what is a
 /// definitive protocol answer, exactly like the unparseable-handshake and
 /// rejected-auth refusals the daemon already writes before closing.
 struct GuardedHandshakeTransport<T> {

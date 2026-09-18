@@ -97,7 +97,7 @@ impl IncidentDebrisArtifactV1 {
 ///
 /// Recovery/corruption artifacts must be written into one quarantined
 /// location with metadata, surfaced by Doctor and collected by the
-/// retention machinery — never left as loose siblings. This contract names
+/// retention machinery, never left as loose siblings. This contract names
 /// that location (store-relative) and the retention window after which
 /// quarantined artifacts become collection-eligible.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

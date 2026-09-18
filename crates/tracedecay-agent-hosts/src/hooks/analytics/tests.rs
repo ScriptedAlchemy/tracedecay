@@ -102,8 +102,8 @@ fn native_dispatch_dispositions_remain_distinct_in_telemetry() {
     );
 }
 
-/// A hook subprocess never has a published snapshot — nothing in the hook
-/// path opens a store or contacts the daemon before the span is built — so
+/// A hook subprocess never has a published snapshot, nothing in the hook
+/// path opens a store or contacts the daemon before the span is built, so
 /// treating absence as "timings off" suppressed `hook_completed` for every
 /// real hook while `hook_invoked` kept being written. Absence must behave
 /// like the invocation half; only an authority that says off turns it off.

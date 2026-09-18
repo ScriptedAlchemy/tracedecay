@@ -507,8 +507,8 @@ pub(crate) async fn sweep_orphan_stores(
 //
 // `build_store_census` walks *from* the registry: for every registered
 // project, for every one of its registered store instances. A store dir with
-// no registry trace at all — no `code_projects` row for its identity, ever —
-// is invisible to that walk no matter how large it grows. This is a distinct
+// no registry trace at all, meaning no `code_projects` row for its identity
+// ever, is invisible to that walk no matter how large it grows. This is a distinct
 // failure mode from [`StoreDisposition::Orphaned`] (whose registry row still
 // exists; only its root vanished): here the row itself is gone, e.g. because
 // registry GC removed the stale identity row without also removing
@@ -522,7 +522,7 @@ pub(crate) async fn sweep_orphan_stores(
 /// One store directory found on disk with no registry identity at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnregisteredStoreFinding {
-    /// The `projects/` leaf directory name — the project id this store would
+    /// The `projects/` leaf directory name, the project id this store would
     /// have if it were registered.
     pub project_dir_name: String,
     pub data_root: PathBuf,
@@ -577,8 +577,8 @@ pub async fn census_unregistered_project_dirs(
 }
 
 /// The partitioned collection decision over a set of unregistered-store
-/// findings. There is no `Live`/`Relinkable` disposition here — an
-/// unregistered directory has no registry identity to resolve at all — so
+/// findings. There is no `Live`/`Relinkable` disposition here, an
+/// unregistered directory has no registry identity to resolve at all, so
 /// every finding is either past the retention window or not.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UnregisteredCollectionPlan {

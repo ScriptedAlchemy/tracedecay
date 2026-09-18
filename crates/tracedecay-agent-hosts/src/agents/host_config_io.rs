@@ -232,7 +232,7 @@ pub(super) fn render_json_config(path: &Path, value: &serde_json::Value) -> Resu
         return Err(TraceDecayError::Config {
             message: format!(
                 "internal error: serialized JSON for {} failed re-parse validation.\n  \
-                 This is a bug in tracedecay — please report it.",
+                 This is a bug in tracedecay, please report it.",
                 path.display()
             ),
         });
@@ -726,8 +726,8 @@ pub fn write_json_file(path: &Path, value: &serde_json::Value) -> Result<()> {
 /// The override is honored only when it is non-empty and falls under `home`.
 /// That keeps isolated-HOME tests from picking up the operator's real
 /// `KIMI_CODE_HOME` / `VIBE_HOME`, and refuses a host directory that escapes
-/// the admitted profile home. Anything else — unset, empty, or outside
-/// `home` — uses `home.join(default_relative)`.
+/// the admitted profile home. Anything else, unset, empty, or outside
+/// `home`, uses `home.join(default_relative)`.
 pub(crate) fn host_home_override(home: &Path, env_key: &str, default_relative: &str) -> PathBuf {
     std::env::var_os(env_key)
         .filter(|value| !value.is_empty())
@@ -1297,11 +1297,11 @@ fn parse_toml_config(path: &Path, contents: &str) -> Result<toml::Value> {
         return Ok(toml::Value::Table(toml::map::Map::new()));
     }
     // NOTE: `str.parse::<toml::Value>()` parses a single TOML value in toml v1,
-    // not a document — using it here would treat any well-formed config.toml as
+    // not a document, using it here would treat any well-formed config.toml as
     // unparseable and silently drop its contents. Use `toml::from_str` instead.
     let table: toml::Table = toml::from_str(contents).map_err(|e| TraceDecayError::Config {
         message: format!(
-            "failed to parse {} as TOML: {e}. Refusing to overwrite — fix the file or remove it manually.",
+            "failed to parse {} as TOML: {e}. Refusing to overwrite, fix the file or remove it manually.",
             path.display()
         ),
     })?;

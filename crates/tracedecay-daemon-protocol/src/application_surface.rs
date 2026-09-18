@@ -1,8 +1,8 @@
 //! Owner-neutral application-surface request, result, and parse contracts.
 //!
 //! These types sit immediately above the daemon invocation envelope. They do
-//! not themselves serialize on the socket — [`crate::DaemonInvocationPayload`]
-//! does — but they name the reviewed request body the MCP/CLI/HTTP adapters
+//! not themselves serialize on the socket. [`crate::DaemonInvocationPayload`]
+//! does. They name the reviewed request body the MCP/CLI/HTTP adapters
 //! share. They live here so `tracedecay-mcp` can own the generic adapter
 //! without depending on daemon-service. Execution stays in daemon-service.
 
@@ -62,8 +62,8 @@ pub enum ApplicationSurfaceAdapterError {
     #[error("owning daemon application service is unavailable")]
     DaemonUnavailable,
     /// No daemon accepted the connection after the transport's restart grace;
-    /// the request was never sent. Surfaced as a dispatch error — not a
-    /// retryable problem envelope — so dispatchers fail fast with the typed
+    /// the request was never sent. Surfaced as a dispatch error, not a
+    /// retryable problem envelope, so dispatchers fail fast with the typed
     /// connect diagnostic instead of re-dispatching until their deadline.
     #[error("{detail}")]
     DaemonUnreachable { reason_code: String, detail: String },

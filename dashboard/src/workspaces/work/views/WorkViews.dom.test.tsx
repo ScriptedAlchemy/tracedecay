@@ -10,7 +10,7 @@
  *
  * The second is the honesty rule. Each of these projections is asked to
  * encode a measurement this build cannot take, and the failure mode is not a
- * broken drawing — it is a gap that quietly acquires a value. Every projection
+ * broken drawing, it is a gap that quietly acquires a value. Every projection
  * is therefore asserted to render its absent channels as stated absences, and
  * a refusal from the daemon is asserted never to render as a projection of
  * nothing.
@@ -276,7 +276,7 @@ function danglingReferences(container: HTMLElement): string[] {
       if (value === null) continue;
       for (const id of value.split(/\s+/).filter((token) => token !== '')) {
         // Resolved against the document, the way an assistive technology
-        // resolves an IDREF — not against this subtree.
+        // resolves an IDREF, not against this subtree.
         if (element.ownerDocument.getElementById(id) === null) {
           offences.push(`${element.tagName.toLowerCase()} ${attribute}="${id}"`);
         }
@@ -400,7 +400,7 @@ describe('the projection switcher', () => {
 
   /**
    * Losing the switcher on a refusal would strand a reader in a projection
-   * they cannot leave — so the tabs stay. Which means the region they name has
+   * they cannot leave, so the tabs stay. Which means the region they name has
    * to stay with them: tabs that keep `aria-controls` pointed at a panel the
    * refusal branch never drew are a dangling reference, and the accessibility
    * gate reads that as a critical invalid attribute value rather than as a
@@ -426,8 +426,8 @@ describe('every attempt-shaped projection', () => {
   /**
    * The assertion this file exists for. Wall clock and observed execution
    * order survived the graph-read mount as the two measurements no contract
-   * carries — an attempt still records an end and no start, and nothing binds
-   * a task's completion to the instant another task finished — and a
+   * carries, an attempt still records an end and no start, and nothing binds
+   * a task's completion to the instant another task finished, and a
    * projection that drew either would be drawing a number nobody could check.
    */
   it.each([
@@ -516,7 +516,7 @@ describe('every attempt-shaped projection', () => {
  * These four readings were the timeline's absences until the route landed, so
  * the tests here are the mirror image of the ones above: each asserts that a
  * measurement is now drawn from `WorkAttemptV1` rather than inferred, and that
- * the page's own limits — a cap, a refusal, a typed absence — are still said
+ * the page's own limits, a cap, a refusal, a typed absence, are still said
  * out loud instead of collapsing into an empty record.
  */
 describe('the execution record', () => {

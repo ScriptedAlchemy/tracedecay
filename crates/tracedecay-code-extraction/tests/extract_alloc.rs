@@ -5,7 +5,7 @@
 //! keep a small signature prefix. Each fixture here pairs a tiny item header
 //! with a huge body (hundreds of KB of repeated statements), proves the
 //! emitted signature strings byte-for-byte, and caps the bytes allocated
-//! during the walk below the fixture size — a whole-file or whole-item copy
+//! during the walk below the fixture size. A whole-file or whole-item copy
 //! busts the budget immediately.
 //!
 //! This suite is its own test binary (not a `main.rs` module) because the
@@ -80,7 +80,7 @@ fn measure_allocation<T>(work: impl FnOnce() -> T) -> (T, usize) {
 
 /// Statement lines per hot body. Each line carries `PAD_WIDTH` bytes of
 /// trailing comment so the body is huge in *bytes* while staying small in
-/// node count — the memcpy waste under test scales with bytes, while the
+/// node count. The memcpy waste under test scales with bytes, while the
 /// legitimate walk cost (complexity traversal stack) scales with nodes.
 const BODY_LINES: usize = 640;
 const PAD_WIDTH: usize = 960;

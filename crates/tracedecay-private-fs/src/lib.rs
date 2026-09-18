@@ -288,7 +288,7 @@ compile_error!("TraceDecay private filesystem authority requires Unix or Windows
 /// Windows `LockFileEx` with `LOCKFILE_FAIL_IMMEDIATELY` reports
 /// `ERROR_LOCK_VIOLATION` (33) instead, often with a kind other than
 /// `WouldBlock`. Sharing violations (`ERROR_SHARING_VIOLATION`, 32) and
-/// `AccessDenied` (`ERROR_ACCESS_DENIED`, 5) are different operations — an
+/// `AccessDenied` (`ERROR_ACCESS_DENIED`, 5) are different operations, an
 /// open/ACL problem is not proof that another authority holds the lock.
 pub fn is_lock_contended(error: &io::Error) -> bool {
     classify_lock_contention(error, cfg!(windows))

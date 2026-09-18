@@ -43,7 +43,7 @@ pub trait AutomationSessionStore: Send + Sync {
     ///
     /// The scheduler uses this as a gate: no observed activity means nothing
     /// new to run against. The registered adapter maps a failed read to
-    /// `None` with a logged warning — a store the scheduler cannot read has
+    /// `None` with a logged warning, a store the scheduler cannot read has
     /// no observable new activity, so automation stays idle instead of
     /// running against a broken store.
     fn latest_session_activity_secs(&self) -> StoreFuture<'_, Option<i64>>;

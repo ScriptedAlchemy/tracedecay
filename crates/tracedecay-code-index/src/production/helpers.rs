@@ -426,8 +426,8 @@ where
     // Every file resolves against the same immutable whole-set index, so this
     // is one ordered fan-out over the indexing pool. Concatenating each file's
     // edges in file-index order reproduces the exact sequence the serial loop
-    // pushed, so the stable sort and dedup below — and therefore every edge
-    // digest downstream — do not depend on the width.
+    // pushed, so the stable sort and dedup below, and therefore every edge
+    // digest downstream, do not depend on the width.
     let per_file = collect_by_file_index_ordered(files.len(), workers, &|index| {
         resolve_one_file_cross_file_references(files, &by_simple_name, &rust_files, index)
     })?;
@@ -1523,7 +1523,7 @@ fn file_qualified_name_matches(
 
 /// A `Type::method` whose owning type is defined in `scope_index` (as
 /// `scope_qualified_type`, the type's crate-relative path) may live in any
-/// other file of the same crate — either an inherent `impl Type` or a unique
+/// other file of the same crate, either an inherent `impl Type` or a unique
 /// `impl Trait for Type` whose UFCS name still answers the type-path call.
 /// Validate the type at scope, match the method by its file-relative
 /// `Type::method` path (including the UFCS alias), and require the `impl`

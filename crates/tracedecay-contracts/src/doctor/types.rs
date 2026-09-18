@@ -27,7 +27,7 @@ use crate::identity::application_identifier;
 #[serde(rename_all = "snake_case")]
 pub enum DoctorFindingFamilyV1 {
     /// advisory/scout findings (GitHub review, CI localization,
-    /// proximity, context scout) — `crate::advisory` / domain feedback.
+    /// proximity, context scout): `crate::advisory` / domain feedback.
     Advisory,
     /// Desired-versus-effective configuration and compatibility drift from
     /// `ProjectConfigurationRuntime` / `ConfigurationControlPlane`.
@@ -269,7 +269,7 @@ impl DoctorFindingV1 {
     /// 1. Every finding cites at least one typed evidence reference.
     /// 2. Evidence references are unique (no duplicates).
     /// 3. A [`DoctorEvidenceStateV1::HealthyCompleteCoverage`] finding requires
-    ///    [`DoctorCoverageCompletenessV1::Complete`] coverage — partial or
+    ///    [`DoctorCoverageCompletenessV1::Complete`] coverage. Partial or
     ///    unknown coverage never collapses into a healthy claim.
     pub fn new(
         family: DoctorFindingFamilyV1,

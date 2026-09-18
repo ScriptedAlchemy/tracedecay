@@ -27,7 +27,7 @@ use super::{
 
 /// Rename-stable identity for one scope root, stated in the same terms as the
 /// verified-marker container fence: `(device, inode)` is the durable file-id
-/// pair — the Unix device and inode, or the Windows volume serial number and
+/// pair, the Unix device and inode, or the Windows volume serial number and
 /// by-handle file index. Timestamps only supplement it.
 ///
 /// The persisted shape is platform-neutral, so one journal row means the same
@@ -35,7 +35,7 @@ use super::{
 /// nonzero, and the inode/file index must not be the unsupported `u64::MAX`
 /// sentinel. Anything else is the absence of a provable identity, including a
 /// row written before this fence. Identity unknown fails closed to a full
-/// re-proof — [`super::scope_roots::validate_scope_transaction`] refuses such
+/// re-proof, [`super::scope_roots::validate_scope_transaction`] refuses such
 /// a row by name at the journal read, rather than letting a bare deserialize
 /// error surface as unsafe state or letting timestamps alone authorize a
 /// destructive rename.
@@ -159,9 +159,9 @@ impl ScopeQuarantineAuthority {
                         return Err(identity_changed(&scope.scope_hash, "before quarantine"));
                     }
                     drop(source);
-                    // Verify through the capability opened at `prepare` — the
+                    // Verify through the capability opened at `prepare`, the
                     // proof that nothing swapped this directory since the
-                    // collection decision — and only then release it. cap-std
+                    // collection decision, and only then release it. cap-std
                     // opens directories without `FILE_SHARE_DELETE`, so Windows
                     // refuses to rename one while the handle is live.
                     //

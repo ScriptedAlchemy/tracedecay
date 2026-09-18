@@ -633,7 +633,7 @@ async fn settle_in_process_invocation(
             // An authoritative effect settles itself: its own budget bounds it,
             // and when that budget expires after the commit point it reports
             // `PartialEffect` with a committed receipt. Waiting only
-            // `DAEMON_TASK_ABORT_DEADLINE` — two seconds, a *shutdown* bound —
+            // `DAEMON_TASK_ABORT_DEADLINE`, two seconds, a *shutdown* bound,
             // replaced that answer with `ResetRequired` whenever settlement
             // took a moment longer than the deadline, which tells the operator
             // their store is corrupt and must be reset when in truth one

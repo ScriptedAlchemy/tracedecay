@@ -484,7 +484,7 @@ pub(super) fn intern_exact_terms(
 /// Intern the batch's distinct terms and return the ids now present in
 /// `vocabulary`, so the posting writer can confirm every planned posting's
 /// term was interned with one integer probe per row. `terms` is ascending by
-/// term text — the order `vocabulary` was always interned in — and carries
+/// term text, the order `vocabulary` was always interned in, and carries
 /// the ids the insert plan already content-addressed, so neither the digest
 /// nor the walk over every posting is repeated here.
 pub(super) fn intern_terms(

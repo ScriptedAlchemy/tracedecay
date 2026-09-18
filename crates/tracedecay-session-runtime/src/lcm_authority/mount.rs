@@ -33,7 +33,7 @@ const LCM_GRANT_ID: &str = "grant.daemon.lcm";
 const LCM_GRANT_SETTLEMENT_MARGIN: Duration = Duration::from_secs(1);
 // The canonical LCM operation budgets. LCM reads verify content hashes over
 // whole payloads before slicing, so their byte budget covers verified read
-// I/O — not the response, which stays bounded by the context budget and the
+// I/O, not the response, which stays bounded by the context budget and the
 // MCP response cap. The admitted describe/expand bindings share these.
 pub const LCM_MAX_RESULTS: u64 = 4_096;
 pub const LCM_MAX_BYTES: u64 = 64 * 1024 * 1024;

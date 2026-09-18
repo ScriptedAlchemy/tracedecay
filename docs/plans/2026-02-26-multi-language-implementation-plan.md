@@ -1,6 +1,6 @@
 # Multi-Language Support (Go + Java) Implementation Plan
 
-> **Archived record — not implementation authority.** This document preserves
+> **Archived record, not implementation authority.** This document preserves
 > historical intent and evidence. Current requirements come only from the
 > `docs/plans/tracedecay-v2/` hierarchy. Exact tests and counts, source-string
 > checks, branch/commit/worktree choreography, snapshots, receipts,
@@ -95,7 +95,7 @@ fn test_new_edge_kinds_roundtrip() {
 **Step 2: Run tests to verify they fail**
 
 Run: `cargo test --test types_test test_new_node_kinds_roundtrip test_new_edge_kinds_roundtrip`
-Expected: FAIL — variants don't exist yet
+Expected: FAIL, variants don't exist yet
 
 **Step 3: Add NodeKind variants**
 
@@ -193,7 +193,7 @@ Expected: PASS
 **Step 6: Run full test suite to check no regressions**
 
 Run: `cargo test`
-Expected: PASS — existing code doesn't break since we only added new variants
+Expected: PASS, existing code doesn't break since we only added new variants
 
 **Step 7: Commit**
 
@@ -259,7 +259,7 @@ fn test_language_registry_supported_extensions() {
 **Step 2: Run tests to verify they fail**
 
 Run: `cargo test --test extraction_test test_language_registry`
-Expected: FAIL — `LanguageRegistry` doesn't exist
+Expected: FAIL, `LanguageRegistry` doesn't exist
 
 **Step 3: Define trait and registry in `src/extraction/mod.rs`**
 
@@ -429,7 +429,7 @@ impl crate::extraction::LanguageExtractor for RustExtractor {
 **Step 6: Run tests to verify they pass**
 
 Run: `cargo test --test extraction_test`
-Expected: PASS — all existing extraction tests still pass, plus new registry tests
+Expected: PASS, all existing extraction tests still pass, plus new registry tests
 
 **Step 7: Commit**
 
@@ -515,7 +515,7 @@ In `src/codegraph.rs`:
 **Step 3: Verify compilation and tests**
 
 Run: `cargo test`
-Expected: PASS — all existing tests pass, Rust extraction behavior unchanged
+Expected: PASS, all existing tests pass, Rust extraction behavior unchanged
 
 **Step 4: Commit**
 
@@ -526,7 +526,7 @@ git commit -m "feat: integrate LanguageRegistry into CodeGraph for multi-languag
 
 ---
 
-### Task 5: Implement Go extractor — types and package
+### Task 5: implement go extractor, types and package
 
 **Files:**
 - Modify: `src/extraction/go_extractor.rs`
@@ -835,7 +835,7 @@ func HandleRequest() {}
 **Step 2: Run tests to verify they fail**
 
 Run: `cargo test --test go_extraction_test`
-Expected: FAIL — Go extractor is a stub
+Expected: FAIL. Go extractor is a stub
 
 **Step 3: Implement the full Go extractor**
 
@@ -867,7 +867,7 @@ Expected: PASS
 **Step 5: Run full test suite**
 
 Run: `cargo test`
-Expected: PASS — no regressions
+Expected: PASS, no regressions
 
 **Step 6: Commit**
 
@@ -1238,7 +1238,7 @@ public class App {
 **Step 2: Run tests to verify they fail**
 
 Run: `cargo test --test java_extraction_test`
-Expected: FAIL — Java extractor is a stub
+Expected: FAIL. Java extractor is a stub
 
 **Step 3: Implement the full Java extractor**
 
@@ -1272,7 +1272,7 @@ Expected: PASS
 **Step 5: Run full test suite**
 
 Run: `cargo test`
-Expected: PASS — no regressions
+Expected: PASS, no regressions
 
 **Step 6: Commit**
 
@@ -1321,7 +1321,7 @@ if uref.reference_kind == EdgeKind::Calls
 **Step 2: Run tests**
 
 Run: `cargo test`
-Expected: PASS — all tests pass including resolution tests
+Expected: PASS, all tests pass including resolution tests
 
 **Step 3: Commit**
 

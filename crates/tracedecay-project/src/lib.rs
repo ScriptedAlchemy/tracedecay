@@ -5,7 +5,7 @@
 //! [`project::TraceDecay`] without a dependency cycle. It owns the daemon
 //! configuration authority ([`config`]), the runtime-port wiring the extracted
 //! crates invert ([`runtime_ports`]), the process-wide product runtime
-//! ([`product_runtime`], [`version`]), and — behind `test-helpers` — the
+//! ([`product_runtime`], [`version`]), and behind `test-helpers` the
 //! registered host-admission test runtime every integration fixture composes.
 //!
 //! The daemon client is the one capability this crate cannot build: the

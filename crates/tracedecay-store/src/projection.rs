@@ -172,10 +172,11 @@ impl ObservationProjection {
     /// The deterministic `output_digest` is a pure function of the projector
     /// version, ordinal, session, and message, so it is derived lazily on first
     /// use (see [`SessionMessageProjection::output_digest`]) instead of on
-    /// every derivation. Read paths that only need the projected records —
-    /// temporal hydration, occurrence materialization, parent resolution —
+    /// every derivation. Read paths that only need the projected records
     /// therefore never pay the canonical-JSON plus SHA-256 cost, while write
-    /// paths that persist the digest observe byte-identical values.
+    /// paths that persist the digest observe byte-identical values. That
+    /// covers temporal hydration, occurrence materialization, and parent
+    /// resolution.
     fn message_projection(
         provenance: ProjectionProvenance,
         session: SessionRecord,
@@ -661,7 +662,7 @@ pub struct ProjectionBatchItem {
 pub struct ProjectionDrainBatch {
     /// Items in authoritative sequence order.
     pub items: Vec<ProjectionBatchItem>,
-    /// Whether queued work remains after this window — either ready items
+    /// Whether queued work remains after this window, either ready items
     /// past the window budget or a retry-deferred queue head.
     pub has_more: bool,
 }

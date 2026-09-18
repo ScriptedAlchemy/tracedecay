@@ -5,7 +5,7 @@
 //! Anthropic does not publish standalone machine-readable schemas for these
 //! files (marketplace.json even references a schema URL that is not served),
 //! so the schemas vendored at `tests/fixtures/claude-schemas/` are derived
-//! from the Claude Code docs — see each schema's top-level `description` for
+//! from the Claude Code docs. See each schema's top-level `description` for
 //! provenance. This closes the gap where the Cursor/Codex configs were
 //! schema-validated (`plugin_config_schema_test.rs`) but the Claude configs
 //! only had semantic spot checks.

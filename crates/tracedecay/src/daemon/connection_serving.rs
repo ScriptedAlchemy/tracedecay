@@ -202,7 +202,7 @@ fn is_mcp_initialize_request(request: Option<&JsonRpcRequest>) -> bool {
 ///
 /// Propagating the parse failure with `?` here drops the socket while the
 /// client's first request is still unread, which the kernel reports to the
-/// client as `Connection reset by peer` — a raw transport error that hides
+/// client as `Connection reset by peer`, a raw transport error that hides
 /// wire-revision skew. The refusal frame plus a drained receive buffer turns
 /// that into a readable typed refusal followed by a clean EOF.
 pub(super) async fn refuse_unparseable_handshake(
@@ -222,7 +222,7 @@ pub(super) async fn refuse_unparseable_handshake(
 ///
 /// Tearing the socket down on the bare `Err` left the client's pending read
 /// at EOF, which every client surface reported as "connection closed, the
-/// outcome is unknown" — a transport mystery for what is a definitive daemon
+/// outcome is unknown", a transport mystery for what is a definitive daemon
 /// answer. The frame never echoes the supplied token.
 async fn refuse_unauthenticated_client(
     transport: &mut (impl tracedecay_mcp::McpTransport + Send),
@@ -252,7 +252,7 @@ fn profile_identity_warming_error() -> TraceDecayError {
 ///
 /// The stage reaches a cold `DaemonSessionRuntimeRegistryV1::open` through
 /// `registered_profile_database`, and the only other arm the callers raced it
-/// against was peer full close — which a half-closed one-shot client never
+/// against was peer full close, which a half-closed one-shot client never
 /// satisfies while it is still waiting for its response. A contended cold open
 /// therefore pinned the connection, its lifecycle activity permit and its
 /// admission slot for as long as the open took.
@@ -261,7 +261,7 @@ fn profile_identity_warming_error() -> TraceDecayError {
 /// *without* cancelling the open: the registry is a per-profile `OnceCell`, so
 /// dropping the initializer future would abandon the partially finished open
 /// and make the next client start over. Detaching it instead lets this client's
-/// retry — or the next one — find the registry already warm.
+/// retry, or the next one, find the registry already warm.
 async fn bind_authenticated_profile_identity_within_deadline(
     handshake: &mut DaemonHandshake,
     store_administration: &StoreAdministration,
@@ -350,8 +350,8 @@ const PROJECT_OWNER_HALF_CLOSE_GRACE: Duration = Duration::from_millis(750);
 /// Deliberately *not* `PROJECT_OPEN_REQUEST_DEADLINE`. That 500 ms bound
 /// answers "has this route's already-admitted open published yet", and the
 /// route keeps warming behind the refusal. The binding stage is a different
-/// question — it performs the profile's one cold
-/// `DaemonSessionRuntimeRegistryV1::open`, schema convergence included — and
+/// question, it performs the profile's one cold
+/// `DaemonSessionRuntimeRegistryV1::open`, schema convergence included, and
 /// measurement says 500 ms is inside that open's normal range, not past it: on
 /// this workspace's daemon suite a cold profile open measured 4 ms warm, 331 ms
 /// uncontended and over 500 ms with six connections opening their own profiles
@@ -749,7 +749,7 @@ where
         loop {
             // This loop continues after the read branch, so unlike the one-shot
             // selects below it drops an in-flight read every time `open` wins the
-            // race — and the same transport is then handed to the routed server.
+            // race, and the same transport is then handed to the routed server.
             // That is only safe because the transport's read half keeps its
             // partial-frame accumulator (`tracedecay_framing::BoundedLineReader`), so a
             // dropped read resumes mid-frame instead of losing the bytes it already

@@ -165,7 +165,7 @@ impl GatewayDiagnostic {
     /// Normalizes one diagnostic into its merge lane.
     ///
     /// The lane is authoritative, but within the `TraceDecay` lane a producer
-    /// already named by the projection is preserved — merging must not erase
+    /// already named by the projection is preserved, merging must not erase
     /// `tracedecay-github`/`tracedecay-ci`/`tracedecay-proximity` back into an
     /// anonymous `tracedecay`.
     fn normalize(mut self, lane: DiagnosticSource) -> Self {

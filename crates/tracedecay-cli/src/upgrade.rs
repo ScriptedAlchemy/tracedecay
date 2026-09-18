@@ -6,7 +6,7 @@
 //! only then is it published over the running executable. Installations owned by
 //! a package manager (Homebrew, Scoop) are upgraded by that manager and never
 //! written to directly; see [`UpgradeSource`].
-//! Beta and stable are separate channels — a beta build only sees beta
+//! Beta and stable are separate channels, a beta build only sees beta
 //! releases and vice versa.
 
 use std::fmt;
@@ -144,7 +144,7 @@ fn fetch_release_download(tag: &str, asset_name: &str) -> Result<ReleaseDownload
         .ok_or_else(|| TraceDecayError::Config {
             message: format!(
                 "release {tag} exists but asset '{asset_name}' is not yet available.\n  \
-                 CI build may still be in progress — try again in a few minutes.\n  \
+                 CI build may still be in progress, try again in a few minutes.\n  \
                  https://github.com/{GITHUB_REPO}/releases/tag/{tag}",
             ),
         })?;
@@ -557,7 +557,7 @@ pub enum UpgradeOutcome {
         /// Version of the freshly installed binary: the release-manifest
         /// version for GitHub-release installs, the linked binary's
         /// self-reported version for package-manager installs. Daemon restore
-        /// validates this version — the binary it actually restarts — instead
+        /// validates this version, the binary it actually restarts, instead
         /// of the one that was running before the upgrade. `None` only when
         /// the manager's install could not be interrogated; restore
         /// verification then validates the pre-upgrade version and, if a new
@@ -565,7 +565,7 @@ pub enum UpgradeOutcome {
         /// rather than silently passing.
         version: Option<String>,
     },
-    /// Already on the latest version — the binary was not replaced.
+    /// Already on the latest version. The binary was not replaced.
     AlreadyCurrent,
 }
 
@@ -768,7 +768,7 @@ fn github_latest_unavailable_error(is_beta: bool) -> TraceDecayError {
     let channel = if is_beta { "beta" } else { "stable" };
     TraceDecayError::Config {
         message: format!(
-            "failed to check for updates — no installable GitHub release asset is available for \
+            "failed to check for updates, no installable GitHub release asset is available for \
              the current platform on the {channel} channel.\n  \
              GitHub may be reachable, but release CI may still be uploading binaries."
         ),
@@ -996,7 +996,7 @@ fn run_delegated_upgrade(
     let label = manager.label();
     eprintln!("Refreshing {label} package metadata: {refresh}");
     if !refresh.status().is_ok_and(|status| status.success()) {
-        eprintln!("  warning: `{refresh}` failed — continuing with existing metadata");
+        eprintln!("  warning: `{refresh}` failed, continuing with existing metadata");
     }
 
     eprintln!("Delegating upgrade to {label}: {upgrade}");
@@ -1049,7 +1049,7 @@ fn run_delegated_upgrade(
     // `installed_version` may be None here (assumed install, undetectable
     // binary): daemon restore then validates the pre-upgrade version and
     // reports a typed identity mismatch if the manager really did install a
-    // new daemon — truthful failure over a fabricated version.
+    // new daemon, truthful failure over a fabricated version.
     Ok(UpgradeOutcome::Installed {
         binary,
         version: installed_version,
@@ -1140,7 +1140,7 @@ fn switch_channel_for(method: &InstallMethod, target_channel: &str) -> Result<St
         cloud::fetch_latest_stable_version()
     }
     .ok_or_else(|| TraceDecayError::Config {
-        message: format!("failed to find latest {target_channel} release — could not reach GitHub"),
+        message: format!("failed to find latest {target_channel} release, could not reach GitHub"),
     })?;
 
     eprintln!("  Target: v{latest}");

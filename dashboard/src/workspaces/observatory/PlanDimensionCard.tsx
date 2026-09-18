@@ -6,8 +6,8 @@
  * eye reads a page of two measurements as a page with two things on it rather
  * than as a page with thirteen requirements and two answers.
  *
- * Every row Plan 26 names — support, eligible denominator, censoring/unknowns,
- * interval coverage, horizon, descriptor revision, safe anchors — is rendered
+ * Every row Plan 26 names, support, eligible denominator, censoring/unknowns,
+ * interval coverage, horizon, descriptor revision, safe anchors, is rendered
  * on every card, including the cards whose answer is "not published". The rows
  * are a definition list so a screen reader gets the same term/value pairing the
  * grid gives the eye, and the state is a `StateChip` (icon + label +

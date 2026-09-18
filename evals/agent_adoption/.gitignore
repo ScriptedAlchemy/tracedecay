@@ -1,4 +1,4 @@
-# Live run artifacts (contain machine-absolute temp paths) — never commit.
+# Live run artifacts (contain machine-absolute temp paths). Never commit.
 runs/
 *.stdout.jsonl
 *.stderr.log

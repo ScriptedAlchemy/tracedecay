@@ -1,7 +1,7 @@
 # TraceDecay for OpenCode
 
 This plugin bundles the TraceDecay MCP server, a custom LSP registration, a
-native TypeScript plugin, and — through the optional Agent component — the
+native TypeScript plugin, and, through the optional Agent component, the
 shared workflow skills, command prompt templates, and schema-adapted
 subagents.
 

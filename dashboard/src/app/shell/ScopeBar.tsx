@@ -21,7 +21,7 @@ function toggleTheme() {
  * 52px register carrying `Project: all` or the reconciled project label with
  * its canonical ID, the active channel and title, and the shell's own
  * controls. Every view preserves and displays scope; transitions are
- * explicit — the only scope control here is the one that clears it.
+ * explicit, the only scope control here is the one that clears it.
  *
  * `channel` is the route's channel, resolved by the shell (which sits inside
  * the router) rather than read here, so the register can be rendered and
@@ -43,12 +43,12 @@ export function ScopeBar({
   // end of the page". Its key is rooted at the registry prefix the daemon's
   // `project_registry_changed` invalidation names, so a rename or an
   // active-project switch re-runs the reconciliation below instead of leaving
-  // this — the read every write control depends on — stale until a reload.
+  // this, the read every write control depends on, stale until a reload.
   const entry = useProjectEntry(scope.kind === 'project' ? scope.projectId : null);
 
   // The one place a selected project is reconciled against the registry, for
-  // both its activation and its label. Every entry into a project scope — deep
-  // link, command palette, Remote Brain, this bar — arrives `unresolved` with
+  // both its activation and its label. Every entry into a project scope, deep
+  // link, command palette, Remote Brain, this bar, arrives `unresolved` with
   // an unverified label, and this read is what settles both. Controls consult
   // `scopeWritable`, so until this lands they report writability as unknown
   // rather than offering a write the gateway would refuse.
@@ -66,7 +66,7 @@ export function ScopeBar({
     // canonical ID, so at 200% text zoom the pair is taller than the register.
     // Pinned to exactly 52 the bar could not take them, and a clip would cut
     // off the project name and its `unverified`/`not in registry` caveat at
-    // precisely the zoom level someone would be using in order to read them.
+    // precisely the zoom level someone would be using to read them.
     <header className="flex min-h-[var(--shell-register)] shrink-0 items-stretch border-b border-edge-frame bg-surface-1">
       {/* `min-w-0` without `overflow-hidden`: the horizontal containment comes
         * from `truncate` on the label itself, which shortens the name and

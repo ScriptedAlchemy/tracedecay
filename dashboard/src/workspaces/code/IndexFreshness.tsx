@@ -1,10 +1,10 @@
 /**
- * INDEX FRESHNESS — `GET /api/code-index/freshness`.
+ * INDEX FRESHNESS, `GET /api/code-index/freshness`.
  *
  * The branch-aware answer to "is the graph beside this panel current, and
  * current *for what*". Every symbol, edge and trace on this page was read from
  * one sealed code-index generation, and that generation was sealed against one
- * exact source reference — so a spine drawn from a generation sealed on
+ * exact source reference, so a spine drawn from a generation sealed on
  * `refs/heads/main` while the checkout sits on a feature branch is stale in a
  * way no node count reveals.
  *
@@ -15,7 +15,7 @@
  *                panel says so instead of drawing a "fresh" badge.
  *   unknown      a registry is attached but has no mounted scheduler for this
  *                project, or has one that has not sealed a generation.
- *   loading      a mount exists and is indexing — a generation is coming.
+ *   loading      a mount exists and is indexing, a generation is coming.
  *   partial      a mount and a generation exist but the scheduler's own
  *                coverage of them is incomplete.
  *   ready        a complete, fresh generation with complete coverage.
@@ -164,7 +164,7 @@ function WorktreeReading({
         <p className="text-state-warning">
           parked: {worktree.parked.reason}
           {worktree.parked.retries_on_wake ? '' : ' · does not retry on wake'}
-          {' — '}
+          {', '}
           {worktree.parked.remediation}
         </p>
       ) : null}
@@ -181,8 +181,8 @@ function WorktreeReading({
         ) : null}
         <Row label="sealed">{formatMicros(worktree.sealed_at_micros)}</Row>
         <Row label="reconciled">{formatMicros(worktree.last_reconcile_micros)}</Row>
-        {/* A pending-hint count of zero is a real reading — the scheduler
-          * counted and found none — so unlike the identity fields above it is
+        {/* A pending-hint count of zero is a real reading, the scheduler
+          * counted and found none, so unlike the identity fields above it is
           * printed whenever the server sent a number, and omitted only when it
           * sent none. */}
         {worktree.hook_hint_count != null ? (

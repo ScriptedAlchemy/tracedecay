@@ -352,8 +352,8 @@ fn diagnostic_graph_problem(detail: &str) -> TraceDecayError {
 /// store as one clean-generation snapshot.
 ///
 /// This is the production write path for the compiler pillar. Failure to
-/// publish never fails the diagnose call — the caller still receives its
-/// mapped diagnostics — but the outcome is reported in the response so a
+/// publish never fails the diagnose call. The caller still receives its
+/// mapped diagnostics, but the outcome is reported in the response so a
 /// silent no-op is observable.
 ///
 /// Identity is resolved from the code-index generation authority, never minted
@@ -361,7 +361,7 @@ fn diagnostic_graph_problem(detail: &str) -> TraceDecayError {
 /// the projection compares a record's `file_occurrence_id` against the
 /// saved-edit cycle's impact target and its `generation_id` against the cycle's
 /// code-index generation, and both sides now come from the same mint. Without a
-/// resolver — a direct, non-daemon server — the honest outcome is to publish
+/// resolver, a direct, non-daemon server, the honest outcome is to publish
 /// nothing under a named reason rather than to guess a repository-relative
 /// path, which the projection could only refuse.
 #[hotpath::measure(future = true, label = "mcp.workflow.diagnose.publish")]
@@ -654,8 +654,8 @@ async fn wait_for_test_run_cancellation(
 ) {
     // CancellationSignal is still a polled atomic (no event wait API on this
     // type without changing application crate callers we do not own). When no
-    // signal is attached, wait only on the emitter. Otherwise poll at 50ms —
-    // same cancel semantics, ~10x fewer timers than the prior 5ms wakeups.
+    // signal is attached, wait only on the emitter. Otherwise poll at 50ms.
+    // Same cancel semantics, ~10x fewer timers than the prior 5ms wakeups.
     let Some(cancellation) = cancellation else {
         emitter.cancelled().await;
         return;

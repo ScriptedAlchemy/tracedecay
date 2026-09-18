@@ -96,7 +96,7 @@ pub(super) fn def_run_affected_tests() -> ToolDefinition {
         "Run Affected Tests",
         "Run `cargo test` for tests that cover the symbols in the explicit \
          `changed_paths` manifest. Closes the loop opened by \
-         `tracedecay_test_map` / `tracedecay_test_risk` — emits pass/fail per \
+         `tracedecay_test_map` / `tracedecay_test_risk`, emits pass/fail per \
          test alongside the source nodes each test covers. Output is the \
          libtest summary parsed into JSON.",
         json!({

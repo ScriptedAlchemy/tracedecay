@@ -2,8 +2,8 @@
  * The holographic-memory reads the Knowledge workspace consumes beyond the
  * three contracted routes.
  *
- * `memory_api.rs` serves this family in two tiers. Three routes — `/`,
- * `/status`, `/fact/{id}` — answer `DashboardEnvelopeV1<…>` and are registered
+ * `memory_api.rs` serves this family in two tiers. Three routes, `/`,
+ * `/status`, `/fact/{id}`, answer `DashboardEnvelopeV1<…>` and are registered
  * in `contract_schema.rs`, so their schemas are generated and the workspace
  * reads them through {@link useEnvelope}. Every route below answers a bare
  * `Json<Value>`: they are NOT in the contract catalog, there is nothing for
@@ -19,7 +19,7 @@
  *     as a clean empty surface; a body missing an unconditional key did not come
  *     from this handler and must fail the parse.
  *   - A key the handler marks `skip_serializing_if = "Option::is_none"` is
- *     `.optional()` — genuinely absent, never `null`. A key it serializes as
+ *     `.optional()`, genuinely absent, never `null`. A key it serializes as
  *     `null` is `.nullable()`. The two say different things about whether a
  *     measurement was taken, and this dashboard may not blur them.
  *
@@ -57,7 +57,7 @@ export type TrustDetailAvailability = z.infer<
  * `timestamp`, `action`, `old_trust`, `new_trust`, `delta` and
  * `details_availability` are inserted unconditionally. `source` and `note` are
  * inserted only when the event carried them, so they are absent rather than
- * null — which is exactly the difference between "this event named no source"
+ * null, which is exactly the difference between "this event named no source"
  * and "this event's source is unknown".
  */
 export const TrustHistoryEventSchema = z
@@ -168,7 +168,7 @@ export type ProjectionPoint = z.infer<typeof ProjectionPointSchema>;
  *
  * `method` is the honest part of this payload. The handler emits `"pca"` only
  * when `pca_scores` succeeded over at least two equal-length phase vectors;
- * everything else — one point, no vectors, a failed decomposition — is
+ * everything else, one point, no vectors, a failed decomposition, is
  * `"none"`, and a `none` scatter is not a map of the store's semantic space. A
  * surface that drew both the same way would be claiming a projection the daemon
  * explicitly declined to compute.

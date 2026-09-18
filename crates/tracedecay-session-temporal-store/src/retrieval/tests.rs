@@ -2684,7 +2684,7 @@ async fn derived_candidate_materializes_boundaries_with_canonical_evidence_linka
     );
 }
 
-/// A group's cost must follow what the ranking needs from it — its bounds — not
+/// A group's cost must follow what the ranking needs from it, its bounds, not
 /// how many messages happen to sit inside it. Charging every member against the
 /// record budget is what let one wide span refuse a whole query.
 #[tokio::test]

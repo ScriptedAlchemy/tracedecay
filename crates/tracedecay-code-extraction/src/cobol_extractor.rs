@@ -50,7 +50,7 @@ impl<'s> ExtractionState<'s> {
     ///
     /// The file root is pushed onto `node_stack` as the first frame when
     /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
+    /// path as the leading segment. Prepending `self.file_path` here was
     /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
         self.node_stack
@@ -370,7 +370,7 @@ impl CobolExtractor {
     /// into logical "function" bodies.
     fn visit_procedure_division(state: &mut ExtractionState, node: TsNode<'_>) {
         // Collect all children for multi-pass grouping. Walks via cursor
-        // (O(N)) instead of `node.child(i)` in a loop — `child(i)` is O(i),
+        // (O(N)) instead of `node.child(i)` in a loop. `child(i)` is O(i),
         // turning the seed into O(N²) on PROCEDURE DIVISIONs with hundreds
         // of paragraphs.
         let mut children: Vec<TsNode<'_>> = Vec::with_capacity(node.child_count());

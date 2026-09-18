@@ -2,30 +2,30 @@
  *
  * OFFLINE POSTURE: every `url()` below resolves through the bundler into a
  * local woff2 emitted next to the app. There is no CDN link, no remote
- * `@import`, and no runtime fetch — the daemon serves the whole face set from
+ * `@import`, and no runtime fetch. The daemon serves the whole face set from
  * the embedded dist, so the dashboard types correctly on a machine that has
  * never had a network.
  *
  * The three faces and why each is here:
  *
- *   Archivo Variable (display) — SIL OFL 1.1. The design system's named
+ *   Archivo Variable (display), SIL OFL 1.1. The design system's named
  *     display face (mockups/ui-concept-v2/DESIGN-SYSTEM.md): a grotesk with a
  *     real width axis, shipped as the one `standard` file carrying both
- *     weight and width. That axis is the point — the wordmark, legends and
+ *     weight and width. That axis is the point. The wordmark, legends and
  *     titles are set expanded to `--display-width`, and a static-width face
  *     silently ignores that instruction. One variable file replaces the six
  *     static weights it succeeds.
- *   IBM Plex Sans (body) — SIL OFL 1.1. Drawn for engineering documentation,
+ *   IBM Plex Sans (body), SIL OFL 1.1. Drawn for engineering documentation,
  *     so it holds its counters at the 11-13px this console actually sets, and
  *     its flared stems and single-storey detailing are unmistakably not Inter.
- *   IBM Plex Mono (mono) — SIL OFL 1.1. Here mono is a first-class face: it
+ *   IBM Plex Mono (mono), SIL OFL 1.1. Here mono is a first-class face: it
  *     carries code symbols, file paths, graph node labels AND every measured
  *     numeral including the 34-60px display tier. Plex Mono is the only member
  *     of the family without a variable build, so the three weights the UI
  *     actually uses (400 body, 500 display numerals, 600 emphasis) ship as
  *     statics rather than pulling a fourth family in for coherence.
  *
- * Latin and Latin-Extended only, and no italics — the app sets none. Non-Latin
+ * Latin and Latin-Extended only, and no italics. The app sets none. Non-Latin
  * text falls through to `system-ui`, which carries Cyrillic, Greek and
  * Vietnamese on every platform this ships to. Three families are vendored
  * because three faces are designed; a fourth kept only to cover those scripts

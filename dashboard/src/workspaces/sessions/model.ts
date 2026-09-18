@@ -1,5 +1,5 @@
 /**
- * Sessions — the pure model under the workspace.
+ * Sessions, the pure model under the workspace.
  *
  * Everything here is a deterministic transform of wire records the daemon
  * already served: URL state, index paging, the typed extent of a session row,
@@ -28,7 +28,7 @@ import type { EvidenceGrade } from '../../ui/EvidenceGrade.tsx';
  * A selected session, provider-qualified when the selecting record carried a
  * provider. The retained session store keys sessions by `(provider,
  * session_id)`; a transcript search hit carries the provider as `source`,
- * which the contract leaves nullable — so a selection may know the id and not
+ * which the contract leaves nullable, so a selection may know the id and not
  * the provider, and the join below says so rather than guessing one.
  */
 export interface SessionSelection {
@@ -168,7 +168,7 @@ export function pageOffset(page: number, rows: number): number {
 }
 
 /* ------------------------------------------------------------------------ *
- * Session extent — typed from the recorded fields, never from the clock
+ * Session extent, typed from the recorded fields, never from the clock
  * ------------------------------------------------------------------------ */
 
 export type SessionExtent =
@@ -213,7 +213,7 @@ export type IndexJoin =
    * provider cannot pick between providers and does not. */
   | { kind: 'ambiguous'; rows: readonly LoomSessionRowV1[] }
   /** The loaded index page holds no such row. Not "the session does not
-   * exist" — the page is one window over the store. */
+   * exist", the page is one window over the store. */
   | { kind: 'absent' };
 
 export function joinIndexRow(

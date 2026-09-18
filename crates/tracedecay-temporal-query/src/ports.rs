@@ -42,7 +42,7 @@ pub enum TemporalPortError {
     BudgetExceeded {
         resource: &'static str,
         /// Present when the refusing boundary keeps a counter. A request-shape
-        /// check — a field cap, a parameter ceiling — has none, and reports
+        /// check, a field cap, a parameter ceiling, has none, and reports
         /// `None` rather than inventing numbers.
         accounting: Option<ReadBudgetAccounting>,
     },
@@ -59,7 +59,7 @@ pub enum TemporalPortError {
 ///
 /// Both variants are exact. A bounded read never counts the rows it declined to
 /// read, so an exhausted read reports what it consumed and that storage held
-/// more — never a total it would have to run the refused scan to learn.
+/// more, never a total it would have to run the refused scan to learn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BudgetObservation {
     /// The request asked for more units than the admitted maximum.

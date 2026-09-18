@@ -74,7 +74,7 @@ pub struct NativeCandidateGenerationIdentityV1 {
 /// A refused file produces no sanitization receipt and no sanitized bytes, so
 /// there is nothing a snapshot entry could truthfully carry for it: it is
 /// withheld from the generation and named here instead. The distinction that
-/// matters is scope — a refusal is evidence about *one file*, never about the
+/// matters is scope, a refusal is evidence about *one file*, never about the
 /// tree, so it must not be allowed to cost every other file its index.
 #[derive(Debug)]
 pub struct WithheldSourceV1 {
@@ -285,8 +285,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
         {
             return Ok(None);
         }
-        // The reference must exist — evidence naming a ref this repository does
-        // not have is provenance we cannot stand behind — but it is *only* the
+        // The reference must exist, evidence naming a ref this repository does
+        // not have is provenance we cannot stand behind, but it is *only* the
         // provenance name. The commit is resolved by its own object id, because
         // demanding the reference still peel to this revision silently dropped
         // the Git evidence of every generation sealed at a revision the branch
@@ -728,7 +728,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         let requested_scope = CodeIndexGenerationScopeV1::for_snapshot(&snapshot);
         // Retained-history generations live inside the active publication
         // pointer, so they need an active generation to ride on. A store with
-        // no publication at all has no such anchor — there the mint itself
+        // no publication at all has no such anchor, there the mint itself
         // establishes the pointer, and every later exact mint (including the
         // second half of a both-sides miss in one call) rides it as history.
         let publication = match self
@@ -1142,7 +1142,7 @@ mod tests {
 
     /// A revision the branch has already moved past is still an immutable
     /// commit, and capturing it is the only way a base whose ref advanced
-    /// mid-request — or a merge-base, or a deliberately pinned commit — ever
+    /// mid-request, or a merge-base, or a deliberately pinned commit, ever
     /// gets indexed. The capture used to peel the reference and refuse every
     /// revision that was not its current tip, so all of those were permanently
     /// uncapturable while the reference itself carried no information the

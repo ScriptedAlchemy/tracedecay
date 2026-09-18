@@ -4,7 +4,7 @@ import type { KeyboardEvent } from 'react';
  * Roving arrows over a list of row buttons.
  *
  * Rows are native `<button>`s, so Enter/Space activate for free; this adds the
- * movement keys — arrows, Home, End and Page keys — so a keyboard reader can
+ * movement keys, arrows, Home, End and Page keys, so a keyboard reader can
  * move through a result list without tabbing every row. The container's
  * `onKeyDown` hands its element and the event here; the handler moves focus
  * and consumes the key only when it recognised one.

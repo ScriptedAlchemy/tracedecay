@@ -349,7 +349,7 @@ impl git_correlation::GitCorrelationSessionStore for GraphBackedTestStore {
 }
 
 /// A fresh project has never published a Git evidence projection. The
-/// attribution sweep must complete as a typed no-op — not report a retryable
+/// attribution sweep must complete as a typed no-op, not report a retryable
 /// unavailability, which put the ingest pass into an endless retry loop on
 /// every fresh project (the hermes stock journey surfaced it as a
 /// "graph projection has no relational verified head" warning storm).

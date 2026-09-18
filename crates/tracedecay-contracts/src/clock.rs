@@ -48,7 +48,7 @@ pub fn try_now_micros() -> Result<UtcMicros, ClockError> {
 /// Saturating by construction: a clock that reads before the Unix epoch yields
 /// `UtcMicros(0)`, and an instant beyond `i64::MAX` microseconds clamps to
 /// `UtcMicros(i64::MAX)`. Runtimes that stamp "now" share this definition so
-/// the clamp cannot differ by call site — a truncating `as i64` cast, which
+/// the clamp cannot differ by call site, a truncating `as i64` cast, which
 /// two call sites previously used, wraps a far-future clock into a negative
 /// timestamp that then compares as older than every stored record.
 #[must_use]

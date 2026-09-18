@@ -101,7 +101,7 @@ pub fn resolve_db_for_branch(
         return (
             default_db,
             Some(meta.default_branch.clone()),
-            Some("detached HEAD — using default branch index".to_string()),
+            Some("detached HEAD, using default branch index".to_string()),
         );
     };
 
@@ -115,7 +115,7 @@ pub fn resolve_db_for_branch(
             default_db,
             Some(ancestor.clone()),
             Some(format!(
-                "branch '{branch_name}' is not tracked — serving from '{ancestor}'. \
+                "branch '{branch_name}' is not tracked, serving from '{ancestor}'. \
                          Run `tracedecay branch add {branch_name}` to track it."
             )),
         );
@@ -126,7 +126,7 @@ pub fn resolve_db_for_branch(
         default_db,
         Some(serving),
         Some(format!(
-            "branch '{branch_name}' is not tracked — serving from '{}'. \
+            "branch '{branch_name}' is not tracked, serving from '{}'. \
              Run `tracedecay branch add {branch_name}` to track it.",
             meta.default_branch
         )),

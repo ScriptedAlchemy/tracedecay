@@ -662,7 +662,7 @@ fn retrieval_only_publication_serves_no_names_truthfully() {
 }
 
 /// A ranking over a prefix of the graph must never be reported as the graph's
-/// ranking — the examination budget bounds the scan, and reaching it is
+/// ranking, the examination budget bounds the scan, and reaching it is
 /// truthful truncation rather than a silent partial answer.
 #[test]
 fn an_exhausted_ranking_budget_is_reported_not_hidden() {

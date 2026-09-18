@@ -20,8 +20,8 @@ import { ChannelAbsence, EmptyReading, ViewCaption } from './WorkViewChannel.tsx
  *
  * These three readings used to be the timeline's absences. They are drawn here
  * rather than folded into the weave itself because they answer a different
- * question about the same page — the weave says which runs touched which tasks,
- * and this says what actually executed — and because their coverage is its own:
+ * question about the same page, the weave says which runs touched which tasks,
+ * and this says what actually executed, and because their coverage is its own:
  * the weave is drawn over the snapshot's page and this over the attempt list's,
  * two reads with two independent caps. Merging them would produce one caption
  * that could not honestly describe either.
@@ -217,7 +217,7 @@ function ExecutorRow({
  *
  * A sequence and deliberately not an axis. `terminal.observed_at` is the one
  * real instant on the page, so the attempts that reached a terminal can be put
- * in the order they reached it — and that is the whole of what this build can
+ * in the order they reached it, and that is the whole of what this build can
  * say about time here. Spacing the marks by the gaps between those instants
  * would draw durations out of end points, so the caption says the spacing means
  * nothing and the weave above carries the wall-clock absence itself.

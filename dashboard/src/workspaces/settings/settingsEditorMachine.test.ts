@@ -2,9 +2,9 @@
  * What the editor machine forbids.
  *
  * Each case below names a combination the six mirrored `useState` slices could
- * hold at once — a confirmation beside a review it was not given for, a saved
+ * hold at once, a confirmation beside a review it was not given for, a saved
  * notice above a change still under review, a submit built from a revision the
- * resource had already moved past — and shows either that the state cannot be
+ * resource had already moved past, and shows either that the state cannot be
  * built or that the machine refuses it and says why.
  *
  * No DOM, no transport: the machine is a pure function and is exercised as one.
@@ -72,7 +72,7 @@ describe('settings editor: reaching a confirmed change', () => {
   });
 
   /** The inline review states validity while the value is still being typed,
-   * from the same plan `review_requested` would freeze — never a second one. */
+   * from the same plan `review_requested` would freeze, never a second one. */
   it('replans a scope live without freezing a review', () => {
     const untouched = initialSettingsEditorState(AUTHORITY);
     expect(settingsScopePlan(untouched, 'project')).toMatchObject({ outcome: 'unchanged' });
@@ -216,8 +216,8 @@ describe('settings editor: a confirmation cannot outlive its review', () => {
 });
 
 describe('settings editor: a stale revision cannot reach the wire', () => {
-  // Even hand-built — the shape below is the one the mirrored slices produced
-  // routinely — a state whose review names a revision the authority has moved
+  // Even hand-built, the shape below is the one the mirrored slices produced
+  // routinely, a state whose review names a revision the authority has moved
   // past yields no request.
   it('supersedes a submit issued from a review that holds a stale revision', () => {
     const stale: SettingsEditorState = {

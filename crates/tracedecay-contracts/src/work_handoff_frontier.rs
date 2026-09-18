@@ -37,7 +37,7 @@ pub enum WorkHandoffFrontierError {
 
 /// One attempt on the evidence frontier: exactly which attempt, in which
 /// state, backed by which sealed evidence digest (when the attempt has
-/// reported one). No lease or fence is part of the frontier — those are
+/// reported one). No lease or fence is part of the frontier. Those are
 /// runtime authority, not checkpoint evidence.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

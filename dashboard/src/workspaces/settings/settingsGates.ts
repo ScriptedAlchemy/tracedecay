@@ -2,7 +2,7 @@
  * Whether a settings scope may be written, and why not when it may not.
  *
  * Two independent authorities have to agree, and a boolean could only report
- * their conjunction — which left a disabled editor claiming "this dashboard is
+ * their conjunction, which left a disabled editor claiming "this dashboard is
  * not authorized" when the real obstacle was that the selected project is not
  * the active one. They stay distinguishable:
  *

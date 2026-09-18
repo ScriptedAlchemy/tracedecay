@@ -3,7 +3,7 @@
 //! Encoding happens at seal directly from the manifest rows the seal already
 //! holds. Decoding happens at open, after the bundle envelope has verified the
 //! artifact's content digest and its generation-identity binding, so the
-//! checks here are structural defense in depth — a corrupt row is a typed
+//! checks here are structural defense in depth, a corrupt row is a typed
 //! `Corrupt`, never a partially installed catalog.
 
 use std::collections::BTreeMap;

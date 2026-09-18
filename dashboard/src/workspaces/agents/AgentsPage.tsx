@@ -45,13 +45,13 @@ const BASE = '/api/plugins/analytics';
  * Agents: who delegated to whom, read from the authorities that record it.
  *
  * The composition is the V2 Agents plate. A register of five independent
- * authorities leads — usage, hierarchy, tokens, Work, failure — each with its
+ * authorities leads, usage, hierarchy, tokens, Work, failure, each with its
  * own state and never a total over them. The hero aperture is the delegation
  * topology: the daemon's subagent tree laid out left to right by generation,
  * hover inspecting and click selecting, with the exact tree beneath it as the
  * synchronized fallback. A workspace-owned inspector reads the inspected or
  * selected session across every authority, and the ledgers that used to be
- * the page — handoff frontier, token frontier, failure context, telemetry —
+ * the page, handoff frontier, token frontier, failure context, telemetry , 
  * remain beneath as the exact evidence the field summarizes.
  *
  * Selection is the only act that reads. Hovering a session changes nothing but
@@ -76,7 +76,7 @@ export function AgentsPage() {
     `${BASE}/underused`,
     AnalyticsUnderusedPayloadV1Schema,
   );
-  // `/diagnostics` is the only endpoint on this plugin that carries a clock —
+  // `/diagnostics` is the only endpoint on this plugin that carries a clock , 
   // `events_per_hour` over the counted window, and the most recent events with
   // their own timestamps. It is also the slowest (it folds the full
   // hook-analytics JSONL), so it lives behind its own boundary and the fast
@@ -133,7 +133,7 @@ export function AgentsPage() {
   }, [selectedId, treeAvailable]);
 
   // The token frontier is read for a session this page can actually name: the
-  // selected one, or — with nothing selected — the newest top of the tree, and
+  // selected one, or, with nothing selected, the newest top of the tree, and
   // the inspector says which. Without a session there is no question to ask,
   // and the surface says so rather than drawing an empty frontier.
   const newestSession = newestTreeSession(treePayload);
@@ -407,7 +407,7 @@ const EMPTY_MODEL = fitDelegationTopology({
 }).model;
 
 /** Sessions per managed subagent, straight from the session store. A count of
- * delegations, not of work done inside them — that context lives in Loom's
+ * delegations, not of work done inside them, that context lives in Loom's
  * per-thread drill-down. */
 function SubagentSessions({
   rows,

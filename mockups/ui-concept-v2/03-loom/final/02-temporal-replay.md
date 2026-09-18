@@ -2,7 +2,7 @@
 design_status: current
 ---
 
-# Loom 02 — Temporal replay
+# Loom 02, Temporal replay
 
 - **Asset:** `02-temporal-replay.png`
 - **Lifecycle:** `current`

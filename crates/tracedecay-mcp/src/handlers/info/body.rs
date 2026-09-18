@@ -1,4 +1,4 @@
-//! `tracedecay_body` — source bodies for symbols matched by name.
+//! `tracedecay_body`, source bodies for symbols matched by name.
 
 use crate::ToolResult;
 use crate::rendered_tool_result;

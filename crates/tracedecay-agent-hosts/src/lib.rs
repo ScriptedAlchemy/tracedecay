@@ -15,7 +15,7 @@
 //! catalog is a typed error rather than an empty allowlist.
 //!
 //! A crate-local `cargo check` passing is not evidence the production
-//! composition root is wired — check the registration call sites too.
+//! composition root is wired, check the registration call sites too.
 //!
 //! ## Packaging
 //!
@@ -34,7 +34,7 @@
 /// `Database::publish_test_runtime` materialises a profile-scoped sidecar shard
 /// that the kernel initialises through
 /// `tracedecay_runtime_core::ports::registered_schema`. That port fails closed
-/// until the real schema — owned by `tracedecay-global-db` — is registered.
+/// until the real schema, owned by `tracedecay-global-db`, is registered.
 /// Production wires it from the daemon composition root; this crate's test
 /// target reuses the identical installer through its `test-helpers`
 /// dev-dependency. Idempotent: the port keeps the first registration, so every

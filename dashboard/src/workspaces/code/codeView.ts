@@ -46,7 +46,7 @@ export const CODE_VIEW_DEFINITIONS = {
  * Views the switcher offers.
  *
  * A pending view is not a control until someone asks for it. Atlas stays
- * unavailable on a deep link — that answer is honest — but it does not sit
+ * unavailable on a deep link, that answer is honest, but it does not sit
  * disabled on every Code visit. Keeping the slot visible would only complete
  * the enum; the operator cannot use it.
  */
