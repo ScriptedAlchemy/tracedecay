@@ -21,6 +21,7 @@ mod dependency_hint_test;
 mod edit_test;
 #[cfg(feature = "test-transport")]
 mod expand_query_behavior;
+mod feedback_expand_test;
 mod graph_analysis_test;
 mod graph_query_test;
 mod health_behavior_test;
