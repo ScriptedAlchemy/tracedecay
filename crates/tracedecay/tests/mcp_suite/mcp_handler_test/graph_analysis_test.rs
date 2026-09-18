@@ -3307,3 +3307,236 @@ async fn field_sites_ignores_field_text_in_real_rust_literals() {
     );
     assert_eq!(output["write_sites"][0]["line"], 256, "payload: {output}");
 }
+
+fn field_site(line: u64, enclosing: &str, snippet: &str) -> Value {
+    json!({
+        "file": "src/lib.rs",
+        "line": line,
+        "enclosing": enclosing,
+        "snippet": snippet,
+    })
+}
+
+const FIELD_BEHAVIOR_SOURCE: &str = r#"pub struct Counter {
+    pub n: u32,
+}
+
+pub struct Gauge {
+    pub n: u32,
+}
+
+impl Counter {
+    pub fn read(&self, gauge: &Gauge) -> u32 {
+        let kept = self.n;
+        let other = gauge.n;
+        kept + other
+    }
+}
+
+pub fn bump(counter: &mut Counter, gauge: &mut Gauge) -> u32 {
+    let same = counter.n == 0;
+    counter.n = 1;
+    gauge.n += 2;
+    let borrowed = &mut counter.n;
+    let shifted = counter.n << 1;
+    counter.n <<= 1;
+    let shown = "counter.n = 9";
+    // counter.n = 8;
+    let _ = (same, borrowed, shifted, shown);
+    counter.n
+}
+
+pub fn arrow(counter: &Counter) -> u32 {
+    take!(counter.n => 1);
+    counter.n
+}
+"#;
+
+async fn call_field_sites(host: &impl AnalysisToolHost, arguments: Value) -> Value {
+    let result = handle_tool_call(host, "tracedecay_field_sites", arguments, None, None)
+        .await
+        .expect("production MCP field-sites call");
+    extract_json(&result.value)
+}
+
+#[tokio::test]
+async fn field_sites_behavior_reports_literal_read_and_write_sites() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(project_root.join("src/lib.rs"), FIELD_BEHAVIOR_SOURCE).unwrap();
+    let (host, _env) = init_test_project(&project_root).await;
+
+    let read_method = "src/lib.rs::Counter::read";
+    let bump = "src/lib.rs::bump";
+    let arrow = "src/lib.rs::arrow";
+    let reads = json!([
+        field_site(11, read_method, "let kept = self.n;"),
+        field_site(12, read_method, "let other = gauge.n;"),
+        field_site(18, bump, "let same = counter.n == 0;"),
+        field_site(22, bump, "let shifted = counter.n << 1;"),
+        field_site(27, bump, "counter.n"),
+        field_site(31, arrow, "take!(counter.n => 1);"),
+        field_site(32, arrow, "counter.n"),
+    ]);
+    let writes = json!([
+        field_site(19, bump, "counter.n = 1;"),
+        field_site(20, bump, "gauge.n += 2;"),
+        field_site(21, bump, "let borrowed = &mut counter.n;"),
+        field_site(23, bump, "counter.n <<= 1;"),
+    ]);
+
+    let bare = call_field_sites(&host, json!({"field": "n", "limit": 20, "format": "json"})).await;
+    assert_eq!(
+        bare,
+        json!({
+            "field": "n",
+            "qualifier": null,
+            "qualifier_applied": false,
+            "write_count": 4,
+            "read_count": 7,
+            "write_sites": writes,
+            "read_sites": reads,
+        }),
+        "bare field must partition assignment, compound assignment, mut borrow, and shift-assign as writes, and comparison, shift, and fat-arrow uses as reads"
+    );
+
+    let writes_only = call_field_sites(
+        &host,
+        json!({"field": "n", "writes_only": true, "format": "json"}),
+    )
+    .await;
+    assert_eq!(
+        writes_only,
+        json!({
+            "field": "n",
+            "qualifier": null,
+            "qualifier_applied": false,
+            "write_count": 4,
+            "write_sites": writes,
+        }),
+        "writes_only must omit the read list rather than return it empty"
+    );
+
+    let qualified = call_field_sites(&host, json!({"field": "Counter::n", "format": "json"})).await;
+    assert_eq!(
+        qualified,
+        json!({
+            "field": "Counter::n",
+            "qualifier": "Counter",
+            "qualifier_applied": true,
+            "write_count": 3,
+            "read_count": 6,
+            "write_sites": [
+                field_site(19, bump, "counter.n = 1;"),
+                field_site(21, bump, "let borrowed = &mut counter.n;"),
+                field_site(23, bump, "counter.n <<= 1;"),
+            ],
+            "read_sites": [
+                field_site(11, read_method, "let kept = self.n;"),
+                field_site(18, bump, "let same = counter.n == 0;"),
+                field_site(22, bump, "let shifted = counter.n << 1;"),
+                field_site(27, bump, "counter.n"),
+                field_site(31, arrow, "take!(counter.n => 1);"),
+                field_site(32, arrow, "counter.n"),
+            ],
+        }),
+        "Counter::n must drop Gauge sites"
+    );
+
+    let missing = call_field_sites(&host, json!({"field": "Missing::n", "format": "json"})).await;
+    assert_eq!(
+        missing,
+        json!({
+            "field": "Missing::n",
+            "qualifier": "Missing",
+            "qualifier_applied": true,
+            "write_count": 0,
+            "read_count": 0,
+            "write_sites": [],
+            "read_sites": [],
+        }),
+        "an unknown qualifier is an empty census, not every same-named field"
+    );
+
+    // The scan stops only after both kinds have reached `limit`, so reads that
+    // precede the first write stay in the result.
+    let limited =
+        call_field_sites(&host, json!({"field": "n", "limit": 1, "format": "json"})).await;
+    assert_eq!(
+        limited,
+        json!({
+            "field": "n",
+            "qualifier": null,
+            "qualifier_applied": false,
+            "write_count": 1,
+            "read_count": 3,
+            "write_sites": [
+                field_site(19, bump, "counter.n = 1;"),
+            ],
+            "read_sites": [
+                field_site(11, read_method, "let kept = self.n;"),
+                field_site(12, read_method, "let other = gauge.n;"),
+                field_site(18, bump, "let same = counter.n == 0;"),
+            ],
+        }),
+    );
+
+    let missing_field = expect_tool_error(
+        handle_tool_call(
+            &host,
+            "tracedecay_field_sites",
+            json!({"format": "json"}),
+            None,
+            None,
+        )
+        .await,
+    );
+    assert_eq!(
+        missing_field,
+        "config error: tracedecay_field_sites failed over production MCP: tool execution failed: config error: tracedecay_field_sites requires a 'field' argument"
+    );
+
+    close_test_graph(host).await;
+}
+
+#[tokio::test]
+async fn field_sites_behavior_refuses_unbound_qualified_receiver() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("src/lib.rs"),
+        r#"pub struct Counter {
+    pub n: u32,
+}
+pub struct Gauge {
+    pub n: u32,
+}
+
+pub fn closure_then_sibling(counter: &Counter) -> u32 {
+    let read_gauge = |counter: Gauge| counter.n;
+    read_gauge(Gauge { n: 3 }) + counter.n
+}
+"#,
+    )
+    .unwrap();
+    let (host, _env) = init_test_project(&project_root).await;
+
+    let error = expect_tool_error(
+        handle_tool_call(
+            &host,
+            "tracedecay_field_sites",
+            json!({"field": "Counter::n", "format": "json"}),
+            None,
+            None,
+        )
+        .await,
+    );
+    assert_eq!(
+        error,
+        "config error: tracedecay_field_sites failed over production MCP: tool project route failed: reason_code=verified-field-qualifier-unavailable retryable=false: the indexed graph cannot bind field receiver '<unresolved>' at src/lib.rs:9 to exactly one qualified owner"
+    );
+
+    close_test_graph(host).await;
+}
