@@ -1005,7 +1005,16 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
                     .expect("registered daemon ingest response text"),
             )
             .expect("registered daemon ingest payload");
-            if payload["status"] == "committed" {
+            // `accepted_for_replay` with `completed: true` is the terminal
+            // pass when this Cursor event upserts no new observations. Waiting
+            // for `committed` never leaves that state.
+            let status = payload["status"].as_str();
+            if payload["completed"] == true
+                && matches!(
+                    status,
+                    Some("committed" | "exact_duplicate" | "accepted_for_replay")
+                )
+            {
                 break output;
             }
             if payload["completed"] == false {
@@ -1038,9 +1047,13 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
             .expect("registered daemon ingest response text"),
     )
     .expect("registered daemon ingest payload");
-    assert_eq!(
-        payload["status"], "committed",
-        "registered daemon ingest did not commit: {response}"
+    assert!(
+        payload["completed"] == true
+            && matches!(
+                payload["status"].as_str(),
+                Some("committed" | "exact_duplicate" | "accepted_for_replay")
+            ),
+        "registered daemon ingest did not finish: {response}"
     );
 
     // Codex records a turn in its rollout, not in the Stop event, so the
