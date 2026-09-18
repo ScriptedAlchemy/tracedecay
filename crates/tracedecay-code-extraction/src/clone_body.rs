@@ -12,6 +12,9 @@ mod rename;
 pub const CONSERVATIVE_CLONE_NORMALIZATION_REVISION_V1: u16 = 1;
 pub const RENAME_CLONE_NORMALIZATION_REVISION_V1: u16 = 1;
 pub const MIN_AUTOMATIC_CLONE_BODY_TOKENS_V1: u32 = 30;
+/// Source-byte guard checked before tokenization. Token count cannot bound one
+/// giant literal token, while the text artifact still serializes its bytes.
+pub const MAX_AUTOMATIC_CLONE_BODY_BYTES_V1: u64 = 64 * 1024;
 /// Bodies with more non-trivia tokens than this are not clone candidates and
 /// keep no token stream. A clone body is persisted as one serialized record
 /// inside a 4 MiB text-artifact page; a 14k-token function (a generated
@@ -35,8 +38,13 @@ pub enum ConservativeCloneTokenV1 {
 pub enum CloneBodyEligibilityV1 {
     Eligible,
     ExcludedIncompleteTokenization,
-    ExcludedTooSmall { minimum_tokens: u32 },
-    ExcludedTooLarge { maximum_tokens: u32 },
+    ExcludedTooSmall {
+        minimum_tokens: u32,
+    },
+    ExcludedTooLarge {
+        maximum_tokens: u32,
+        maximum_bytes: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -50,6 +58,7 @@ pub enum CloneBodyTokenizationStatusV1 {
 #[serde(rename_all = "snake_case")]
 pub enum CloneBodyTokenizationIssueV1 {
     BodyBoundaryUnavailable,
+    BodyExceedsSizeBound,
     InvalidSourceRange,
     ParseError,
 }
@@ -176,7 +185,21 @@ fn extract_clone_body(
     language: &str,
     logical_path: &str,
 ) -> ExtractedCloneBodyV1 {
-    let conservative = conservative_fields(syntax, source, language);
+    let body_bytes = syntax
+        .body
+        .end_byte()
+        .saturating_sub(syntax.body.start_byte()) as u64;
+    let conservative = if body_bytes > MAX_AUTOMATIC_CLONE_BODY_BYTES_V1 {
+        ConservativeFields {
+            tokens: Arc::from([]),
+            issues: vec![CloneBodyTokenizationIssueV1::BodyExceedsSizeBound],
+            token_count: 0,
+            status: CloneBodyTokenizationStatusV1::Partial,
+            eligibility: oversized_clone_body(),
+        }
+    } else {
+        conservative_fields(syntax, source, language)
+    };
     // An oversized body keeps its count and its typed exclusion but no
     // stream: the streams are what would not fit a page, and rename
     // normalization has nothing to normalize for.
@@ -261,9 +284,7 @@ fn conservative_fields(
             minimum_tokens: MIN_AUTOMATIC_CLONE_BODY_TOKENS_V1,
         }
     } else if emitter.token_count > MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1 {
-        CloneBodyEligibilityV1::ExcludedTooLarge {
-            maximum_tokens: MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1,
-        }
+        oversized_clone_body()
     } else {
         CloneBodyEligibilityV1::Eligible
     };
@@ -278,6 +299,13 @@ fn conservative_fields(
         token_count: emitter.token_count,
         status: tokenization_status,
         eligibility,
+    }
+}
+
+const fn oversized_clone_body() -> CloneBodyEligibilityV1 {
+    CloneBodyEligibilityV1::ExcludedTooLarge {
+        maximum_tokens: MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1,
+        maximum_bytes: MAX_AUTOMATIC_CLONE_BODY_BYTES_V1,
     }
 }
 

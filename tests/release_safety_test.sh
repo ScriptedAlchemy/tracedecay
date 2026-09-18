@@ -228,6 +228,7 @@ for path, text in ((stable_path, stable), (beta_path, beta)):
         "--repo",
         "--signer-workflow",
         "--source-digest",
+        '--signer-ref "refs/heads/master"',
         "outputs.build_required",
         'test "$GITHUB_REF" = "refs/heads/master"',
         'git merge-base --is-ancestor "$source_sha" "$GITHUB_SHA"',
@@ -298,6 +299,12 @@ if (
     and os.environ.get("GH_FAIL_ATTESTATION") == "1"
 ):
     raise SystemExit(17)
+if (
+    arguments[:2] == ["attestation", "verify"]
+    and os.environ.get("GH_FAIL_TAG_REF") == "1"
+    and arguments[arguments.index("--source-ref") + 1].startswith("refs/tags/")
+):
+    raise SystemExit(18)
 """,
         encoding="utf-8",
     )
@@ -348,6 +355,55 @@ if (
     if invocations != expected:
         raise SystemExit(
             "canonical release verifier did not preserve exact provenance: "
+            f"{invocations!r}"
+        )
+
+    invocation_log.write_text("", encoding="utf-8")
+    files_index = command.index("--files")
+    fallback_command = [
+        *command[:files_index],
+        "--signer-ref",
+        f"refs/tags/{tag}",
+        "--signer-ref",
+        "refs/heads/master",
+        *command[files_index:],
+    ]
+    fallback_environment = environment.copy()
+    fallback_environment["GH_FAIL_TAG_REF"] = "1"
+    subprocess.run(fallback_command, cwd=root, env=fallback_environment, check=True)
+    invocations = [
+        json.loads(line)
+        for line in invocation_log.read_text(encoding="utf-8").splitlines()
+    ]
+    expected = []
+    for file in files:
+        expected.append(
+            [
+                "attestation",
+                "verify",
+                str(file),
+                *expected_suffix,
+            ]
+        )
+        expected.append(
+            [
+                "attestation",
+                "verify",
+                str(file),
+                "--repo",
+                repo,
+                "--signer-workflow",
+                signer,
+                "--source-ref",
+                "refs/heads/master",
+                "--source-digest",
+                source_digest,
+                "--deny-self-hosted-runners",
+            ]
+        )
+    if invocations != expected:
+        raise SystemExit(
+            "canonical release verifier did not fall back to the allowed master ref: "
             f"{invocations!r}"
         )
 

@@ -21,26 +21,7 @@
 name: hotpath-runtime-core
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, labeled]
-    paths:
-      - crates/tracedecay-runtime-core/src/git_repository.rs
-      - crates/tracedecay-runtime-core/src/git_repository/**
-      - crates/tracedecay-runtime-core/tests/git_repository_authority*.rs
-      - crates/tracedecay-runtime-core/benches/git_repository_authority.rs
-      - crates/tracedecay-runtime-core/Cargo.toml
-      - Cargo.toml
-      - Cargo.lock
-      - .github/workflows/hotpath-runtime-core.yml
-      - scripts/check-rust-cache-lineage.py
-      - scripts/drop-prefix-restored-rust-artifacts.sh
-      - scripts/rust_cache_lineage.py
-      - scripts/test-rust-cache-lineage.py
   workflow_dispatch:
-
-concurrency:
-  group: hotpath-runtime-core-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -57,10 +38,6 @@ env:
 
 jobs:
   git-authority:
-    # Opt-in per pull request: label `perf`. Each lane builds the workspace
-    # more than once, which no draft or routine PR should charge to the 20
-    # free runner slots by default. Dispatch runs unconditionally.
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'perf')
     name: git_repository_authority hotpath lanes
     runs-on: ubuntu-latest
     timeout-minutes: 60
