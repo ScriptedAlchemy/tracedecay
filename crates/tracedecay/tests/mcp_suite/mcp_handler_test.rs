@@ -43,6 +43,8 @@ mod move_symbol_test;
 #[cfg(feature = "test-transport")]
 mod project_context_test;
 #[cfg(feature = "test-transport")]
+mod project_search_behavior_test;
+#[cfg(feature = "test-transport")]
 mod rename_symbol_test;
 mod retrieve_truncation_test;
 mod schema_test;
