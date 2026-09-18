@@ -59,6 +59,7 @@ mod session_refresh_status_test;
 mod session_search_test;
 #[cfg(feature = "test-transport")]
 mod shell_dead_code_test;
+mod signature_search_test;
 mod similar_test;
 mod skills_automation_test;
 #[cfg(feature = "test-transport")]
