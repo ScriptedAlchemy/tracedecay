@@ -775,12 +775,13 @@ mod tests {
 
         // extractor.rust.v8 records restricted `pub` re-export scope as a
         // typed value and no longer fabricates receiver types for method
-        // initializers; v9 adds the clone-body token bound. The revision is
-        // part of the batch identity, so the pinned digest moves with it.
-        assert_eq!(descriptor.extractor_revision.as_str(), "extractor.rust.v9");
+        // initializers; v9 adds the clone-body token bound and v10 the byte
+        // bound. The revision is part of the batch identity, so the pinned
+        // digest moves with it.
+        assert_eq!(descriptor.extractor_revision.as_str(), "extractor.rust.v10");
         assert_eq!(
             extraction.batch().rows_digest.as_str(),
-            "sha256:9ec70789226ea2ea9d427d2da4b1c35b54a91da7cf839169b6104ddc2eb1afba"
+            "sha256:2e1ebb8fbd7b438059eda5da2db9c8db9707f219484a28e82066caf527b038c6"
         );
     }
 
