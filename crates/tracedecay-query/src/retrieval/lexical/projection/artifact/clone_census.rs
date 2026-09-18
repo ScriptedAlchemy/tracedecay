@@ -19,6 +19,7 @@ pub struct CodeLexicalCloneIndexCensusV1 {
     pub hot_postings: u64,
     pub hot_posting_rows: u64,
     pub excluded_too_small_bodies: u64,
+    pub excluded_too_large_bodies: u64,
     pub excluded_incomplete_tokenization_bodies: u64,
     pub rename_partial_bodies: u64,
     pub rename_unsupported_bodies: u64,
@@ -76,6 +77,10 @@ pub(super) fn read_clone_index_census(
             CloneBodyEligibilityV1::ExcludedTooSmall { .. } => {
                 census.excluded_too_small_bodies =
                     census.excluded_too_small_bodies.saturating_add(1);
+            }
+            CloneBodyEligibilityV1::ExcludedTooLarge { .. } => {
+                census.excluded_too_large_bodies =
+                    census.excluded_too_large_bodies.saturating_add(1);
             }
         }
     }

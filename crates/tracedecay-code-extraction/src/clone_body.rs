@@ -12,6 +12,15 @@ mod rename;
 pub const CONSERVATIVE_CLONE_NORMALIZATION_REVISION_V1: u16 = 1;
 pub const RENAME_CLONE_NORMALIZATION_REVISION_V1: u16 = 1;
 pub const MIN_AUTOMATIC_CLONE_BODY_TOKENS_V1: u32 = 30;
+/// Bodies above this many source bytes are not clone candidates and are not
+/// tokenized. A clone body is persisted as one serialized record inside a
+/// 4 MiB text-artifact page; a generated function of a few hundred KiB
+/// tokenizes to a record larger than the page, and a single such record
+/// parked a whole project's text projection on a deterministic contract
+/// violation with no way to converge. 64 KiB of source keeps the record
+/// inside the page with room for structure tokens and rename streams, and no
+/// human-written function that clone detection could act on is that large.
+pub const MAX_AUTOMATIC_CLONE_BODY_BYTES_V1: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Hash)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -27,6 +36,7 @@ pub enum CloneBodyEligibilityV1 {
     Eligible,
     ExcludedIncompleteTokenization,
     ExcludedTooSmall { minimum_tokens: u32 },
+    ExcludedTooLarge { maximum_bytes: u64 },
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -40,6 +50,9 @@ pub enum CloneBodyTokenizationStatusV1 {
 #[serde(rename_all = "snake_case")]
 pub enum CloneBodyTokenizationIssueV1 {
     BodyBoundaryUnavailable,
+    /// The body was not tokenized because it exceeds
+    /// [`MAX_AUTOMATIC_CLONE_BODY_BYTES_V1`].
+    BodyExceedsSizeBound,
     InvalidSourceRange,
     ParseError,
 }
@@ -166,8 +179,34 @@ fn extract_clone_body(
     language: &str,
     logical_path: &str,
 ) -> ExtractedCloneBodyV1 {
-    let conservative = conservative_fields(syntax, source, language);
-    let rename = rename_fields(syntax, source, language);
+    let body_bytes = syntax
+        .body
+        .end_byte()
+        .saturating_sub(syntax.body.start_byte()) as u64;
+    let (conservative, rename) = if body_bytes > MAX_AUTOMATIC_CLONE_BODY_BYTES_V1 {
+        (
+            ConservativeFields {
+                tokens: Arc::from([]),
+                issues: vec![CloneBodyTokenizationIssueV1::BodyExceedsSizeBound],
+                token_count: 0,
+                status: CloneBodyTokenizationStatusV1::Partial,
+                eligibility: CloneBodyEligibilityV1::ExcludedTooLarge {
+                    maximum_bytes: MAX_AUTOMATIC_CLONE_BODY_BYTES_V1,
+                },
+            },
+            RenameFields {
+                revision: None,
+                status: CloneBodyRenameStatusV1::Partial,
+                issues: Vec::new(),
+                tokens: None,
+            },
+        )
+    } else {
+        (
+            conservative_fields(syntax, source, language),
+            rename_fields(syntax, source, language),
+        )
+    };
     ExtractedCloneBodyV1 {
         logical_path: logical_path.to_owned(),
         language: language.to_owned(),

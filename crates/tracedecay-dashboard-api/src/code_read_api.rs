@@ -326,6 +326,7 @@ fn family_response(
             )
         }
         SimilarCoverageV1::ExcludedTooSmall { .. }
+        | SimilarCoverageV1::ExcludedTooLarge { .. }
         | SimilarCoverageV1::ExcludedIncompleteTokenization => {
             DashboardEnvelopeV1::complete_zero_findings(
                 scope_from_state(state),

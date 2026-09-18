@@ -1816,6 +1816,7 @@ fn clone_index_observation(
                 .then(|| census.map(|census| census.hot_posting_rows))
                 .flatten(),
             excluded_too_small_bodies: census.map(|census| census.excluded_too_small_bodies),
+            excluded_too_large_bodies: census.map(|census| census.excluded_too_large_bodies),
             excluded_incomplete_tokenization_bodies: census
                 .map(|census| census.excluded_incomplete_tokenization_bodies),
             rename_partial_bodies: census.map(|census| census.rename_partial_bodies),

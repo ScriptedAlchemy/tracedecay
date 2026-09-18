@@ -4,8 +4,8 @@ use tracedecay_code_extraction::ClojureExtractor;
 use tracedecay_code_extraction::PerlExtractor;
 use tracedecay_code_extraction::{
     CloneBodyEligibilityV1, CloneBodyTokenizationIssueV1, CloneBodyTokenizationStatusV1,
-    ConservativeCloneTokenV1, LanguageExtractor, PythonExtractor, RustExtractor,
-    TypeScriptExtractor,
+    ConservativeCloneTokenV1, LanguageExtractor, MAX_AUTOMATIC_CLONE_BODY_BYTES_V1,
+    PythonExtractor, RustExtractor, TypeScriptExtractor,
 };
 use tracedecay_domain::NodeKind;
 
@@ -221,6 +221,48 @@ fn automatic_discovery_minimum_is_thirty_non_trivia_tokens() {
         assert_eq!(body.non_trivia_token_count, count);
         assert_eq!(body.eligibility, eligibility);
     }
+}
+
+/// A body above the byte bound is a typed exclusion carrying no token
+/// stream, not a record the text-artifact page later refuses. One such body
+/// parked a whole project's text projection before graph seating; the bound
+/// exists so extraction never emits a record a 4 MiB page cannot hold.
+#[test]
+fn bodies_above_the_byte_bound_are_excluded_without_tokenizing() {
+    let statements =
+        "foo(); ".repeat(usize::try_from(MAX_AUTOMATIC_CLONE_BODY_BYTES_V1).unwrap() / 7 + 64);
+    let artifact =
+        RustExtractor.extract_artifact("src/lib.rs", &format!("fn body() {{ {statements} }}"));
+    let body = &artifact.clone_bodies[0];
+
+    assert_eq!(
+        body.eligibility,
+        CloneBodyEligibilityV1::ExcludedTooLarge {
+            maximum_bytes: MAX_AUTOMATIC_CLONE_BODY_BYTES_V1
+        }
+    );
+    assert!(body.conservative_tokens.is_empty());
+    assert_eq!(body.non_trivia_token_count, 0);
+    assert_eq!(
+        body.tokenization_status,
+        CloneBodyTokenizationStatusV1::Partial
+    );
+    assert_eq!(
+        body.tokenization_issues,
+        vec![CloneBodyTokenizationIssueV1::BodyExceedsSizeBound]
+    );
+    assert!(body.rename_tokens.is_none());
+    assert!(body.complete_rename_tokens().is_none());
+
+    // Just under the bound still tokenizes.
+    let under =
+        "foo(); ".repeat(usize::try_from(MAX_AUTOMATIC_CLONE_BODY_BYTES_V1).unwrap() / 7 - 64);
+    let artifact =
+        RustExtractor.extract_artifact("src/lib.rs", &format!("fn body() {{ {under} }}"));
+    assert_eq!(
+        artifact.clone_bodies[0].eligibility,
+        CloneBodyEligibilityV1::Eligible
+    );
 }
 
 #[test]
