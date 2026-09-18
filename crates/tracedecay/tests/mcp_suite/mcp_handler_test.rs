@@ -61,6 +61,7 @@ mod status_runtime_test;
 mod test_map_test;
 #[cfg(feature = "test-transport")]
 mod todos_test;
+mod type_hierarchy_test;
 mod unsafe_patterns_test;
 #[cfg(feature = "test-transport")]
 mod work_test;
