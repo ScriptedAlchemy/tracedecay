@@ -82,8 +82,7 @@ const PRICING_DIFF: &str = "\
 +
 +pub fn tally(items: &[LineItem]) -> u64 {
 +    calculate_total_cents(items)
- }
-";
+ }";
 
 const ORDERS_BEFORE: &str = r#"//! orders
 use crate::pricing::LineItem;
@@ -179,18 +178,6 @@ fn visible_hazards(payload: &Value) -> Value {
                     .collect()
             })
             .unwrap_or_default(),
-    )
-}
-
-fn matching(items: &Value, pred: impl Fn(&Value) -> bool) -> Value {
-    Value::Array(
-        items
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|item| pred(item))
-            .cloned()
-            .collect(),
     )
 }
 
@@ -463,18 +450,32 @@ async fn test_rename_symbol_apply_rewrites_declaration_and_callers() {
     let p2 = call_json(&cg, "tracedecay_rename_symbol", args).await;
     assert_eq!(p2["success"], true, "idempotent replay: {p2}");
     assert_eq!(p2["replayed"], true, "idempotent replay: {p2}");
-    assert_eq!(
-        p2["operation"], "use-case.application.source-edit.rename-symbol",
-        "{p2}"
-    );
-    assert_eq!(p2["files"], json!(["src/pricing.rs"]), "{p2}");
-    assert_eq!(p2["change_count"], 2, "{p2}");
-    assert_eq!(p2["finding_count"], 0, "{p2}");
-    assert_eq!(p2["durable_metadata_only"], true, "{p2}");
+    assert_eq!(p2["failed"], false, "idempotent replay: {p2}");
     assert_eq!(
         p2["message"], "source edit completed; detailed edit output was not retained",
         "{p2}"
     );
+    assert_eq!(
+        p2["effect"]["payload"]["operation"], "use-case.application.source-edit.rename-symbol",
+        "{p2}"
+    );
+    assert_eq!(
+        p2["effect"]["payload"]["files"],
+        json!(["src/pricing.rs"]),
+        "{p2}"
+    );
+    assert_eq!(p2["effect"]["payload"]["change_count"], 2, "{p2}");
+    assert_eq!(p2["effect"]["payload"]["finding_count"], 0, "{p2}");
+    assert_eq!(
+        p2["effect"]["payload"]["durable_metadata_only"], true,
+        "{p2}"
+    );
+    assert_eq!(p2["effect"]["payload"]["success"], true, "{p2}");
+    assert_eq!(
+        p2["effect"]["execution"]["termination"], "partial",
+        "a replay reports the stored partial receipt: {p2}"
+    );
+    assert_eq!(p2["effect"]["receipt"]["outcome"], "partial", "{p2}");
     assert_eq!(
         fs::read_to_string(project.join("src/pricing.rs")).unwrap(),
         PRICING_AFTER,
@@ -524,6 +525,41 @@ async fn test_rename_symbol_stale_tree_refuses_before_writing() {
                 "kind": "stale_evidence",
                 "blocking": true,
                 "message": "src/pricing.rs no longer matches the admitted graph generation"
+            },
+            {
+                "kind": "stale_evidence",
+                "blocking": true,
+                "message": "target graph evidence no longer resolves in src/pricing.rs"
+            },
+            {
+                "kind": "stale_evidence",
+                "blocking": true,
+                "message": "target graph evidence no longer resolves in src/pricing.rs"
+            },
+            {
+                "kind": "ambiguous_symbol",
+                "blocking": true,
+                "message": "unresolved code spelling may bind this symbol"
+            },
+            {
+                "kind": "stale_evidence",
+                "blocking": true,
+                "message": "rename apply requires the exact accepted preview identity, plan, repository, and graph revisions"
+            }
+        ]),
+        "{p}"
+    );
+    assert_eq!(
+        visible_sites(&p),
+        json!([
+            {
+                "kind": "unresolved_text",
+                "disposition": "blocked",
+                "file": "src/pricing.rs",
+                "line": 17,
+                "expected_bytes": "compute_grand_total",
+                "replacement_bytes": "compute_grand_total",
+                "reason": "unresolved code spelling may bind this symbol"
             }
         ]),
         "{p}"
@@ -652,10 +688,32 @@ async fn test_rename_symbol_blocks_unresolved_cross_module_spelling() {
     assert_eq!(payload["success"], false, "unresolved spelling: {payload}");
     assert_eq!(payload["dry_run"], true, "{payload}");
     assert_eq!(payload["message"], BLOCKED_MESSAGE, "{payload}");
+    assert_eq!(payload["reference_count"], 2, "{payload}");
     assert_eq!(
-        matching(&visible_sites(&payload), |site| {
-            site["file"] == "src/nested/orders.rs"
+        payload["files"],
+        json!([
+            { "file": "src/nested/orders.rs", "replaced_count": 1 },
+            { "file": "src/pricing.rs", "replaced_count": 2 }
+        ]),
+        "{payload}"
+    );
+    assert_eq!(
+        payload["dispositions"],
+        json!({ "changed": 3, "unchanged": 0, "skipped": 0, "blocked": 1 }),
+        "{payload}"
+    );
+    assert_eq!(
+        payload["impact"],
+        json!({
+            "callers": ["src/nested/orders.rs::order_total", "src/pricing.rs::tally"],
+            "reexports": [],
+            "affected_files": ["src/nested/orders.rs", "src/pricing.rs"],
+            "affected_tests": []
         }),
+        "{payload}"
+    );
+    assert_eq!(
+        visible_sites(&payload),
         json!([
             {
                 "kind": "unresolved_text",
@@ -667,27 +725,38 @@ async fn test_rename_symbol_blocks_unresolved_cross_module_spelling() {
                 "reason": "unresolved code spelling may bind this symbol"
             },
             {
-                "kind": "unresolved_text",
-                "disposition": "blocked",
+                "kind": "resolved_call",
+                "disposition": "changed",
                 "file": "src/nested/orders.rs",
                 "line": 5,
                 "expected_bytes": "compute_grand_total",
-                "replacement_bytes": "compute_grand_total",
-                "reason": "unresolved code spelling may bind this symbol"
+                "replacement_bytes": "calculate_total_cents",
+                "reason": "exact graph-bound occurrence"
+            },
+            {
+                "kind": "declaration",
+                "disposition": "changed",
+                "file": "src/pricing.rs",
+                "line": 8,
+                "expected_bytes": "compute_grand_total",
+                "replacement_bytes": "calculate_total_cents",
+                "reason": "exact graph-bound occurrence"
+            },
+            {
+                "kind": "resolved_call",
+                "disposition": "changed",
+                "file": "src/pricing.rs",
+                "line": 17,
+                "expected_bytes": "compute_grand_total",
+                "replacement_bytes": "calculate_total_cents",
+                "reason": "exact graph-bound occurrence"
             }
         ]),
         "{payload}"
     );
     assert_eq!(
-        matching(&visible_hazards(&payload), |hazard| {
-            hazard["kind"] == "ambiguous_symbol"
-        }),
+        visible_hazards(&payload),
         json!([
-            {
-                "kind": "ambiguous_symbol",
-                "blocking": true,
-                "message": "unresolved code spelling may bind this symbol"
-            },
             {
                 "kind": "ambiguous_symbol",
                 "blocking": true,
