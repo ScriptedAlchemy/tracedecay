@@ -23,13 +23,14 @@ use tracedecay_domain::{FactOwnerV1, ObservationScopeV1, ProjectId};
 use tracedecay_session_memory::memory::MemoryApplication;
 use tracedecay_store::{FactReadControl, StoreShardScopeV1};
 
-use tracedecay_automation_runtime::automation::run_ledger::load_run_records;
+use tracedecay_automation_runtime::automation::run_ledger::{
+    canonical_record_started_at_seconds, load_run_records,
+};
 use tracedecay_daemon_service::retained_owner::open_project_retained_memory_target;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{AnalyticsToolCounts, RegisteredGlobalDb};
 use tracedecay_project::project::TraceDecay;
 use tracedecay_project::project::current_timestamp;
-use tracedecay_runtime_core::timeutil::parse_rfc3339_timestamp;
 use tracedecay_session_memory::fact_store::DatabaseFactStore;
 use tracedecay_store_runtime::retained_memory::MemoryTargetAccessV1;
 
@@ -793,7 +794,7 @@ async fn automation_section(project_root: &Path, since: i64) -> Value {
     let mut in_window = 0usize;
     let mut by_job: BTreeMap<String, BTreeMap<&'static str, i64>> = BTreeMap::new();
     for record in &records {
-        if let Some(started_at) = parse_rfc3339_timestamp(&record.started_at)
+        if let Ok(started_at) = canonical_record_started_at_seconds(record, "analytics window")
             && started_at < since
         {
             continue;
