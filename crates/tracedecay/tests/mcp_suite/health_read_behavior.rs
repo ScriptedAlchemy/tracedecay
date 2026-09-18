@@ -1,10 +1,11 @@
 //! Serving status of `tracedecay_health_read` through the production MCP
 //! `tools/call` the daemon mounts.
 //!
-//! The tool takes no selector. The answer is the admitted project's serving
-//! database: writable file, file the daemon could open only read-only, or no
-//! file at the canonical path. Unix file mode and unlink are how a host
-//! reaches the last two; Windows sharing locks do not expose them the same way.
+//! The tool takes no selector. A writable serving file answers `ok`. Removing
+//! that file answers `degraded`. Mode `0444` does not become `read_only`:
+//! admission still opens the store as writable, owner publication cannot
+//! persist, and the same call returns the typed owner-failed problem. Windows
+//! sharing locks do not expose the sealed file the same way.
 
 #![cfg(unix)]
 
@@ -22,6 +23,8 @@ use super::support::{TestTempDir, test_temp_dir};
 struct HealthProject {
     harness: ProductionProjectCompositionHarnessV1,
     project_root: PathBuf,
+    // Moved into the sealed reopen. Dropping it earlier removes the serving
+    // database out from under the daemon.
     isolation: TestTempDir,
 }
 
@@ -99,26 +102,24 @@ async fn health_read_reports_ok_until_the_serving_database_is_gone() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn health_read_reports_read_only_when_the_serving_database_is_not_writable() {
+async fn health_read_refuses_when_the_serving_database_cannot_be_written() {
     let writable = open_health_project().await;
     assert_eq!(
         call_health_payload(&writable, json!({"format": "json"})).await,
         json!({"status": "ok"})
     );
     let sealed = seal_serving_database(writable).await;
+    let problem = call_health_problem(&sealed, json!({"format": "json"})).await;
     assert_eq!(
-        call_health_payload(&sealed, json!({"format": "json"})).await,
-        json!({"status": "read_only"})
+        problem.schema_id,
+        "schema.application.primitive.health-read.result"
     );
-    let markdown = call_health_text(&sealed, json!({})).await;
+    assert_eq!(problem.kind, "execution_failed");
+    assert_eq!(problem.code, "application.runtime.owner_failed");
+    assert_eq!(problem.retry, "never");
     assert_eq!(
-        &markdown[..MARKDOWN_READ_ONLY.len()],
-        MARKDOWN_READ_ONLY,
-        "default MCP rendering must lead with the read-only serving status:\n{markdown}"
-    );
-    assert!(
-        markdown.contains("binding=binding.mcp.health_read.v1"),
-        "read-only MCP rendering must name the MCP binding:\n{markdown}"
+        problem.message,
+        "The project runtime for this operation failed to publish; reopen the project"
     );
     sealed.harness.shutdown().await;
 }
@@ -130,16 +131,6 @@ const MARKDOWN_OK: &str = "\
 
     {
       \"status\": \"ok\"
-    }
-";
-
-const MARKDOWN_READ_ONLY: &str = "\
-## health\\_read
-
-### Payload
-
-    {
-      \"status\": \"read_only\"
     }
 ";
 
@@ -257,6 +248,57 @@ async fn call_health(fixture: &HealthProject, arguments: Value) -> JsonRpcRespon
         .call_tool(&fixture.project_root, "tracedecay_health_read", arguments)
         .await
         .expect("production MCP tools/call tracedecay_health_read")
+}
+
+struct HealthProblem {
+    schema_id: String,
+    kind: String,
+    code: String,
+    retry: String,
+    message: String,
+}
+
+async fn call_health_problem(fixture: &HealthProject, arguments: Value) -> HealthProblem {
+    let response = call_health(fixture, arguments).await;
+    assert!(
+        response.error.is_none(),
+        "a sealed serving database must stay a tool result, not a transport error: {:?}",
+        response.error
+    );
+    let result = response.result.expect("health read tool result");
+    assert_eq!(
+        result["isError"],
+        json!(true),
+        "a sealed serving database must refuse the read: {result}"
+    );
+    let text = result["content"][0]["text"]
+        .as_str()
+        .expect("health read text");
+    let envelope: Value = serde_json::from_str(text).unwrap_or_else(|error| {
+        panic!("health read refusal was not an application envelope: {error}; text={text}")
+    });
+    HealthProblem {
+        schema_id: envelope["contract"]["schema_id"]
+            .as_str()
+            .expect("schema id")
+            .to_owned(),
+        kind: envelope["problem"]["kind"]
+            .as_str()
+            .expect("problem kind")
+            .to_owned(),
+        code: envelope["problem"]["code"]
+            .as_str()
+            .expect("problem code")
+            .to_owned(),
+        retry: envelope["problem"]["retry"]
+            .as_str()
+            .expect("problem retry")
+            .to_owned(),
+        message: envelope["problem"]["message"]
+            .as_str()
+            .expect("problem message")
+            .to_owned(),
+    }
 }
 
 async fn call_health_text(fixture: &HealthProject, arguments: Value) -> String {
