@@ -53,6 +53,15 @@ mod dispatch_tests;
     clippy::uninlined_format_args
 )]
 mod graph_search_dispatch_tests;
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::await_holding_lock,
+    clippy::redundant_closure_for_method_calls,
+    clippy::uninlined_format_args
+)]
+mod hook_runtime_behavior_tests;
 pub mod info;
 pub(crate) mod retained_catalog;
 #[cfg(test)]
