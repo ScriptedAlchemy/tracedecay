@@ -39,6 +39,7 @@ async fn feedback_list_returns_the_published_compiler_finding_and_denies_other_h
     drop(server);
 
     let compiler = compiler_failure(&fixture.project_root);
+    let message = compiler_diagnostic_message(&compiler);
     let diagnosed = tool_json(
         &mcp_call(
             &fixture,
@@ -116,7 +117,6 @@ async fn feedback_list_returns_the_published_compiler_finding_and_denies_other_h
         finding["finding"]["provider_state"], "supported_completed_complete",
         "{finding}"
     );
-    let message = format!("cannot find function `{SYMBOL}` in this scope");
     assert_eq!(projection["code"], "E0425", "{projection}");
     assert_eq!(projection["severity"], "error", "{projection}");
     assert_eq!(projection["producer"], "code_diagnostic", "{projection}");
@@ -206,7 +206,26 @@ fn compiler_failure(project: &Path) -> String {
         .expect("project parent")
         .join("compiler-out");
     fs::create_dir_all(&output_dir).expect("compiler output directory");
-    let output = Command::new("rustc")
+    // `rustup` selects the toolchain from the working directory. The fixture
+    // project lives outside the repository, so a bare `rustc` there is the
+    // default toolchain (edition 2021) and never emits E0425. Resolve the
+    // compiler from the repository root first, then compile in the project.
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let resolved = Command::new("rustup")
+        .args(["which", "rustc"])
+        .current_dir(workspace)
+        .output()
+        .expect("resolve rustc");
+    let rustc_path = String::from_utf8(resolved.stdout).expect("rustc path");
+    assert!(
+        resolved.status.success(),
+        "rustup which rustc failed: {}",
+        String::from_utf8_lossy(&resolved.stderr)
+    );
+    let output = Command::new(rustc_path.trim())
         .current_dir(project)
         .args([
             "--crate-type=lib",
@@ -229,6 +248,19 @@ fn compiler_failure(project: &Path) -> String {
         "{stderr}"
     );
     stderr
+}
+
+/// The host-visible finding text is the compiler's own E0425 message, not a
+/// restatement of a fixture string. A later rustc that rewords the diagnostic
+/// still has to carry that exact line through diagnose and list.
+fn compiler_diagnostic_message(stderr: &str) -> String {
+    stderr
+        .lines()
+        .find_map(|line| {
+            line.split_once("error[E0425]: ")
+                .map(|(_, message)| message.trim().to_owned())
+        })
+        .expect("rustc E0425 message")
 }
 
 async fn published_cycle(fixture: &crate::support::ProductionCompositionFixture) -> Value {
