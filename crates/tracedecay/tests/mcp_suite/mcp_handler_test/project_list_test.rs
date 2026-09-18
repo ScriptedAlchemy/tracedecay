@@ -512,7 +512,8 @@ fn pin_registration_times(registry_path: &Path, active_id: &str) {
 }
 
 /// One request in, one response out, the same line framing `McpServer::run_connection`
-/// serves to a client. Arguments are not rewritten: an omitted `format` stays omitted.
+/// serves to a client. Arguments are not rewritten: an omitted `format` stays omitted
+/// and the default page is markdown, not JSON.
 struct ClientCall {
     request: Option<String>,
     response: String,
