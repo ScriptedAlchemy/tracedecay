@@ -8,6 +8,7 @@ mod admin_test;
 mod affected_tests_behavior_test;
 mod automation_runs_test;
 mod bounded_analysis_test;
+mod callers_for_test;
 #[cfg(feature = "test-transport")]
 mod branch_search_test;
 #[cfg(feature = "test-transport")]
