@@ -256,7 +256,10 @@ jobs:
           set -euo pipefail
           bundle="tracedecay-beta-${RELEASE_TAG}-${{ matrix.name }}.mcpb"
           rm -rf verify-mcpb
-          python3 -m zipfile -e "$bundle" verify-mcpb
+          # unzip applies the mode bits build-mcpb.py records in the archive,
+          # which is what an MCPB host does. `python3 -m zipfile -e` drops
+          # them, so `test -x` failed on every Unix target with no output.
+          unzip -q "$bundle" -d verify-mcpb
           test -x verify-mcpb/server/tracedecay
           verify-mcpb/server/tracedecay --version
           verify-mcpb/server/tracedecay --help >/dev/null
