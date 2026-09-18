@@ -117,7 +117,7 @@ async fn session_refresh_begin_starts_then_joins_the_same_profile_operation() {
     );
     assert_eq!(
         unknown_scope["error"]["message"],
-        "tool execution failed: config error: invalid retained application request for tracedecay_session_refresh_begin: scope: unknown variant `user`, expected `project` or `profile`",
+        "tool execution failed: config error: invalid retained application request for tracedecay_session_refresh_begin: scope.kind: unknown variant `user`, expected `project` or `profile`",
         "{unknown_scope}"
     );
 
