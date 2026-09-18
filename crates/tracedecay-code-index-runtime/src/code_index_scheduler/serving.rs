@@ -1657,6 +1657,15 @@ impl LatestCodeTextGenerationV1 {
                 };
             }
         };
+        let successor = match self.clone_successor_progress() {
+            CloneSuccessorProgressReadV1::Idle => None,
+            CloneSuccessorProgressReadV1::Backfilling(progress) => Some(progress),
+            CloneSuccessorProgressReadV1::Busy => {
+                return CodeCloneIndexStatusV1::Unavailable {
+                    reason: "clone-index status is being updated".to_owned(),
+                };
+            }
+        };
         let artifact = match owners.clone_index_artifact() {
             Ok(artifact) => artifact,
             Err(error) => {
@@ -1665,7 +1674,6 @@ impl LatestCodeTextGenerationV1 {
                 };
             }
         };
-        let successor = self.clone_successor_progress();
         let (completed_source_pages, total_source_pages, bytes_on_disk) = successor.map_or(
             (
                 artifact.source_pages,
@@ -1709,16 +1717,24 @@ impl LatestCodeTextGenerationV1 {
         }
     }
 
-    fn clone_successor_progress(&self) -> Option<CloneSuccessorProgressV1> {
-        let slot = self.text_projection_build.lock_slot();
+    fn clone_successor_progress(&self) -> CloneSuccessorProgressReadV1 {
+        let slot = match self.text_projection_build.slot.try_lock() {
+            Ok(slot) => slot,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return CloneSuccessorProgressReadV1::Busy;
+            }
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        };
         match &*slot {
             CodeTextProjectionSlotV1::CloneSuccessorPending => {
                 let owners = match self.query_owner_readiness() {
                     CodeTextQueryOwnerReadinessV1::Ready(owners) => owners,
                     CodeTextQueryOwnerReadinessV1::Pending
-                    | CodeTextQueryOwnerReadinessV1::Invalid => return None,
+                    | CodeTextQueryOwnerReadinessV1::Invalid => {
+                        return CloneSuccessorProgressReadV1::Idle;
+                    }
                 };
-                Some(CloneSuccessorProgressV1 {
+                CloneSuccessorProgressReadV1::Backfilling(CloneSuccessorProgressV1 {
                     completed_source_pages: 0,
                     total_source_pages: owners.hydration.verified_artifact().page_count(),
                     bytes_on_disk: None,
@@ -1730,7 +1746,7 @@ impl LatestCodeTextGenerationV1 {
                     .as_ref()
                     .and_then(|builder| builder.next_cursor().ok().flatten())
                     .map_or(0, |cursor| cursor.next_page_ordinal());
-                Some(CloneSuccessorProgressV1 {
+                CloneSuccessorProgressReadV1::Backfilling(CloneSuccessorProgressV1 {
                     completed_source_pages,
                     total_source_pages: build.prior.page_count(),
                     bytes_on_disk: build
@@ -1742,7 +1758,7 @@ impl LatestCodeTextGenerationV1 {
             }
             CodeTextProjectionSlotV1::Idle
             | CodeTextProjectionSlotV1::HeadOpening
-            | CodeTextProjectionSlotV1::Building(_) => None,
+            | CodeTextProjectionSlotV1::Building(_) => CloneSuccessorProgressReadV1::Idle,
         }
     }
 
@@ -1760,6 +1776,12 @@ struct CloneSuccessorProgressV1 {
     completed_source_pages: u64,
     total_source_pages: u64,
     bytes_on_disk: Option<u64>,
+}
+
+enum CloneSuccessorProgressReadV1 {
+    Idle,
+    Backfilling(CloneSuccessorProgressV1),
+    Busy,
 }
 
 fn clone_index_observation(

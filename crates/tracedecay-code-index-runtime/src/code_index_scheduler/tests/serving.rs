@@ -913,6 +913,48 @@ fn clone_status_distinguishes_unavailable_backfill_partial_ready_and_stale() {
 }
 
 #[tokio::test]
+async fn dashboard_freshness_does_not_join_a_clone_backfill_slice() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn alpha() { one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount worktree");
+    let latest = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+    while !latest.query_owners_are_ready() {
+        latest.advance_text_serving(1).expect("advance text build");
+    }
+
+    let held_slot = latest.text_projection_build.lock_slot();
+    let freshness = tokio::time::timeout(
+        Duration::from_millis(100),
+        registry.dashboard_freshness(fixture.path()),
+    )
+    .await
+    .expect("dashboard freshness must not wait for the clone backfill slice")
+    .expect("mounted dashboard freshness");
+    assert!(matches!(
+        freshness.clone_index,
+        Some(
+            tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Unavailable {
+                reason
+            }
+        ) if reason == "clone-index status is being updated"
+    ));
+
+    drop(held_slot);
+    registry.shutdown().await;
+}
+
+#[tokio::test]
 async fn query_admission_serves_v14_while_clone_successor_is_pending() {
     let fixture = GitFixture::new(&[(
         "src/lib.rs",
