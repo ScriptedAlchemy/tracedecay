@@ -36,8 +36,6 @@ mod hermes_skill_bridge_test;
 mod inheritance_depth_test;
 mod lcm_test;
 #[cfg(feature = "test-transport")]
-mod project_list_test;
-#[cfg(feature = "test-transport")]
 mod memory_contradiction_contract_test;
 #[cfg(feature = "test-transport")]
 mod memory_fact_assertions;
@@ -47,6 +45,8 @@ mod memory_feedback_test;
 mod move_symbol_test;
 #[cfg(feature = "test-transport")]
 mod project_context_test;
+#[cfg(feature = "test-transport")]
+mod project_list_test;
 #[cfg(feature = "test-transport")]
 mod project_search_behavior_test;
 #[cfg(feature = "test-transport")]

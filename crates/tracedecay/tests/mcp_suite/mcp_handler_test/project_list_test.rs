@@ -581,7 +581,7 @@ fn directory(path: &Path) -> PathBuf {
 
 fn git_repository(path: &Path) -> PathBuf {
     let root = directory(path);
-    let status = Command::new("git")
+    let status = Command::new(crate::common::git_program())
         .args(["init", "--quiet"])
         .current_dir(&root)
         .status()
