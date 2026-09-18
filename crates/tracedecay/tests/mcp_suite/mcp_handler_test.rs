@@ -19,6 +19,8 @@ mod context_test;
 mod dependency_hint_test;
 #[cfg(feature = "test-transport")]
 mod edit_test;
+#[cfg(feature = "test-transport")]
+mod expand_query_behavior;
 mod graph_analysis_test;
 mod graph_query_test;
 mod impact_behavior_test;
