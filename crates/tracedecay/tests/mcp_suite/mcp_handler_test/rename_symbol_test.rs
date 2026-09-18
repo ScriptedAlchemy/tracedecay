@@ -1,20 +1,19 @@
-//! `tracedecay_rename_symbol`, apply-grade rename bound to preview evidence.
+//! `tracedecay_rename_symbol` as a host calls it: one `tools/call` on the
+//! production MCP server the daemon composition mounts.
 //!
 //! The preview (`tracedecay_rename_preview`) reports the exact node identity;
 //! the apply consumes it and must succeed only while that evidence still
 //! matches the live tree: staleness refuses, invalid targets are denied, and a
-//! partial-failure apply restores every already-written preimage.
+//! publication failure leaves every file byte-identical to its preimage.
 
-use crate::support::*;
 use crate::support::{
-    handle_production_source_edit_tool_call as handle_tool_call,
-    init_production_source_edit_project as init_test_project,
+    ProductionSourceEditFixture, extract_first_json_content,
+    init_production_source_edit_project as init_test_project, test_temp_dir,
 };
 use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
-use tracedecay_mcp::ToolResult;
 
 const PRICING_BEFORE: &str = r#"//! pricing
 pub struct LineItem {
@@ -179,23 +178,64 @@ fn visible_hazards(payload: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// One production `tools/call`. JSON is the public `format` a host requests
+/// when it wants the structured payload; a protocol error is not a rename.
+async fn call_json(
+    fixture: &ProductionSourceEditFixture,
+    tool_name: &str,
+    arguments: Value,
+) -> Value {
+    let response = tools_call(fixture, tool_name, arguments)
+        .await
+        .unwrap_or_else(|error| panic!("{tool_name} did not answer tools/call: {error}"));
+    let result = response
+        .result
+        .as_ref()
+        .unwrap_or_else(|| panic!("{tool_name} returned no tools/call result: {response:?}"));
+    extract_first_json_content(result)
+}
+
+async fn tools_call(
+    fixture: &ProductionSourceEditFixture,
+    tool_name: &str,
+    mut arguments: Value,
+) -> Result<tracedecay_mcp::JsonRpcResponse, String> {
+    if let Some(object) = arguments.as_object_mut() {
+        object
+            .entry("format".to_owned())
+            .or_insert_with(|| json!("json"));
+    }
+    let response = fixture
+        .harness
+        .call_tool(&fixture.project_root, tool_name, arguments)
+        .await
+        .map_err(|error| error.to_string())?;
+    if let Some(error) = &response.error {
+        return Err(format!("{error:?}"));
+    }
+    Ok(response)
+}
+
 /// Runs `tracedecay_rename_preview` for `symbol` and returns the exact node
 /// identity the apply must be bound to.
-async fn preview_node(cg: &ProductionSourceEditFixture, symbol: &str) -> Value {
+async fn preview_node(fixture: &ProductionSourceEditFixture, symbol: &str) -> Value {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let search = loop {
-        match handle_tool_call(
-            cg,
+        match tools_call(
+            fixture,
             "tracedecay_find_exact_symbol",
             json!({ "name": symbol, "limit": 20 }),
-            None,
-            None,
         )
         .await
         {
-            Ok(result) => break result,
+            Ok(response) => {
+                let result = response.result.as_ref().unwrap_or_else(|| {
+                    panic!("exact symbol lookup returned no tools/call result: {response:?}")
+                });
+                break extract_first_json_content(result);
+            }
             Err(error)
-                if error.to_string().contains("code-graph-unavailable")
+                if error.contains("code-graph-unavailable")
                     && tokio::time::Instant::now() < deadline =>
             {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -203,7 +243,6 @@ async fn preview_node(cg: &ProductionSourceEditFixture, symbol: &str) -> Value {
             Err(error) => panic!("exact symbol lookup failed: {error}"),
         }
     };
-    let search: Value = serde_json::from_str(extract_text(&search.value)).unwrap();
     let node_id = search["matches"]
         .as_array()
         .and_then(|matches| {
@@ -216,21 +255,17 @@ async fn preview_node(cg: &ProductionSourceEditFixture, symbol: &str) -> Value {
         .unwrap_or_else(|| {
             panic!("symbol {symbol:?} missing from production code graph: {search}")
         });
-    let result = handle_tool_call(
-        cg,
+    let payload = call_json(
+        fixture,
         "tracedecay_rename_preview",
         json!({ "node_id": node_id }),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let payload = extract_first_json_content(&result.value);
+    .await;
     let node = payload["node"].clone();
-    assert!(node["id"].is_string(), "preview node identity: {payload}");
-    assert!(
-        node["qualified_name"].is_string(),
-        "preview must report the qualified name the apply binds to: {payload}"
+    assert_eq!(node["id"], node_id, "preview node identity: {payload}");
+    assert_eq!(
+        node["name"], symbol,
+        "preview must report the looked-up symbol: {payload}"
     );
     node
 }
@@ -247,17 +282,17 @@ fn rename_args(node: &Value, new_name: &str) -> Value {
     })
 }
 
-async fn preview_rename(cg: &ProductionSourceEditFixture, node: &Value, new_name: &str) -> Value {
-    let result = handle_tool_call(
-        cg,
+async fn preview_rename(
+    fixture: &ProductionSourceEditFixture,
+    node: &Value,
+    new_name: &str,
+) -> Value {
+    let payload = call_json(
+        fixture,
         "tracedecay_rename_symbol",
         rename_args(node, new_name),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let payload = rename_payload(&result);
+    .await;
     assert_eq!(payload["success"], true, "rename preview: {payload}");
     assert_eq!(payload["dry_run"], true, "rename preview: {payload}");
     assert_eq!(
@@ -286,11 +321,6 @@ fn accepted_apply_args(node: &Value, new_name: &str, preview: &Value, key: &str)
             "graph_revision": preview["graph_revision"],
         },
     })
-}
-
-fn rename_payload(result: &ToolResult) -> Value {
-    let text = extract_text(&result.value);
-    serde_json::from_str(text).unwrap_or_else(|e| panic!("rename payload not JSON: {e}\n{text}"))
 }
 
 #[tokio::test]
@@ -391,10 +421,7 @@ async fn test_rename_symbol_apply_rewrites_declaration_and_callers() {
         &preview,
         "rename.apply-and-replay",
     );
-    let result = handle_tool_call(&cg, "tracedecay_rename_symbol", args.clone(), None, None)
-        .await
-        .unwrap();
-    let p = rename_payload(&result);
+    let p = call_json(&cg, "tracedecay_rename_symbol", args.clone()).await;
     assert_eq!(p["success"], true, "payload: {p}");
     assert_eq!(p["replayed"], false, "payload: {p}");
     assert_eq!(p["message"], "rename applied", "payload: {p}");
@@ -417,10 +444,7 @@ async fn test_rename_symbol_apply_rewrites_declaration_and_callers() {
 
     // An exact idempotent replay returns the durable receipt without attempting
     // to reinterpret the now-retired node identity.
-    let result2 = handle_tool_call(&cg, "tracedecay_rename_symbol", args, None, None)
-        .await
-        .unwrap();
-    let p2 = rename_payload(&result2);
+    let p2 = call_json(&cg, "tracedecay_rename_symbol", args).await;
     assert_eq!(p2["success"], true, "idempotent replay: {p2}");
     assert_eq!(p2["replayed"], true, "idempotent replay: {p2}");
     assert_eq!(
@@ -471,10 +495,7 @@ async fn test_rename_symbol_stale_tree_refuses_before_writing() {
         &preview,
         "rename.stale-tree",
     );
-    let result = handle_tool_call(&cg, "tracedecay_rename_symbol", args, None, None)
-        .await
-        .unwrap();
-    let p = rename_payload(&result);
+    let p = call_json(&cg, "tracedecay_rename_symbol", args).await;
     assert_eq!(p["success"], false, "stale evidence must refuse: {p}");
     assert_eq!(
         p["message"], BLOCKED_MESSAGE,
@@ -527,10 +548,7 @@ async fn test_rename_symbol_denies_invalid_and_colliding_names() {
 
     // A denied preview has no acceptance to apply.
     let invalid = rename_args(&node, "not an identifier");
-    let result = handle_tool_call(&cg, "tracedecay_rename_symbol", invalid, None, None)
-        .await
-        .unwrap();
-    let p = rename_payload(&result);
+    let p = call_json(&cg, "tracedecay_rename_symbol", invalid).await;
     assert_eq!(p["success"], false, "invalid name must be denied: {p}");
     assert_eq!(p["dry_run"], true, "{p}");
     assert_eq!(p["new_name"], "not an identifier");
@@ -550,10 +568,7 @@ async fn test_rename_symbol_denies_invalid_and_colliding_names() {
 
     // Identical to the old name.
     let same = rename_args(&node, "compute_grand_total");
-    let result = handle_tool_call(&cg, "tracedecay_rename_symbol", same, None, None)
-        .await
-        .unwrap();
-    let p = rename_payload(&result);
+    let p = call_json(&cg, "tracedecay_rename_symbol", same).await;
     assert_eq!(p["success"], false, "same-name rename must be denied: {p}");
     assert_eq!(
         p["message"], "new name is identical to the bound old name",
@@ -572,10 +587,7 @@ async fn test_rename_symbol_denies_invalid_and_colliding_names() {
     // Collides with an identifier already present in a touched file.
     let collision_message = "`tally` already occurs in src/pricing.rs; collision, shadowing, or changed resolution is possible";
     let collision = rename_args(&node, "tally");
-    let result = handle_tool_call(&cg, "tracedecay_rename_symbol", collision, None, None)
-        .await
-        .unwrap();
-    let p = rename_payload(&result);
+    let p = call_json(&cg, "tracedecay_rename_symbol", collision).await;
     assert_eq!(p["success"], false, "collision must be denied: {p}");
     assert_eq!(p["message"], BLOCKED_MESSAGE, "{p}");
     assert_eq!(p["new_name"], "tally");
@@ -614,16 +626,12 @@ async fn test_rename_symbol_blocks_unresolved_cross_module_spelling() {
     let (cg, _env) = init_test_project(project).await;
 
     let node = preview_node(&cg, "compute_grand_total").await;
-    let result = handle_tool_call(
+    let payload = call_json(
         &cg,
         "tracedecay_rename_symbol",
         rename_args(&node, "calculate_total_cents"),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let payload = rename_payload(&result);
+    .await;
 
     assert_eq!(payload["success"], false, "unresolved spelling: {payload}");
     assert_eq!(payload["dry_run"], true, "{payload}");
@@ -701,9 +709,15 @@ async fn test_rename_symbol_publication_failure_preserves_preimage() {
     let preview = preview_rename(&cg, &node, "calculate_total_cents").await;
 
     // `src/` read-only blocks the temp-file publish of `src/pricing.rs`.
+    // The guard restores write permission even if the tool call panics, so
+    // the temp directory can still be removed.
     let src_dir = project.join("src");
     let writable = fs::metadata(&src_dir).unwrap().permissions();
     fs::set_permissions(&src_dir, fs::Permissions::from_mode(0o555)).unwrap();
+    let _restore = RestoreWrite {
+        path: src_dir,
+        permissions: writable,
+    };
 
     let args = accepted_apply_args(
         &node,
@@ -711,14 +725,8 @@ async fn test_rename_symbol_publication_failure_preserves_preimage() {
         &preview,
         "rename.publication-failure",
     );
-    let apply = handle_tool_call(&cg, "tracedecay_rename_symbol", args, None, None).await;
-
-    // Restore permissions before asserting so the tempdir always cleans up.
-    fs::set_permissions(&src_dir, writable).unwrap();
-
     // Publication refusal is a typed tool result, not a successful rename.
-    let result = apply.expect("publication failure must still return a tool result");
-    let p = rename_payload(&result);
+    let p = call_json(&cg, "tracedecay_rename_symbol", args).await;
     assert_eq!(p["success"], false, "payload: {p}");
 
     assert_eq!(
@@ -731,4 +739,17 @@ async fn test_rename_symbol_publication_failure_preserves_preimage() {
         ORDERS_BEFORE,
         "published caller must be rolled back to its preimage"
     );
+}
+
+#[cfg(unix)]
+struct RestoreWrite {
+    path: std::path::PathBuf,
+    permissions: fs::Permissions,
+}
+
+#[cfg(unix)]
+impl Drop for RestoreWrite {
+    fn drop(&mut self) {
+        fs::set_permissions(&self.path, self.permissions.clone()).unwrap();
+    }
 }
