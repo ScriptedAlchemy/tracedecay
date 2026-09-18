@@ -1,8 +1,9 @@
 //! Caller-visible `tracedecay_lcm_expand_query` behavior through the MCP server.
 //!
-//! Temporal receipts (generation watermarks, cursors, anchor ids) are store
-//! identity, not the answer the tool is called for. They are removed before
-//! the payload is compared to the literal contract.
+//! Anchor ids and the authorized store path are process-local identity. They
+//! are removed before the payload is compared. Coverage stays: a hit is
+//! `partial` because the matched record's coverage is unknown, and a miss is
+//! `ok` with zero coverage.
 
 use crate::support::{
     activate_test_temporal_generation, extract_real_server_text, handle_real_server_tool_call,
@@ -169,17 +170,20 @@ async fn problem(server: &McpServer, arguments: Value) -> Value {
 
 fn stable(payload: &Value) -> Value {
     let mut payload = payload.clone();
-    payload
-        .as_object_mut()
-        .expect("expand-query payload")
-        .remove("temporal");
+    let coverage = payload
+        .pointer("/temporal/coverage")
+        .cloned()
+        .unwrap_or(Value::Null);
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("temporal".to_owned(), json!({ "coverage": coverage }));
+    }
     payload
 }
 
 fn expected_hit(session_id: &str, prompt: &str, query: &str, body: &str) -> Value {
     let chars = u64::try_from(body.chars().count()).unwrap();
     json!({
-        "status": "ok",
+        "status": "partial",
         "context_blocks": [{
             "kind": "raw_message",
             "node_id": null,
@@ -217,7 +221,15 @@ fn expected_hit(session_id: &str, prompt: &str, query: &str, body: &str) -> Valu
             "store_id": null,
             "snippet": body,
         }],
-        "omitted": 0,
+        "omitted": 1,
+        "temporal": {
+            "coverage": {
+                "visible": 0,
+                "hidden": 0,
+                "unknown": 1,
+                "redacted": 0,
+            },
+        },
         "provider": "cursor",
         "session_id": session_id,
     })
@@ -242,6 +254,14 @@ fn expected_miss(session_id: &str, prompt: &str, query: &str) -> Value {
         "node_ids": [],
         "matches": [],
         "omitted": 0,
+        "temporal": {
+            "coverage": {
+                "visible": 0,
+                "hidden": 0,
+                "unknown": 0,
+                "redacted": 0,
+            },
+        },
         "provider": "cursor",
         "session_id": session_id,
     })
