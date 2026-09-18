@@ -251,7 +251,7 @@ fn strip_id_lines(text: &str) -> String {
 
 #[tokio::test]
 async fn inheritance_depth_ranks_literal_extends_depths() {
-    let mut project = open_project(&[
+    let project = open_project(&[
         (
             "src/lib.rs",
             "pub mod hierarchy;\npub mod side;\npub mod wide;\n",
@@ -346,8 +346,9 @@ async fn inheritance_depth_ranks_literal_extends_depths() {
         json!({"result_count": 0, "ranking": []}),
     );
 
-    let markdown =
-        tool_text(&call_inheritance_depth(&project, json!({"path": "src/hierarchy.rs"})).await);
+    let markdown_response =
+        call_inheritance_depth(&project, json!({"path": "src/hierarchy.rs"})).await;
+    let markdown = tool_text(&markdown_response);
     assert_eq!(
         strip_id_lines(markdown),
         "\
@@ -377,7 +378,7 @@ async fn inheritance_depth_ranks_literal_extends_depths() {
 
 #[tokio::test]
 async fn inheritance_depth_default_limit_keeps_ten_deepest() {
-    let mut project = open_project(&[
+    let project = open_project(&[
         ("src/lib.rs", "pub mod long;\n"),
         ("src/long.rs", LONG_CHAIN),
     ])
@@ -427,7 +428,7 @@ async fn inheritance_depth_default_limit_keeps_ten_deepest() {
 
 #[tokio::test]
 async fn inheritance_depth_cycle_is_unavailable() {
-    let mut project =
+    let project =
         open_project(&[("src/lib.rs", "pub mod cycle;\n"), ("src/cycle.rs", CYCLE)]).await;
 
     let response = call_inheritance_depth(&project, json!({"format": "json"})).await;
