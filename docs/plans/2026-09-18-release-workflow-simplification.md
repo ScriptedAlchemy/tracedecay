@@ -279,32 +279,30 @@ rustc 1.98.1 from a rustc 1.97.1 build stops avoidable cache-key drift.
 
 #### B1. Measure the single production build before changing release profile
 
-After A lands, capture Cargo timings for the one production build on Windows,
-macOS, and both Linux targets. Rank crates by code generation and link time,
-then remove production features or dependencies that the shipped CLI does not
-call.
+Done, on x86_64 Linux. See
+[`docs/release-build-profile-measurement.md`](../release-build-profile-measurement.md).
 
-Estimated cut to pursue: 5-15m on the 55.7m Windows build and 3-10m on Unix.
-These are targets for measured dependency/feature pruning, not established
-savings.
+The cold production build is 18m12s on a 4 vCPU / 16 GiB host. 86% of sectioned
+unit time is LLVM codegen, and 48.5 of 60.1 unit-minutes are TraceDecay's own
+61 units against 11.6 for all 722 dependency units. Feature pruning is not the
+lever: all 148 tree-sitter and C units together are under 5 unit-minutes.
 
-Do not begin by changing optimization semantics. The workspace has no custom
-release LTO setting, release debuginfo is already disabled, Linux already uses
-mold, and Windows already uses `lld-link`. Disabling nonexistent LTO or
-installing another linker cannot explain the baseline.
+Optimization semantics were measured rather than assumed, and they are not the
+cost: `opt-level = 2` across every unit returns 3 seconds of 18m12s, and
+`opt-level = 1` on the composition root returns 6 seconds of the 4m36s serial
+tail while making the binary larger. The confirmed driver is code volume,
+380,869 monomorphized symbols, of which `serde` and `serde_json` instantiate
+60.1 MiB.
 
 #### B2. Trial higher release codegen parallelism only with product evidence
 
-The default release profile uses Cargo's default 16 codegen units. A stock
-runner trial may compare 16 with a higher value if B1 shows LLVM codegen, not
-dependency compilation, dominates.
+Rejected on measurement; do not run the trial.
 
-Estimated cut to pursue: 3-10m on Windows and macOS; no claimed cut until the
-same binary-size, startup, representative query, and indexing checks pass.
-Reject the change if runtime regression buys CI speed.
-
-Land B only after the architecture baseline. Otherwise duplicate builds and
-acceptance noise will obscure the treatment.
+The 4m36s `tracedecay` → `tracedecay-cli` tail already runs at a mean 3.08 of 4
+cores (`/proc/stat` sampled every 5s). The stretches at one core are
+single-threaded rustc frontend and the final link, which codegen units do not
+divide. Raising `codegen-units` above the default 16 has no idle capacity to
+reclaim on a four-core runner and would cost cross-unit inlining.
 
 ### C. Cache
 
