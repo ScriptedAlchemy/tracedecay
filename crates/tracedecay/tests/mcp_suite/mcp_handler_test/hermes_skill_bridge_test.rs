@@ -108,7 +108,8 @@ fn file_snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
             } else if metadata.is_dir() {
                 pending.push(path);
             } else if metadata.is_file() {
-                files.insert(path, fs::read(&path).unwrap());
+                let bytes = fs::read(&path).unwrap();
+                files.insert(path, bytes);
             }
         }
     }
