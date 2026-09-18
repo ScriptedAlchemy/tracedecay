@@ -269,6 +269,9 @@ async fn source_edit_rollback_restores_move_preimages_and_replays_the_receipt() 
     )
     .await;
     let replay = tool_payload(&replay_response);
+    // The replay is the durable receipt, not a second live restore. The
+    // surface contract keeps `failed: false` beside `success: true` and puts
+    // the retained metadata on `effect.payload`; the files stay the preimages.
     assert_eq!(replay["replayed"], json!(true));
     assert_eq!(replay["success"], json!(true));
     assert_eq!(replay["failed"], json!(false));
