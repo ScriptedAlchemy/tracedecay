@@ -117,6 +117,21 @@ def main() -> int:
         (root / "binaries" / "tracedecay-beta-v1.2.3-windows.zip").unlink()
         (root / "mcpbs" / "tracedecay-beta-v1.2.3-windows.mcpb").unlink()
         run(root, False, profile="beta", allow_missing=True)
+        # An MCPB that leaked into the binaries directory (a `tracedecay-beta-*`
+        # artifact glob did this) is foreign there, in both modes.
+        for child in ("binaries", "mcpbs"):
+            for item in (root / child).iterdir():
+                item.unlink()
+        for target in manifest["include"]:
+            (root / "binaries" / (
+                f"tracedecay-beta-v1.2.3-{target['name']}.{target['archive']}"
+            )).write_bytes(b"artifact")
+            (root / "mcpbs" / (
+                f"tracedecay-beta-v1.2.3-{target['name']}.mcpb"
+            )).write_bytes(b"artifact")
+        (root / "binaries" / "tracedecay-beta-v1.2.3-linux.mcpb").write_bytes(b"artifact")
+        run(root, False, profile="beta")
+        run(root, False, profile="beta", allow_missing=True)
     print("release artifact validator tests passed")
     return 0
 
