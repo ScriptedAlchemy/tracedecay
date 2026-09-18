@@ -1,46 +1,37 @@
-//! Caller-visible behavior of `tracedecay_skill_list`.
+//! `tracedecay_skill_list` as an MCP client sees it.
 //!
-//! The tool is the read-only inventory of the active profile's managed
-//! skills. These assertions name the skill the caller stored and the
-//! lifecycle they asked for, so a filter that ignores `state`, a body that
-//! appears without `include_body`, or a repeat call that invents usage fails.
+//! Each case sends `tools/call` through the production server and compares
+//! the JSON-RPC text with the skills stored in the isolated profile. Clock
+//! fields are not pinned. A filter that ignores `state`, a body that appears
+//! without `include_body`, a support-file byte that leaks into the listing,
+//! or a repeat call that invents usage fails.
 
 use std::fs;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::mcp::McpServer;
 use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
     ManagedSupportFile, SkillInstallTarget, create_managed_skill, set_managed_skill_state,
 };
 
-use crate::fixture;
 use crate::support::{
-    GLOBAL_DB_ENV_LOCK, GlobalDbEnvGuard, HomeEnvGuard, TestTraceDecay, extract_json, extract_text,
-    open_active_project_scoped_runtime,
+    GLOBAL_DB_ENV_LOCK, HomeEnvGuard, ProductionCompositionFixture, production_composition_fixture,
 };
 
 const ACTOR: &str = "skill-list-proof";
+const CLI_FALLBACK: &str = "This tool is also available from the shell: `tracedecay tool skill_list ...` \
+(`tracedecay tool skill_list --help` for parameters). If MCP calls keep failing or timing out, fall \
+back to that CLI instead of querying .tracedecay databases directly.";
 
 #[tokio::test]
 async fn skill_list_returns_stored_skills_for_the_requested_state() {
-    let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
-    let dir = TempDir::new().unwrap();
-    let project = dir.path().join("repo");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(
-        project.join("src/lib.rs"),
-        "pub fn skill_list_marker() {}\n",
-    )
-    .unwrap();
-    let home = dir.path().join("home");
-    let _home_guard = HomeEnvGuard::set(&home);
-    let _global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
-    let cg = TestTraceDecay::new(fixture::init_project_from_template(&project).await.unwrap());
+    let _env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
+    let home = TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(home.path());
     let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
     let profile_root_text = profile_root.display().to_string();
-    let runtime = open_active_project_scoped_runtime(&cg).await;
+    fs::create_dir_all(&profile_root).unwrap();
 
     create_managed_skill(&profile_root, active_draft())
         .await
@@ -66,12 +57,9 @@ async fn skill_list_returns_stored_skills_for_the_requested_state() {
     .await
     .unwrap();
 
-    let server =
-        McpServer::new_with_host_admission_test_runtime_for_test(cg.into_inner(), None, runtime)
-            .await
-            .expect("registered test server");
+    let fixture = production_composition_fixture().await;
 
-    let all = call_skill_list(&server, json!({"format": "json"})).await;
+    let all = call_skill_list(&fixture, json!({"format": "json"})).await;
     assert_eq!(all["status"], "ok");
     assert_eq!(all["profile_root"], profile_root_text);
     assert_eq!(all["count"], 3);
@@ -87,13 +75,13 @@ async fn skill_list_returns_stored_skills_for_the_requested_state() {
         "skill list must not inline support-file bytes: {all}"
     );
 
-    let active = call_skill_list(&server, json!({"state": "active", "format": "json"})).await;
+    let active = call_skill_list(&fixture, json!({"state": "active", "format": "json"})).await;
     assert_eq!(active["status"], "ok");
     assert_eq!(active["count"], 1);
     assert_eq!(listed(&active), vec![active_listing()]);
 
     let with_body = call_skill_list(
-        &server,
+        &fixture,
         json!({"state": "active", "include_body": true, "format": "json"}),
     )
     .await;
@@ -105,20 +93,20 @@ async fn skill_list_returns_stored_skills_for_the_requested_state() {
     assert_eq!(with_body["skills"][0]["metadata"]["id"], "skill-active");
 
     let disabled_only =
-        call_skill_list(&server, json!({"state": "disabled", "format": "json"})).await;
+        call_skill_list(&fixture, json!({"state": "disabled", "format": "json"})).await;
     assert_eq!(disabled_only["count"], 1);
     assert_eq!(listed(&disabled_only), vec![disabled_listing()]);
 
     let archived_only =
-        call_skill_list(&server, json!({"state": "archived", "format": "json"})).await;
+        call_skill_list(&fixture, json!({"state": "archived", "format": "json"})).await;
     assert_eq!(archived_only["count"], 1);
     assert_eq!(listed(&archived_only), vec![archived_listing()]);
 
-    let again = call_skill_list(&server, json!({"state": "active", "format": "json"})).await;
+    let again = call_skill_list(&fixture, json!({"state": "active", "format": "json"})).await;
     assert_eq!(listed(&again), vec![active_listing()]);
     assert_eq!(again["skills"][0]["usage_summary"]["view_count"], 0);
 
-    let markdown = call_skill_list_text(&server, json!({"state": "active"})).await;
+    let markdown = call_skill_list_text(&fixture, json!({"state": "active"})).await;
     assert_eq!(
         markdown,
         format!(
@@ -134,41 +122,66 @@ async fn skill_list_returns_stored_skills_for_the_requested_state() {
         )
     );
 
-    let rejected = server
-        .call_tool_for_test(
+    let rejected = fixture
+        .harness
+        .call_tool(
+            &fixture.project_root,
             "tracedecay_skill_list",
             json!({"state": "retired", "format": "json"}),
         )
         .await
-        .expect_err("unknown lifecycle state must be rejected");
+        .expect("production MCP call returns a JSON-RPC response");
     assert_eq!(
-        rejected.to_string(),
-        "config error: unknown managed skill state: retired"
+        serde_json::to_value(&rejected).expect("JSON-RPC response"),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {
+                "code": -32603,
+                "message": "tool execution failed: config error: unknown managed skill state: retired",
+                "data": {
+                    "tool": "tracedecay_skill_list",
+                    "cli_fallback": CLI_FALLBACK,
+                }
+            }
+        })
     );
-
-    drop(server);
-    drop(env_lock);
 }
 
-async fn call_skill_list(server: &McpServer, args: Value) -> Value {
-    let result = server
-        .call_tool_for_test("tracedecay_skill_list", args)
+async fn call_skill_list(fixture: &ProductionCompositionFixture, arguments: Value) -> Value {
+    let text = call_skill_list_text(fixture, arguments).await;
+    serde_json::from_str(&text).unwrap_or_else(|error| panic!("skill list JSON: {error}\n{text}"))
+}
+
+async fn call_skill_list_text(fixture: &ProductionCompositionFixture, arguments: Value) -> String {
+    let response = fixture
+        .harness
+        .call_tool(&fixture.project_root, "tracedecay_skill_list", arguments)
         .await
-        .expect("tracedecay_skill_list");
+        .unwrap_or_else(|error| {
+            panic!("tracedecay_skill_list production invocation failed: {error}")
+        });
     assert!(
-        result.touched_files.is_empty(),
-        "skill list must not report file edits: {:?}",
-        result.touched_files
+        response.error.is_none(),
+        "tracedecay_skill_list returned a production MCP error: {:?}",
+        response.error.as_ref().map(|error| &error.message)
     );
-    extract_json(&result.value)
-}
-
-async fn call_skill_list_text(server: &McpServer, args: Value) -> String {
-    let result = server
-        .call_tool_for_test("tracedecay_skill_list", args)
-        .await
-        .expect("tracedecay_skill_list markdown");
-    extract_text(&result.value).to_string()
+    let result = response
+        .result
+        .unwrap_or_else(|| panic!("tracedecay_skill_list returned no production MCP result"));
+    let content = result["content"]
+        .as_array()
+        .unwrap_or_else(|| panic!("skill list content: {result}"));
+    assert_eq!(
+        content.len(),
+        1,
+        "skill list must not append extra blocks: {result}"
+    );
+    assert_eq!(content[0]["type"], "text");
+    content[0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("skill list text: {result}"))
+        .to_string()
 }
 
 fn listed(payload: &Value) -> Vec<Value> {
