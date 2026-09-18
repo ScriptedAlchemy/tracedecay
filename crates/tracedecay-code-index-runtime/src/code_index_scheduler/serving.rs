@@ -950,8 +950,17 @@ fn map_text_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortEr
         CodeLexicalArtifactErrorV1::Incompatible(_) => RetrievalPortError::IncompatibleProjection,
         CodeLexicalArtifactErrorV1::Contract(detail) => RetrievalPortError::Contract(detail),
         CodeLexicalArtifactErrorV1::Corrupt(detail) => RetrievalPortError::Contract(detail),
-        CodeLexicalArtifactErrorV1::Unreserved(_)
-        | CodeLexicalArtifactErrorV1::BatchTooLarge { .. } => RetrievalPortError::BudgetExceeded,
+        CodeLexicalArtifactErrorV1::Unreserved(detail) => RetrievalPortError::AuthorityUnavailable(
+            format!("lexical artifact reservation is unavailable: {detail}"),
+        ),
+        error @ CodeLexicalArtifactErrorV1::BatchTooLarge { .. } => {
+            // The builder has already tightened the source to one record
+            // before this mapping. The same record and fixed budget reproduce
+            // this refusal forever; calling it a request budget timeout made
+            // the background worker retry it as transient work and discarded
+            // the required/maximum evidence.
+            RetrievalPortError::Contract(error.to_string())
+        }
         CodeLexicalArtifactErrorV1::Io(detail) | CodeLexicalArtifactErrorV1::Missing(detail) => {
             RetrievalPortError::AuthorityUnavailable(detail)
         }
@@ -3751,7 +3760,12 @@ pub(super) fn text_artifact_builder_budget(
     build_memory_budget
         .checked_sub(source_window_bytes)
         .filter(|remaining| *remaining > 0)
-        .ok_or(RetrievalPortError::BudgetExceeded)
+        .ok_or_else(|| {
+            RetrievalPortError::Contract(format!(
+                "text-artifact source window needs {source_window_bytes} bytes, exhausting its \
+                 {build_memory_budget}-byte build reservation"
+            ))
+        })
 }
 
 #[cfg(test)]
