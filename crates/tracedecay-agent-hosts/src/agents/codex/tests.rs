@@ -992,7 +992,17 @@ fn prepare_stages_the_source_and_returns_ready_for_cli_activation() {
     let outcome = CodexIntegration
         .prepare_non_interactive_install(&install_ctx(home.path()))
         .unwrap();
-    assert!(matches!(outcome, NonInteractiveInstallOutcome::Ready));
+    // Activation is the host CLI's job. CI and other machines without `codex`
+    // must stop after staging, with the same command the operator runs.
+    match outcome {
+        NonInteractiveInstallOutcome::Ready => {}
+        NonInteractiveInstallOutcome::DeferredUserAction(deferred) => {
+            assert_eq!(
+                deferred.remediation,
+                "Codex activates plugins through its native cache. Run `codex plugin add tracedecay@personal` after TraceDecay stages the source package."
+            );
+        }
+    }
     assert!(codex_plugin_manifest_path(home.path()).is_file());
     assert!(codex_personal_marketplace_path(home.path()).is_file());
     assert_eq!(
