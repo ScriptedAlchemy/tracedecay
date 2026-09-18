@@ -3,6 +3,9 @@
 //! Handles below are the `rh_` prefix plus the first 12 bytes of SHA-256 of the
 //! stored bytes. They are not taken from the store's return value, so a digest
 //! change fails the call the same way a copied envelope handle would.
+//!
+//! JSON pages are the exact text the host receives. `serde_json` sorts object
+//! keys because this build does not enable `preserve_order`.
 
 use crate::mcp_server_test::support::{
     jsonrpc_request, response_with_id, run_server_with_messages, setup_server,
@@ -73,19 +76,19 @@ async fn retrieve_returns_stored_pages_as_literal_json() {
     let end = response_with_id(&responses, json!(4));
     assert_eq!(
         tool_text(&first),
-        r#"{"handle":"rh_4cfdb03cc4950792e96d771e","expired":false,"original_chars":16,"total_chars":16,"offset":0,"next_offset":null,"has_more":false,"created_at":4102444800,"expires_at":4102531200,"content":"Hello, retrieve."}"#
+        r#"{"content":"Hello, retrieve.","created_at":4102444800,"expired":false,"expires_at":4102531200,"handle":"rh_4cfdb03cc4950792e96d771e","has_more":false,"next_offset":null,"offset":0,"original_chars":16,"total_chars":16}"#
     );
     assert_eq!(
         tool_text(&window),
-        r#"{"handle":"rh_4cfdb03cc4950792e96d771e","expired":false,"original_chars":16,"total_chars":16,"offset":7,"next_offset":15,"has_more":true,"created_at":4102444800,"expires_at":4102531200,"content":"retrieve"}"#
+        r#"{"content":"retrieve","created_at":4102444800,"expired":false,"expires_at":4102531200,"handle":"rh_4cfdb03cc4950792e96d771e","has_more":true,"next_offset":15,"offset":7,"original_chars":16,"total_chars":16}"#
     );
     assert_eq!(
         tool_text(&tail),
-        r#"{"handle":"rh_4cfdb03cc4950792e96d771e","expired":false,"original_chars":16,"total_chars":16,"offset":15,"next_offset":16,"has_more":true,"created_at":4102444800,"expires_at":4102531200,"content":"."}"#
+        r#"{"content":".","created_at":4102444800,"expired":false,"expires_at":4102531200,"handle":"rh_4cfdb03cc4950792e96d771e","has_more":false,"next_offset":null,"offset":15,"original_chars":16,"total_chars":16}"#
     );
     assert_eq!(
         tool_text(&end),
-        r#"{"handle":"rh_4cfdb03cc4950792e96d771e","expired":false,"original_chars":16,"total_chars":16,"offset":16,"next_offset":null,"has_more":false,"created_at":4102444800,"expires_at":4102531200,"content":""}"#
+        r#"{"content":"","created_at":4102444800,"expired":false,"expires_at":4102531200,"handle":"rh_4cfdb03cc4950792e96d771e","has_more":false,"next_offset":null,"offset":16,"original_chars":16,"total_chars":16}"#
     );
 }
 
@@ -132,7 +135,7 @@ async fn retrieve_default_and_markdown_slice_characters_not_bytes() {
     assert_eq!(tool_text(&markdown_page), hello_markdown);
     assert_eq!(
         tool_text(&crab_json),
-        r#"{"handle":"rh_85646496e4a65bc20aa95627","expired":false,"original_chars":5,"total_chars":5,"offset":2,"next_offset":3,"has_more":true,"created_at":4102444800,"expires_at":4102531200,"content":"🦀"}"#
+        r#"{"content":"🦀","created_at":4102444800,"expired":false,"expires_at":4102531200,"handle":"rh_85646496e4a65bc20aa95627","has_more":true,"next_offset":3,"offset":2,"original_chars":5,"total_chars":5}"#
     );
     assert_eq!(
         tool_text(&crab_markdown),
@@ -167,9 +170,9 @@ async fn retrieve_reports_missing_and_expired_handles() {
     let second_expired = response_with_id(&responses, json!(3));
     assert_eq!(
         tool_text(&missing),
-        r#"{"handle":"rh_0123456789abcdef01234567","expired":null,"content":null,"reason_code":"handle_not_found","message":"Response handle was not found in this project's local cache.","retryable":true,"retry_instruction":"Re-run the original MCP tool in this project to regenerate the full response and a fresh handle."}"#
+        r#"{"content":null,"expired":null,"handle":"rh_0123456789abcdef01234567","message":"Response handle was not found in this project's local cache.","reason_code":"handle_not_found","retry_instruction":"Re-run the original MCP tool in this project to regenerate the full response and a fresh handle.","retryable":true}"#
     );
-    let expired = r#"{"handle":"rh_f9b0078b5df596d2ea19010c","expired":true,"content":null,"reason_code":"handle_expired","message":"Response handle expired at 1000086400 and was removed from this project's local cache.","retryable":true,"retry_instruction":"Re-run the original MCP tool in this project to regenerate the full response and a fresh handle.","created_at":1000000000,"expires_at":1000086400}"#;
+    let expired = r#"{"content":null,"created_at":1000000000,"expired":true,"expires_at":1000086400,"handle":"rh_f9b0078b5df596d2ea19010c","message":"Response handle expired at 1000086400 and was removed from this project's local cache.","reason_code":"handle_expired","retry_instruction":"Re-run the original MCP tool in this project to regenerate the full response and a fresh handle.","retryable":true}"#;
     assert_eq!(tool_text(&first_expired), expired);
     assert_eq!(tool_text(&second_expired), expired);
 }
