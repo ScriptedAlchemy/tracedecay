@@ -207,14 +207,17 @@ impl StaticLanguageRegistry {
             // struct-literal initialisers (never method calls or constructor-like
             // names), records restricted `pub` re-export scopes separately
             // from unrestricted exports, and resolves inherent impl methods across files of
-            // the owning type. Pinning these behaviors forces older file
-            // artifacts to be re-extracted.
+            // the owning type. Every language moved one revision when clone-body
+            // eligibility gained its upper token bound: a sealed file artifact
+            // from before it can hold a body record no text-artifact page can
+            // admit, and only re-extraction removes it. Pinning these behaviors
+            // forces older file artifacts to be re-extracted.
             let extractor_revision = if language == "rust" {
-                8
+                9
             } else if matches!(language.as_str(), "typescript" | "protobuf" | "sql") {
-                4
+                5
             } else {
-                3
+                4
             };
             let descriptor = LanguageDescriptorV1 {
                 language: LanguageId::new(language.clone())
@@ -415,7 +418,7 @@ mod tests {
         assert!(rust.stable_member_spans);
         assert!(rust.capabilities.extraction);
         assert_eq!(rust.root_markers, vec!["Cargo.toml".to_owned()]);
-        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v8");
+        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v9");
 
         assert_eq!(
             registry
