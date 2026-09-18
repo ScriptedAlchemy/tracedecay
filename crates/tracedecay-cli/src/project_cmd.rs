@@ -78,7 +78,7 @@ pub(crate) async fn handle_projects_action(
 ///
 /// The destructive path runs offline inside the bounded profile-offline
 /// window, so it completes even when the project's runtime is wedged in a
-/// terminal activation loop — the managed daemon service is stopped (the
+/// terminal activation loop, the managed daemon service is stopped (the
 /// supervisor bounds the stop) and restored afterward. The preview runs
 /// through the daemon like every other read-only `projects` subcommand and
 /// never stops the service.
@@ -350,7 +350,7 @@ fn registry_admin_arguments(project_root: Option<PathBuf>, mut arguments: Value)
 }
 
 /// Renders the plain-text `projects context` view. Deliberately omits
-/// `project.git_remote_url` — a git remote URL can embed credentials
+/// `project.git_remote_url`, a git remote URL can embed credentials
 /// (`https://user:token@host/...`), so it must never be printed here or
 /// serialized into the JSON view (see `PublicCodeProject`).
 #[cfg(test)]

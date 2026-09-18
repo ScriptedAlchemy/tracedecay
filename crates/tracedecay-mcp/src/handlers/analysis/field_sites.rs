@@ -1,4 +1,4 @@
-//! `tracedecay_field_sites` — read and write references to a named field.
+//! `tracedecay_field_sites`, read and write references to a named field.
 
 use super::*;
 
@@ -64,7 +64,7 @@ pub async fn handle_field_sites(
 
                 // Cheap textual pre-filter before any per-file store read. Most
                 // files in a repository never mention the field, and fetching their
-                // nodes anyway cost one daemon round trip per file in the project —
+                // nodes anyway cost one daemon round trip per file in the project,
                 // O(store) work to answer a question whose result is a handful of
                 // sites.
                 let masked = path_is_rust(file).then(|| {

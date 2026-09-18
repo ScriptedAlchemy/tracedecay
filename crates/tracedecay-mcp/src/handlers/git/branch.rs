@@ -556,7 +556,7 @@ pub async fn handle_branch_diff(ctx: &McpToolContext<'_>, args: Value) -> Result
         .filter(|head| !head.is_empty())
         .map(str::to_owned)
         .ok_or_else(|| TraceDecayError::Config {
-            message: "cannot determine head branch — specify it explicitly".to_string(),
+            message: "cannot determine head branch. Specify it explicitly".to_string(),
         })?;
     let limit = args
         .get("limit")

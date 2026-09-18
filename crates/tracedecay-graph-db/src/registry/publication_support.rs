@@ -236,8 +236,8 @@ impl GraphDbRegistry {
                 }
                 // An in-flight open or close always settles within its owning
                 // call (Ready, Faulted, or removed). A verified operation that
-                // races such a transition — e.g. a first activation whose
-                // graph runtime is still binding asynchronously — waits it out
+                // races such a transition, e.g. a first activation whose
+                // graph runtime is still binding asynchronously, waits it out
                 // under its own deadline, exactly like the resolve path, so a
                 // mid-transition mount is never surfaced as unavailability.
                 super::RegistryEntry::Opening {

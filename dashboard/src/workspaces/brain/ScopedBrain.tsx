@@ -31,7 +31,7 @@ import { SchemaConvergencePanel } from '../observatory/DoctorInspector.tsx';
  * The Brain, scoped to one project: "what does TraceDecay actually know about
  * this project?"
  *
- * Selecting a project used to change nothing here — the surface still drew the
+ * Selecting a project used to change nothing here, the surface still drew the
  * whole registry, so the one gesture that should have produced the most
  * detailed view produced the least. It is composed from exactly two tiers of
  * real daemon reads, and it never blurs them together:
@@ -57,7 +57,7 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
   const holdingsTabStop = useScrollTabStop(holdingsRef);
 
   // The registry backbone. Read by absolute id rather than through the scoped
-  // gateway — `/api/projects` is deliberately never rewritten by scope (see
+  // gateway, `/api/projects` is deliberately never rewritten by scope (see
   // `scopedUrl`), and this read must resolve for a project whose graph is not
   // mounted, which is exactly when the rest of this surface cannot.
   // The shared per-project registry read: the same key and route the scope bar
@@ -117,7 +117,7 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
   // count query fails, so a 200 carries counts that were really taken and a
   // zero among them is an empty graph. The rule here used to blank all three
   // whenever any one was zero, on the stated grounds that the response "cannot
-  // distinguish zero data from a query failure" — it can, by status code, and
+  // distinguish zero data from a query failure", it can, by status code, and
   // the rule cost a project with an indexed graph and no edges its node count
   // as well.
   const totals = envelopePayload(overview.data)?.totals ?? null;
@@ -131,7 +131,7 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
 
   // Named per source, so a dash in the readout is accounted for rather than
   // being left to read as zero. Of the HUD's sources only the subgraph has its
-  // own boundary; the overview, memory and analytics reads report here — a
+  // own boundary; the overview, memory and analytics reads report here, a
   // read still in flight, a failed read and a source that declared itself
   // unavailable are three different sentences, not one shared dash.
   const readAbsence = (
@@ -254,8 +254,8 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
           ref={holdingsRef}
           aria-label={`What TraceDecay holds for ${label}`}
           // Only where it is really a scroller. Its overflow is applied at `lg`,
-          // so below that this is an ordinary block in the page flow — measured
-          // at 320 and 768 CSS px as `overflow-y: visible` — and a literal
+          // so below that this is an ordinary block in the page flow, measured
+          // at 320 and 768 CSS px as `overflow-y: visible`, and a literal
           // `tabIndex={0}` put a stop that does nothing in front of the holdings
           // on exactly the screens where tabbing is most of the navigation.
           tabIndex={holdingsTabStop}
@@ -336,13 +336,13 @@ function projectContextReadState(
  * account of what it went looking for.
  *
  * The route (`graph_service.rs::subgraph_payload`) fails with 500
- * `read_failed`, so an empty 200 is always an answered read — but *what* it
+ * `read_failed`, so an empty 200 is always an answered read, but *what* it
  * answers depends on the mode it ran in, and the two are not the same claim.
  * An unseeded slice draws from the whole graph, so empty means the graph holds
  * nothing. A seeded slice that found no seed means the search matched nothing,
  * which says nothing at all about whether the project is indexed. This surface
  * only ever requests the default slice, but reading `mode` rather than
- * assuming it keeps the sentence true if that ever changes — and the previous
+ * assuming it keeps the sentence true if that ever changes, and the previous
  * text ("cannot distinguish empty data from query failure") was false either
  * way, since the status code distinguishes them.
  */
@@ -398,7 +398,7 @@ function ScopedReadout({
 function ProjectHoldings({ data }: { data: ProjectContextPayloadV1 }) {
   // The route's own discriminant, honoured before its arrays are read. A
   // non-`ok` body sends `project: null` with empty `aliases`, which
-  // rendered as a project that simply holds nothing — the same picture a real
+  // rendered as a project that simply holds nothing, the same picture a real
   // empty project draws, for a response that measured nothing at all.
   if (data.status !== 'ok') {
     return (

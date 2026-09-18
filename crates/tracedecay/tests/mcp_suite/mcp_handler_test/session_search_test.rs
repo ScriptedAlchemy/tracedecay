@@ -260,8 +260,8 @@ async fn message_search_rejects_unsupported_project_scope() {
     .expect("project-scoped message search must stay served");
 }
 
-/// Cross-project selection has exactly one spelling —
-/// `project_selector.project_id` — so top-level aliases are refused with the
+/// Cross-project selection has exactly one spelling,
+/// `project_selector.project_id`, so top-level aliases are refused with the
 /// typed invalid-selector route error, a foreign registered id fails closed
 /// as not-found-or-not-authorized, and a malformed selector is a decode error
 /// naming the argument.

@@ -4,7 +4,7 @@
  *
  * It holds no state of its own beyond the machine. The authority is whatever
  * the last parsed read produced, the draft and the review live in the machine,
- * and a request exists only where the machine has reached `submitting` — which
+ * and a request exists only where the machine has reached `submitting`, which
  * it only does after re-deriving the confirmed change against the revision the
  * editor currently holds. There is no path from a click straight to a PATCH.
  *

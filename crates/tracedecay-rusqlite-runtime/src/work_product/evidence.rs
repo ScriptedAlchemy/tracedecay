@@ -15,7 +15,7 @@
 //! ## The version must be the one that was asked for
 //!
 //! Every request carries a `VerifiedWorkGraphVersionV1`, and the answer is that
-//! version — never "whatever is current", which would silently swap the
+//! version, never "whatever is current", which would silently swap the
 //! caller's question. An older published version is therefore answered as
 //! itself: verified versions are retained, and reading one is a temporal read,
 //! not a stale one. What is refused is an identity this authority did not
@@ -29,7 +29,7 @@
 //!
 //! A journaled link names a `RetrievalAnchorId` and an evidence digest. It does
 //! not carry content, and this authority owns no retrieval or disclosure store
-//! it could read content from — the anchor rows live under the repository
+//! it could read content from, the anchor rows live under the repository
 //! observation authority, which is scoped by project and repository, not by the
 //! registered profile owner this journal is keyed on. So an expansion returns
 //! the anchor id as the content handle and reports `redacted`: the content
@@ -148,7 +148,7 @@ fn task_links(graph: &WorkProductGraphV1, task_id: &TaskId) -> Vec<TaskEvidenceL
 /// graph read: the journal's covered prefix is answered, and a version folded
 /// across an event outside the selection is not readable under it, because that
 /// graph never existed under this selection. A version *inside* the covered
-/// prefix is served normally — an event admitted under some other scope later
+/// prefix is served normally, an event admitted under some other scope later
 /// in the journal does not retract evidence the caller is plainly authorized
 /// for.
 fn verified_graph(

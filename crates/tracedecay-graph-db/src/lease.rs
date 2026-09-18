@@ -127,8 +127,8 @@ impl VerifiedGenerationState {
         self.known
             .insert(lease.locator.clone(), Arc::downgrade(lease));
         // `stored` is the durable-row ledger. A sealed-only generation has
-        // no staging rows — they were released, or it was sealed straight
-        // from its manifest — so remembering its lease must not claim any.
+        // no staging rows, they were released, or it was sealed straight
+        // from its manifest, so remembering its lease must not claim any.
         if !self.sealed_only.contains(&lease.locator) {
             self.stored.insert(
                 lease.locator.clone(),
@@ -438,7 +438,7 @@ impl VerifiedGraphSnapshot {
     ///
     /// Plan 39 G7b: `VerifiedGraphSnapshot` is the sole production read
     /// boundary, and reverse adjacency (callers, impact, reverse
-    /// reachability) previously had no bulk form here — only
+    /// reachability) previously had no bulk form here, only
     /// [`Self::outgoing_relation_ids`]. Exposing it lets those reads leave
     /// SQL `edges` joins without dropping their budgets.
     #[hotpath::measure(

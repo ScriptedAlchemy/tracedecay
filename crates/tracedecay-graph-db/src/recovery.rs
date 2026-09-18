@@ -102,7 +102,7 @@ pub(crate) fn validate_or_initialize_format(
     // scanning. This loop stays as the authority that *defines* the index
     // set: a fresh store and a store whose last checkpoint predates catalog
     // index persistence register here, and without the indexes the unique-key
-    // lookups in `state.rs` degrade from a hash hit to a full node scan —
+    // lookups in `state.rs` degrade from a hash hit to a full node scan,
     // measured at 500k entities, 64 point reads took 23.7s instead of 1.4ms,
     // and the bounded traversal 773ms instead of 2.7ms. The span shows which
     // side of the engine boundary the rebuild cost actually lands on.

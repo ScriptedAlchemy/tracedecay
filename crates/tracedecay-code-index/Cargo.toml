@@ -20,7 +20,7 @@ default = [
     "medium",
     "full",
 ]
-# Markdown is admitted by every tier, not just `full` — see the note on the
+# Markdown is admitted by every tier, not just `full`, see the note on the
 # extraction crate's `lite` feature. The local alias keeps this crate's
 # Markdown-specific tests aligned with the forwarded extraction tier.
 lite = ["tracedecay-code-extraction/lite", "lang-markdown"]

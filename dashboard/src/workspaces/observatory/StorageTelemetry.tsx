@@ -251,7 +251,7 @@ function TableGrowthPanel({
         </div>
       ) : null}
 
-      {/* Server reasons, verbatim, for every state — including an observed read
+      {/* Server reasons, verbatim, for every state, including an observed read
           whose table coverage is partial. The rows above format the structured
           byte evidence; these sentences say why each table was left out. */}
       {presentation.notes.length > 0 ? (
@@ -277,9 +277,8 @@ function TableGrowthPanel({
 
 /** One telemetry dimension. The state is carried by words (the summary names
  * it outright) with the tone dot as a redundant, never sole, signal. `unset`
- * additionally renders its owner setting as a mono token, so a missing setting
- * is structurally — not just chromatically — distinct from an undetermined
- * read. */
+ * also renders its owner setting as a mono token, so a missing setting is
+ * distinct in structure and color from an undetermined read. */
 function DimensionRow({
   label,
   presentation,
@@ -311,7 +310,7 @@ function DimensionRow({
 }
 
 /** The summary sentence, with a named owner setting rendered as a mono token.
- * The rendered text is unchanged — the mono run only makes "you have not set
+ * The rendered text is unchanged, the mono run only makes "you have not set
  * this" structurally distinct from "the server could not tell". */
 function DimensionSummary({ presentation }: { presentation: DimensionPresentation }) {
   const { settingKey, summary } = presentation;

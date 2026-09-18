@@ -21,7 +21,7 @@ pub(super) const CODE_SYMBOL_EVIDENCE_PREFIX: &str = "code-symbol:";
 /// Admits a caller-supplied node id as a graph occurrence id. Every graph
 /// handler that takes a node id funnels through this one guard, so a blank
 /// value is rejected as a typed argument error naming the parameter before
-/// canonicality parsing ever sees it — including handlers that decode a
+/// canonicality parsing ever sees it, including handlers that decode a
 /// typed request DTO and therefore bypass `require_node_id`. Search evidence
 /// anchors in the `code-symbol:` namespace are unwrapped to the enclosed
 /// occurrence. Other `code-*` evidence namespaces fail closed instead of

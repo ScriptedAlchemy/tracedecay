@@ -526,7 +526,7 @@ mod goal_event_tests {
     #[test]
     fn task_complete_and_turn_events_map_exactly_without_lookalikes() {
         // Binding shape: write_codex_rollout_with_structured_events /
-        // task_events_become_turn_boundary_rows — singular task_complete only.
+        // task_events_become_turn_boundary_rows, singular task_complete only.
         let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 1).unwrap();
         for (payload, expected_state, expected_status) in [
             (
@@ -2257,7 +2257,7 @@ mod recent_first_discovery_tests {
     }
 
     /// Coverage: retained traversal across passes must visit every historical
-    /// file — tracked pending work, never a skipped range.
+    /// file, tracked pending work, never a skipped range.
     #[test]
     fn codex_history_frontier_covers_every_backlog_file_across_passes() {
         let temp = TempDir::new().unwrap();
@@ -2518,7 +2518,7 @@ mod recent_first_discovery_tests {
     /// Sweep-complete is store-durable: a fresh source reading only admission
     /// parse offsets (the production persist path) idles instead of restarting
     /// truncated-from-zero. MemoryHostAdmission is the same offset table a
-    /// process restart would reopen — not a process-local memo.
+    /// process restart would reopen, not a process-local memo.
     #[tokio::test]
     async fn codex_sweep_complete_watermark_survives_admission_restart() {
         let temp = TempDir::new().unwrap();

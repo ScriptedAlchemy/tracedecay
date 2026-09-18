@@ -310,7 +310,7 @@ enum OpeningAuthority {
 }
 
 /// Releases an in-flight `Opening` slot when its mounting call exits without
-/// writing terminal truth — plain open failures and unwinds. Terminal
+/// writing terminal truth, plain open failures and unwinds. Terminal
 /// settlements (`Ready`/`Faulted`) overwrite the slot first, which makes this
 /// guard a no-op: `remove_opening` verifies identity and only ever removes
 /// `Opening` entries.
@@ -889,8 +889,8 @@ impl GraphDbRegistry {
         }
     }
 
-    /// Reports whether any entry — `Ready`, `Opening`, `Closing`, `Retiring`,
-    /// or `Faulted` — currently occupies this shard's slot.
+    /// Reports whether any entry, `Ready`, `Opening`, `Closing`, `Retiring`,
+    /// or `Faulted`, currently occupies this shard's slot.
     ///
     /// A lease-only consumer of a shared physical shard (for example the code
     /// graph, which never attaches its own map owner; see
@@ -2710,7 +2710,7 @@ mod tests {
 
         // Let the waiter observe the in-flight Opening slot, then cancel it
         // while the winner's native open is still gated: the waiter must fail
-        // with its own typed cancellation — not a reconstructed registration
+        // with its own typed cancellation, not a reconstructed registration
         // and not an unmounted-runtime error.
         thread::sleep(Duration::from_millis(100));
         waiter_cancelled.store(true, Ordering::Release);

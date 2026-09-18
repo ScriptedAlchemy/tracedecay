@@ -157,7 +157,7 @@ describe('the Workflows registry', () => {
     );
   });
 
-  it('renders a refusal as the daemon’s own state, never as an empty registry', async () => {
+  it('renders a refusal as the daemon\'s own state, never as an empty registry', async () => {
     serve(() => PROBLEM);
     renderPage();
 
@@ -308,7 +308,7 @@ describe('the selected definition', () => {
     expect(document.querySelector('[data-workflow-selected]')).toBeTruthy();
   });
 
-  it('lights a step’s neighbours on hover and pins them on click', async () => {
+  it('lights a step\'s neighbours on hover and pins them on click', async () => {
     serveRegistry();
     renderPage();
     await userEvent.click(await registryRow(/workflow\.release-train/));

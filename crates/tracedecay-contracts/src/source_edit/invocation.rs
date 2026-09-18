@@ -3,7 +3,7 @@
 //!
 //! These types name the edit the caller asked for. Authority, policy proof,
 //! actor, and scope are minted by the daemon after project admission and are
-//! never accepted here. Live cancellation stays on the invocation envelope —
+//! never accepted here. Live cancellation stays on the invocation envelope.
 //! [`CancellationSignal`] is process-local and is not part of this contract.
 
 use serde::{Deserialize, Serialize};
@@ -37,7 +37,7 @@ pub struct SourceEditReconciliationInvocationV1 {
 /// User-controlled identity of one completed source edit whose retained
 /// preimages the caller asks the daemon to restore.
 ///
-/// The preimage bytes never cross this boundary — they stay in the
+/// The preimage bytes never cross this boundary. They stay in the
 /// server-side rollback record and the caller only names public digests.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

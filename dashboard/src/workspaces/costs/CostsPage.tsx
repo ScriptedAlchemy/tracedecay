@@ -45,7 +45,7 @@ import { TopologyMetricsCosts } from './TopologyMetricsCosts.tsx';
 const BASE = '/api/plugins/savings';
 
 /**
- * Costs — channel 11: actual provider spend, attributed.
+ * Costs, channel 11: actual provider spend, attributed.
  *
  * Two independent reads compose the surface. `/overview` carries the all-time
  * usage totals, the savings ledger windows, the pricing authority's identity,
@@ -94,7 +94,7 @@ export function CostsPage() {
   );
 
   // A scoped provider the current range no longer carries is still a real
-  // query — the address says so — but nothing here can be scoped to it, so
+  // query, the address says so, but nothing here can be scoped to it, so
   // the selection is shown as such rather than silently dropped.
   const selectedPresent =
     query.provider !== null && ledger !== null
@@ -234,7 +234,7 @@ type AttributionRead =
  * Three ways it fails to yield a ledger, and they are told apart: the read
  * itself blocked (transport, refusal, schema); the payload arrived and says
  * the store is not mounted or the read failed; the payload arrived and the
- * provider-usage aggregate behind it could not serve exact deltas — the
+ * provider-usage aggregate behind it could not serve exact deltas, the
  * session store is there, but its usage projection is partial or absent.
  */
 function resolveAttribution(read: PayloadReadState<SavingsModelsPayloadV1>): AttributionRead {

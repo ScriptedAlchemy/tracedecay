@@ -1,6 +1,6 @@
 /**
  * The registers the Knowledge workspace posts to the shell's status strip:
- * the memory overview read, its graph sub-read, and the camera position —
+ * the memory overview read, its graph sub-read, and the camera position , 
  * the three the plate names beside the transport cells. Each is the
  * authority's own word plus one qualifier; none is inferred from another,
  * and one camera's answer never stands in for another's. Pure, so the strip's
@@ -18,8 +18,8 @@ import { knowledgeViewLabel, type KnowledgeViewKind } from './KnowledgeViews.tsx
 const OWNER = 'knowledge';
 
 /** An envelope read as one register: pending, transport, or the daemon's own
- * domain state with the qualifier the payload supplies. A null payload —
- * which the envelope ladder reports as a transport outcome — never reaches
+ * domain state with the qualifier the payload supplies. A null payload , 
+ * which the envelope ladder reports as a transport outcome, never reaches
  * `ready`. */
 function envelopeRegister<T>(
   id: string,
@@ -83,7 +83,7 @@ function readRegister(
 ): StatusRegister {
   if (!read) return { id, label, value: 'unknown', state: 'unknown', detail: 'sub-read not reported' };
   // The daemon's error sentence outranks the measured qualifier; its code
-  // does not — the aperture's coverage footer prints the code beside the
+  // does not, the aperture's coverage footer prints the code beside the
   // reasons, and the strip has room for a word and a count.
   return {
     id,

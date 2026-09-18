@@ -1,6 +1,6 @@
-# CodeGraph Rust Port — Design Document
+# CodeGraph Rust port. Design document
 
-> **Archived record — not implementation authority.** This document preserves
+> **Archived record, not implementation authority.** This document preserves
 > historical intent and evidence. Current requirements come only from the
 > `docs/plans/tracedecay-v2/` hierarchy. Exact tests and counts, source-string
 > checks, branch/commit/worktree choreography, snapshots, receipts,
@@ -26,7 +26,7 @@ The Rust version will become the canonical CodeGraph implementation, replacing t
 - CLI interface
 
 ### Out of Scope
-- Multi-language support (Rust only for now — can be added later)
+- Multi-language support (Rust only for now, can be added later)
 - Framework-specific resolvers (React, Express, Laravel, etc.)
 - Interactive installer (unnecessary for a single binary)
 
@@ -141,11 +141,11 @@ struct Edge {
 ## SQLite Schema
 
 Tables:
-- `nodes` — all extracted symbols with metadata
-- `edges` — relationships between nodes
-- `files` — tracked files with content hashes (for incremental sync)
-- `nodes_fts` — FTS5 virtual table on node names and signatures
-- `vectors` — embeddings stored as BLOBs with node_id foreign key
+- `nodes`, all extracted symbols with metadata
+- `edges`, relationships between nodes
+- `files`, tracked files with content hashes (for incremental sync)
+- `nodes_fts`. FTS5 virtual table on node names and signatures
+- `vectors`, embeddings stored as BLOBs with node_id foreign key
 
 ## Extraction Pipeline
 
@@ -180,7 +180,7 @@ Two strategies (no framework-specific resolvers):
 
 2. **Name-based matching:** For method calls (`.foo()`), match by method name against all known methods. Ranking: same module > same crate > external.
 
-Type-informed matching (narrowing method resolution by receiver type) is a stretch goal — treat as best-effort.
+Type-informed matching (narrowing method resolution by receiver type) is a stretch goal, treat as best-effort.
 
 ## Graph Queries
 
@@ -199,12 +199,12 @@ Type-informed matching (narrowing method resolution by receiver type) is a stret
 
 Stdio transport, JSON-RPC protocol. Tools exposed to Claude Code:
 
-- `codegraph_search` — find symbols by name (FTS5)
-- `codegraph_context` — build context for a task (semantic search + graph expansion)
-- `codegraph_callers` / `codegraph_callees` — call relationships
-- `codegraph_impact` — impact radius analysis
-- `codegraph_node` — get full symbol details
-- `codegraph_status` — index stats and health
+- `codegraph_search`, find symbols by name (FTS5)
+- `codegraph_context`, build context for a task (semantic search + graph expansion)
+- `codegraph_callers` / `codegraph_callees`, call relationships
+- `codegraph_impact`, impact radius analysis
+- `codegraph_node`, get full symbol details
+- `codegraph_status`, index stats and health
 
 Implementation: `tokio` async I/O, read/write JSON-RPC over stdin/stdout.
 
@@ -254,13 +254,13 @@ Per-project `.codegraph/config.json`:
 
 ## Implementation Order
 
-1. **Types & config** — Core types, configuration, error handling
-2. **SQLite layer** — Schema, connection, CRUD operations, FTS5
-3. **Tree-sitter extraction** — Parse Rust files, emit nodes and edges
-4. **Reference resolution** — Use-statement and name-based resolution
-5. **Graph queries** — Callers, callees, impact, dead code, etc.
-6. **CLI** — Init, index, sync, status, query commands
-7. **Context builder** — Semantic search + graph expansion for context
-8. **Vector embeddings** — ONNX runtime integration, embedding storage
-9. **MCP server** — Stdio JSON-RPC transport, tool handlers
-10. **Incremental sync** — Content hashing, dirty detection, partial re-index
+1. **Types & config**. Core types, configuration, error handling
+2. **SQLite layer**. Schema, connection, CRUD operations, FTS5
+3. **Tree-sitter extraction**. Parse Rust files, emit nodes and edges
+4. **Reference resolution**. Use-statement and name-based resolution
+5. **Graph queries**. Callers, callees, impact, dead code, etc.
+6. **CLI**. Init, index, sync, status, query commands
+7. **Context builder**. Semantic search + graph expansion for context
+8. **Vector embeddings**. ONNX runtime integration, embedding storage
+9. **MCP server**. Stdio JSON-RPC transport, tool handlers
+10. **Incremental sync**. Content hashing, dirty detection, partial re-index

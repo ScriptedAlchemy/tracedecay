@@ -39,7 +39,7 @@ export function TraceChunkFallback({
           role="status"
           className="px-2.5 py-2 text-2xs leading-relaxed text-state-loading"
         >
-          loading the trace view — the code for this surface is still arriving. No
+          loading the trace view, the code for this surface is still arriving. No
           call edge has been requested yet, so nothing here is an empty
           neighbourhood, a zero or a settled field.
         </p>

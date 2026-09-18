@@ -860,7 +860,7 @@ impl StoreRuntimeRetirementReservation {
     /// and returns the original targets for a later attempt.
     ///
     /// Once [`Self::commit`] crosses the owner-attachment fence, terminal
-    /// outcomes—not reusable targets—describe the physical-close result.
+    /// outcomes, not reusable targets, describe the physical-close result.
     #[hotpath::measure(label = "runtime_core.registry.retirement_cancel")]
     pub fn cancel(
         &mut self,

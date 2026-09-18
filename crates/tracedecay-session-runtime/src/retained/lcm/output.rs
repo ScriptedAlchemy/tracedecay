@@ -490,7 +490,7 @@ pub(super) fn expand_query_result(
 
 /// The serialized payload budget for an expand-query response: the MCP
 /// response cap minus headroom for the retained envelope's authority and
-/// receipt metadata. Staying under it preserves the synthesis contract — the
+/// receipt metadata. Staying under it preserves the synthesis contract, the
 /// render layer's generic truncation would otherwise replace the typed
 /// payload with an opaque preview-and-handle wrapper.
 const SYNTHESIS_PAYLOAD_BUDGET_CHARS: usize = 11_000;
@@ -502,9 +502,9 @@ const FLOOR_PROMPT_CHARS: usize = 512;
 
 /// Bounds an expand-query result to the MCP synthesis contract. Input
 /// clamping (`prompt_truncated` / `query_truncated`) is recorded as typed
-/// truncation markers; an over-budget payload is compacted — bounded context
+/// truncation markers; an over-budget payload is compacted, bounded context
 /// blocks and match snippets with the synthesis prompt rebuilt from the
-/// compact blocks — and, if still over budget, floored to the bounded
+/// compact blocks, and, if still over budget, floored to the bounded
 /// contract scalars with the unbounded arrays dropped.
 pub(super) fn bound_expand_query_result_for_mcp(
     result: &mut LcmExpandQueryResultV1,

@@ -13,7 +13,7 @@
 //! global MCP-only install), Doctor must keep install/doctor parity: either
 //! grade the current owned surface, or emit an explicit migration advisory for
 //! leftover retired artifacts. Silent omission of retired steering/agent
-//! checks is schema drift — operators need a truthful advisory, not a green
+//! checks is schema drift. Operators need a truthful advisory, not a green
 //! report that ignores rotting files.
 
 mod adapters;

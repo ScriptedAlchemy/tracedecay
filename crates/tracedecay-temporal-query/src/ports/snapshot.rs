@@ -743,7 +743,7 @@ impl TemporalExecutionSnapshot {
     /// Only a prepared (root-wide) cohort is frozen: it is carried in the
     /// snapshot, so a cursor can bind its exact contents. An ordinary session
     /// read materializes a bounded window of storage instead, and binds its
-    /// position by keyset — the window's contents cannot be named before it is
+    /// position by keyset, the window's contents cannot be named before it is
     /// read, and the generation the candidate read is pinned to already keeps
     /// the rows behind that keyset immutable.
     pub fn candidate_cohort_digest(&self) -> &BindingDigest {

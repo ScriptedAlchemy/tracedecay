@@ -532,7 +532,7 @@ fn directed_relation_ids(
         match overflow {
             RelationFanoutOverflow::Truncate => {
                 // Paged consumers document a `limit` per start. Do not share
-                // a total cap across the batch — that would turn later starts
+                // a total cap across the batch, that would turn later starts
                 // into empty pages with no truncation signal.
                 let ids = ordered_relation_ids(
                     database,
@@ -701,7 +701,7 @@ fn relation_projection_cached(
 ///
 /// A start with no projected entity yields an empty batch rather than an
 /// error, matching the existing outgoing contract. The `max_relations` budget
-/// is charged across the whole batch — not per start — so a caller cannot
+/// is charged across the whole batch, not per start, so a caller cannot
 /// exceed it by widening `starts`. [`RelationFanoutOverflow::Refuse`] fails
 /// with [`GraphDbError::BudgetExhausted`] the moment the next row would
 /// exceed the budget (without walking the remaining edges).

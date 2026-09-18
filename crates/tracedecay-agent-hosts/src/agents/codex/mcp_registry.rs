@@ -24,7 +24,7 @@
 //! # Why this exists at all: the MCP-only install mode
 //!
 //! In the plugin-bearing install (the default component set, `Core` +
-//! `ContextMcp`), the MCP route is *inside* the bundle — the rendered
+//! `ContextMcp`), the MCP route is *inside* the bundle, the rendered
 //! `.mcp.json` under `.codex/plugins/tracedecay/` declares the `graph` server,
 //! and Codex loads it only once the operator has installed and enabled the
 //! plugin. TraceDecay must not also register a second, standalone server there:
@@ -34,7 +34,7 @@
 //! An **MCP-only** component set (`ContextMcp` and/or `OperatorMcp` selected
 //! *without* `Core`) is the case that had no working registration at all before
 //! this module. That set deploys the plugin's `.mcp.json` and nothing else, and
-//! since the plugin is never installed, the file is inert — the operator ends
+//! since the plugin is never installed, the file is inert, the operator ends
 //! up with a staged file and no MCP server. `codex mcp add` is exactly the
 //! host-owned command that closes that gap without touching the plugin
 //! lifecycle, so it is driven for that set and only for that set. See
@@ -48,7 +48,7 @@
 //! when deciding whether any TraceDecay registration remains. The registration
 //! transaction is therefore told about exactly that file after the command
 //! runs, so its existing rollback authority can restore the pre-command
-//! document. TraceDecay still never *writes* it — Codex's own CLI does.
+//! document. TraceDecay still never *writes* it. Codex's own CLI does.
 //!
 //! Because that one file also carries Codex-owned activation and hook-trust
 //! state, a region guard runs on both sides of the invocation: if the host
@@ -93,8 +93,8 @@ const CODEX_HOOKS_KEY: &str = "hooks";
 /// Whether this component set is the MCP-only (non-plugin) install.
 ///
 /// True exactly when an MCP component is selected and `Core` is not. `Core`
-/// carries the Codex plugin bundle — its hooks, skills, and the `.mcp.json`
-/// Codex reads once the plugin is installed — so a `Core`-bearing set already
+/// carries the Codex plugin bundle, its hooks, skills, and the `.mcp.json`
+/// Codex reads once the plugin is installed, so a `Core`-bearing set already
 /// has an MCP route and must not gain a second, standalone one. Without `Core`
 /// the staged `.mcp.json` is never loaded by anything, and the host registry is
 /// the only way the server actually exists.
@@ -121,7 +121,7 @@ pub(super) fn require_codex_cli() -> Result<PathBuf> {
 /// `HOME` without mutating the process environment.
 ///
 /// The launch contract (`--env` pairs, then `--`, then command and arguments)
-/// is built from [`CODEX_MCP_SERVER_ENV`] and [`CODEX_MCP_SERVER_ARGS`] — the
+/// is built from [`CODEX_MCP_SERVER_ENV`] and [`CODEX_MCP_SERVER_ARGS`], the
 /// same constants the plugin bundle's `.mcp.json` writer consumes, so the two
 /// spellings of the same server cannot drift apart.
 ///
@@ -231,7 +231,7 @@ fn preserved_regions(path: &Path) -> Result<CodexPreservedRegionsV1> {
 
 /// Read the config once, returning both its exact bytes (for the rollback
 /// record) and its preserved regions (for the guard). A missing file is a valid
-/// observation — Codex creates the config on first `mcp add`.
+/// observation. Codex creates the config on first `mcp add`.
 fn read_config_observation(path: &Path) -> Result<(Option<Vec<u8>>, CodexPreservedRegionsV1)> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,

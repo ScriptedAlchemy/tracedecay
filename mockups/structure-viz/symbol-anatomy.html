@@ -1,13 +1,13 @@
 <!doctype html>
 <!--
-  MOCKUP — not production code. Concept 1 of 3: SYMBOL ANATOMY.
+  MOCKUP. Not production code. Concept 1 of 3: SYMBOL ANATOMY.
 
   Chrome tokens are copied verbatim from dashboard/src/theme/tokens.css and the
   @theme block of dashboard/src/theme/tailwind.css. kindColor() below is a
   line-for-line port of dashboard/src/viz/graph/kindColor.ts, so a kind lands on
   the same hue here as it does in the product's canvas and spine.
 
-  Every number on this page is INVENTED but honestly shaped — see
+  Every number on this page is INVENTED but honestly shaped, see
   notes/symbol-anatomy.md for exactly which fields a real backend would have to
   serve and which ones no current endpoint carries.
 
@@ -16,7 +16,7 @@
 <html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8" />
-<title>Symbol anatomy — mockup</title>
+<title>Symbol anatomy, mockup</title>
 <style>
 :root {
   --raw-surface-0: oklch(0.145 0.003 260);
@@ -207,8 +207,8 @@ td, th { padding: 0; text-align: left; font-weight: inherit; }
   <!-- ==================================================================
        THE BODY AND ITS TISSUE
        Callers left, callees right, the symbol itself in the middle. The
-       bar beside each neighbour is its CALL-SITE COUNT — the one number
-       that says how hard that neighbour leans on this symbol — and hue is
+       bar beside each neighbour is its CALL-SITE COUNT. The one number
+       that says how hard that neighbour leans on this symbol, and hue is
        the neighbour's kind, taken from the product's kindColor arc. The
        curve between a neighbour and the body is the edge itself: it is a
        connector, and its length means nothing at all.
@@ -257,8 +257,8 @@ td, th { padding: 0; text-align: left; font-weight: inherit; }
       </g>
 
       <!-- column legends -->
-      <text x="24" y="18" class="td-legend" style="font-size:10px" fill="var(--raw-text-muted)" letter-spacing="1.6">callers — who reaches in</text>
-      <text x="1416" y="18" text-anchor="end" class="td-legend" style="font-size:10px" fill="var(--raw-text-muted)" letter-spacing="1.6">callees — what it reaches for</text>
+      <text x="24" y="18" class="td-legend" style="font-size:10px" fill="var(--raw-text-muted)" letter-spacing="1.6">callers, who reaches in</text>
+      <text x="1416" y="18" text-anchor="end" class="td-legend" style="font-size:10px" fill="var(--raw-text-muted)" letter-spacing="1.6">callees, what it reaches for</text>
     </svg>
 
     <figcaption style="padding:2px 20px 12px">
@@ -309,7 +309,7 @@ td, th { padding: 0; text-align: left; font-weight: inherit; }
         tick height = messages in that session (0 → 214) · hue = host ·
         the 2026-06-02 session's message count was never recorded, so its tick is drawn
         <b style="color:var(--raw-text-secondary);font-weight:500">hollow at zero height</b> and its row reads
-        <b style="color:var(--raw-state-unknown);font-weight:500">unrecorded</b> — the session is still on the axis,
+        <b style="color:var(--raw-state-unknown);font-weight:500">unrecorded</b>. The session is still on the axis,
         because it did edit this symbol
       </figcaption>
     </div>
@@ -377,7 +377,7 @@ td, th { padding: 0; text-align: left; font-weight: inherit; }
 
 <script>
 /* ------------------------------------------------------------------------
- * kindColor — line-for-line port of dashboard/src/viz/graph/kindColor.ts.
+ * kindColor, line-for-line port of dashboard/src/viz/graph/kindColor.ts.
  * Duplicated here only because a standalone file:// mockup cannot import the
  * product module; if the arc ever moves, this copy is wrong and the mockup
  * should be regenerated rather than patched.
@@ -437,7 +437,7 @@ const SPAN_DAYS = 63, MSG_MAX = 214;
 
 const FACTS = [
   { trust: 0.98, kind: 'decision', text: 'graph_overview must admit scope through policy::routing before it touches the store; the store layer trusts its caller.' },
-  { trust: 0.94, kind: 'project',  text: 'top_connected_rows serves exactly twelve rows and five fields — id, name, kind, file_path, degree.' },
+  { trust: 0.94, kind: 'project',  text: 'top_connected_rows serves exactly twelve rows and five fields. Id, name, kind, file_path, degree.' },
   { trust: 0.81, kind: 'decision', text: 'the overview is unseeded; reseeding happens only on symbol selection.' },
   { trust: 0.46, kind: 'project',  text: 'kind_histogram is no longer part of the overview payload.' },
 ];
@@ -468,7 +468,7 @@ const el = (tag, attrs, text) => {
 const marks = document.getElementById('anatomy-marks');
 const edges = document.getElementById('anatomy-edges');
 document.getElementById('body-kindcap').setAttribute('fill', hue('function'));
-/* The masthead's kind chip wears the same hue as the body's cap — one rule,
+/* The masthead's kind chip wears the same hue as the body's cap, one rule,
  * two places, no second palette. */
 document.querySelectorAll('[data-kind]').forEach((n) => {
   n.style.background = hue(n.dataset.kind);

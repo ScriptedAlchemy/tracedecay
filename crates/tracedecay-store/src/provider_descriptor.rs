@@ -2,8 +2,8 @@
 //!
 //! The projection reducer itself is provider-neutral: it turns canonical facts
 //! into session, message, and workflow records the same way for every host.
-//! Two decisions are not neutral, because the provider — or the capture source
-//! its records were read through — changes the answer:
+//! Two decisions are not neutral, because the provider, or the capture source
+//! its records were read through, changes the answer:
 //!
 //! * whether a record may omit its native record id, because the provider
 //!   synthesizes a stable one instead;

@@ -332,7 +332,7 @@ The Plan-05 query pipeline executes these phases without combining them:
 4. Pass all compact candidates to the one federated fusion implementation. The
    existing exact tier remains lexicographically first and cannot be demoted by
    graph/semantic scores, diversity, or reranking. This plan evaluates semantic
-   weighting/fusion candidates—including exact rational RRF if proposed—on
+   weighting/fusion candidates, including exact rational RRF if proposed, on
    the same recorded candidate inputs; no algorithm, constant, or weight
    activates without a passing Plan 15 evaluation.
 5. Use the complete comparator and diversity policy from the tested generic
@@ -465,8 +465,8 @@ asynchronous non-blocking contract.
 `HfHubModelMemberSourceV1::fetch_member` unconditionally returned
 `semantic model lifecycle operation rejected`, so no shipped binary could
 acquire a model. The distribution gate's packaged-semantic half tested only
-typed fallback/strict-unavailable behavior—the exact terminal absence produced
-by that rejection—and therefore encoded the bug as its passing specification.
+typed fallback/strict-unavailable behavior, the exact terminal absence produced
+by that rejection, and therefore encoded the bug as its passing specification.
 The corrected gate now runs packaged background acquisition and verifies the
 installed Jina members; restoring the unconditional rejection makes that gate
 fail, and restoring the source makes it pass.
@@ -526,7 +526,7 @@ fail, and restoring the source makes it pass.
   normal cross-platform CI, and rollback drill are still incomplete.
   `result-pending.json` therefore keeps activation false and truthfully reports
   `pending`.
-  (Update 2026-08-07: the named artifact is stale — no `result-pending.json`
+  (Update 2026-08-07: the named artifact is stale, no `result-pending.json`
   exists in-tree (`git ls-files` returns zero hits). The behavior it stood for
   is intact and is now asserted by the evaluation harness itself:
   `tests/search_eval_cli_test.rs:53`

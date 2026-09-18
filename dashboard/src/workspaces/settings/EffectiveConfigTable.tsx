@@ -105,7 +105,7 @@ export function EffectiveConfigTable({
   const visible = (key: string | null) =>
     key !== null && groups.some((group) => group.rows.some((row) => row.key === key));
   // Roving tabindex: the row focus last rested on (focus sets `inspectedKey`),
-  // else the selected row, else the first — so Tab out and Shift+Tab back lands
+  // else the selected row, else the first, so Tab out and Shift+Tab back lands
   // where the reader left, not at the top of the table.
   const firstKey = groups[0]?.rows[0]?.key ?? null;
   const tabbableKey = visible(inspectedKey)
@@ -119,7 +119,7 @@ export function EffectiveConfigTable({
   const pinned = editor.state.status === 'submitting';
 
   // Focus returns to the edited row when a frozen review resolves and the
-  // control the reader was on — Apply, Retry, Load current values — unmounts
+  // control the reader was on, Apply, Retry, Load current values, unmounts
   // with the review stage. Only when focus was actually lost to the document:
   // a keystroke in another scope's input also ends a staged review, and that
   // input must keep its focus.

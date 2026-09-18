@@ -28,7 +28,7 @@ pub async fn run_analytics_sync() -> tracedecay_domain::errors::Result<()> {
     Ok(())
 }
 /// `tracedecay analytics diagnostics`: the CLI wrapper around the dashboard
-/// diagnostics summary — durable `analytics_events` plus merged hook JSONL.
+/// diagnostics summary, durable `analytics_events` plus merged hook JSONL.
 pub async fn run_analytics_diagnostics(
     all_projects: bool,
     no_sync: bool,

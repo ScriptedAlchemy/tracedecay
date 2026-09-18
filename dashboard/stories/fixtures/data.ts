@@ -170,7 +170,7 @@ function projectEntry(
  * reviewer nothing about the layout being reviewed. These entries are generated
  * from the same `projectEntry` shape as the hand-written ones above (so they
  * stay gated by the parse test), and their ages and masses are derived from the
- * index — deterministic, never random — to land bodies in every recency column
+ * index, deterministic, never random, to land bodies in every recency column
  * and across the mass axis.
  */
 const SYNTHETIC_REPOS: ReadonlyArray<{
@@ -187,7 +187,7 @@ const SYNTHETIC_REPOS: ReadonlyArray<{
     'zed-extensions', 'polars-bench', 'sqlite-vfs', 'tokio-probe',
   ].map((name, index) => ({
     name,
-    // 0.6h · 1.9 ^ index — a geometric spread from "minutes ago" out past a
+    // 0.6h · 1.9 ^ index. A geometric spread from "minutes ago" out past a
     // year, so every recency column is occupied and none is crowded.
     ageSecs: Math.round(2_160 * 1.9 ** index),
     // Masses that cycle through four magnitudes rather than tracking age, so
@@ -239,7 +239,7 @@ function syntheticGroup(repo: {
   };
 }
 
-/** GET /api/projects — brain/delivery registry (`DashboardEnvelopeV1<
+/** GET /api/projects. Brain/delivery registry (`DashboardEnvelopeV1<
  * ProjectsPayloadV1>`; src/dashboard/projects.rs `list`). */
 const projectTree: ReadonlyArray<Record<string, unknown>> = [
     {
@@ -282,7 +282,7 @@ const projectTree: ReadonlyArray<Record<string, unknown>> = [
     // Registry entries that are NOT git checkouts. TraceDecay indexes plain
     // directories too, and eight of the forty-four entries on the owner's real
     // profile are in this class. Their branch count is UNKNOWN, not zero, and
-    // the Delivery field draws them in a fenced band below the measured plot —
+    // the Delivery field draws them in a fenced band below the measured plot.
     // so the fixture has to contain some, or that band never renders under
     // audit and the distinction goes unverified.
     {
@@ -320,7 +320,7 @@ const projectTree: ReadonlyArray<Record<string, unknown>> = [
 ];
 
 /** `projects.rs` answers with BOTH shapes: the grouped `project_tree` the Brain
- * field draws, and a flat `projects` list of `PublicCodeProject` — a narrower
+ * field draws, and a flat `projects` list of `PublicCodeProject`. A narrower
  * record with `created_at`, `display_root` and `git_common_dir` that the
  * registry entries do not carry. Derived from the tree so the two views can
  * never disagree about which projects exist. */
@@ -356,7 +356,7 @@ const projectsPayload: Record<string, unknown> = {
 };
 
 /* ==========================================================================
- * /api/plugins/holographic/ — memory overview + facts + entities
+ * /api/plugins/holographic/. Memory overview + facts + entities
  * (memory_api.rs::overview; facts.rs fact_summary_json / entity_json /
  * overview_payload / trust_histogram). Consumed by KnowledgePage
  * (MemoryOverviewPayloadV1Schema) and ExplorerPage memory source.
@@ -374,11 +374,11 @@ const FACT_CATEGORIES = [
 const FACT_CONTENTS = [
   'For native split Lynx Module Federation remotes, the external .lynx.bundle must encode both the background container entry and a main-thread synthetic container entry.',
   'Lynx Module Federation CI separates native and Web Linux jobs so Rspeedy builds and browser setup run in parallel.',
-  'The non-eager startup failure was a registration race, not a malformed lazy bundle — the shared background chunk is a valid Webpack {ids, modules} chunk.',
+  'The non-eager startup failure was a registration race, not a malformed lazy bundle. The shared background chunk is a valid Webpack {ids, modules} chunk.',
   'The Orbit Control demo exercises three genuine Module Federation consumption forms without eager shares.',
   'Web and native public-path contracts differ; Web builds set output.assetPrefix to auto.',
   'The iOS GitHub Actions job uses pinned actions/cache v5 restore/save for one atomic exact-key cache.',
-  'Concurrent agents share the repo target/; waiting on cargo’s directory lock is expected.',
+  'Concurrent agents share the repo target/; waiting on cargo\'s directory lock is expected.',
   'Never add --locked to local or agent Cargo commands; CI and packaging own lockfile reproducibility.',
   'Route literal/regex text to tracedecay_grep, symbol names to tracedecay_search, and concepts to tracedecay_context.',
   'Prefer file-edit tools over inline python heredocs for on-disk changes.',
@@ -388,7 +388,7 @@ const FACT_CONTENTS = [
   'Compaction defaults to gpt-5.6-terra with extra-high reasoning for LCM summarization.',
   'Empty and Unavailable temporal roots are distinct; do not collapse them in the registry mapping.',
   'Binary slot staleness manifests as stale hook logs; check the resolved graph DB path first.',
-  'Pathspec-scoped commits (git commit -- <paths>) avoid sweeping others’ staged work in shared trees.',
+  'Pathspec-scoped commits (git commit -- <paths>) avoid sweeping others\' staged work in shared trees.',
   'Hook-driven incremental indexing triggers on agent hooks; gix reconciles lazily without always-on watchers.',
 ] as const;
 
@@ -494,7 +494,7 @@ function memoryEntities(): Record<string, unknown>[] {
  * the fixture indices so the constellation draws the same picture every run:
  * each fact mentions one entity (its index modulo the entity list), every
  * third fact supports the next, one pair contradicts, one supersedes, and one
- * edge names a root this bounded slice did not include — the dangling case
+ * edge names a root this bounded slice did not include. The dangling case
  * the drawing must count rather than draw.
  */
 function memoryGraph(facts: ReturnType<typeof memoryFacts>): Record<string, unknown> {
@@ -710,7 +710,7 @@ function memoryTrustHistoryPayload(factId: string): Record<string, unknown> {
 }
 
 /* ==========================================================================
- * /api/plugins/graph/* — overview / search / subgraph
+ * /api/plugins/graph/*. Overview / search / subgraph
  * (graph_service.rs overview_payload / search_payload / subgraph_payload;
  * graph_queries.rs NODE_COLUMNS, edge_rows_for_ids, top_connected_rows).
  * Consumed by CodePage (GraphOverview/GraphSearch/Subgraph) and ExplorerPage.
@@ -741,7 +741,7 @@ const GRAPH_FILES = [
 /**
  * Realistic symbol names, cycled by node index. The audit's Code and Explorer
  * shots print these in the most-connected list, the search results and the
- * canvas labels — `sym_0`-style placeholders there would put a fixture
+ * canvas labels. `sym_0`-style placeholders there would put a fixture
  * artifact into every review screenshot where a plausible daemon symbol
  * belongs. Names are invented but shaped like this codebase's own.
  */
@@ -831,7 +831,7 @@ const GRAPH_NODE_ABSENT = {
  * Every key is present because none of the Rust fields is
  * `skip_serializing_if`: an absent column reaches the browser as an explicit
  * null, not as a missing key. The metric columns are SQLite integers, so
- * `is_async` is 0/1 rather than a boolean — a fixture that sent `true` here
+ * `is_async` is 0/1 rather than a boolean. A fixture that sent `true` here
  * would be testing the surface against a payload the daemon cannot produce.
  * `edge_kind` and `edge_line` are null on every row except the caller/callee
  * rows of the neighbors route, which set them per edge.
@@ -883,7 +883,7 @@ function graphNode(i: number, prefix: string, degree: number): Record<string, un
 }
 
 /** Deterministic hub-and-cluster subgraph: a few high-degree hubs, overlapping
- * clusters, and a long tail — visually interesting for the Sigma canvas on
+ * clusters, and a long tail. Visually interesting for the Sigma canvas on
  * /code (graph_service.rs default_subgraph). */
 interface BaseGraph {
   nodes: Record<string, unknown>[];
@@ -903,7 +903,7 @@ function buildBaseGraph(): BaseGraph {
     if (edgeSet.has(key)) return;
     edgeSet.add(key);
     // `edge_rows_for_ids` groups on (source, target, kind) and never joins
-    // `nodes`, so the subgraph's edges carry null names — unlike the neighbors
+    // `nodes`, so the subgraph's edges carry null names, unlike the neighbors
     // route, which does resolve them.
     edges.push({
       source: ids[a],
@@ -962,7 +962,7 @@ const BASE_GRAPH = buildBaseGraph();
  *    carries it.
  *  - each row then passes through `node_with_span` (adds `span`) and
  *    `attach_degrees` (adds `degree`, the node's total in+out edge count over
- *    ALL edge kinds — 0 when the node has none).
+ *    ALL edge kinds. 0 when the node has none).
  *  - `neighborhood_edge_rows` returns `source, target, kind, line,
  *    source_name, target_name` for every edge kind where `source = ?1 OR
  *    target = ?1`. That WHERE clause is why a `contains` row in this payload
@@ -1005,7 +1005,7 @@ function neighborPairs(nodeId: string, side: 'callers' | 'callees'): NeighborPai
     const index = (hash + i * 11 + (side === 'callers' ? 0 : 5)) % 40;
     if (seen.has(index)) continue;
     seen.add(index);
-    // Call sites per pair: power-law-ish, one dominant channel then a tail —
+    // Call sites per pair: power-law-ish, one dominant channel then a tail.
     // the shape a real `calls` edge multiset has, and what makes the channel
     // widths and spring stiffnesses on this surface tellable apart.
     const id = `sym-${index}`;
@@ -1044,7 +1044,7 @@ function neighborsPayload(nodeId: string, limit: number): Record<string, unknown
   const callers = expand(callerPairs, 'callers').slice(0, limit);
   const callees = expand(calleePairs, 'callees').slice(0, limit);
 
-  // The container OF this node — one `contains` row, with this node as the
+  // The container OF this node. One `contains` row, with this node as the
   // target, exactly as the endpoint's `source = ?1 OR target = ?1` filter
   // allows. Membranes on the drill-in are the transitive result of collecting
   // these across the focus and its expanded neighbours.
@@ -1084,7 +1084,7 @@ function neighborsPayload(nodeId: string, limit: number): Record<string, unknown
 }
 
 /** GET /api/plugins/graph/subgraph[?node_id=]. Unseeded returns the full hub
- * overview (mode "default"); a node_id returns that node’s neighborhood
+ * overview (mode "default"); a node_id returns that node's neighborhood
  * (mode "seeded"), matching graph_service.rs subgraph_payload. */
 // `coerce_limit(params.limit_nodes, 80, 250)` / `(params.limit_edges, 120,
 // 500)` in graph_api.rs: the defaults are 80 and 120, not 40. The Code
@@ -1129,12 +1129,12 @@ function subgraphPayload(nodeId: string | null): Record<string, unknown> {
 
 function graphOverviewPayload(): Record<string, unknown> {
   // top_connected: highest-degree hubs first. This row set had drifted away
-  // from its own stated contract — it emitted 18 full node records, while
+  // from its own stated contract. It emitted 18 full node records, while
   // `graph_queries::top_connected_rows` selects exactly FIVE columns from a
   // `LIMIT 12` subquery and never joins `qualified_name`. The Code workspace
   // renders these rows directly, so the audit was judging a payload the daemon
   // cannot produce. Restored to the real shape, including the real curve:
-  // degree in a symbol graph is power-law, not linear — one run-away hub, a
+  // degree in a symbol graph is power-law, not linear. One run-away hub, a
   // steep fall, then near-ties bunching at the bottom of the twelve.
   //
   // The row still deserializes into the whole `GraphNodeV1`, so the twenty-two
@@ -1143,8 +1143,8 @@ function graphOverviewPayload(): Record<string, unknown> {
   //
   // The NAMES matter as much as the degrees, and `hub_0 … hub_11` hid the
   // single hardest thing about this row set. On a real Rust graph the most
-  // connected symbols are language primitives and one-word generics — `path`,
-  // `json`, `u64`, `Value`, `trim`, `kind` — and two of the owner's twelve are
+  // connected symbols are language primitives and one-word generics. `path`,
+  // `json`, `u64`, `Value`, `trim`, `kind`, and two of the owner's twelve are
   // literally the same word in different files. `top_connected_rows` does not
   // serve `qualified_name`, so the file is the ONLY thing that can tell them
   // apart, and a fixture of unique invented names meant the card never had to.
@@ -1259,7 +1259,7 @@ function similarOccurrence(i: number, generation: string): Record<string, unknow
 }
 
 /**
- * `GET /api/plugins/graph/shared-code/family` — wire-true against
+ * `GET /api/plugins/graph/shared-code/family`. Wire-true against
  * `code_reads.rs::shared_family_result`: one digest group per class (the route
  * answers one class per request and a body has one exact key per class), the
  * selected source (`sym-0`) never among the members (serving.rs skips it),
@@ -1297,7 +1297,7 @@ function sharedCodeFamilyPayload(matchClass: string, cursor: string | null): Rec
 }
 
 /**
- * `GET /api/plugins/graph/compare/union-layout` — wire-true against
+ * `GET /api/plugins/graph/compare/union-layout`. Wire-true against
  * `code_read_api::RevisionPairUnionLayoutV1`: identity-sorted file and symbol
  * regions across `main` and `feature`, one of each change class.
  */
@@ -1396,8 +1396,8 @@ function graphPathPayload(): Record<string, unknown> {
  * owner's twenty-five rows sit within a few percent of 1.80B. The fixture used
  * to ramp evenly from 8.4M down to 1.1M, which made twenty-five equal-length
  * rails look like a legitimate ranking in every audit shot. Two rows genuinely
- * deviate — the primary checkout above and a small unrelated repository well
- * below — and those are the only rows worth drawing.
+ * deviate. The primary checkout above and a small unrelated repository well
+ * below, and those are the only rows worth drawing.
  */
 const SAVINGS_PROJECTS: ReadonlyArray<readonly [string, number]> = [
   ['/fast/projects/tracedecay', 2_939_894_592],
@@ -1570,7 +1570,7 @@ function savingsPayload(): Record<string, unknown> {
  * The pricing classes are the point of this fixture. On a real profile the
  * bundled table prices the Anthropic and OpenAI models exactly, leaves one
  * Codex model slug it has never heard of unpriced, and cannot price Cursor
- * usage at all — Cursor observations name no model. So the four providers
+ * usage at all. Cursor observations name no model. So the four providers
  * below are one fully priced, one partially priced, one unpriced with null
  * identity, and one priced provider that only appears in the long range,
  * which is the combination every Costs plate has to keep apart.
@@ -1907,7 +1907,7 @@ function costsReadModel(): Record<string, unknown> {
  * The categories `usage_summary_from_events` actually emits, at the
  * proportions a real store actually holds them in (captured 2026-07-25).
  *
- * This replaces a sixteen-row fixture that ramped smoothly from 1,840 to 86 —
+ * This replaces a sixteen-row fixture that ramped smoothly from 1,840 to 86.
  * a distribution no analytics store produces, and one that let a linear bar
  * chart look perfectly reasonable in every audit shot while the real payload
  * (6,774 against 1) rendered eleven invisible slivers. `record_event_usage`
@@ -1966,7 +1966,7 @@ function analyticsAgentsPayload(): Record<string, unknown> {
  *
  * Pre-order, exactly as the daemon serves it: a two-level Codex tree, a Claude
  * session whose parent was never ingested, and one flat session. The abnormal
- * links are in the fixture on purpose — they are the states the surface has to
+ * links are in the fixture on purpose. They are the states the surface has to
  * keep apart, and a fixture holding only clean edges would never exercise them.
  */
 function analyticsSubagentTreePayload(): Record<string, unknown> {
@@ -2142,7 +2142,7 @@ function jobsPayload(): Record<string, unknown> {
   return { jobs, count: jobs.length };
 }
 
-/** `automation_run_api::run_list` — the run-history ledger tail, projected by
+/** `automation_run_api::run_list`. The run-history ledger tail, projected by
  * `run_history_row`. Two terminal states so the audit shoots both the applied
  * row and the failed row with its error sentence. */
 function automationRunsPayload(): Record<string, unknown> {
@@ -2307,13 +2307,13 @@ const SKILL_ROWS: ReadonlyArray<readonly [string, string, string, string]> = [
 
 /** Wire-true ManagedSkill rows (managed_skill_model.rs): id/title/state nest
  * under `metadata`. AutomationsPage reads those top-level, so titles render as
- * index fallbacks — flagged in the report as a component/wire mismatch. */
+ * index fallbacks. Flagged in the report as a component/wire mismatch. */
 function skillsPayload(): Record<string, unknown> {
   const skills = SKILL_ROWS.slice(0, 4).map(([id, title, state, category]) => ({
     metadata: {
       id,
       title,
-      summary: `${title} — managed automation skill.`,
+      summary: `${title}: managed automation skill.`,
       category,
       targets: ['claude', 'codex'],
       state,
@@ -2374,7 +2374,7 @@ const DOCTOR_FAMILIES = [
 ] as const;
 
 /**
- * `GET /api/doctor/findings` with an admitted report reader — the populated
+ * `GET /api/doctor/findings` with an admitted report reader. The populated
  * report, not the empty one.
  *
  * This fixture used to be deliberately empty, and said so: the inspector
@@ -2382,8 +2382,8 @@ const DOCTOR_FAMILIES = [
  * indicator hues miss WCAG AA as 11px text on `--surface-2`, and an empty
  * envelope was the only way to keep the audited surface at zero axe violations.
  * It kept the gate green by keeping the defective markup off the page. The
- * badge now follows the `StateChip` idiom — hue on the lamp and glyph, label on
- * an AA token — so the findings can be served and actually scanned.
+ * badge now follows the `StateChip` idiom. Hue on the lamp and glyph, label on
+ * an AA token, so the findings can be served and actually scanned.
  *
  * All eight `DoctorEvidenceStateV1` values appear exactly once, so every badge
  * variant is on screen for the axe scan rather than a representative few. Only
@@ -2475,7 +2475,7 @@ function doctorFindingsEnvelope(): Record<string, unknown> {
   ];
 
   // Two families answered nothing. These render as coverage-gap chips above the
-  // cards, which is the report saying which sources it never reached — a report
+  // cards, which is the report saying which sources it never reached. A report
   // that dropped them would read as a clean bill of health for all seven.
   const consulted = ['advisory', 'configuration', 'storage_runtime', 'storage', 'code_index'];
   const payload = {
@@ -2511,7 +2511,7 @@ function doctorFindingsEnvelope(): Record<string, unknown> {
  * ========================================================================== */
 
 /** The owner setting a soft store budget comes from, and the wording the daemon
- * emits for an unset budget — copied verbatim from
+ * emits for an unset budget. Copied verbatim from
  * `storage_telemetry_api.rs` so these fixtures stay wire-true. */
 const BUDGET_SETTING_KEY = 'sync.retention.v1 store_soft_budgets_bytes';
 const BUDGET_UNSET_REASON =
@@ -2611,7 +2611,7 @@ const TABLE_GROWTH_STATES = [
   },
 ] as const;
 
-/** GET /api/storage/telemetry — observatory (StorageTelemetryPayloadV1Schema).
+/** GET /api/storage/telemetry. Observatory (StorageTelemetryPayloadV1Schema).
  *
  * One entry per distinct store *file*: the graph and project-memory roles share
  * a database in project storage mode and are therefore one card carrying both
@@ -2709,7 +2709,7 @@ const storageTelemetry = envelope({
       growth: storeGrowthUnknown,
     },
     {
-      // The configured budget is unreadable, so the budget is unknown — the
+      // The configured budget is unreadable, so the budget is unknown. The
       // dashboard never renders that as "within budget".
       store: 'sessions.db',
       roles: ['sessions'],
@@ -2779,7 +2779,7 @@ const storageTelemetry = envelope({
 });
 
 /** One of the five stores failed its pragma read, so the endpoint's coverage is
- * partial over the enumerated store set — wire-true to
+ * partial over the enumerated store set. Wire-true to
  * `DashboardCoverageV1::partial` and the endpoint's own refresh legal action. */
 const storageTelemetryEnvelope = {
   ...storageTelemetry,
@@ -2800,7 +2800,7 @@ const storageTelemetryEnvelope = {
   ],
 };
 
-/** GET /api/storage/findings — observatory canonical Doctor projection plus
+/** GET /api/storage/findings. Observatory canonical Doctor projection plus
  * per-producer source coverage. This fixture follows the production parser
  * path; source state is not inferred from an empty finding list. */
 const storageFindings = envelope({
@@ -2990,7 +2990,7 @@ const capabilities: Record<string, unknown> = {
     enabled: true,
     mode: 'standalone_backend',
     backend: 'codex_app_server',
-    // `host_mode` is an `AutomationHostMode` — `standalone` or
+    // `host_mode` is an `AutomationHostMode`. `standalone` or
     // `delegated_host`. `standalone_backend` belongs to the sibling `mode`
     // field and is not a value this key can hold.
     host_mode: 'standalone',
@@ -3010,7 +3010,7 @@ const capabilities: Record<string, unknown> = {
  * The Loom weave's two sources, mirrored from a real daemon response captured
  * on 2026-07-25 (`tracedecay dashboard --port 7341`, profile-sharded store,
  * 6,053 sessions). Shapes are exact; the population is shaped to the same
- * DISTRIBUTION the real store has —
+ * DISTRIBUTION the real store has.
  * fixtures that differ only in size systematically under-test the surface:
  *
  *   - Message counts are heavily skewed (a handful in the hundreds, a long
@@ -3019,7 +3019,7 @@ const capabilities: Record<string, unknown> = {
  *   - `last_message_at` is null on most rows. On the real profile only 14 of
  *     100 sessions carry an end later than their start, and drawing open
  *     threads correctly is the single most load-bearing honesty behaviour on
- *     the surface — a fixture where every session has an end would render a
+ *     the surface. A fixture where every session has an end would render a
  *     weave that cannot exist.
  *   - Some rows report zero messages, which the weave draws hollow.
  *   - Two rows are subagents.
@@ -3116,10 +3116,10 @@ function loomSessionsPayload(): Record<string, unknown> {
  * and populated with the same skewed distribution the Loom fixture carries, so
  * the audited surface renders a real session ledger rather than the
  * `lcm_temporal_retrieval_not_mounted` refusal (which the search and
- * session-detail routes below still model — those states must stay reachable).
+ * session-detail routes below still model. Those states must stay reachable).
  * ========================================================================== */
 
-/** ISO day bucket `daysAgo` days back — the timeline's bucket key. */
+/** ISO day bucket `daysAgo` days back. The timeline's bucket key. */
 function lcmDateBucket(daysAgo: number): string {
   return new Date((nowSecs - daysAgo * DAY) * 1000).toISOString().slice(0, 10);
 }
@@ -3244,7 +3244,7 @@ function lcmOverviewPayload(): Record<string, unknown> {
 }
 
 /* ==========================================================================
- * GET /api/loom/temporal (loom_api.rs::temporal) — the weave's canonical
+ * GET /api/loom/temporal (loom_api.rs::temporal). The weave's canonical
  * read: sessions plus durable causal relations (commits, edited files,
  * branch/worktree spans) with per-source coverage. Wire-true to
  * `LoomTemporalPayloadV1`; the session population reuses the same skewed
@@ -3260,7 +3260,7 @@ function loomTemporalPayload(): Record<string, unknown> {
     started_at: row['started_at'],
     last_message_at: row['last_message_at'],
     // A recorded end exists on a minority of rows, and never without a last
-    // message — the weave draws open threads from exactly this distinction.
+    // message. The weave draws open threads from exactly this distinction.
     ended_at: i % 8 === 1 ? (row['last_message_at'] as number | null) : null,
     messages: row['messages'],
     models: [{ model: null }, { model: pick(LOOM_MODELS, i) }],
@@ -3429,7 +3429,7 @@ function loomTemporalPageEnvelope(rawLimit: string | null, rawOffset: string | n
 }
 
 /* ==========================================================================
- * GET /api/delivery/overview (delivery_api.rs::overview) — the Delivery
+ * GET /api/delivery/overview (delivery_api.rs::overview). The Delivery
  * pipeline plate. Local git-authority stages are measured; the stages that
  * require an external forge authority are modeled `not_published` with the
  * authority named, which is the honest reading of a local-only daemon and
@@ -3493,7 +3493,7 @@ function deliveryOverviewPayload(): Record<string, unknown> {
 }
 
 /* ==========================================================================
- * GET /api/delivery/inbox (delivery_api.rs::inbox) — the registry-admitted,
+ * GET /api/delivery/inbox (delivery_api.rs::inbox). The registry-admitted,
  * indexed-head-joined pull request inbox across projects. Three registered
  * projects in three provider states, five admitted PRs, and membership edges
  * that include the correlating bases the daemon MAY serve (shared Work
@@ -3556,7 +3556,7 @@ function inboxPullRequest(
     state: options.state ?? 'current',
     pull_request: {
       id: `github:${number}`,
-      label: `Pull request #${number} — ${title}`,
+      label: `Pull request #${number}, ${title}`,
       provider: 'github',
       pull_request_id: number,
       identity: {
@@ -3685,7 +3685,7 @@ function deliveryInboxPayload(): Record<string, unknown> {
 }
 
 /* ==========================================================================
- * GET /api/plugins/graph/strata (graph_structure_api.rs::strata) — the CORTEX
+ * GET /api/plugins/graph/strata (graph_structure_api.rs::strata). The CORTEX
  * relief's one reading: file depth strata plus per-directory boundary totals,
  * wrapped in the measurement-grade `StructureReadV1` union. Modeled as a real
  * measurement so the terrain draws; the unmeasured and failed states stay
@@ -3763,7 +3763,7 @@ const LOOM_CHAIN_TOOLS = [
 ] as const;
 
 /** One session's transcript. `timestamp` is null on every message, exactly as
- * the daemon serves it — the chain rail reads that and prints "ordinal order",
+ * the daemon serves it. The chain rail reads that and prints "ordinal order",
  * so a fixture with timestamps would hide the behaviour under audit. */
 function loomChainPayload(): Record<string, unknown> {
   const sessionId = loomSessionId(0);
@@ -3931,7 +3931,7 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/doctor/findings': doctorFindingsEnvelope(),
   '/api/settings': settings,
   '/api/capabilities': capabilities,
-  // Memory (holographic) — consumed with a trailing slash by KnowledgePage and
+  // Memory (holographic). Consumed with a trailing slash by KnowledgePage and
   // ExplorerPage (`/api/plugins/holographic/?...`).
   '/api/plugins/holographic/': envelope(memoryPayload()),
   '/api/plugins/holographic': envelope(memoryPayload()),
@@ -3965,7 +3965,7 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   // The bare-path entry is the parse gate's; `resolveFixture` answers the
   // route itself range-by-range above.
   '/api/plugins/savings/models': savingsModelsPayload('all'),
-  // Canonical memory status (memory_api.rs::status) — the scoped Brain's fact and
+  // Canonical memory status (memory_api.rs::status). The scoped Brain's fact and
   // entity readouts. Distinct from the overview payload above.
   '/api/plugins/holographic/status': envelope(memoryStatusPayload()),
   // Analytics reads are envelope-only. Their generated inner contracts follow
@@ -3991,14 +3991,14 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/observatory': observatoryEnvelope(),
   '/api/costs': costsEnvelope(),
   // Code-index freshness. Served against a mounted daemon scheduler, which is
-  // the state the audit needs to shoot — the unattached case is a state chip
+  // the state the audit needs to shoot. The unattached case is a state chip
   // with no reading behind it.
   '/api/code-index/freshness': CODE_INDEX_FRESHNESS_FIXTURES.ready_absent,
   '/api/remote/status': remoteOperationalStatusEnvelope(),
   // Work. The two mounted read routes. Unlike every other fixture here these
   // are wrapped in the application's `HttpJsonEnvelope` rather than
   // `DashboardEnvelopeV1`, because `mod.rs` nests the Work routes straight
-  // onto the application router — see `workApi.ts`, which walks that wrapper.
+  // onto the application router. See `workApi.ts`, which walks that wrapper.
   // The work-product graph read. Serves the Work projections and the Agents
   // workspace's handoff frontier and attempt failures.
   '/api/work/views': workEnvelope(workGraphViewsPayload()),
@@ -4092,10 +4092,10 @@ function workflowDefinitionsPayload(): Record<string, unknown>[] {
   ];
 }
 
-/** The three immutable versions of `workflow.review-sweep`, ascending. v3 is
+/** The three immutable versions of `workflow.review-sweep`, ascending. V3 is
  * the registry's copy; v1 and v2 differ from it in exactly the ways the
- * version track columns report — v2 re-pinned the policy digest, v3 added the
- * synthesize step — so the pin-delta cells exercise `first`, `same` and
+ * version track columns report. V2 re-pinned the policy digest, v3 added the
+ * synthesize step, so the pin-delta cells exercise `first`, `same` and
  * `changed` in one shot. */
 function workflowHistoryPayload(): Record<string, unknown>[] {
   const [v3] = workflowDefinitionsPayload();
@@ -4113,8 +4113,8 @@ function workflowHistoryPayload(): Record<string, unknown>[] {
 }
 
 /** A `workflow.review-sweep` v3 run mid-flight. Timing is carried entirely by
- * the journal — admitted, first step started and completed, second step
- * started — because that is where the page reads it from. */
+ * the journal. Admitted, first step started and completed, second step
+ * started, because that is where the page reads it from. */
 function workflowRunPayload(): Record<string, unknown> {
   const [pinned] = workflowDefinitionsPayload();
   const digest = (label: string): string =>
@@ -4260,7 +4260,7 @@ export const FIXTURE_PREFIXES: ReadonlyArray<readonly [string, unknown]> = [
   // the panel as `unsupported_schema` and be audited as a broken surface.
   ['/api/plugins/graph/path', FIXTURES['/api/plugins/graph/path']],
   ['/api/plugins/hermes-lcm/search', FIXTURES['/api/plugins/hermes-lcm/search']],
-  // Dynamic: `/session/{session_id}` — the Loom thread chain. One transcript
+  // Dynamic: `/session/{session_id}`. The Loom thread chain. One transcript
   // answers for every id, which is what a fixture can honestly be.
   ['/api/plugins/hermes-lcm/session/', unavailableEnvelope(
     'lcm_temporal_retrieval_not_mounted',
@@ -4275,8 +4275,8 @@ export const FIXTURE_PREFIXES: ReadonlyArray<readonly [string, unknown]> = [
  *
  * The Work routes are the one family on this dashboard that does not answer
  * with `DashboardEnvelopeV1`. `src/dashboard/mod.rs` nests them onto the
- * application router, so they carry the application's own `HttpJsonEnvelope`
- * — a `kind`/`value` union whose outcome packet holds the generated contract
+ * application router, so they carry the application's own `HttpJsonEnvelope`,
+ * a `kind`/`value` union whose outcome packet holds the generated contract
  * under `payload`. `workApi.ts` walks exactly that structure and hands what it
  * finds to the generated schema, so a fixture that wrapped the payload any
  * other way would be refused as `unsupported_schema` and the audit would
@@ -4578,7 +4578,7 @@ function workGraphViewsPayload(): Record<string, unknown> {
         workload: {
           // Runtime coverage is partial, so the authority withholds every
           // runtime-gated figure rather than answering it over a partial
-          // observation — exactly what it does live.
+          // observation. Exactly what it does live.
           actual_concurrency: null,
           blocked_effort: null,
           graph_version: WORK_GRAPH_VERSION,
@@ -4927,7 +4927,7 @@ function costsEnvelope(): Record<string, unknown> {
     }),
   ];
   // Usage without an exact provider/model price produces a null cost with
-  // this exact reason — never a zero bill.
+  // this exact reason, never a zero bill.
   const estimatedCost = [
     metricValue({
       metric: 'provider_cost',
@@ -4975,7 +4975,7 @@ function costsEnvelope(): Record<string, unknown> {
   };
 }
 
-/** GET /api/remote/status — Settings Remote Brain operational plane. */
+/** GET /api/remote/status. Settings Remote Brain operational plane. */
 function remoteOperationalStatusEnvelope(): Record<string, unknown> {
   return envelope(
     {
@@ -5140,8 +5140,8 @@ function analyticsOverviewPayload(): Record<string, unknown> {
 
 /** The Plan 26 Observatory projection `analytics_api::overview` embeds
  * (`application::observability::observatory_read_model`). It is never absent on
- * this route — a missing store yields the `analytics:unavailable` model with
- * `current: false`, not a null — so the fixture carries the complete-coverage
+ * this route. A missing store yields the `analytics:unavailable` model with
+ * `current: false`, not a null, so the fixture carries the complete-coverage
  * variant: every envelope in the horizon parsed, so each metric reports an
  * exact value and `unavailable_reason` stays null. */
 function observatoryReadModel(): Record<string, unknown> {
@@ -5228,15 +5228,15 @@ function observatoryReadModel(): Record<string, unknown> {
 export const EMPTY_FIXTURE: Record<string, unknown> = {};
 
 /**
- * GET /api/projects/{project_id} — the registry backbone (src/dashboard/
+ * GET /api/projects/{project_id}. The registry backbone (src/dashboard/
  * projects.rs `context`). Resolves for every registered project regardless of
  * whether its graph is mounted, which is exactly the property the scoped Brain
  * depends on, so the fixture answers for any id rather than only known ones.
  */
 function projectContextPayload(projectId: string): Record<string, unknown> {
   // `context` answers with a `PublicCodeProject`, the same narrow record the
-  // list route's flat `projects` carries — not the registry entry the tree
-  // holds — so the two routes are read from one source here.
+  // list route's flat `projects` carries, not the registry entry the tree
+  // holds, so the two routes are read from one source here.
   const known = flatProjects.find((entry) => entry['project_id'] === projectId);
   const root = `/fast/projects/${projectId}`;
   const entry = known ?? {
@@ -5279,7 +5279,7 @@ export function resolveFixture(pathname: string, search = ''): unknown {
   // The project-scoped gateway. The daemon binds `/api/projects/{id}/{tail}`
   // and serves `/api/{tail}` against that project's own state
   // (src/dashboard/mod.rs `project_scoped_api_gateway`), so the fixture layer
-  // has to perform the same rewrite — otherwise every scoped read a workspace
+  // has to perform the same rewrite, otherwise every scoped read a workspace
   // makes would resolve to the registry payload and the scoped surfaces would
   // be audited against a shape the daemon never sends. `/api/projects/{id}`
   // with no tail is a different route (`projects::context`) and is handled
@@ -5351,7 +5351,7 @@ export function resolveFixture(pathname: string, search = ''): unknown {
  * `underused` / `diagnostics_summary`). Consumed by AgentsPage.
  *
  * Both were previously unmapped and resolved to `{}`, so the audit never once
- * rendered the plates that depend on them. Shapes and — more importantly —
+ * rendered the plates that depend on them. Shapes and, more importantly,
  * DISTRIBUTIONS are taken from a real daemon response captured on 2026-07-25
  * (profile-sharded store, 10,000-event window):
  *

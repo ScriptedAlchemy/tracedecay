@@ -364,7 +364,7 @@ impl GraphReplayPoolLockV1 {
 /// directory. The pool root sits directly beside the graph database
 /// (`database_path().with_extension("graph-replay")`), so its parent always
 /// exists and no ancestors are ever manufactured the way `create_dir_all`
-/// would — under a permissive umask that would hard-link already-private
+/// would, under a permissive umask that would hard-link already-private
 /// sealed generations into a world-readable pool.
 pub(super) fn ensure_private_graph_replay_pool_root(
     pool_root: &Path,
@@ -713,7 +713,7 @@ pub(super) fn read_full(
 /// Withdraw a rolled-back transaction's pool exposure. The canonical files
 /// are restored by the rollback rename before this runs, so the graph replay
 /// path resolves them from the generation directory again. Only entries that
-/// are provably that generation's sealed bytes are removed — normally the
+/// are provably that generation's sealed bytes are removed, normally the
 /// very inode the rollback just renamed back, or a same-digest copy left by
 /// the eager staging path. A foreign same-name entry (non-regular or with
 /// different bytes) was never linked by this transaction and is left in

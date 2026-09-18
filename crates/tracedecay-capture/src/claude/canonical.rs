@@ -156,7 +156,7 @@ fn normalize_record(
 /// Claude writes API-error placeholders as assistant records carrying
 /// `isApiErrorMessage: true`, model `"<synthetic>"`, and all-zero
 /// `message.usage`. No provider request was billed for them, so their zero
-/// counters must never become provider-usage rows — recording them attributes
+/// counters must never become provider-usage rows, recording them attributes
 /// zero-token usage to the non-model `"<synthetic>"` and pollutes billing.
 /// Either native signal alone marks the placeholder (older records may carry
 /// one without the other).
@@ -466,7 +466,7 @@ fn append_message_facts(
 /// `TaskUpdate` tool calls; per-session state mirrored under
 /// `~/.claude/tasks/<session>/`). Each call is one lifecycle event on one task
 /// item. The native input rides in `content` verbatim; ids and statuses are
-/// never synthesized (`TaskCreate` carries no task id or status in its input —
+/// never synthesized (`TaskCreate` carries no task id or status in its input;
 /// the id only arrives later via `toolUseResult`).
 fn append_task_lifecycle_fact(
     name: &str,

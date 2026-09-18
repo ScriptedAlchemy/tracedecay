@@ -119,8 +119,8 @@ pub struct GraphGenerationManifest {
     pub dependencies: Vec<GraphGenerationDependency>,
     pub entities: Vec<GraphEntity>,
     pub relations: Vec<GraphGenerationRelation>,
-    /// Memoized canonical digests of this instance. Never serialized — the
-    /// canonical replay payload and every digest byte are unchanged — and
+    /// Memoized canonical digests of this instance. Never serialized, the
+    /// canonical replay payload and every digest byte are unchanged, and
     /// invisible to equality; re-validated against the fields on every read.
     #[serde(skip)]
     digest_memo: ManifestDigestMemo,
@@ -129,9 +129,9 @@ pub struct GraphGenerationManifest {
 /// The small, cheaply cloned metadata half of a generation manifest: exactly
 /// the fields that name a generation and bind it to its dependency closure.
 ///
-/// Every stage after the staged rows are durable — the close/reopen
+/// Every stage after the staged rows are durable, the close/reopen
 /// recovered-digest proof, quarantine, lease seating, and the finalization
-/// receipt — reads only these fields. Carrying them separately lets the bulk
+/// receipt, reads only these fields. Carrying them separately lets the bulk
 /// `entities`/`relations` vectors (multiple gigabytes on a first index) be
 /// released the moment the last staging page commits, instead of staying live
 /// through reopen and verification alongside the rebuilt in-RAM store.
@@ -270,7 +270,7 @@ impl fmt::Debug for DependencyClosureDigestMemo {
 /// every mutation pattern the repository exercises (dependency, generation,
 /// source, watermark, and row-set size changes). The bulk rows are validated
 /// by count only: replacing a row in place on the same instance after a
-/// digest read would go unobserved, and no flow does that — production
+/// digest read would go unobserved, and no flow does that, production
 /// manifests are constructed, proven, and then held behind `Arc`, while
 /// fixtures mutate freshly constructed or freshly cloned (cold) instances
 /// before their first digest read.
@@ -552,8 +552,8 @@ impl GraphGenerationManifest {
 
     /// The metadata half of this manifest, cloned away from its bulk rows.
     /// Carries the memoized dependency-closure digest along when it still
-    /// binds, so later phases that hold only the identity — staging, the
-    /// close/reopen recovered-digest proof, recovery — do not recompute a
+    /// binds, so later phases that hold only the identity, staging, the
+    /// close/reopen recovered-digest proof, recovery, do not recompute a
     /// digest this manifest already proved.
     #[must_use]
     pub fn identity(&self) -> GraphGenerationManifestIdentity {
@@ -944,8 +944,8 @@ pub(crate) fn verify_sealed_copy_generation(
     #[cfg(test)]
     SEALED_COPY_PROOFS.with(|count| count.set(count.get() + 1));
     // The canonical byte count is the same stream the staging proof would
-    // have hashed (the digests match byte for byte), so a sealed *build* —
-    // which enumerated the staging database's rows to produce this copy —
+    // have hashed (the digests match byte for byte), so a sealed *build*,
+    // which enumerated the staging database's rows to produce this copy,
     // may file it with the publication's verify-once marker.
     verify_recovered_rows(database, identity, expected, check)
 }
@@ -996,7 +996,7 @@ fn verify_recovered_rows(
     if &actual != expected {
         // Name the row set the observed digest was taken over. A digest pair
         // on its own cannot distinguish "these rows changed" from "a
-        // different number of rows was enumerated" — the released-row and
+        // different number of rows was enumerated", the released-row and
         // partial-restage failures are exactly the second kind, and without
         // the counts every such report reads as unexplained corruption.
         let (entities, relations) = projection_node_counts(
@@ -1767,8 +1767,8 @@ fn write_generation_identity_frames(
 /// Big-endian `(tag length, payload length)` headers of one digest frame.
 ///
 /// The streaming writer ([`write_frame`]) and the parallel proof's chunk
-/// encoder (`generation::recovered`) emit the identical frame layout —
-/// `tag_len | tag | byte_len | bytes` — so the length encoding lives here
+/// encoder (`generation::recovered`) emit the identical frame layout,
+/// `tag_len | tag | byte_len | bytes`, so the length encoding lives here
 /// once and the two emitters cannot drift.
 fn frame_length_headers(tag: &str, bytes: &[u8]) -> Result<([u8; 8], [u8; 8]), GraphDbError> {
     let tag_len =

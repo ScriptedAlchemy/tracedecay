@@ -198,7 +198,7 @@ pub async fn ingest_homes_for_projects(
     stats
 }
 
-/// [`ingest_for_project`] with explicit Hermes home directories — the test
+/// [`ingest_for_project`] with explicit Hermes home directories, the test
 /// seam for pointing the sweep at a temporary home instead of the real
 /// `~/.hermes`.
 pub async fn ingest_homes(

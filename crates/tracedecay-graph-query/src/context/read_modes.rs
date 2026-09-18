@@ -239,7 +239,7 @@ fn scope_to_range(
 ///
 /// `LineageSymbolRecordV1::start_line` is the extractor's 0-based row and
 /// `line_span` counts lines inclusively, so the display span is
-/// `start_line + 1 ..= start_line + line_span` — the same `+ 1` convention the
+/// `start_line + 1 ..= start_line + line_span`, the same `+ 1` convention the
 /// verified graph handlers use. A zero span or an overflowing sum is a
 /// degenerate record: this yields `None` rather than an error, because symbol
 /// enrichment must never fail the source read that carries it.

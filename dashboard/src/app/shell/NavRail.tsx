@@ -87,7 +87,7 @@ const DOCTOR_HEALTH: Record<
  * How one storage-finding producer reads for the global dot.
  *
  * A producer only counts as health when it actually looked (`real`) and found
- * nothing. Anything it did observe is a finding. Everything else — a source the
+ * nothing. Anything it did observe is a finding. Everything else, a source the
  * canonical report only partially observed, or a producer unsupported on this
  * store established nothing either way, and reporting "no evidence" as a clean
  * bill of health is the whole defect this dot exists to avoid.
@@ -111,7 +111,7 @@ function kindHealth(status: StorageFindingKindStatusV1): DoctorHealth {
  * One channel on the rail (NAVIGATION.md "Behavior").
  *
  * Selected: a 3px cyan gutter, the raised face, a cyan channel number and a
- * white label — position marked by colour, not decoration. Hover inspects:
+ * white label, position marked by colour, not decoration. Hover inspects:
  * the face rises and the text brightens, and nothing about selection, scope
  * or any measured value changes. Keyboard focus is the design system's 2px
  * cyan outline from the base layer; hover never substitutes for it.
@@ -172,7 +172,7 @@ function RailLink({
 }
 
 /** The single Doctor dot (plan 11a): one mark, never a count, never another
- * badge — but it reports its own reading rather than only its worst one. */
+ * badge, but it reports its own reading rather than only its worst one. */
 function DoctorDot({ health }: { health: DoctorHealth }) {
   const presentation = DOCTOR_HEALTH[health];
   return (
@@ -223,8 +223,8 @@ function useDoctorHealth(): DoctorHealth {
  * The brand block (NAVIGATION.md "Persistent regions" 1): the trace-tail
  * glyph and the wordmark at the top of the rail.
  *
- * Identity only. It is not a link — Brain is reached through channel 01, and
- * the shipping shell exposes no logo action — and it never visualizes
+ * Identity only. It is not a link, Brain is reached through channel 01, and
+ * the shipping shell exposes no logo action, and it never visualizes
  * activity, health, connectivity, feed or work. The glyph is static CSS with
  * no state input by construction; nothing here can be wired to a reading
  * without becoming a different component. Sized to the register beside it so
@@ -252,7 +252,7 @@ function BrandBlock() {
  * numbered workspaces in their fixed order, 192px expanded or 48px compact.
  *
  * Navigation only: no status, no badges except the single Doctor health dot
- * on Observatory, which is where Doctor lives. One flat register — the rail
+ * on Observatory, which is where Doctor lives. One flat register, the rail
  * used to file channels under group dividers and pin Settings to its foot,
  * which drew channel 12 below channel 14; the canonical rail draws them in
  * numeric order and nowhere else.

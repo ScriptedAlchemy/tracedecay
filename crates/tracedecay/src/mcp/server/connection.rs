@@ -173,7 +173,7 @@ impl McpServer {
     /// Persists the tokens-saved counter, flushes pending tokens to the
     /// worldwide counter, checkpoints the WAL, and logs a session summary.
     ///
-    /// Idempotent — safe to call multiple times. `run` invokes it once when
+    /// Idempotent, safe to call multiple times. `run` invokes it once when
     /// its main loop exits; callers (e.g. `main.rs`, tests) may invoke it
     /// explicitly afterwards without re-running the persistence logic.
     #[hotpath::skip]

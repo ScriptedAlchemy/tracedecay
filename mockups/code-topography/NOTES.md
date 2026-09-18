@@ -1,4 +1,4 @@
-# Design notes — code topography
+# Design notes, code topography
 
 Per-sheet notes are printed on each sheet. This file holds what is common to all
 four: the rules they obey, the data they are allowed to claim, and where they are
@@ -8,7 +8,7 @@ knowingly weak.
 
 The ask was for callers/callees traced **over the surrounding types**, a way to see
 the structure of many files and many functions in a file, and "the topography of the
-code base" — explicitly not boxes-and-arrows UML and not a route-between-two-points
+code base", explicitly not boxes-and-arrows UML and not a route-between-two-points
 diagram.
 
 Everything here follows from one decision: **treat structure as terrain and traffic
@@ -40,15 +40,15 @@ line) and its aggregation ratio; sheet 03 prints its vertical scale (1 px = 1.35
 source lines) and its datum; sheet 04 prints the aggregation ratio on the ruler
 itself.
 
-**Absence is drawn, not cropped — one deliberate beat per sheet.**
+**Absence is drawn, not cropped. One deliberate beat per sheet.**
 
 - 01 `hooks/src/vendor/` is on the map at its true position and true area with a
   dashed shoreline and an empty interior: *no relief, 0 of 11 files parsed*.
-- 02 a downstream channel ends in a dashed mouth at `dyn ContextSource` — full
+- 02 a downstream channel ends in a dashed mouth at `dyn ContextSource`, full
   width, then it stops: *channel ends, target not in graph*.
 - 03 core 6 is banded to line 331 and the remaining 281 lines are drawn at full
   length and hatched, with the reason and the consequence: *outgoing edges unknown,
-  not zero* — so no arc leaves it.
+  not zero*. So no arc leaves it.
 - 04 the axis is drawn to its floor and then hatched: *statement scale not held*.
   The absence of finer resolution is itself a reading.
 
@@ -57,11 +57,11 @@ block from `dashboard/src/theme/tokens.css`, including the `[data-theme='light']
 mappings. Kind hues are not baked: `topography.js` registers one custom property
 per kind with its dark value and a `:root[data-theme='light']` override with its
 light value, so a theme flip re-tints every band with no observer and no second copy
-of the arithmetic — the same pattern `kindColorVars` uses in the app.
+of the arithmetic. The same pattern `kindColorVars` uses in the app.
 
 ## Reuse of the existing language
 
-- **Kind hue** is `kindColor.ts` transcribed verbatim — the same hash, the same
+- **Kind hue** is `kindColor.ts` transcribed verbatim. The same hash, the same
   chroma step, the same `186 + hash % 148` arc, the same two lightness levels. A
   `struct` is the same hue on these sheets as on the Code workspace's connectivity
   spine. Sheet 01 extends the arc to DSM cluster ids so a cluster keeps one hue
@@ -94,7 +94,7 @@ of the arithmetic — the same pattern `kindColorVars` uses in the app.
   aggregate (19 regions standing for 1 206 symbols) and prints the ratio. Sheets 02
   and 03 declare themselves direct renders and print their node counts to show they
   are inside the band. Sheet 04 turns the cap into a labelled position on its ruler
-  — the point where bodies stop being masses and start being symbols.
+ . The point where bodies stop being masses and start being symbols.
 
 ## Known weaknesses
 

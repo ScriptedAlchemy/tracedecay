@@ -23,7 +23,7 @@ import { artifactPayloadBelongsTo, missingArtifactKinds } from "./ledger.ts";
  *
  * Everything here is a reading of the ledger. The row prints the record's own
  * status word and canonical acceptance tallies; the artifact panel prints the handler's
- * `integrity_status` rather than deciding integrity in the browser — the
+ * `integrity_status` rather than deciding integrity in the browser, the
  * publication chain lives beside the ledger on disk, and only the daemon can
  * compare them.
  */

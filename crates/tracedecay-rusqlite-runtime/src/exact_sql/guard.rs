@@ -184,7 +184,7 @@ where
 /// lives in the connection's own `temp` schema, cannot alias or mutate
 /// anything in `main`, and disappears with the connection. Denying them while
 /// permitting durable DDL inverted the blast radius, and it left derived
-/// per-connection scratch — the projection output-state cache — unable to
+/// per-connection scratch, the projection output-state cache, unable to
 /// exist at all.
 ///
 /// Temporary **triggers and views** stay denied. A temp trigger can fire on a

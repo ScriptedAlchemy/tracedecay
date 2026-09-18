@@ -68,7 +68,7 @@ pub enum RetrievalPortError {
 
 impl RetrievalPortError {
     /// True when this failure is a deterministic contract violation that the
-    /// same input reproduces on every pass — a wrong filesystem mode, a
+    /// same input reproduces on every pass, a wrong filesystem mode, a
     /// symlinked or non-directory store path, a corrupt identity. Background
     /// workers park these visibly instead of masking them as warming, unlike
     /// transient capacity, availability, staleness, and cancellation failures

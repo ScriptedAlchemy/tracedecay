@@ -566,8 +566,8 @@ async fn run_daemon_shutdown(
         project_servers,
     };
     // Graceful means every lane drained cooperatively inside its budget;
-    // anything else — a timed-out owner, a forced client abort, a failed or
-    // timed-out project server — makes this attempt a forced shutdown.
+    // anything else, a timed-out owner, a forced client abort, a failed or
+    // timed-out project server, makes this attempt a forced shutdown.
     if receipt.in_flight.is_clean()
         && receipt.clients.is_clean()
         && receipt.background.unfinished().is_empty()
@@ -707,7 +707,7 @@ mod tests {
         );
         // Past the reserve boundary an overrun phase still gets a deadline it
         // can report a named timeout against, rather than being dropped from
-        // the sequence — and store close still gets the rest.
+        // the sequence, and store close still gets the rest.
         tokio::time::advance(tokio::time::Duration::from_secs(15)).await;
         assert_eq!(budget.project_servers(), tokio::time::Instant::now());
         assert_eq!(budget.store_close(), overall);

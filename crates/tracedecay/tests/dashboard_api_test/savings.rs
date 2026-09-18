@@ -743,7 +743,7 @@ fn session_content_counts_ignore_metadata_usage_without_canonical_provider_evide
         }
 
         // S3: no model id → null model, tokens still counted (approximate
-        // o200k when tokenized — there is no tokenizer to be exact with).
+        // o200k when tokenized. There is no tokenizer to be exact with).
         let unknown_session = find_session(&payload, "sess-unknown");
         let unknown_model = &unknown_session["models"][0];
         assert!(unknown_model["model"].is_null());
@@ -830,7 +830,7 @@ fn session_content_counts_ignore_metadata_usage_without_canonical_provider_evide
         assert_eq!(sessions["session_count"], 5);
         assert_eq!(sessions["messages"], 7);
         // No observation projection checkpoint exists in this fixture, so the
-        // canonical usage-event count is unknowable and stays null — the same
+        // canonical usage-event count is unknowable and stays null, the same
         // typed state `provider_usage.available == false` below encodes. A
         // fabricated 0 here would claim a measured absence that was never
         // observed.

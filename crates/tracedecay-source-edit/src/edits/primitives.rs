@@ -2,7 +2,7 @@
 //! insertion, and symbol-span replacement. Every primitive resolves its
 //! target path or symbol, reads the current bytes through the source-edit
 //! file authority, computes the modified text, and hands the before/after
-//! pair to [`commit_or_preview_edit`] — the single write-or-
+//! pair to [`commit_or_preview_edit`], the single write-or-
 //! preview gate shared by every primitive (including `ast_grep_rewrite` in
 //! the sibling `ast_grep` module).
 
@@ -128,7 +128,7 @@ pub(crate) async fn str_replace(
     if matches.next().is_some() {
         // Two matches already consumed from `matches`; the remainder it
         // still holds is every match after those, so the total is that
-        // count plus the two already seen — no need for a second,
+        // count plus the two already seen, no need for a second,
         // redundant full-string `source.matches(old_str).count()` pass.
         let n = 2 + matches.count();
         return Ok(EditResult {
@@ -209,7 +209,7 @@ pub(crate) async fn multi_str_replace(
         if hits.next().is_some() {
             // Two matches already consumed from `hits`; the remainder it
             // still holds is every match after those, so the total is
-            // that count plus the two already seen — no need for a
+            // that count plus the two already seen, no need for a
             // redundant full-string `source.matches(old).count()` pass.
             let count = 2 + hits.count();
             return Ok(MultiEditResult {
@@ -392,7 +392,7 @@ pub(crate) async fn insert_at(
 
 /// Replaces the full source of a named symbol (function, method, struct,
 /// etc.) with `new_source`. Resolves the symbol via exact qualified-name
-/// match — if the name is ambiguous, callable definitions win; if still
+/// match, if the name is ambiguous, callable definitions win; if still
 /// ambiguous after that filter, the edit is refused so we don't clobber
 /// the wrong site.
 #[hotpath::measure(label = "edits.replace_symbol", future = true)]

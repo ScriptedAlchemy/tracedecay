@@ -4,12 +4,12 @@
  *   node --test mockups/code-topography/prototype/
  *
  * No framework, no install: `node:test` and `node:assert/strict` only, which is
- * the point — the simulation is pure enough to be tested without a browser, a
+ * the point. The simulation is pure enough to be tested without a browser, a
  * bundler or a dependency, and every clause of the sensory contract that can be
  * stated as a number is stated here rather than in prose.
  *
  * Tolerances are named and justified where they appear. Where a claim can be
- * exact — determinism, reduced-motion equivalence — it is asserted EXACTLY, by
+ * exact, determinism, reduced-motion equivalence. It is asserted EXACTLY, by
  * bitwise array comparison, because a tolerance there would be hiding drift.
  */
 import test from 'node:test';
@@ -21,7 +21,7 @@ import { DATASET, buildSimSpec, hopRings } from './dataset.js';
 const DT = 1 / 60;
 
 /**
- * A single anchored body with no channels at all — the weight channel in
+ * A single anchored body with no channels at all. The weight channel in
  * isolation, so a mass claim cannot be contaminated by a neighbour's pull.
  */
 function loneBody(mass, params) {
@@ -53,7 +53,7 @@ function pair(stiffness, { mass = 20, separation = 200, params } = {}) {
  *
  * A speed threshold cannot be used here. An underdamped body passes through
  * zero speed at every turning point, so "first frame under 0.6 px/s" samples
- * WHERE IN THE SWING the frame happened to land and is not monotone in mass —
+ * WHERE IN THE SWING the frame happened to land and is not monotone in mass,
  * measured 115 frames at mass 20 against 71 at mass 40, which is a
  * frame-quantisation artefact, not a lighter-feeling hub. The envelope is what
  * a reader actually perceives as "it has stopped".
@@ -145,7 +145,7 @@ test('TENSION: a stiff channel propagates displacement, a weak one does not', ()
     const sim = pair(calls);
     const start = sim.positionOf('b').x;
     // Hold 'a' displaced long enough for the neighbourhood to reach the
-    // deformed equilibrium — this measures coupling, not the transient.
+    // deformed equilibrium. This measures coupling, not the transient.
     for (let i = 0; i < 600; i += 1) {
       sim.applyDrag('a', -PULL, 0);
       sim.step(DT);
@@ -186,7 +186,7 @@ test('TENSION: on the real subgraph, deformation falls off with hop distance', (
   }
   const oneHop = byHop.get(1);
   const threeHop = byHop.get(3) ?? 0;
-  assert.ok(oneHop > 12, `one-hop neighbours barely moved (${oneHop.toFixed(2)} px) — coupling is not being felt`);
+  assert.ok(oneHop > 12, `one-hop neighbours barely moved (${oneHop.toFixed(2)} px), coupling is not being felt`);
   assert.ok(
     threeHop < oneHop * 0.35,
     `three-hop displacement ${threeHop.toFixed(2)} px is not clearly less than one-hop ${oneHop.toFixed(2)} px`,
@@ -225,7 +225,7 @@ test('RELEASE: total energy decays monotonically and nearly to nothing', () => {
   assert.ok(sim.isSettled(), 'the field never came to rest after release');
 });
 
-test('RELEASE: the swing decays fast — one small overshoot, then nothing', () => {
+test('RELEASE: the swing decays fast, one small overshoot, then nothing', () => {
   const PULL = 200;
   const sim = loneBody(63);
   const anchor = sim.anchorOf('a');
@@ -251,11 +251,11 @@ test('RELEASE: the swing decays fast — one small overshoot, then nothing', () 
     previous = offset;
     if (swings.length >= 3) break;
   }
-  assert.ok(swings.length >= 2, 'the body never swung back — check the release path');
+  assert.ok(swings.length >= 2, 'the body never swung back, check the release path');
   assert.ok(swings[0] >= PULL * 0.9, `the first swing should be the pull itself, measured ${swings[0].toFixed(1)} px`);
   assert.ok(swings[1] < PULL * 0.12, `overshoot ${swings[1].toFixed(2)} px is more than 12 % of the pull`);
   if (swings[2] !== undefined) {
-    assert.ok(swings[2] < PULL * 0.02, `second swing ${swings[2].toFixed(3)} px is still visible — this is ringing`);
+    assert.ok(swings[2] < PULL * 0.02, `second swing ${swings[2].toFixed(3)} px is still visible. This is ringing`);
   }
 });
 
@@ -295,7 +295,7 @@ test('DETERMINISM: same seed and same gesture script give an identical trajector
 });
 
 test('REDUCED MOTION: settling in one shot lands on bit-identical positions', () => {
-  // Reduced motion is not an approximation of the animated path — it is the
+  // Reduced motion is not an approximation of the animated path. It is the
   // same `step()` sequence with the paints removed. So the arrays must match
   // EXACTLY, and this test would catch any renderer-side shortcut that broke
   // that equivalence.
@@ -358,7 +358,7 @@ test('substepping is a refinement, not a different simulation', () => {
 
 test('every drawn row IS the measured hop ring', () => {
   // The row caption is "hop distance from the focus, not elevation", so a node's
-  // ring and its measured distance cannot be allowed to disagree — that caption
+  // ring and its measured distance cannot be allowed to disagree. That caption
   // is the whole reason the sheet is not a decorative flow diagram.
   const rings = hopRings(DATASET, DATASET.focusId);
   const expected = { u3: 3, u2: 2, u1: 1, focus: 0, d1: 1, d2: 2, d3: 3 };

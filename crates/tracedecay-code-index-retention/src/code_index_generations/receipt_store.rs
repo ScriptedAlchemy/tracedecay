@@ -45,7 +45,7 @@ fn receipt_bytes<T: Serialize>(
 }
 
 /// Whether the exact receipt is already committed. A present file with
-/// different bytes is not "durable with drift" — it is a digest collision and
+/// different bytes is not "durable with drift", it is a digest collision and
 /// therefore corrupt evidence.
 pub(super) fn receipt_is_durable<T: Serialize>(
     store_root: &Path,

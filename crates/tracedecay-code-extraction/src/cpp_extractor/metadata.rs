@@ -439,7 +439,7 @@ fn tail_has_pure_virtual_token(
 
 /// True when `tail` contains a C++ pure-specifier `= 0`.
 ///
-/// The `0` must be a lone token — `= 00`, `= 0x`, and `= 0UL` are not
+/// The `0` must be a lone token. `= 00`, `= 0x`, and `= 0UL` are not
 /// pure-specifiers. `= 0 override` / `= 0;` remain valid.
 fn is_pure_specifier(tail: &[u8]) -> bool {
     let mut index = 0;

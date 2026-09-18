@@ -7,13 +7,13 @@
  * about accessibility:
  *
  *  1. Arrow keys and Enter reach every row, including the project rows, and
- *     the active row is announced — the list is a `listbox` whose selection
+ *     the active row is announced, the list is a `listbox` whose selection
  *     lives in `aria-activedescendant` on the input, so a mouse-only test
  *     would pass while a screen reader was told nothing.
  *
  *  2. The activation the pick lands in is the one the registry measured. The
  *     listing carries `is_active` computed against the same `active_project_id`
- *     the gateway accepts writes on, so a pick may start from that answer —
+ *     the gateway accepts writes on, so a pick may start from that answer,
  *     but the field is optional on the wire, and a row that omits it must
  *     leave the scope unresolved rather than reading absence as "not active".
  */
@@ -38,7 +38,7 @@ import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
  *
  * `is_active` is passed through as given, including `undefined`, because the
  * field is optional on the wire and the case where it is missing is one of the
- * cases under test — a helper that defaulted it would delete that case.
+ * cases under test, a helper that defaulted it would delete that case.
  */
 function registryEntry(
   projectId: string,
@@ -132,7 +132,7 @@ function combobox(): HTMLElement {
 /** The row the input currently points at, by its rendered label.
  *
  * Resolved with `getElementById`, exactly as an assistive technology resolves
- * an IDREF — so an `aria-activedescendant` that names no element reports "the
+ * an IDREF, so an `aria-activedescendant` that names no element reports "the
  * active id names no row" rather than quietly passing. */
 function activeOptionLabel(): string {
   const id = combobox().getAttribute('aria-activedescendant');
@@ -239,7 +239,7 @@ describe('CommandPalette keyboard operation', () => {
   it('leaves a row that never said whether it is active unresolved, not inactive', async () => {
     // `is_active` is optional on the wire. Reading its absence as `false`
     // would disable writes on the active project and tell the reader, in a
-    // full sentence, that it is not the active one — a confident wrong answer
+    // full sentence, that it is not the active one, a confident wrong answer
     // built out of a field the daemon simply did not send.
     const user = userEvent.setup();
     stubListing(listing([registryEntry('proj-quiet', 'Unstated', undefined)]));
@@ -259,8 +259,8 @@ describe('CommandPalette keyboard operation', () => {
  * The option ids themselves, which are what the announcement is made of.
  *
  * `aria-activedescendant` holds an IDREF, and IDREFs are whitespace-delimited.
- * Option ids were built from `entry.id` — `scope:{project_id}:{canonical_root}`
- * — so a project checked out under a path containing a space produced a value
+ * Option ids were built from `entry.id`, `scope:{project_id}:{canonical_root}`
+ *, so a project checked out under a path containing a space produced a value
  * naming two ids, neither of which existed, and the row a keyboard user had just
  * moved to was announced as nothing. Every fixture above uses `/repos/{id}`,
  * which is why the suite never saw it.
@@ -268,7 +268,7 @@ describe('CommandPalette keyboard operation', () => {
 describe('CommandPalette option identity', () => {
   /**
    * Quotes and backslashes are legal in a POSIX path, and unlike a space they do
-   * not break `getElementById` — so asserting only that the reference resolves
+   * not break `getElementById`, so asserting only that the reference resolves
    * would pass with the ids built from the path. What has to hold is that no path
    * character reaches the id at all: the announcement must be a bare token,
    * whatever the project is checked out under.
@@ -299,7 +299,7 @@ describe('CommandPalette option identity', () => {
  * The list scrolls past about eight rows and the project rows come after every
  * workspace, so arrowing into the registry moved a selection off screen. And
  * `active` was reset only by a query change or a reopen, while the list has a
- * second input — the registry read — so a listing that shrank left the index
+ * second input, the registry read, so a listing that shrank left the index
  * past the end: `aria-activedescendant` referring to nothing, and Enter firing
  * nothing, on a palette that still looked navigable.
  */
@@ -344,7 +344,7 @@ describe('CommandPalette long and shrinking lists', () => {
     const deep = activeOptionLabel();
     expect(deep).not.toContain('names no row');
 
-    // The registry answers with fewer projects than before — a refetch after a
+    // The registry answers with fewer projects than before, a refetch after a
     // project was removed. Every row past the new end disappears at once.
     act(() => {
       client.setQueryData([...projectRegistryListKey, UNSCOPED_CACHE_KEY], {

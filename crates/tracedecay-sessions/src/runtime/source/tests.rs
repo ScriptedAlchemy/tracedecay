@@ -1035,7 +1035,7 @@ fn raw_strict_resume_validates_the_prefix_once_per_scan() {
 /// A first-sight scan must not hash the whole file to police itself.
 ///
 /// The snapshot fingerprint exists to catch a rewrite that lands *during* a
-/// scan, and catching that needs two independent full passes — one before the
+/// scan, and catching that needs two independent full passes, one before the
 /// read and one after. On a cold catch-up every file takes both, which is why
 /// ingesting 109 MB of transcript cost 43.5 GB of hashing. Identity, size and
 /// mtime already fail closed on every observable change, so the pair is spent

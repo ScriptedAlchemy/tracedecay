@@ -150,7 +150,7 @@ fn probe_projection() -> GraphProjectionIdentity {
 /// deferred graph route while activation is still warming, both application
 /// services attach immediately, graph reads stay typed-unavailable until
 /// activation, and the same bound route recovers the moment activation
-/// completes — no rebind, no 5-second refusal loop for the daemon lifetime.
+/// completes. No rebind, no 5-second refusal loop for the daemon lifetime.
 #[tokio::test]
 async fn work_surfaces_attach_and_recover_through_deferred_graph_activation() {
     tracedecay_global_db::register_registered_schema_installer();

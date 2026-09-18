@@ -10,7 +10,7 @@ import { failedEvents, readOutcomes, type AttemptFailureReading } from './failur
  *
  * The analytics fold accounts for how the window's events came out, and carries
  * a short tape of the latest ones. The work-product graph's runtime projection
- * accounts for attempts — the executions the daemon could observe, and the
+ * accounts for attempts, the executions the daemon could observe, and the
  * state each is in.
  *
  * Three separations this surface exists to hold:
@@ -53,7 +53,7 @@ export function AgentFailureContext({
               <span className="td-value">{outcome.counted.toLocaleString()}</span> accounted
               events came out as a failure
               {outcome.counted > 0
-                ? ` — ${((outcome.failedTotal / outcome.counted) * 100).toFixed(outcome.failedTotal === 0 ? 0 : 2)}%`
+                ? `, ${((outcome.failedTotal / outcome.counted) * 100).toFixed(outcome.failedTotal === 0 ? 0 : 2)}%`
                 : ''}
               .
             </p>
@@ -76,7 +76,7 @@ export function AgentFailureContext({
                 data-agent-outcomes-unclassified={outcome.unclassified.length}
               >
                 {outcome.unclassifiedTotal.toLocaleString()} events came out as{' '}
-                {outcome.unclassified.map((row) => row.label).join(', ')} — {' '}
+                {outcome.unclassified.map((row) => row.label).join(', ')}, {' '}
                 {outcome.unclassified.length === 1 ? 'a word' : 'words'} this build does not
                 classify either way. {outcome.unclassified.length === 1 ? 'It is' : 'They are'}{' '}
                 counted in the denominator above and in neither the failures nor the settled
@@ -85,7 +85,7 @@ export function AgentFailureContext({
             ) : null}
             <p className="text-3xs leading-relaxed text-text-muted">
               Shares are of the {outcome.counted.toLocaleString()} events this accounting
-              described, which is not necessarily the whole window — the fold counts the window
+              described, which is not necessarily the whole window, the fold counts the window
               and describes the outcomes separately.
             </p>
           </>
@@ -97,7 +97,7 @@ export function AgentFailureContext({
         {tape.served === 0 ? (
           <p className="text-2xs leading-relaxed text-text-muted" data-agent-failure-tape="none">
             The fold served no recent events, so there is no tape to read failures off. The
-            outcome accounting above is unaffected by this — it is a separate measurement.
+            outcome accounting above is unaffected by this, it is a separate measurement.
           </p>
         ) : tape.events.length === 0 ? (
           <p className="text-2xs leading-relaxed text-text-muted" data-agent-failure-tape="clean">
@@ -132,8 +132,8 @@ export function AgentFailureContext({
             </ol>
             <p className="text-3xs leading-relaxed text-text-muted">
               {tape.events.length} of the {tape.served} events the fold served came out as a
-              failure. The tape carries no message, stack or argument — only the tool, the
-              instant and the outcome — so nothing here explains why any of them failed.
+              failure. The tape carries no message, stack or argument, only the tool, the
+              instant and the outcome, so nothing here explains why any of them failed.
             </p>
           </>
         )}
@@ -188,7 +188,7 @@ function AttemptFailures({ reading }: { reading: AttemptFailureReading }) {
         <StateChip kind="unavailable" detail="runtime projection observed no attempt" />
         <p className="text-3xs leading-snug text-text-muted">
           The graph answered at version {reading.graphVersion} and its runtime projection
-          reports coverage <span className="td-value">unavailable</span> — the daemon could
+          reports coverage <span className="td-value">unavailable</span>, the daemon could
           observe no attempt. That is the daemon declining to say how attempts came out, so no
           failure count is drawn from it.
         </p>
@@ -262,8 +262,8 @@ function AttemptFailures({ reading }: { reading: AttemptFailureReading }) {
         </ul>
       )}
       <p className="text-3xs leading-relaxed text-text-muted">
-        The runtime projection carries an attempt identity and a state and nothing else — no
-        message, no exit code, no instant — so this names which attempts did not come out clean
+        The runtime projection carries an attempt identity and a state and nothing else, no
+        message, no exit code, no instant, so this names which attempts did not come out clean
         and cannot say why.
       </p>
     </section>

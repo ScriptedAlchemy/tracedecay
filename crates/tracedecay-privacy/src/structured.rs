@@ -728,7 +728,7 @@ fn parse_toml_document(
     // Only a header TOML itself accepts commits the document to the TOML
     // lane. Prose that opens with a bracketed annotation line (LCM's own
     // compacted-history scaffold emits `[Current user objective …]`) is not a
-    // table header — bare TOML keys cannot contain unquoted spaces — and must
+    // table header, bare TOML keys cannot contain unquoted spaces, and must
     // fall through to the raw scan instead of quarantining as malformed TOML.
     let table_header = table_candidate.starts_with('[')
         && table_candidate.ends_with(']')

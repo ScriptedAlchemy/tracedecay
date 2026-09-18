@@ -84,7 +84,7 @@ const ABSENT_TAIL: &str = "/application/route-exposure-conformance-absent";
 const RELATIVE_WITNESS_TAIL: &str = "/application/primitives/storage_status";
 
 /// A project id the registry cannot resolve, used to show that an unresolved
-/// project also answers `404` — which is why the witness probe above has to pass
+/// project also answers `404`, which is why the witness probe above has to pass
 /// before any per-route verdict is trusted.
 const UNKNOWN_PROJECT_ID: &str = "project.route-exposure-conformance-unknown";
 
@@ -391,7 +391,7 @@ fn read_listening_url(stdout: std::process::ChildStdout, process: &mut Child) ->
     if let Some(url) = listening {
         // Keep draining the pipe for the server's whole life. Dropping the read
         // end here would turn the dashboard's next stdout write into SIGPIPE,
-        // killing the very mount the journey is about to exercise — a failure
+        // killing the very mount the journey is about to exercise, a failure
         // that surfaces later as a connection refusal with no cause attached.
         std::thread::spawn(move || {
             let mut line = String::new();
@@ -606,8 +606,8 @@ fn product_task_create_draft() -> Value {
 /// Both arms are named because the point is that the surface never leaves the
 /// contract: a served operation carries a binding, a contract, and one of the
 /// three outcome families; a refused one carries the safe problem record and a
-/// status that says so. Anything else — a bare `405`, an empty body, an
-/// untagged object — is the failure this gate exists to catch.
+/// status that says so. Anything else, a bare `405`, an empty body, an
+/// untagged object, is the failure this gate exists to catch.
 fn assert_canonical_envelope(label: &str, status: u16, body: &Value) {
     assert_ne!(status, 404, "{label} must be mounted: {body}");
     assert_ne!(status, 405, "{label} must accept POST: {body}");
@@ -702,8 +702,8 @@ fn post_dashboard_envelope(agent: &ureq::Agent, url: &str, body: &Value) -> (u16
 /// The mounting window between daemon start and the project runtime binding is
 /// a real production state the dashboard renders as retryable warming, so it
 /// is graded here rather than slept past: every answer inside the window must
-/// be the typed retryable unavailable problem — never an empty success, a
-/// crash, or a concealment — and the first answer outside it is returned for
+/// be the typed retryable unavailable problem, never an empty success, a
+/// crash, or a concealment, and the first answer outside it is returned for
 /// the caller's strict assertions.
 fn poll_past_warming(label: &str, post: &mut dyn FnMut() -> (u16, Value)) -> (u16, Value) {
     let deadline = Instant::now() + Duration::from_secs(120);
@@ -735,7 +735,7 @@ fn poll_past_warming(label: &str, post: &mut dyn FnMut() -> (u16, Value)) -> (u1
 ///
 /// This deliberately does not reuse [`assert_canonical_envelope`]: that helper
 /// reads any `404` as an unmounted route, but a concealed denial answers `404`
-/// *with* the canonical problem record — the discriminator between the two is
+/// *with* the canonical problem record, the discriminator between the two is
 /// the envelope in the body, which is exactly what is asserted here.
 fn assert_typed_problem(label: &str, status: u16, body: &Value, expected: (u16, &str, bool)) {
     let (expected_status, expected_kind, expected_retryable) = expected;
@@ -761,8 +761,8 @@ fn assert_typed_problem(label: &str, status: u16, body: &Value, expected: (u16, 
 /// it: every previous test of the surface either stubbed the owner, mocked the
 /// fetch, or graded route registration without looking at the answer. This runs
 /// both surfaces of one live daemon in the order a real client encounters them
-/// and grades every typed state the dashboard renders — warming, absence,
-/// staleness, denial, refusal, and the real payloads — so a drift on either
+/// and grades every typed state the dashboard renders, warming, absence,
+/// staleness, denial, refusal, and the real payloads, so a drift on either
 /// side is a failure with a named side.
 #[test]
 fn the_work_surface_answers_real_requests_on_both_published_mounts() {
@@ -1372,8 +1372,8 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
 /// `the_work_surface_answers_real_requests_on_both_published_mounts` proves the
 /// TaskId-rooted read at its floor: a task with no accepted attempt, whose only
 /// truthful answer is zero selected sources. The question a dashboard user
-/// actually opens a task to ask — *who worked on this, and in which provider
-/// session* — was never driven on either mount. This runs one real pinned
+/// actually opens a task to ask. *who worked on this, and in which provider
+/// session*, was never driven on either mount. This runs one real pinned
 /// provider through the production spawn path, links the accepted attempt,
 /// imports the provider transcript, and grades the answer on the daemon mount
 /// and the dashboard mount, in all four temporal modes, across a physical
@@ -1475,8 +1475,8 @@ fn public_executable_routes_are_served_by_the_production_daemon() {
             assert!(
                 probe.status == StatusCode::NOT_FOUND.as_u16()
                     || probe.status == StatusCode::METHOD_NOT_ALLOWED.as_u16(),
-                "the {surface} method-mismatch probe answered {} — neither 404 \
-                 nor 405 — so it no longer discriminates a mounted path. A \
+                "the {surface} method-mismatch probe answered {}, neither 404 \
+                 nor 405, so it no longer discriminates a mounted path. A \
                  binding served on GET as well as POST would do this; give such \
                  a binding a probe method it does not serve instead of relaxing \
                  this check.\n  {}",

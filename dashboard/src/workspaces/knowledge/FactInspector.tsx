@@ -1,5 +1,5 @@
 /**
- * FACT INSPECTOR — one fact, its retained content, where it came from, how its
+ * FACT INSPECTOR, one fact, its retained content, where it came from, how its
  * trust moved, and exactly which of those readings this build can vouch for.
  *
  * Two modes, and the eyebrow says which is in force. INSPECTING previews the
@@ -9,7 +9,7 @@
  * selected fact and reports each read's own state.
  *
  * The provenance block prints the fact's persisted fields by their real names
- * — `source_label`, `created_at`, `last_recalled_at` — rather than the
+ *, `source_label`, `created_at`, `last_recalled_at`, rather than the
  * concept plate's `repo`/`path` vocabulary, because no path or repository
  * authority is joined to a memory fact today. Where the plate shows a
  * verification checklist, the ladder shows typed absences.
@@ -264,7 +264,7 @@ function ContentBlock({
   }
   if (detail?.outcome === 'transport') {
     // A null payload under `complete_zero_findings` is the route's answer for
-    // an identity the store does not hold — an absence, not a green complete.
+    // an identity the store does not hold, an absence, not a green complete.
     const missing = detail.state === 'complete_zero_findings';
     return (
       <div className="flex flex-col gap-2" data-content-state={missing ? 'missing' : 'transport'}>

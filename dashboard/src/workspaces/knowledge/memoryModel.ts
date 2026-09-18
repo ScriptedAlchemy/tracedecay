@@ -75,8 +75,8 @@ export function trustHistoryReading(payload: TrustHistoryPayload): TrustHistoryR
   };
 }
 
-/** The state a feedback event's detail is in. `available` is not a state chip —
- * the detail is simply shown — so this is only called for the other two. */
+/** The state a feedback event's detail is in. `available` is not a state chip , 
+ * the detail is simply shown, so this is only called for the other two. */
 export function trustDetailState(
   availability: TrustDetailAvailability,
 ): DomainStateKind | null {
@@ -99,7 +99,7 @@ export function trustDetailState(
 export interface ProjectionReading {
   /** `true` only when the daemon decomposed query-time-derived phase encodings. */
   readonly projected: boolean;
-  /** What the panel says the axes mean — or that they mean nothing. */
+  /** What the panel says the axes mean, or that they mean nothing. */
   readonly note: string;
   readonly points: ProjectionPayload['points'];
   /** Drawing extents, `null` when there is nothing to draw. */
@@ -137,12 +137,12 @@ export function projectionReading(payload: ProjectionPayload): ProjectionReading
   return {
     projected,
     note: projected
-      ? `principal components of ${points.length.toLocaleString()} query-time-derived phase encodings returned by a request bounded to ${payload.limit.toLocaleString()} facts, of width ${payload.dim.toLocaleString()} — the axes are the two directions of greatest variance, and carry no unit`
+      ? `principal components of ${points.length.toLocaleString()} query-time-derived phase encodings returned by a request bounded to ${payload.limit.toLocaleString()} facts, of width ${payload.dim.toLocaleString()}, the axes are the two directions of greatest variance, and carry no unit`
       : points.length === 0
         ? payload.coverage.completeness === 'complete'
           ? `the complete eligible set returned no phase encodings, so there is nothing to project`
           : `this ${payload.coverage.completeness} request, bounded to ${payload.limit.toLocaleString()} facts, returned no phase encodings; whole-store coverage is unknown`
-        : `too few comparable query-time-derived phase encodings to decompose (${points.length.toLocaleString()} of width ${payload.dim.toLocaleString()}) — the positions below are placeholders, not a projection`,
+        : `too few comparable query-time-derived phase encodings to decompose (${points.length.toLocaleString()} of width ${payload.dim.toLocaleString()}), the positions below are placeholders, not a projection`,
     points,
     extent,
     categories,
@@ -153,7 +153,7 @@ export function projectionReading(payload: ProjectionPayload): ProjectionReading
 /* ---- similarity ---------------------------------------------------------- */
 
 export interface SimilarityReading {
-  /** Facts successfully encoded on read — never the store's fact total. */
+  /** Facts successfully encoded on read, never the store's fact total. */
   readonly encoded: number;
   /** Pairs scored above the computation's own floor, before this request's. */
   readonly scored: number;
@@ -186,7 +186,7 @@ export function similarityReading(payload: SimilarityPayload): SimilarityReading
     max: distribution.max_score,
     denominators:
       payload.count < 2
-        ? `${payload.count.toLocaleString()} query-time encoded fact${payload.count === 1 ? '' : 's'} — a pair needs two, so nothing was scored`
+        ? `${payload.count.toLocaleString()} query-time encoded fact${payload.count === 1 ? '' : 's'}, a pair needs two, so nothing was scored`
         : `${returned.toLocaleString()} pairs shown at or above ${payload.min_similarity.toFixed(2)}; ${payload.total_pairs.toLocaleString()} finite pairs scored globally over ${payload.count.toLocaleString()} query-time encoded facts`,
   };
 }

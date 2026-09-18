@@ -157,7 +157,7 @@ pub enum TargetScan {
     /// repository. Historical attribution is unavailable for this target,
     /// but retrying cannot restore the archived ref.
     MissingReference,
-    /// The scan could not run — the worktree is gone, `git log` failed, or the
+    /// The scan could not run, the worktree is gone, `git log` failed, or the
     /// repository was unreadable. Distinct from `Scanned(vec![])`: the target's
     /// commits are unknown, not absent, so the sweep watermark must not move
     /// past it or the target would never be revisited.

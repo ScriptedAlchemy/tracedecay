@@ -498,7 +498,7 @@ async fn cancellation_during_file_proof_and_emission_settles_typed_and_releases_
 /// checkpoints precede the first proof window (two in the adapter, one in the
 /// backend, two in the LCM open) and the proof then checkpoints once per
 /// 64 KiB window of the 1 MiB payload, so a budget of eight is exhausted at
-/// the fourth window — any budget in 6..=20 trips inside the proof.
+/// the fourth window, any budget in 6..=20 trips inside the proof.
 #[tokio::test]
 async fn work_budget_exhausted_during_file_proof_is_typed_and_emits_nothing() {
     let dir = tempdir().expect("temporary directory");

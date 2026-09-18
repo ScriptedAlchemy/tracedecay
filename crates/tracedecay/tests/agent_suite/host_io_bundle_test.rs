@@ -3,7 +3,7 @@
 //! Every automation entry point that writes host-owned files takes a
 //! [`HostIo`], so these tests can hand two differently-composed bundles to the
 //! same process and prove that each write, removal, and export sweep reaches
-//! exactly the bundle it was given — and that a bundle whose write surface
+//! exactly the bundle it was given, and that a bundle whose write surface
 //! refuses produces a typed error, never an empty or "disabled" success.
 
 use std::path::{Path, PathBuf};

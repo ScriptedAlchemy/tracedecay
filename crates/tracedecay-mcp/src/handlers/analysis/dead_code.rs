@@ -1,4 +1,4 @@
-//! `tracedecay_dead_code` — symbols with no incoming edges.
+//! `tracedecay_dead_code`, symbols with no incoming edges.
 
 use super::*;
 

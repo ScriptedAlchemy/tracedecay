@@ -528,7 +528,7 @@ fn component_assets(
     // directory, exactly as Claude Code's marketplace source feeds
     // `claude plugin install`. Render it through the integration's own
     // renderer so the bytes the transaction deploys are byte-identical to the
-    // ones staging writes and the doctor reads — two renderers here would let
+    // ones staging writes and the doctor reads, two renderers here would let
     // an install and a repair disagree about what was staged.
     if (host, component) == (HostKindV1::Gemini, HostComponentV1::ContextMcp) {
         let files = super::gemini::rendered_extension_files(tracedecay_bin)
@@ -870,7 +870,7 @@ mod tests {
     }
 
     /// Both writers must agree even when the running binary is not the
-    /// installed one — `./target/release/tracedecay reinstall` is exactly the
+    /// installed one. `./target/release/tracedecay reinstall` is exactly the
     /// case that corrupted the `OpenCode` transaction and wedged the shared
     /// component-set journal.
     #[test]
@@ -933,7 +933,7 @@ mod tests {
     }
 
     /// Both writers must agree even when the running binary is not the
-    /// installed one — `./target/release/tracedecay reinstall` is exactly the
+    /// installed one. `./target/release/tracedecay reinstall` is exactly the
     /// case that corrupted the Hermes transaction and left a pending
     /// `component-set-journal.hermes.v1.json` behind.
     #[test]
@@ -1176,7 +1176,7 @@ mod tests {
     /// descriptor, never Copilot's own `mcp-config.json`: that document is
     /// written by the host command, and owning it here would make the
     /// transaction's artifact write race the host's registry merge. Core is
-    /// refused through the capability matrix, not through a missing arm — the
+    /// refused through the capability matrix, not through a missing arm, the
     /// host reports no hook route to install.
     #[test]
     fn copilot_packages_only_the_mcp_route_its_host_cli_registers() {
@@ -1238,7 +1238,7 @@ mod tests {
     /// `gemini extensions install` adopts. Core is refused because the staged
     /// extension declares no hook and the capability matrix reports none, and
     /// the deployed bytes must be exactly what the integration's own staging
-    /// writes — otherwise install and repair would stage two different
+    /// writes, otherwise install and repair would stage two different
     /// extensions.
     #[test]
     fn gemini_packages_the_extension_source_its_host_cli_installs() {

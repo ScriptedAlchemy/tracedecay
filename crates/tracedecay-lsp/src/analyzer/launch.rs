@@ -2,7 +2,7 @@
 //!
 //! A configured command such as `rust-analyzer` is usually a rustup proxy. The
 //! proxy resolves the project's active toolchain from the spawn directory and,
-//! by default, downloads that toolchain when it is missing — so opening a
+//! by default, downloads that toolchain when it is missing, so opening a
 //! dashboard on a project whose parent pins an uninstalled toolchain started a
 //! network install into the rustup home. Every spawn therefore goes through
 //! [`AnalyzerLaunchResolver::resolve`]: a proxy is replaced by the real

@@ -895,8 +895,8 @@ mod tests {
 
     /// A prepared cohort is frozen into the snapshot, so a cursor binds its
     /// exact contents: replaying against the same cohort succeeds and any
-    /// change refuses. Ordinary session reads bind position by keyset instead
-    /// — their cohort is a window that is only materialized by the read.
+    /// change refuses. Ordinary session reads bind position by keyset instead,
+    /// their cohort is a window that is only materialized by the read.
     #[test]
     fn cursor_ignores_unrelated_no_match_state_but_rejects_candidate_change() {
         let provider = auth(7);

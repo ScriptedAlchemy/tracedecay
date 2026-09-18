@@ -9,7 +9,7 @@
 //! The temporal occurrence is generation-bound, so it only exists once a refresh
 //! has materialized the message. A summary published while a refresh is still
 //! pending must therefore resolve through the durable observation authority
-//! instead — the exact-observation anchor identity is retained when the
+//! instead, the exact-observation anchor identity is retained when the
 //! observation is persisted and does not change when the refresh later
 //! materializes the occurrence, so both routes agree on the anchor.
 //!
@@ -17,9 +17,9 @@
 //! occurrences of the whole message set are read in one statement, and the
 //! messages that leaves unresolved share one pass over the session's canonical
 //! observation effects, each observation decoded and projected once. Per
-//! message the outcome is exactly the single-message resolution — same anchor
+//! message the outcome is exactly the single-message resolution, same anchor
 //! derivation, ownership, receipt agreement, readability and ambiguity
-//! refusals — so `K` sources cost one scan of `N` effects instead of `K`.
+//! refusals, so `K` sources cost one scan of `N` effects instead of `K`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -51,7 +51,7 @@ struct MaterializedOccurrence {
 /// source order) for one session, reading the shared authorities once.
 ///
 /// A message absent from the returned map has no canonical anchor in this
-/// store at all — the only case in which the publication falls back to a
+/// store at all, the only case in which the publication falls back to a
 /// legacy compatibility anchor. A refusal raised by one message's own
 /// evidence names that message; a refusal the shared observation scan raises
 /// before any message matched (missing or undecodable observation authority)

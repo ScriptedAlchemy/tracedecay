@@ -6,15 +6,15 @@
 > `tracedecay-usecases` are all workspace members with clean
 > `cargo check --workspace`; `tracedecay-migrate` was deleted outright
 > (`923816ed3`) rather than landed, folding its surface into `global-db` and
-> `runtime-core`. The "scar cleanup" item this plan called for — delete each
-> mover's `SEAMS.md` as its rows resolve — is done: all seven were retired,
+> `runtime-core`. The "scar cleanup" item this plan called for, delete each
+> mover's `SEAMS.md` as its rows resolve, is done: all seven were retired,
 > with their few still-durable contracts (fail-open/fail-closed port
 > semantics, dependency/forbidden-edge proofs, sealed benchmark provenance,
 > the `tracedecay-application`-vs-`tracedecay-usecases` layer-naming split)
 > folded into each crate's `lib.rs` module doc. Treat the target map and
 > execution-model sections below as historical planning, not open work.
 
-Supersedes the phased breakup plans (deleted). Owner rulings: **no phases** —
+Supersedes the phased breakup plans (deleted). Owner rulings: **no phases**,
 one mass move of all root subsystems into workspace crates; **breakage during
 the move is acceptable** ("move all crate code first, then deal with the
 aftermath once the builds will no longer be slow"); validation is the whole
@@ -22,7 +22,7 @@ product end to end, not per-move gates.
 
 ## Why
 
-`src/` is ~700K lines in one crate — every edit recompiles a 1.3 GB rlib that
+`src/` is ~700K lines in one crate, every edit recompiles a 1.3 GB rlib that
 ~56 test binaries relink. Measured duplication with the 21 existing crates is
 ~0.9%; the mass is genuinely unsplit subsystems. Only moving them out shrinks
 the serial build tail.
@@ -55,7 +55,7 @@ dashboard/assets.rs, hooks/ daemon-side handlers (cycle with daemon), and thin
 
 - One mover agent per subsystem in an isolated worktree; `git mv` whole
   modules; shim files at old paths; each mover compiles only ITS crate
-  (best-effort) — a red root is acceptable and expected mid-landing.
+  (best-effort), a red root is acceptable and expected mid-landing.
 - Lead octopus-merges all mover branches into the split landing, resolves
   Cargo.toml/lock unions, then runs the single mass fix-to-green campaign
   (fleet of fixer agents on compile errors, then whole-product validation:
@@ -80,7 +80,7 @@ ceremony.
   the code; root integration tests that exercise one crate's surface migrate
   into that crate's tests/ (with their fixtures, fixing the cargo-package
   escapes the movers cataloged). The ~56 root test binaries shrink to the
-  cross-crate journeys only — that is where the relink win lives.
+  cross-crate journeys only, that is where the relink win lives.
 - **Tame the imports.** The root shims (`pub use tracedecay_x::*`) are
   transitional scaffolding, not architecture. After green, ast-grep sweeps
   repoint root and test call sites from shim paths (`crate::sessions::X`)

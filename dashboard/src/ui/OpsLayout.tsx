@@ -24,7 +24,7 @@ export function FreshnessMeter({
     <span
       className={cn('inline-flex shrink-0 items-center gap-1.5 text-2xs', className)}
       data-freshness={tier}
-      title={`${tier} — ${FRESHNESS_BOUNDS[tier]}`}
+      title={`${tier}, ${FRESHNESS_BOUNDS[tier]}`}
     >
       <span aria-hidden className="inline-flex h-3 items-end gap-[2px]">
         {[0, 1, 2, 3].map((index) => (

@@ -1,8 +1,8 @@
 //! Equivalence proofs for lazily memoized projection output digests.
 //!
-//! Each test recomputes the digest with the exact pre-memoization expression —
+//! Each test recomputes the digest with the exact pre-memoization expression,
 //! the same canonical JSON shape fed through `PayloadReferenceV1::for_payload`
-//! — and asserts the memoized accessor returns identical bytes.
+//!, and asserts the memoized accessor returns identical bytes.
 
 use serde_json::json;
 use tracedecay_domain::{

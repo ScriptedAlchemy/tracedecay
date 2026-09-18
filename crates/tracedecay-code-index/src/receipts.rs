@@ -8,8 +8,8 @@
 //! `source_manifest_digest`), the prior/current chunk digests, the operation,
 //! the outcome, and the output digest. Unchanged chunks are authenticated by
 //! the request digest and summarized by `reused_count` without per-chunk rows.
-//! Receipts are deterministic — the domain contract excludes store-owned
-//! operational timestamps from receipt identity — so replaying an identical
+//! Receipts are deterministic, the domain contract excludes store-owned
+//! operational timestamps from receipt identity, so replaying an identical
 //! request with identical decisions produces an identical receipt and
 //! publication digest (idempotent replay).
 //!
@@ -146,7 +146,7 @@ pub fn decisions_for_noop(_changes: &ChangedCodeChunkSetV1) -> Vec<ChunkProjecti
 ///
 /// Every entry point that accepts a request from outside its call chain
 /// recomputes the canonical request digest and re-validates the changed-chunk
-/// set — both O(request) canonical hashes over sets that reach six figures.
+/// set, both O(request) canonical hashes over sets that reach six figures.
 /// Once a chain has done that for a request it does not mutate again, the
 /// same evidence is threaded to the remaining steps instead of hashing the
 /// request two more times.
@@ -175,8 +175,8 @@ impl ProjectionRequestEvidenceV1 {
 /// Whether a batch receipt's publication digest still has to be recomputed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PublicationDigestTrustV1 {
-    /// The receipt crossed a trust boundary — a projection sink, durable
-    /// storage, or any other caller — so its self-declared publication digest
+    /// The receipt crossed a trust boundary, a projection sink, durable
+    /// storage, or any other caller, so its self-declared publication digest
     /// proves nothing until it is recomputed from the receipt's own fields.
     Unverified,
     /// The receipt was sealed by [`build_batch_receipt`] earlier in this same

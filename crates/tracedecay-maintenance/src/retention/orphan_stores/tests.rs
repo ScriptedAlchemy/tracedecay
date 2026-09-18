@@ -242,8 +242,8 @@ fn live_registered_alias_keeps_the_store_out_of_every_collectable_bucket() {
 
 #[test]
 fn live_git_common_dir_keeps_a_linked_worktree_store_live() {
-    // A linked worktree's own root can vanish while the repository — and every
-    // other checkout sharing its common directory — stays live.
+    // A linked worktree's own root can vanish while the repository stays live,
+    // including every other checkout sharing its common directory.
     let gone_worktree = PathBuf::from("/definitely/not/here/linked-worktree");
     let shared_common_dir = std::env::current_dir().unwrap();
     let mut census_entry = entry(

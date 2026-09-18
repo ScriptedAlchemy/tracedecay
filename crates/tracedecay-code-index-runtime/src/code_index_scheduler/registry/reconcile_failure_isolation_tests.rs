@@ -3,7 +3,7 @@
 //!
 //! Both defects these tests pin were only observable *at the loop*: a policy
 //! object can behave perfectly while nothing consults it. Every assertion here
-//! counts reconcile passes the worker actually dispatched — never elapsed time,
+//! counts reconcile passes the worker actually dispatched, never elapsed time,
 //! which swings run to run on a shared machine.
 
 use std::fs;
@@ -452,8 +452,8 @@ async fn a_capacity_refusal_that_never_clears_is_bounded() {
 }
 
 /// FINDING 2, the distinction that matters most. A refusal that *is* a
-/// resident-memory admission failure but can never be admitted — the request
-/// alone exceeds the whole process limit — must not be self-retried. No other
+/// resident-memory admission failure but can never be admitted, the request
+/// alone exceeds the whole process limit, must not be self-retried. No other
 /// holder releasing anything makes it fit, so retrying it is the unbounded
 /// retry this PR exists to remove, wearing a capacity label.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -648,8 +648,8 @@ async fn corrupt_publication_without_build_progress_returns_terminal_admission()
 }
 
 /// The typed park is the mount's publication-authority, not a bool this worker
-/// latches after it personally observes the error. A park already present —
-/// planted by admission, a previous owner, or a test of that contract — must
+/// latches after it personally observes the error. A park already present,
+/// planted by admission, a previous owner, or a test of that contract, must
 /// stop the loop before it dispatches another reconcile.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn terminal_publication_park_stops_the_worker_without_a_local_latch() {

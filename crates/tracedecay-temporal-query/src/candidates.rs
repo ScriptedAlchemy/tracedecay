@@ -310,8 +310,8 @@ struct LexicalTokens<'a> {
     has_boolean_operator: bool,
 }
 
-/// Drops the operator positions no boolean expression can use — leading,
-/// trailing, and repeated — so the clause the store receives always alternates
+/// Drops the operator positions no boolean expression can use, leading,
+/// trailing, and repeated, so the clause the store receives always alternates
 /// term, operator, term. Terms are deduplicated only for a plain conjunction,
 /// where a repeat adds no constraint; rewriting a typed expression would change
 /// what it asked for.

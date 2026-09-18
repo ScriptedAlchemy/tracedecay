@@ -509,7 +509,7 @@ fn telemetry(fact: &Value) -> Value {
 }
 
 fn graph_publication_retryable(error: &tracedecay_domain::errors::TraceDecayError) -> bool {
-    // Control flow keys on typed project-route reason codes only — never English
+    // Control flow keys on typed project-route reason codes only, never English
     // detail prose (migrate-callers-then-delete-legacy).
     tracedecay::daemon::tool_call_transport_error_is_retryable(error)
         || matches!(

@@ -1,7 +1,7 @@
 /**
  * URL state for the Loom temporal field. Every addressable piece of reader
  * intent lives in the query string, so a link reproduces the same window,
- * branch set, filters and playback position — and a refetch never resets them.
+ * branch set, filters and playback position, and a refetch never resets them.
  *
  * Parsing is defensive: a malformed value is ignored rather than turned into a
  * window or a filter the reader never asked for.

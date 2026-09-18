@@ -248,7 +248,7 @@ fn doctor_check_registration(
 ) {
     if !config.exists() {
         dc.warn(&format!(
-            "{} not found — run `tracedecay install --agent zed` if you use {}",
+            "{} not found, run `tracedecay install --agent zed` if you use {}",
             config.display(),
             product
         ));

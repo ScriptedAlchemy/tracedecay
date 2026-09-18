@@ -8,10 +8,10 @@
 //!
 //! Supported block forms (Svelte 4 and 5):
 //!
-//! * `<script lang="ts">` — component instance script
-//! * `<script>` — component instance script (plain JS)
-//! * `<script module>` — module-level script (Svelte 5)
-//! * `<script context="module">` — module-level script (Svelte 4)
+//! * `<script lang="ts">`, component instance script
+//! * `<script>`, component instance script (plain JS)
+//! * `<script module>`, module-level script (Svelte 5)
+//! * `<script context="module">`, module-level script (Svelte 4)
 
 use std::borrow::Cow;
 
@@ -76,7 +76,7 @@ impl SvelteExtractor {
                     j += 1;
                 }
                 if j == lines.len() {
-                    // Unclosed tag — treat remainder as content.
+                    // Unclosed tag. Treat remainder as content.
                     if content_start < lines.len() {
                         ranges.push((content_start, lines.len()));
                     }

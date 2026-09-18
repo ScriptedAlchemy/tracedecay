@@ -64,7 +64,7 @@ mod unguarded {
     fn workload_is_a_no_op_for_profiling() {
         let report = Path::new(env!("CARGO_TARGET_TMPDIR")).join("session-memory-hotpath-off.json");
         let _ = std::fs::remove_file(&report);
-        // SAFETY: single-threaded with respect to readers — the feature-off
+        // SAFETY: single-threaded with respect to readers, the feature-off
         // build contains no hotpath runtime and nothing else in this test
         // binary reads these variables.
         unsafe {

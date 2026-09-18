@@ -6,7 +6,7 @@
  * viewing speed, but it never invents an event, a timestamp, or duration.
  */
 export interface LoomPlaybackFrame {
-  /** Stable LCM message identity — selection survives a render or refetch. */
+  /** Stable LCM message identity, selection survives a render or refetch. */
   id: string;
   /** The session store's ordering key, when it supplied one. */
   ordinal: number | null;

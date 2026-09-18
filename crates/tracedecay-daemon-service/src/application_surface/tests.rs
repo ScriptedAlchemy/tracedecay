@@ -1861,7 +1861,7 @@ async fn resolver_conceals_cross_project_scope_with_one_typed_denial() {
 }
 
 /// A dead daemon socket must be a fail-fast dispatch error carrying the
-/// typed connect diagnostic — never a retryable problem envelope. Wrapping
+/// typed connect diagnostic, never a retryable problem envelope. Wrapping
 /// it as retryable made the CLI re-dispatch (re-paying the 8 s connect
 /// grace each pass) until its 120 s deadline: 131 s measured for
 /// `storage_status` against a dead socket while sibling compatibility tools

@@ -32,7 +32,7 @@ const URI_SPECIAL_STATE_DB: &str = "state #%.vscdb";
 
 /// A failed durable message-id lookup is store *unavailability*, not proof the
 /// bubble is already durable. The sweep must defer it and ingest it on a later
-/// pass instead of skipping it — and it must not let a later header in the
+/// pass instead of skipping it, and it must not let a later header in the
 /// same composer advance the source cursor past the unverified bubble, which
 /// is what made the old `unwrap_or(true)` a permanent silent drop.
 #[tokio::test]
@@ -320,7 +320,7 @@ fn fixture_backed_composer_envelope_todos_reach_workflow_lifecycle() {
     ))
     .expect("Cursor composer envelope todos expected envelope");
     let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 1).unwrap();
-    // Fixture lastUpdatedAt is null — checkpoint is the content fingerprint.
+    // Fixture lastUpdatedAt is null, checkpoint is the content fingerprint.
     assert!(native.get("lastUpdatedAt").is_some_and(Value::is_null));
     let checkpoint = composer_envelope_todo_checkpoint(&native)
         .expect("fixture todos must yield a content fingerprint checkpoint");

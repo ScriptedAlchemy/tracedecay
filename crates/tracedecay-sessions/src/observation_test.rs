@@ -957,7 +957,7 @@ async fn cancellation_after_point_read_and_replay_discards_non_atomic_results() 
 ///
 /// Single-record preparation sanitizes the record and captures repository
 /// provenance, which opens the repository and reads loose refs and the Git
-/// index — synchronous and unbounded on a large repository. The probe stands
+/// index, synchronous and unbounded on a large repository. The probe stands
 /// in for that span at a controllable 50ms. `#[tokio::test]` runs on one
 /// worker, so the watcher can observe `active` above zero only if the span is
 /// genuinely off that worker: preparing inline leaves the watcher unpolled

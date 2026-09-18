@@ -1,6 +1,6 @@
 # Rust Parser Migration
 
-> **Archived supporting design — not implementation authority.** This document
+> **Archived supporting design, not implementation authority.** This document
 > preserves historical parser-migration analysis. Current requirements come
 > only from the `docs/plans/tracedecay-v2/` hierarchy. Exact crate layouts,
 > source-shape checks, branch choreography, and staged gate lists below are not
@@ -175,7 +175,7 @@ Translation strategy: keep the file structure the same (one Rust module per `*.c
 
 ## Testing strategy
 
-**Parity, not just compilation.** A regression suite parses a corpus of real-world files (the tracedecay codebase itself, the tree-sitter test fixtures, plus a curated set of "weird" markdown files including the autolink construct from #49) with both the C grammar and the Rust grammar, then asserts:
+A regression suite asserts parse-tree parity, not only successful compilation. It parses a corpus of real-world files (the tracedecay codebase itself, the tree-sitter test fixtures, plus a curated set of "weird" markdown files including the autolink construct from #49) with both the C grammar and the Rust grammar, then asserts:
 
 1. Both produce the same node count.
 2. Both produce the same root S-expression (after node name normalization).

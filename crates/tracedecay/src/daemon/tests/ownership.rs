@@ -102,8 +102,8 @@ async fn assert_fresh_project_open_owners(label: &str, git_state: ProjectGitStat
         "fresh project open must retain its LSP owner"
     );
     // Project open publishes the route as soon as its owners are registered and
-    // lets the cold code-index mount finish behind it, so the feedback cycle —
-    // which is minted against a sealed generation — arrives with that
+    // lets the cold code-index mount finish behind it, so the feedback cycle,
+    // which is minted against a sealed generation, arrives with that
     // generation rather than inside the open. Sampling the instant the open
     // returns therefore measures mount latency, not ownership. Wait for the
     // deferred mount for the one Git state that must reach it; an unborn HEAD
@@ -747,7 +747,7 @@ fn database_owner_registry_rekeys_and_evicts_stale_routes() {
 
 /// A failed rekey is terminal for the route: its replacement key could not be
 /// taken, so this registration can never serve again. Clearing the fence alone
-/// is not enough — the code-index activation mount and the query-authority
+/// is not enough, the code-index activation mount and the query-authority
 /// waiter no longer poll that flag, they hang off the route's own cancellation
 /// child. The revocation must cancel it, and must leave the project-open token
 /// it descends from alone: that one belongs to the caller, not the route.

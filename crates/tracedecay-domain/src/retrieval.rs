@@ -1121,7 +1121,7 @@ pub enum PublicRetrieverStatus {
 /// and hashed with
 /// [`QUERY_FALLBACK_SUBPAYLOAD_DIGEST_DOMAIN`]; the `digest` field is excluded
 /// from the hashed bytes. It contains the complete accepted
-/// exact+lexical+graph result — IDs, order, contributions, explanations,
+/// exact+lexical+graph result. IDs, order, contributions, explanations,
 /// coverage, and cursor bytes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

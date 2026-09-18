@@ -1,5 +1,5 @@
 //! The preparation-to-embedding boundary `build.rs` crosses, exercised as the
-//! exact code the build script mounts — not a copy that can drift.
+//! exact code the build script mounts, not a copy that can drift.
 //!
 //! Covers the property the bundle store exists for: once a producer's output
 //! is promoted, the bytes the compiler embeds no longer depend on the producer

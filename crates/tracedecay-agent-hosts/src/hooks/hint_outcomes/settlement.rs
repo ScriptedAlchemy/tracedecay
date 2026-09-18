@@ -7,7 +7,7 @@
 //! [`settle_project_hint_outcomes`] pass. Settlement imports the hook
 //! JSONL tail (where hooks record `hint_emitted`) into the durable
 //! `analytics_events` authority and then correlates outcomes into the same
-//! table — the one the `tracedecay_analytics` hints section and the
+//! table, the one the `tracedecay_analytics` hints section and the
 //! dashboard analytics API already read.
 
 use std::path::Path;
@@ -191,7 +191,7 @@ pub enum HintOutcomeSettlement {
 
 impl HintOutcomeSettlement {
     /// Renders the settlement into the ingest output object. Every state is
-    /// visible — an unavailable authority or failed pass is reported, not
+    /// visible, an unavailable authority or failed pass is reported, not
     /// silently dropped.
     pub fn as_json(&self) -> Value {
         match self {
@@ -228,7 +228,7 @@ impl HintOutcomeSettlement {
 /// unresolved hints against the project session store. Callers resolve
 /// `sources` themselves (production: `analytics_bridge::hook_import_sources`;
 /// fixtures: isolated temp files) so this pass never touches ambient
-/// operator state on its own. Best-effort by contract — failures come back
+/// operator state on its own. Best-effort by contract, failures come back
 /// as typed [`HintOutcomeSettlement`] states and are logged here so every
 /// caller inherits the same observability.
 #[hotpath::measure(label = "hosts.hooks.hint_outcomes.settle", future = true)]
@@ -313,7 +313,7 @@ pub async fn settle_project_hint_outcomes(
 /// Every stage carries only what settlement proved: the idempotent
 /// `hint_outcome` write is the exactly-once terminal ledger, so
 /// `invoked`/`terminal` count only hints settled this pass and cross-pass
-/// sums never double-count. `independently_useful` = `acted` only — the
+/// sums never double-count. `independently_useful` = `acted` only, the
 /// correlator behaviorally verified a category-matching tool fired in the
 /// independently ingested session activity (never display/self-report).
 /// `repeat_useful` stays 0 (settlement never verifies repeat use), unresolved

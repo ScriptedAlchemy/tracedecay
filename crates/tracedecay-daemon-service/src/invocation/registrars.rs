@@ -1073,8 +1073,8 @@ impl DaemonWorkRuntimeRegistrar {
                     // Store authority only. The evidence-retrieval adapter is
                     // built fresh by every route that mounts it, so comparing
                     // its object identity refused the second route of one
-                    // project — a linked worktree, or a reopen of a route
-                    // whose server was replaced — and left it permanently
+                    // project, a linked worktree, or a reopen of a route
+                    // whose server was replaced, and left it permanently
                     // degraded. Its own project scope is already proven by
                     // `grant.scope` and the authority digest.
                     if registered.actor == actor
@@ -1211,8 +1211,8 @@ impl DaemonRetainedRuntimeRegistrar {
 
     /// Registers this project's one retained runtime, or joins the incumbent.
     ///
-    /// Identity is the registered store authority — the exact authorized scope
-    /// and the actor whose grant issued it — never the identity of the ports
+    /// Identity is the registered store authority, the exact authorized scope
+    /// and the actor whose grant issued it, never the identity of the ports
     /// object. Every route builds its own `RetainedSurfacePortsV1`, so
     /// comparing that object (or the grant digest it folds the current
     /// configuration into) refused the second same-identity worktree route and

@@ -12,7 +12,7 @@ import {
 /**
  * Delivery's URL-addressable state. Every workspace mode, scope, filter and
  * selection lives here so a pasted link restores the same inbox row, umbrella,
- * journey episode or review thread — and so the DOM, the field and the exact
+ * journey episode or review thread, and so the DOM, the field and the exact
  * table fallback all read one location instead of three.
  */
 export const DELIVERY_MODES = ['inbox', 'umbrella', 'journey', 'review'] as const;
@@ -131,7 +131,7 @@ export function writeDeliveryLocation(
   return next;
 }
 
-/** A full `/delivery?…` href for a patch over the current location — the
+/** A full `/delivery?…` href for a patch over the current location, the
  * anchor form of `writeDeliveryLocation`, for links rather than handlers. */
 export function deliveryHref(current: URLSearchParams, patch: DeliveryLocationPatch): string {
   const query = writeDeliveryLocation(current, patch).toString();

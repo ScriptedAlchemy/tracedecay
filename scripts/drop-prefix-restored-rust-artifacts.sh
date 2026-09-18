@@ -5,7 +5,7 @@
 # key still unpacks another generation's target/. rustc writes .rmeta as
 # mode 0444; a later compile of the same crate hash then fails with
 # "failed to write ... .rmeta". The cargo registry from the restore stays
-# — only the incompatible compiler outputs are discarded. Never chmod.
+#, only the incompatible compiler outputs are discarded. Never chmod.
 set -euo pipefail
 
 cache_hit="${1-}"

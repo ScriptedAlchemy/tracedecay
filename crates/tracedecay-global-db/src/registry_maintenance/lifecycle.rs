@@ -9,14 +9,14 @@ pub enum StaleRootScope {
     /// gone (the user reviews candidates before applying).
     CanonicalRootMissing,
     /// Post-update auto-GC scope: both the canonical and display roots are
-    /// gone — stricter, because nobody reviews the deletion.
+    /// gone, stricter, because nobody reviews the deletion.
     AllRootsMissing,
 }
 
 /// Whether a recorded root could be proven present or absent.
 ///
-/// Deletion authority requires proof of *absence*. An inspection that fails —
-/// an unreadable parent directory, a stale mount, any I/O error — proves
+/// Deletion authority requires proof of *absence*. An inspection that fails,
+/// an unreadable parent directory, a stale mount, any I/O error, proves
 /// nothing, so it is [`RootLivenessV1::Unverifiable`] and never absence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootLivenessV1 {
@@ -315,7 +315,7 @@ pub struct ForgetRegistryProjectRows {
 /// `code_projects` row (its aliases, store instances, graph scopes, and store
 /// artifacts cascade away with it) plus the path-keyed `projects` ledger rows
 /// for every root and alias the identity records. Sibling identities are
-/// untouched — this is the row authority behind `tracedecay projects forget`.
+/// untouched, this is the row authority behind `tracedecay projects forget`.
 pub async fn forget_registry_project(
     db: &RegisteredGlobalDb,
     project_id: &str,

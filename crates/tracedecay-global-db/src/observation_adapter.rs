@@ -52,9 +52,9 @@ use tracedecay_rusqlite_runtime::repository::{
 
 /// Observation-store adapter over the already-registered authoritative
 /// runtime. The struct is concrete: the collision tests prove the
-/// terminal-refusal fast path never accesses the retained observation row —
+/// terminal-refusal fast path never accesses the retained observation row,
 /// they corrupt and hide that row after the marker exists, so any later read
-/// fails loudly — not through an adapter seam or test-only port.
+/// fails loudly, not through an adapter seam or test-only port.
 #[derive(Clone)]
 pub struct GlobalDbObservationStore {
     database: Database,
@@ -67,9 +67,9 @@ impl GlobalDbObservationStore {
         Self { database, runtime }
     }
 
-    /// Records a terminal refusal — the marker in
+    /// Records a terminal refusal, the marker in
     /// `observation_admission_refusals` AND the typed
-    /// `observation_identity_collision` coverage advance — in ONE atomic
+    /// `observation_identity_collision` coverage advance, in ONE atomic
     /// authority transaction, but only when
     /// the candidate stands at the sequential scan frontier; any other shape
     /// (covered replay, stale expected cursor, gap, generation jump) leaves
@@ -81,7 +81,7 @@ impl GlobalDbObservationStore {
     /// frontier is re-verified INSIDE the transaction (exact compare-and-set
     /// against the durable cursor), the advance-ledger row must carry the
     /// `observation_identity_collision` reason with no receipt, and the cursor moves to
-    /// the advance's next position — executed through the one canonical
+    /// the advance's next position, executed through the one canonical
     /// cursor-advance statement set
     /// (`tracedecay_rusqlite_runtime::repository::observation_cursor_authority`)
     /// that the runtime write path also executes. No record content is
@@ -224,7 +224,7 @@ impl GlobalDbObservationStore {
         drop(ledger_rows);
         // A coverage row that names any other reason or a receipt is a real
         // cursor-advance failure: roll the WHOLE transaction back so the
-        // marker is not visible either — no orphan, by construction.
+        // marker is not visible either, no orphan, by construction.
         if !cursor_advance_ledger_row_matches(
             ledger.as_ref(),
             ObservationCoverageReason::ObservationIdentityCollision.as_str(),
@@ -1751,14 +1751,14 @@ fn read_runtime_source_cursor(
 /// the caller's expected cursor matches the durable one. Generation values
 /// are opaque source identities, not ordered counters.
 ///
-/// `NotAtFrontier` is the not-at-frontier verdict — a covered replay or a stale
-/// expected view — and leaves every ledger untouched. Gaps and generation
+/// `NotAtFrontier` is the not-at-frontier verdict, a covered replay or a stale
+/// expected view, and leaves every ledger untouched. Gaps and generation
 /// jumps never reach the advance constructor here: `ObservationWrite::new`
 /// already validated that this write's expected→next cursor transition
 /// covers the candidate range, which is exactly the transition the advance
 /// re-derives from the same identity, expected cursor, and range. A
 /// construction failure is therefore a contract violation, and it surfaces
-/// as the typed store error — silently answering "not at the scan frontier"
+/// as the typed store error, silently answering "not at the scan frontier"
 /// would record no coverage and leave the refused record re-read forever.
 enum RefusedScanFrontier {
     AtFrontier(Box<ObservationCursorAdvance>),

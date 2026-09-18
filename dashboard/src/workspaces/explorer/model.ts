@@ -1,6 +1,6 @@
 /**
  * Explorer read-model: normalises the three independent memories the daemon
- * exposes — the code graph, session transcripts, and holographic knowledge —
+ * exposes, the code graph, session transcripts, and holographic knowledge , 
  * into one comparable result shape.
  *
  * Rules this module exists to enforce:
@@ -23,7 +23,7 @@ import { matchedFieldNames, matchWindow } from '../../ui/search/terms.ts';
  */
 export type LaneId = 'code' | 'sessions' | 'knowledge' | 'semantic';
 
-/** The lanes a coordinator source answers for — the only lanes rows come from. */
+/** The lanes a coordinator source answers for, the only lanes rows come from. */
 export type SourceLaneId = Exclude<LaneId, 'semantic'>;
 
 export const SOURCE_LANE_IDS: readonly SourceLaneId[] = ['code', 'sessions', 'knowledge'];
@@ -88,7 +88,7 @@ export const LANES: readonly LaneSpec[] = [
 ];
 
 export interface Signal {
-  /** The payload field this number came from — shown verbatim to the user. */
+  /** The payload field this number came from, shown verbatim to the user. */
   readonly field: string;
   readonly value: number;
   /** Largest value seen across the lane's loaded rows, for the proportion. */
@@ -314,7 +314,7 @@ export interface FacetCount {
   readonly count: number;
 }
 
-/** Pivot counts over the rows actually loaded — never over the whole index. */
+/** Pivot counts over the rows actually loaded, never over the whole index. */
 export function facetCounts(hits: readonly Hit[]): FacetCount[] {
   const counts = new Map<string, number>();
   for (const hit of hits) {

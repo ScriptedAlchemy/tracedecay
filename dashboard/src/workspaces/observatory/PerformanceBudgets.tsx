@@ -18,7 +18,7 @@ export function PerformanceBudgets() {
       title="Performance budgets"
       blurb={
         'p50/p95/p99 with support and intervals, queue/lock/provider spans, RSS/CPU/I/O,' +
-        ' no-progress outcomes, and the accepted budget revision — from the Plan 26 canonical' +
+        ' no-progress outcomes, and the accepted budget revision, from the Plan 26 canonical' +
         ' read model'
       }
       result={read.data}

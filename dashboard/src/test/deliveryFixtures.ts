@@ -7,7 +7,7 @@ import type {
 /**
  * Delivery test fixtures shaped to the generated contracts. Two registered
  * projects, three admitted pull requests, and membership edges that include
- * the correlating bases the daemon *may* serve — so umbrella grouping,
+ * the correlating bases the daemon *may* serve, so umbrella grouping,
  * cross-project rails and journey lanes can be exercised without inventing a
  * wire shape. Production inboxes today serve only the branch reference; the
  * DOM tests that assert the unavailable-correlation state use `INBOX_BRANCH_ONLY`.
@@ -41,7 +41,7 @@ function pullRequestRow(
     state: 'current',
     pull_request: {
       id: `github:${number}`,
-      label: `Pull request #${number} — ${title}`,
+      label: `Pull request #${number}, ${title}`,
       provider: 'github',
       pull_request_id: number,
       identity: {
@@ -162,7 +162,7 @@ export const INBOX: DeliveryInboxV1 = {
       branch_ref: 'refs/heads/feature/delivery',
       pull_request: {
         id: 'github:43',
-        label: 'Pull request #43 — Persist retry backoff',
+        label: 'Pull request #43, Persist retry backoff',
         provider: 'github',
         pull_request_id: '43',
         identity: {

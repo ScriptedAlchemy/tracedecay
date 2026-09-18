@@ -282,7 +282,7 @@ fn claude_real_usage_shape_records_true_counts_and_model() {
 
 /// Claude API-error placeholders (`isApiErrorMessage: true`, model
 /// `"<synthetic>"`, all-zero usage) represent no billed provider request and
-/// must not produce any usage fact — recording them attributed zero-token
+/// must not produce any usage fact, recording them attributed zero-token
 /// rows to the non-model `"<synthetic>"` in billing.
 #[test]
 fn claude_api_error_placeholder_records_no_provider_usage() {

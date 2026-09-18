@@ -14,12 +14,12 @@ import type { WorkDagReading } from './workViewsModel.ts';
  * Three relation kinds are laid out and they are drawn differently on
  * purpose, because they are different claims the plan makes:
  *
- *   gating          `dependencies` — the hard edge. It is the edge the strata
+ *   gating          `dependencies`, the hard edge. It is the edge the strata
  *                   were layered by, so it always runs downward except inside
  *                   a declared cycle.
- *   informational   `informational_relations` — a named soft relation that
+ *   informational   `informational_relations`, a named soft relation that
  *                   gates nothing. It may run in any direction.
- *   causal          `causal_candidates` — a nominated possible cause. Also
+ *   causal          `causal_candidates`, a nominated possible cause. Also
  *                   soft, also directional (cause → the task nominating it).
  *
  * A relation whose far end the page did not return is reported in
@@ -84,7 +84,7 @@ export interface WorkDagLayoutStratum {
 }
 
 export interface WorkDagLayout {
-  /** Every laid-out task, ordered by depth then column — the reading order. */
+  /** Every laid-out task, ordered by depth then column, the reading order. */
   readonly nodes: readonly WorkDagLayoutNode[];
   readonly byId: ReadonlyMap<string, WorkDagLayoutNode>;
   readonly edges: readonly WorkDagLayoutEdge[];
@@ -101,7 +101,7 @@ interface StratumComponent {
 }
 
 /** Mean of the given columns, or `null` for a component with no laid-out
- * predecessor — those sort after every anchored one. */
+ * predecessor, those sort after every anchored one. */
 function barycenter(columns: readonly number[]): number | null {
   if (columns.length === 0) return null;
   return columns.reduce((sum, column) => sum + column, 0) / columns.length;
@@ -151,7 +151,7 @@ function downwardPath(
   return `M ${fromX} ${fromY} L ${fromX} ${midY} L ${toX} ${midY} L ${toX} ${toY}`;
 }
 
-/** A cubic curve for an edge that does not run down the strata — a climb
+/** A cubic curve for an edge that does not run down the strata, a climb
  * inside a cycle, or a soft relation between peers or running upward. Curved
  * rather than orthogonal so it cannot be mistaken for a gating edge even in a
  * monochrome rendering. */

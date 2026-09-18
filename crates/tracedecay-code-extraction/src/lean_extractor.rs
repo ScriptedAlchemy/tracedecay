@@ -28,7 +28,7 @@ struct ExtractionState<'s> {
     source: &'s [u8],
     file_node_id: String,
     timestamp: u64,
-    /// `(qualified_prefix, parent_id)` — top is the active scope. The file
+    /// `(qualified_prefix, parent_id)`. Top is the active scope. The file
     /// frame is the last resort and is never popped.
     scope_stack: Vec<(String, String)>,
 }
@@ -131,7 +131,7 @@ impl LeanExtractor {
         // Skip anonymous keyword tokens (e.g. the literal `namespace`,
         // `def`, `theorem` words inside their parent named nodes).
         // Their `kind()` matches the named outer kind but they are not
-        // structural — emitting nodes for them would produce phantom
+        // structural. Emitting nodes for them would produce phantom
         // `<anonymous>` modules and double-counted definitions.
         if !node.is_named() {
             return;
@@ -160,7 +160,7 @@ impl LeanExtractor {
             // `open`, `attribute`, `notation`, `mixfix`, `macro_rules`,
             // `variable`, `universe`, `prelude`, `elab`, `syntax`,
             // `hash_command`, `export`, `builtin_initialize` are out of
-            // scope — they don't define named graph entities we track.
+            // scope. They don't define named graph entities we track.
             _ => {}
         }
     }
@@ -179,9 +179,9 @@ impl LeanExtractor {
 
     /// Handles `namespace` / `section`. Named blocks emit a `Module`
     /// node and push a new scope so the body is parented to it. Anonymous
-    /// `section` blocks (no `name` field) emit nothing — they're scope
-    /// markers in the source, but as graph nodes they'd just be noise —
-    /// the body is recursed into so contained defs still get parented to
+    /// `section` blocks (no `name` field) emit nothing. They're scope
+    /// markers in the source, but as graph nodes they'd just be noise.
+    /// The body is recursed into so contained defs still get parented to
     /// the *surrounding* scope.
     fn visit_namespace(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = node.child_by_field_name("name").map(|n| state.node_text(n));
@@ -197,7 +197,7 @@ impl LeanExtractor {
             false
         };
 
-        // Recurse into every child *except* the `name` field — the rest is
+        // Recurse into every child *except* the `name` field. The rest is
         // the body. Iterating all children with their field names works
         // for both `namespace` and `section`.
         let mut cursor = node.walk();

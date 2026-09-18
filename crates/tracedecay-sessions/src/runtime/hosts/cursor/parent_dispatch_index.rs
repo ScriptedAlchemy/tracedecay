@@ -54,7 +54,7 @@ const DISPATCH_AGENT_KEYS: &[&str] = &[
 /// Bytes and records consumed by one parent-dispatch lookup.
 ///
 /// Production callers feed these into Hotpath gauges. Tests assert scan
-/// bounds from the same receipt — there is no test-only production port.
+/// bounds from the same receipt, there is no test-only production port.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DispatchScanReceipt {
     pub bytes_parsed: u64,
@@ -189,7 +189,7 @@ impl ParentDispatchIndex {
                 }
             };
         // Prefix-validation bytes are hot-path reads, so they are charged to
-        // the same receipt the gauges and the bound tests read — a repeat
+        // the same receipt the gauges and the bound tests read, a repeat
         // lookup that reports none is the proof that the revision fast path
         // served without touching the file.
         let mut receipt = DispatchScanReceipt {
@@ -257,8 +257,8 @@ impl ParentDispatchIndex {
         let expected = entry.resume_digest.witness(verified_cursor);
         let cached = entry.models.get(agent_id).cloned();
         // Zero-I/O hit, which is the reason this index exists: the native
-        // revision — identity, length, and the change token, which on Unix
-        // carries ctime and on Windows carries native ChangeTime — is identical
+        // revision, identity, length, and the change token, which on Unix
+        // carries ctime and on Windows carries native ChangeTime, is identical
         // to the one this entry was verified under, and the entry covers the
         // whole file. Nothing can have been appended or rewritten, so
         // re-hashing the prefix would only re-prove that.

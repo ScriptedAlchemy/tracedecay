@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Self-tests for grade.py — no live agents, no tokens.
+"""Self-tests for grade.py, no live agents, no tokens.
 
 Covers the pure grader surface that the agent-adoption harness relies on:
   * scenario-prompt neutrality lint (positive + negative cases),

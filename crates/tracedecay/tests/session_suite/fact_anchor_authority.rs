@@ -2,7 +2,7 @@
 //! contract. A revoked or missing authority fails closed with a typed error and
 //! no partial commit, ambiguous project scope never falls back to another
 //! store, linked worktrees resolve through canonical project identity, and
-//! concurrent clients commit exactly one fact/anchor — losers get the
+//! concurrent clients commit exactly one fact/anchor, losers get the
 //! idempotent replay or a typed conflict, never a second writer.
 
 use std::path::{Path, PathBuf};
@@ -860,8 +860,8 @@ async fn daemon_only_writer_rejects_foreign_authority_and_shares_one_writer_toke
         "the second writer must fail with the authority error, got {error}"
     );
 
-    // A client re-resolving the same database rides the retained authority —
-    // one writer token, one owner — instead of opening another writer.
+    // A client re-resolving the same database rides the retained authority,
+    // one writer token, one owner, instead of opening another writer.
     let joined = DatabaseAuthority::for_runtime(&db_path, "joined client fixture")
         .expect("a client must re-join the retained authority");
     assert_eq!(joined.role(), authority.role());

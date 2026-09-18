@@ -55,7 +55,7 @@ import {
 const BASE = '/api/plugins/holographic';
 
 /**
- * Knowledge — channel seven.
+ * Knowledge, channel seven.
  *
  * Four camera positions over one memory store, in the order a reader descends
  * through it: the facts explorer, the phase geometry those facts sit in, the
@@ -67,7 +67,7 @@ const BASE = '/api/plugins/holographic';
  * Everything the daemon mounts for holographic memory is consumed here. Three
  * of those routes are contracted (`/`, `/status`, `/fact/{id}`) and read
  * through the generated schemas; the rest answer bare JSON and are read through
- * the house payload ladder with schemas written against their handlers — see
+ * the house payload ladder with schemas written against their handlers, see
  * `data/query/memory.ts`, which explains why that split exists and what it
  * obliges.
  */
@@ -93,7 +93,7 @@ export function KnowledgePage() {
         <p className="min-w-0 text-2xs text-text-muted">{knowledgeViewNote(view)}</p>
       </div>
       {/* The element `aria-controls` names, present for as long as the switcher
-       * is — a reference to an element that was never drawn is an invalid one,
+       * is, a reference to an element that was never drawn is an invalid one,
        * which is what the accessibility gate reads it as. */}
       <div
         id={KNOWLEDGE_PANEL_ID}
@@ -137,7 +137,7 @@ function KnowledgeView({
  * beside them.
  *
  * Three verbs, kept apart. INSPECT is the fact under the pointer or under
- * keyboard focus — on a constellation body or a ledger row — and it previews
+ * keyboard focus, on a constellation body or a ledger row, and it previews
  * the bounded overview row without a fetch; it is sticky until Escape so a
  * reader can move into the inspector. SELECT is a click or Enter, lives in
  * the address, and reads the canonical detail and trust audit. SEARCH is the
@@ -456,7 +456,7 @@ function LedgerBay({
         {coverageNotice}
         <p className="p-6 text-center text-sm text-text-muted">
           {applied
-            ? `no loaded facts match “${applied}”`
+            ? `no loaded facts match "${applied}"`
             : factsComplete
               ? 'no facts recorded'
               : 'no facts were returned by this incomplete read'}
@@ -509,8 +509,8 @@ function LedgerBay({
 }
 
 /** Roving arrows over the ledger rows: rows are native buttons, so Enter and
- * Space activate for free; arrows, Home, End and Page keys move focus — and
- * with it inspection — without a Tab through every row. */
+ * Space activate for free; arrows, Home, End and Page keys move focus, and
+ * with it inspection, without a Tab through every row. */
 function onLedgerKeyDown(event: KeyboardEvent<HTMLElement>) {
   const container = event.currentTarget;
   const rows = [...container.querySelectorAll<HTMLButtonElement>('button[aria-pressed]')];
@@ -592,7 +592,7 @@ function StoreReadouts({
 
 /** What the right bay shows when no fact is inspected: the store as a whole.
  * The trust distribution and its denominator, the encoding algebra, the
- * category census and the growth series — each from its own read, each
+ * category census and the growth series, each from its own read, each
  * printing what its counts cover. */
 function StoreSummary({
   summary,
@@ -707,7 +707,7 @@ function GrowthChart({
  *
  * `composeTrustDistribution` takes the finest canonical source that carries
  * mass, and this plate prints which one it used. When the mass all lands in a
- * single band there is no shape to draw, so the reading is stated instead —
+ * single band there is no shape to draw, so the reading is stated instead , 
  * one full bar beside nine empty ones is the same non-information in a more
  * confident costume.
  */
@@ -717,7 +717,7 @@ function TrustDistributionPlate({ distribution }: { distribution: TrustDistribut
       <figure className="flex flex-col gap-1">
         <figcaption className="td-legend">trust distribution</figcaption>
         <p className="text-2xs leading-relaxed text-text-muted">
-          The store reported no trust distribution — not a distribution of zero, but no reading
+          The store reported no trust distribution, not a distribution of zero, but no reading
           at all.
         </p>
       </figure>
@@ -779,7 +779,7 @@ function TrustDistributionPlate({ distribution }: { distribution: TrustDistribut
 /** "2026-05-08" -> "May 8". The growth caption prints a date beside a facts
  * count in a narrow rail; the full ISO stamp alone (10 chars) leaves no room
  * for the count next to it before the two end labels collide. The full date
- * stays in the chart's `ariaLabel` — this is a display-only compaction, not a
+ * stays in the chart's `ariaLabel`, this is a display-only compaction, not a
  * different value. */
 function formatShortDate(iso: string): string {
   const date = new Date(`${iso}T00:00:00Z`);
@@ -789,7 +789,7 @@ function formatShortDate(iso: string): string {
 
 /** One category's share of the loaded fact set, read the same way the fact
  * list itself is: a printed count for precision, a rail scaled to the busiest
- * category on screen for ranking. No fabricated denominator — the rail
+ * category on screen for ranking. No fabricated denominator, the rail
  * measures against the largest category actually present, not an assumed
  * total. */
 function CategoryBar({ row, ceiling }: { row: MemoryCategoryCountV1; ceiling: number }) {

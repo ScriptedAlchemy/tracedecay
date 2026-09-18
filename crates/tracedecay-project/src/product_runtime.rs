@@ -193,8 +193,8 @@ pub fn product_runtime() -> Result<&'static RegisteredProductRuntime, ProductRun
 
 /// Canonical fixture dashboard bundle for tests and integration harnesses.
 ///
-/// Shaped like a real Rsbuild dist — a titled index that names its
-/// `/static/js/index.*` entry script — so suite assertions about entry-script
+/// Shaped like a real Rsbuild dist, a titled index that names its
+/// `/static/js/index.*` entry script, so suite assertions about entry-script
 /// serving and SPA fall-through stay falsifiable against the fixture.
 #[cfg(any(test, feature = "test-helpers"))]
 pub const FIXTURE_DASHBOARD_ASSETS: StaticDashboardAssets = StaticDashboardAssets {

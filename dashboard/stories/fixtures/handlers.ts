@@ -14,7 +14,7 @@ import { http, HttpResponse, type JsonBodyType, type RequestHandler } from 'msw'
 import { setupServer, type SetupServer } from 'msw/node';
 import { resolveFixture } from './data.ts';
 
-/** Catch-all GET for /api/** — resolves the pathname to its fixture payload. */
+/** Catch-all GET for /api/**. Resolves the pathname to its fixture payload. */
 export const handlers = [
   http.get('*/api/events', () =>
     // The event stream is intentionally empty in fixtures: the app degrades to
@@ -32,7 +32,7 @@ export const handlers = [
     const url = new URL(request.url);
     return HttpResponse.json(resolveFixture(url.pathname, url.search) as JsonBodyType);
   }),
-  // The Work routes are the one family the dashboard reads with POST — they are
+  // The Work routes are the one family the dashboard reads with POST. They are
   // nested onto the application router, whose reads take a request body. Scoped
   // to `/api/work/*` rather than to `/api/*` on purpose: a POST catch-all would
   // turn every unmodelled command in every other workspace's MSW test from a
@@ -66,7 +66,7 @@ export const handlers = [
 export type HttpFault =
   /** The daemon answered, and its handler failed. */
   | 'server_error'
-  /** The route is not bound — a renamed or unbuilt API surface. */
+  /** The route is not bound. A renamed or unbuilt API surface. */
   | 'not_found'
   /** No identity: the caller is not authenticated. */
   | 'unauthorized'
@@ -78,7 +78,7 @@ export type HttpFault =
    * unbound `/api` route with the SPA's own `index.html` produces exactly
    * this, which is why it is HTML here and not random bytes. */
   | 'malformed_body'
-  /** 200 with well-formed JSON the build's decoder rejects — the daemon moved
+  /** 200 with well-formed JSON the build's decoder rejects. The daemon moved
    * ahead of this bundle. A list where every schema expects an object is the
    * cheapest shape that no workspace decoder accepts. */
   | 'unsupported_shape';
@@ -120,7 +120,7 @@ export function faultHandler(pathPattern: string, fault: HttpFault): RequestHand
   return http.get(pathPattern, () => faultResponse(fault));
 }
 
-/** Every `/api` GET fails the same way — the whole daemon is in one bad state. */
+/** Every `/api` GET fails the same way. The whole daemon is in one bad state. */
 export function allRoutesFail(fault: HttpFault): RequestHandler {
   return faultHandler('*/api/*', fault);
 }

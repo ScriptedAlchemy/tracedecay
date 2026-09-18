@@ -1,5 +1,5 @@
 /**
- * MEMORY GEOMETRY — the store's semantic space, and what it implies.
+ * MEMORY GEOMETRY, the store's semantic space, and what it implies.
  *
  * Two routes that inspect the same query-time encoding method over their own
  * admitted fact sets. `/projection` may filter and cap facts before deriving
@@ -336,7 +336,7 @@ function SimilarityBody({ data }: { data: SimilarityPayload }) {
         </ol>
       )}
       <p className="text-3xs leading-relaxed text-text-muted">
-        a scored pair is a measurement, not a proposal — the Curation view
+        a scored pair is a measurement, not a proposal, the Curation view
         reports the daemon's automatic post-validation outcomes and explicit
         policy-owned run control
       </p>

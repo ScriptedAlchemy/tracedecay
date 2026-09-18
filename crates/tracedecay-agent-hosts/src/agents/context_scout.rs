@@ -564,8 +564,8 @@ impl ContextScoutModelExecutionV1 {
 
     /// Returns the measured input token count so callers reuse this single
     /// tokenization. Encoding the serialized request is the most expensive
-    /// step on a deadline-bounded proposal — a cold BPE table build alone can
-    /// spend the whole budget — so it must happen exactly once per request.
+    /// step on a deadline-bounded proposal, a cold BPE table build alone can
+    /// spend the whole budget, so it must happen exactly once per request.
     pub fn validate_input(
         &self,
         request: &ContextScoutModelRequestV1,
@@ -885,7 +885,7 @@ pub(super) fn serialized_token_count(_value: &impl Serialize) -> Option<usize> {
 ///
 /// The first `serialized_token_count` anywhere in the process builds a
 /// multi-megabyte BPE table. Measured on one contended Linux core that build
-/// runs 0.9s, and 4.4s at a tenth of a core — while a Scout proposal gives
+/// runs 0.9s, and 4.4s at a tenth of a core, while a Scout proposal gives
 /// itself one second for everything, tokenizer included. Paying the build
 /// inside `propose` therefore spends the whole budget before the backend is
 /// ever raced, and the proposal reports `DeadlineExceeded` over a denial or a
@@ -2006,7 +2006,7 @@ mod tests {
     // Model-assisted selection is only reachable in a `token-counting` build.
     // Without the BPE tokenizer `serialized_token_count` yields no measurement,
     // and an unmeasurable request can never be *proven* within the input
-    // budget — so `validate_input` refuses it as `TokenBudgetExceeded` before
+    // budget, so `validate_input` refuses it as `TokenBudgetExceeded` before
     // any assistant is consulted. That refusal is the correct production
     // behaviour (a build that cannot count tokens must not ship unbounded
     // input to a model), which means the *typed model outcome* these tests

@@ -1798,7 +1798,7 @@ async fn open_effect_store(name: &str) -> (TempDir, TestConnection) {
     (directory, TestConnection::open(&database_path))
 }
 
-/// Case 2 — idempotent replay. Re-projecting an observation at or below the
+/// Case 2, idempotent replay. Re-projecting an observation at or below the
 /// checkpoint conflicts on the primary key, and the conflict branch's
 /// field-by-field comparison must converge instead of erroring.
 #[tokio::test]
@@ -1824,7 +1824,7 @@ async fn canonical_effect_replay_converges_on_an_identical_row() {
     );
 }
 
-/// Case 3 — conflict with a divergent payload. The durable row satisfies the
+/// Case 3, conflict with a divergent payload. The durable row satisfies the
 /// insert guard (same observation, sequence, and receipt) yet disagrees on the
 /// projected effect, so the conflict-only read-back must still reject it.
 #[tokio::test]

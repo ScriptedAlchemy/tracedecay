@@ -35,7 +35,7 @@ fn malformed_json_is_scanned_without_claiming_structural_parse() {
 fn credential_bearing_object_keys_are_a_typed_quarantine_state() {
     // A key carrying credential material cannot be redacted without rewriting
     // the document's structure, so the sanitizer quarantines the payload. The
-    // typed state must say so — collapsing it into "sanitizer unavailable"
+    // typed state must say so. Collapsing it into "sanitizer unavailable"
     // made real quarantines surface as construction faults downstream.
     let input = format!(r#"{{"{SECRET}":"ordinary-value"}}"#);
     let quarantined = sanitize_structured_payload(input.as_bytes(), limits());

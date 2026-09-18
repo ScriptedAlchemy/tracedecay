@@ -333,7 +333,7 @@ pub(crate) async fn handle_status_command(
     .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
         message: format!(
             "status did not complete within {}s; the daemon may still be \
-             starting or opening this project — retry, or raise \
+             starting or opening this project, retry, or raise \
              {STATUS_DEADLINE_ENV}",
             budget.as_secs()
         ),
@@ -549,12 +549,12 @@ async fn handle_status_command_within(
         let dir_name = tracedecay::config::active_data_dir_name(&project_path);
         if stderr_is_terminal {
             eprintln!(
-                "\n\x1b[33mWarning: {dir_name} is not in .gitignore — \
+                "\n\x1b[33mWarning: {dir_name} is not in .gitignore. \
                  run `echo {dir_name} >> .gitignore` to exclude it from git.\x1b[0m"
             );
         } else {
             eprintln!(
-                "\nWarning: {dir_name} is not in .gitignore — \
+                "\nWarning: {dir_name} is not in .gitignore. \
                  run `echo {dir_name} >> .gitignore` to exclude it from git."
             );
         }

@@ -24,10 +24,10 @@ ranking.
 Lexical clause matches 73 occurrences, well inside the 256 page. Hotpath places
 the cost outside retrieval entirely. Over a 1,978 s window,
 `mcp.server.tools_call.dispatch` averaged 23.68 s across 186 calls and
-`mcp.hook_runtime.total` averaged 23.60 s across 179 — so essentially the whole
+`mcp.hook_runtime.total` averaged 23.60 s across 179, so essentially the whole
 tool latency is admission-side, before dispatch. Inside it,
 `daemon.context_scout.lifecycle_lookup` averaged 19.80 s (p95 32.04 s) across
-179 calls, and `daemon.context_scout.lookup.unresolved` counted 153 — every
+179 calls, and `daemon.context_scout.lookup.unresolved` counted 153, every
 lookup resolved nothing. A lookup that returns no authority should not cost 20 s
 of a tool's deadline; that is its own mis-sized cost and its own investigation.
 The concurrent code-index rebuild is the ambient load (`code_index.restore
@@ -54,7 +54,7 @@ anything, and it proposes almost the whole store:
 | Span | phrase, over member occurrences | 0 |
 | Burst | phrase, over member occurrences | 0 |
 
-The same four terms joined with `AND` match **2** occurrences in 2 sessions —
+The same four terms joined with `AND` match **2** occurrences in 2 sessions,
 those two are the query's answer. The OR clause spans 1,468 of the 1,606
 sessions.
 
@@ -80,17 +80,17 @@ recent rows of the OR match:
 | recency-ordered (today's keyset) | 0 | 0 | 1 | 8 |
 | bm25-ordered | 0 | 170 | 96 | 75 |
 
-The two true hits sit at recency rank 37,718 and 39,653 of 41,064 — near the
-oldest end — and at bm25 rank 290 and 5,968. The two pages share zero rows.
+The two true hits sit at recency rank 37,718 and 39,653 of 41,064, near the
+oldest end, and at bm25 rank 290 and 5,968. The two pages share zero rows.
 
 This is the load-bearing finding: **a bm25 page of 256 does not contain the
 answer either.** bm25 over an OR match rewards a document that repeats a common
 term as readily as one that covers all four, so the answer lands just outside
 the page (290) and far outside it (5,968).
 
-Nothing downstream recovers it. `candidate_score` is a per-channel constant —
+Nothing downstream recovers it. `candidate_score` is a per-channel constant,
 every Lexical candidate scores 400 regardless of how many query terms it
-matched — and no candidate row in the temporal path carries a bm25 or
+matched, and no candidate row in the temporal path carries a bm25 or
 term-coverage score at all. Term coverage is not represented anywhere: not in
 the clause (OR flattens it), not on the candidate, not in the ranker.
 
@@ -121,7 +121,7 @@ Two residual cases matter for the options below. `dashboard contracts generate`
 matches 280 rows under AND, above the 256 page, so AND alone does not remove
 truncation. `span burst membership record read` matches 0 under AND; relaxing
 one term gives 0, 6, 5, 0, 0 depending on which is dropped, against 38,427 for
-full OR — so a graduated relaxation is precise where OR is not.
+full OR, so a graduated relaxation is precise where OR is not.
 
 The 280-row case also spans 84 distinct sessions, and the bm25 page of 256 spans
 75. Both are inside `MAX_TEMPORAL_PARTICIPANTS` (256), so neither option below
@@ -140,7 +140,7 @@ matches than one page; refusing is the wrong terminal for a normal condition.
 - Cost: no new query cost. One page instead of a refusal.
 - Coverage contract: `coverage.total()` stops meaning "the whole result-eligible
   population" and starts meaning "the population inside the admitted page",
-  with the omission carrying the difference. That is a real contract change —
+  with the omission carrying the difference. That is a real contract change,
   the record-read slice just narrowed `result_eligible_anchors` to the anchors
   candidate channels proposed, and this widens the same counter's meaning to
   "proposed, within the page". Both the counter and the omission have to be
@@ -166,7 +166,7 @@ when the strict form does not fill the page.
   of 41,064, so the read completes with coverage genuinely complete and the
   later clauses (Summary, Span, Burst) actually get to run. Today the Lexical
   clause consumes all 256 slots before those three clauses are reached, so a
-  common token silently starves every other channel — a fact currently
+  common token silently starves every other channel, a fact currently
   invisible in coverage.
 - Coverage contract: unchanged and honest. `coverage.total()` keeps meaning the
   whole result-eligible population, because the population now fits.
@@ -192,7 +192,7 @@ generate`, 280 rows).
   *relevant* result sets rather than on every multi-word query. The partial
   label becomes rare and meaningful instead of universal.
 
-### (d) Raise `candidate_limit` — rejected
+### (d) Raise `candidate_limit`, rejected
 
 41,064 candidates for a 2-row answer is not a budget that is too small; it is a
 population that is wrong by four orders of magnitude. Raising the ceiling to
@@ -209,8 +209,8 @@ landing first.**
 (b) is what makes the query answerable at all: it turns a 41,064-row population
 into a 2-row population that fits the page 128× over, keeps coverage honest,
 costs 100× less, and lets the Summary/Span/Burst clauses run instead of being
-starved. (a) alone does not answer the query — measured, a page of 256 contains
-zero matching rows under either ordering — so shipping (a) first would convert a
+starved. (a) alone does not answer the query, measured, a page of 256 contains
+zero matching rows under either ordering, so shipping (a) first would convert a
 truthful refusal into a confidently-labelled wrong answer.
 
 (a) is still required, because `dashboard contracts generate` proves a strict
@@ -233,14 +233,14 @@ smaller change and belongs with (b).
 `validate_clause` refused an over-long clause with
 `BudgetExceeded { resource: "candidate clause bytes", accounting: None }`, so a
 query longer than the admitted metadata field cap reached the operator as
-`budget-refused` with no ceiling and no length — the same blindness the record
+`budget-refused` with no ceiling and no length, the same blindness the record
 budgets had before. It now carries
 `ReadBudgetAccounting::requested(clause_cap, clause.value.len())`, covered by
 `root_candidate_preparation_sizes_the_clause_byte_refusal`.
 
 Two candidate-producer refusals still report `accounting: None`: `candidate
 filter scans` and `candidate bytes`. Both are reachable, neither has a test, and
-neither is reachable from the existing retrieval fixtures — their anchors carry
+neither is reachable from the existing retrieval fixtures, their anchors carry
 no owner kind, so the root authority predicate excludes them from every
 candidate clause. Sizing those two needs a candidate fixture wide enough to
 exhaust a scan ceiling, which is its own slice.

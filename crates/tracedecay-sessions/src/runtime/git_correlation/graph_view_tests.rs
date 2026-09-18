@@ -1,10 +1,10 @@
 //! The indexed graph view must answer exactly what the complete in-memory
 //! projection answers, while touching rows in proportion to the answer.
 //!
-//! Every query below is evaluated twice — through
+//! Every query below is evaluated twice, through
 //! [`GitEvidenceProjectionV1`] over the full projection (the oracle the
 //! facades used to hydrate on every read) and through
-//! [`GitEvidenceGraphView`] over the published graph — and the results must be
+//! [`GitEvidenceGraphView`] over the published graph. The results must be
 //! identical, ordering included. Row-touch scaling is asserted with the graph
 //! store's thread-scoped decode counters rather than wall time.
 

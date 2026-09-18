@@ -872,8 +872,8 @@ impl ProjectMemoryGraphStore for DatabaseFactStore<'_> {
 }
 
 /// The single owned-or-borrowed handle shape for the shared project-memory
-/// database. Every project-memory route — the root crate's `tracedecay::facts`
-/// fact-store accessors and the MCP memory handlers alike — resolves
+/// database. Every project-memory route, the root crate's `tracedecay::facts`
+/// fact-store accessors and the MCP memory handlers alike, resolves
 /// through this one type and its `db_path() == graph_db_path` routing
 /// predicate, instead of each maintaining its own near-duplicate enum kept in
 /// sync only by hand.

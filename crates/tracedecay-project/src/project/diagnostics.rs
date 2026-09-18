@@ -48,7 +48,7 @@ impl TraceDecay {
     /// serving reads or writes. The comparison is against the open-time branch
     /// (`active_branch`), so reopening clears the drift even when the new
     /// branch is untracked and legitimately falls back to an ancestor's
-    /// provenance — avoiding a reopen loop. Returns `false` when the store
+    /// provenance, avoiding a reopen loop. Returns `false` when the store
     /// publishes no branch metadata at all, where there is no branch identity
     /// to drift from.
     pub fn branch_drifted(&self) -> bool {
@@ -85,13 +85,13 @@ impl TraceDecay {
     }
 
     /// On-disk path to the `SQLite` DB this instance is serving. Useful for
-    /// diagnostics (e.g. WAL/SHM size sampling) — returns the same path that
+    /// diagnostics such as WAL/SHM size sampling. Returns the same path that
     /// `Database::open` was called with.
     ///
     /// The inputs (`project_root`, `store_layout.data_root`, and
     /// `serving_branch`) are immutable for the lifetime of a `TraceDecay`
-    /// instance — branch changes are served by a freshly constructed
-    /// instance rather than mutating an existing one — so the resolved path
+    /// instance. Branch changes are served by a freshly constructed
+    /// instance rather than mutating an existing one, so the resolved path
     /// is memoized in `db_path_cache` after the first call instead of
     /// re-reading and re-parsing branch metadata from disk on every call.
     pub fn db_path(&self) -> PathBuf {

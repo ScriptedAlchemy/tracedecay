@@ -1,5 +1,5 @@
 /**
- * CODE DIAGNOSTICS — the broker resource at `/api/plugins/code-diagnostics`:
+ * CODE DIAGNOSTICS. The broker resource at `/api/plugins/code-diagnostics`:
  * `GET` for the snapshot, `POST /refresh` and `POST /refresh/{language}` to
  * make the analyzers run, and `PATCH` to change which of them run at all.
  *
@@ -10,7 +10,7 @@
  * Everything shown is the broker's own snapshot. Engine states (`ready`,
  * `crashed`, `unavailable`, …) are the server's words rendered directly; a
  * broker with no engines mounted is an honest empty, and an unreachable
- * authority renders as the boundary's unavailable state — never as a clean
+ * authority renders as the boundary's unavailable state, never as a clean
  * zero-error report.
  *
  * The controls hold the same line. Three distinct in-flight facts live on this
@@ -110,8 +110,8 @@ function SnapshotBody({ data, controls }: { data: DiagnosticsSnapshot; controls:
   const shown = data.diagnostics.slice(0, SHOWN);
   const rest = data.diagnostics.length - shown.length;
   // A settings write is a compare-and-set against the settings the broker
-  // holds. When it could not read them the body still carries values — the
-  // built-in defaults — and a patch sent against those would write this
+  // holds. When it could not read them the body still carries values, the
+  // built-in defaults, and a patch sent against those would write this
   // panel's guess over a file whose contents nobody here has seen. So the
   // settings controls are withheld, and the refresh controls, which carry no
   // revision and overwrite nothing, are not.
@@ -138,7 +138,7 @@ function SnapshotBody({ data, controls }: { data: DiagnosticsSnapshot; controls:
       <dl className="grid grid-cols-3 gap-x-3 gap-y-0.5 text-2xs">
         <Figure label="errors" value={data.summary.total_errors} emphasis="error" />
         <Figure label="warnings" value={data.summary.total_warnings} emphasis="warning" />
-        {/* The broker's own count of analyzer work in flight — not this
+        {/* The broker's own count of analyzer work in flight, not this
           * browser's request, which is reported on the buttons. */}
         <Figure label="broker refreshing" value={data.summary.pending_refreshes} />
       </dl>
@@ -193,7 +193,7 @@ function SnapshotBody({ data, controls }: { data: DiagnosticsSnapshot; controls:
  *
  * A select rather than a toggle because the route's `IdleBackfillMode` is an
  * enum, and rendering it as a checkbox would hard-code the assumption that it
- * stays two-valued — the same assumption that turns a third mode, when one is
+ * stays two-valued, the same assumption that turns a third mode, when one is
  * added, into a control that silently cannot express it.
  */
 function IdleBackfill({
@@ -295,7 +295,7 @@ function EngineLine({
  * `aria-busy` rather than a label swap: the button keeps its accessible name
  * while the request is out, so a screen reader is not told the control has
  * become a different control. The word beside it changes because a sighted
- * reader needs the same fact, and it says `sent` rather than `refreshing` —
+ * reader needs the same fact, and it says `sent` rather than `refreshing`,
  * what this browser knows is that the request went out, not that an analyzer
  * is running, which is what the engine's own chip says.
  */

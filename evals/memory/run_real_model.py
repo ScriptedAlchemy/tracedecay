@@ -42,7 +42,7 @@ DEFAULT_MODEL = "gpt-5.4-mini"
 DEFAULT_CURSOR_MODEL = "composer-2.5"
 
 # Provider API keys forwarded from the real user's ~/.hermes/.env into the
-# isolated eval HOME. Keys only — never logged.
+# isolated eval HOME. Keys only, never logged.
 PROVIDER_ENV_KEYS = (
     "GLM_API_KEY",
     "ZAI_API_KEY",
@@ -52,7 +52,7 @@ PROVIDER_ENV_KEYS = (
 )
 
 # Output lines that mean the agent never ran a real turn; a scenario whose
-# transcript matches one of these is an error, not a pass — otherwise a
+# transcript matches one of these is an error, not a pass, otherwise a
 # no-op agent would vacuously satisfy "nothing was stored" assertions.
 FATAL_TURN_PATTERNS = (
     re.compile(r"re-authenticate", re.IGNORECASE),
@@ -739,9 +739,9 @@ def main(argv):
             failed = [o for o in outcomes if not o["passed"]]
             status = "pass" if not failed else "fail"
             if failed and scenario.get("contract") == "pending-sibling":
-                status = "fail (note: scenario contract is pending-sibling — see contract_notes)"
+                status = "fail (note: scenario contract is pending-sibling, see contract_notes)"
             if not all(t["turn_valid"] for t in transcripts):
-                status = "error (agent turn invalid — see transcript logs)"
+                status = "error (agent turn invalid, see transcript logs)"
                 failed = failed or [{"name": "agent-turn", "passed": False}]
             report["scenarios"].append(
                 {
@@ -759,10 +759,10 @@ def main(argv):
             for outcome in outcomes:
                 marker = "pass" if outcome["passed"] else "FAIL"
                 if outcome.get("error"):
-                    print(f"  [{marker}] {outcome['name']} — {outcome['error']}")
+                    print(f"  [{marker}] {outcome['name']}, {outcome['error']}")
                 else:
                     print(
-                        f"  [{marker}] {outcome['name']} — actual {outcome['actual']} "
+                        f"  [{marker}] {outcome['name']}, actual {outcome['actual']} "
                         f"{outcome['op']} expected {outcome['expected']}"
                     )
         finally:

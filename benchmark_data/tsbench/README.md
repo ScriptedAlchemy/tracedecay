@@ -1,4 +1,4 @@
-# tsbench — tracedecay run
+# tsbench, tracedecay run
 
 Adapts [`Mibayy/tsbench`](https://github.com/Mibayy/tsbench) (the 96-task
 agent benchmark token-savior uses to publish its 97.9% score) to drive
@@ -38,33 +38,33 @@ PY
 
 ## What the patch changes (vs. upstream `bench.py`)
 
-- **MCP config** — launches `tracedecay serve -p <root> --timings` instead of
+- **MCP config**, launches `tracedecay serve -p <root> --timings` instead of
   `token_savior.server` over Python stdio.
-- **System prompt** — rewrites `SYSTEM_PROMPT_TS` to map each token-savior
+- **System prompt**, rewrites `SYSTEM_PROMPT_TS` to map each token-savior
   tool to its tracedecay equivalent (`find_symbol` →
   `tracedecay_find_exact_symbol`, `get_function_source` → `tracedecay_body`,
   `get_full_context` → `tracedecay_context`, etc.). Where no tracedecay
   equivalent exists (`add_field_to_model`, `move_symbol`,
   `analyze_config`, `analyze_docker`), the prompt explicitly allows
   `Read` / `Edit` fallback.
-- **`--disallowedTools`** — relaxed from
+- **`--disallowedTools`**, relaxed from
   `["Read","Grep","Glob","Agent"]` to `["Agent"]` only, since the four
   fallback task categories need text-level tools.
-- **Tool-prefix matcher** — `ts_prefixes = ("mcp__tracedecay__",)`.
-- **Results path** — `results-tracedecay/raw/` (so a tracedecay run doesn't
+- **Tool-prefix matcher**. `ts_prefixes = ("mcp__tracedecay__",)`.
+- **Results path**. `results-tracedecay/raw/` (so a tracedecay run doesn't
   overwrite token-savior's `results/raw/`).
-- **Seed-session filename** — `.bench-tracedecay-session-id`.
-- **`CLAUDE_PROJECT_ROOT`** env var — set to `ROOT` (the local repo) instead
+- **Seed-session filename**. `.bench-tracedecay-session-id`.
+- **`CLAUDE_PROJECT_ROOT`** env var, set to `ROOT` (the local repo) instead
   of the hard-coded `/root/projects/tsbench`.
 
 ## Environment
 
-- `TRACEDECAY_BIN` — path to the tracedecay binary. Defaults to the release
+- `TRACEDECAY_BIN`, path to the tracedecay binary. Defaults to the release
   build in the canonical checkout location.
-- `TSBENCH_BARE` — set to `0` on macOS / Max OAuth (default is `1`, but
+- `TSBENCH_BARE`, set to `0` on macOS / Max OAuth (default is `1`, but
   `--bare` mode broke OAuth in our environment). On Linux + API key, leave
   default.
-- `TSBENCH_MODEL` — defaults to `claude-opus-4-7`.
+- `TSBENCH_MODEL`, defaults to `claude-opus-4-7`.
 
 ## License
 

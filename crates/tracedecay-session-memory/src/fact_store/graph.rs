@@ -574,8 +574,8 @@ fn ensure_not_cancelled(read_control: &FactReadControl) -> FactStoreResult<()> {
 /// Reports whether the projected memory-graph source is provably unchanged
 /// since a prior [`load_source`] observed `source_stamp`.
 ///
-/// `memory_v2_lineage_events` is append-only — schema triggers reject updates
-/// and deletes — and its `event_sequence` is an `AUTOINCREMENT` key that is
+/// `memory_v2_lineage_events` is append-only, schema triggers reject updates
+/// and deletes, and its `event_sequence` is an `AUTOINCREMENT` key that is
 /// never reused. Every committed mutation that can change the projected
 /// source (new facts, assertions, evidence, payload rows, curated relations,
 /// active-assertion or payload-access transitions) records at least one

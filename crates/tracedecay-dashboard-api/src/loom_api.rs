@@ -40,7 +40,7 @@ const GIT_CORRELATION_PROJECTION: &str = "verified session-git-evidence graph pr
 /// Verified git-correlation evidence recovered for one dashboard read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DashboardGitCorrelationReadV1 {
-    /// The projection has never published a verified head — the typed empty
+    /// The projection has never published a verified head, the typed empty
     /// start of a project without any recorded Git evidence.
     Unpublished,
     /// The recovered verified projection: every recorded span and commit

@@ -426,7 +426,7 @@ impl ClojureExtractor {
     ///
     /// Iterates direct children via a cursor (O(N)) and skips the first
     /// `skip` via `Iterator::skip`. Earlier revisions used
-    /// `for i in skip..N { node.child(i) }` — tree-sitter's `child(i)` is
+    /// `for i in skip..N { node.child(i) }`. Tree-sitter's `child(i)` is
     /// O(i) so that was O(N²) per `list_lit`, painful on Clojure forms with
     /// hundreds of top-level statements.
     fn extract_calls(state: &mut ExtractionState, node: TsNode<'_>, fn_id: &str, skip: usize) {

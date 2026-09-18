@@ -3,8 +3,8 @@ import { formatCount, formatMicrosUtcClock, splitCount, splitSignedBytes } from 
 
 /**
  * The magnitude language is shared so two surfaces cannot quietly abbreviate the
- * same number differently. Where a surface genuinely needs a different scale —
- * a token ledger whose small end is already four figures — that is a parameter
+ * same number differently. Where a surface genuinely needs a different scale,
+ * a token ledger whose small end is already four figures, that is a parameter
  * here, not a second copy of the thresholds.
  */
 describe('count thresholds', () => {

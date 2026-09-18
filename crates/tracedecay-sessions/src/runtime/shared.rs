@@ -591,7 +591,7 @@ impl ProjectRootMatcherCache {
 /// * **Project** scope keeps a record when its working directory belongs to
 ///   the project being ingested.
 /// * **Profile** (user-global) scope keeps a record when its working directory
-///   belongs to *no* registered project — records with no working directory at
+///   belongs to *no* registered project, records with no working directory at
 ///   all are user-global by definition. That is exactly the complement of the
 ///   project scopes, so each record lands in one store and not both.
 ///
@@ -618,7 +618,7 @@ impl TranscriptScopeMatcher {
     }
 
     /// Profile scope when `registered_roots` is present, project scope
-    /// otherwise — the shape every provider source carries as an
+    /// otherwise, the shape every provider source carries as an
     /// `Option<Vec<PathBuf>>` user scope beside its project root.
     pub fn for_scope(project_root: &Path, registered_roots: Option<&[PathBuf]>) -> Self {
         registered_roots.map_or_else(|| Self::project(project_root), Self::profile)
@@ -665,7 +665,7 @@ impl TranscriptScopeMatcher {
 
     /// Tri-state scope acceptance: `Match`/`NoMatch` mirror [`Self::accepts`],
     /// while `Unknown` reports that a bounded git timeout left the record's
-    /// scope undecided — deferring callers must not persist their cursor.
+    /// scope undecided, deferring callers must not persist their cursor.
     pub fn membership(&self, cwd: Option<&Path>) -> ProjectMembership {
         match self {
             Self::Project(project) => cwd.map_or(ProjectMembership::NoMatch, |cwd| {

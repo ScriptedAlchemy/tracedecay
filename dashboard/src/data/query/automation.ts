@@ -2,7 +2,7 @@
  * Reads and controls for the automation scheduler.
  *
  * `automation_scheduler_api.rs` answers `status`, `pause`, and `resume` with
- * the *same* payload — the controls re-read rather than acknowledge — and that
+ * the *same* payload, the controls re-read rather than acknowledge, and that
  * is what makes an honest control possible here. A route that replied
  * `{"ok":true}` would leave this module to assume the new state and flip the
  * toggle on faith; because the server returns the reading it just took, the
@@ -69,7 +69,7 @@ export function setSchedulerPaused(
  * What a control attempt produced, including the case where there was no
  * attempt.
  *
- * `not_dispatched` is not a failure of the write — it is the absence of one,
+ * `not_dispatched` is not a failure of the write, it is the absence of one,
  * and it stays separate for the same reason Settings keeps `unavailable` apart
  * from `error`: nothing was sent, so nothing changed, and the surface must not
  * imply the scheduler was asked and refused.
@@ -84,7 +84,7 @@ export type SchedulerControlResult =
  * Carried as mutation context rather than read again at settlement, because
  * the two moments can disagree. `useSchedulerControl` derives its key from the
  * scope of the render it last ran in, and React Query invokes the settlement
- * callbacks from the CURRENT options — so a pause dispatched against project A
+ * callbacks from the CURRENT options, so a pause dispatched against project A
  * that is still in flight when the reader switches to project B would have
  * settled against B's key: A's scheduler reading written into B's cache entry,
  * or B's entry invalidated because A's write failed. Either way one project's
@@ -103,7 +103,7 @@ interface SchedulerDispatch {
  * cache entry, so the badge and tiles update from the server's own answer
  * rather than from a refetch that could race, and without a window where the
  * screen shows the pre-control state as though the control had not run. It is
- * written to the entry belonging to the project that was dispatched to — see
+ * written to the entry belonging to the project that was dispatched to, see
  * {@link SchedulerDispatch}.
  *
  * Returns the scope authority alongside the mutation, so the control that
@@ -115,7 +115,7 @@ export function useSchedulerControl() {
   const client = useQueryClient();
   // The status read's own key, from the authority that builds it, not a second
   // construction of it. `scopeKey(scope)` was the second construction and it
-  // disagreed with the read under the all-projects default — see
+  // disagreed with the read under the all-projects default, see
   // {@link scopedQueryKey}.
   const statusKey = scopedQueryKey(
     scope,
@@ -141,7 +141,7 @@ export function useSchedulerControl() {
     mutationFn: async (paused: boolean) => {
       // Nothing leaves the browser unless the scope is known to accept it. The
       // button is disabled on this same reading, so arriving here means the
-      // disable was bypassed — and dispatching anyway would trade a stated
+      // disable was bypassed, and dispatching anyway would trade a stated
       // reason for a 405 that this layer cannot tell apart from a route that
       // has gone away.
       if (writability.state !== "writable") {
@@ -186,14 +186,14 @@ export function useSchedulerControl() {
  * Every field below is required because the route makes it unconditional:
  * `automation_jobs_api::list` answers `{jobs, count}`, `automation_skills_api::
  * list` answers `{…, count, skills, …}`, and the automatic-fact-receipts
- * list answers `{receipts, count, limit, error}` — each built by a `json!`
+ * list answers `{receipts, count, limit, error}`, each built by a `json!`
  * literal with no conditional key.
  *
  * That requiredness is load-bearing rather than pedantic. These schemas used to
  * make the collection optional (`skills?`, plus an `items?` alternative that no
  * handler has ever sent), and an optional array resolved through `?? []` into a
  * rendered "no managed skills". A store the daemon could not read, a renamed
- * field, a proxy's substituted body — all of them parsed clean and printed as a
+ * field, a proxy's substituted body, all of them parsed clean and printed as a
  * queue that had been checked and found empty. Required fields route those
  * bodies to `unsupported_schema` in `fetchPayload` instead, which is what
  * `PayloadBoundary` renders as a state rather than as content.
@@ -243,7 +243,7 @@ const JobsPayloadSchema = z
 /** `ManagedSkill` (managed_skill_model.rs): `metadata.id`, `.title` and
  * `.state` are plain required fields on the struct, so they are read directly
  * rather than through the chain of `?? skill['name'] ?? index` fallbacks this
- * card used to carry — every one of which described a payload no route sends,
+ * card used to carry, every one of which described a payload no route sends,
  * and the last of which printed an array index as if it were a skill. */
 const ManagedSkillStateSchema = z.enum(["active", "disabled", "archived"]);
 
@@ -387,8 +387,8 @@ const RunsPayloadSchema = z
 
 /** `automation_run_api::artifact_list` (`/api/automation/runs/{id}/artifacts`):
  * the run's recorded artifacts plus the handler's own chain summary, which
- * carries the integrity verdict — verified, mismatched, unavailable, or failed
- * — computed server-side against the published chain. */
+ * carries the integrity verdict, verified, mismatched, unavailable, or failed
+ *, computed server-side against the published chain. */
 const RunArtifactsPayloadSchema = z
   .object({
     run_id: z.string(),
@@ -1261,7 +1261,7 @@ export type ListReading<Row> =
  *
  * Each of these routes derives `count` from the very vector it serializes as
  * the list, so a body where the two disagree did not reach this browser as the
- * handler wrote it — a truncating proxy, a partial response, a different build.
+ * handler wrote it, a truncating proxy, a partial response, a different build.
  * The rows are still shown, because they are real rows; what changes is that
  * they stop being presented as the complete collection. Rendering the array
  * alone would turn a truncated read into a confident inventory, which is the
@@ -1334,7 +1334,7 @@ export function automationRunsReading(
  * `automation_automatic_fact_receipts_api::list` runs its query under
  * `coerce_limit(params.limit, 50, 200)`, and this page sends no `limit`, so it
  * reads the default page of 50. A response holding exactly its own limit is
- * therefore a page, not a total — the same distinction the Agents workspace
+ * therefore a page, not a total, the same distinction the Agents workspace
  * draws around its analytics cap.
  */
 export function talliedFactReceipts(

@@ -273,7 +273,7 @@ pub(super) fn def_signature() -> ToolDefinition {
         "tracedecay_signature",
         "Signature",
         "Return the signature-level metadata for symbols matching a qualified \
-         name — visibility, signature string (generics, params, return type, \
+         name, visibility, signature string (generics, params, return type, \
          where clauses), docstring, async flag, and kind. No bodies. Use this \
          instead of reading source files when you only need the public-API \
          surface of a function, method, or type. Multiple rows can be \
@@ -298,7 +298,7 @@ pub(super) fn def_callers() -> ToolDefinition {
     // alwaysLoad: "who calls this / find references" is the second-most-common
     // native reflex after grep. It only needs a node_id, so keeping it loaded
     // lets the model chain straight from a search/context hit into a caller
-    // trace. This is the 7th (and final) always-loaded tool — see def_grep.
+    // trace. This is the 7th (and final) always-loaded tool, see def_grep.
     def_always_load(
         "tracedecay_callers",
         "Callers",
@@ -395,7 +395,7 @@ pub(super) fn def_type_hierarchy() -> ToolDefinition {
     def(
         "tracedecay_type_hierarchy",
         "Type Hierarchy",
-        "Use when asked a trait/interface/class type-hierarchy question — trigger before manually grepping `impl X for` / `extends X` chains across files. Returns the full recursive tree of implementors and extenders for a resolved type node.",
+        "Use when asked a trait/interface/class type-hierarchy question, trigger before manually grepping `impl X for` / `extends X` chains across files. Returns the full recursive tree of implementors and extenders for a resolved type node.",
         json!({
             "type": "object",
             "properties": {
@@ -426,7 +426,7 @@ pub(super) fn def_derives() -> ToolDefinition {
             "properties": {
                 "qualified_name": {
                     "type": "string",
-                    "description": "The type's qualified name (or short name — same lookup as tracedecay_by_qualified_name)."
+                    "description": "The type's qualified name (or short name, same lookup as tracedecay_by_qualified_name)."
                 },
                 "node_id": {
                     "type": "string",
@@ -477,7 +477,7 @@ pub(super) fn def_field_sites() -> ToolDefinition {
          Returns two arrays: write_sites (assignments to the field) and \
          read_sites (everything else). Each entry includes file, line, \
          enclosing symbol, and a source snippet. Useful when renaming, \
-         removing, or adding an invariant to a field — the write-site list \
+         removing, or adding an invariant to a field, the write-site list \
          is the exact blast radius. Pattern matches `.<field>` references; \
          field-by-name is shorthand for any struct's same-named field, while \
          `Struct::field` form narrows to a specific declaration.",
@@ -586,7 +586,7 @@ pub(super) fn def_config() -> ToolDefinition {
          (e.g. 'package.version', 'dependencies.tokio'). Returns each match's \
          file, parsed value, and the line where the key is defined. Format is \
          detected from extension: .toml → TOML, .json → JSON. \
-         \n\nDoes not query the code graph — pure filesystem + parser. Works \
+         \n\nDoes not query the code graph, pure filesystem + parser. Works \
          on uninitialized projects.",
         json!({
             "type": "object",
@@ -651,7 +651,7 @@ pub(super) fn def_outline() -> ToolDefinition {
         "tracedecay_outline",
         "File Outline",
         "Flat list of every top-level symbol defined in a file (functions, structs, \
-         enums, traits, classes, impls, etc.) — like a table of contents. Sorted by \
+         enums, traits, classes, impls, etc.), like a table of contents. Sorted by \
          line number; no code bodies. Includes ast-grep outline JSON when the host \
          ast-grep CLI supports outline flags from ast-grep 0.44 or newer. Optional \
          'kinds' filter narrows to specific node kinds. Use this as the cheapest way \
@@ -681,7 +681,7 @@ pub(super) fn def_read() -> ToolDefinition {
         "Read File (mode-aware)",
         "Read a file or its symbol map. Modes: 'full' (entire file), 'lines' \
          (1-based inclusive line slice via the 'lines' arg, e.g. '120-180'), \
-         'map' (flat list of every top-level symbol from the graph — no source \
+         'map' (flat list of every top-level symbol from the graph, no source \
          bytes touched), 'signatures' (functions and types with their cached \
          signature). Line reads include overlapping symbol signatures by default; \
          full reads can opt in with include_symbols. Cross-session cached: a re-call \
@@ -717,7 +717,7 @@ pub(super) fn def_find_exact_symbol() -> ToolDefinition {
         "tracedecay_find_exact_symbol",
         "Exact Symbol Lookup",
         "Return every node whose `name` column equals the given bare \
-         identifier — a single O(log n) index probe against `idx_nodes_name`. \
+         identifier, a single O(log n) index probe against `idx_nodes_name`. \
          No BM25, no fuzzy match, no scoring. Use this when you already know \
          the symbol name and want the cheapest possible lookup; use \
          `tracedecay_search` for relevance-ranked discovery instead.",

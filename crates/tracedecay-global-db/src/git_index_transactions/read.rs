@@ -5,7 +5,7 @@
 //! [`RepositoryReadOperationV1::Code`](tracedecay_store::RepositoryReadOperationV1)
 //! ("repository attachment does not own code reads") because the git-index
 //! transaction tables live in the daemon `RegisteredGlobalDb`, not in the runtime crate's
-//! writer ledger. This executor answers that family here — the mirror image of
+//! writer ledger. This executor answers that family here, the mirror image of
 //! how [`EffectsLedgerReadExecutor`](tracedecay_rusqlite_runtime) answers the
 //! effects family in the runtime crate, where those tables happen to live.
 //!

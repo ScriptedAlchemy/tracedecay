@@ -363,7 +363,7 @@ pub(super) async fn concrete_dispatch_group_accepts(
     options: ToolCallRegistryOptions<'_>,
 ) -> bool {
     let invalid_args = Value::String("dispatch-metadata-probe".to_owned());
-    // The probe args are deliberately invalid, so an accepted tool still fails —
+    // The probe args are deliberately invalid, so an accepted tool still fails,
     // just not with the sentinel every group returns for a name it does not own.
     let owned = |result: Result<ToolResult>| {
         !matches!(

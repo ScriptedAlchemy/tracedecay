@@ -247,7 +247,7 @@ fn receipt_backed_doctor_checks_deployed_digests_registration_and_repair() {
     );
 
     // The receipt still owns the path, so moved bytes are content drift the
-    // ordinary reinstall converges — not a contested claim.
+    // ordinary reinstall converges, not a contested claim.
     let modified = artifact_root
         .path()
         .join(&receipt.artifacts[0].relative_path);
@@ -1126,7 +1126,7 @@ fn embedded_component_sets_complete_lifecycle_for_all_supported_hosts() {
 /// Drift on a path the receipt still owns must be a warning Doctor reports, not
 /// a blocking ownership conflict, and `Repair` must converge it while backing
 /// the previous bytes up. Nothing under `.cursor` that TraceDecay does not own
-/// may change — including when a run is interrupted before it mutates anything.
+/// may change, including when a run is interrupted before it mutates anything.
 #[test]
 fn cursor_core_drift_warns_and_reinstall_converges_with_a_backup() {
     let artifacts = tempfile::tempdir().unwrap();
@@ -1214,7 +1214,7 @@ fn cursor_core_drift_warns_and_reinstall_converges_with_a_backup() {
                 && artifact.state == HostBundleComponentDoctorStateV1::Drifted)
     );
 
-    // An interrupted run — refused before it mutates anything — leaves both the
+    // An interrupted run, refused before it mutates anything, leaves both the
     // drifted artifact and the unrelated Cursor config exactly as they were.
     let repair_request = request(HostBundleLifecycleOpV1::Repair, 72);
     let repair_preview = HostComponentSetTransactionV1::new(&mut writer)
