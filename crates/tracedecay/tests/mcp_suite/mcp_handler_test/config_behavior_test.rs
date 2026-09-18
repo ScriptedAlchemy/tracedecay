@@ -87,9 +87,7 @@ const VERSION_MARKDOWN: &str = "\
 
 const EMPTY_MARKDOWN: &str = "\
 **match_count:** 0
-
-## matches
-_None._
+matches: none
 ";
 
 fn write_config_project(project: &Path) {
