@@ -35,6 +35,7 @@ mod handshake;
 mod invocation_ownership;
 mod lifecycle;
 mod logging;
+mod multi_root_execute_mcp;
 mod multi_root_journey;
 mod ownership;
 mod remote_project_deletion;
