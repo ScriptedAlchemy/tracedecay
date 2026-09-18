@@ -2227,58 +2227,163 @@ async fn test_callers_for_rejects_unknown_kind() {
     shutdown_graph_fixture(cg).await;
 }
 
-#[tokio::test]
-async fn test_by_qualified_name_finds_indexed_node() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let exact = call_production_tool(
-        &cg,
-        "tracedecay_find_exact_symbol",
-        json!({"name": "helper", "limit": 5, "format": "json"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let exact: Value = serde_json::from_str(extract_text(&exact.value)).unwrap();
-    let qualified_name = exact["matches"]
-        .as_array()
-        .and_then(|matches| matches.first())
-        .and_then(|item| item["qualified_name"].as_str())
-        .expect("exact-symbol response must expose helper's qualified name");
+/// Occurrence ids hash the fixture's temporary git directory, so they change
+/// every run. Drop them before comparing the location an agent actually opens.
+fn stable_symbol_locations(mut items: Vec<Value>) -> Vec<Value> {
+    for item in &mut items {
+        item.as_object_mut()
+            .expect("qualified-name row")
+            .remove("node_id");
+    }
+    items.sort_by(|left, right| {
+        left["file"]
+            .as_str()
+            .cmp(&right["file"].as_str())
+            .then(
+                left["start_line"]
+                    .as_u64()
+                    .cmp(&right["start_line"].as_u64()),
+            )
+            .then(left["name"].as_str().cmp(&right["name"].as_str()))
+    });
+    items
+}
 
+async fn qualified_name_rows(fixture: &GraphQueryFixture, qualified_name: &str) -> Vec<Value> {
     let result = call_production_tool(
-        &cg,
+        fixture,
         "tracedecay_by_qualified_name",
-        json!({"qualified_name": qualified_name}),
+        json!({"qualified_name": qualified_name, "format": "json"}),
         None,
         None,
     )
     .await
-    .unwrap();
-    let items: Vec<Value> = serde_json::from_str(extract_text(&result.value)).unwrap();
-    assert!(
-        !items.is_empty(),
-        "expected at least one match for helper qname"
-    );
-    assert!(items.iter().any(|i| i["name"] == "helper"));
-    assert!(items[0]["start_line"].as_u64().is_some());
-    assert_eq!(items[0]["unavailable_fields"], json!(["attrs_start_line"]));
+    .unwrap_or_else(|error| {
+        panic!("tracedecay_by_qualified_name({qualified_name}) failed: {error}")
+    });
+    serde_json::from_value(extract_json(&result.value)).unwrap_or_else(|error| {
+        panic!(
+            "tracedecay_by_qualified_name({qualified_name}) was not a JSON array: {error}; {}",
+            result.value
+        )
+    })
 }
 
 #[tokio::test]
-async fn test_by_qualified_name_returns_empty_for_unknown() {
-    let (cg, _env, _dir) = production_empty_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_by_qualified_name",
-        json!({"qualified_name": "crate::does::not::exist"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let items: Vec<Value> = serde_json::from_str(extract_text(&result.value)).unwrap();
-    assert!(items.is_empty());
+async fn tracedecay_by_qualified_name_returns_the_symbol_at_that_exact_name() {
+    let (fixture, _root) = production_graph_query_fixture().await;
+
+    let helper = qualified_name_rows(&fixture, "src/utils.rs::helper").await;
+    let greeting = qualified_name_rows(&fixture, "src/utils.rs::format_greeting").await;
+    let entry = qualified_name_rows(&fixture, "src/main.rs::main").await;
+    let bare_name = qualified_name_rows(&fixture, "helper").await;
+    let suffix = qualified_name_rows(&fixture, "utils.rs::helper").await;
+    let unknown = qualified_name_rows(&fixture, "src/utils.rs::does_not_exist").await;
+
+    assert_eq!(
+        stable_symbol_locations(helper),
+        vec![json!({
+            "name": "helper",
+            "qualified_name": "src/utils.rs::helper",
+            "kind": "function",
+            "file": "src/utils.rs",
+            "start_line": 3,
+            "end_line": 5,
+            "unavailable_fields": ["attrs_start_line"]
+        })]
+    );
+    assert_eq!(
+        stable_symbol_locations(greeting),
+        vec![json!({
+            "name": "format_greeting",
+            "qualified_name": "src/utils.rs::format_greeting",
+            "kind": "function",
+            "file": "src/utils.rs",
+            "start_line": 7,
+            "end_line": 9,
+            "unavailable_fields": ["attrs_start_line"]
+        })]
+    );
+    assert_eq!(
+        stable_symbol_locations(entry),
+        vec![json!({
+            "name": "main",
+            "qualified_name": "src/main.rs::main",
+            "kind": "function",
+            "file": "src/main.rs",
+            "start_line": 5,
+            "end_line": 8,
+            "unavailable_fields": ["attrs_start_line"]
+        })]
+    );
+    assert_eq!(bare_name, Vec::<Value>::new());
+    assert_eq!(suffix, Vec::<Value>::new());
+    assert_eq!(unknown, Vec::<Value>::new());
+
+    let server = fixture
+        .production
+        .harness
+        .server(fixture.project_root())
+        .expect("production graph-query server");
+    for arguments in [json!({}), json!({"qualified_name": 4})] {
+        let response =
+            handle_real_server_tool_call_raw(&server, "tracedecay_by_qualified_name", arguments)
+                .await;
+        assert_eq!(
+            response["error"],
+            json!({
+                "code": -32602,
+                "message": "missing required parameter: qualified_name",
+                "data": {
+                    "detail": "missing required parameter: qualified_name",
+                    "reason_code": "missing_required_parameter",
+                    "retryable": false,
+                    "tool": "tracedecay_by_qualified_name"
+                }
+            }),
+            "rejection: {response}"
+        );
+    }
+    shutdown_graph_fixture(fixture).await;
+}
+
+#[tokio::test]
+async fn tracedecay_by_qualified_name_returns_every_symbol_sharing_that_name() {
+    let (fixture, _root) = graph_query_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(
+            project.join("src/lib.rs"),
+            "fn overloaded() {}\nfn overloaded() {}\n",
+        )
+        .unwrap();
+    })
+    .await;
+
+    let rows = qualified_name_rows(&fixture, "src/lib.rs::overloaded").await;
+    assert_eq!(
+        stable_symbol_locations(rows),
+        vec![
+            json!({
+                "name": "overloaded",
+                "qualified_name": "src/lib.rs::overloaded",
+                "kind": "function",
+                "file": "src/lib.rs",
+                "start_line": 1,
+                "end_line": 1,
+                "unavailable_fields": ["attrs_start_line"]
+            }),
+            json!({
+                "name": "overloaded",
+                "qualified_name": "src/lib.rs::overloaded",
+                "kind": "function",
+                "file": "src/lib.rs",
+                "start_line": 2,
+                "end_line": 2,
+                "unavailable_fields": ["attrs_start_line"]
+            }),
+        ]
+    );
+    shutdown_graph_fixture(fixture).await;
 }
 
 #[tokio::test]
