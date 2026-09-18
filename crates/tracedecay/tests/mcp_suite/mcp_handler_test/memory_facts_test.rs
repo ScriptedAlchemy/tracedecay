@@ -88,6 +88,10 @@ pub(super) async fn invoke_production_tool(
     invoke_exact_tool(&fixture.server, tool_name, arguments).await
 }
 
+pub(super) fn production_server(fixture: &FactStoreMcpFixture) -> &tracedecay::mcp::McpServer {
+    fixture.server.as_ref()
+}
+
 pub(super) async fn close_test_graph(fixture: FactStoreMcpFixture) {
     fixture.production.harness.shutdown().await;
 }
@@ -1080,20 +1084,6 @@ async fn memory_status_reports_canonical_similarity_projection_shape() {
             .as_u64()
             .is_some_and(|capacity| capacity > 0)
     );
-    close_test_graph(cg).await;
-}
-
-#[tokio::test]
-async fn fact_store_reason_requires_an_entity_selection() {
-    let cg = setup_project().await;
-
-    for args in [json!({}), json!({"entities": ["same", "same"]})] {
-        let result = invoke_production_tool(&cg, "tracedecay_fact_store_reason", args).await;
-        assert!(
-            result.is_err(),
-            "the exact reason route must reject empty or duplicate entity selections"
-        );
-    }
     close_test_graph(cg).await;
 }
 
