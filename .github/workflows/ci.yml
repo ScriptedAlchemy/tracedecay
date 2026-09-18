@@ -3,6 +3,12 @@ name: CI
 on:
   push:
     branches: [master, feature/holographic-memory]
+  # Pull-request CI is on demand. `opened`/`synchronize` still create a queued
+  # run when every job skips, so this trigger is only `labeled`: add or
+  # re-add `ci-full` to test the current head.
+  pull_request:
+    branches: ['**']
+    types: [labeled]
   workflow_dispatch:
     inputs:
       run_os:
@@ -42,14 +48,11 @@ env:
   AST_GREP_VERSION: "0.44.0"
 
 jobs:
-  # Manual dispatch is the only PR-head entry point. GitHub queues a
-  # pull_request workflow before evaluating job conditions, and automation
-  # applied every opt-in label to 173 PRs; only removing the trigger prevents
-  # that volume from occupying the account FIFO. A dispatch runs the Linux
-  # lane and may add OS, host, or perf work through explicit inputs. A master
-  # push runs the Linux lane only so release jobs retain runner slots.
+  # `ci-full` is the pull-request entry point. A master push and a manual
+  # dispatch still run the Linux lane. OS, host, and perf stay opt-in.
   scope-gate:
     name: Scope gate
+    if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'ci-full' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
