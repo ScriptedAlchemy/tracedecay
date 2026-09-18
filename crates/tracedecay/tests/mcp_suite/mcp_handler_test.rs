@@ -69,6 +69,7 @@ mod test_map_test;
 mod test_risk_behavior_test;
 mod todos_test;
 mod type_hierarchy_test;
+mod unmounted_files_test;
 mod unsafe_patterns_test;
 #[cfg(feature = "test-transport")]
 mod work_test;
