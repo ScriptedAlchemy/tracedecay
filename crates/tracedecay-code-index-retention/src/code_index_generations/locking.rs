@@ -50,7 +50,6 @@ pub fn try_acquire_code_generation_store_read_lock(
     match lock
         .try_lock_shared()
         .map_err(std::io::Error::from)
-        .map_err(std::io::Error::from)
     {
         Ok(()) => Ok(Some(CodeGenerationStoreLockV1 {
             file: lock,

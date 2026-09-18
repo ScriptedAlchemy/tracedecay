@@ -224,7 +224,6 @@ fn acquire_shared_or_inherited_at(path: &Path, operation: &str) -> Result<Lifecy
     match file
         .try_lock_shared()
         .map_err(std::io::Error::from)
-        .map_err(std::io::Error::from)
     {
         Ok(()) => Ok(LifecycleLease {
             hold: LeaseHold::File(file),
@@ -388,7 +387,6 @@ fn acquire_shared_at(path: &Path, operation: &str) -> Result<LifecycleLease> {
     match file
         .try_lock_shared()
         .map_err(std::io::Error::from)
-        .map_err(std::io::Error::from)
     {
         Ok(()) => Ok(LifecycleLease {
             hold: LeaseHold::File(file),
@@ -408,7 +406,6 @@ fn try_acquire_shared_at(path: &Path, operation: &str) -> Result<SharedLeaseAtte
     let file = open_lock_file(path)?;
     match file
         .try_lock_shared()
-        .map_err(std::io::Error::from)
         .map_err(std::io::Error::from)
     {
         Ok(()) => Ok(SharedLeaseAttempt::Acquired(LifecycleLease {
