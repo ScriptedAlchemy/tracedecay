@@ -2333,6 +2333,15 @@
             "null"
           ]
         },
+        "excluded_too_large_bodies": {
+          "description": "Bodies excluded because they exceed the automatic-discovery byte bound.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "excluded_too_small_bodies": {
           "description": "Bodies excluded because they are below the automatic-discovery minimum.",
           "format": "uint64",
@@ -2452,6 +2461,7 @@
         "hot_postings_skipped",
         "hot_posting_rows_skipped",
         "excluded_too_small_bodies",
+        "excluded_too_large_bodies",
         "excluded_incomplete_tokenization_bodies",
         "rename_partial_bodies",
         "rename_unsupported_bodies",
@@ -21314,6 +21324,25 @@
           "required": [
             "status",
             "minimum_tokens"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "maximum_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "status": {
+              "const": "excluded_too_large",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "maximum_bytes"
           ],
           "type": "object"
         },
