@@ -944,6 +944,27 @@ impl StoreAdministration {
         registry.mounted_session_databases().await
     }
 
+    /// The mounted session-runtime registry for this profile, when one is
+    /// installed. Branch publication reads the project's durable cursor-key
+    /// authority through it so an explicitly published branch can mount its
+    /// own query authority instead of borrowing a peer worktree's.
+    #[hotpath::measure(label = "daemon.branch_admin.session_runtime_registry", future = true)]
+    pub(super) async fn mounted_session_runtime_registry(
+        &self,
+    ) -> Option<Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>> {
+        let profile_root = self
+            .profile_identity()
+            .and_then(|identity| authority::canonical_identity_path(identity.profile_root()))
+            .ok()?;
+        let registry = {
+            let registries = self.session_runtime_registries.lock().await;
+            registries
+                .get(&profile_root)
+                .map(|entry| Arc::clone(&entry.registry))
+        }?;
+        registry.get().cloned()
+    }
+
     #[hotpath::measure(label = "daemon.branch_admin.mounted_project_servers", future = true)]
     pub(super) async fn mounted_project_servers(&self) -> Vec<Arc<crate::mcp::McpServer>> {
         let Ok(profile_root) = self
