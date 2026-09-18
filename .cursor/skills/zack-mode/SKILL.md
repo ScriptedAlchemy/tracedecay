@@ -19,6 +19,12 @@ Focused tests support this proof but do not replace it. Measure performance
 claims on a representative journey. Label static code properties as hypotheses.
 Report what ran, what happened, and what remains unverified.
 
+When the work is a proof or a test, read and follow
+`principle-prove-it-works` and `principle-test-behavior-not-implementation`
+(pstack plugin). Do not paste those skills here. Assert the literal result a
+caller sees. If a test would still pass when every imported function returned
+undefined, rewrite the assertion or delete the test.
+
 ## Discipline
 
 Fix the root cause. Do not weaken an assertion or raise a timeout, budget, or
