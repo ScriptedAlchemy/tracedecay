@@ -154,6 +154,19 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  benchmark-harness:
+    name: Benchmark harness self-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      # The runtime benchmark harness produces the evidence PRs cite; its own
+      # unit tests only count if something runs them.
+      - name: Test the runtime benchmark harness
+        working-directory: benchmark_data/runtime
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
+
   commit-messages:
     name: Commit Messages
     runs-on: ubuntu-latest
