@@ -167,12 +167,12 @@ fn assert_identity(opened: &OpenedCheckout, payload: &Value) {
     );
     assert_eq!(
         payload["branch"]["branch_resolution"],
-        json!("single_db"),
+        json!("exact"),
         "{payload}"
     );
     assert_eq!(
         payload["branch"]["tracked_branch_count"],
-        json!(0),
+        json!(1),
         "{payload}"
     );
 }
