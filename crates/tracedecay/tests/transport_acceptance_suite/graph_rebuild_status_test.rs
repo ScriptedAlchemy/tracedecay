@@ -24,6 +24,8 @@ use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay_mcp::JsonRpcResponse;
 
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(90);
+const RELATION_FREE_BACKGROUND_FILE_COUNT: u32 = 768;
+const RELATION_FREE_FUNCTIONS_PER_FILE: u32 = 128;
 
 fn git(project: &Path, args: &[&str]) {
     let output = Command::new("git")
@@ -226,12 +228,14 @@ async fn wait_for_background_refresh(
     .unwrap_or_else(|_| panic!("reopen omitted background-refresh status: {last_status}"));
 }
 
-fn install_background_batch(isolation_root: &Path, project: &Path) {
+fn install_relation_free_background_batch(isolation_root: &Path, project: &Path) {
     let staging = isolation_root.join("refresh-batch-staging");
     fs::create_dir_all(&staging).expect("background batch staging directory");
-    for file_index in 0..768_u32 {
+    // This is a throughput fixture, not an edge fixture: every function is
+    // independent, so the sealed canonical edge census is intentionally zero.
+    for file_index in 0..RELATION_FREE_BACKGROUND_FILE_COUNT {
         let mut source = String::new();
-        for symbol_index in 0..128_u32 {
+        for symbol_index in 0..RELATION_FREE_FUNCTIONS_PER_FILE {
             writeln!(
                 source,
                 "pub fn refresh_probe_{file_index:04}_{symbol_index:03}(input: u32) -> u32 {{ input + {symbol_index} }}"
@@ -269,7 +273,7 @@ async fn background_refresh_and_reopen_report_only_servable_generations_inner() 
     let initial_generation =
         wait_for_current_generation(&harness, &project, &initial_revision, "before_reopen").await;
 
-    install_background_batch(isolation.path(), &project);
+    install_relation_free_background_batch(isolation.path(), &project);
     commit_all(&project, "install background refresh batch");
     let refreshed_revision = head(&project);
     let receipt = tool(
