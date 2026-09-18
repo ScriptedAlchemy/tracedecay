@@ -1,8 +1,8 @@
 # Test-support features for the crate split (2026-08-01)
 
-Companion to `2026-07-31-one-shot-crate-split.md`. That plan moved subsystems
-out of `src/` and accepted breakage; lib targets converged first. This plan
-covers the **`--all-targets` aftermath**: upstream test-only surfaces are
+The one-shot crate split moved subsystems out of `src/` and accepted breakage;
+lib targets converged first. This note covers the **`--all-targets` aftermath**:
+upstream test-only surfaces are
 `#[cfg(test)]`-gated, so they vanish at the crate boundary and every downstream
 crate's `lib test` target fails to resolve them.
 
