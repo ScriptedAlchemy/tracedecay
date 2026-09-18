@@ -120,10 +120,23 @@ fn process_resident_memory_limit_v1(
     cgroup_limit: Option<u64>,
     override_limit: Option<NonZeroU64>,
 ) -> NonZeroU64 {
-    let automatic_limit = process_resident_memory_limit_for_system_v1(effective_memory_bytes_v1(
-        total_memory_bytes,
-        cgroup_limit,
-    ));
+    // Retain one quarter of physical RAM for the OS and other processes, then
+    // respect the operator's cgroup ceiling as-is. Applying the quarter again
+    // *after* taking min(host, cgroup) double-discounted a deliberately sized
+    // service: 128 GiB host, memory.high=26 GiB became 19.5 GiB even though
+    // memory.max=30 GiB already retained the safety margin. An 18 GiB serving
+    // graph could then never admit its 2.6 GiB replacement builder.
+    let host_limit = (total_memory_bytes != 0)
+        .then(|| process_resident_memory_limit_for_system_v1(total_memory_bytes));
+    let automatic_limit = match (host_limit, cgroup_limit) {
+        (Some(host), Some(cgroup)) => NonZeroU64::new(host.get().min(cgroup))
+            .unwrap_or(DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1),
+        (Some(host), None) => host,
+        (None, Some(cgroup)) => {
+            NonZeroU64::new(cgroup).unwrap_or(DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1)
+        }
+        (None, None) => DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+    };
     override_limit.map_or(automatic_limit, |override_limit| {
         cgroup_limit.map_or(override_limit, |cgroup_limit| {
             NonZeroU64::new(override_limit.get().min(cgroup_limit))
@@ -134,12 +147,14 @@ fn process_resident_memory_limit_v1(
 
 /// Size the shared resident-allocation authority for this process.
 ///
-/// The automatic authority uses the lower of physical RAM and this process's
-/// finite cgroup-v2 `memory.max` / `memory.high`, then retains one quarter
-/// outside modeled concurrent allocations. [`PROCESS_RESIDENT_MEMORY_LIMIT_ENV_V1`]
-/// can lower or raise the automatic authority, but a finite cgroup ceiling
-/// remains an upper bound. The resulting authority throttles simultaneous
-/// scratch ownership; it never limits repository bytes on disk.
+/// The automatic authority retains one quarter of physical RAM, then takes the
+/// lower of that host allowance and this process's finite cgroup-v2
+/// `memory.max` / `memory.high`. A cgroup is already an operator-sized service
+/// allowance and is not discounted a second time.
+/// [`PROCESS_RESIDENT_MEMORY_LIMIT_ENV_V1`] can lower or raise the automatic
+/// authority, but a finite cgroup ceiling remains an upper bound. The resulting
+/// authority throttles simultaneous scratch ownership; it never limits
+/// repository bytes on disk.
 #[must_use]
 pub fn detected_process_resident_memory_limit_v1() -> NonZeroU64 {
     let system = System::new_with_specifics(
