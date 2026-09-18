@@ -3,19 +3,22 @@
 //! `tracedecay_work_resume_attempts` through the production MCP server.
 //!
 //! Restart recovery fences durable open attempts only after this daemon's
-//! process registry is gone. A live provider holder is a conflict, and a
-//! settled attempt is left sealed. The crash below drops the runtime before
-//! the harness so shutdown cannot run the cancellation ladder and settle the
-//! child that recovery is supposed to find still open.
+//! process is gone. A live provider holder is a conflict, and a settled
+//! attempt is left sealed. Shutdown would run the cancellation ladder and
+//! settle the child recovery is supposed to find still open, so the live
+//! daemon is a separate process stopped with SIGKILL.
 
 use crate::fixture;
 use crate::support::{extract_real_server_text, handle_real_server_tool_call, test_temp_dir};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::mcp::McpServer;
 use tracedecay_domain::configuration::{
@@ -36,7 +39,13 @@ const HELD_ATTEMPT_ID: &str = "attempt.resume-attempts.held";
 const LIVE_HOLDER_CODE: &str = "application.work-attempt.live-holder";
 const LIVE_HOLDER_MESSAGE: &str =
     "Work attempt recovery requires the current worktree to have no live provider holder.";
+const CRASH_CHILD_ENV: &str = "TRACEDECAY_WORK_RESUME_ATTEMPTS_CHILD";
+const CRASH_ROOT_ENV: &str = "TRACEDECAY_WORK_RESUME_ATTEMPTS_ROOT";
+const CRASH_READY_FILE: &str = "resume-attempts-ready";
+const CRASH_EVIDENCE_FILE: &str = "resume-attempts-evidence.json";
+const CRASH_LOG_FILE: &str = "resume-attempts-child.log";
 
+#[derive(Debug, Serialize, Deserialize)]
 struct LiveDaemonEvidence {
     empty_report: Value,
     missing_field: Value,
@@ -48,21 +57,15 @@ struct LiveDaemonEvidence {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resume_attempts_refuses_a_live_holder_and_reports_the_lost_attempt() {
+    if std::env::var_os(CRASH_CHILD_ENV).is_some() {
+        hold_provider_until_killed().await;
+        return;
+    }
+
     let isolation = test_temp_dir();
     let project_root = isolation.path().join("project");
     seed_project(&project_root);
-
-    let crash_isolation = isolation.path().to_path_buf();
-    let crash_project = project_root.clone();
-    let evidence = tokio::task::spawn_blocking(move || {
-        let handle =
-            std::thread::spawn(move || lose_provider_holder(crash_isolation, crash_project));
-        handle
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-    })
-    .await
-    .expect("live daemon thread");
+    let evidence = kill_live_daemon(isolation.path()).await;
 
     assert_eq!(
         evidence.empty_report,
@@ -268,27 +271,116 @@ fn only_recovery(report: &Value) -> &Value {
     &required[0]
 }
 
-fn lose_provider_holder(isolation: PathBuf, project_root: PathBuf) -> LiveDaemonEvidence {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .expect("runtime for the daemon that loses its provider holder");
-    let (harness, evidence) =
-        runtime.block_on(Box::pin(drive_live_daemon(isolation, project_root)));
-    // Drop the runtime first so attempt tasks abort inside `child.wait`.
-    // Dropping the harness afterwards finds no runtime and does not spawn
-    // shutdown, which would settle the open attempt before recovery sees it.
-    drop(runtime);
-    drop(harness);
-    evidence
+async fn kill_live_daemon(isolation: &Path) -> LiveDaemonEvidence {
+    let log_path = isolation.join(CRASH_LOG_FILE);
+    let log_file = std::fs::File::create(&log_path).expect("child log");
+    let filter = format!(
+        "{}::resume_attempts_refuses_a_live_holder_and_reports_the_lost_attempt",
+        module_path!()
+            .strip_prefix("mcp_suite::")
+            .unwrap_or(module_path!())
+    );
+    let mut child = Command::new(std::env::current_exe().expect("test executable"))
+        .arg(&filter)
+        .arg("--exact")
+        .arg("--nocapture")
+        .env(CRASH_CHILD_ENV, "1")
+        .env(CRASH_ROOT_ENV, isolation)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log_file.try_clone().expect("clone child log")))
+        .stderr(Stdio::from(log_file))
+        .process_group(0)
+        .spawn()
+        .expect("spawn the daemon that will lose its provider holder");
+    let ready = isolation.join(CRASH_READY_FILE);
+    let started = Instant::now();
+    while !ready.is_file() {
+        if let Some(status) = child.try_wait().expect("poll crash child") {
+            panic!(
+                "crash child exited before the provider was held ({status}) filter={filter}: {}",
+                child_log(&log_path)
+            );
+        }
+        if started.elapsed() > Duration::from_secs(90) {
+            let _ = kill_process_group(child.id());
+            let _ = child.wait();
+            panic!(
+                "crash child did not hold the provider within 90s: {}",
+                child_log(&log_path)
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        kill_process_group(child.id()),
+        0,
+        "SIGKILL must reach the live daemon before recovery"
+    );
+    let status = child.wait().expect("wait for the killed daemon");
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGKILL),
+        "the live daemon must die by SIGKILL so shutdown cannot settle the open attempt: {status}; {}",
+        child_log(&log_path)
+    );
+    let bytes = std::fs::read(isolation.join(CRASH_EVIDENCE_FILE)).unwrap_or_else(|error| {
+        panic!(
+            "lost the live daemon's MCP evidence ({error}): {}",
+            child_log(&log_path)
+        )
+    });
+    serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+        panic!(
+            "live daemon MCP evidence was not JSON ({error}): {}",
+            child_log(&log_path)
+        )
+    })
+}
+
+async fn hold_provider_until_killed() {
+    let isolation = PathBuf::from(std::env::var_os(CRASH_ROOT_ENV).unwrap_or_else(|| {
+        panic!("{CRASH_ROOT_ENV} must name the isolation root the parent will reopen")
+    }));
+    let project_root = isolation.join("project");
+    let (harness, evidence) = drive_live_daemon(isolation.clone(), project_root).await;
+    let evidence_path = isolation.join(CRASH_EVIDENCE_FILE);
+    let mut evidence_file = std::fs::File::create(&evidence_path).expect("evidence file");
+    evidence_file
+        .write_all(&serde_json::to_vec(&evidence).expect("serialize MCP evidence"))
+        .expect("write MCP evidence");
+    evidence_file.sync_all().expect("sync MCP evidence");
+    drop(evidence_file);
+    std::fs::write(isolation.join(CRASH_READY_FILE), b"held").expect("ready file");
+    // The parent SIGKILLs this process. Dropping the harness here would shut
+    // the daemon down and settle the attempt recovery has to find still open.
+    std::mem::forget(harness);
+    std::future::pending::<()>().await;
+}
+
+fn kill_process_group(pid: u32) -> i32 {
+    let pgid = i32::try_from(pid).expect("process id fits SIGKILL");
+    // The child is the leader of its own group, including the provider it
+    // spawned. A negative id is the process-group form of kill(2).
+    let result = unsafe { libc::kill(-pgid, libc::SIGKILL) };
+    if result == 0 {
+        return 0;
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return 0;
+    }
+    panic!("could not SIGKILL process group {pgid}: {error}");
+}
+
+fn child_log(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_else(|error| format!("child log unreadable: {error}"))
 }
 
 async fn drive_live_daemon(
     isolation: PathBuf,
     project_root: PathBuf,
 ) -> (ProductionProjectCompositionHarnessV1, LiveDaemonEvidence) {
-    let mut harness =
+    let harness =
         ProductionProjectCompositionHarnessV1::open(isolation.clone(), [project_root.clone()])
             .await
             .expect("production composition");
