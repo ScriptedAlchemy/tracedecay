@@ -270,31 +270,6 @@ fn invalid_request_problem() -> Value {
     })
 }
 
-fn denied_problem() -> Value {
-    json!({
-        "revision": 1,
-        "kind": "not_found_or_not_authorized",
-        "code": "not_found_or_not_authorized",
-        "message": "The requested resource was not found or is not authorized",
-        "diagnostic": null,
-        "committed_receipt": null,
-        "owning_layer": "application",
-        "terminality": "pre_admission",
-        "retryable": false,
-        "retry": "never",
-        "retry_scope": null,
-        "retry_after_millis": null,
-        "cancellation_stage": null,
-        "unavailable_classification": null,
-        "execution_failure_classification": null,
-        "request_id": "request.stable",
-        "trace_id": "request.stable",
-        "details": [],
-        "legal_actions": [],
-        "coverage": null
-    })
-}
-
 fn assert_problem(response: &Value, expected: Value) {
     assert_eq!(response["jsonrpc"], "2.0", "{response}");
     assert_eq!(response["id"], 1, "{response}");
@@ -618,7 +593,26 @@ async fn fact_store_search_rejects_blank_limit_and_unknown_fields() {
         }),
     )
     .await;
-    assert_problem(&missing, denied_problem());
+    assert_eq!(missing["jsonrpc"], "2.0", "{missing}");
+    assert_eq!(missing["id"], 1, "{missing}");
+    assert!(
+        missing.get("result").is_none() || missing["result"].is_null(),
+        "{missing}"
+    );
+    assert_eq!(
+        missing["error"],
+        json!({
+            "code": -32602,
+            "message": "tool project route failed: reason_code=project_route_not_found retryable=false: registered project not found for project_selector.project_id=project.missing; run tracedecay_project_search",
+            "data": {
+                "detail": "registered project not found for project_selector.project_id=project.missing; run tracedecay_project_search",
+                "reason_code": "project_route_not_found",
+                "retryable": false,
+                "tool": TOOL
+            }
+        }),
+        "{missing}"
+    );
 
     fixture.harness.shutdown().await;
 }
