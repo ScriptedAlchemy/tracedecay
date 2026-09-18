@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.41](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.40...v0.1.0-beta.41) (2026-09-18)
+
+
+### Bug Fixes
+
+* **code-index:** keep graph-off text serving terminal without a seat ([#1569](https://github.com/ScriptedAlchemy/tracedecay/issues/1569)) ([44acc8a](https://github.com/ScriptedAlchemy/tracedecay/commit/44acc8a1bca47e4dc3ae7d8be93bd6c6c44b6d0f))
+* **code-index:** withhold current while the serving seat lags ([5cf3482](https://github.com/ScriptedAlchemy/tracedecay/commit/5cf3482fa85c94309301e2fb7547ecc6b92f2d76))
+* **configuration:** converge retired core settings out of old snapshots ([4d8c365](https://github.com/ScriptedAlchemy/tracedecay/commit/4d8c36597ddd8e0a30dc798f3aa438c878cee0b8))
+* **configuration:** converge retired core settings out of old snapshots ([475fb53](https://github.com/ScriptedAlchemy/tracedecay/commit/475fb53f734c38e55ea03caa14c8bdc1a5823161))
+* **release:** build packaged crates against the workspace lockfile ([89a3423](https://github.com/ScriptedAlchemy/tracedecay/commit/89a34237d86b41d7e6ed66a41bbddfa30107e133))
+* **release:** re-apply workspace path patches in distribution acceptance ([34fa6d0](https://github.com/ScriptedAlchemy/tracedecay/commit/34fa6d0e98718d08295b1f73030084c0153e8d84))
+* **surface:** name the field a refused application request failed on ([3352774](https://github.com/ScriptedAlchemy/tracedecay/commit/33527745b0b73d01e686af8c287a55eba11ff5ba))
+* **surface:** name the field a refused application request failed on ([729ca26](https://github.com/ScriptedAlchemy/tracedecay/commit/729ca26a7335cde8fe78ee9f1eda6a815a273d6e))
+
+
+### Performance Improvements
+
+* **index:** share clone-body tokens; scan secrets with the DFA ([1e454ff](https://github.com/ScriptedAlchemy/tracedecay/commit/1e454fffb8f913b6d25bb8efec5b02b82fb69b14))
+* **index:** share clone-body tokens; scan secrets with the DFA ([1518721](https://github.com/ScriptedAlchemy/tracedecay/commit/1518721f370cf31db954a226a559898ca78da66a))
+
 ## [0.1.0-beta.40](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.39...v0.1.0-beta.40) (2026-09-17)
 
 
