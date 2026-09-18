@@ -29,6 +29,8 @@ mod edit_test;
 mod fact_store_update_behavior_test;
 #[cfg(feature = "test-transport")]
 mod feedback_list_test;
+#[cfg(feature = "test-transport")]
+mod files_behavior_test;
 mod find_exact_symbol_test;
 mod graph_analysis_test;
 mod graph_query_test;
