@@ -42,6 +42,8 @@ mod memory_status_test;
 mod move_symbol_behavior_test;
 #[cfg(feature = "test-transport")]
 mod move_symbol_test;
+#[cfg(feature = "test-transport")]
+mod mutate_graph_test;
 #[cfg(all(feature = "test-transport", unix))]
 mod release_placement_test;
 #[cfg(feature = "test-transport")]
