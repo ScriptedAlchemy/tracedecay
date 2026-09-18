@@ -15,7 +15,7 @@ use super::memory_fact_assertions::assert_fact_list;
 /// the removed direct broad-action handler.
 pub(super) struct FactStoreMcpFixture {
     production: ProductionCompositionFixture,
-    server: Arc<tracedecay::mcp::McpServer>,
+    pub(super) server: Arc<tracedecay::mcp::McpServer>,
 }
 
 async fn fact_store_mcp_fixture() -> FactStoreMcpFixture {
@@ -33,7 +33,7 @@ pub(super) async fn setup_project() -> FactStoreMcpFixture {
 
 /// Invoke an exact MCP operation through the production daemon executor and
 /// project its typed operation payload for focused behavioral assertions.
-async fn invoke_exact_tool(
+pub(super) async fn invoke_exact_tool(
     server: &tracedecay::mcp::McpServer,
     tool_name: &str,
     arguments: Value,
@@ -108,11 +108,11 @@ fn committed_add_result(payload: &Value) -> &Value {
     result
 }
 
-struct FactStoreCrossProjectFixture {
-    harness: tracedecay::daemon::ProductionProjectCompositionHarnessV1,
+pub(super) struct FactStoreCrossProjectFixture {
+    pub(super) harness: tracedecay::daemon::ProductionProjectCompositionHarnessV1,
     target_root: std::path::PathBuf,
-    active_server: Arc<tracedecay::mcp::McpServer>,
-    target_server: Arc<tracedecay::mcp::McpServer>,
+    pub(super) active_server: Arc<tracedecay::mcp::McpServer>,
+    pub(super) target_server: Arc<tracedecay::mcp::McpServer>,
     _isolation: TestTempDir,
 }
 
@@ -147,7 +147,7 @@ fn initialize_production_fact_project(root: &Path) {
     assert!(commit.success(), "git commit should succeed");
 }
 
-async fn fact_store_cross_project_fixture() -> FactStoreCrossProjectFixture {
+pub(super) async fn fact_store_cross_project_fixture() -> FactStoreCrossProjectFixture {
     let isolation = test_temp_dir();
     let active_root = isolation.path().join("active");
     let target_root = isolation.path().join("target");
