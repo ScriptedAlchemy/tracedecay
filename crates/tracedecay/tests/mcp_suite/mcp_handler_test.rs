@@ -14,6 +14,8 @@ mod dependency_hint_test;
 mod edit_test;
 mod graph_analysis_test;
 mod graph_query_test;
+#[cfg(feature = "test-transport")]
+mod insert_at_test;
 mod lcm_test;
 #[cfg(feature = "test-transport")]
 mod memory_contradiction_contract_test;
