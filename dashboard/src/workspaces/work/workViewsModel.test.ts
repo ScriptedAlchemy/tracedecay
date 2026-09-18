@@ -487,7 +487,7 @@ describe('the graph channels bound onto the projections', () => {
     });
   }
 
-  it('weights the critical path with the authority’s own chain and effort', () => {
+  it('weights the critical path with the authority\'s own chain and effort', () => {
     const reading = workDagReading(
       [projection({ task_id: 'a' })],
       graphOf({

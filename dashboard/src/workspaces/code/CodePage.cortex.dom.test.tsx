@@ -287,7 +287,7 @@ describe('typed absences on the inspector', () => {
     expect(strata.textContent).toMatch(/src\/dashboard/);
   });
 
-  it('names a file the layering scan never laid out, with the scan’s own extent', async () => {
+  it('names a file the layering scan never laid out, with the scan\'s own extent', async () => {
     vi.stubGlobal('fetch', serve());
     const user = userEvent.setup();
     renderCode();

@@ -1139,7 +1139,7 @@ describe('Settings section navigation', () => {
     expect(findConfigSection(sectionsFixture(['project']), 'project.sync')).toBeUndefined();
   });
 
-  it('jumps to the section the rail names and marks the inspected row’s section', async () => {
+  it('jumps to the section the rail names and marks the inspected row\'s section', async () => {
     const user = userEvent.setup();
     const scrollTo = vi.fn();
     vi.spyOn(Element.prototype, 'scrollTo').mockImplementation(scrollTo);

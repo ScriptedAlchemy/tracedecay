@@ -554,7 +554,7 @@ export function cortexAbsences(model: CortexModel): readonly CortexPanel[] {
         .reduce((total, region) => total + region.outgoingEdges, 0)
         .toLocaleString()} boundary edges, unrouted`,
       teach:
-        'the strata read serves each region its own boundary totals, not region-pair edge counts, so no channel is drawn between two regions. Each region’s in and out totals are columns in the table.',
+        'the strata read serves each region its own boundary totals, not region-pair edge counts, so no channel is drawn between two regions. Each region\'s in and out totals are columns in the table.',
     },
     {
       label: 'weather',

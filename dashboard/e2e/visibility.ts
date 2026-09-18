@@ -107,7 +107,7 @@ export function assertVisibilityReport(report: VisibilityReport, tag: string): v
   if (report.faded > 0) {
     throw new Error(
       `${tag}: ${report.faded}/${report.sampled} rendered regions sit at opacity ` +
-        `${report.worst}. The capture is blank where they are ` +
+        `${report.worst}, so the capture is blank where they are ` +
         `(${report.worstSample}) (data-motion=${report.motion})`,
     );
   }
