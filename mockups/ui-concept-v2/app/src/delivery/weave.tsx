@@ -1,5 +1,5 @@
 import { useWorkspaceState } from "../app/workspace";
-/** State 04 — PR journey overview as a connected luminous lane weave (plate species). */
+/** State 04, PR journey overview as a connected luminous lane weave (plate species). */
 import { useState } from "react";
 import { JOURNEY_PHASES, type JourneyLane, type LaneEvent } from "./data";
 import { EpisodeDetails, hash32, mulberry } from "./field";

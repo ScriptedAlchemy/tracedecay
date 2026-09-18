@@ -80,8 +80,8 @@ impl ReaderQueryExecutor for ExactSqlOnlyReaderV1 {
 /// Outcome of one worker's best-effort cache release.
 ///
 /// Only a real per-connection fault (the pragma reporting a SQLite error) is
-/// an `Err`. A worker that cannot be reached right now — terminated, or busy
-/// inside a retained snapshot — has nothing this release can act on, and
+/// an `Err`. A worker that cannot be reached right now, terminated, or busy
+/// inside a retained snapshot, has nothing this release can act on, and
 /// reporting it as a failure would mask genuine storage errors behind
 /// lifecycle noise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

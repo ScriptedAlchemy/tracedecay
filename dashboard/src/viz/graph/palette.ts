@@ -31,7 +31,7 @@ export function palette(element: HTMLElement): GraphPalette {
   const token = (name: string, fallback: string): [number, number, number] => {
     // Sigma's WebGL programs parse colors themselves and accept only
     // hex / rgb() / named forms. Our oklch tokens resolve to `lab(...)`,
-    // which they cannot parse — every node and edge silently became black.
+    // which they cannot parse, every node and edge silently became black.
     // Normalize through the canvas parser (which does understand lab/oklch)
     // so the renderer always receives a form it can read.
     return cssColorToRgb(style.getPropertyValue(name).trim() || fallback);
@@ -47,7 +47,7 @@ export function palette(element: HTMLElement): GraphPalette {
     edge: token('--raw-graph-edge', '#375372'),
     label: token('--raw-graph-text', '#c4d4e8'),
     /* A node label is a code symbol, so it belongs to the same mono face as
-     * every other symbol, path and measured value in the app — read from the
+     * every other symbol, path and measured value in the app, read from the
      * token rather than named here, because a canvas that hard-codes its own
      * family is a canvas that quietly stops matching the design system. Kept as
      * a raw string: unlike the colors above it is not a color to normalize. */

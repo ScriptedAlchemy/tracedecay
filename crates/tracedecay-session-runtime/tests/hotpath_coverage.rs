@@ -72,7 +72,7 @@ mod unguarded {
         let report =
             Path::new(env!("CARGO_TARGET_TMPDIR")).join("session-runtime-hotpath-off.json");
         let _ = std::fs::remove_file(&report);
-        // SAFETY: single-threaded with respect to readers — the feature-off
+        // SAFETY: single-threaded with respect to readers, the feature-off
         // build contains no hotpath runtime and nothing else in this test
         // binary reads these variables.
         unsafe {

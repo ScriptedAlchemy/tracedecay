@@ -14,11 +14,11 @@
 //!
 //! Content token counts carry an explicit provenance label:
 //!
-//! - `"tokenized"` — stored text counted with a
+//! - `"tokenized"`, stored text counted with a
 //!   real BPE tokenizer (see `token_count`): exact for OpenAI-family
 //!   models, a labeled approximation for vendors without a public
 //!   tokenizer.
-//! - `"estimated"` — the chars/4 heuristic the LCM views use
+//! - `"estimated"`, the chars/4 heuristic the LCM views use
 //!   (`(LENGTH(text)+3)/4`), the fallback when the `token-counting`
 //!   feature is compiled out.
 //!
@@ -913,7 +913,7 @@ pub async fn overview(
             .unwrap_or_else(|error| {
                 // The session block's contract requires `db`, which the shared
                 // failure block cannot know. Without it a failed session read
-                // would fail to decode and collapse the whole route to a 500 —
+                // would fail to decode and collapse the whole route to a 500,
                 // turning one unavailable block into a total outage, and hiding
                 // which read actually failed.
                 merge(
@@ -1036,7 +1036,7 @@ pub async fn costs(
 // `costs_http` / `costs_export` are deleted with their last caller, for the
 // same reason as their Observatory twins above `observatory_model`. They
 // mounted `/api/plugins/savings/costs{,/export}` over the identical
-// `costs_model` that `/api/costs` — the route `CanonicalCosts.tsx` reads —
+// `costs_model` that `/api/costs`, the route `CanonicalCosts.tsx` reads,
 // already serves. The savings family's OTHER routes (`overview`, `ledger`,
 // `sessions`, `models`, `pricing`) are not aliases: each is the sole mount of
 // its handler and has live consumers, so they stay.
@@ -1070,7 +1070,7 @@ async fn savings_overview(gdb: &RegisteredGlobalDb, db_path: &str) -> Value {
         .unwrap_or_default()
         .as_secs() as i64;
     // An unreadable ledger renders as an unavailable block naming the failed
-    // read — the same honest degrade the sibling blocks below already use —
+    // read, the same honest degrade the sibling blocks below already use,
     // never as a page of zero totals.
     let windows = async {
         Ok::<_, String>((
@@ -1091,7 +1091,7 @@ async fn savings_overview(gdb: &RegisteredGlobalDb, db_path: &str) -> Value {
     };
 
     // Legacy lifetime counters (`projects.tokens_saved`) predate the ledger
-    // and often carry history the event log does not — surface both.
+    // and often carry history the event log does not, surface both.
     let conn = gdb.read_connection();
     let lifetime_projects = match query_rows(
         &conn,
@@ -1364,7 +1364,7 @@ pub async fn ledger(
 /// GET `/api/plugins/savings/sessions?range=&limit=&offset=`
 ///
 /// Sessions without any timestamp (neither `started_at` nor message
-/// timestamps — true for Cursor hook ingests today) are only included in the
+/// timestamps, true for Cursor hook ingests today) are only included in the
 /// default `all` range, since they cannot be placed on a timeline.
 pub async fn sessions(
     State(state): State<DashboardState>,
@@ -1451,7 +1451,7 @@ pub async fn sessions(
             })
         });
 
-        // One grouped aggregate over the page's (provider, session_id) pairs —
+        // One grouped aggregate over the page's (provider, session_id) pairs,
         // previously each page row ran its own aggregate query (N+1, up to 100
         // round-trips re-running the json_extract CTE per page render). The
         // VALUES list joins as the outer loop so each pair stays an indexed
@@ -1775,7 +1775,7 @@ pub async fn models(
     }
 }
 
-/// GET `/api/plugins/savings/pricing` — deterministic bundled all-provider
+/// GET `/api/plugins/savings/pricing`, deterministic bundled all-provider
 /// prices with content-addressed provenance.
 pub async fn pricing() -> Json<Value> {
     Json(savings_pricing::pricing_payload())

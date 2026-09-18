@@ -3,13 +3,13 @@
  *
  * `mod.rs::capabilities` builds `multi_root` as the generated
  * `MultiRootCapabilityV1` on every request. No dashboard code parsed it, and
- * the fixture bundle did not even carry the member — so the capability was
+ * the fixture bundle did not even carry the member, so the capability was
  * both unread and unrepresented, and the audit could not have caught either
  * from a screenshot.
  *
  * Four readings are pinned here. The pair that matters is `absent` against
  * `unavailable`: a daemon that never mentioned the capability and a daemon
- * that mentioned it in order to decline are different facts, and collapsing
+ * that mentioned it to decline are different facts, and collapsing
  * them would attribute a reason to a daemon that gave none.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';

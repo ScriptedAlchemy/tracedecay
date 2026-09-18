@@ -91,7 +91,7 @@ fn acquire_nofollow_lock(lock_path: &Path) -> std::io::Result<std::fs::File> {
         ));
     }
     let file = file.into_std();
-    fs2::FileExt::lock_exclusive(&file)?;
+    file.lock()?;
     Ok(file)
 }
 
@@ -331,7 +331,7 @@ fn bind_staged_run_record_exact_with_publisher<T>(
                 Err(error) => Err(error),
             }
         })();
-        let unlock = fs2::FileExt::unlock(&ledger_lock).map_err(TraceDecayError::from);
+        let unlock = ledger_lock.unlock().map_err(TraceDecayError::from);
         result.and_then(|bound| unlock.map(|()| bound))
     })
 }
@@ -494,7 +494,7 @@ fn publish_staged_run_record_exact_blocking_with_publisher(
             publication,
             publish_file,
         );
-        let unlock = fs2::FileExt::unlock(&lock).map_err(TraceDecayError::from);
+        let unlock = lock.unlock().map_err(TraceDecayError::from);
         result.and_then(|outcome| unlock.map(|()| outcome))
     })
 }
@@ -551,7 +551,7 @@ fn repair_corrupt_run_ledger_append_intent_impl(
             })?;
             repair_corrupt_append_intent(dashboard_root, &ledger_path, &mut ledger, &bytes)
         })();
-        let unlock = fs2::FileExt::unlock(&ledger_lock).map_err(TraceDecayError::from);
+        let unlock = ledger_lock.unlock().map_err(TraceDecayError::from);
         result.and(unlock)
     })
 }
@@ -653,7 +653,7 @@ where
             }
             remove_canonical_spool_durable(&path)
         })();
-        let unlock = fs2::FileExt::unlock(&ledger_lock).map_err(TraceDecayError::from);
+        let unlock = ledger_lock.unlock().map_err(TraceDecayError::from);
         result.and(unlock)
     })
 }
@@ -1653,7 +1653,7 @@ fn with_spool_lock<T>(dashboard_root: &Path, operation: impl FnOnce() -> Result<
     let lock_path = dashboard_root.join(EXACT_RUN_SPOOL_LOCK);
     let lock = acquire_nofollow_lock(&lock_path).map_err(TraceDecayError::from)?;
     let result = cleanup_abandoned_exact_spool_temps(&directory).and_then(|()| operation());
-    let unlock = fs2::FileExt::unlock(&lock).map_err(TraceDecayError::from);
+    let unlock = lock.unlock().map_err(TraceDecayError::from);
     result.and_then(|value| unlock.map(|()| value))
 }
 

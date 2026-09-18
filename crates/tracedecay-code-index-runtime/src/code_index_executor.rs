@@ -35,7 +35,7 @@ impl<A> McpRetrievalExecutionControlV1<A> {
         )
     }
 
-    /// Resolves with this request's terminal reason once it settles — the
+    /// Resolves with this request's terminal reason once it settles, the
     /// async twin of [`Self::request_termination`].
     ///
     /// `request_termination` only answers where something asks it, and the
@@ -45,7 +45,7 @@ impl<A> McpRetrievalExecutionControlV1<A> {
     /// on the in-flight decode. A request that settles inside that window has
     /// no checkpoint to unwind at, so the single execution permit stayed held
     /// by work no caller was waiting for, and every following search was
-    /// refused `search_capacity_unavailable` — a refusal the dispatch contract
+    /// refused `search_capacity_unavailable`, a refusal the dispatch contract
     /// advertises as retryable while guaranteeing the retry fails too.
     /// Awaiting this alongside the execution drops the abandoned work at its
     /// current await point and releases the permit with it.
@@ -101,8 +101,8 @@ async fn mcp_search_request_settlement(
 
 /// Await `work` under the request's own deadline and cancellation.
 ///
-/// Every scheduler read an admitted search takes — authority resolution before
-/// the execution permit, text-serving and cursor resolution after it — parks
+/// Every scheduler read an admitted search takes, authority resolution before
+/// the execution permit, text-serving and cursor resolution after it, parks
 /// on the scheduler's mounted map, and none of them consults a request
 /// control while parked. A daemon holding that map across a mount, retire, or
 /// shutdown is exactly the window a settled request waited out with its caller
@@ -143,14 +143,14 @@ async fn settled_or<F: std::future::Future>(
 /// The permit bounds how many scans run at once, not how many requests may
 /// exist. Refusing the loser of a permit race outright answered it with
 /// `CapacityUnavailable`, the same reason a genuinely oversized bounded read is
-/// refused with — so two dashboard family reads fired together made the loser
+/// refused with, so two dashboard family reads fired together made the loser
 /// report that a retained generation exceeded the bounded-read limits. A
 /// request that carries a deadline or a cancellation has said how long it can
 /// wait: it queues on the permit up to that bound and settles with the typed
 /// `TimedOut` or `Cancelled` state if the permit never comes. The semaphore is
 /// tokio's, so the wait parks a future rather than a runtime worker. A request
 /// that carries neither declared no wait budget and is still refused at once
-/// rather than parked behind a holder nothing bounds — the same rule the exact
+/// rather than parked behind a holder nothing bounds, the same rule the exact
 /// scheduler reads apply.
 pub(crate) async fn acquire_execution_permit(
     execution_admission: Arc<tokio::sync::Semaphore>,
@@ -895,9 +895,9 @@ where
                         // The permit follows request settlement, not this
                         // work's natural completion. `work` is polled first, so
                         // an unsettled request behaves exactly as before; a
-                        // settled one is dropped where it stands — including
+                        // settled one is dropped where it stands, including
                         // mid-`mounted.lock()` or mid-decode, the awaits that
-                        // no checkpoint covers — and `_execution_permit` is
+                        // no checkpoint covers, and `_execution_permit` is
                         // released with the task. `settle_owned_blocking_task`
                         // below normally names the precise terminal reason
                         // first; this only keeps the typed state when it did
@@ -1479,7 +1479,7 @@ where
             }
             // Clone backfill is retained-worker work after the seat. Kick that
             // wake before any inline slice so a quiet daemon does not strand
-            // the successor on this request thread. Match the admission —
+            // the successor on this request thread. Match the admission,
             // terminal Corrupt must fail closed before the inline slice.
             match schedulers.request_query_background_reconcile(&scope).await {
                 code_index_scheduler::CodeIndexReconcileAdmissionV1::Accepted
@@ -1496,7 +1496,7 @@ where
                 Ok(code_index_scheduler::CloneSimilarityWarmupForRequestV1::Ready) => {}
                 Ok(code_index_scheduler::CloneSimilarityWarmupForRequestV1::Pending) => {
                     // One bounded slice ran; retained worker owns the rest.
-                    // Surface warming — not a hard GenerationUnavailable miss.
+                    // Surface warming, not a hard GenerationUnavailable miss.
                     return unavailable(
                         code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnverified,
                     );

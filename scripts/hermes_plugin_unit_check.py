@@ -666,7 +666,7 @@ def _check_response_envelope_table(plugin):
         # A prose trailer block beside the JSON block (stale-graph freshness
         # note) is skipped, not concatenated into the payload.
         responses["tracedecay_status"] = mcp_result(
-            json.dumps(plain), "\ncode_graph_freshness: stale — serving generation g1"
+            json.dumps(plain), "\ncode_graph_freshness: stale, serving generation g1"
         )
         assert plugin.call_tracedecay_json("tracedecay_status", {}) == plain
         ok("prose content trailers do not disturb the JSON payload")

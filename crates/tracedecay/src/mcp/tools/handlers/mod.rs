@@ -265,7 +265,7 @@ pub struct ToolCallRegistryOptions<'a> {
         Option<tracedecay_session_memory::context::ResolvedSessionIdentity>,
     /// The canonical profile identity bound by the daemon handshake. A
     /// dashboard profile write resolves its configuration layer through this
-    /// identity, so it must not be derived from the project-session store —
+    /// identity, so it must not be derived from the project-session store,
     /// that authority mounts behind the core project-open publication and is
     /// absent on the core server that answers the first tool calls.
     pub(crate) daemon_user_profile_id: Option<tracedecay_domain::configuration::UserProfileId>,
@@ -801,7 +801,7 @@ pub(super) fn append_code_graph_freshness(
         "while source freshness remains unverified"
     };
     content.push(json!({"type": "text", "text": format!(
-        "\ncode_graph_freshness: stale — serving the last complete generation \
+        "\ncode_graph_freshness: stale, serving the last complete generation \
          {generation} (sealed {age} ago) {remedy}; results may trail the live worktree"
     )}));
 }

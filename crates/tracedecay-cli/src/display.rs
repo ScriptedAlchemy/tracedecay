@@ -81,7 +81,7 @@ pub fn print_status_header(
 ///
 /// The readings come straight from the daemon status contract: the sealed
 /// generation census (`graph_statistics`) and the scheduler's freshness view
-/// (`code_index_freshness`). Absent readings render as their typed reasons —
+/// (`code_index_freshness`). Absent readings render as their typed reasons.
 /// nothing is defaulted to zero.
 #[derive(Clone, Copy)]
 pub struct StatusTable<'a> {
@@ -161,7 +161,7 @@ fn census_absence_line(census: &GenerationCensusSnapshot) -> String {
     }
 }
 
-/// Maximum cell width — caps total table width at 100 columns.
+/// Maximum cell width, caps total table width at 100 columns.
 const MAX_CELL_WIDTH: usize = 32;
 
 /// Maximum number of country flags to display in the title row.

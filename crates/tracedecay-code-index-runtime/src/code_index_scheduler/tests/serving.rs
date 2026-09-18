@@ -178,7 +178,7 @@ fn foreground_query_owner_read_stays_warming_until_background_projection_finishe
 /// The production text-serving journey with a durable store: build the `SQLite`
 /// lexical artifact in bounded page windows, publish it durably (pointer names
 /// the content-addressed artifact file), then reopen the durable head after a
-/// simulated restart in a single bounded pass — no rebuild — and serve exact
+/// simulated restart in a single bounded pass, no rebuild, and serve exact
 /// and lexical queries from it.
 #[test]
 fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
@@ -1733,7 +1733,7 @@ fn cold_owner_warmup_seats_query_owners_before_clone_backfill() {
 }
 
 /// `query_owners_are_ready` is the sole exact/lexical bit for the published
-/// seat gate and the full graph-replay skip — both directions.
+/// seat gate and the full graph-replay skip, both directions.
 ///
 /// Owners-ready with clone backfill still unfinished must admit seat/replay;
 /// lexical-incomplete (owners absent) must refuse both. Clone completeness is
@@ -1988,7 +1988,7 @@ fn published_text_artifact_with_stale_search_revision_is_rebuilt() {
 /// normalizes the exhausted file position, so its live cursor sits one file
 /// rollover past the last durably accepted page exactly when that page filled
 /// on a file boundary. Holding the builder's durable progress against that
-/// normalized cursor — instead of against the completion receipt — reports a
+/// normalized cursor, instead of against the completion receipt, reports a
 /// deterministic contract violation, which parks the text projection as
 /// unconvergeable and leaves the complete serving seat permanently empty.
 #[test]
@@ -3719,9 +3719,9 @@ async fn query_authority_lookup_preserves_real_mount_identity_isolation() {
 /// The defect this covers: during any generation rebuild search used to
 /// collapse into `GenerationUnavailable` for the whole window while
 /// callers/grep/context kept serving. Holding the scheduler mutex reproduces
-/// exactly that window — the background worker owns the scheduler — while the
+/// exactly that window, the background worker owns the scheduler, while the
 /// last complete generation stays in `serving_generation`. A seat whose
-/// currency witness still re-proves against the unchanged checkout serves as
+/// currency witness still re-proves against the unchanged checkout is
 /// current; once the checkout drifts under the held mutex the witness
 /// disproves and the fallback serves the same complete generation reported
 /// stale.
@@ -3729,7 +3729,7 @@ async fn query_authority_lookup_preserves_real_mount_identity_isolation() {
 /// The ready gate itself no longer abstains for this window. Decoupling
 /// freshness from publication work moved readiness onto the per-worktree
 /// source-freshness state, so the gate reads it without the scheduler and an
-/// unchanged checkout stays ready while a rebuild owns the mutex — which is
+/// unchanged checkout stays ready while a rebuild owns the mutex, which is
 /// the point of the decoupling, and what the witnessed assertion below
 /// already required of the query path.
 // Holding the scheduler guard across the awaits is the scenario, not an
@@ -3790,7 +3790,7 @@ async fn search_serves_the_last_complete_generation_while_the_scheduler_rebuilds
         .expect("search keeps serving through the rebuild instead of failing");
     assert!(
         !witnessed.served_stale,
-        "a seat re-proven current against the unchanged checkout serves as current"
+        "a seat re-proven current against the unchanged checkout is current"
     );
 
     // Drift the checkout while the rebuild still owns the scheduler: the
@@ -3854,7 +3854,7 @@ async fn search_serves_the_last_complete_generation_while_the_scheduler_rebuilds
 /// graph enrichment must neither block nor mark that text owner stale.
 ///
 /// This occupies the decode barrier exactly as activation of a new generation
-/// does — pinned slot empty, one decode in flight — and deliberately leaves the
+/// does, pinned slot empty, one decode in flight, and deliberately leaves the
 /// scheduler mutex FREE, so the ready gate is admitted and would park inside it.
 #[tokio::test]
 async fn search_never_awaits_an_in_flight_decode_while_a_generation_is_servable() {
@@ -3932,8 +3932,8 @@ async fn search_never_awaits_an_in_flight_decode_while_a_generation_is_servable(
 
 /// The cold-restore window: a sealed active generation is on disk and the
 /// freshness fences pass, but the serving slot is empty because activation has
-/// not seated anything yet. The typed refusal is already determined — the
-/// activation gate can only ever admit the seated slot — so search resolution
+/// not seated anything yet. The typed refusal is already determined, the
+/// activation gate can only ever admit the seated slot, so search resolution
 /// must deliver that verdict without joining (or starting) the single-flight
 /// O(store) decode. Before the reorder, a cold `search` against a rebuilding
 /// generation parked on that decode for 76 s before returning the refusal the
@@ -4150,9 +4150,9 @@ async fn search_fails_fast_when_no_complete_generation_exists() {
     registry.shutdown().await;
 }
 
-/// The live outage this covers: a scope's branch label moves — a restored
+/// The live outage this covers: a scope's branch label moves, a restored
 /// generation was sealed before a `git switch`, or a retained route scope
-/// pinned the label that was live at project open — while the worktree the
+/// pinned the label that was live at project open, while the worktree the
 /// daemon is serving stays byte-identical. The label is not checkout
 /// identity: the ready ladder has already verified the generation against
 /// the live worktree, so the exact worktree's own graph must keep serving as
@@ -4227,8 +4227,8 @@ async fn moved_reference_label_still_serves_the_exact_worktree_as_current() {
         .expect("the callable-code ladder also serves through a moved reference");
     assert_eq!(ladder.generation.manifest().generation_id, fresh_generation);
 
-    // The root-scope ready gate behind graph reads and the runtime census —
-    // the arms with no stale fallback — must not be orphaned either. Seating
+    // The root-scope ready gate behind graph reads and the runtime census,
+    // the arms with no stale fallback, must not be orphaned either. Seating
     // races the publication event, so the gate is polled bounded.
     let decoded = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -4253,7 +4253,7 @@ async fn moved_reference_label_still_serves_the_exact_worktree_as_current() {
 
 /// The second half of the outage: search resolves its generation without ever
 /// running the freshness ladder, so when both arms came up empty nothing
-/// requested the reconcile that would remedy it — the typed failure repeated
+/// requested the reconcile that would remedy it, the typed failure repeated
 /// forever. Search must now ask for its own remedy, exactly once per due
 /// window, and must still never reconcile inline or park.
 // Holding the scheduler guard across the awaits is the scenario: it is how this
@@ -5947,7 +5947,7 @@ async fn unpinned_query_serves_freshness_resolved_latest_generation() {
 
     // The unpinned query's ladder checks inline and hands the rebuild to the
     // background worker. Join the text-owner receipt that exact resolution
-    // actually serves — not the later graph-bearing serving swap.
+    // actually serves, not the later graph-bearing serving swap.
     let _ = registry.latest_text_fresh_for_scope(&resolved).await;
     let next = wait_for_queryable_text_generation_change(&registry, fixture.path(), &initial).await;
     let expected = next.metadata().manifest().generation_id.clone();

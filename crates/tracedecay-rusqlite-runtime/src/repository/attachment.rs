@@ -565,7 +565,7 @@ impl RepositoryRuntimePhysicalAttachment {
     /// writer. Maintenance runs after admission has closed, so this does not
     /// require `admission_open`; a still-`Ready` writer is moved to
     /// `Draining` first. PASSIVE checkpoints stay on [`Self::run_checkpoint`].
-    /// Admission is not reopened after Truncate — the exclusive window lasts
+    /// Admission is not reopened after Truncate, the exclusive window lasts
     /// until `drain` + `close_and_join`.
     ///
     /// The permit binding, admission-stage authority, and request-local

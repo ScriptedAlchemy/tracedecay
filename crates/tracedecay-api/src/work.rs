@@ -1,7 +1,7 @@
 //! The canonical Work HTTP surface.
 //!
-//! Every Work adapter — the daemon's application router, the dashboard's public
-//! `/api/work` mount, the catalog registry, and the generated SDKs — is derived
+//! Every Work adapter, the daemon's application router, the dashboard's public
+//! `/api/work` mount, the catalog registry, and the generated SDKs, is derived
 //! from the single [`WorkOperation`] descriptor in this module. Adding an
 //! operation is one enum variant plus one row in the `work_operations!` table,
 //! which derives every key, id, segment, and path; there is no second route
@@ -360,8 +360,8 @@ impl WorkOperation {
     /// Resolve an operation from the final path segment that names it.
     ///
     /// The route segment is the one public name a Work operation has, so every
-    /// adapter that accepts an operation by name — the router, the CLI, the
-    /// catalog — resolves it here rather than keeping a second name table.
+    /// adapter that accepts an operation by name, the router, the CLI, the
+    /// catalog, resolves it here rather than keeping a second name table.
     pub fn from_route_segment(segment: &str) -> Option<Self> {
         Self::ALL
             .iter()

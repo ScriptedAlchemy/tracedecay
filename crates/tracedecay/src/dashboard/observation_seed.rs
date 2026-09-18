@@ -196,7 +196,7 @@ pub async fn seed_session_message_observation_for_test(
 /// Materializes the pending session-temporal refresh so the seeded
 /// observations become readable through the daemon retrieval authority, then
 /// re-applies the session relation projection for the newly-active
-/// generation — the step the daemon's LCM effects loop performs after every
+/// generation, the step the daemon's LCM effects loop performs after every
 /// production refresh, without which summary lineage reads go relation-blind.
 pub async fn materialize_session_temporal_refresh_for_test(
     project_database: &RegisteredGlobalDb,

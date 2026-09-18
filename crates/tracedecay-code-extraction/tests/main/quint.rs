@@ -140,7 +140,7 @@ fn nested_modules_parent_correctly() {
 
 #[test]
 fn inner_braces_do_not_pop_module_scope() {
-    // Set/record literals use `{}` too — they must not trick the brace
+    // Set/record literals use `{}` too. They must not trick the brace
     // counter into popping the module scope.
     let source = "module M {\n\
                   val s = Set(1, 2, 3)\n\
@@ -180,7 +180,7 @@ fn empty_file_produces_only_file_node() {
 
 #[test]
 fn import_from_clause_terminates_path() {
-    // `import path.* from "spells"` — the `from` keyword should commit
+    // `import path.* from "spells"`. The `from` keyword should commit
     // the path before reaching the string literal. The `*` is an
     // operator, currently dropped (we only join identifiers and `.`).
     let source = "import basicSpells.* from \"spells/basicSpells\"\n\nmodule M { }\n";

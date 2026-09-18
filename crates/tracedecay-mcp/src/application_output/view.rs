@@ -436,7 +436,7 @@ mod tests {
     }
 
     /// Partial evidence must be projected into the typed human fields that name
-    /// what was covered — coverage, per-domain state, paging cursor, receipt,
+    /// what was covered, coverage, per-domain state, paging cursor, receipt,
     /// and cancellation. Markdown rendering and
     /// escaping belong to `cli::output::markdown`, so a display-label rename
     /// must not land here.

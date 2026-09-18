@@ -3,7 +3,7 @@
 //! `skill_usage` classifies stored analytics rows through [`infer_usage_events`],
 //! `runner::evidence` scores tool families through [`underused_tool_family_signals`],
 //! and `skill_writer` reports [`ToolFamilySignal`]. The module names no other
-//! subsystem — it is pure classification over `serde_json` values.
+//! subsystem, it is pure classification over `serde_json` values.
 //!
 //! Host MCP namespaces are restated here as literals so this contracts leaf
 //! does not depend on `tracedecay-agent-hosts`. They must stay aligned with

@@ -119,9 +119,9 @@ function readSessionContext(
  * Transport states a repeat read can clear on its own: the daemon was
  * unreachable, answered a bare non-2xx, or said it had nothing ready yet.
  *
- * Every other transport state is a standing condition — a refusal
+ * Every other transport state is a standing condition, a refusal
  * (`unauthorized`, `denied`), a scope that will not serve the read (`locked`),
- * a body this client cannot read (`unsupported_schema`) — and re-asking gets
+ * a body this client cannot read (`unsupported_schema`), and re-asking gets
  * the same answer, so the poll stops and the state is rendered.
  */
 const RETRYABLE_TRANSPORT_STATES: ReadonlySet<DashboardDomainStateV1> = new Set<
@@ -135,7 +135,7 @@ const RETRYABLE_TRANSPORT_STATES: ReadonlySet<DashboardDomainStateV1> = new Set<
  *
  * A ladder rather than an attempt budget. An admitted run does not stop
  * existing because the daemon blinked, and this poll is the only thing that
- * can ever resolve it, so a budget strands every run that outlives it — the
+ * can ever resolve it, so a budget strands every run that outlives it, the
  * daemon comes back, the run completes, and the surface never finds out.
  * Backing off instead keeps the run reachable while making a dead daemon cost
  * two reads a minute, and the failing reads stay on screen the whole time
@@ -174,7 +174,7 @@ export interface ExplorerController {
   /** Whether the current scope accepts a query run, from the scope authority.
    * Anything but `writable` means no run was, or will be, dispatched. */
   readonly writability: ScopeWritability;
-  /** One read model per lane, in `LANES` order — four, including semantic. */
+  /** One read model per lane, in `LANES` order, four, including semantic. */
   readonly lanes: readonly ExplorerLaneReadModel[];
   /** The lanes the current lane filter admits. */
   readonly visibleLanes: readonly ExplorerLaneReadModel[];
@@ -233,8 +233,8 @@ export function useExplorerController(): ExplorerController {
   const activeRunIdForQuery = activeRunId ?? '';
   // `fetchEnvelope` reports a transport failure as data rather than throwing,
   // so react-query's own failure count never moves and cannot pace the retry
-  // below. This is that count — how far down the backoff ladder the poll has
-  // walked — reset by the first read that lands an envelope.
+  // below. This is that count, how far down the backoff ladder the poll has
+  // walked, reset by the first read that lands an envelope.
   const transportFailures = useRef(0);
   const runStatus = useQuery({
     queryKey: ['explorer', 'query-run', scopeKey(scope), activeRunIdForQuery],
@@ -249,8 +249,8 @@ export function useExplorerController(): ExplorerController {
       // No data yet: the first read has not landed, keep the fast tick.
       if (result === undefined) return 250;
       if (result.outcome === 'transport') {
-        // This poll is the only thing that resolves an admitted run — run
-        // completion publishes no targeted invalidation — so a transport
+        // This poll is the only thing that resolves an admitted run, run
+        // completion publishes no targeted invalidation, so a transport
         // failure a repeat read could clear must not end it, at any count: a
         // run whose daemon blinks more times than some budget allows is still
         // a live run, and abandoning it is the stuck surface this poll exists
@@ -391,8 +391,8 @@ export function useExplorerController(): ExplorerController {
   };
 
   // The rows on screen must belong to the scope in the register. When the
-  // scope changes under a submitted query — a project selected, a deep link
-  // resolving from `unresolved` to `active` — the run is re-created against
+  // scope changes under a submitted query, a project selected, a deep link
+  // resolving from `unresolved` to `active`, the run is re-created against
   // the new scope rather than left showing the old project's answer.
   const requestScope = `${scopeKey(scope)}:${writability.state}`;
   const lastRequestScope = useRef(requestScope);

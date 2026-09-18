@@ -876,7 +876,7 @@ async fn anchor_lookups_that_resolve_a_summary_read_its_summary_relations() {
     let read = runtime.retrieval_read_for_test().await;
     // A summary describe hydrates over the summary's own anchor, so its
     // candidate arrives on the anchor channel carrying the summary's evidence
-    // role and summary identity — never an occurrence identity.
+    // role and summary identity, never an occurrence identity.
     let mut candidate = candidate_for_anchor("anchor-summary-provider");
     candidate.channel = CandidateChannel::Anchor;
     candidate.evidence_role = Some("summary".to_string());

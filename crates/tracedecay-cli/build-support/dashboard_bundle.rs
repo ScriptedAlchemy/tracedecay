@@ -142,7 +142,7 @@ pub fn open(
     if actual != digest_hex {
         return Err(format!(
             "staged dashboard bundle {} has digest {actual}, not the digest it is named after; \
-             the bundle store was modified outside the build — remove it to rebuild",
+             the bundle store was modified outside the build, remove it to rebuild",
             root.display()
         )
         .into());

@@ -16,7 +16,7 @@
 //! * `exec_command` exit code and wall time exist only as free text inside the
 //!   `function_call_output` ("Process exited with code N", "Wall time: X
 //!   seconds"). They are parsed out; when the marker is absent the value is
-//!   `null` — never guessed.
+//!   `null`, never guessed.
 //! * Encrypted inter-agent messages record only the routing edge
 //!   (`author` → `recipient`, `encrypted: true`); the ciphertext is never
 //!   stored or decoded.
@@ -162,9 +162,9 @@ impl CodexStructuredState {
     }
 
     /// Route a rollout line to a structured handler. Returns:
-    /// * `None` — not a structured line; the caller falls through to the
+    /// * `None`, not a structured line; the caller falls through to the
     ///   generic handlers.
-    /// * `Some(rows)` — the line was recognized. `rows` may be empty (an
+    /// * `Some(rows)`, the line was recognized. `rows` may be empty (an
     ///   `exec_command` call is buffered until its output arrives; a recognized
     ///   but unusable line is consumed so it is not re-processed).
     pub(super) fn event_from_line(
@@ -253,7 +253,7 @@ impl CodexStructuredState {
                         // Consumed: emission is deferred until the paired output.
                         Some(Vec::new())
                     } else {
-                        // Not an `exec_command` harness (other JS) — generic path.
+                        // Not an `exec_command` harness (other JS), generic path.
                         None
                     }
                 }
@@ -335,8 +335,8 @@ impl CodexStructuredState {
         let Some(input) = payload.get("input").and_then(Value::as_str) else {
             return false;
         };
-        // `None` — no `tools.exec_command(` call in the harness (other JS); the
-        // caller leaves the line on the generic path. `Some(inv)` — an exec call
+        // `None`, no `tools.exec_command(` call in the harness (other JS); the
+        // caller leaves the line on the generic path. `Some(inv)`, an exec call
         // was found; `cmd`/`workdir` may still be `None` when the argument could
         // not be extracted (fields fall back to null, never guessed).
         let Some(inv) = extract_exec_command_args(input) else {
@@ -445,8 +445,8 @@ const EXEC_MARKER: &str = "tools.exec_command(";
 /// only covers the quoted-key minority), scan the literal tolerantly for the
 /// top-level `cmd`/`workdir` string values.
 ///
-/// Returns `None` when the harness contains no `exec_command` call (other JS) —
-/// the caller then leaves the line on the generic `tool_event` path. When a call
+/// Returns `None` when the harness contains no `exec_command` call (other JS).
+/// The caller then leaves the line on the generic `tool_event` path. When a call
 /// is present but no `cmd` string can be recovered, the returned `cmd` is `None`
 /// (the field falls back to null; nothing is guessed).
 #[hotpath::measure(label = "sessions.hosts.codex.extract_exec_args")]
@@ -542,7 +542,7 @@ fn scan_js_exec_object(s: &str, brace_idx: usize) -> (Option<String>, Option<Str
         }
         let (key, after_key) = read_js_object_key(s, i);
         i = skip_ws(s, after_key);
-        // A malformed pair (no `:`) — bail rather than risk spinning.
+        // A malformed pair (no `:`), bail rather than risk spinning.
         if i >= s.len() || bytes[i] != b':' {
             return (cmd, workdir, i);
         }
@@ -705,7 +705,7 @@ fn command_string(value: Option<&Value>) -> Option<String> {
 /// time line) from spoofing the exec result. Both wrappers are covered: the
 /// classic `exec_command` output ("Process exited with code N", "Wall time: X
 /// seconds") and the newer custom `exec` harness ("Script completed\nWall time
-/// X seconds", which carries no exit code — so it stays null).
+/// X seconds", which carries no exit code, so it stays null).
 pub(super) fn parse_exec_output(output: &str) -> (Option<i64>, Option<f64>) {
     const EXIT_MARKER: &str = "Process exited with code ";
     const WALL_MARKER: &str = "Wall time";
@@ -1640,7 +1640,7 @@ mod tests {
     #[test]
     fn custom_tool_call_non_exec_js_falls_through_to_generic() {
         // A custom `exec` tool whose harness does not call `exec_command` (e.g.
-        // pure JS) is not an exec join — it stays on the generic path.
+        // pure JS) is not an exec join, it stays on the generic path.
         let mut state = CodexStructuredState::new();
         let path = std::path::Path::new("/tmp/rollout.jsonl");
         let call = json!({

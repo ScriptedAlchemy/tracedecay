@@ -4,8 +4,8 @@
 //!
 //! The v6.x `notify-debouncer-full` watcher recursively watched the **working
 //! tree** and drowned on monorepo `node_modules`/`target` churn. This watcher
-//! watches **only git metadata** under `<git_common_dir>` — `HEAD`,
-//! `packed-refs`, `refs/` and `worktrees/` — which is ~5-20 inotify watches per
+//! watches **only git metadata** under `<git_common_dir>`, `HEAD`,
+//! `packed-refs`, `refs/` and `worktrees/`, which is ~5-20 inotify watches per
 //! repository and never fires on a source-file edit. That distinction is the
 //! entire safety argument: we react to *git operations* (commit, checkout,
 //! branch create, worktree add, rebase), not to editor saves.
@@ -21,13 +21,13 @@
 //!   [`tokio::sync::Notify`];
 //!   the task sleeps until the quiet deadline
 //!   (`watch_debounce_ms`) or the hard cap (`watch_max_delay_ms`), whichever is
-//!   first — no busy polling.
+//!   first, no busy polling.
 //! * Debounce drains submit exact-frontier freshness requests to the canonical
 //!   code-index scheduler. The watcher never opens or mutates a legacy graph.
 //! * The [`backstop`] timer is the freshness floor for every registered
 //!   repository: each due root submits a freshness request through the same
-//!   scheduler ingress. A live heartbeat proves only watcher-task liveness —
-//!   the watcher reacts to git metadata alone — so liveness never vetoes
+//!   scheduler ingress. A live heartbeat proves only watcher-task liveness,
+//!   the watcher reacts to git metadata alone, so liveness never vetoes
 //!   coverage.
 
 #![cfg(unix)]
@@ -382,7 +382,7 @@ impl GitWatcher {
 
     /// A doctor-facing health value for one project's watch coverage.
     /// Read-only: registered state, overflow-roster membership, and the typed
-    /// watch status — no git IO and no store opens.
+    /// watch status, no git IO and no store opens.
     pub async fn health_value(&self, project_root: Option<&Path>) -> serde_json::Value {
         if !self.inner.enabled {
             return serde_json::json!({
@@ -609,7 +609,7 @@ async fn repository_task(inner: Arc<GitWatcherInner>, state: Arc<WatchState>) {
 }
 
 /// Translates a raw notify event into dirty-set marks. Does NOT re-derive git
-/// state — it only records *what kind of path changed* so the debounce drain
+/// state, it only records *what kind of path changed* so the debounce drain
 /// can resolve the actual git state once, after quiescence.
 fn classify_and_mark(state: &Arc<WatchState>, event: &notify::Event) {
     if state.is_retired() {
@@ -759,7 +759,7 @@ async fn debounce_loop(
                 OperationObservation::State(state) => state,
                 OperationObservation::Cancelled => return DebounceExit::Cancelled,
             };
-            // If an operation is in flight, do not fire yet — wait for the next
+            // If an operation is in flight, do not fire yet, wait for the next
             // event (marker removal wakes us) or a short recheck tick.
             if operation_state == OperationState::InFlight {
                 tokio::select! {

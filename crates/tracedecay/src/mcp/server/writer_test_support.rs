@@ -44,8 +44,8 @@ impl WriterTestFixtureAuthority {
             .expect("reopen registered project graph")
     }
 
-    /// Releases the retained runtime — the profile's only session-relation
-    /// writer — while keeping the profile pin alive, so a test can reopen the
+    /// Releases the retained runtime, the profile's only session-relation
+    /// writer, while keeping the profile pin alive, so a test can reopen the
     /// profile the way a fresh process would.
     pub(super) fn release_runtime_for_reopen(self) -> PinnedUserDataDir {
         self._pin
@@ -56,7 +56,7 @@ impl WriterTestFixtureAuthority {
 /// session-relation graph has exactly one writer, so tests must share this
 /// runtime instead of constructing a second one on the same profile. This is
 /// the registry authority the daemon holds in production, so a server built
-/// from it resolves path selectors — including hook workspace routes —
+/// from it resolves path selectors, including hook workspace routes,
 /// instead of reporting the project unregistered.
 pub(super) fn registered_runtime(
     authority: &WriterTestFixtureAuthority,

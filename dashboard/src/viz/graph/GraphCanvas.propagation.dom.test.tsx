@@ -10,7 +10,7 @@ import { setMotionPreference } from '../trace/reducedMotion.ts';
  *
  * Unlike `GraphCanvas.dom.test.tsx`, this file deliberately does NOT mock
  * `activation.ts`: the whole question is whether a strike delivered from
- * outside the renderer — the way the Brain's SSE effect delivers one — reaches
+ * outside the renderer, the way the Brain's SSE effect delivers one, reaches
  * the drawn graph and travels the real edge. Sigma is mocked only far enough
  * to hand back the graphology instance it was given, so every assertion below
  * is made against the geometry the renderer actually composed.
@@ -183,7 +183,7 @@ describe('GraphCanvas travelling activation', () => {
     field.strike(['p1'], 0.9);
     field.strike(['repo:r'], 0.3);
 
-    // The strike alone woke the loop — nothing else could have, the field has
+    // The strike alone woke the loop, nothing else could have, the field has
     // no clock of its own.
     expect(frames).toHaveLength(1);
 
@@ -233,8 +233,8 @@ describe('GraphCanvas travelling activation', () => {
   });
 
   // The canvas used to read `prefers-reduced-motion` directly, which meant the
-  // app's own persisted control — the one a reader actually sets, and the only
-  // way to ask for stillness on an OS that reports no preference — had no effect
+  // app's own persisted control, the one a reader actually sets, and the only
+  // way to ask for stillness on an OS that reports no preference, had no effect
   // on the single most motion-heavy surface in the product. These two cover both
   // directions of that pin, because a control that can only agree with the OS is
   // not a control.
@@ -288,7 +288,7 @@ describe('GraphCanvas travelling activation', () => {
 
     // Setting the preference notifies every `useReducedMotion` subscriber; React
     // re-renders and the canvas settles. A shortened animation would leave the
-    // traveller parked somewhere on the curve — a genuine no-motion path has
+    // traveller parked somewhere on the curve, a genuine no-motion path has
     // nowhere for it to be, so it is gone.
     setMotionPreference('reduced');
     rerender(<GraphCanvas nodes={NODES} edges={EDGES} activation={field} />);

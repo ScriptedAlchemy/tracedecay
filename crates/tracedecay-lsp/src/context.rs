@@ -184,7 +184,7 @@ pub struct ContextProjectionRequest {
 impl ContextProjectionRequest {
     /// Builds a request with no bound content identity. Only the protocol
     /// actor may bind one, so a caller-constructed request always starts
-    /// unbound — the same state a decoded client payload starts in.
+    /// unbound. The same state a decoded client payload starts in.
     pub fn new(kind: ContextProjectionKind, document_uri: Option<String>) -> Self {
         Self {
             kind,

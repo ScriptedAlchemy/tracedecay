@@ -110,7 +110,7 @@ pub use store::{
 
 /// Appends hotpath's ureq middleware to a GitHub agent config builder so
 /// outbound requests are timed and reported in the `http` report, keyed by
-/// normalized endpoint (method + host/path only — no query string, fragment,
+/// normalized endpoint (method + host/path only, no query string, fragment,
 /// or credential ever crosses into the recorded key). A no-op with the
 /// `hotpath` feature disabled, so every call site compiles identically both
 /// ways.

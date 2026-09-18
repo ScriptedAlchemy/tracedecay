@@ -1009,7 +1009,7 @@ pub async fn write_meta_value(
 /// An empty provider is an unattributed observation (hook routes cannot
 /// always name the provider); it matches any canonical provider, and the
 /// canonical map in [`GitEvidenceProjectionV1::new`] settles the final
-/// label. Two distinct non-empty providers never match — one session
+/// label. Two distinct non-empty providers never match, one session
 /// carrying both is rejected by `canonical_provider_map`.
 pub fn providers_compatible(left: &str, right: &str) -> bool {
     left.is_empty() || right.is_empty() || left == right

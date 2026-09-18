@@ -7,7 +7,7 @@
  * This mirrors `WORKSPACES` in `src/app/routes.tsx`. It is kept as a standalone
  * data module (no JSX / CSS imports) so it can be consumed from a plain Node /
  * Playwright context without dragging in the React app bundle. When a surface
- * is added or removed in routes.tsx, update this list in the same change — the
+ * is added or removed in routes.tsx, update this list in the same change. The
  * audit's coverage is only as complete as this registry.
  */
 
@@ -46,7 +46,7 @@ export const STORY_SURFACES: readonly StorySurface[] = [
     path: '/explorer',
     label: 'Explorer',
     description:
-      'One query across four independent lanes — code, sessions, knowledge, semantic — each with its own lifecycle and typed absence.',
+      'One query across four independent lanes: code, sessions, knowledge, semantic. Each with its own lifecycle and typed absence.',
     wired: true,
   },
   {

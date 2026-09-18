@@ -184,9 +184,9 @@ pub fn read_bounded_to_string(
 ///
 /// The partial-frame accumulator (`retained`), the overflow latch
 /// (`oversized`), and the bounded `inspect_prefix` live in this struct rather
-/// than on the read future's stack. Dropping an in-flight read — the normal
+/// than on the read future's stack. Dropping an in-flight read, the normal
 /// outcome of losing a `tokio::select!` race against shutdown, cancellation, or
-/// a completed handler — therefore loses nothing: bytes already consumed from
+/// a completed handler, therefore loses nothing: bytes already consumed from
 /// `inner` stay accumulated here and the next `read_*` call resumes the same
 /// frame. Callers that read under `select!` MUST use this type (or a transport
 /// that owns one) rather than the free `read_bounded_*` functions, whose state

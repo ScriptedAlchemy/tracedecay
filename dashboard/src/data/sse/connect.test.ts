@@ -292,7 +292,7 @@ describe("dashboard SSE wire bridge", () => {
    *
    * Decoding it is what makes the subscription worth having. A decoder that
    * only accepts the poll shape drops every hook, session-ingest, code-index,
-   * tool-call and task frame the daemon sends — and still reports the link as
+   * tool-call and task frame the daemon sends, and still reports the link as
    * live, because the state flips before the frame is parsed. That failure is
    * invisible to every other test here, so it is pinned against the real
    * constant rather than a plausible one.

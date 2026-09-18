@@ -24,7 +24,7 @@ pub fn text_matches_scope_identity(
 /// scope was resolved), and it moves under a fixed worktree on every ordinary
 /// commit, branch switch, or rebase. Demanding label equality here refused
 /// the exact checkout's own generation whenever the two resolutions straddled
-/// a label move — a retained route scope pinned at project open outlived
+/// a label move, a retained route scope pinned at project open outlived
 /// every later `git switch`, so the graph the daemon was actively indexing
 /// became permanently unservable for that route. Currency is not this gate's
 /// job either: the ready ladder proves the generation against the live

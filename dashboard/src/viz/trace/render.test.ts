@@ -12,7 +12,7 @@ import { channelWidth, sillWidth, taperAt } from './render.ts';
 
 describe('channel and sill widths', () => {
   it('puts a square root between a call-site count and a width', () => {
-    // Magnitude reaches the eye through area, not radius — the same rule the
+    // Magnitude reaches the eye through area, not radius, the same rule the
     // Code spine's mark diameter follows.
     expect(channelWidth(4) - channelWidth(1)).toBeCloseTo(1.15, 5);
     expect(channelWidth(16) - channelWidth(9)).toBeCloseTo(1.15, 5);

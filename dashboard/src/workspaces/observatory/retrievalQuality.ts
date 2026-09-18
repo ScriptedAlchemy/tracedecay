@@ -27,7 +27,7 @@ const NO_ABLATION_PROJECTION =
 export type RetrievalBand = PlanDimensionBand;
 
 /**
- * Source freshness, coverage, and denial — the band that is genuinely measured.
+ * Source freshness, coverage, and denial, the band that is genuinely measured.
  *
  * Each of these may still arrive with `value: null` and the projector's own
  * reason, which is an unmeasured metric and a different state from an

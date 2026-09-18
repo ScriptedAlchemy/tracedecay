@@ -130,7 +130,7 @@ fn round_bin_edge(edge: f64) -> f64 {
 }
 
 /// Fixed-width histogram over the observed `[min_score, max_score]` range of
-/// the computed pairs (adaptive, not a fixed `[-1, 1]` window — real HRR data
+/// the computed pairs (adaptive, not a fixed `[-1, 1]` window, real HRR data
 /// clusters tightly and a fixed window collapses into one bin). A degenerate
 /// range (all scores equal) yields a single bin.
 ///

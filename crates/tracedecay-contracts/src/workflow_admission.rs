@@ -3,7 +3,7 @@
 //! Plan 32: unknown operations and incompatible schemas reject before
 //! activation. Structural validation proves only the DAG shape, so activation
 //! additionally admits every step operation against the canonical Work
-//! executable catalog — the registry fan-out lowers steps into. The schema
+//! executable catalog: the registry fan-out lowers steps into. The schema
 //! and capability halves of the check are the catalog digest pin:
 //! [`crate::work_executable_catalog_digest`] hashes every capability manifest
 //! and schema authority, so a stale `pinned_catalog_digest` is a typed

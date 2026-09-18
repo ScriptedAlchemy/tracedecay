@@ -81,14 +81,14 @@ truthful rather than being replaced with fabricated values.
   now carries `AgentHandoffs.tsx`, `AgentToolActivity.tsx` and
   `AgentFailureContext.tsx`, each with a `.dom.test.tsx`. The handoff frontier
   and the attempt failures are read from `operation.work.views`
-  (`POST /api/work/views`) — `WorkItemV1.handoffs` and the runtime projection on
-  the same graph version — and the tool activity from the
+  (`POST /api/work/views`), `WorkItemV1.handoffs` and the runtime projection on
+  the same graph version, and the tool activity from the
   `/api/plugins/analytics/diagnostics` members the page already fetched and was
   discarding (`tool_call_count`, `by_tool_category`, `ratios`, `recent_hooks`).
   Two gaps stayed open under that correction and are both closed by the
   correction below.
 - CLOSED 2026-08-15 (was Plan 11 owner): `redacted` and `locked` are
-  exercised with supplied backend state — `d1005fb6d` drives both through
+  exercised with supplied backend state, `d1005fb6d` drives both through
   the Sessions workspace via canonical daemon envelopes
   (`SessionInspector.dom.test.tsx`), `c250cb434` renders server-supplied
   `locked` and `redacted` in Observatory (`CanonicalObservations.dom.test.tsx`),
@@ -96,7 +96,7 @@ truthful rather than being replaced with fabricated values.
   `StateChip.dom.test.tsx` holds a compile-time exhaustiveness gate over all
   18 `DomainStateKind` states. Verified 48/48 on 2026-08-15.
 - **Correction 2026-08-15 (Agents):** the two gaps the 2026-08-08 note left
-  open — no handoff-token enumeration route, and no subagent TREE read model —
+  open, no handoff-token enumeration route, and no subagent TREE read model,
   are closed.
 
   *Subagent tree.* `GET /api/plugins/analytics/subagent-tree`
@@ -110,19 +110,19 @@ truthful rather than being replaced with fabricated values.
   The walk is iterative, so a pathological chain cannot overflow the daemon
   stack, and edges never join two providers that minted the same session id.
   `dashboard/src/workspaces/agents/SubagentTree.tsx` consumes it, so Agents now
-  shows delegation as a tree beside — not instead of — the per-agent rollup,
+  shows delegation as a tree beside, not instead of, the per-agent rollup,
   which cannot carry an edge.
 
   *Handoff-token enumeration.* `operation.handoff.list_task_handoffs`
   (`POST /api/application/handoff/list-task`) enumerates issued handoff-open
   grants. It is catalogued as `EffectClass::Read` with a non-required
-  idempotency contract and an operation receipt — the first handoff operation
-  that is not effect-shaped — and takes an evidence path in the daemon rather
+  idempotency contract and an operation receipt, the first handoff operation
+  that is not effect-shaped, and takes an evidence path in the daemon rather
   than minting an effect id for an operation that commits nothing. It is
   recipient-scoped: the daemon returns exactly the grants the caller could
   itself redeem (same session, scope, and recipient principal that redemption
   checks), so listing grants no authority the caller did not already hold. No
-  bearer exists anywhere in it — the authority never stored one — and expired
+  bearer exists anywhere in it, the authority never stored one, and expired
   grants are retained and reported, because a lapsed handoff leaves no
   work-graph record and is otherwise invisible. Both SDKs project it and
   `dashboard/src/workspaces/agents/AgentHandoffTokens.tsx` reads it.
@@ -150,7 +150,7 @@ the transfer-payload ceilings as acceptance criteria ("dont care about
 dashbaord bugets we can delete that"). `scripts/check-dashboard-budget.mjs`,
 its `dashboard-assets` CI step, and the
 `tests/dashboard_workflow_contract_test.sh` lock on it are deleted; no payload
-budget is measured or enforced. This withdraws only the byte ceilings — it is
+budget is measured or enforced. This withdraws only the byte ceilings, it is
 not permission to regress code splitting or ship falsified measurements.
 
 Retained code that budget enforcement previously motivated stays on its own
@@ -162,7 +162,7 @@ empty canvas rather than an error, which would be a falsified reading).
 The virtualization bound is likewise asserted rather than described:
 `VirtualList.dom.test.tsx` proves a 100-row page and the 200-row threshold stay
 plainly rendered, and that a 5,000- and 20,000-row list windows to a
-viewport-sized set under the 250-element ceiling — with a nonzero lower bound,
+viewport-sized set under the 250-element ceiling, with a nonzero lower bound,
 because a virtualizer that mounted nothing would otherwise satisfy any ceiling.
 
 One audit finding was checked and refuted: `/api/plugins/graph/strata` does
@@ -379,7 +379,7 @@ Styling system (design-owned; foundation lanes do not restyle or restructure):
 - Tailwind CSS v4, zero-runtime, over a semantic design-token layer expressed
   as CSS custom properties: color/space/type/radius/elevation scales plus
   named tokens for every `DashboardDomainState`, for severity, and for
-  evidence-quality — severity and evidence quality are separate token axes,
+  evidence-quality, severity and evidence quality are separate token axes,
   never one red/amber/green scale. Dark is the default theme; light,
   `prefers-contrast: more`, and forced-colors are first-class token themes.
 - Radix primitives for accessible interaction patterns, composed through a
@@ -398,7 +398,7 @@ Visualization:
   `ProjectionView`/`ProjectionManifest` frontend type design is abandoned; no
   such Rust or TypeScript types exist, and they are not missing dashboard work.
   Sigma.js + Graphology (MIT, WebGL, offline) is the default connected-graph
-  renderer adapter — it is the only permissive renderer that honors the
+  renderer adapter, it is the only permissive renderer that honors the
   representative/large graph tiers below;
   `d3-force`/d3 scales remain as layout physics for small ego-views and as
   the scale/axis toolkit for bespoke canvas surfaces (Loom temporal traces,
@@ -407,7 +407,7 @@ Visualization:
   quantitative charting library, imported modularly and lazy-loaded per
   route within each route's bundle budget; the earlier Observable Plot
   admission is withdrawn. The user named cosmograph.app as the visual
-  benchmark — "i want visuals like that" — not as a library mandate.
+  benchmark, "i want visuals like that", not as a library mandate.
   Cosmograph remains only a gated optional GPU adapter for overflow tiers per
   the fallback contract below. No renderer becomes
   graph, query, health, readiness, ranking, or action authority.
@@ -514,7 +514,7 @@ count, and score kind; none may be hidden only in a tooltip or drawer.
 - Retriever rows preserve server order and identify retriever/revision, stage,
   contribution/abstention/exclusion/unavailable state, score kind and
   descriptor/calibration revision, reason codes, coverage, and anchor IDs.
-- “Confidence” is reserved for a calibrated probability or interval that names
+- "Confidence" is reserved for a calibrated probability or interval that names
   estimator, calibration revision, cohort, horizon, support, and drift
   validity. Lexical/vector/reranker/heuristic/ordinal values retain their raw
   unit, direction, comparison scope, and revision and never share a normalized
@@ -625,8 +625,8 @@ separate mechanical and semantic columns, relationship paths, freshness,
 coverage, omitted counts, and exact evidence expansion. Exact same-range or
 symbol overlap remains distinct from configured-threshold proximity.
 Denied/private cells expose neither hidden actor, root, address, count, nor
-content. Partial or unknown mechanical coverage cannot render “clean merge”;
-partial or unknown semantic coverage cannot render “no overlap.”
+content. Partial or unknown mechanical coverage cannot render "clean merge";
+partial or unknown semantic coverage cannot render "no overlap."
 
 The execution-topology inspector is rooted in the opaque Plan 24 `TaskId`
 (`WorkItemId`) and exact `WorkItemVersionId`. Every lane, rail, heat cell,
@@ -831,7 +831,7 @@ filters, selection, evidence, temporal frame, or legal actions.
 
 ## Responsive, accessibility, performance, and usability journeys
 
-**Approved acceptance — desktop-first, not desktop-only (2026-07-28).**
+**Approved acceptance, desktop-first, not desktop-only (2026-07-28).**
 Desktop visual review and golden baselines use 1280×720 and 1440×900. Narrow
 viewports are functional/accessibility acceptance surfaces rather than a
 second mobile visual-design program: no capability, truth state, provenance,
@@ -876,7 +876,7 @@ keyboard-ready/input-latency targets, the frame-time and long-task budgets,
 the planner first-progress and first-result timing targets, the heap and
 retention ceilings, and the sustained-SSE throughput/coalescing rates. No
 performance number is measured or gated for acceptance; performance problems
-are ordinary bugs. The withdrawal removes only the numeric gates — these
+are ordinary bugs. The withdrawal removes only the numeric gates, these
 correctness behaviors stand on their own: SSE queue overflow marks the
 projection stale and performs one canonical invalidation/refetch rather than
 silently dropping events; planner progress remains explicitly pending/partial

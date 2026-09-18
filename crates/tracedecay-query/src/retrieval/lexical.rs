@@ -91,7 +91,7 @@ pub const MAX_LEXICAL_QUERY_TERM_BYTES_V1: usize = 512;
 
 /// Summed document-frequency budget for lexical term-source admission. Every
 /// candidate is decoded from its row and scored, so the union of the request's
-/// term sources — not the winner cap — decides the lane's transient allocation
+/// term sources, not the winner cap, decides the lane's transient allocation
 /// and wall time: unbounded, a natural-language task whose terms include
 /// common words hydrated ~74k rows of a 472k-chunk corpus per read (~0.95 GB
 /// decoded, 5.7 s) and missed the context deadline. Term sources are admitted
@@ -330,8 +330,8 @@ pub struct LexicalLaneRequest<'a> {
     pub budget: RetrievalBudget,
     /// The live request authority the lane consults between bounded units of
     /// row work. The candidate-source bound keeps one
-    /// request's hydration finite, but a caller that has already settled —
-    /// cancelled, past its deadline, or revoked — must not keep the shared
+    /// request's hydration finite, but a caller that has already settled,
+    /// cancelled, past its deadline, or revoked, must not keep the shared
     /// search execution permit occupied while the remaining rows decode and
     /// score. Cancellation unwinds the scan with
     /// [`RetrievalPortError::Cancelled`] instead of an empty or partial batch.

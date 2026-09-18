@@ -61,7 +61,7 @@ fn test_svelte_no_script_block_returns_file_node_only() {
     let source = "<h1>Hello</h1>\n<p>World</p>";
     let result = SvelteExtractor.extract("Static.svelte", source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    // Only the File node — no symbols to extract.
+    // Only the File node. No symbols to extract.
     let non_file: Vec<_> = result
         .nodes
         .iter()

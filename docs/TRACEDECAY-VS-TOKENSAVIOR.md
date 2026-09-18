@@ -3,7 +3,7 @@
 > **Superseded comparison snapshot.** The implementation row ("Rust + SQLite")
 > and "per-branch DB" claim describe the retired pre-V2 model. Current graph
 > storage is Grafeo via `tracedecay-graph-db`; one project store, branch as
-> provenance only — see
+> provenance only, see
 > [Plan 38](plans/tracedecay-v2/38-storage-retention-size-and-efficiency.md)
 > and the [V2 operating model](V2-OPERATING-MODEL.md). Benchmark numbers below
 > are historical.
@@ -17,11 +17,11 @@ results from a synthetic indexer benchmark and a 96-task agent benchmark
 | **Implementation** | Rust + SQLite + tree-sitter | Python + in-memory dict |
 | **Languages indexed** | 46 via tree-sitter grammars (Rust, Python, Go, TS/JS, Java, Kotlin, Scala, C#, Swift, C/C++, Ruby, PHP, Dart, Lua, Perl, Bash, Pascal, COBOL, Fortran, …) | 7 via regex annotators (Python, TS/JS, Rust, Go, C, C#) + 8 config formats (TOML/JSON/YAML/XML/INI/HCL/env/Dockerfile) |
 | **MCP tools exposed** | 70+ (one fewer without `ast-grep`) | 68 (`full`), 15 (`optimized` default) |
-| **Branch-aware indexing** | yes — per-branch DB, `tracedecay branch …` | no |
+| **Branch-aware indexing** | yes, per-branch DB, `tracedecay branch …` | no |
 | **Index freshness** | on-demand staleness check per MCP call + catch-up sync on connect | no |
 | **Health analytics** | 11 dedicated tools (complexity, hotspots, dead-code, redundancy, doc-coverage, coupling, dsm, gini, …) | 2 (dead-code, complexity) |
 | **Edit primitives** | symbol-aware (`replace_symbol`, `insert_at_symbol`) + range (`str_replace`, `insert_at`, `ast_grep_rewrite`) | `replace_symbol_source`, `insert_near_symbol`, `add_field_to_model`, `move_symbol` |
-| **Shell-output compaction** | out of scope — pair with [RTK](https://github.com/ScriptedAlchemy/rtk) | yes (34 compactors in v4.3+) |
+| **Shell-output compaction** | out of scope, pair with [RTK](https://github.com/ScriptedAlchemy/rtk) | yes (34 compactors in v4.3+) |
 | **Config / Docker linting** | no | yes (`analyze_config`, `analyze_docker`) |
 | **Indexer cold time (FastAPI)** | **2.15 s** | 6.21 s |
 | **Impact analysis (FastAPI)** | **0.57 ms** | 24.4 ms |
@@ -41,12 +41,12 @@ Python, TypeScript/JavaScript, Rust, Go, C, C# (each 200–750 lines of
 regex + brace-matching), plus structured-format annotators for TOML,
 JSON, YAML, XML, INI, HCL, `.env*`, and Dockerfile. Regex parsing is
 simple to extend, deliberately permissive on partial / malformed code,
-but doesn't carry type or scope information across constructs — it
+but doesn't carry type or scope information across constructs, it
 catches function/class declarations and import sites cleanly but
 won't resolve, for example, which `impl` block a Rust method
 belongs to or which interface a TS class implements.
 
-**tracedecay** parses **46 languages** through tree-sitter grammars —
+**tracedecay** parses **46 languages** through tree-sitter grammars,
 Rust, Python, Go, TypeScript / TSX / JavaScript, Java, Kotlin, Scala,
 C#, Swift, C, C++, Objective-C, Ruby, PHP, Dart, Lua, Perl, Bash,
 Pascal, COBOL, Fortran, OCaml, Haskell, Elixir, Erlang, Clojure, Julia,
@@ -55,7 +55,7 @@ GW-BASIC, MSBASIC2, QBasic, QuickBasic, Lean, Quint. The full AST is
 available to the extractor, so edge kinds beyond "this name appears
 here" are recoverable: `implements`, `extends`, `type_of`, `annotates`,
 `returns`, `receives`, in addition to `calls` and `uses`. The trade-off
-is one tree-sitter grammar (and matching extractor) per language —
+is one tree-sitter grammar (and matching extractor) per language,
 adding a language is a several-hundred-line commitment vs. token-
 savior's regex-and-go.
 
@@ -63,8 +63,8 @@ Practical implication: on the seven languages both tools cover,
 token-savior gets file outlines fast and reliably; tracedecay gets
 richer graph queries (impact radius, call chains, type hierarchies)
 because the edges exist in the first place. On anything outside
-token-savior's annotator set — Java, Kotlin, Scala, Swift, C++, Ruby,
-PHP, Dart, Lua, etc. — tracedecay is the only option that yields a
+token-savior's annotator set. Java, Kotlin, Scala, Swift, C++, Ruby,
+PHP, Dart, Lua, etc., tracedecay is the only option that yields a
 structured index.
 
 ### 1.2 Branch-aware indexing
@@ -102,7 +102,7 @@ exposes health-focused MCP tools that have no token-savior equivalent:
 | `tracedecay_test_risk` | Files at risk for the next regression |
 | `tracedecay_dependency_depth` | Longest paths in the dependency DAG |
 
-Plus dedicated tools for cross-cutting agent workflows — `tracedecay_diagnose`
+Plus dedicated tools for cross-cutting agent workflows, `tracedecay_diagnose`
 (triages a stuck session), `tracedecay_run_affected_tests`,
 `tracedecay_diagnostics` (TypeScript LSP integration), `tracedecay_outline`,
 `tracedecay_signature_search`, `tracedecay_type_hierarchy`,
@@ -123,7 +123,7 @@ savior's cache is invalidated on a per-tool basis and re-built lazily.
 ### 1.5 Rust + SQLite: durable and fast
 
 - **Cold index** is ~3× faster on real Python codebases (FastAPI: 2.15 s vs
-  6.21 s — see §3).
+  6.21 s, see §3).
 - **Impact analysis** is ~43× faster on the same project (0.57 ms vs 24.4 ms
   handler time), because the reverse-dependency walk runs against an indexed
   SQLite table rather than a pure-Python `dict[str, list[str]]`.
@@ -137,7 +137,7 @@ savior's cache is invalidated on a per-tool basis and re-built lazily.
 ### 1.6 Per-call timing telemetry
 
 `tracedecay serve --timings` annotates every `tools/call` response with
-`_meta.duration_us` — the pure handler execution time. Lets agents (and
+`_meta.duration_us`, the pure handler execution time. Lets agents (and
 benchmarks) attribute latency to actual query work vs. JSON-RPC / stdio /
 parser overhead. There is no equivalent in token-savior.
 
@@ -183,7 +183,7 @@ tracedecay bench       # built-in retrieval benchmark
 ```
 
 Graph-traversal tools such as `impact` and `callers` take a `node_id`, not a
-bare symbol name — resolve one with `search` or `find_exact_symbol` first.
+bare symbol name, resolve one with `search` or `find_exact_symbol` first.
 
 There are no per-tool top-level subcommands (`tracedecay query`,
 `tracedecay files`, `tracedecay affected` and friends do not exist); run
@@ -213,7 +213,7 @@ fall back to `Read` + `Grep` on `.env*` plus reading the relevant
 ### 2.2 Dockerfile linting
 
 `analyze_docker` checks for common Dockerfile anti-patterns (`DOCKER-*`,
-`INFRA-*`) — unsafe `apt-get` flags, missing layer caching, root user, etc.
+`INFRA-*`), unsafe `apt-get` flags, missing layer caching, root user, etc.
 tracedecay indexes Dockerfiles as files but doesn't lint them. **Workaround**:
 `Read` the Dockerfile, judge against the rubric.
 
@@ -225,14 +225,14 @@ keep tracedecay focused on code-graph queries.
 
 token-savior ships:
 
-- `add_field_to_model` — Prisma / Pydantic / dataclass / TS interface
+- `add_field_to_model`. Prisma / Pydantic / dataclass / TS interface
   field insertion
-- `move_symbol` — function-or-class move with cross-file import rewrite
+- `move_symbol`, function-or-class move with cross-file import rewrite
 
 tracedecay doesn't have these. **Workaround**: combine
 `tracedecay_replace_symbol` / `tracedecay_str_replace` / `tracedecay_insert_at`
 with `Edit` for import-site fixups. On `tsbench` this scored full marks on
-TASK-012 (the canonical add-field-to-model task) without a dedicated tool —
+TASK-012 (the canonical add-field-to-model task) without a dedicated tool,
 the agent uses `tracedecay_str_replace` against the model block directly.
 
 These are arguably out of scope: a single `add_field` tool needs syntax
@@ -244,7 +244,7 @@ multi-thousand-LoC commitments per dialect.
 
 tracedecay's scope is the *code-graph query layer*; it deliberately does not
 intercept shell-tool output. For that layer, pair tracedecay with
-[RTK (Rust Token Killer)](https://github.com/ScriptedAlchemy/rtk) — a
+[RTK (Rust Token Killer)](https://github.com/ScriptedAlchemy/rtk), a
 transparent CLI proxy that compacts verbose `git diff`, `kubectl logs`,
 `pytest`, `gh run view`, etc. before they hit the agent's context. RTK is
 a separate concern with no overlap with tracedecay's code-graph
@@ -256,7 +256,7 @@ token-savior accepts `names=[...]` lists in find / get_function_source /
 get_full_context: one round-trip retrieves multiple symbols. tracedecay's
 equivalent tools each take a single symbol or node_id. Issuing N MCP calls
 pays N × stdio JSON-RPC overheads (~300 µs each per the §3 benchmark).
-For typical agent workloads — 5–10 queries per task — the absolute cost is
+For typical agent workloads, 5–10 queries per task, the absolute cost is
 sub-millisecond per call, but at hundreds of queries it adds up.
 **Mitigation**: `tracedecay_context` retrieves a relevance-ranked bundle of
 related symbols in one call when the task is open-ended, which usually
@@ -282,7 +282,7 @@ recall remains out of scope.
 Adapted from token-savior's own `benchmarks/run_benchmarks.py`. Same clone
 of FastAPI, same random sample of symbols (seed=42), shared between both
 tools so per-query rows are directly comparable. tracedecay is driven through
-a long-lived `tracedecay serve --timings` session — the per-query column
+a long-lived `tracedecay serve --timings` session, the per-query column
 reports the handler's `_meta.duration_us`, stripping JSON-RPC / stdio /
 Python-parse overhead. token-savior runs in-process.
 
@@ -302,7 +302,7 @@ which writes `comparison-report.md` into its results directory.
 
 The compact-on-disk row goes to token-savior: it stores a JSON dict of
 symbols, while tracedecay stores the full graph (typed nodes + edges) in
-SQLite. The 10× symbol/node count is what you pay for that — and what
+SQLite. The 10× symbol/node count is what you pay for that, and what
 makes the impact-radius walk possible.
 
 The `find_symbol` row is the only tracedecay loss on lookup latency, and
@@ -327,7 +327,7 @@ Our adaptation:
 - Rewrite `SYSTEM_PROMPT_TS` to map each token-savior tool to its tracedecay
   equivalent (or, where none exists, a `Read` / `Edit` fallback).
 - Relax `--disallowedTools` from `["Read","Grep","Glob","Agent"]` to
-  `["Agent"]` only — needed because tracedecay doesn't provide
+  `["Agent"]` only, needed because tracedecay doesn't provide
   `analyze_config` / `analyze_docker` / `add_field_to_model`.
 - Update the prefix matcher to `mcp__tracedecay__*`.
 - No CLAUDE.md baking, no `--bare` (Max OAuth incompatibility), no
@@ -350,12 +350,12 @@ Our adaptation:
 
 | Task | Cat. | Score | Root cause |
 |---|---|:-:|---|
-| TASK-008 | audit | 0/2 | `tracedecay_dead_code` returns a different candidate set than token-savior's `find_dead_code` — semantic mismatch with the ground-truth `DEAD-*` IDs |
-| TASK-015 | edit | 0/2 | `tracedecay_insert_at_symbol` places the new function differently than `insert_near_symbol` would have — both succeed, but the grader expects token-savior's placement convention |
+| TASK-008 | audit | 0/2 | `tracedecay_dead_code` returns a different candidate set than token-savior's `find_dead_code`, semantic mismatch with the ground-truth `DEAD-*` IDs |
+| TASK-015 | edit | 0/2 | `tracedecay_insert_at_symbol` places the new function differently than `insert_near_symbol` would have, both succeed, but the grader expects token-savior's placement convention |
 | TASK-007 | explanation | 1/2 | Entry-point answer missing one rubric keyword |
 | TASK-018 | debug | 1/2 | The retired `tracedecay_redundancy` scan flagged the `bench_tracedecay.py` fork as a duplicate of `bench.py`; the grader expected only the curated `DUP-*` pairs. |
 | TASK-086 | documentation | 1/2 | Module README missing rubric keywords |
-| TASK-087 | documentation | 1/2 | Same class — token-savior's BENCHMARK-SUMMARY lists TASK-087 as one of their own known 1/2 misses |
+| TASK-087 | documentation | 1/2 | Same class, token-savior's BENCHMARK-SUMMARY lists TASK-087 as one of their own known 1/2 misses |
 
 ### What's notable
 
@@ -377,7 +377,7 @@ Our adaptation:
   minutes wall time across one Max OAuth session.
 
 Reproduction harness and patch in
-[`benchmark_data/tsbench/`](../benchmark_data/tsbench/) — see
+[`benchmark_data/tsbench/`](../benchmark_data/tsbench/), see
 [`benchmark_data/tsbench/README.md`](../benchmark_data/tsbench/README.md).
 
 ---
@@ -389,7 +389,7 @@ Reproduction harness and patch in
   (Java, Kotlin, Scala, Swift, C++, Ruby, PHP, Dart, Lua, OCaml,
   Haskell, Elixir, Erlang, Clojure, etc.).
 - You need typed-edge queries (`implements`, `extends`, `type_of`,
-  `annotates`, impact radius, call chains, type hierarchies) — these
+  `annotates`, impact radius, call chains, type hierarchies), these
   require AST-level parsing, not regex.
 - You need cross-branch indexing, durable on-disk state, or live file
   watching.
@@ -403,7 +403,7 @@ Reproduction harness and patch in
 **Use token-savior when:**
 - Your project is in one of its six supported languages (Python,
   TS/JS, Rust, Go, C, C#) and you mostly need symbol lookups +
-  file outlines — regex annotators are simple, permissive on
+  file outlines, regex annotators are simple, permissive on
   partial code, and have negligible startup cost.
 - You want `analyze_config` / `analyze_docker` linting out of the box.
 - You're running on a token-savior-tuned tsbench rubric and need the
@@ -411,5 +411,5 @@ Reproduction harness and patch in
 
 For shell-output token reduction (verbose `git diff` / `kubectl logs` /
 `pytest` outputs), pair tracedecay with
-[RTK](https://github.com/ScriptedAlchemy/rtk) — that's a separate
+[RTK](https://github.com/ScriptedAlchemy/rtk), that's a separate
 problem from code-graph queries and RTK addresses it directly.

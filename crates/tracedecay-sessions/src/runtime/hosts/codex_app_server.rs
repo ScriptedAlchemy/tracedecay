@@ -431,7 +431,7 @@ fn run_codex_protocol(
         )?;
 
         // `stdin` stays open for the whole turn. `codex app-server` treats stdin
-        // EOF as a client disconnect and shuts the session down immediately —
+        // EOF as a client disconnect and shuts the session down immediately,
         // measured at 70ms after close, exit status 0, with the in-flight turn
         // cancelled and no `turn/completed` ever emitted. Closing it here to mean
         // "no further requests" therefore killed every automation run before the

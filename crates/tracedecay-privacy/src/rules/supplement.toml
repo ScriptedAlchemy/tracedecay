@@ -13,9 +13,9 @@
 #   description         required, human-facing rationale
 #   regex               required
 #   kind                required here, absent upstream: which detector the match
-#                       is attributed to — "private_key" | "bearer_token" |
+#                       is attributed to, "private_key" | "bearer_token" |
 #                       "known_credential" | "credential_assignment"
-#   profiles            required here: which scan profiles load the rule —
+#   profiles            required here: which scan profiles load the rule,
 #                       "observation" (inline record capture) and/or "memory"
 #                       (durable memory-fact writes, a stricter profile)
 #   assignment_min_len  optional: opts the rule into the bounded key=value scan,
@@ -35,7 +35,7 @@ id = "tracedecay-private-key-block"
 description = """
 Whole PEM private-key block, including a block that the record truncated before
 its END armour. Upstream `private-key` requires at least 64 bytes of body *and*
-a closing `KEY-----`, so it does not fire on a transcript that was cut mid-key —
+a closing `KEY-----`, so it does not fire on a transcript that was cut mid-key,
 which is exactly the case a capture-time sanitizer has to survive.
 """
 kind = "private_key"

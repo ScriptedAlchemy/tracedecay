@@ -285,7 +285,7 @@ impl ProjectMemoryFactPageV1 {
             validate_owned_fact_id(cursor, &owner)?;
             // Resume semantics are exclusive-start (`fact_id > cursor`), so
             // the canonical cursor for a full page is exactly its last fact
-            // id — the same convention the search-page cursor uses. Anything
+            // id, the same convention the search-page cursor uses. Anything
             // else either re-serves returned rows or silently skips rows.
             if previous != Some(cursor) {
                 return Err(FactStoreError::Contract(DomainError::NonCanonical {

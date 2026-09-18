@@ -3,7 +3,6 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
-use fs2::FileExt;
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, set_owner_private_file_mode};
 
 use crate::config;
@@ -728,7 +727,7 @@ pub fn append_lock_path(path: &Path) -> PathBuf {
 // should reuse one rather than hand-rolling a third:
 //
 //   1. Sidecar advisory lock (this utility). Open a dedicated `<file>.lock`
-//      handle for read+write and hold an `fs2` `flock` on it while mutating the
+//      handle for read+write and hold a `File::lock` on it while mutating the
 //      real file. Use it to serialize writers to an append-only log or an
 //      mmap/config file where readers must never see a torn write and a crashed
 //      holder must not leave a stale marker (the OS drops the lock on process
@@ -779,7 +778,7 @@ pub(super) fn open_lock_file(lock_path: &Path, private: bool) -> io::Result<fs::
 /// the read+write-handle rationale.
 pub fn try_acquire_sidecar_lock(lock_path: &Path) -> io::Result<Option<fs::File>> {
     let file = open_lock_file(lock_path, false)?;
-    match file.try_lock_exclusive() {
+    match file.try_lock().map_err(std::io::Error::from) {
         Ok(()) => Ok(Some(file)),
         // `is_lock_contended` covers Windows, where contention surfaces as
         // ERROR_LOCK_VIOLATION rather than a `WouldBlock` error kind.
@@ -797,7 +796,7 @@ pub fn acquire_sidecar_lock_blocking(lock_path: &Path) -> io::Result<fs::File> {
 
 fn acquire_lock_file_blocking(lock_path: &Path, private: bool) -> io::Result<fs::File> {
     let file = open_lock_file(lock_path, private)?;
-    file.lock_exclusive()?;
+    file.lock()?;
     Ok(file)
 }
 

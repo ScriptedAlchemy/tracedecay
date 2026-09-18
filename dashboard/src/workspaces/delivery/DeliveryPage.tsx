@@ -31,14 +31,14 @@ import { ReviewWorkspace } from './ReviewWorkspace.tsx';
 import { LocalFirstWing } from './LocalFirstWing.tsx';
 
 /**
- * Delivery — channel 08.
+ * Delivery, channel 08.
  *
  * One DOM shell, four workspace modes over two real read authorities:
  *
- * - `GET /api/delivery/inbox` — the registry-admitted, indexed-head-joined
+ * - `GET /api/delivery/inbox`, the registry-admitted, indexed-head-joined
  *   pull request inbox across every registered project, with server-owned
  *   attention and membership edges.
- * - `GET /api/projects/{id}/delivery/overview` — the selected project's eight
+ * - `GET /api/projects/{id}/delivery/overview`, the selected project's eight
  *   independently typed Git/provider projections (changes, commits, pull
  *   requests, reviews, CI checks, failure localization, releases, freshness).
  *

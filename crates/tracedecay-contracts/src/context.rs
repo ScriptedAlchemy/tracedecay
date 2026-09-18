@@ -113,8 +113,8 @@ impl ResolvedScope {
     /// Project, repository, and worktree are checkout identity. `reference`
     /// is deliberately not: it is the branch label HEAD happened to carry
     /// when the scope was resolved, and it moves under a fixed worktree on
-    /// every ordinary commit, branch switch, or rebase. Comparing it —
-    /// directly or through the derived `scope_digest` via full equality —
+    /// every ordinary commit, branch switch, or rebase. Comparing it,
+    /// directly or through the derived `scope_digest` via full equality,
     /// turns a label move into a false identity mismatch, orphaning a
     /// retained route from the graph of the very checkout it is serving.
     /// Serving-eligibility and authority gates compare checkout identity

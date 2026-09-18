@@ -405,7 +405,7 @@ fn stop_daemon(daemon: &mut Daemon) {
     // The daemon's own shutdown contract is DAEMON_SHUTDOWN_DEADLINE (45s):
     // every owner phase gets a typed deadline and the process exits with a
     // receipt even when an owner times out. The assertion here is that
-    // shutdown COMPLETES within that contract — a tighter local SLA turned
+    // shutdown COMPLETES within that contract, a tighter local SLA turned
     // loaded CI runners into false failures.
     let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {

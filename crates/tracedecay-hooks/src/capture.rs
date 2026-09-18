@@ -152,9 +152,9 @@ fn capture_native_event_for_replay_inner(
 /// the spool already holds.
 ///
 /// The event ID is derived from the host's own identity fields, so one host
-/// event delivered twice — a retried callback, or sibling hooks firing
-/// concurrently for the same edit — produces two envelopes that differ only in
-/// the instant each process observed it. `HookSpoolV1::append` is idempotent
+/// event delivered twice produces two envelopes that differ only in the
+/// instant each process observed it. A retried callback or sibling hooks
+/// firing concurrently for the same edit do the same. `HookSpoolV1::append` is idempotent
 /// for an identical envelope but reports `EventIdConflict` for that timestamp
 /// difference, which the capture lane surfaced as a failed hook exit even
 /// though the event was already durable. Normalise the observation instant the

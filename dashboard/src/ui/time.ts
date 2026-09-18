@@ -38,7 +38,7 @@ export function freshnessTier(ageSecs: number): FreshnessTier {
   return 'dormant';
 }
 
-/** 1..4 — how many steps of the freshness meter are filled. */
+/** 1..4, how many steps of the freshness meter are filled. */
 export function freshnessSteps(tier: FreshnessTier): number {
   return FRESHNESS_TIERS.indexOf(tier) + 1;
 }
@@ -58,7 +58,7 @@ export function relativeAge(
   return `${Math.floor(delta / MONTH)}mo ago`;
 }
 
-/** "now" / "15m" / "6d" / "1mo" — the compact unit-only variant for dense
+/** "now" / "15m" / "6d" / "1mo", the compact unit-only variant for dense
  * rows; a call site that needs prose appends "ago" itself. A future
  * observation reads "now" rather than a negative age. Returns null for an
  * absent timestamp so callers must render the absence explicitly. */

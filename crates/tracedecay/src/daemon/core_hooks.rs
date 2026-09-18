@@ -1,8 +1,8 @@
 //! Host hook events: daemon notification over the broker connection.
 //!
 //! The wire metadata and event constructors are pure data and live in
-//! [`tracedecay_hooks::core_events`]. Only delivery — which needs the daemon
-//! connection, handshake, and preamble — remains root-coupled.
+//! [`tracedecay_hooks::core_events`]. Only delivery, which needs the daemon
+//! connection, handshake, and preamble, remains root-coupled.
 
 use std::path::Path;
 

@@ -1635,8 +1635,8 @@ pub(super) async fn trigger_contracts_intact(
 /// One authority trigger body a session-temporal v3 store carries in the shape
 /// that shipped rather than the current one.
 ///
-/// Every release that persisted schema marker 3 — v0.1.0-beta.25 through
-/// v0.1.0-beta.37, the newest tag — published one identical 81-trigger
+/// Every release that persisted schema marker 3, v0.1.0-beta.25 through
+/// v0.1.0-beta.37, the newest tag, published one identical 81-trigger
 /// authority inventory (the exact SQL lives in
 /// `tests/fixtures/session-temporal-released-v3-triggers.sql`). No trigger name
 /// changed, so a v3 store differs from the current contract in exactly these

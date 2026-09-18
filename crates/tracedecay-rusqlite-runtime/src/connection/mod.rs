@@ -32,7 +32,7 @@ const PREPARED_STATEMENT_CACHE_CAPACITY: usize = 128;
 ///
 /// A checkpoint returns WAL *contents* to the database; it does not return the
 /// WAL file's blocks. `journal_size_limit` is the only control that does, and
-/// SQLite's default (`-1`) never shrinks the file — so an isolated write burst
+/// SQLite's default (`-1`) never shrinks the file, so an isolated write burst
 /// pins the WAL at its high-water mark for the life of the database. This
 /// runtime is more exposed than most, because it sets `wal_autocheckpoint = 0`
 /// and drives every checkpoint from [`crate::checkpoint`]: SQLite will not
@@ -181,7 +181,7 @@ impl OpenedDatabaseFile {
     /// The pinned-descriptor ABA fence is unaffected: the reader worker still
     /// runs `verify_connection` (pathname inode identity plus
     /// `SQLITE_FCNTL_HAS_MOVED`, rechecked afterwards) and re-pins the file
-    /// before it reports startup — the same fence that already makes the
+    /// before it reports startup, the same fence that already makes the
     /// writer's canonical-path open safe on these hosts.
     pub(crate) fn reader_open_path(
         &self,
@@ -593,7 +593,7 @@ fn open_raw(
 
 /// Configuration is measured apart from the raw open: `journal_mode = WAL`
 /// and the verification pragmas read and can write the database, so under a
-/// held write lock this phase — not the file open — is where a slow
+/// held write lock this phase, not the file open, is where a slow
 /// startup's time goes.
 fn finish_open(
     connection: Connection,

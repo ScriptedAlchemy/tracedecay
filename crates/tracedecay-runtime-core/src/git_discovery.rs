@@ -34,8 +34,8 @@ const CLI_FALLBACK_HEADROOM: Duration = Duration::from_millis(250);
 /// Default probe budget for synchronous discovery without an explicit deadline.
 ///
 /// Authority and CLI fallback share one deadline. The total is the modelled
-/// first-phase cost plus reserved CLI headroom — not the first-phase cost
-/// alone — so a slow unreadable authority cannot starve the supported fallback.
+/// first-phase cost plus reserved CLI headroom, not the first-phase cost
+/// alone, so a slow unreadable authority cannot starve the supported fallback.
 const DEFAULT_DISCOVERY_TIMEOUT: Duration =
     MODELLED_SLOW_AUTHORITY_WALK.saturating_add(CLI_FALLBACK_HEADROOM);
 /// Upper bound between `try_wait` polls. Keep slices short enough that cancel
@@ -224,8 +224,8 @@ fn join_identity_resolution(
     tokio::task::spawn_blocking(move || {
         let result = resolve_identity_from_authority(&retire.0);
         // Retired before publishing, so a caller arriving after the answer
-        // starts a fresh resolution — which the retained topology answers
-        // without a walk — instead of joining a resolution that is history.
+        // starts a fresh resolution, which the retained topology answers
+        // without a walk, instead of joining a resolution that is history.
         drop(retire);
         let _ = publish.send(Some(result));
     });
@@ -263,7 +263,7 @@ fn resolve_identity_from_authority(path: &Path) -> IdentityResolutionResult {
 ///
 /// Live defect this exists for: this function promises discovery "without
 /// blocking the async executor", but the in-process authority probe ran inline
-/// on the calling worker with no bound at all — only the `git` subprocess
+/// on the calling worker with no bound at all, only the `git` subprocess
 /// fallback below ever observed the deadline. On a slow volume every tokio
 /// worker serving daemon connections sat inside `gix` discovery at once, so
 /// the accept loop was never polled and the listening socket refused new
@@ -597,7 +597,7 @@ mod tests {
             .args(args)
             .current_dir(cwd)
             .status()
-            .expect("git not on PATH — required for identity tests");
+            .expect("git not on PATH, required for identity tests");
         assert!(status.success(), "git {args:?} failed in {}", cwd.display());
     }
 

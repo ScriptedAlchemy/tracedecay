@@ -419,7 +419,7 @@ impl VerifiedGraphQuery {
     /// Returns one stable page restricted to the requested logical files.
     ///
     /// Resolution goes through the per-file catalog index rather than the
-    /// whole-corpus occurrence stream — a page for a handful of changed
+    /// whole-corpus occurrence stream, a page for a handful of changed
     /// files must never hydrate every symbol in the generation. The canonical
     /// stream orders by occurrence, so sorting the per-file union preserves
     /// the exact page identity the stream scan produced.
@@ -594,7 +594,7 @@ impl VerifiedGraphQuery {
     /// recognized markers are lexically attached attributes, so a marker
     /// always occupies the same file as the function it annotates, and only
     /// the requested files can contribute either endpoint. The unscoped
-    /// census keeps the corpus sweep — that is its job.
+    /// census keeps the corpus sweep, that is its job.
     #[hotpath::measure(label = "usecases.graph.verified.test_annotated_files")]
     pub fn test_annotated_logical_files(
         &self,
@@ -689,13 +689,13 @@ impl VerifiedGraphQuery {
 }
 
 /// Admits the request and opens a verified query through the lower graph
-/// ports. Every port wait — admission and projection open — is raced against
+/// ports. Every port wait, admission and projection open, is raced against
 /// the canonical deadline/cancellation pair, and fresh time is rechecked after
 /// each acquisition.
 ///
 /// The composition-root adapter closes over those ports; this function never
 /// names a root type, and the source authority is frozen from the supplied
-/// context before the query exists — no later surface accepts a runtime,
+/// context before the query exists, no later surface accepts a runtime,
 /// root, or database.
 #[hotpath::measure(label = "usecases.graph.open_verified", future = true)]
 pub async fn open_verified_graph_query(

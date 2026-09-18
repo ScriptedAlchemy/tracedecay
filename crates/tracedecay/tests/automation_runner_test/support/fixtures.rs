@@ -31,7 +31,7 @@ use super::{project_memory_owner, test_automation_run_control};
 /// lifecycle lease. The hermetic escape hatch
 /// (`TraceDecay::standalone_test_open_options`) is `cfg(test)`/`test-transport`
 /// gated, so it is inactive for this integration binary and cannot be relied
-/// on — the fixture must pin the profile itself, the same shape
+/// on, the fixture must pin the profile itself, the same shape
 /// `memory_eval_test::initialize_fixture_project` already uses.
 ///
 /// The shard lives under the project's own `.tracedecay/` marker directory so

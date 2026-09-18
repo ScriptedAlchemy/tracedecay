@@ -421,7 +421,7 @@ impl MaintenanceCoordinator {
         self.cancel();
         // Cancel stops the next pass; an in-flight tick only notices between
         // stores. Abort the tasks so shutdown does not wait for retention or
-        // RSS sampling to finish — those are abandonable maintenance, not
+        // RSS sampling to finish, those are abandonable maintenance, not
         // durability. The abort deadline is the join backstop if a tick is
         // stuck in blocking work.
         join_abandoned_maintenance_task(self.task.lock().await.take(), "retention_tick").await;
@@ -710,7 +710,7 @@ impl MaintenanceCoordinator {
 
         // Branch-store GC: the watcher owns no store authorities, while this
         // owner already holds the administration coordinator. Daily cadence,
-        // retry-eligible — the stamp advances only when every mounted project's
+        // retry-eligible, the stamp advances only when every mounted project's
         // pass succeeded.
         if continuation.is_none() && !self.cancellation.is_cancelled() {
             let gc_due = self
@@ -1337,7 +1337,7 @@ mod tests {
     fn store_window_round_robin_reaches_every_store_and_never_starves() {
         // With more stores than the budget, feeding each tick's cursor into the
         // next must cover every store within ceil(count / budget) ticks while
-        // no tick exceeds the budget — nothing reclaimable is skipped forever.
+        // no tick exceeds the budget, nothing reclaimable is skipped forever.
         for &(count, budget) in &[(7usize, 3usize), (50, 8), (17, 5), (8, 8), (1, 8)] {
             let keys = store_keys(count);
             let ticks = count.div_ceil(budget);

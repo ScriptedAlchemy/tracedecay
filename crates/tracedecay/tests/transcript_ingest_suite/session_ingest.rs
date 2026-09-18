@@ -43,7 +43,7 @@ struct IngestTestRuntime {
     _profile: Option<tempfile::TempDir>,
     /// Project runs only: a project sessions store carries its verified graph
     /// runtime once its project-memory owner is mounted, and Git evidence
-    /// convergence — which every project catch-up pass finalizes through —
+    /// convergence, which every project catch-up pass finalizes through,
     /// refuses to publish without one. Holding the memory database keeps that
     /// owner mounted for the whole pass, the way the daemon does.
     _memory: Option<std::sync::Arc<tracedecay_runtime_core::db::Database>>,

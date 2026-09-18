@@ -138,7 +138,7 @@ pub(crate) fn record_scan_generation_changed() {
 /// One durable capture window: how many frames it carried.
 ///
 /// Frames-per-window is the batching ratio the writer amplification question
-/// turns on, and it cannot be read off the writer's own counters — those mix
+/// turns on, and it cannot be read off the writer's own counters, those mix
 /// observation writes with code-index writes, so a cold run makes batching look
 /// far worse than it is. Counting windows and frames at the point they are
 /// submitted keeps the ratio attributable to session ingestion alone.
@@ -160,7 +160,7 @@ pub(crate) fn record_capture_single() {
 /// The aggregate says three quarters of decoded frames are thrown away but not
 /// which are cheap to avoid: a blank line costs only a decode, while an
 /// out-of-scope frame was read, decoded, and parsed before anything consulted
-/// its scope. Only the split says whether the scope test belongs earlier —
+/// its scope. Only the split says whether the scope test belongs earlier,
 /// which is why this takes the reason rather than counting skips as one number.
 pub(crate) fn record_frame_skipped(reason: ObservationCoverageReason) {
     add(

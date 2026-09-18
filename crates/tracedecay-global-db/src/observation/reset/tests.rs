@@ -56,8 +56,8 @@ fn seed_preserved_transcript_rows(conn: &rusqlite::Connection) {
 /// an active generation frozen at a high projection frontier, the batch
 /// receipt certifying that generation's occurrence/current/FTS coverage, one
 /// occurrence, an applied relation receipt, and a running refresh operation.
-/// Every guard trigger is satisfied on the way in — the generation walks
-/// `building -> ready -> active` and the receipt lands while it is building —
+/// Every guard trigger is satisfied on the way in, the generation walks
+/// `building -> ready -> active` and the receipt lands while it is building,
 /// so the fixture cannot be weaker than production.
 fn seed_active_temporal_generation(conn: &rusqlite::Connection) {
     conn.execute_batch(
@@ -382,7 +382,7 @@ async fn paged_census_finds_cline_observation_without_source_cursor() {
 
 /// A store that did admit a Cline-like task under the combined `<task>` source
 /// carries no record of which scheme wrote those rows, so it must still refuse
-/// with the typed `ResetRequired` state naming the observation authority —
+/// with the typed `ResetRequired` state naming the observation authority,
 /// whether the host shows up as an observation provider or only as a cursor.
 #[tokio::test]
 async fn populated_store_with_cline_like_sources_still_refuses_without_the_marker() {
@@ -509,7 +509,7 @@ async fn refused_observation_shape_resets_scoped_and_readmits() {
 /// A retained admission-refusal terminal names an observation row by id and
 /// digest. After a scoped reset recreates the observation authority empty,
 /// a leftover terminal would falsely suppress the re-ingested record whose
-/// rewritten payload happens to match the stale refusal signature — so the
+/// rewritten payload happens to match the stale refusal signature, so the
 /// scoped reset must clear the refusal authority with the rest.
 #[tokio::test]
 async fn scoped_reset_clears_retained_admission_refusals() {
@@ -599,7 +599,7 @@ async fn healthy_observation_authority_refuses_the_scoped_reset() {
 /// The session-temporal projection is projector output over the observation
 /// stream, so it resets with the stream it projects. Refusing over it instead
 /// made the reset unreachable on any store that had ever ingested; preserving
-/// the generation while deleting its occurrences would be worse — the frozen
+/// the generation while deleting its occurrences would be worse, the frozen
 /// frontier of the retained active generation would exclude every re-ingested
 /// effect from rebuild discovery, and its immutable batch receipt would go on
 /// certifying occurrence, current-entity and FTS counts for rows that no
@@ -722,7 +722,7 @@ fn seed_observation_bound_anchors(conn: &rusqlite::Connection) {
 
 /// The anchors an admitted observation binds, and the native-record aliases
 /// resolving to them, are re-derived by the next admission of the same
-/// records — and verified field-for-field against whatever row already holds
+/// records, and verified field-for-field against whatever row already holds
 /// the anchor id. A retained anchor whose transcript file was since replaced
 /// (a new source generation) fails that verification as a storage collision
 /// on every retry; a retained alias whose record was revised refuses it
@@ -905,7 +905,7 @@ async fn anchor_dispositions_on_observation_anchors_refuse_atomically() {
 /// A scoped reset must never orphan preserved evidence. External payload
 /// manifests are durable LCM publication metadata whose receipt lives in the
 /// `sanitization_receipts` table the reset recreates empty, and they are not
-/// reconstructible from the transcripts — so a store holding one refuses
+/// reconstructible from the transcripts, so a store holding one refuses
 /// atomically instead of having its external-payload metadata deleted to make
 /// the reset succeed. Everything else preserved keeps its evidence, and
 /// `PRAGMA foreign_key_check` proves it.
@@ -1001,8 +1001,8 @@ async fn preserved_dependencies_refuse_atomically_and_stay_coherent() {
 
 /// The reset removes immutability triggers, deletes the projection, restores
 /// the triggers and enrolls the new scheme inside one transaction. A failure
-/// after the trigger removal and after the deletion — here the referential
-/// integrity check, the last step before commit — must therefore leave the
+/// after the trigger removal and after the deletion, here the referential
+/// integrity check, the last step before commit, must therefore leave the
 /// store exactly as refused: no missing trigger, no partial deletion, and no
 /// premature scheme enrollment that would let the old-scheme rows readmit.
 #[tokio::test]
@@ -1096,7 +1096,7 @@ async fn a_failure_after_deletion_leaves_the_refused_store_unchanged() {
 /// Row counts alone do not prove it: an ingestion cursor, an advance ledger
 /// entry, or a projector checkpoint that outlived the reset would each silently
 /// skip exactly the native events the rebuild depends on re-offering. Every
-/// pre-reset cursor must therefore be refused after the reset — the tables come
+/// pre-reset cursor must therefore be refused after the reset, the tables come
 /// back at the canonical shape and empty, the identical advance re-presents as
 /// new rather than deduping against a survivor, and the temporal refresh query
 /// discovers the re-ingested stream from zero instead of the frozen frontier.

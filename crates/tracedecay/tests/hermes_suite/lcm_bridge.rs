@@ -17,7 +17,7 @@ use tracedecay_runtime_core::ast_grep::ast_grep_command;
 // plugin dir). Only `generated_python_sources_compile` runs this: loading the
 // plugin via `PLUGIN_LOAD_PRELUDE` already compiles every module, so a
 // per-test compile pass would just re-parse ~150KB of generated Python in
-// each of the ~50 checks — measurable on Windows CI where these tests are a
+// each of the ~50 checks, measurable on Windows CI where these tests are a
 // runtime hotspot.
 const PYTHON_COMPILE_CHECK: &str = r#"
 import pathlib as _compile_pathlib
@@ -74,14 +74,14 @@ const GENERATOR_COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 /// One unpinned Hermes install shared by every check.
 ///
 /// The embedded host catalog regenerates the full plugin from embedded
-/// templates, so the output is identical for every unpinned install — there
+/// templates, so the output is identical for every unpinned install. There
 /// is no reason to redo it per test. Each check writes its own uniquely
 /// named script into the shared plugin dir and only mutates state inside its
 /// own python interpreter, so tests stay independent.
 ///
 /// The bundle is also shared across *processes* (see [`cached_install_home`]):
 /// nextest runs one process per test, so a `LazyLock` alone re-renders the
-/// bundle 70+ times per suite. Rendering is not cheap — `get_tool_definitions`
+/// bundle 70+ times per suite. Rendering is not cheap. `get_tool_definitions`
 /// probes the host `ast-grep` with `--version` and `outline --help`, two real
 /// subprocess spawns, and Windows CI resolves `ast-grep` through an npm shim.
 struct SharedInstall {
@@ -199,7 +199,7 @@ fn cached_install_home() -> Option<PathBuf> {
 /// Every input that can change the rendered bundle: the generator build (this
 /// executable embeds the plugin templates), the binary path baked into
 /// `tools.py`, and the `ast-grep` image whose presence decides which tool
-/// definitions are rendered. Metadata only — resolving the key must not spawn
+/// definitions are rendered. Metadata only. Resolving the key must not spawn
 /// the subprocesses the shared bundle exists to avoid.
 fn install_key() -> String {
     let mut hasher = DefaultHasher::new();
@@ -255,7 +255,7 @@ fn wait_for_ready(ready: &Path, lock: &Path) -> bool {
 ///
 /// `(file stem, POSIX body, Windows body)`. cmd.exe `echo` always appends a
 /// newline that POSIX `printf` does not, and a plain `echo text 1>&2` would
-/// emit a trailing space before the redirect — hence the redirect-first form
+/// emit a trailing space before the redirect, hence the redirect-first form
 /// (`>&2 echo`).
 const FAKE_TRACEDECAY_BINARIES: &[(&str, &str, &str)] = &[
     (
@@ -376,7 +376,7 @@ fn run_generated_plugin_script(script_name: &str, script: &str, failure_message:
 
 /// Every generated Python module must compile standalone. Loading the plugin
 /// package (as all other checks do) exercises the same parse, but a syntax
-/// error in a lazily imported module would slip through — this is the one
+/// error in a lazily imported module would slip through. This is the one
 /// place that still runs an explicit `py_compile` pass.
 #[test]
 fn generated_python_sources_compile() {

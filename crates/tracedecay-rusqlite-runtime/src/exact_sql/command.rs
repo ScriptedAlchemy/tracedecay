@@ -68,8 +68,8 @@ const EXACT_SQL_WRITE_LOCK_ACQUIRE_LIMIT: Duration = Duration::from_millis(64);
 /// Takes SQLite's write lock on the worker thread, retrying while it is busy.
 ///
 /// This is measured separately from the caller-side begin it serves. The two
-/// run on different threads — the caller waits on a channel while this waits on
-/// the lock — so reporting both under one label sums a queue wait and a lock
+/// run on different threads. The caller waits on a channel while this waits on
+/// the lock, so reporting both under one label sums a queue wait and a lock
 /// wait into a single population whose mean and p95 describe neither. Keep the
 /// names distinct: the split is what says whether a slow begin was blocked by
 /// SQLite or merely by the worker being busy with something else.
@@ -285,7 +285,7 @@ pub(crate) fn run_writer_command(
                     // The whole writer-thread hold of one interactive
                     // transaction, caller think-time included. Every queued
                     // write and command behind it waits inside this span, so
-                    // it — not SQLite execution — is what explains begin
+                    // it, not SQLite execution, is what explains begin
                     // latency elsewhere while an interactive lease is open.
                     Ok(transaction) if reply.try_send(Ok(())).is_ok() => {
                         Some(hotpath::measure_block!(
@@ -444,8 +444,8 @@ pub(crate) fn reject_writer_command(command: WriterCommand) {
 /// `sqlite3_interrupt` on a write statement inside an explicit transaction
 /// rolls that whole transaction back itself and returns the connection to
 /// autocommit. A `ROLLBACK` issued afterwards fails with "cannot rollback - no
-/// transaction is active", which is not a durability problem — the work is
-/// already discarded — so the autocommit state is what decides here rather
+/// transaction is active", which is not a durability problem. The work is
+/// already discarded, so the autocommit state is what decides here rather
 /// than a second statement.
 fn discard_transaction(
     mut transaction: Transaction<'_>,
@@ -467,8 +467,8 @@ fn discard_transaction(
 /// Releases the writer-owned transaction and publishes the receipt for it.
 ///
 /// Every path that ends a transaction without a caller-issued terminal comes
-/// through here, so the rollback is always durable — and its outcome always
-/// readable — before the command channel is dropped and the writer released.
+/// through here, so the rollback is always durable, and its outcome always
+/// readable, before the command channel is dropped and the writer released.
 fn release_rolled_back(
     transaction: Transaction<'_>,
     before: u64,
@@ -746,7 +746,7 @@ fn run_transaction(
                 // completed round trip renews it. A statement that ran to its
                 // own execution deadline and then failed kept the writer busy
                 // for that whole span; charging it to idleness released the
-                // transaction before the caller — still holding the error —
+                // transaction before the caller, still holding the error,
                 // could roll it back.
                 idle_deadline = renewed_at + EXACT_SQL_TRANSACTION_IDLE_LIMIT;
                 // A long-lease transaction earns its next lease by committing
@@ -910,8 +910,8 @@ pub(crate) mod lease_clock {
 
     /// Freezes this thread's lease clock `by` past its current reading.
     ///
-    /// Only code already running on the writer thread — in practice an
-    /// [`super::ExactSqlWriteAuthority`] verification — can move the clock
+    /// Only code already running on the writer thread, in practice an
+    /// [`super::ExactSqlWriteAuthority`] verification, can move the clock
     /// the transaction loop reads.
     pub(crate) fn advance(by: Duration) {
         let advanced = lease_now() + by;

@@ -370,7 +370,7 @@ pub(super) async fn recover_source_edit_transaction(
     // never finalized. But the edit primitive publishes every file to disk
     // BEFORE the journal advances to `Applied`, so the worktree may already hold
     // the finished edit. Inspect the on-disk state before touching a single
-    // byte — a crash after a successful write must never silently roll that
+    // byte, a crash after a successful write must never silently roll that
     // written edit back to its preimage. This mirrors the client-timeout path,
     // which surfaces `EffectUnknown` and lets `source_edit_reconcile` decide,
     // rather than destroying bytes.
@@ -399,8 +399,8 @@ pub(super) async fn recover_source_edit_transaction(
 
     // (ii)/(iii) The write did not complete. When the worktree is still fully at
     //     the preimage (ii) the write never landed and rollback is a no-op. When
-    //     it is a torn partial multi-file write (iii) — some files published,
-    //     others not — rolling back to a consistent pre-edit state lets the whole
+    //     it is a torn partial multi-file write (iii), some files published,
+    //     others not, rolling back to a consistent pre-edit state lets the whole
     //     atomic plan be retried, but it discards the bytes of the files that did
     //     publish, so we WARN first. `rollback_planned_source_edit_files` restores
     //     per file and REFUSES any foreign bytes outright, so it can only ever

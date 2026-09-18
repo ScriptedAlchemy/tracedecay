@@ -14,7 +14,7 @@
  *
  * Canvas2D cannot read CSS custom properties, so the composing component
  * samples the token block once at mount and once per theme flip and hands the
- * resolved strings in — the same arrangement `viz/trace/palette.ts` uses, which
+ * resolved strings in, the same arrangement `viz/trace/palette.ts` uses, which
  * keeps `tokens.css` the single source of the instrument's colour without a
  * `getComputedStyle` call inside a draw.
  */
@@ -91,7 +91,7 @@ function hashString(value: string): number {
  * from a hash of the directory name.
  *
  * The wobble is deterministic (no `Math.random`, so a screenshot is stable) and
- * it carries NO measurement — the legend says so out loud. Its only job is to
+ * it carries NO measurement, the legend says so out loud. Its only job is to
  * stop nineteen ellipses from reading as nineteen buttons, which is the exact
  * "nothing here is a box" instruction the sheet was drawn under. The harmonics
  * are mean-preserving in radius, so two regions with the same file count still
@@ -247,7 +247,7 @@ export function createCortexRenderer(
     ctx!.save();
     if (region.contour === 'none') {
       // Measured zero internal edges. Drawn at true position and true area,
-      // dashed and empty — absence as a mark, never as flat ground.
+      // dashed and empty, absence as a mark, never as flat ground.
       tracePath(outline, region.x, region.y, 1);
       ctx!.setLineDash([5 / scale, 4 / scale]);
       ctx!.strokeStyle = palette.stateUnknown;

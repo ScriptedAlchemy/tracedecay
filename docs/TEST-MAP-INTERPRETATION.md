@@ -4,7 +4,7 @@
 > **One-line summary:** the headline `coverage_pct` is a **static attribution
 > lower bound**, not line/branch coverage from a profiler. Treat it as a floor,
 > weight it by *how* a function was attributed, and expect it to read low on
-> integration-heavy repos — that is the tool being honest, not a verdict that
+> integration-heavy repos, that is the tool being honest, not a verdict that
 > your code is untested.
 
 This guide explains what the two tools actually measure, where they are known to
@@ -25,7 +25,7 @@ measurement.
 
 | Term you'll see | What it actually means |
 |---|---|
-| `coverage_pct` | `attributed / total_functions` — the share of functions **statically reachable** from a test within the configured depth. A lower bound on exercised coverage. |
+| `coverage_pct` | `attributed / total_functions`, the share of functions **statically reachable** from a test within the configured depth. A lower bound on exercised coverage. |
 | `has_test` (per risk item) | `true` when the function was attributed by *any* method (direct or closure). It does **not** mean a test asserts this function's behavior. |
 | `confidence: "static_lower_bound"` | The aggregate is explicitly labeled a floor. Real executed coverage is higher. |
 
@@ -38,18 +38,18 @@ never run in your configuration.
 
 ---
 
-## 2. Direct vs. calibrated (closure) attribution
+## 2. Direct vs. Calibrated (closure) attribution
 
 Every attributed function records *how* it was deemed covered, in
 `attribution_method`. There are two live methods today:
 
 | `attribution_method` | `attribution_depth` | Meaning | Risk multiplier |
 |---|---|---|---|
-| `direct_unit` | `1` | A test calls this function **directly** (depth-1 `#[test]` caller, or a caller that lives in a test file). This is the strongest, smallest signal — a real, named test points straight at this function. | `0.1` |
+| `direct_unit` | `1` | A test calls this function **directly** (depth-1 `#[test]` caller, or a caller that lives in a test file). This is the strongest, smallest signal, a real, named test points straight at this function. | `0.1` |
 | `closure` | `2` or `3` | This function is reachable from a test through 1–2 intermediate functions. It is **calibrated integration-style evidence**: a test exercises code that eventually reaches this function, but no test names it directly. | `0.4` |
 | `none` | `null` | No static path from any test reaches this function within depth 3. | `1.0` |
 
-(Other methods — `trait_resolved`, `public_api`, `cli_entry` — are defined in
+(Other methods, `trait_resolved`, `public_api`, `cli_entry`, are defined in
 the design but **not yet implemented**; their counts are reported as `0` in the
 `attribution` block. See [§3](#3-known-undercount-scenarios).)
 
@@ -59,7 +59,7 @@ weaker: it tells you "some test reaches the neighborhood of this function," so
 it *reduces* the residual risk score (multiplier `0.4` vs `1.0`) but does **not**
 erase it (it stays well above `direct_unit`'s `0.1`). When you are deciding
 where to write the next test, prefer a `closure`-attributed high-complexity
-function over a `direct_unit`-attributed one — the former has only broad
+function over a `direct_unit`-attributed one, the former has only broad
 behavioral evidence today.
 
 The aggregate `summary.attribution` block breaks the numerator out by method:
@@ -67,8 +67,8 @@ The aggregate `summary.attribution` block breaks the numerator out by method:
 ```jsonc
 "attribution": {
   "depth": 3,
-  "direct_unit_attributed": <depth-1 count — strongest signal>,
-  "closure_attributed":     <depth 2–3 count — calibrated integration evidence>,
+  "direct_unit_attributed": <depth-1 count, strongest signal>,
+  "closure_attributed":     <depth 2–3 count, calibrated integration evidence>,
   "trait_resolved_attributed": 0,   // designed (H2), not shipped
   "public_api_attributed":     0,   // designed (H3), not shipped
   "cli_entry_attributed":      0,   // designed (H4), not shipped
@@ -79,7 +79,7 @@ The aggregate `summary.attribution` block breaks the numerator out by method:
 `test_map` finds test callers via the same depth-3 walk, but its output lists
 each matching test without a per-test `depth`/`attribution_method` tag. So in
 the zoom-in `test_map` view you cannot currently tell a direct test edge from a
-depth-3 transitive one by the field alone — use `test_risk`'s
+depth-3 transitive one by the field alone, use `test_risk`'s
 `attribution_method`/`attribution_depth` when you need that distinction. (Adding
 the tag to `test_map` output is tracked as design §4.3, not yet shipped.)
 
@@ -126,13 +126,13 @@ Read the report top-down:
      "attributed":             <reachable from a test, depth ≤ 3>,
      "reachable_unattributed": <has incoming Calls, but no static test path>,
      "orphan_entry":           <zero incoming Calls edges>,
-     "excluded":               <non-src removed from the denominator — non-zero, repo-dependent>
+     "excluded":               <non-src removed from the denominator, non-zero, repo-dependent>
    }
    ```
    - `reachable_unattributed` is the **genuine attribution backlog**: functions
      that are called by real code (so not dead) but that no static test path
      reaches. These are *likely tested through a dispatch/process boundary we
-     can't see* — **never call them "untested."** On an integration-heavy repo
+     can't see*, **never call them "untested."** On an integration-heavy repo
      this bucket is large, and that is expected.
    - `orphan_entry` is **not** dead code. It includes real entry points (`main`,
      which has no static caller), trait impls whose only caller is dynamic, and
@@ -140,7 +140,7 @@ Read the report top-down:
      list.
    - `excluded` (non-`src/`: dashboard Python, scripts, benches, `build.rs`)
      is removed from the denominator (Phase-1 bucketing, **shipped**). On an
-     integration-heavy repo it is a large number — those are real non-`src/` nodes
+     integration-heavy repo it is a large number, those are real non-`src/` nodes
      correctly kept out of the attribution numerator, not a coverage gap.
 
 2. **Then read `coverage_pct` as a floor.** "25% statically attributed" means
@@ -149,16 +149,16 @@ Read the report top-down:
    (`reachable_unattributed`) and "no static caller at all" (`orphan_entry`).
 
 3. **Use `attribution_method` to weight what you see.** A `closure`-attributed
-   function is covered by *broad behavioral evidence* only — if it is also
+   function is covered by *broad behavioral evidence* only, if it is also
    high-complexity or high-churn, it is a better "next test" candidate than a
    `direct_unit`-attributed function of the same raw risk. `top_risk_unattributed`
    (`== top_risk_untested` today) names the single highest-risk function with no
-   attribution at all — usually the best place to start.
+   attribution at all, usually the best place to start.
 
 4. **Cross-check with `test_map`.** `test_map(file=...)` gives the zoom-in:
    which tests (file + name) reach a file's functions, and which functions have
    no test caller up to depth 3. Remember a listed test may be a direct caller
-   *or* a depth-2/3 transitive caller — the per-test depth is not currently
+   *or* a depth-2/3 transitive caller, the per-test depth is not currently
    exposed, so when it matters, confirm with `test_risk(node/...)`'s
    `attribution_method`.
 
@@ -171,10 +171,10 @@ Read the report top-down:
 
 ## 5. Related
 
-- [`TEST-MAP-AUDIT.md`](./archive/TEST-MAP-AUDIT.md) — root-cause audit of the original
+- [`TEST-MAP-AUDIT.md`](./archive/TEST-MAP-AUDIT.md), root-cause audit of the original
   shallow-attribution signal.
-- [`TEST-MAP-CALIBRATION-DESIGN.md`](./TEST-MAP-CALIBRATION-DESIGN.md) — the
+- [`TEST-MAP-CALIBRATION-DESIGN.md`](./TEST-MAP-CALIBRATION-DESIGN.md), the
   heuristic design (H1 closure + H5 bucketing shipped;
   H2 trait/impl, H3 public-API, H4 CLI-entry designed, not yet shipped).
-- `/// skip-test-coverage` docstring convention — marks genuinely-untestable
+- `/// skip-test-coverage` docstring convention, marks genuinely-untestable
   functions so they leave the risk view cleanly (see the User Guide).

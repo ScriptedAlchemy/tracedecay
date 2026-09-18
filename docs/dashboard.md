@@ -1,6 +1,6 @@
 # Dashboard
 
-The embedded dashboard is the daemon’s graphical client for code intelligence,
+The embedded dashboard is the daemon's graphical client for code intelligence,
 project memory, lossless context, work, configuration, diagnostics, and usage.
 Start it with:
 
@@ -42,7 +42,7 @@ Hermes wrapper the same routes are reverse-proxied at
 | `GET /search?q=&limit=&offset=` | Paginated symbol search over name, qualified name, signature, and file path (`LIKE`, escaped). Exact-name matches rank first. Results carry full-graph `degree`. `limit` ≤ 200. |
 | `GET /node/{id}` | Single node detail: signature, doc, visibility, span (`start_line`/`end_line`/columns), complexity counters, `degree`. 404 with a `detail` body when missing. |
 | `GET /node/{id}/neighbors?limit=` | Depth-1 neighborhood: `callers` / `callees` (calls edges, hydrated node rows + `degree`), raw `edges` touching the node, and `edges_by_kind` counts. |
-| `GET /subgraph?node_id=&limit_nodes=&limit_edges=` | One-hop subgraph for visualization. Caps default 80 nodes / 120 edges (max 250 / 500); `capped.nodes` / `capped.edges` report truncation. Accepts `q=` instead of `node_id` (best search hit becomes the seed; a query with no hit returns an empty payload). With no seed at all it returns the **default overview slice** (`mode: "default"`): the top-degree hubs plus the edges among them — hubs with no edges to other hubs are pruned in favor of interconnected ones, and isolated nodes only fill leftover capacity (so tiny or edge-free indexes still render). Seeded responses carry `mode: "seeded"`. Nodes carry `degree` so the UI can show collapsed-neighbor counts. |
+| `GET /subgraph?node_id=&limit_nodes=&limit_edges=` | One-hop subgraph for visualization. Caps default 80 nodes / 120 edges (max 250 / 500); `capped.nodes` / `capped.edges` report truncation. Accepts `q=` instead of `node_id` (best search hit becomes the seed; a query with no hit returns an empty payload). With no seed at all it returns the **default overview slice** (`mode: "default"`): the top-degree hubs plus the edges among them, hubs with no edges to other hubs are pruned in favor of interconnected ones, and isolated nodes only fill leftover capacity (so tiny or edge-free indexes still render). Seeded responses carry `mode: "seeded"`. Nodes carry `degree` so the UI can show collapsed-neighbor counts. |
 | `GET /path?from=&to=&max_depth=` | Undirected BFS shortest path between two node ids (depth default 6, max 10; visited-set capped at 20k). Returns `found`, ordered `path` ids, hydrated `nodes`, and the `edges` along the route. |
 
 `GET /api/capabilities` advertises `features.graph: true` and lists `graph`

@@ -80,7 +80,7 @@ lang-lean = ["large-grammars"]
 
 [dependencies]
 hotpath.workspace = true
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-large-treesitters = { package = "tokensave-large-treesitters", version = "0.5.0", optional = true }
 tracedecay-medium-treesitters = { package = "tokensave-medium-treesitters", version = "0.2.0", optional = true }

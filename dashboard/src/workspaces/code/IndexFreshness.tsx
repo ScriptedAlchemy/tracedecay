@@ -1,10 +1,10 @@
 /**
- * INDEX FRESHNESS — `GET /api/code-index/freshness`.
+ * INDEX FRESHNESS, `GET /api/code-index/freshness`.
  *
  * The branch-aware answer to "is the graph beside this panel current, and
  * current *for what*". Every symbol, edge and trace on this page was read from
  * one sealed code-index generation, and that generation was sealed against one
- * exact source reference — so a spine drawn from a generation sealed on
+ * exact source reference, so a spine drawn from a generation sealed on
  * `refs/heads/main` while the checkout sits on a feature branch is stale in a
  * way no node count reveals.
  *
@@ -15,7 +15,7 @@
  *                panel says so instead of drawing a "fresh" badge.
  *   unknown      a registry is attached but has no mounted scheduler for this
  *                project, or has one that has not sealed a generation.
- *   loading      a mount exists and is indexing — a generation is coming.
+ *   loading      a mount exists and is indexing, a generation is coming.
  *   partial      a mount and a generation exist but the scheduler's own
  *                coverage of them is incomplete.
  *   ready        a complete, fresh generation with complete coverage.
@@ -35,7 +35,15 @@ import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import { authorizationState } from '../../ui/EnvelopeTruth.tsx';
 import { StateChip } from '../../ui/StateChip.tsx';
-import { elideStart, formatCount, formatMicrosUtc, splitBytes } from '../../ui/format.ts';
+import { elideStart, formatCount, formatMicrosUtc } from '../../ui/format.ts';
+import {
+  codeIndexBlockedReasonLabel,
+  codeIndexPhaseLabel,
+  codeIndexProgressPercentage,
+  formatDurationMicros,
+  isCurrentOrNewerCodeIndexProgress,
+} from '../observatory/CodeIndexPipeline.tsx';
+import { formatBytes } from '../observatory/storageModel.ts';
 
 type CodeIndexBuildProgress = NonNullable<CodeIndexWorktreeFreshnessV1['progress']>;
 
@@ -156,7 +164,7 @@ function WorktreeReading({
         <p className="text-state-warning">
           parked: {worktree.parked.reason}
           {worktree.parked.retries_on_wake ? '' : ' · does not retry on wake'}
-          {' — '}
+          {', '}
           {worktree.parked.remediation}
         </p>
       ) : null}
@@ -173,8 +181,8 @@ function WorktreeReading({
         ) : null}
         <Row label="sealed">{formatMicros(worktree.sealed_at_micros)}</Row>
         <Row label="reconciled">{formatMicros(worktree.last_reconcile_micros)}</Row>
-        {/* A pending-hint count of zero is a real reading — the scheduler
-          * counted and found none — so unlike the identity fields above it is
+        {/* A pending-hint count of zero is a real reading, the scheduler
+          * counted and found none, so unlike the identity fields above it is
           * printed whenever the server sent a number, and omitted only when it
           * sent none. */}
         {worktree.hook_hint_count != null ? (
@@ -203,7 +211,7 @@ function BuildProgressReading({
   progress: CodeIndexBuildProgress;
   observedAtMicros: number;
 }) {
-  const percentage = progressPercentage(progress);
+  const percentage = codeIndexProgressPercentage(progress);
   const quietSeconds =
     progress.phase !== 'ready' &&
     observedAtMicros - progress.last_progress_micros >= STALLED_AFTER_SECONDS * 1_000_000
@@ -219,7 +227,7 @@ function BuildProgressReading({
       <div className="flex min-w-0 items-baseline justify-between gap-2">
         <span className="td-legend">Code progress</span>
         <span className="td-value shrink-0 text-text-primary">
-          {phaseLabel(progress.phase)} · {percentage.toFixed(1)}%
+          {codeIndexPhaseLabel(progress.phase)} · {percentage.toFixed(1)}%
         </span>
       </div>
       <progress
@@ -263,7 +271,7 @@ function BuildProgressReading({
         </Row>
       </dl>
       {progress.blocked_reason ? (
-        <p className="text-state-warning">blocked: {blockedReasonLabel(progress.blocked_reason)}</p>
+        <p className="text-state-warning">blocked: {codeIndexBlockedReasonLabel(progress.blocked_reason)}</p>
       ) : null}
     </div>
   );
@@ -337,7 +345,7 @@ function useLatestBuildProgress(
             next.delete(worktree.worktree_root);
             changed = true;
           }
-        } else if (!current || isCurrentOrNewerProgress(incoming, current)) {
+        } else if (!current || isCurrentOrNewerCodeIndexProgress(incoming, current)) {
           next.set(worktree.worktree_root, incoming);
           changed = true;
         }
@@ -348,78 +356,12 @@ function useLatestBuildProgress(
   return latestProgress;
 }
 
-function isCurrentOrNewerProgress(
-  incoming: CodeIndexBuildProgress,
-  rendered: CodeIndexBuildProgress,
-): boolean {
-  if (incoming.daemon_incarnation !== rendered.daemon_incarnation) {
-    return incoming.daemon_incarnation > rendered.daemon_incarnation;
-  }
-  if (incoming.producer_incarnation !== rendered.producer_incarnation) {
-    return incoming.producer_incarnation > rendered.producer_incarnation;
-  }
-  return incoming.progress_epoch >= rendered.progress_epoch;
-}
-
-function progressPercentage(progress: CodeIndexBuildProgress): number {
-  const completed =
-    progress.total_lexical_units > 0
-      ? progress.completed_lexical_units / progress.total_lexical_units
-      : progress.phase === 'ready'
-        ? 1
-        : 0;
-  return Math.min(100, Math.max(0, completed * 100));
-}
-
-function phaseLabel(phase: CodeIndexBuildProgress['phase']): string {
-  switch (phase) {
-    case 'source_scan':
-      return 'source scan';
-    case 'relational_preparation':
-      return 'relational preparation';
-    case 'bulk_commit':
-      return 'bulk commit';
-    case 'index_build':
-      return 'index build';
-    case 'verification':
-      return 'verification';
-    case 'ready':
-      return 'ready';
-  }
-}
-
-function blockedReasonLabel(reason: NonNullable<CodeIndexBuildProgress['blocked_reason']>): string {
-  switch (reason) {
-    case 'resident_memory':
-      return 'resident memory';
-    case 'source_unavailable':
-      return 'source unavailable';
-    case 'artifact_store_unavailable':
-      return 'artifact store unavailable';
-    case 'retry_backoff':
-      return 'retry backoff';
-    case 'publication_authority_corrupt':
-      return 'publication authority corrupt';
-  }
-}
-
-function formatBytes(bytes: number): string {
-  const { value, unit } = splitBytes(bytes);
-  return unit ? `${value} ${unit}` : value;
-}
-
 function formatDurationSeconds(seconds: number): string {
   if (seconds < 90) return `${Math.round(seconds)}s`;
   if (seconds < 5_400) return `${Math.round(seconds / 60)}m`;
   const hours = Math.floor(seconds / 3_600);
   const minutes = Math.round((seconds % 3_600) / 60);
   return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
-}
-
-function formatDurationMicros(micros: number): string {
-  if (micros < 1_000) return `${micros}µs`;
-  if (micros < 1_000_000) return `${Math.round(micros / 1_000)}ms`;
-  return formatDurationSeconds(micros / 1_000_000);
 }
 
 function Row({

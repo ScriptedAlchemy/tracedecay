@@ -1,6 +1,6 @@
 # Final Plan: macOS launchd Support for the TraceDecay Daemon
 
-> **Archived record — not implementation authority.** This document preserves
+> **Archived record, not implementation authority.** This document preserves
 > historical intent and evidence. Current requirements come only from the
 > `docs/plans/tracedecay-v2/` hierarchy. Exact tests and counts, source-string
 > checks, branch/commit/worktree choreography, snapshots, receipts,
@@ -146,7 +146,7 @@ Paths:
 The plist path follows macOS convention. The socket/log paths follow existing
 TraceDecay storage behavior for parity with the current daemon code.
 
-### 5.2 launchctl domain helpers
+### 5.2 Launchctl domain helpers
 
 Add:
 

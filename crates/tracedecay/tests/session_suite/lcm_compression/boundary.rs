@@ -3,7 +3,7 @@ use super::*;
 // Mirrors hermes-lcm `_compression_boundary_cooldown_active`: after a
 // compression-boundary session start whose old_session_id does not match the
 // bound session (skip-carry-over), preflight must not request compression
-// again until the 60-second cooldown elapses — but it must keep ingesting.
+// again until the 60-second cooldown elapses, but it must keep ingesting.
 #[tokio::test]
 async fn boundary_skip_starts_preflight_compression_cooldown() {
     let tmp = TempDir::new().unwrap();
@@ -42,7 +42,7 @@ async fn boundary_skip_starts_preflight_compression_cooldown() {
     assert_eq!(response.reason, "compression_boundary_cooldown");
     // Cooldown is lossless for stored history: the read-only preflight
     // replays every persisted message. Host-active messages are not ingested
-    // by preflight anymore — ingest belongs to the transcript/compress paths.
+    // by preflight anymore, ingest belongs to the transcript/compress paths.
     assert_eq!(response.replay_messages.len(), 4);
     assert!(
         db.lcm_load_raw_message("cursor", "fresh-user")

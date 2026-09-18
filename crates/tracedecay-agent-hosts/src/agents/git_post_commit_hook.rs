@@ -15,7 +15,7 @@ use super::host_config_io::{home_dir, quote_posix_command_arg};
 /// "# tracedecay: auto-sync". Those are not detected by this constant, so
 /// existing tracedecay git hooks will not be treated as already-present and a
 /// second tracedecay block may be appended on offer. This is intentional
-/// (install path only writes new identity) — users can manually remove the
+/// (install path only writes new identity), users can manually remove the
 /// old block.
 const HOOK_MARKER: &str = "# tracedecay: auto-sync";
 
@@ -293,7 +293,7 @@ fn insert_gitconfig_value(contents: &str, section: &str, key: &str, value: &str)
         let trimmed = line.trim();
         if trimmed.starts_with('[') {
             if in_section {
-                // We've hit the next section — insert before it.
+                // We've hit the next section, insert before it.
                 section_end = Some(i);
                 break;
             }
@@ -326,7 +326,7 @@ fn insert_gitconfig_value(contents: &str, section: &str, key: &str, value: &str)
             result.push(&entry);
         }
     } else {
-        // Section doesn't exist — append it.
+        // Section doesn't exist, append it.
         for line in &lines {
             result.push(line);
         }

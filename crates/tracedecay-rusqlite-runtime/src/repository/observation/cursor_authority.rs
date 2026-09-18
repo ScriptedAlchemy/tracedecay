@@ -1,8 +1,8 @@
 //! The one canonical spelling of "advance an observation source cursor".
 //!
-//! Every executor of the cursor-advance authority — the runtime write
+//! Every executor of the cursor-advance authority, the runtime write
 //! command path ([`super::ObservationExecutor`]) and the global-db
-//! observation adapter's atomic refusal-marker + coverage transaction —
+//! observation adapter's atomic refusal-marker + coverage transaction,
 //! reads, records, verifies, and commits through exactly this statement set,
 //! so the authority cannot drift into parallel spellings. The statements are
 //! transport-neutral text: one caller binds them on the runtime writer's
@@ -37,7 +37,7 @@ pub const COMMIT_SOURCE_CURSOR_SQL: &str =
         cursor_json = excluded.cursor_json";
 
 /// Whether one [`READ_CURSOR_ADVANCE_SQL`] row is exactly this advance's
-/// row — the same reason and the same (possibly absent) sanitization receipt
+/// row, the same reason and the same (possibly absent) sanitization receipt
 /// id. Any other row retained under the coverage key is a cursor-advance
 /// collision.
 #[must_use]

@@ -104,7 +104,7 @@ pub fn format_report_console(report: &BenchReport) -> String {
     const W_FILES: usize = 7;
     const W_NODES: usize = 7;
 
-    // ANSI escape codes — kept here, like the equivalents in src/display.rs,
+    // ANSI escape codes, kept here, like the equivalents in src/display.rs,
     // so we don't pull in a colour crate just for this surface.
     const RESET: &str = "\x1b[0m";
     const BOLD: &str = "\x1b[1m";
@@ -118,7 +118,7 @@ pub fn format_report_console(report: &BenchReport) -> String {
 
     let _ = writeln!(
         s,
-        "{BOLD}{CYAN}tracedecay bench{RESET}{BOLD} — {} {}{RESET}\n",
+        "{BOLD}{CYAN}tracedecay bench{RESET}{BOLD}, {} {}{RESET}\n",
         report.aggregate.queries,
         if report.aggregate.queries == 1 {
             "query"
@@ -199,7 +199,7 @@ pub fn format_report_console(report: &BenchReport) -> String {
     };
     let _ = writeln!(
         s,
-        " {BOLD}Aggregate:{RESET} {agg_color}{BOLD}{:.0}%{RESET} mean savings — {} → {} tokens across {} {}.",
+        " {BOLD}Aggregate:{RESET} {agg_color}{BOLD}{:.0}%{RESET} mean savings, {} → {} tokens across {} {}.",
         report.aggregate.mean_savings_pct,
         format_token_count(report.aggregate.total_baseline_tokens),
         format_token_count(report.aggregate.total_context_tokens),

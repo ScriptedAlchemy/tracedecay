@@ -2,7 +2,7 @@
 //!
 //! The adapter decodes one strict request DTO, resolves the project-scoped
 //! daemon route, and returns the daemon's canonical application outcome. It
-//! owns no work state, scheduling, retry, provider, or persistence logic — the
+//! owns no work state, scheduling, retry, provider, or persistence logic, the
 //! CLI is one more caller of the same daemon invocation the HTTP mount, the
 //! dashboard, and the generated SDKs already use.
 

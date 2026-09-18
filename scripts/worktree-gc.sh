@@ -41,21 +41,21 @@ Options:
   -h, --help               Show this help
 
 Classification (linked worktrees only; the primary checkout is PRIMARY):
-  DIRTY           uncommitted changes — never touchable
-  ACTIVE          a process cwd is inside the tree (/proc) — never touchable
-  LOCKED          `git worktree lock` (porcelain `locked`) — never touchable
+  DIRTY           uncommitted changes, never touchable
+  ACTIVE          a process cwd is inside the tree (/proc), never touchable
+  LOCKED          `git worktree lock` (porcelain `locked`), never touchable
   FRESH           clean, HEAD equals the integration tip, no unique commits,
-                  and younger than --stale-age-hours — never a GC candidate
+                  and younger than --stale-age-hours, never a GC candidate
   CURRENT         clean, HEAD equals the branch upstream tip or is an ancestor
-                  at most N commits behind — keep
+                  at most N commits behind, keep
   STALE-DETACHED  clean, detached, HEAD is an ancestor of the integration tip
-                  — GC candidate
+                  GC candidate
   STALE-MERGED    clean, on a local branch fully merged into the integration
                   branch with no upstream, AND either unique commits already
                   merged into integration (HEAD is a strict ancestor of the
                   tip) OR the worktree is older than --stale-age-hours
-                  — GC candidate + `branch -d`
-  FOREIGN         anything else — keep, owner's call
+                  GC candidate + `branch -d`
+  FOREIGN         anything else, keep, owner's call
 EOF
 }
 
@@ -528,7 +528,7 @@ classify_worktree() {
     local branch dirty pids verdict extra="" unique_merged=0 aged=0 age_secs="" why=""
 
     if [[ "$path" == "$PRIMARY" ]]; then
-        printf '%s\n' "PRIMARY|primary checkout — never a GC candidate"
+        printf '%s\n' "PRIMARY|primary checkout, never a GC candidate"
         return
     fi
 
@@ -542,18 +542,18 @@ classify_worktree() {
         return
     fi
     if ((dirty > 0)); then
-        printf '%s\n' "DIRTY|${path}: uncommitted changes (${dirty} paths) — never touchable"
+        printf '%s\n' "DIRTY|${path}: uncommitted changes (${dirty} paths), never touchable"
         return
     fi
 
     pids="$(active_pids_for "$path")"
     if [[ -n "$pids" ]]; then
-        printf '%s\n' "ACTIVE|${path}: process cwd inside worktree (pid ${pids}) — never touchable"
+        printf '%s\n' "ACTIVE|${path}: process cwd inside worktree (pid ${pids}), never touchable"
         return
     fi
 
     if ((locked == 1)); then
-        printf '%s\n' "LOCKED|git worktree lock on ${path} — never touchable"
+        printf '%s\n' "LOCKED|git worktree lock on ${path}, never touchable"
         return
     fi
 
@@ -618,7 +618,7 @@ classify_worktree() {
             printf '%s\n' "STALE-MERGED|${why}"
             return
         fi
-        printf '%s\n' "FRESH|${path} HEAD equals ${INTEGRATION_NAME} with no unique commits and younger than ${STALE_AGE_HOURS}h — never a GC candidate"
+        printf '%s\n' "FRESH|${path} HEAD equals ${INTEGRATION_NAME} with no unique commits and younger than ${STALE_AGE_HOURS}h, never a GC candidate"
         return
     fi
 
@@ -839,14 +839,14 @@ delete_candidates() {
         require_absolute_path "$path"
 
         if porcelain_locked_now "$path"; then
-            printf '  skip %s  (LOCKED at delete-time — never touchable)\n' "$path"
+            printf '  skip %s  (LOCKED at delete-time, never touchable)\n' "$path"
             skipped=$((skipped + 1))
             continue
         fi
 
         live_pids="$(live_cwd_pids_now "$path")"
         if [[ -n "$live_pids" ]]; then
-            printf '  skip %s  (ACTIVE at delete-time, pid %s — never touchable)\n' "$path" "$live_pids"
+            printf '  skip %s  (ACTIVE at delete-time, pid %s, never touchable)\n' "$path" "$live_pids"
             skipped=$((skipped + 1))
             continue
         fi

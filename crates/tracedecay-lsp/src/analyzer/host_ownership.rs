@@ -10,7 +10,7 @@
 //! and uninstall".
 //!
 //! The `OpenCode` installer already records that contract in the host's own
-//! configuration — `lsp.tracedecay.initialization.tracedecay` carries
+//! configuration, `lsp.tracedecay.initialization.tracedecay` carries
 //! `duplicateAnalyzerAvoidance` plus an `analyzerOwnership.retainedByExtension`
 //! map naming the analyzer the host already runs for each extension. This
 //! module is where that declaration stops being inert configuration: the broker
@@ -100,8 +100,8 @@ impl HostAnalyzerOwnership {
     ///
     /// A missing, unreadable, or non-JSON configuration yields no declared
     /// ownership: this file belongs to the host, and `TraceDecay` cannot invent an
-    /// ownership claim the host never made. It never *relaxes* a claim either —
-    /// a claim only ever comes from a parsed declaration.
+    /// ownership claim the host never made. It never *relaxes* a claim either.
+    /// A claim only ever comes from a parsed declaration.
     pub fn from_opencode_project_root(project_root: &Path) -> Self {
         Self::from_opencode_config_file(&project_root.join(OPENCODE_PROJECT_CONFIG_FILE))
     }
@@ -192,7 +192,7 @@ impl HostAnalyzerOwnership {
 
 /// The home-level `OpenCode` configuration path under an explicit config root.
 ///
-/// `$XDG_CONFIG_HOME` wins only when it is absolute — a relative value does
+/// `$XDG_CONFIG_HOME` wins only when it is absolute, a relative value does
 /// not name a usable config root and `OpenCode` itself falls back to
 /// `~/.config`. This mirrors the resolution the `OpenCode` installer uses when
 /// it writes the registration, so the broker reads the same file the

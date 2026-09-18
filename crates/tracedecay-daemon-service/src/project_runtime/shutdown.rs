@@ -101,7 +101,7 @@ impl ProjectRuntimeRegistryV1 {
     /// recovery owner, synchronously.
     ///
     /// Called from `DaemonInvocationService::cancel_admissions`, so both halves
-    /// run at shutdown *prepare* time — before any owner join is polled.
+    /// run at shutdown *prepare* time, before any owner join is polled.
     /// Previously this only set `closed`, and the recovery owners were left to
     /// be cancelled deep inside the async `shut_down_all` drain; blocked-interval
     /// and workflow-census cycles kept scanning for the whole of the phases in
@@ -111,7 +111,7 @@ impl ProjectRuntimeRegistryV1 {
     ///
     /// `shut_down_all` is retryable: a failed drain stores `shutdown_started =
     /// false` so a later attempt re-runs it. Cancelling owners at prepare time
-    /// would be wrong if such a retry could be expected to keep them running —
+    /// would be wrong if such a retry could be expected to keep them running,
     /// but it cannot. `closed` is one-way: it is set true here and nothing in
     /// the workspace ever stores false, and every admission path (`reserve`,
     /// `publish`, `register_or_reconcile`, request admission) refuses with
@@ -122,7 +122,7 @@ impl ProjectRuntimeRegistryV1 {
     /// idempotent, so the retry itself is a no-op against them.
     ///
     /// Targeted single-project retirement deliberately does not come through
-    /// here — `retire_roots`/`quiesce_roots` fence one root and join that
+    /// here, `retire_roots`/`quiesce_roots` fence one root and join that
     /// project's owners in `shut_down_observability`, leaving every other
     /// project's recovery running.
     pub(crate) fn begin_shutdown(&self) {
@@ -135,8 +135,8 @@ impl ProjectRuntimeRegistryV1 {
     ///
     /// Runs under the runtime map's `std` mutex and touches no async lock, so
     /// it stays callable from the synchronous `cancel_admissions` half of
-    /// shutdown. Cancelling a token only flags it and wakes its waiters — the
-    /// woken tasks are scheduled, never polled inline — so no cancelled owner
+    /// shutdown. Cancelling a token only flags it and wakes its waiters, the
+    /// woken tasks are scheduled, never polled inline, so no cancelled owner
     /// can re-enter this lock while the guard is held.
     ///
     /// No owner can slip past the sweep. `register_or_reconcile` rechecks
@@ -407,7 +407,7 @@ fn shut_down_runtimes(
 /// A project runtime holds the last references to generation-sized owners
 /// (the retained decoded code-index generation, feedback and evidence
 /// readers). Dropping them frees millions of small allocations and on a
-/// repository-sized corpus that took several seconds — inside the invocation
+/// repository-sized corpus that took several seconds, inside the invocation
 /// owner's join, after its bounded code-index sweep had already spent its
 /// abort deadline, which is exactly what outlived the supervisor's TERM
 /// grace. Every owner was already cancelled and joined by the shutdown phases

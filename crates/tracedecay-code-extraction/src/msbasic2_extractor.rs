@@ -389,7 +389,7 @@ impl MsBasic2Extractor {
 
                     i = body_end;
                 } else {
-                    // REM block not followed by RETURN — skip.
+                    // REM block not followed by RETURN. Skip.
                     i = body_end;
                 }
             } else {

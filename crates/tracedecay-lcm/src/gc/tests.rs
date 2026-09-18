@@ -1539,7 +1539,7 @@ async fn drain_round_trips_for_tombstones(count: usize) -> Result<usize, String>
 #[tokio::test]
 async fn pending_delete_drain_probes_metadata_once_for_the_whole_set() -> Result<(), String> {
     /// Round trips one additional tombstone adds: the `gc_meta` clear that
-    /// retires that tombstone. The batched existence probe is *not* here — it
+    /// retires that tombstone. The batched existence probe is *not* here, it
     /// is paid once for the whole drain.
     const PER_TOMBSTONE_ROUND_TRIPS: usize = 1;
     const SMALL: usize = 2;
@@ -1560,7 +1560,7 @@ async fn pending_delete_drain_probes_metadata_once_for_the_whole_set() -> Result
 
 /// M11 equivalence: a tombstone whose metadata row is still present must be
 /// preserved (not unlinked) and a tombstone whose row is gone must be reaped,
-/// in the same drain — the batched probe must not conflate the two.
+/// in the same drain, the batched probe must not conflate the two.
 #[tokio::test]
 async fn pending_delete_drain_batches_mixed_metadata_presence() -> Result<(), String> {
     let store = test_store().await?;
@@ -1684,7 +1684,7 @@ async fn unreferenced_reap_round_trips(count: usize) -> Result<usize, String> {
 ///
 /// Measured as a marginal, not read off the SQL: reap two batch sizes and
 /// compare. Each extra payload still pays for the work that is irreducibly its
-/// own — its metadata read, its placeholder sweep, its row deletes. What must
+/// own, its metadata read, its placeholder sweep, its row deletes. What must
 /// *not* be in the marginal is a pass-level query; if a reference-closure scan
 /// creeps back into the loop the marginal rises and this fails, whatever the
 /// statement text looks like.
@@ -1692,7 +1692,7 @@ async fn unreferenced_reap_round_trips(count: usize) -> Result<usize, String> {
 /// The reap loop prepares each delete and clears the whole batch's GC marks in
 /// one bounded statement afterwards, so the mark delete is not in the marginal
 /// either. That is a batch-only property: `delete_external_payload_in_transaction`
-/// still clears a single payload's own mark, and no batching removes that —
+/// still clears a single payload's own mark, and no batching removes that,
 /// `delete_external_payload_applies_db_then_file_and_is_idempotent` gates it.
 #[tokio::test]
 async fn unreferenced_reap_scans_reference_closure_once_for_the_batch() -> Result<(), String> {
@@ -1700,7 +1700,7 @@ async fn unreferenced_reap_scans_reference_closure_once_for_the_batch() -> Resul
     /// work that is irreducibly that payload's own: loading its metadata row,
     /// its residual-placeholder sweep, its metadata-row delete, and its
     /// pending-delete tombstone write. Neither a reference-closure scan nor a
-    /// GC-mark delete is in there — both are paid once for the batch, and that
+    /// GC-mark delete is in there, both are paid once for the batch, and that
     /// is what this test guards.
     const PER_PAYLOAD_ROUND_TRIPS: usize = 4;
     const SMALL: usize = 2;
@@ -1780,8 +1780,8 @@ async fn shared_reference_closure_still_rejects_a_referenced_payload() -> Result
 ///
 /// The payload deliberately has no metadata row, which is the state the
 /// missing-metadata reap and the crash-recovery path both operate in. That
-/// keeps the live-reference closure scan — a different, deliberately broad
-/// query this PR does not touch — out of the measurement, so what is counted
+/// keeps the live-reference closure scan, a different, deliberately broad
+/// query this PR does not touch, out of the measurement, so what is counted
 /// is the residual-placeholder sweep's own selectivity.
 async fn residual_sweep_rows_visited(decoys: usize) -> Result<usize, String> {
     let store = test_store().await?;
@@ -1894,8 +1894,8 @@ async fn residual_placeholder_sweep_prefilters_on_live_prefixes() -> Result<(), 
 }
 
 /// M2 equivalence: the narrowed prefilter must rewrite exactly the rows the bare
-/// `%ref%` form rewrote — live placeholders in every text column, plus the
-/// stored `payload_ref` — and must leave inline prose that merely mentions the
+/// `%ref%` form rewrote, live placeholders in every text column, plus the
+/// stored `payload_ref`, and must leave inline prose that merely mentions the
 /// ref, and already-tombstoned placeholders, untouched.
 #[tokio::test]
 async fn narrowed_prefilter_rewrites_the_same_rows() -> Result<(), String> {

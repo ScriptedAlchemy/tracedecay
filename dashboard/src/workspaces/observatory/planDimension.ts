@@ -14,7 +14,7 @@
  *
  *   measured     the projector published a value. The figure is printed and
  *                every accompanying fact is the wire's own.
- *   unmeasured   the projector published the metric but no value — a real
+ *   unmeasured   the projector published the metric but no value, a real
  *                accounting state carrying a denominator, coverage counts, a
  *                descriptor revision, and anchors. The reason is printed where
  *                the figure would be. It is never 0.
@@ -41,7 +41,7 @@ import { denominatorSentence, metricFigure } from '../../ui/metricModel.ts';
 import { formatMicrosUtc } from '../../ui/format.ts';
 
 /** What is said in place of a figure that does not exist. Never `0`, never an
- * empty string — both read as a measurement. */
+ * empty string, both read as a measurement. */
 export const NO_FIGURE = '—';
 
 /** Said where support, a denominator, or coverage would go for a dimension no
@@ -82,7 +82,7 @@ export interface PlanDimensionBand {
 
 /** One dimension reduced to the strings a card renders. Every field of the
  * plan's mandatory list is present on every card, including the cards that have
- * to answer "not published" — an omitted row would read as an oversight rather
+ * to answer "not published", an omitted row would read as an oversight rather
  * than as a stated absence. */
 export interface PlanDimensionPresentation {
   id: string;
@@ -108,7 +108,7 @@ export interface PlanDimensionPresentation {
 /**
  * Resolve one metric identifier against a read model's measurements.
  *
- * A metric absent from the payload is `unpublished` — the projector does not
+ * A metric absent from the payload is `unpublished`, the projector does not
  * emit it. A metric present with `value: null` is `unmeasured`, and the reason
  * is the projector's own; a projector that emitted no reason is reported as
  * having emitted none rather than being given one here.
@@ -156,7 +156,7 @@ export function supportSentence(reading: DimensionReading): string {
 }
 
 /** Censored, excluded, and unknown counts, always stated separately. Zero of
- * each is a real reading and prints as such — this line is the one place the
+ * each is a real reading and prints as such, this line is the one place the
  * absence of censoring must be assertable rather than inferred from silence. */
 export function censoringSentence(reading: DimensionReading): string {
   if (reading.kind === 'unpublished') return NOT_PUBLISHED;
@@ -190,7 +190,7 @@ export function horizonSentence(horizon: ObservabilityHorizonV1): string {
 /**
  * The safe anchors a reader may follow: the scope the read was authorized for
  * and the watermark it was taken at. Neither is a project path, a query, or a
- * payload — Plan 26 forbids those reaching a metric label, and nothing here
+ * payload, Plan 26 forbids those reaching a metric label, and nothing here
  * constructs one.
  */
 export function anchorSentence(reading: DimensionReading, anchors: ReadAnchors): string {

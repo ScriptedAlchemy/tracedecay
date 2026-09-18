@@ -1,7 +1,7 @@
 //! Versioned language descriptor contracts. One versioned
 //! `LanguageDescriptorV1` per language is shared by extraction, structural
 //! search, outline, rewrite, analyzer routing, and host LSP projection.
-//! Descriptors — not extractors — select grammars and capabilities.
+//! Descriptors, not extractors, select grammars and capabilities.
 //!
 //! These are pure values: no parser acquisition, no host `ast-grep` binary,
 //! no configuration-owned executable commands or settings.

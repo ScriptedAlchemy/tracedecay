@@ -82,8 +82,8 @@ fn lock_codex_meta_cache() -> MutexGuard<'static, CodexMetaCache> {
 ///
 /// The fill runs on its own task, so the request that elected it may stop
 /// waiting without orphaning the claim: the owner still settles the parse,
-/// publishes or fails, and only then drops. Dropping — after publication, on a
-/// terminal failure, or when the fill task itself is torn down — removes
+/// publishes or fails, and only then drops. Dropping, after publication, on a
+/// terminal failure, or when the fill task itself is torn down, removes
 /// exactly this claim and wakes every waiter, which re-checks the cache and
 /// elects a new fill when nothing was published.
 struct CodexMetaFillClaim {
@@ -193,7 +193,7 @@ fn lookup_codex_meta(key: &CodexMetaCacheKey) -> TranscriptIngestResult<CodexMet
 ///
 /// The memory reservation travels inside the blocking closure: dropping this
 /// task's `JoinHandle` does not stop started blocking work, so the charge is
-/// released only when the parse itself settles — shrunk into the cache entry
+/// released only when the parse itself settles, shrunk into the cache entry
 /// on success, or dropped with the worker's result otherwise.
 async fn fill_codex_session_meta(
     claim: CodexMetaFillClaim,

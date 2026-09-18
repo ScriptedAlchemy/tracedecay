@@ -3,8 +3,8 @@
 //! The session store keeps the *same* conversation content in several places
 //! at rest, forever:
 //!
-//! * `lcm_raw_messages` — the lossless raw ingest of every message.
-//! * `session_messages` — the projected/queryable twin of each raw message,
+//! * `lcm_raw_messages`, the lossless raw ingest of every message.
+//! * `session_messages`, the projected/queryable twin of each raw message,
 //!   keyed by the same `(provider, message_id)`.
 //! * FTS shadow tables over each (`lcm_raw_messages_fts`,
 //!   `session_messages_fts`), maintained by triggers.
@@ -19,17 +19,17 @@
 //!
 //! # Projection durability is the safety invariant
 //!
-//! A raw row is *projection-durable* when a summary node's lineage covers it —
+//! A raw row is *projection-durable* when a summary node's lineage covers it,
 //! i.e. its `store_id` appears as a `raw_message` source in
 //! `lcm_summary_sources` (see
 //! `tracedecay_session_temporal_store::operations::summary_projection`, which persists
 //! `LcmSourceRef::RawMessage { store_id }` as `('raw_message', store_id)`).
 //! Only projection-durable rows are ever acted on. Rows with no summary lineage
-//! are live, un-projected evidence and are **never** touched — this is the
+//! are live, un-projected evidence and are **never** touched, this is the
 //! plan's non-goal ("no lossy deletion of live, referenced evidence") expressed
 //! directly in SQL.
 //!
-//! # One content copy (§4) — supersede-after-durability via content addressing
+//! # One content copy (§4), supersede-after-durability via content addressing
 //!
 //! This module supersedes the redundant copies rather than duplicating a fourth
 //! storage scheme, because the store already owns a content-addressed external
@@ -47,7 +47,7 @@
 //! 3. **Projected dedupe** (shortest window): a projected `session_messages`
 //!    row is eligible only when its raw twin is still present and that raw row
 //!    has durable summary lineage. It is then pure duplication of the retained
-//!    raw copy, so it is dropped — the raw row is the single content copy and
+//!    raw copy, so it is dropped, the raw row is the single content copy and
 //!    the projected form is reconstructable from it.
 //!
 //! Every pass is bounded (`max_batch_size`) and incremental so the daemon can

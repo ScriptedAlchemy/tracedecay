@@ -197,7 +197,7 @@ pub const RETIRED_MUTATION_COPY_TABLES: &[(&str, &[&str])] = &[
 /// tables hold only part of a store's history. Composing an answer from that
 /// would understate what the store knows, and blaming an absent row would
 /// name the wrong cause. Both become this one typed state, which clears when
-/// the last chunk drops the last predecessor — the same presence the
+/// the last chunk drops the last predecessor, the same presence the
 /// migration itself uses as its progress marker.
 fn refuse_while_history_migrates(connection: &rusqlite::Connection) -> rusqlite::Result<()> {
     let placeholders = RETIRED_MUTATION_COPY_TABLES

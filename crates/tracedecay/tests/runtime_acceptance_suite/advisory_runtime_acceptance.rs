@@ -1043,7 +1043,7 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
 
     // Codex records a turn in its rollout, not in the Stop event, so the
     // project-scoped Stop ingest below has to find a rollout whose `cwd` is
-    // this project — exactly the shape the daemon's project scheduler admits.
+    // this project, exactly the shape the daemon's project scheduler admits.
     let codex_sessions = environment.home().join(".codex/sessions");
     std::fs::create_dir_all(&codex_sessions).unwrap();
     let mut codex_meta: Value = serde_json::from_str(include_str!(
@@ -1340,9 +1340,9 @@ fn find_advisory_cycle(value: &Value) -> Option<Value> {
 // provider_branch_review/`, the same captures the decoder tests above consume)
 // through the shipped decoders, sanitizer, and canonical anchor authorities.
 // Only immutable *identity* (head commit, reviewed path and lines) is
-// retargeted onto this test's real repository — the same retargeting
+// retargeted onto this test's real repository, the same retargeting
 // `ci_localization_resolves_generation_symbol_callers_and_tests_from_canonical_graph`
-// already performs — so the recorded protocol shape, bodies, digests, and
+// already performs, so the recorded protocol shape, bodies, digests, and
 // lifecycle flags stay exactly as captured.
 // ---------------------------------------------------------------------------
 
@@ -2236,7 +2236,7 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
         FeedbackFindingLifecycleV1::Active
     );
     // `Clean` is reserved for a covered cycle that found nothing, so a positive
-    // four-pillar cycle terminates `Blocked` — findings present, coverage
+    // four-pillar cycle terminates `Blocked`, findings present, coverage
     // complete. The point of pinning it is that it is neither `Clean` (which
     // would mean the pillars produced nothing) nor any degraded terminal.
     assert_eq!(

@@ -36,7 +36,7 @@ fn assert_not_truncated(text: &str, tool: &str) {
 /// Builds a wide file-level dependency cycle: each file calls the next file's
 /// function and the last calls the first, so the whole set is one strongly
 /// connected component. Rendered in full, one such component already exceeds
-/// the response budget — which is exactly the shape a real workspace produces.
+/// the response budget, which is exactly the shape a real workspace produces.
 fn write_wide_cycle(project: &std::path::Path, module_count: usize, prefix: &str) {
     let source_dir = project.join("src");
     fs::create_dir_all(&source_dir).unwrap();

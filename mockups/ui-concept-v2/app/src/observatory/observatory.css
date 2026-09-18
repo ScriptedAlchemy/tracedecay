@@ -112,7 +112,7 @@
   background: color-mix(in oklab, var(--signal-cyan) 22%, var(--edge-subtle));
 }
 
-/* unlit observation slots: geometry, not data — no packed observation
+/* unlit observation slots: geometry, not data, no packed observation
  * falls inside the -12h..capture window */
 .ob-slot {
   position: absolute;
@@ -674,7 +674,7 @@
   color: color-mix(in oklab, var(--ink-muted) 80%, #0b1018);
 }
 
-/* per-stage typed state row (colored words, not boxes — plate rhythm) */
+/* per-stage typed state row (colored words, not boxes, plate rhythm) */
 .ob-stage-states {
   display: grid;
   grid-template-columns: repeat(7, minmax(0, 1fr));

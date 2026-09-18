@@ -470,7 +470,7 @@ fn complete_handoff_effect(
 /// `EffectId`, an idempotency key and a `DurableEffect` receipt, all of which
 /// assert a committed state change. This operation reads the grant store and
 /// leaves it byte-identical, so it carries an operation receipt and a coverage
-/// claim instead — and the coverage claim is only `Complete` when the
+/// claim instead, and the coverage claim is only `Complete` when the
 /// enumeration did not hit its ceiling.
 fn handoff_evidence(
     registered: &RegisteredWorkRuntime,

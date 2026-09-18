@@ -5,7 +5,7 @@
  * so this asserts the negative directly: `fetch` is stubbed to throw if it is
  * called at all, and each write is invoked under a non-active and an unresolved
  * scope. Asserting only on the returned outcome would pass just as happily
- * against a control that dispatched and then reported the gateway's 405 — a
+ * against a control that dispatched and then reported the gateway's 405, a
  * different and worse behaviour, since it asks a project to change and relies
  * on the daemon to refuse.
  *
@@ -94,7 +94,7 @@ describe('writes under a scope that does not accept them', () => {
     /**
      * Settings refuses before its *refresh*, not merely before its PATCH. The
      * mutation re-reads settings to recheck the held revision, and once the
-     * control is disabled that read is work nobody asked for — and it would make
+     * control is disabled that read is work nobody asked for, and it would make
      * a disabled control look like it had begun something.
      */
     it('does not dispatch a settings patch, nor its pre-patch refresh', async () => {
@@ -118,7 +118,7 @@ describe('writes under a scope that does not accept them', () => {
 
 /**
  * Activation is measured from a registry read, so it can be stale by the time a
- * write goes out — the daemon may have activated a different project in
+ * write goes out, the daemon may have activated a different project in
  * between. The refusal a dispatched write can still meet therefore has to stay
  * readable, and it is recognized by its body rather than by the status alone.
  */

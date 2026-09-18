@@ -246,8 +246,8 @@ impl JsonlFrameAdmission {
     /// Deciding this early is not reason-preserving, and deliberately so. A
     /// frame that is *also* malformed would have been covered as
     /// `MalformedFrame` had it been decoded; refused early it is covered as
-    /// `OutOfScope`. That is the intended reading — a rollout this scope does
-    /// not own is not this pass's to report structural health on — and it is
+    /// `OutOfScope`. That is the intended reading. A rollout this scope does
+    /// not own is not this pass's to report structural health on, and it is
     /// what makes the skipped decode observable in production state rather
     /// than only in a counter.
     pub(in crate::runtime) fn non_durable_before_decode(reason: ObservationCoverageReason) -> Self {
@@ -349,9 +349,9 @@ static SHARED_JSONL_PREPARATION_AUTHORITY: OnceLock<SharedJsonlPreparationAuthor
 
 /// Mount the process-wide JSONL page-preparation authority.
 ///
-/// The first successful install wins. Later calls — including concurrent
+/// The first successful install wins. Later calls, including concurrent
 /// `OnceLock::set` losers and fixtures that carry distinct
-/// [`ProcessResidentMemoryV1`] / [`ProcessBackgroundCpuV1`] Arcs — are no-ops.
+/// [`ProcessResidentMemoryV1`] / [`ProcessBackgroundCpuV1`] Arcs, are no-ops.
 /// `InvalidFrameState` is a frame-parse failure, not "another caller already
 /// mounted preparation". Treating a second installer as a frame error poisons
 /// every later host-admission fixture in the same process (the `mcp_suite`
@@ -1853,8 +1853,8 @@ impl ActiveAdmission<'_> {
                         provider: self.provider,
                     }
                 } else if outcome.retryable {
-                    // A retryable advance failure — a cursor CAS lost to a
-                    // peer ingestor, a still-mounting write authority — says
+                    // A retryable advance failure, a cursor CAS lost to a
+                    // peer ingestor, a still-mounting write authority, says
                     // nothing about the record; wrapping it as NonDurable
                     // laundered the admission's own verdict into a terminal
                     // non-retryable disposition.
@@ -1995,7 +1995,7 @@ impl ActiveAdmission<'_> {
                     // authorities, and retryable races keep the admission
                     // authority's own verdict as a typed block. The frontier
                     // must not advance over a record whose durable fate is
-                    // unknown — the persist may already have committed and
+                    // unknown, the persist may already have committed and
                     // advanced the source cursor, so a cover-past write here
                     // would stack a second, conflicting cursor advance on
                     // every frame.
@@ -2842,8 +2842,8 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
 /// content. Only these may be covered past: they re-fail identically on every
 /// sweep, so a durable typed refusal reason is what lets the stream converge.
 /// Identity collisions retain their exact reason; other deterministic content
-/// refusals use `AdmissionRefused`. Every other failure — store commit/read-back failures,
-/// unbound authorities, retryable races — says nothing about the record and
+/// refusals use `AdmissionRefused`. Every other failure, store commit/read-back failures,
+/// unbound authorities, retryable races, says nothing about the record and
 /// must surface as a typed block instead of writing coverage over a commit
 /// that never landed (or one that already landed and advanced the cursor).
 fn is_deterministic_content_refusal(outcome: &HostAdmissionOutcome) -> bool {

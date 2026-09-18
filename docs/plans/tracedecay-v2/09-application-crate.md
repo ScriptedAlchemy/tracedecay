@@ -28,7 +28,7 @@ application context remains application/surface work, not a frontend
 by `refactor(usecases): move src/application into tracedecay-usecases`
 (8946d412f5) and since reshaped into the session-identity type that *maps into*
 the application scope rather than carrying a rival context. Exactly one
-`RequestContext` is defined repo-wide — the scope-carrying one at
+`RequestContext` is defined repo-wide, the scope-carrying one at
 `crates/tracedecay-contracts/src/context.rs:429`, whose
 `scope: ResolvedScope` is a required field. Scope resolution is
 fail-closed on profile identity:

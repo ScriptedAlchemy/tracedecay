@@ -125,14 +125,14 @@ pub async fn sessions_for(
             result.observed_count = Some(observed_count);
             result.observed_sessions = Some(observed.into_iter().map(correlation_hit).collect());
             result.message = Some(format!(
-                "no producing sessions; {observed_count} session(s) observed this commit — pass relation=observed to list them",
+                "no producing sessions; {observed_count} session(s) observed this commit. Pass relation=observed to list them",
             ));
         } else {
             result.message = Some(if index_empty {
                 if matches!(&query.git_ref, GitRefFilter::Commit(_)) {
-                    "no commit evidence indexed yet — run `tracedecay sync` to ingest direct host/tool evidence; `tracedecay sessions git-sync` adds weaker historical overlap evidence".to_owned()
+                    "no commit evidence indexed yet. Run `tracedecay sync` to ingest direct host/tool evidence; `tracedecay sessions git-sync` adds weaker historical overlap evidence".to_owned()
                 } else {
-                    "correlation index empty (no git spans recorded yet) — it will converge on the next daemon startup, or run `tracedecay sessions git-sync` to schedule it now".to_owned()
+                    "correlation index empty (no git spans recorded yet). It will converge on the next daemon startup, or run `tracedecay sessions git-sync` to schedule it now".to_owned()
                 }
             } else {
                 "no sessions matched this git ref".to_owned()

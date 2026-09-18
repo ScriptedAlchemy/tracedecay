@@ -25,8 +25,8 @@ const PR_CONTEXT_CURSOR_SESSION: &str = "session.daemon.pr-context";
 /// It is deliberately the three fields
 /// [`tracedecay_contracts::ResolvedScope::identifies_same_checkout`] compares,
 /// and not the scope digest. The digest also covers the git reference the
-/// scope was resolved under, which changes on every ordinary branch switch —
-/// binding cursors to it would invalidate in-flight pagination whenever HEAD
+/// scope was resolved under, which changes on every ordinary branch switch.
+/// Binding cursors to it would invalidate in-flight pagination whenever HEAD
 /// moved, while proving nothing about which checkout is being read.
 #[derive(Clone, Copy, Serialize)]
 pub(super) struct PrContextCursorScope<'a> {
@@ -227,7 +227,7 @@ pub(super) struct PrContextCursorPosition {
 /// Opens the cursor authority for this call's admitted project store.
 ///
 /// The signing key is the store's own pre-provisioned cursor key, so a cursor
-/// minted here can only be verified by the same store — that is what keeps a
+/// minted here can only be verified by the same store, that is what keeps a
 /// foreign store's cursor from continuing this pagination. Attached means
 /// admitted; an absent lease is the typed denied state.
 #[hotpath::measure(label = "mcp.git.cursor.authority")]
@@ -651,7 +651,7 @@ mod tests {
     /// Switching branches does not move the checkout, so a page opened on one
     /// branch must continue on another. Only the reference differs between the
     /// two scopes below, and the reference-sensitive `scope_digest` differs
-    /// with it — binding cursor identity to that digest would break pagination
+    /// with it, binding cursor identity to that digest would break pagination
     /// on every ordinary branch switch.
     #[test]
     fn a_cursor_survives_a_branch_switch_on_the_same_checkout() {
@@ -753,7 +753,7 @@ mod tests {
             .expect("the same store, authorized, opens its own cursor authority");
     }
 
-    /// Two stores can serve the same checkout — a registered project store and
+    /// Two stores can serve the same checkout, a registered project store and
     /// a differently registered one for the same worktree. A cursor minted
     /// against one must not verify against the other, so the store's own
     /// registered shard is part of cursor identity.
@@ -798,7 +798,7 @@ mod tests {
         );
     }
 
-    /// One project has several registered shards — its session store, its
+    /// One project has several registered shards, its session store, its
     /// project store, and its code stores. They are different stores, so
     /// reducing the shard to the project it mentions would let a cursor minted
     /// against one verify against another.

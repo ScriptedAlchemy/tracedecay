@@ -65,7 +65,7 @@ async fn stored_cursors(conn: &impl QueryExecutor) -> Vec<ObservationSourceCurso
 }
 
 /// A store can hold committed observations with no `source_cursors` row at all
-/// — an older writer, or a crash between the two writes. Repair reconstructs
+///, an older writer, or a crash between the two writes. Repair reconstructs
 /// the frontier from the commit itself instead of restarting the source.
 #[tokio::test]
 async fn repair_reconstructs_a_missing_committed_source_cursor() {

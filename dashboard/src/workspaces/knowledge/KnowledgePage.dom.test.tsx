@@ -102,7 +102,7 @@ function memoryGraph(facts: readonly MemoryFactRowV1[]): MemoryGraphPayloadV1 {
 }
 
 /** `memory_api::overview` seeds the whole holographic block before it reads
- * anything, so `reads` and `facts_coverage` are always present — a body without
+ * anything, so `reads` and `facts_coverage` are always present, a body without
  * them is one the route cannot produce. */
 function memoryOverview(
   holographic: Partial<MemoryHolographicPayloadV1>,
@@ -533,7 +533,7 @@ describe('KnowledgePage fact detail', () => {
     await userEvent.type(input, 'needle');
     await userEvent.keyboard('{Enter}');
 
-    expect(await screen.findByText(/no loaded facts match “needle”/i)).toBeTruthy();
+    expect(await screen.findByText(/no loaded facts match "needle"/i)).toBeTruthy();
     expect(screen.getByText(/fact coverage is partial/i)).toBeTruthy();
     expect(screen.queryByText(/loaded top-100 slice/i)).toBeNull();
   });

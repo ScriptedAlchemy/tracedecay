@@ -1,7 +1,7 @@
 //! Parser for `cargo check` / `cargo clippy` stderr output.
 //!
-//! Extracts structured diagnostics — severity, optional error code, message,
-//! and primary source location — from the human-readable text that the
+//! Extracts structured diagnostics, severity, optional error code, message,
+//! and primary source location, from the human-readable text that the
 //! `rustc` / `clippy` toolchain emits. Used by the `tracedecay_diagnose` MCP
 //! tool to map each diagnostic to a graph node and pre-attach the relevant
 //! callers/callees.
@@ -9,7 +9,7 @@
 //! The parser is intentionally lenient: it scans line-by-line and silently
 //! skips anything it doesn't recognise. Diagnostics that don't carry a
 //! source location (e.g. summary errors, "could not compile" tails)
-//! are dropped — they have no source location to map.
+//! are dropped, they have no source location to map.
 
 use serde::{Deserialize, Serialize};
 
@@ -50,7 +50,7 @@ pub struct Diagnostic {
 
 /// Parses raw cargo / rustc / clippy stderr text into structured diagnostics.
 ///
-/// Diagnostics without a primary source location are dropped — they cannot
+/// Diagnostics without a primary source location are dropped, they cannot
 /// be mapped to a graph node and would only add noise. Filtering of which
 /// severities to keep is the caller's responsibility.
 pub fn parse_cargo_output(text: &str) -> Vec<Diagnostic> {
@@ -148,7 +148,7 @@ fn parse_span(line: &str) -> Option<(String, u32, u32)> {
 }
 
 fn parse_location(rest: &str) -> Option<(String, u32, u32)> {
-    // Split on the last two `:`s — the file path itself may contain `:`
+    // Split on the last two `:`s, the file path itself may contain `:`
     // on Windows (drive letter), so working from the right is safer.
     let (file_and_line, col_str) = rest.rsplit_once(':')?;
     let (file, line_str) = file_and_line.rsplit_once(':')?;

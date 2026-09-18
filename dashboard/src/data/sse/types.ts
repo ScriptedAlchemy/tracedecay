@@ -12,7 +12,7 @@ export const MAX_QUEUED_BYTES = 10 * 1024 * 1024; // 10 MiB
  *
  * Identity memory has to outlive the queue. A canonical refresh commits while
  * the stream keeps running, and an event redelivered after that commit must
- * still be recognized as already applied — clearing the identity set was what
+ * still be recognized as already applied, clearing the identity set was what
  * let a redelivery be applied twice. So the growth is bounded explicitly
  * instead of by wiping: two full queue ceilings, evicted in insertion order.
  * The per-stream watermark is the primary guard (anything at or below it is
@@ -42,7 +42,7 @@ export interface EventRevision {
 }
 
 /**
- * A single SSE event envelope. `payload` is opaque to the reducer — it never
+ * A single SSE event envelope. `payload` is opaque to the reducer, it never
  * derives product semantics (branch stack, merge order, readiness, legal
  * action) from it.
  */
@@ -82,7 +82,7 @@ export interface SseBatch<TPayload = unknown> {
   refetch: boolean;
   /**
    * True when the projection is marked stale (overflow). Stale is sticky until
-   * a canonical refresh actually succeeds — see {@link ReseedToken}.
+   * a canonical refresh actually succeeds, see {@link ReseedToken}.
    */
   stale: boolean;
 }
@@ -98,7 +98,7 @@ export type RefetchReason =
 /**
  * Handle on one canonical-refresh transaction.
  *
- * The refresh is asynchronous and slow — it awaits every active query — so the
+ * The refresh is asynchronous and slow, it awaits every active query, so the
  * stream keeps running underneath it. The token records the canonical-signal
  * epoch the refresh was issued against, which is what lets the reducer answer
  * the only question that matters when the refresh settles: is this refresh

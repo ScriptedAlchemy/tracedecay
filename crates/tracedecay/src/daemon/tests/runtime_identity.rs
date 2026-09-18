@@ -258,8 +258,8 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
     // `f347a0a46` ("fix(index): require opt-in for linked worktree scopes")
     // gates project-open code-index activation for a linked worktree behind
     // `sync.watch_linked_worktrees`, which defaults off. The linked route still
-    // reaches its full upgrade — the daemon publishes
-    // `phase=full_published code_index=linked_worktree_disabled` for it — and
+    // reaches its full upgrade, the daemon publishes
+    // `phase=full_published code_index=linked_worktree_disabled` for it, and
     // keeps the exact server and scheduler bindings this test is about, but it
     // owns no verified code graph. A graph query routed to it must therefore
     // answer the typed `code-graph-unavailable` refusal rather than silently
@@ -271,7 +271,7 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
     // each answers this admission instead of parking a background task that
     // would wake on every other route's serving seat, take the shared project
     // writer lane it can never use, and still be resolving at reopen and
-    // shutdown. Assert the admission is exact to the route — the primary
+    // shutdown. Assert the admission is exact to the route, the primary
     // shares this store and stays admitted.
     let project_id = tracedecay_domain::ProjectId::new(
         linked_graph
@@ -328,7 +328,7 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
 
     // The refusal is exact to the route, not a project-wide outage: the primary
     // route shares the same store authority, is admitted, and still answers the
-    // listing — with its own census, never the linked worktree's sources.
+    // listing, with its own census, never the linked worktree's sources.
     let primary_session_id = "session.primary-route-follow-up";
     notify_workspace_open(primary_server.as_ref(), primary_session_id, &primary).await;
     // `project_server` may publish `code_index=warming`; require the exact
@@ -491,8 +491,8 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         "routing must ignore, not rewrite or delete, a stale legacy worktree-local marker"
     );
     // Every whole-worktree demand the daemon raised for the linked route on
-    // its own — both full servers' startup catch-up and the `workspaceOpen`
-    // hook above — is automatic and stays behind the watch opt-in, so the
+    // its own, both full servers' startup catch-up and the `workspaceOpen`
+    // hook above, is automatic and stays behind the watch opt-in, so the
     // route never mounts a scheduler, let alone publishes a generation. The
     // refusal asserted earlier is therefore a property of the route, not of
     // whether the follow-up read raced an index the daemon should never have
@@ -516,7 +516,7 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
 /// configuration surface, a linked worktree of the same project is admitted to
 /// automatic indexing, seats its own generation, serves its own census (never
 /// the primary's), reopens through the retained canonical runtime, and shuts
-/// down within the same bound — all concurrently with the primary route.
+/// down within the same bound, all concurrently with the primary route.
 #[tokio::test]
 async fn opted_in_linked_worktree_indexes_reopens_and_shuts_down_beside_primary() {
     let home = TempDir::new().expect("isolated home");
@@ -688,7 +688,7 @@ async fn opted_in_linked_worktree_indexes_reopens_and_shuts_down_beside_primary(
         // any of those registrations
         // by object identity refuses the reopen, `settle_failed_full_upgrade`
         // reclaims the core, and `project_server` still answers `Ok` with a
-        // route that shares the store publication — so every assertion above
+        // route that shares the store publication, so every assertion above
         // holds while the route serves core-only capabilities for the life of
         // the daemon. Name the published level so that degradation fails here.
         assert_reopened_linked_route_is_not_degraded(&servers, &linked_key);

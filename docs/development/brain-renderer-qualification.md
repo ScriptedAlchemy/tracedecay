@@ -72,8 +72,8 @@ failure are not qualified by the narrow-viewport capture.
 | 5,000 synthetic SSE envelopes | HTTP fixture transmitted 5,000 frames in 2,507 ms. The normal EventSource path received them; bounded retention remained 64. `sse-overview-5000.json`. |
 | 20,000 further synthetic SSE envelopes | Transmitted in 10,064 ms; UI retained exact terminal `run-1099-1700000000000000:dashboard_activity:45000`, and selecting it inspected `tracedecay`. `sse-overview-20000.json`, `brain-20000-events.png`. This proves terminal acceptance and bounded retention, not persistence of every intermediate frame. |
 
-A load-discovered label bug is fixed: the old “per min” number counted only the
-64-pulse ring. It now reads “retained · last 60s” and explicitly says counts cover
+A load-discovered label bug is fixed: the old "per min" number counted only the
+64-pulse ring. It now reads "retained · last 60s" and explicitly says counts cover
 the retained window rather than the entire stream. No retention budget changed.
 
 The frame sampler uses requestAnimationFrame intervals, not fabricated renderer

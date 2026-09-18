@@ -292,8 +292,8 @@ ON work_duplicate_adjudications_v1 (
 /// row with a product item would invent a correspondence neither authority
 /// records.
 ///
-/// Every measurement the product projections expose — item effort, declared
-/// causal candidates, scheduled_at, deadline — lives inside `event_payload`
+/// Every measurement the product projections expose, item effort, declared
+/// causal candidates, scheduled_at, deadline, lives inside `event_payload`
 /// exactly as the caller declared it in the event. Nothing in this schema
 /// derives, estimates, or backfills one.
 pub const WORK_PRODUCT_SCHEMA_V1: &str = "

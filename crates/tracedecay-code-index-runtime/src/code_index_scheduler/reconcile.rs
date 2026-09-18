@@ -282,9 +282,9 @@ impl CodeIndexSchedulerErrorV1 {
     /// for these instead of resealing a duplicate; payload corruption and
     /// identity failures stay terminal so reconcile can rebuild.
     ///
-    /// `Conflict` is a lifecycle or compare-and-swap race — a graph runtime
+    /// `Conflict` is a lifecycle or compare-and-swap race, a graph runtime
     /// mid-close/retire, a concurrent publisher, or a superseded verified
-    /// head — never evidence about the sealed payload. Classifying it
+    /// head, never evidence about the sealed payload. Classifying it
     /// terminal turned one such race into a permanent outage: the seat pass
     /// gave up stale serving, the next reconcile hit the same race, and the
     /// route answered `generation_unverified` until the daemon restarted.
@@ -320,9 +320,9 @@ impl CodeIndexSchedulerErrorV1 {
 
     /// The structured conflict verdict carried by a graph-projection
     /// activation failure, when this error is one. The seat retry loop uses
-    /// it to recognize a deterministic conflict — the same guard site
+    /// it to recognize a deterministic conflict, the same guard site
     /// refusing with identical compared evidence on consecutive attempts
-    /// over the same sealed generation — which no amount of backoff can
+    /// over the same sealed generation, which no amount of backoff can
     /// outwait (issue #765).
     pub fn activation_conflict_context(&self) -> Option<&GraphConflictContextV1> {
         match self {
@@ -378,8 +378,8 @@ impl CodeIndexSchedulerErrorV1 {
     ///
     /// The distinction the admission failure carries is the whole point. A
     /// request that exceeds the *entire* process limit is shaped like a
-    /// capacity refusal and is not one — no other holder can release enough for
-    /// it — so it is classified permanent and never self-retried. Identity
+    /// capacity refusal and is not one, no other holder can release enough for
+    /// it, so it is classified permanent and never self-retried. Identity
     /// failures, git and IO faults, production and privacy refusals, adjustment
     /// invariant breaks, an uninstalled worker plan, and publication conflicts
     /// likewise reproduce over the same input or already have an owner that
@@ -405,7 +405,7 @@ impl CodeIndexSchedulerErrorV1 {
 
 /// Counts in-flight owner passes (retained activation or reconcile). A
 /// counter rather than a flag so the background worker can hold the state
-/// across an entire pass — claim of the pending wake through arrival restore —
+/// across an entire pass, claim of the pending wake through arrival restore,
 /// while the scheduler's own entry points nest inside it without clearing the
 /// in-progress signal early.
 pub struct ReconcilePassGuard(Arc<AtomicUsize>);
@@ -677,7 +677,7 @@ pub struct CodeIndexWorktreeSchedulerV1 {
     pub(super) ignored_source_admissions: Vec<CodeIndexIgnoredSourceAdmissionV1>,
     /// Set when a retained generation was refused because its ignored-source
     /// roster no longer verifies. That refusal also clears the roster, so the
-    /// next pass rebuilds without it — but the refused pass has already
+    /// next pass rebuilds without it, but the refused pass has already
     /// consumed the wake that ran it, so nothing scheduled that next pass and
     /// the still-pending source stayed uncaptured with no seat at all. The
     /// worker takes this flag to re-arm exactly one pass; taking it clears it,
@@ -1522,7 +1522,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         // this pass decoded the generation and re-derived every sealed digest.
         // A dirty remount (hints, config drift, or a moved frontier) must still
         // seat from the durable pointer without joining the publication decode
-        // barrier — activation may already own that flight.
+        // barrier, activation may already own that flight.
         let frontier_sweep = self.retained_frontier_stat_sweep(&pointer);
         let content_matches = decoded.as_ref().is_some_and(|generation| {
             frontier_sweep.as_ref().is_some_and(|sweep| {
@@ -1572,8 +1572,8 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     /// Witness + git/stat fence that does not read sealed generation bytes.
-    /// `Some` is the negative cache only — the metadata the witness recorded
-    /// has not moved — and hands back the sweep so the caller can settle
+    /// `Some` is the negative cache only, the metadata the witness recorded
+    /// has not moved, and hands back the sweep so the caller can settle
     /// currency against the retained generation's sealed file digests.
     fn retained_frontier_stat_sweep(
         &self,
@@ -1890,7 +1890,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         {
             // Live ignored admissions already forced the complete path above.
             // An ordinary unequal capture is a real edit: rebuild under the
-            // exact durable pointer. Do not fall through to reconcile_now —
+            // exact durable pointer. Do not fall through to reconcile_now,
             // that decodes the sealed generation through generations_root,
             // so a transient store failure never reaches publish and the
             // retry extracts the whole worktree again.
@@ -1925,7 +1925,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             let generation = if let Some(pending) = pending {
                 // The previous pass already built this generation and lost
                 // only the durable write. Republish it without a second
-                // whole-store extract — isolated graph-off retries otherwise
+                // whole-store extract, isolated graph-off retries otherwise
                 // miss their deadline waiting on a cold parser warmup.
                 let scope = CodeIndexGenerationScopeV1::for_snapshot(&captured.snapshot);
                 let mut publication = publication;
@@ -2347,8 +2347,8 @@ impl CodeIndexWorktreeSchedulerV1 {
 
     /// Records one attempted reconcile pass against the installed test fault.
     ///
-    /// The worker loop reaches indexing through three branches — a retained
-    /// text generation, retained-owner activation, and a plain reconcile — so
+    /// The worker loop reaches indexing through three branches, a retained
+    /// text generation, retained-owner activation, and a plain reconcile, so
     /// hooking any single one of them counts a subset of the passes the loop
     /// actually makes. This is called once at the top of the loop's blocking
     /// closure instead, which is what `install_reconcile_fault_for_test`
@@ -2912,13 +2912,13 @@ impl CodeIndexWorktreeSchedulerV1 {
         gix::open(&self.project_root).is_ok()
     }
 
-    /// Run the cheap Git/stat ladder — unverified restore, tier-1 git
-    /// metadata, tier-2 bounded staleness with the source witness — without
+    /// Run the cheap Git/stat ladder, unverified restore, tier-1 git
+    /// metadata, tier-2 bounded staleness with the source witness, without
     /// posting a worker wake.
     ///
     /// The ladder judges movement from source truth only: Git metadata and the
     /// stat witness. It deliberately does not compare the cancellation epoch
-    /// against the last reconciled epoch — every epoch advance is paired with
+    /// against the last reconciled epoch, every epoch advance is paired with
     /// its own worker wake (a hook hint, an overflow, an observed change), so
     /// that pending pass is already the remedy. Treating a hint-advanced epoch
     /// as movement here made a concurrent query escalate the targeted hint
@@ -2954,24 +2954,24 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// [`Self::ensure_fresh_for_query`] with the O(store) rebuild moved off the
     /// request path.
     ///
-    /// Runs the identical ladder — unverified restore, tier-1 git metadata,
-    /// tier-2 bounded staleness — but where `ensure_fresh_for_query` calls
+    /// Runs the identical ladder, unverified restore, tier-1 git metadata,
+    /// tier-2 bounded staleness, but where `ensure_fresh_for_query` calls
     /// `reconcile_now()` inline this only *requests* the background worker.
     /// The ladder's checks never extract or publish; its remedy does, and a
     /// query must never pay for it. Unlike
     /// [`Self::latest_complete_ready_for_query_with`], this arm still sweeps
-    /// the source witness on an elapsed threshold — stat metadata first, then
-    /// the sealed file digests when the metadata is unchanged — so a quiet
+    /// the source witness on an elapsed threshold, stat metadata first, then
+    /// the sealed file digests when the metadata is unchanged, so a quiet
     /// repository can reset its clock without a capture.
     ///
     /// Returns whether a reconcile was actually requested. A quiet repository
     /// must answer `false` and wake nothing: the ladder suppressing work is the
     /// common case, and waking the worker on every read would turn each query
-    /// into a rebuild trigger — exactly the coupling this change removes.
+    /// into a rebuild trigger, exactly the coupling this change removes.
     ///
     /// Only proven movement is recorded as an observed source change. An owner
-    /// nothing has verified yet — a fresh mount or restart whose first pass is
-    /// still pending — answers "not current" so the caller posts its plain
+    /// nothing has verified yet, a fresh mount or restart whose first pass is
+    /// still pending, answers "not current" so the caller posts its plain
     /// query-admission wake, but nothing was observed to move, so no overflow
     /// hint, observed-change marker, or cancellation epoch is minted for it.
     /// Fabricating that overflow made the restart's own verifying pass skip
@@ -3008,7 +3008,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     /// True when reconciliation has verified the live worktree against source
-    /// truth and that verified source publishes no code generation at all —
+    /// truth and that verified source publishes no code generation at all,
     /// the typed state of a project whose files are all unsupported,
     /// unextractable, or absent. Distinct from a warming scheduler, whose
     /// verification has not run yet, and from a publish failure, which leaves
@@ -3234,8 +3234,8 @@ impl CodeIndexWorktreeSchedulerV1 {
 
     /// Decode, validate, mint, and warm the active generation eagerly.
     ///
-    /// Activation — mount with an existing sealed store, or reconcile
-    /// completion — is where a generation's O(store) derivations belong. Run
+    /// Activation, mount with an existing sealed store, or reconcile
+    /// completion, is where a generation's O(store) derivations belong. Run
     /// this on a blocking worker at those points and the first query finds the
     /// decoded generation, its exact-admission sweep, its record indices, and
     /// its lane owners already built. A query that arrives while this is still
@@ -3298,7 +3298,7 @@ impl CodeIndexWorktreeSchedulerV1 {
 
     /// Read, sanitize, intern and identify one candidate path.
     /// `Ok(None)` means the path is not an indexable source file (vanished,
-    /// no extension, or no language descriptor) — the sequential loop's
+    /// no extension, or no language descriptor), the sequential loop's
     /// `continue` arms. Pure with respect to the shared byte pool: the pool
     /// is content-addressed under its own lock, so concurrent interning
     /// yields the same digests and the same shared buffers.

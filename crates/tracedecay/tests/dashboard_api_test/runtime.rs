@@ -247,7 +247,7 @@ impl DashboardTestRuntimeV1 {
     }
 
     /// The dashboard authority plus the daemon-owned LCM and verified graph
-    /// read ports — the composition production mounts for `hermes-lcm`,
+    /// read ports, the composition production mounts for `hermes-lcm`,
     /// explorer, and `/api/plugins/graph/*` reads.
     pub(crate) async fn dashboard_test_authority_with_session_reads(
         self: &Arc<Self>,

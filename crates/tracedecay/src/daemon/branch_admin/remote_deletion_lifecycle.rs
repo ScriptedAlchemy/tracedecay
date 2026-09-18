@@ -964,7 +964,7 @@ impl StoreAdministration {
                 // Upstream followed the reservation with a separate
                 // `prove_no_external_branch_store_holders` sweep. That API no
                 // longer exists at this tip: `begin_destructive_code_maintenance`
-                // *is* the holder proof — it fails closed unless every physical
+                // *is* the holder proof, it fails closed unless every physical
                 // runtime for these paths is closed, and it retires each closed
                 // shard's code authority so no stale handle can reopen the store.
                 // A second textual sweep would only restate what the reservation

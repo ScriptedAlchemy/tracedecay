@@ -1,0 +1,113 @@
+# Packaged-crate distribution battery. Visibility only; not a ship gate.
+#
+# GitHub release assets are the just-built production binary, its archive,
+# and the MCPB that wraps that same binary. `cargo package`, extracted-crate
+# rebuilds, nextest, and MCP inspector dogfood prove the unpublished crate
+# graph, not those assets. Beta.40 run 35271070760 spent ~24m of the aarch64
+# ship job on that battery and then failed before MCPB. This workflow runs
+# the battery once a day on one free ubuntu-latest runner.
+name: Distribution acceptance
+
+on:
+  schedule:
+    # Daily 08:00 UTC. Visibility only; not a merge or release gate.
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: distribution-acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  distribution-acceptance:
+    name: Distribution acceptance (x86_64-linux)
+    if: github.repository == 'ScriptedAlchemy/tracedecay'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      TARGET: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.2"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12.10"
+
+      - name: Build dashboard
+        working-directory: dashboard
+        run: |
+          npm ci
+          npm run build
+
+      - name: Export dashboard bundle digest for skip-mode builds
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest="$(python3 scripts/check-dashboard-bundle.py dashboard/app-dist --print-digest)"
+          echo "TRACEDECAY_SKIP_DASHBOARD_BUILD=1" >> "$GITHUB_ENV"
+          echo "TRACEDECAY_DASHBOARD_BUNDLE_SHA256=${digest}" >> "$GITHUB_ENV"
+
+      - name: Validate portable distribution harnesses
+        run: |
+          python3 scripts/test-check-packaged-lsp-bridge.py
+          python3 scripts/test-build-mcpb.py
+          python3 scripts/test-resolve-installed-binary.py
+          python3 scripts/test-check-packaged-mcp-stdio.py
+          python3 scripts/test-check-distribution-feature-wiring.py
+          python3 scripts/test-resolve-release-source-profile.py
+          python3 scripts/test-package-release-archive.py
+          bash scripts/test-check-distribution-clean-source.sh
+          bash scripts/test-check-distribution-snapshot.sh
+          bash scripts/test-check-distribution-reuse.sh
+
+      # rust-toolchain.toml is the only compiler this job may install. See
+      # release-beta.yml: floating stable fragments rust-cache's env key.
+      - name: Resolve pinned toolchain
+        id: pin
+        shell: bash
+        run: |
+          python3 -c 'import pathlib, tomllib; print("toolchain=" + tomllib.loads(pathlib.Path("rust-toolchain.toml").read_text(encoding="utf-8"))["toolchain"]["channel"])' >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # 1.97.1 pin
+        with:
+          toolchain: ${{ steps.pin.outputs.toolchain }}
+          targets: ${{ env.TARGET }}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: release-beta-${{ env.TARGET }}
+          cache-workspace-crates: "false"
+          cache-on-failure: true
+
+      - name: Install mold
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
+        with:
+          mold-version: 2.41.0
+          make-default: true
+
+      - name: Build release binary for packaging
+        run: cargo build --package tracedecay-cli --bin tracedecay --release --target ${{ env.TARGET }} --no-default-features --features production --locked
+
+      - name: Run distribution acceptance
+        run: |
+          set -euo pipefail
+          cargo fetch --locked --target ${{ env.TARGET }}
+          lockfile_sha="$(python3 -c 'import hashlib; print(hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest())')"
+          binary="target/${TARGET}/release/tracedecay"
+          test -f "$binary"
+          CARGO_NET_OFFLINE=true bash scripts/check-distribution-acceptance.sh \
+            --reuse-release-binary "$binary"
+          actual_lockfile_sha="$(python3 -c 'import hashlib; print(hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest())')"
+          test "$actual_lockfile_sha" = "$lockfile_sha"

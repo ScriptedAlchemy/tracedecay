@@ -165,8 +165,8 @@ impl DaemonSessionRetrievalService {
     /// A session with no active temporal generation resolves as
     /// `TemporalStoreUnavailable`. While the refresh worker is still
     /// converging history (for example re-deriving a reset store from its
-    /// preserved transcripts) that label is untrue — the store is fine, the
-    /// projection is pending — so the worker's own serving state, with its
+    /// preserved transcripts) that label is untrue, the store is fine, the
+    /// projection is pending, so the worker's own serving state, with its
     /// backlog and blocker, is the answer instead. Once the worker is current
     /// the temporal outcome stands: nothing is going to project the session.
     ///
@@ -324,7 +324,7 @@ impl DaemonSessionRetrievalService {
             }
             // Zero temporal rows for the session is only evidence of absence
             // once history is not still converging. A missing worker (core /
-            // direct mounts) is not convergence — treat CompleteZero as
+            // direct mounts) is not convergence, treat CompleteZero as
             // absence there. While historical catch-up is in flight, surface
             // that state instead of a complete description at generation zero.
             SessionRetrievalOutcome::CompleteZero { .. }

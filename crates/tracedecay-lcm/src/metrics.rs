@@ -30,7 +30,7 @@ fn add_usize(name: &'static str, delta: usize) {
 /// `Some(bytes)` charges the verified content bytes; `None` counts a failed
 /// verification. The bytes gauge is the corpus-scale decode measure that the
 /// per-row `sessions.lcm.raw.verify_row` span cannot express, and failures
-/// stay visible because a rejected row aborts its whole page — decode work
+/// stay visible because a rejected row aborts its whole page, decode work
 /// paid and then discarded.
 #[inline(always)]
 pub(crate) fn record_lcm_raw_row_verified(content_bytes: Option<usize>) {
@@ -43,7 +43,7 @@ pub(crate) fn record_lcm_raw_row_verified(content_bytes: Option<usize>) {
 /// One completed LCM grep page.
 ///
 /// `pages` counts every completed page so zero-hit pages stay visible, and
-/// `like_fallback` marks pages that bypassed FTS for the LIKE table scan —
+/// `like_fallback` marks pages that bypassed FTS for the LIKE table scan,
 /// the two query plans have very different costs, and without the split a
 /// slow-grep profile cannot say which plan the workload is actually on.
 #[inline(always)]

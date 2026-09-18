@@ -1,10 +1,10 @@
 /**
- * LCM OVERVIEW — the right-hand register when no session is selected.
+ * LCM OVERVIEW, the right-hand register when no session is selected.
  *
  * Four independent reads, each stated with its own coverage and never summed
  * into one another: the LCM timeline (temporal scope and token provenance),
  * the LCM overview (the canonical hydrated window the daemon drained for this
- * read — sessions, messages, providers, roles, compaction), and the index page
+ * read, sessions, messages, providers, roles, compaction), and the index page
  * (which slice of the retained session store is on screen). The overview's
  * counts describe the drained window, not the whole store; the index's
  * `total` is the store's own count. Both are printed with their denominators.

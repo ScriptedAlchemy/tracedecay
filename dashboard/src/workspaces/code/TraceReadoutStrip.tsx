@@ -4,7 +4,7 @@
  * Every figure on it is counted by `readoutCells` from the same `TraceModel`
  * the canvas draws, so the plate cannot say one thing while the picture says
  * another. What is left for this module is the layout that makes seven readings
- * legible at every width — which is a presentation problem, not a measurement
+ * legible at every width, which is a presentation problem, not a measurement
  * one, and is the whole reason it is separate from the arithmetic.
  */
 import { readoutCells } from '../../viz/trace/readout.ts';
@@ -30,7 +30,7 @@ export function TraceReadoutStrip({
     <div className="border-b border-edge-subtle" data-testid="trace-readout">
       {/* Seven cells divide evenly into none of these column counts, and the
         * leftover space over a lit container renders as an eighth cell with
-        * nothing in it — which on a plate whose whole subject is absence reads
+        * nothing in it, which on a plate whose whole subject is absence reads
         * as a reading that failed to arrive. The last cell is widened at each
         * breakpoint by exactly the shortfall, so every row is full and the
         * hairline grid stays a grid. */}
@@ -59,7 +59,7 @@ export function TraceReadoutStrip({
       </dl>
       {expanding ? (
         <p className="border-t border-edge-subtle px-2.5 py-1 text-3xs text-state-loading">
-          still expanding hop 2 — every reading above is for what has arrived so far
+          still expanding hop 2, every reading above is for what has arrived so far
         </p>
       ) : null}
     </div>

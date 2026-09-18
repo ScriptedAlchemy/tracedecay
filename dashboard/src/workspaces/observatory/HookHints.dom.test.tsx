@@ -6,7 +6,7 @@ import { HookHints } from './HookHints.tsx';
 /**
  * `/api/plugins/analytics/hints` is the typed hint summary: per category, how
  * many hints the hooks emitted and what the agent did with them. The rules
- * under test are the workspace ones — a category's counts appear in their own
+ * under test are the workspace ones, a category's counts appear in their own
  * labelled cells, an unavailable hint store renders as its reason rather than
  * as an empty table, and no funnel or percentage is fabricated from tallies
  * the daemon declared independent.

@@ -357,7 +357,7 @@ impl ObservationCoverageReason {
     }
 
     /// True when the evidence could have produced a durable observation but
-    /// was refused — the counts Doctor surfaces as a degraded (yet observed
+    /// was refused, the counts Doctor surfaces as a degraded (yet observed
     /// and final) condition. Blank, out-of-scope, unsupported-fact, and
     /// duplicate dispositions are expected coverage outcomes, not refusals.
     pub fn is_refusal(self) -> bool {

@@ -1,8 +1,8 @@
 //! Read-only, cheap-to-query storage observability (plan 38 §7): per-store
 //! size and free-page ratio for every registered profile-sharded store under
-//! a profile root, plus an unregistered-directory backlog summary —
-//! reachable from `tracedecay storage report` without a live daemon
-//! or any [`tracedecay_global_db::RegisteredGlobalDb`] writer authority.
+//! a profile root, plus an unregistered-directory backlog summary reachable
+//! from `tracedecay storage report` without a live daemon or any
+//! [`tracedecay_global_db::RegisteredGlobalDb`] writer authority.
 //!
 //! # Why this does not snapshot stores in place
 //!
@@ -12,16 +12,17 @@
 //! family by reflinking it, falling back to a **full byte copy** when the
 //! filesystem cannot reflink, and any graph database a live daemon has open
 //! is WAL-backed and therefore takes that path. Running this report over the
-//! profile it was written for — the owner's, at 91GB — would have copied
-//! every registered store to read three pragmas off it, on a command whose
-//! entire promise is being cheap enough to run on a full profile.
+//! profile it was written for would have copied every registered store to
+//! read three pragmas off it. The owner's profile was 91GB, on a command
+//! whose entire promise is being cheap enough to run on a full profile.
 //!
 //! So sizes come from filesystem metadata (exact, no locks, no I/O beyond
 //! `stat`) and free-page counts from a short read-only connection. The one
 //! registry snapshot uses an OS-temporary scratch directory, never a child of
-//! the profile it inspects. If a free-page connection fails — busy, corrupt,
-//! or a WAL database with no `-shm` to map read-only — its fields are `None`
-//! rather than guessed at, and the store still reports its size.
+//! the profile it inspects. If a free-page connection fails because the store
+//! is busy, corrupt, or a WAL database with no `-shm` to map read-only, its
+//! fields are `None` rather than guessed at, and the store still reports its
+//! size.
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -60,7 +61,7 @@ pub struct StoreSizeReportEntry {
 
 /// The full report: per-store sizes plus an unregistered-directory backlog
 /// summary (plan 38 §2's disjoint on-disk-only audit class, sized here rather
-/// than classified — the daemon sweep and `sweep_unregistered_stores` own
+/// than classified, the daemon sweep and `sweep_unregistered_stores` own
 /// collection).
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct StorageReport {
@@ -620,8 +621,8 @@ pub async fn build_project_storage_report_from_daemon(
 /// when the global registry's exclusive-maintenance authority is unavailable.
 /// The protection set (the serving generation plus live native-preview
 /// bindings) is only resolvable from mounted daemon authorities; a caller that
-/// holds it passes it here. Inventory-less surfaces — including
-/// [`build_project_storage_report_from_daemon`] — pass `None` and the
+/// holds it passes it here. Inventory-less surfaces, including
+/// [`build_project_storage_report_from_daemon`], pass `None` and the
 /// retention dry run reports itself unavailable rather than planning against
 /// an unproven protection set.
 #[hotpath::measure(label = "maintenance.storage_report.project")]
@@ -886,7 +887,7 @@ fn sqlite_family_member(database_path: &Path, suffix: &str) -> PathBuf {
 }
 
 /// Reads the free-page pragmas over the shared bounded read-only probe.
-/// Returns `None` on any failure — a store held by a busy writer, a corrupt
+/// Returns `None` on any failure, a store held by a busy writer, a corrupt
 /// file, or a WAL database whose `-shm` cannot be mapped read-only. A report
 /// must degrade, never block and never repair.
 fn sample_free_pages(graph_db_path: &Path) -> Option<(u64, f64)> {
@@ -1694,7 +1695,7 @@ mod tests {
 
     /// Exceeding the digest budget must not by itself discard the census. The
     /// fixture's active pointer is deliberately corrupt, so the metadata-only
-    /// fallback still refuses — but it refuses for the *pointer*, proving the
+    /// fallback still refuses, but it refuses for the *pointer*, proving the
     /// budget no longer short-circuits ahead of it.
     #[test]
     fn oversized_generation_digest_scan_falls_through_to_the_metadata_census() {

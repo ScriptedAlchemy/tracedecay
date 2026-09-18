@@ -1,5 +1,5 @@
 /**
- * STRATA — `GET /api/plugins/graph/strata`.
+ * STRATA. `GET /api/plugins/graph/strata`.
  *
  * The graph's dependency layering: how deep the import/dependency chains run,
  * and which directories form the clusters those chains cross. Where the spine
@@ -11,7 +11,7 @@
  * computes both, and the gap between them is the amount of layering the graph
  * has beyond what its own structure requires.
  *
- * Truthfulness. This is a BUDGETED scan — `scan` carries the file and edge caps
+ * Truthfulness. This is a BUDGETED scan, `scan` carries the file and edge caps
  * it ran under, how many it actually examined, and whether the answer came from
  * cache. A depth computed over a truncated file set is a floor, not a depth, so
  * a capped scan says so on the same line as the number rather than underneath
@@ -103,13 +103,13 @@ function StrataReading({ measurement }: { measurement: StrataMeasurementV1 }) {
 
       {capped ? (
         <p className="text-3xs leading-snug text-state-unknown">
-          the scan stopped at its budget —{' '}
+          the scan stopped at its budget,{' '}
           {filesCapped ? `${scan.max_files.toLocaleString()} files` : null}
           {filesCapped && edgesCapped ? ' and ' : null}
           {edgesCapped
             ? `${scan.max_dependency_edges.toLocaleString()} dependency edges`
             : null}{' '}
-          in {scan.budget_ms} ms — so the depth above is a floor and these clusters are
+          in {scan.budget_ms} ms, so the depth above is a floor and these clusters are
           the ones it reached, not all of them
         </p>
       ) : null}

@@ -309,7 +309,7 @@ pub enum DaemonInvocationError {
     /// The connect phase failed after the restart grace: no daemon accepted
     /// at the endpoint, so the request was never sent. Kept distinct from
     /// [`Self::Unavailable`] because re-dispatching the same request in-process
-    /// cannot succeed until a daemon is back — callers fail fast with the
+    /// cannot succeed until a daemon is back, callers fail fast with the
     /// typed connect diagnostic instead of retrying to their deadline.
     Unreachable {
         reason_code: String,
@@ -555,9 +555,9 @@ impl Drop for InvocationConnectionLease {
 ///
 /// Two sources of evidence qualify: the daemon itself refused this client's
 /// handshake (a wire-revision or credential rotation), or the authority record
-/// that named this endpoint is no longer current (a restart). Anything else —
-/// a reset or closed socket, a stalled or malformed response — is settled
-/// against the one stream that failed.
+/// that named this endpoint is no longer current (a restart). Anything else is
+/// settled against the one stream that failed. That includes a reset or closed
+/// socket, and a stalled or malformed response.
 async fn daemon_generation_changed(
     connection: &crate::connection::DaemonConnection,
     error: &tracedecay_domain::errors::TraceDecayError,
@@ -1258,8 +1258,8 @@ pub fn handshake_refusal_error(
             true,
             format!(
                 "daemon (version {}) rejected this client's authentication token; \
-                 the daemon authority record this client resolved is likely stale — \
-                 retry, or check `tracedecay daemon status`",
+                 the daemon authority record this client resolved is likely stale. \
+                 Retry, or check `tracedecay daemon status`",
                 refusal.daemon_version
             ),
         );

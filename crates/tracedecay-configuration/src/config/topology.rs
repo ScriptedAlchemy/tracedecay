@@ -3,7 +3,7 @@
 //! The sole resolver combines the typed registry default with explicit layers;
 //! these helpers consume its pinned snapshot and return the complete validated
 //! policy. They never inspect paths, invoke Git, manufacture capability or
-//! repository evidence, or substitute a locally invented default — missing,
+//! repository evidence, or substitute a locally invented default, missing,
 //! mistyped, invalid, or unsupported inputs fail closed.
 
 use thiserror::Error;

@@ -53,7 +53,7 @@ export interface TopologyInteraction {
 }
 
 /** The aperture's own width, so columns can stretch to fill it. `null` until
- * measured, which under jsdom is forever — the default pitch then holds. */
+ * measured, which under jsdom is forever, the default pitch then holds. */
 function useApertureWidth(ref: React.RefObject<HTMLDivElement | null>): number | null {
   const [width, setWidth] = useState<number | null>(null);
   useEffect(() => {
@@ -83,8 +83,8 @@ export function DelegationTopology({
   const size = fieldSize(model, geometry);
   const hatchId = useId();
   const byId = useMemo(() => new Map(model.marks.map((mark) => [mark.id, mark])), [model]);
-  // An inspected id the model no longer draws — a bundle the reader just
-  // opened, a session a refetch dropped — isolates nothing rather than
+  // An inspected id the model no longer draws, a bundle the reader just
+  // opened, a session a refetch dropped, isolates nothing rather than
   // dimming everything.
   const keep = useMemo(
     () => (inspectedId !== null && byId.has(inspectedId) ? neighbourhood(model, inspectedId) : null),
@@ -501,7 +501,7 @@ function MarkGlyph({
 }
 
 /** The operable mark: a 44px hit area over the disc, the label to its right,
- * and — for a folded session — the tail control that opens the generation
+ * and, for a folded session, the tail control that opens the generation
  * beneath. Hover and focus inspect; click and Enter select or open. */
 function MarkControl({
   mark,

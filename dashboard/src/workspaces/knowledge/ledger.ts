@@ -4,7 +4,7 @@
  *
  * Ordering is over the LOADED slice only. The overview route serves at most a
  * hundred rows ranked by trust and exposes no cursor, so a sort here can
- * reorder what arrived but can never reach a row it did not — the ledger says
+ * reorder what arrived but can never reach a row it did not, the ledger says
  * so above the rows, and nothing in this module pretends otherwise.
  */
 import { assertNever, type MemoryFactRowV1 } from '../../contracts/generated.ts';

@@ -130,7 +130,7 @@ impl HostAdmissionTestRuntimeV1 {
             .unwrap_or_else(|error| panic!("could not read savings history: {error}"))
     }
 
-    /// Reads the registered project's immutable provider-usage observations —
+    /// Reads the registered project's immutable provider-usage observations,
     /// the canonical accounting authority that replaced per-message usage
     /// metadata (usage is an observation family, not a turn ledger).
     #[doc(hidden)]

@@ -2,7 +2,7 @@
 # End-to-end proof that the TraceDecay Claude Code bundle installs through a
 # STOCK Claude Code CLI. TraceDecay stages the marketplace bundle; the stock
 # host itself performs marketplace registration, plugin install, enablement,
-# and component resolution — exactly the documented operator journey. Used by
+# and component resolution, exactly the documented operator journey. Used by
 # the `claude-integration` CI job and runnable locally:
 #
 #   npm install --global @anthropic-ai/claude-code@<pinned>
@@ -55,7 +55,7 @@ main() {
     seed_throwaway_project "$project"
 
     # Stage the marketplace bundle. Claude Code owns marketplace registration
-    # and enablement, so this step deliberately stops with handover guidance —
+    # and enablement, so this step deliberately stops with handover guidance,
     # the bundle on disk plus the exact stock commands to run next.
     echo "== tracedecay install --agent claude (stages the marketplace bundle)"
     set +e

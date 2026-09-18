@@ -13,7 +13,7 @@ daemon → dashboard-api HTTP → SDK registries → dashboard Work workspace, w
 the stage-grouped board, TaskId deep links, `task_activity` SSE, snapshot/delta
 reads, and seven command surfaces. The DAG/critical-path, timeline, causal, and
 workload projections are not yet built; they remain committed in-scope V2
-deliverables — not descoped — whose data dependency is attempt/execution
+deliverables, not descoped, whose data dependency is attempt/execution
 evidence owned by the Plan 32 workflow runtime (the attempt family was
 deliberately deleted in the Work restore and returns with Plan 32 execution
 evidence). The public SDK delivery stabilizes public SDK
@@ -221,7 +221,7 @@ contradicted experience is quarantined, retired, or excluded. Recall never
 becomes authority or a hidden model default.
 
 Demonstrated expertise is a separate Plan 24-owned, default-off, authorized
-ephemeral operation and task-context view. It may support “who knows” context,
+ephemeral operation and task-context view. It may support "who knows" context,
 reviewer discovery, and handoff explanation only after purpose-specific
 consent and authorization. It is excluded from canonical task evidence,
 retrieval candidates, fusion/ranking, readiness, assignment, reviewer

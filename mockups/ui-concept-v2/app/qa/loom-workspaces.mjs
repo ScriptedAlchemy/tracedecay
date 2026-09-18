@@ -260,7 +260,7 @@ try {
   await page.reload();
   assert.equal(await page.getByRole('tab',{name:'COVERAGE',exact:true}).getAttribute('aria-selected'),'true','Reload retains this gap view');
   await page.locator('.loom-gap-ledger').getByRole('button',{name:'Stale review source',exact:true}).click();
-  assert.equal(await page.getByRole('tab',{name:'SOURCE',exact:true}).getAttribute('aria-selected'),'true','A newly selected gap defaults to its own evidence, not another gap’s candidates');
+  assert.equal(await page.getByRole('tab',{name:'SOURCE',exact:true}).getAttribute('aria-selected'),'true','A newly selected gap defaults to its own evidence, not another gap's candidates');
   assert.match(await page.locator('.loom-gap-facts').innerText(),/14:20:00Z/);
   const gradeBefore=await page.locator('.loom-gap-selection .loom-grade').innerText();
   await page.getByRole('button',{name:'ACKNOWLEDGE GAP',exact:true}).click();

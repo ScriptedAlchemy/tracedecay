@@ -341,7 +341,7 @@ pub struct WorkDecompositionProposalV1 {
     pub rationale: Vec<WorkProposalReasonV1>,
 }
 
-/// Ranked route. Dimensions stay SEPARATE — no scalar score field is permitted here.
+/// Ranked route. Dimensions stay SEPARATE. No scalar score field is permitted here.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkRankedRouteV1 {
@@ -644,8 +644,8 @@ fn partition_routes(
 
 /// Order the survivors by the separate ordinal dimensions.
 ///
-/// The precedence is fixed and lexicographic — correctness, sensitive-data
-/// fitness, evidence quality, autonomy, latency, cost — with `route_id`
+/// The precedence is fixed and lexicographic: correctness, sensitive-data
+/// fitness, evidence quality, autonomy, latency, cost, with `route_id`
 /// ascending as the final tiebreak, so the order is total and no scalar score
 /// is ever formed.
 fn rank_survivors(survivors: &mut [&WorkRouteCandidateV1]) {

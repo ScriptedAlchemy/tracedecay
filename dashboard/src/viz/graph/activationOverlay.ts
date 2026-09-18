@@ -16,8 +16,8 @@ import type { FocusState } from './renderer.ts';
  *
  * It owns the glow companions (a body's corona and bloom), the light that
  * travels a warm dendrite, and the render loop that resolves both. The loop
- * runs only while something real is unresolved — a warm activation field, or a
- * hover isolation still easing into place — and stops itself the moment both
+ * runs only while something real is unresolved, a warm activation field, or a
+ * hover isolation still easing into place, and stops itself the moment both
  * settle, so an idle dashboard costs nothing. It also advances the hover
  * easing, because that easing shares the same frames; the renderer owns where
  * the hover points, this owns how fast it gets there.
@@ -63,7 +63,7 @@ export function createActivationOverlay({
   // ---- glow companions ------------------------------------------------
   // Every point is a body with falloff, not a flat disc: a tight corona in
   // the node's own hue plus a wide, very faint bloom give depth without a
-  // shader. Both ride real signal — vitality at rest, heat when struck — so
+  // shader. Both ride real signal, vitality at rest, heat when struck, so
   // a quiet graph is genuinely quieter, not merely smaller.
   const restingGlow = realNodes.length <= 400;
   const syncGlow = (): void => {
@@ -201,7 +201,7 @@ export function createActivationOverlay({
     if (!keepGoing) lastFrame = 0;
   };
 
-  /** Nothing here is "faster" — the intermediate frames do not exist. */
+  /** Nothing here is "faster", the intermediate frames do not exist. */
   const settle = (): void => {
     if (raf) {
       cancelAnimationFrame(raf);

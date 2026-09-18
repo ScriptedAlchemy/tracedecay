@@ -330,7 +330,7 @@ impl GitCoverageV1 {
     /// Tracked entries, the index tree, and the index checksum are all still
     /// captured exactly, so it is not evidence that a read failed. Counting it
     /// as one made every index transaction ineligible in any repository that
-    /// keeps an ignored directory beside tracked files — `target/`,
+    /// keeps an ignored directory beside tracked files. `target/`,
     /// `node_modules/`, `.tracedecay/`.
     pub fn leaves_state_unread(&self) -> bool {
         self.degradations

@@ -21,9 +21,9 @@ enum ControlledConnectionOutcome {
 /// A connect-phase failure (`daemon_connect_down` / `daemon_connect_saturated`
 /// after the restart grace) means the request was never sent; it becomes the
 /// typed [`DaemonInvocationError::Unreachable`] carrying the connect
-/// diagnostic. Every other transport failure — a closed connection after the
-/// request was written, a stalled response, a refused handshake — keeps the
-/// indeterminate [`DaemonInvocationError::Unavailable`].
+/// diagnostic. Every other transport failure keeps the indeterminate
+/// [`DaemonInvocationError::Unavailable`]. That includes a closed connection
+/// after the request was written, a stalled response, and a refused handshake.
 pub(super) fn classify_invoke_transport_error(
     error: tracedecay_domain::errors::TraceDecayError,
 ) -> DaemonInvocationError {

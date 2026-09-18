@@ -1175,7 +1175,7 @@ fn cli_lifecycle_leaves_an_ambient_kiro_home_sentinel_untouched() {
 }
 
 /// Kiro's documented hook entry schema is `command` plus an optional
-/// `matcher` — an undocumented field (the old `timeout_ms`) is schema noise
+/// `matcher`, an undocumented field (the old `timeout_ms`) is schema noise
 /// Kiro never reads and must not be written.
 #[test]
 fn managed_agent_hook_entries_carry_only_documented_fields() {
