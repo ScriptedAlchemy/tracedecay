@@ -230,13 +230,27 @@ async fn preview_apply_and_replay_replace_each_original_span() {
         replay["message"], "source edit completed; detailed edit output was not retained",
         "{replay}"
     );
-    assert_eq!(replay["change_count"], 2, "{replay}");
-    assert_eq!(replay["files"], json!(["src/main.rs"]), "{replay}");
+    assert_eq!(replay["failed"], false, "{replay}");
+    assert_eq!(replay["effect"]["payload"]["change_count"], 2, "{replay}");
     assert_eq!(
-        replay["operation"], "use-case.application.source-edit.multi-str-replace",
+        replay["effect"]["payload"]["files"],
+        json!(["src/main.rs"]),
         "{replay}"
     );
-    assert_eq!(replay["durable_metadata_only"], true, "{replay}");
+    assert_eq!(
+        replay["effect"]["payload"]["operation"],
+        "use-case.application.source-edit.multi-str-replace",
+        "{replay}"
+    );
+    assert_eq!(
+        replay["effect"]["payload"]["message"],
+        "source edit completed; detailed edit output was not retained",
+        "{replay}"
+    );
+    assert_eq!(
+        replay["effect"]["payload"]["durable_metadata_only"], true,
+        "{replay}"
+    );
     assert_eq!(
         replay["effect"]["effect_id"], applied_result["effect"]["effect_id"],
         "{replay}"
@@ -298,8 +312,7 @@ async fn later_replacement_edits_the_original_span_not_inserted_text() {
     assert_eq!(preview["success"], true, "{preview}");
     assert_eq!(preview["applied_count"], 2, "{preview}");
     assert_eq!(
-        preview["diff"],
-        "@@ -1,2 +1,3 @@\n fn keep() {}\n-fn target() {}\n+fn target() {}\n+fn target_renamed() {}",
+        preview["diff"], "@@ -1,2 +1,3 @@\n fn keep() {}\n fn target() {}\n+fn target_renamed() {}",
         "{preview}"
     );
     assert_eq!(read_file(&dir, "src/main.rs"), original);
