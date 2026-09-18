@@ -74,7 +74,7 @@ async fn health_scores_two_isolated_modules_and_distinguishes_scope() {
     let summary = call_health(&fixture, json!({})).await;
     assert_eq!(
         extract_text(&summary.value),
-        "**quality_signal:** 8706\n**files_analyzed:** 2\n"
+        "**files_analyzed:** 2\n**quality_signal:** 8706\n"
     );
 
     let summary_json = call_health(&fixture, json!({"format": "json"})).await;
