@@ -173,24 +173,26 @@ fn assert_complete_page(payload: &Value, commit: &str, tree: &str, hits: Value) 
     assert_eq!(visible_hits(payload), hits, "{payload}");
 }
 
-fn visible_hits(payload: &Value) -> Vec<Value> {
-    payload["results"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|hit| {
-            json!({
-                "name": hit["name"],
-                "qualified_name": hit["qualified_name"],
-                "kind": hit["kind"],
-                "path": hit["path"],
-                "branch": hit["branch"],
-                "source_reference": hit["source_reference"],
-                "source_revision": hit["source_revision"],
-                "source_tree": hit["source_tree"],
+fn visible_hits(payload: &Value) -> Value {
+    Value::Array(
+        payload["results"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|hit| {
+                json!({
+                    "name": hit["name"],
+                    "qualified_name": hit["qualified_name"],
+                    "kind": hit["kind"],
+                    "path": hit["path"],
+                    "branch": hit["branch"],
+                    "source_reference": hit["source_reference"],
+                    "source_revision": hit["source_revision"],
+                    "source_tree": hit["source_tree"],
+                })
             })
-        })
-        .collect()
+            .collect(),
+    )
 }
 
 fn git(project: &Path, args: &[&str]) -> String {
