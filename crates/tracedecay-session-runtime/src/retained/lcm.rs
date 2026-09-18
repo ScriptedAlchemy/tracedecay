@@ -527,22 +527,7 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
         })?;
         let health = lcm_doctor_health(report);
         let projection = self.projection_serving_status().map(lcm_doctor_projection);
-        let status = match health.status {
-            // A healthy store whose projection is still converging (or has no
-            // serving worker) is partial evidence: nothing is wrong with the
-            // schema, but what it serves is not yet the preserved history.
-            LcmDoctorHealthStatusV1::Complete
-                if projection.as_ref().is_some_and(|projection| {
-                    projection.state != LcmDoctorProjectionStateV1::Current
-                }) =>
-            {
-                RetainedOutcomeStatusV1::Partial
-            }
-            LcmDoctorHealthStatusV1::Complete => RetainedOutcomeStatusV1::Complete,
-            LcmDoctorHealthStatusV1::Partial => RetainedOutcomeStatusV1::Partial,
-            LcmDoctorHealthStatusV1::Unavailable => RetainedOutcomeStatusV1::Unavailable,
-            LcmDoctorHealthStatusV1::Locked => RetainedOutcomeStatusV1::Locked,
-        };
+        let status = lcm_doctor_outcome_status(&health, projection.as_ref());
         // The health reason (a failed probe and its storage error, or a path
         // API refusal) is the operator's only pointer to why diagnosis did
         // not complete, so the result carries it at the top as well.
@@ -569,6 +554,36 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
                 retrieval.projection_serving_status()
             }
             DirectRetainedLcmAuthority::Profile { .. } => None,
+        }
+    }
+}
+
+fn lcm_doctor_outcome_status(
+    health: &LcmDoctorHealthV1,
+    projection: Option<&LcmDoctorProjectionV1>,
+) -> RetainedOutcomeStatusV1 {
+    match health.status {
+        // A healthy store whose projection is still converging (or has no
+        // serving worker) is partial evidence: nothing is wrong with the
+        // schema, but what it serves is not yet the preserved history.
+        LcmDoctorHealthStatusV1::Complete
+            if projection.is_some_and(|projection| {
+                projection.state != LcmDoctorProjectionStateV1::Current
+            }) =>
+        {
+            RetainedOutcomeStatusV1::Partial
+        }
+        LcmDoctorHealthStatusV1::Complete => RetainedOutcomeStatusV1::Complete,
+        LcmDoctorHealthStatusV1::Partial
+        | LcmDoctorHealthStatusV1::Unavailable
+        | LcmDoctorHealthStatusV1::Locked => {
+            // The doctor ran and observed this state. Projecting its diagnostic
+            // payload as an authority-unavailable pre-admission problem made
+            // the CLI reconnect every 250 ms until its 120 s deadline and
+            // discarded the only explanation (for example, the synchronous
+            // size budget). Preserve the exact health state/reason in the
+            // payload and mark the evidence itself partial.
+            RetainedOutcomeStatusV1::Partial
         }
     }
 }
@@ -1035,4 +1050,42 @@ pub(super) fn time_filter(
     parsed
         .map(Some)
         .ok_or(RetainedSurfaceExecutionErrorV1::InvalidRequest)
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_contracts::retained_surfaces::{
+        LcmAuthorityOutcomeV1, LcmDoctorHealthStatusV1, LcmDoctorHealthV1, LcmDoctorResultV1,
+        RetainedOutcomeStatusV1, RetainedSurfaceResultV1,
+    };
+
+    use super::lcm_doctor_outcome_status;
+
+    #[test]
+    fn diagnosed_unavailable_health_remains_a_partial_doctor_result() {
+        for health_status in [
+            LcmDoctorHealthStatusV1::Unavailable,
+            LcmDoctorHealthStatusV1::Locked,
+        ] {
+            let health = LcmDoctorHealthV1 {
+                status: health_status,
+                findings: Vec::new(),
+                reason: Some("synchronous_diagnosis_size_budget_exceeded".to_owned()),
+            };
+            let status = lcm_doctor_outcome_status(&health, None);
+            let result = RetainedSurfaceResultV1::LcmDoctor(LcmDoctorResultV1 {
+                status,
+                authority_outcome: LcmAuthorityOutcomeV1::Ready,
+                health: Some(health),
+                projection: None,
+                reason: Some("synchronous_diagnosis_size_budget_exceeded".to_owned()),
+            });
+
+            assert_eq!(status, RetainedOutcomeStatusV1::Partial);
+            assert!(
+                result.evidence_facts().is_ok(),
+                "the observed health state is the doctor's diagnostic payload, not an unmounted authority"
+            );
+        }
+    }
 }

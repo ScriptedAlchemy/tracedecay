@@ -1,12 +1,14 @@
 name: Release
 
+# Dispatched on `master` by release-please after it creates the immutable
+# tag. GitHub Actions caches are scoped by the workflow run ref: a run on a
+# unique tag cannot restore the previous tag's cache, while master can reuse
+# the same target/profile dependency cache across releases.
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Existing stable release tag to recover"
+        description: "Stable release tag to build or recover"
         required: true
         type: string
 
@@ -15,22 +17,17 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
+  RELEASE_TAG: ${{ inputs.release_tag }}
   TRACEDECAY_SKIP_DASHBOARD_BUILD: "1"
 
 concurrency:
-  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
+  group: release-${{ inputs.release_tag }}
   cancel-in-progress: false
 
 jobs:
   validate-release:
     name: Resolve release source
-    if: >-
-      github.repository == 'ScriptedAlchemy/tracedecay' &&
-      (
-        (github.event_name == 'release' && !github.event.release.prerelease) ||
-        github.event_name == 'workflow_dispatch'
-      )
+    if: github.repository == 'ScriptedAlchemy/tracedecay'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -50,8 +47,7 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
           persist-credentials: false
 
-      - name: Validate manual stable recovery
-        if: github.event_name == 'workflow_dispatch'
+      - name: Validate stable release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -72,16 +68,14 @@ jobs:
           [[ "$version" != *-* ]]
           tag="v${version}"
           test "$RELEASE_TAG" = "$tag"
-          test "$GITHUB_REF" = "refs/tags/${tag}"
-          test "$GITHUB_SHA" = "$source_sha"
-          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
-            git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
-            tag_sha="$(git rev-list -n 1 "$tag")"
-            if [[ "$tag_sha" != "$source_sha" ]]; then
-              echo "::error::${tag} targets ${tag_sha}, not release source ${source_sha}"
-              exit 1
-            fi
+          test "$GITHUB_REF" = "refs/heads/master"
+          git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
+          tag_sha="$(git rev-list -n 1 "$tag")"
+          if [[ "$tag_sha" != "$source_sha" ]]; then
+            echo "::error::${tag} targets ${tag_sha}, not release source ${source_sha}"
+            exit 1
           fi
+          git merge-base --is-ancestor "$source_sha" "$GITHUB_SHA"
           {
             echo "source_sha=${source_sha}"
             echo "source_epoch=${source_epoch}"
@@ -104,6 +98,8 @@ jobs:
             --repo "${{ github.repository }}" \
             --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \
             --source-digest "$source_sha" \
+            --signer-ref "refs/tags/${tag}" \
+            --signer-ref "refs/heads/master" \
             --asset-names retained-asset-names \
             --download-dir retained-assets
 
@@ -505,6 +501,8 @@ jobs:
             --repo "${{ github.repository }}" \
             --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \
             --source-digest "$SOURCE_SHA" \
+            --signer-ref "refs/tags/${TAG}" \
+            --signer-ref "refs/heads/master" \
             --asset-names retained-asset-names \
             --download-dir retained-assets
           while IFS= read -r asset; do
@@ -663,6 +661,8 @@ jobs:
             --repo "${{ github.repository }}" \
             --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \
             --source-digest "$SOURCE_SHA" \
+            --signer-ref "refs/tags/${TAG}" \
+            --signer-ref "refs/heads/master" \
             --files remote-assets/binaries/* remote-assets/mcpbs/*
 
       - name: Mark stable release as latest
