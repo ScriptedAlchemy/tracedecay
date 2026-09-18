@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.44](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.43...v0.1.0-beta.44) (2026-09-18)
+
+
+### Bug Fixes
+
+* **clones:** exclude oversized bodies instead of parking the projection ([3d64ef5](https://github.com/ScriptedAlchemy/tracedecay/commit/3d64ef5b2dc1d7be5034ce452e51f069c34b2955))
+* **clones:** exclude oversized bodies instead of parking the projection ([51db8b9](https://github.com/ScriptedAlchemy/tracedecay/commit/51db8b98bb1588286b926245dc94ecabeec02d9d))
+* **release:** upload only the beta archive as the binary artifact ([2f44a63](https://github.com/ScriptedAlchemy/tracedecay/commit/2f44a63aa3f0d19655da74df974037dfbe0503fd))
+* **release:** upload only the beta archive as the binary artifact ([ba2bf3c](https://github.com/ScriptedAlchemy/tracedecay/commit/ba2bf3c49e0dd60fe9ca9ab397be74a5288d3cd4))
+
 ## [0.1.0-beta.43](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.42...v0.1.0-beta.43) (2026-09-18)
 
 
