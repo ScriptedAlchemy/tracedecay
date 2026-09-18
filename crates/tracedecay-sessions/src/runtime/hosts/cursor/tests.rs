@@ -354,3 +354,189 @@ fn user_scope_selects_one_physical_authority_for_a_mirrored_session() {
         Some("session-mirrored")
     );
 }
+
+/// Fixture for the replayed-ingest journey: one project-scoped Cursor hook
+/// event whose transcript already carries two records.
+fn cursor_replay_fixture() -> (tempfile::TempDir, String, ProjectId) {
+    // Production installs the process-wide capture authorities during daemon
+    // bootstrap; capture refuses with a typed `BackgroundResourceUnavailable`
+    // without them.
+    crate::runtime::observation::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+    let project = tempfile::tempdir().unwrap();
+    let transcript = project.path().join("cursor-replayed.jsonl");
+    std::fs::write(
+        &transcript,
+        concat!(
+            "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Edit the shared file.\"}]}}\n",
+            "{\"role\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Saved src/lib.rs.\"}]}}\n"
+        ),
+    )
+    .unwrap();
+    let event = json!({
+        "session_id": "session-replayed",
+        "conversation_id": "conversation-replayed",
+        "generation_id": "generation-replayed",
+        "transcript_path": transcript,
+        "workspace_roots": [project.path()],
+    })
+    .to_string();
+    let project_id = ProjectId::new("project.cursor-replayed").unwrap();
+    (project, event, project_id)
+}
+
+/// A pass that admits observations and then loses the projection queue to a
+/// peer drainer still committed those observations.
+///
+/// This is the production interleaving on a slow runner: the explicit hook
+/// ingest admits the transcript, the project catch-up sweep's scheduler tick
+/// drains the scope-wide projection queue, and the ingest's own drain then
+/// finds nothing left. Reporting only the projections this pass drained itself
+/// turns a real commit into a terminal, non-retryable `accepted_for_replay`.
+#[tokio::test]
+async fn cursor_ingest_reports_its_commit_when_a_peer_drains_the_projection_queue() {
+    let (_project, event, project_id) = cursor_replay_fixture();
+    let admission = crate::admission::test_support::MemoryHostAdmission::default();
+    let scope = ObservationScopeV1::Project {
+        project_id: project_id.clone(),
+    };
+
+    // Admit exactly as the hook ingest does, then let a peer empty the queue
+    // before the ingest's own drain can run.
+    let transcript: PathBuf = serde_json::from_str::<Value>(&event).unwrap()["transcript_path"]
+        .as_str()
+        .map(PathBuf::from)
+        .unwrap();
+    let source_event: Value = serde_json::from_str(&event).unwrap();
+    let context = cursor_observation_context(&source_event, &transcript, false);
+    let progress = admit_cursor_jsonl_observations(
+        "session-replayed",
+        &transcript,
+        &context,
+        &admission,
+        &scope,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        progress.frames_persisted > 0,
+        "the admit persists the transcript frames: {progress:?}"
+    );
+    let peer = projection::drain_cursor_observation_projections(
+        &admission,
+        &scope,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        peer.messages_upserted > 0,
+        "the peer drainer takes the queued rows: {peer:?}"
+    );
+
+    // The ingest now re-scans an exhausted source against an empty queue.
+    let stats = try_ingest_cursor_transcript_event_capped_with_admission(
+        &event, project_id, &admission, None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        stats.messages_upserted, 0,
+        "the peer already projected these rows: {stats:?}"
+    );
+    assert!(
+        stats.observations_committed > 0 || stats.exact_duplicate,
+        "an ingest whose observations are durable must not look like a pass that captured nothing: {stats:?}"
+    );
+}
+
+/// A pass whose observations a peer drainer already projected must not report
+/// the same zero-change accounting as a pass that captured nothing.
+///
+/// The daemon's project catch-up sweep drains the whole Cursor projection
+/// queue for a scope, not just the rows it admitted itself, and projection
+/// consumes the queue row. So an explicit hook ingest that admitted on a
+/// deferred first call can find the queue empty on its next call even though
+/// its own observations are durably committed. Reported as an unqualified
+/// zero, the admission completes as `accepted_for_replay`: terminal,
+/// non-retryable, and proving nothing.
+#[tokio::test]
+async fn replayed_cursor_ingest_reports_an_exact_duplicate_not_a_bare_replay() {
+    let (_project, event, project_id) = cursor_replay_fixture();
+    let admission = crate::admission::test_support::MemoryHostAdmission::default();
+
+    let committed = try_ingest_cursor_transcript_event_capped_with_admission(
+        &event,
+        project_id.clone(),
+        &admission,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        committed.messages_upserted > 0,
+        "the first pass admits and projects the transcript: {committed:?}"
+    );
+    assert_eq!(
+        committed.observations_committed, 2,
+        "admission is the commit and is accounted for independently of whichever \
+         drainer projects it: {committed:?}"
+    );
+    assert!(
+        !committed.exact_duplicate,
+        "a pass that committed rows is not a duplicate: {committed:?}"
+    );
+
+    // Same event again: the source cursor is at end of file and the projection
+    // queue this scope shares with the catch-up sweep is already empty.
+    let replayed = try_ingest_cursor_transcript_event_capped_with_admission(
+        &event, project_id, &admission, None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        replayed.messages_upserted, 0,
+        "an already-projected replay upserts nothing: {replayed:?}"
+    );
+    assert!(
+        !replayed.source_deferred,
+        "nothing is left to defer: {replayed:?}"
+    );
+    assert!(
+        replayed.exact_duplicate,
+        "a replay of already-durable observations is an exact duplicate, not a bare accepted-for-replay: {replayed:?}"
+    );
+}
+
+/// The duplicate verdict is evidence, not a default: a source this pass has
+/// never opened carries no proof that anything was committed before.
+#[tokio::test]
+async fn first_cursor_ingest_of_an_empty_source_is_never_an_exact_duplicate() {
+    crate::runtime::observation::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+    let project = tempfile::tempdir().unwrap();
+    let transcript = project.path().join("cursor-empty.jsonl");
+    std::fs::write(&transcript, "").unwrap();
+    let event = json!({
+        "session_id": "session-empty",
+        "transcript_path": transcript,
+        "workspace_roots": [project.path()],
+    })
+    .to_string();
+    let admission = crate::admission::test_support::MemoryHostAdmission::default();
+
+    let stats = try_ingest_cursor_transcript_event_capped_with_admission(
+        &event,
+        ProjectId::new("project.cursor-empty").unwrap(),
+        &admission,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(stats.messages_upserted, 0);
+    assert!(
+        !stats.exact_duplicate,
+        "a first-ever scan proves no prior commit: {stats:?}"
+    );
+}
