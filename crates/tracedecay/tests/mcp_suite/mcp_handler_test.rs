@@ -30,6 +30,8 @@ mod schema_test;
 mod session_search_test;
 #[cfg(feature = "test-transport")]
 mod shell_dead_code_test;
+#[cfg(feature = "test-transport")]
+mod skill_list_test;
 mod skills_automation_test;
 mod status_runtime_test;
 mod unsafe_patterns_test;
