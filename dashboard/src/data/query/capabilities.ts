@@ -4,7 +4,7 @@
  * The daemon has reported a typed multi-root capability on this route for as
  * long as the route has existed: `mod.rs::capabilities` builds it from
  * `state.authorized_scope_set` as the generated `MultiRootCapabilityV1`, which
- * is a two-state union — `mounted`, carrying the scope-set id, revision,
+ * is a two-state union, `mounted`, carrying the scope-set id, revision,
  * digest and root count, or `unavailable`, carrying the daemon's own sentence
  * about why. Nothing on this dashboard read it. The capability was answered on
  * every page load and dropped on the floor.
@@ -29,7 +29,7 @@ export const CAPABILITIES_URL = '/api/capabilities';
  * Only the members this dashboard reads, and `multi_root` is optional.
  *
  * A daemon predating the capability answers a bundle without the member at
- * all, and that is not a malformed response — it is an older daemon, which is
+ * all, and that is not a malformed response, it is an older daemon, which is
  * a different reading from "a scope set is not mounted" and must not be
  * flattened into it. `passthrough` keeps the rest of the bundle intact for the
  * fixture gate, which parses the same body against `CapabilitiesSchema`.

@@ -1,4 +1,4 @@
-//! `GET /api/storage/telemetry` — per-store size, free-page ratio, and typed
+//! `GET /api/storage/telemetry`, per-store size, free-page ratio, and typed
 //! budget/growth dimensions served over the dashboard envelope.
 //!
 //! The size samples are **real**: the dashboard invokes the application
@@ -10,7 +10,7 @@
 //! - **budget**: soft budgets are a field of [`tracedecay_configuration::RetentionConfig`]
 //!   (`store_soft_budgets_bytes`). That tree is not a registered configuration
 //!   setting, so a control-plane snapshot cannot admit one. A store with no
-//!   entry reports `unset` — *no budget is configured*, which is deliberately
+//!   entry reports `unset`, *no budget is configured*, which is deliberately
 //!   distinct from "the server cannot evaluate budgets". A config or sample
 //!   the dashboard cannot read reports `unknown`, never a fabricated
 //!   "within budget".
@@ -20,7 +20,7 @@
 //!   not an execution event.
 //!
 //! Store identity: the dashboard holds several *roles* (`graph`, `memory`,
-//! `lcm`, `savings`) that can resolve to the **same** store file — in project
+//! `lcm`, `savings`) that can resolve to the **same** store file, in project
 //! storage mode the graph and project-memory roles are the same database. Roles
 //! are therefore deduplicated by store file identity: one card per real store,
 //! carrying every role it serves, instead of the same store reported twice with

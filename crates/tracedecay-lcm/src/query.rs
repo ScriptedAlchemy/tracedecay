@@ -55,7 +55,7 @@ const RAW_ROLE_PENALTY_CASE: &str =
 /// Maximum grep hits retained per session in a cross-session (`scope: all`)
 /// page. Keeps one noisy session (e.g. a review session full of transcript
 /// inventory tool calls) from flooding the page and crowding out distinct
-/// sessions. Single-session scopes (`current`/`session`) are exempt — capping
+/// sessions. Single-session scopes (`current`/`session`) are exempt, capping
 /// there would silently drop legitimate same-session recall.
 const PER_SESSION_HIT_CAP: usize = 3;
 
@@ -613,8 +613,8 @@ impl ExpandQueryAssembler {
     ) -> Option<(String, LcmContentRange)> {
         // Drop pure machine-noise blocks (base64 thinking-signature blobs and
         // other binary-ish payloads) before they consume the context budget or
-        // pollute the synthesized answer. Dropping is silent — no pagination
-        // entry — because there is nothing meaningful to resume.
+        // pollute the synthesized answer. Dropping is silent, no pagination
+        // entry, because there is nothing meaningful to resume.
         if is_noise_block_content(content) {
             return None;
         }

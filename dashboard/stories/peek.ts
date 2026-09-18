@@ -2,7 +2,7 @@
  * Design-iteration shot against the fixture-backed dev server.
  *
  * `stories/shot.ts` points a browser at a URL and screenshots it, which needs a
- * daemon serving a BUILT bundle — no use while iterating on source. This spawns
+ * daemon serving a BUILT bundle, no use while iterating on source. This spawns
  * `rsbuild dev` over the working tree, serves every `/api` call from the same
  * fixtures the audit uses, and shoots the surfaces named on the command line:
  *
@@ -69,7 +69,7 @@ for (const target of targets) {
     try {
       localStorage.setItem('td-theme', t);
     } catch {
-      /* storage disabled — the dataset alone still themes */
+      /* storage disabled. The dataset alone still themes */
     }
     document.documentElement.dataset['theme'] = t;
   }, theme);

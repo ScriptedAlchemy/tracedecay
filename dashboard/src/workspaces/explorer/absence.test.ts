@@ -4,7 +4,7 @@ import { ExplorerQueryRunV1Schema } from '../../contracts/generated.ts';
 
 /**
  * Coverage fields a source may report. Defaults describe a source that examined
- * its whole denominator and accounted for every unit — the only shape that may
+ * its whole denominator and accounted for every unit, the only shape that may
  * earn a confirmed absence.
  */
 function coverage(over: Record<string, unknown> = {}) {

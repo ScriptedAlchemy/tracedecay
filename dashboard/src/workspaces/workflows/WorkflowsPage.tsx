@@ -22,7 +22,7 @@ import {
 } from './workflowQueries.ts';
 
 /**
- * Workflows — channel fourteen: the definition lifecycle ledger.
+ * Workflows, channel fourteen: the definition lifecycle ledger.
  *
  * Three regions over the canonical `/application/workflow` routes. The
  * registry (list-definitions) names every stable identity and folds its
@@ -98,8 +98,8 @@ export function WorkflowsPage() {
         <Corners />
         <Ticks />
 
-        {/* Three bays at desktop width; one column when the viewport — or a
-          * 200% zoom — cannot pay for three, so registry, detail and run stay
+        {/* Three bays at desktop width; one column when the viewport, or a
+          * 200% zoom, cannot pay for three, so registry, detail and run stay
           * independently addressable rather than clipped. */}
         <div className="grid min-w-0 gap-3 xl:grid-cols-[minmax(18rem,22rem)_minmax(0,1fr)_minmax(20rem,26rem)]">
           <div className="flex min-w-0 flex-col gap-3">

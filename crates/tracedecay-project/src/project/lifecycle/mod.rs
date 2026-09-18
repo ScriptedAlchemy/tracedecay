@@ -301,7 +301,7 @@ impl TraceDecay {
         let project_id = storage::registered_project_id(&store_layout)?;
         // Persist the minted identity in the sanctioned repo-adjacent anchor:
         // the `.git/` repository identity marker. A non-git root persists
-        // nothing here — its identity is deterministic from the canonical
+        // nothing here, its identity is deterministic from the canonical
         // path and durably owned by the profile registry. TraceDecay never
         // creates files inside a project's working tree.
         tracedecay_runtime_core::storage::write_repository_identity_marker(

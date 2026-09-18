@@ -1,4 +1,4 @@
-//! `GET /api/code-index/freshness` — per-mounted-worktree code-index generation
+//! `GET /api/code-index/freshness`, per-mounted-worktree code-index generation
 //! and freshness state.
 //!
 //! The authoritative source is the daemon-owned
@@ -117,7 +117,7 @@ async fn project_code_index_freshness(
                 )
             } else {
                 format!(
-                    "scheduler freshness state is {}; only fresh serves as current",
+                    "scheduler freshness state is {}; only fresh is current",
                     worktree.staleness_state.map_or(
                         "unreported",
                         CodeIndexStalenessStateV1::as_str,
@@ -259,7 +259,7 @@ mod tests {
             assert_eq!(
                 envelope.coverage.omission_reasons,
                 vec![format!(
-                    "scheduler freshness state is {staleness}; only fresh serves as current"
+                    "scheduler freshness state is {staleness}; only fresh is current"
                 )]
             );
         }

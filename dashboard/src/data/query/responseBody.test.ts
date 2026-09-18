@@ -3,7 +3,7 @@
  *
  * Two readings must never be confused: a body that is not JSON, and a body
  * whose read this dashboard cancelled. `response.json()` rejects for both, and
- * the catch-all decoders this replaced reported the second as the first — a
+ * the catch-all decoders this replaced reported the second as the first, a
  * cancellation laundered into a schema mismatch. The contract cases each seam
  * adds on top (payload, envelope, registry) live beside those seams.
  */

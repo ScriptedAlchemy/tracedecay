@@ -57,7 +57,7 @@ export function GradeTag({
 }
 
 /** A named absence: the field the plate would show, and the reason the
- * contract does not carry it. Always text — never a blank cell. */
+ * contract does not carry it. Always text, never a blank cell. */
 export function Absence({
   field,
   reason,

@@ -137,8 +137,8 @@ pub(super) fn apply_wake(
 /// Move every command already sitting in `receiver` into `queue`.
 ///
 /// Each auxiliary channel (exact SQL, incremental vacuum, online backup,
-/// checkpoint) drains identically — park the command, stop on empty, and latch
-/// `input_closed` once the sender is gone — so they share this one loop. The
+/// checkpoint) drains identically, park the command, stop on empty, and latch
+/// `input_closed` once the sender is gone, so they share this one loop. The
 /// product-write channel does not: it settles duplicates through
 /// [`drain_ingress`] instead of parking them.
 pub(super) fn drain_command_ingress<T>(

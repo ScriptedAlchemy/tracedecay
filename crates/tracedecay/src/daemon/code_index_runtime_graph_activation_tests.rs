@@ -1028,7 +1028,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
     let seated_census = if corrupt_graph || dirty_before_restart {
         // A decoded census is a strictly later state than the text-serving
         // head this case already settled on: `latest_complete_ready_decoded_*`
-        // abstains — returning no decoded owner at all — while a reconcile
+        // abstains, returning no decoded owner at all, while a reconcile
         // pass is in flight or the scheduler mutex is momentarily held, and
         // that abstention reads back as a statistics-free projection. Sampling
         // once therefore observes a non-terminal state on any host where the

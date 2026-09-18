@@ -3,9 +3,9 @@
 //! `0a9ebc97a` gave every federated root the one shared profile-store locator,
 //! and `8578e46eb` stopped pairing the workspace's factories with the
 //! authorized scope set by list position. The two lists hold the same roots in
-//! different orders — factories in `canonicalize_lsp_roots` scope-digest order,
+//! different orders, factories in `canonicalize_lsp_roots` scope-digest order,
 //! the scope set in its own (project, repository, worktree, reference,
-//! canonical root) order — so the old `zip` attributed one root's factory to
+//! canonical root) order, so the old `zip` attributed one root's factory to
 //! another root's locator and refused a workspace whose every root was in fact
 //! its own owner, for whichever id orderings happened to disagree.
 //!

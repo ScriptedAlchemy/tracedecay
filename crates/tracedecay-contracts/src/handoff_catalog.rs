@@ -120,7 +120,7 @@ where
 /// The three token operations issue or consume a grant; the enumeration only
 /// looks. Declaring a pure read through the effect-shaped branch below would
 /// catalogue it as a durable administrative effect with a required idempotency
-/// key and an effect receipt — a contract the operation cannot honour, since it
+/// key and an effect receipt, a contract the operation cannot honour, since it
 /// mints no effect to reconcile and nothing to be idempotent about.
 const fn is_read_operation(operation: &str) -> bool {
     matches!(operation.as_bytes(), b"list_task_handoffs")
@@ -199,7 +199,7 @@ fn handoff_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVali
             RevalidationPoint::ExpectedState,
         ])?,
         // `Partial` is retained for the read: hitting the enumeration ceiling
-        // is exactly a partial answer. `EffectUnknown` is not — it is the state
+        // is exactly a partial answer. `EffectUnknown` is not. It is the state
         // of an effect whose commit is in doubt, and an operation that writes
         // nothing can never leave a commit in doubt.
         terminal_states: if reads {

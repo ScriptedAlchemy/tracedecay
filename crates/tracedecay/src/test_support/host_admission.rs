@@ -1,7 +1,7 @@
 //! Root MCP composition over the registered host-admission test runtime.
 //!
-//! The runtime itself — registered databases, session registry, and the
-//! project-graph opens through it — lives in `tracedecay-project`; this
+//! The runtime itself, registered databases, session registry, and the
+//! project-graph opens through it, lives in `tracedecay-project`; this
 //! module keeps its historical path and adds the pieces that need the root's
 //! MCP server: tool calls through the registry-aware dispatcher and direct
 //! server construction contexts.

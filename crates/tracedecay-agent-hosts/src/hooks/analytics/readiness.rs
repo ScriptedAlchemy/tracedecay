@@ -118,7 +118,7 @@ pub(crate) struct TimeoutOutcomesByHost {
     pub(crate) host: ReadinessHost,
     pub(crate) timed_out_true: u64,
     pub(crate) timed_out_false: u64,
-    /// `timeout.timed_out` null/missing — distinct from measured false.
+    /// `timeout.timed_out` null/missing, distinct from measured false.
     pub(crate) timed_out_unavailable: u64,
     pub(crate) budget_ms_present: u64,
     pub(crate) budget_ms_absent: u64,
@@ -304,7 +304,7 @@ type MutableDispositionCounts = BTreeMap<DispositionSeriesKey, DispositionSeries
 /// Aggregate real `hook_completed` telemetry into bounded readiness distributions.
 ///
 /// Null/missing numeric fields increment `absent_count` and never enter buckets as zero.
-/// Missing or invalid dispositions fold into closed typed `unknown` values — never
+/// Missing or invalid dispositions fold into closed typed `unknown` values, never
 /// default-success. Hook names and reason codes are not emitted. Daemon processing
 /// duration is reported unavailable (upstream blocker).
 pub fn aggregate_hook_completed_readiness(rows: &[Value]) -> HookCompletedReadinessDistributions {
@@ -340,7 +340,7 @@ pub fn aggregate_hook_completed_readiness(rows: &[Value]) -> HookCompletedReadin
             rows_folded_to_other_host = rows_folded_to_other_host.saturating_add(1);
         }
 
-        // TRUE host IPC RTT. Null means unavailable — never treat as 0 RTT.
+        // TRUE host IPC RTT. Null means unavailable, never treat as 0 RTT.
         let latency = latency_by_host.entry(host).or_default();
         latency
             .wall_time_us

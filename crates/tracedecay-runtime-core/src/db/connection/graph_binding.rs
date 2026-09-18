@@ -321,7 +321,7 @@ mod tests {
         .await
         .expect("database runtime");
 
-        // Before any record, every stamp is a miss — never a fabricated hit.
+        // Before any record, every stamp is a miss, never a fabricated hit.
         assert!(database.memory_graph_source_watermark_at(7).is_none());
 
         let first = GraphWatermark::new("sha256:memo-stamp-seven").expect("first watermark");
@@ -493,7 +493,7 @@ mod tests {
                 .expect("valid never-activated projection"),
         );
         // A runtime that never becomes available stays a typed refusal at
-        // every read — never a panic, silent success, or empty result.
+        // every read, never a panic, silent success, or empty result.
         assert!(matches!(
             deferred.verified_snapshot(&projection, FactReadControl::new(Arc::new(|| false))),
             Err(GraphDbError::Unavailable { .. })

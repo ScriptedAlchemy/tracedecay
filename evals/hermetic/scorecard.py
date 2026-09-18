@@ -37,7 +37,7 @@ Usage:
     python3 evals/hermetic/scorecard.py <results.jsonl> [--corpus <corpus.jsonl>]
 
 Emits a human-readable table on stdout followed by a machine JSON block
-(delimited so a baseline diff can extract it) — exit 0 even on an empty or
+(delimited so a baseline diff can extract it), exit 0 even on an empty or
 missing results file (prints 0/0).
 """
 
@@ -145,7 +145,7 @@ def aggregate(results: list[dict], corpus: list[dict] | None = None) -> dict:
         stats["adoption_pct"] = adoption_pct(stats["triggered"], stats["opportunities"])
 
     # OVERALL adoption sums only the adoption buckets. `precision` measures
-    # restraint (don't-store-ephemeral) and `other` is uncategorized — counting
+    # restraint (don't-store-ephemeral) and `other` is uncategorized, counting
     # correct abstention as adoption would bias the headline upward.
     total_opp = sum(buckets[n]["opportunities"] for n in order if n in BUCKETS)
     total_trig = sum(buckets[n]["triggered"] for n in order if n in BUCKETS)

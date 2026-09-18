@@ -5,7 +5,7 @@
 //! generated-directory skips, the same refusal to follow links. A second walker
 //! built next to this one would drift, and a scan that disagrees with the one
 //! the indexer used reports findings the rest of the product cannot see. The
-//! walk is therefore public rather than crate-private — the audit in the root
+//! walk is therefore public rather than crate-private, the audit in the root
 //! crate reuses this policy instead of restating it.
 
 use std::path::{Path, PathBuf};

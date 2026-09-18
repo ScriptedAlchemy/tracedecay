@@ -21,7 +21,7 @@ struct CommittedCursorCandidate {
 
 /// Reads the current observation frontier: `COALESCE(MAX(sequence), 0)` over
 /// `observations`. The row cursor lives only inside this function, so it is
-/// fully consumed and dropped before returning — see
+/// fully consumed and dropped before returning, see
 /// `observation_projection::rebuild::read_observation_frontier` for why a
 /// caller doing further reads or writes on the same connection depends on
 /// that.

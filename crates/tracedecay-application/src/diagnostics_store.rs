@@ -6,7 +6,7 @@
 //! survive restarts. Publication is version-monotone: a newer clean
 //! generation clears or supersedes prior current records deterministically,
 //! stale findings never cross snapshots, and dirty editor overlays live only
-//! in memory — they are never sealed into the durable store.
+//! in memory, they are never sealed into the durable store.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -407,7 +407,7 @@ impl<'a> DiagnosticsStore<'a> {
     ///    name exactly `generation` (a clean publication is single-generation
     ///    and carries no stale rows);
     /// 2. every prior `Current` record from any other generation is marked
-    ///    `Cleared` by this generation — a clean generation clears prior
+    ///    `Cleared` by this generation, a clean generation clears prior
     ///    diagnostics, including the empty publication (Plan 35: "A newer
     ///    version clears or supersedes the prior publication
     ///    deterministically");
@@ -735,7 +735,7 @@ impl<'a> DiagnosticsStore<'a> {
         collect_rows(&mut rows, operation).await
     }
 
-    /// Current records bound to `generation` — the only set eligible for
+    /// Current records bound to `generation`, the only set eligible for
     /// active publication.
     pub async fn current_records(
         &self,

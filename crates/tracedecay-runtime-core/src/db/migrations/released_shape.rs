@@ -2,7 +2,7 @@
 //! retired projections.
 //!
 //! Every release from v0.1.0-beta.25 through v0.1.0-beta.37 created one
-//! byte-identical `tracedecay.db` stamped `user_version` 34 — the exact SQL
+//! byte-identical `tracedecay.db` stamped `user_version` 34, the exact SQL
 //! lives in `tests/fixtures/project-store-released-v34.sql`, whose header
 //! carries the tag-to-inventory table. The current contract differs from it in
 //! objects that hold no data of their own (two absent indexes, a renamed
@@ -26,7 +26,7 @@ const OPERATION: &str = "converge released project schema";
 ///
 /// A table is rebuilt when its stored DDL differs from the one the current
 /// contract expects, so this list needs no record of which release changed
-/// what — [`super::final_shape`] stays the single authority on the expected
+/// what. [`super::final_shape`] stays the single authority on the expected
 /// shape.
 struct ReleasedTableRebuild {
     table: &'static str,

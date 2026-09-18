@@ -1,7 +1,7 @@
 /** Loom track model: pure time-window math and axis generation, no DOM. The
  * temporal layout consumes this; tests reason about it directly.
  *
- * Nothing in this module invents a span or a magnitude — every window is
+ * Nothing in this module invents a span or a magnitude, every window is
  * derived from the recorded extent it is clamped against.
  */
 
@@ -98,7 +98,7 @@ export function tickStepFor(spanSeconds: number, width: number): number {
     TICK_STEPS[TICK_STEPS.length - 1]!;
   // The two axis tiers must never say the same thing twice: the fine row wants
   // to sit below whatever the calendar band row is showing. That preference
-  // never outranks legibility, though — dropping under the band unit can cost
+  // never outranks legibility, though, dropping under the band unit can cost
   // several rungs, and a bare "one rung below the band" rule prints 64 ticks
   // across a two-year window. Take the LARGEST rung under the band (fewest
   // ticks), and only if it still keeps ticks no closer than a ~48px pitch;
@@ -177,7 +177,7 @@ function tickLabel(epochSeconds: number, step: number): string {
  * purpose: Brain's `activitySummary.ts` exports `formatDurationMs`, and both
  * take a bare `number`, so a bare `formatDuration` would let either module's
  * formatter be imported into the other's call sites and print a duration off
- * by 1000x with no type error — a wrong number on screen rather than a build
+ * by 1000x with no type error, a wrong number on screen rather than a build
  * failure. Loom's clock is epoch seconds throughout (`formatMoment` multiplies
  * by 1000 to build a `Date`, and the journey extent is padded to 3600).
  */

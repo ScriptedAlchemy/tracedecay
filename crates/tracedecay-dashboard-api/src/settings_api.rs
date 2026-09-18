@@ -847,16 +847,16 @@ fn project_preview_error(
 /// The local preview only refuses a stale revision when the patch carries no
 /// mutation at all: a stale patch that does carry one may still be an exact
 /// idempotent replay, and only the daemon owns that replay authority. So the
-/// authority is the one that rejects a genuinely superseded edit — and it
+/// authority is the one that rejects a genuinely superseded edit, and it
 /// collapses revision and idempotency conflicts into a single opaque
 /// `configuration.conflict`, which names neither the CAS precondition nor the
 /// revision that now holds.
 ///
 /// This re-reads the pinned runtime configuration the same route already
-/// serves as the revision authority. When the revision that now holds is no
+/// uses as the revision authority. When the revision that now holds is no
 /// longer the one this edit expected, the CAS precondition provably failed and
-/// the typed conflict carries both revisions. Every other rejection — an
-/// idempotency conflict against the current revision included — keeps the
+/// the typed conflict carries both revisions. Every other rejection, an
+/// idempotency conflict against the current revision included, keeps the
 /// daemon's own problem envelope rather than being relabeled by a guess.
 fn project_apply_error(
     project_root: &Path,

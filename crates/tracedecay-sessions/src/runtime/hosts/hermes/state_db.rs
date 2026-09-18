@@ -50,7 +50,7 @@ impl HermesReadSql {
     }
 }
 
-/// Column names of the `messages` table — `active` (v12 rewind soft-delete)
+/// Column names of the `messages` table, `active` (v12 rewind soft-delete)
 /// and `reasoning` arrived in later Hermes schema revisions, so the sweep
 /// probes before selecting to stay readable on legacy stores.
 pub async fn message_columns(

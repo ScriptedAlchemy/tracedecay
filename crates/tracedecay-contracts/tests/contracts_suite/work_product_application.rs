@@ -465,7 +465,7 @@ impl WorkHistoryReadPortV1 for PagingHistoryPort {
 }
 
 /// A history port that discloses a `Partial` selection coverage excluding
-/// nothing — a disclosure that contradicts itself.
+/// nothing, a disclosure that contradicts itself.
 struct SelfContradictingCoverageHistoryPort;
 
 impl WorkHistoryReadPortV1 for SelfContradictingCoverageHistoryPort {

@@ -10,7 +10,7 @@
 
 **Spec:** `docs/plans/tracedecay-v2/00-plan-set-index.md`
 
-## Live Handoff Snapshot — 2026-08-23 05:25 UTC
+## Live handoff snapshot, 2026-08-23 05:25 UTC
 
 - Checkout: `/fast/projects/tracedecay`
 - Branch: `cursor/simplify-pr421-hot-paths`
@@ -66,7 +66,7 @@ retention log: succeeded=false, processed_stores=104, deferred_stores=149
 retention degradation: semantic configuration/vector authority unavailable and vector census incomplete
 ```
 
-Earlier writer telemetry from the same old daemon showed 557,009 admitted operations and 556,981 commits, with approximately 3,939 seconds of queue wait and 3,354 seconds of transaction time. Treat this as the leading hypothesis—unchanged transcript rescans plus nearly one SQLite commit per operation—not as proof until the exact merged binary is installed and the identical workload is measured again.
+Earlier writer telemetry from the same old daemon showed 557,009 admitted operations and 556,981 commits, with approximately 3,939 seconds of queue wait and 3,354 seconds of transaction time. Treat this as the leading hypothesis, unchanged transcript rescans plus nearly one SQLite commit per operation, not as proof until the exact merged binary is installed and the identical workload is measured again.
 
 ## Global Constraints
 

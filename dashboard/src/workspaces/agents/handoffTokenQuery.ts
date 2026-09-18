@@ -9,7 +9,7 @@ import { HANDOFF_LIST_TASK_ROUTE } from './handoffTokens.ts';
  *
  * The route is per-session, and this page holds exactly one honest source of
  * session identity: the delegation tree it already read. The NEWEST top is
- * chosen — the most recently started root — because a frontier is read from its
+ * chosen, the most recently started root, because a frontier is read from its
  * leading edge, and the daemon already returns the tree in pre-order with
  * siblings ordered by start.
  *

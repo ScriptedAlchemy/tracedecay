@@ -37,9 +37,9 @@ pub struct WatcherEvent {
 /// understands a documented subset of the `RUST_LOG` grammar rather than the
 /// full directive language: a bare `level` sets the level for every target,
 /// and `target=level` sets the level for targets that start with `target`.
-/// Anything else — span selectors, field predicates, a target with no level —
-/// is recorded as unparsed and reported once, never reinterpreted as
-/// something the operator did not write.
+/// Anything else is recorded as unparsed and reported once, never
+/// reinterpreted as something the operator did not write. That includes span
+/// selectors, field predicates, and a target with no level.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StderrTracingFilter {
     /// Level for targets that no directive names.
@@ -107,7 +107,7 @@ impl StderrTracingFilter {
     }
 
     /// The most verbose level any directive can enable. Only a max-level hint
-    /// for the subscriber — [`Self::level_for_target`] still decides each
+    /// for the subscriber, [`Self::level_for_target`] still decides each
     /// event, so a target directive never globalizes.
     pub fn max_level(&self) -> LevelFilter {
         self.targets
@@ -168,7 +168,7 @@ impl StderrTracingDefault {
 
 /// Installs the process-wide stderr `tracing` subscriber, honoring `RUST_LOG`
 /// over `default`. Additive to the bespoke `[tracedecay] event=` stderr lines
-/// above — both channels share stderr, and tools that parse `event=` lines are
+/// above, both channels share stderr, and tools that parse `event=` lines are
 /// unaffected because tracing output never carries that marker.
 ///
 /// An explicit `RUST_LOG` is operator intent and outranks `default`, including

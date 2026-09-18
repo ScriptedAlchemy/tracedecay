@@ -91,7 +91,7 @@ type RouteChunkBoundaryState = {
   attempt: number;
   /** The loader the current `error`/`attempt` belong to. Every route mounts
    * this same component type at the same Outlet position, so React reconciles
-   * a navigation as a PROP change — the boundary must notice the new loader
+   * a navigation as a PROP change, the boundary must notice the new loader
    * itself rather than assuming a fresh mount. */
   loadedFor: RouteChunkLoader;
 };
@@ -123,7 +123,7 @@ function lazyFor(load: RouteChunkLoader): LazyExoticComponent<ComponentType> {
  * from `/brain` to `/code` updates `load` on the existing instance. The first
  * version of this class computed `lazy(props.load)` once in its constructor,
  * which pinned every client-side navigation to whichever workspace loaded
- * first — the URL and the nav rail moved, the content never did.
+ * first, the URL and the nav rail moved, the content never did.
  */
 export class RouteChunkBoundary extends Component<
   RouteChunkBoundaryProps,

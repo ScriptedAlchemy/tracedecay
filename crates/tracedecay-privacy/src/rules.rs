@@ -17,7 +17,7 @@
 //! Both documents are bound with [`include_str!`], so the ruleset is fixed at
 //! compile time: no filesystem read, no network, no ordering nondeterminism.
 //! Compilation failure is a typed [`CredentialRuleSetError`] that names the
-//! document and the offending rule id. It is never an empty ruleset — a
+//! document and the offending rule id. It is never an empty ruleset, a
 //! detector that silently stops detecting is the one failure mode a privacy
 //! boundary cannot have.
 
@@ -57,7 +57,7 @@ pub(crate) const fn rule_document_bytes() -> [&'static [u8]; 2] {
 /// Upstream's generated "context" rules all open with this preamble: an
 /// unanchored run of identifier bytes ahead of the provider keyword. Its
 /// presence is what distinguishes a rule that matches `provider_key = <secret>`
-/// — an assignment, whose match is mostly context — from one that matches a
+///, an assignment, whose match is mostly context, from one that matches a
 /// self-identifying token. The distinction decides which detector a finding is
 /// attributed to, and a finding that misnames its detector is worse than no
 /// finding.
@@ -236,8 +236,8 @@ impl KeywordMatcher {
 
 /// One compiled credential rule.
 ///
-/// The surface is unchanged from the hand-written era — [`Self::kind`],
-/// [`Self::is_match`], [`Self::ranges`] — so every caller kept working. What
+/// The surface is unchanged from the hand-written era. [`Self::kind`],
+/// [`Self::is_match`], [`Self::ranges`], so every caller kept working. What
 /// changed is behind it: matches now pass a rule's entropy floor and its
 /// allowlists before they count.
 pub struct CredentialPattern {
@@ -377,7 +377,7 @@ struct CompiledAllowlist {
 impl CompiledAllowlist {
     fn excuses(&self, text: &str, whole: Match<'_>, secret: Match<'_>) -> bool {
         // `regexTarget` selects what the *regexes* read. Stopwords always read
-        // the secret, upstream included — pointing them at the match would let
+        // the secret, upstream included, pointing them at the match would let
         // the keyword that triggered the rule excuse it, so `auth = <secret>`
         // would be waved through by the stopword "auth".
         let regex_target = match self.target {
@@ -642,12 +642,12 @@ fn compile_regex(
 /// changing what it means.
 ///
 /// Gitleaks rules are authored for Go's RE2. RE2 and Rust's `regex` share the
-/// important restrictions — no backreferences, no lookaround — which is why the
+/// important restrictions, no backreferences, no lookaround, which is why the
 /// catalogue transfers at all. They disagree in exactly two places, and both
 /// are mechanical:
 ///
 /// * **A literal `{`.** RE2 reads a brace that opens no valid repetition as a
-///   literal; Rust refuses it. Upstream depends on the RE2 reading — the global
+///   literal; Rust refuses it. Upstream depends on the RE2 reading, the global
 ///   allowlist matches shell placeholders with `^\$(?:\d+|{\d+})$`. Those braces
 ///   are escaped; real quantifiers (`{16}`, `{0,50}`, `{20,}`) are untouched.
 /// * **`\w`.** In RE2 it is exactly `[0-9A-Za-z_]`. In Rust it is Unicode-aware,
@@ -655,8 +655,14 @@ fn compile_regex(
 ///   upstream rules that repeat `\w` over a wide bound
 ///   (`pypi-...[\w-]{50,1000}`) blow past the compiler's 10 MB program limit.
 ///   Expanding `\w` to its RE2 meaning fixes the semantics and the size at once
-///   — every rule in the catalogue then compiles under the default limit, with
+///  , every rule in the catalogue then compiles under the default limit, with
 ///   no memory headroom bought and no rule dropped.
+////// * **`\b` / `\B`.** RE2's word boundary is ASCII. Rust's is Unicode-aware,
+///   and a Unicode boundary is the one construct the lazy DFA gives up on the
+///   moment the haystack holds a non-ASCII byte: every file with an em-dash or
+///   an emoji in a comment was then scanned by the PikeVM, the slowest engine,
+///   once per rule. `(?-u:\b)` is both the upstream meaning and a DFA-eligible
+///   pattern.
 ///
 /// `\W`, `\D` and `\S` would need the same treatment but appear nowhere in the
 /// catalogue; a refresh that introduces one is caught by the compile test,
@@ -665,7 +671,11 @@ fn compile_regex(
 /// Character classes are tracked because `\w` expands differently inside one:
 /// `[\w-]` has to become `[0-9A-Za-z_-]`, never a nested class.
 fn re2_compatible_regex(pattern: &str) -> Cow<'_, str> {
-    if !pattern.contains('{') && !pattern.contains(r"\w") {
+    if !pattern.contains('{')
+        && !pattern.contains(r"\w")
+        && !pattern.contains(r"\b")
+        && !pattern.contains(r"\B")
+    {
         return Cow::Borrowed(pattern);
     }
     let bytes = pattern.as_bytes();
@@ -679,6 +689,15 @@ fn re2_compatible_regex(pattern: &str) -> Cow<'_, str> {
                     "0-9A-Za-z_"
                 } else {
                     "[0-9A-Za-z_]"
+                });
+                index += 2;
+                continue;
+            }
+            if !in_class && matches!(bytes[index + 1], b'b' | b'B') {
+                rewritten.push_str(if bytes[index + 1] == b'b' {
+                    "(?-u:\\b)"
+                } else {
+                    "(?-u:\\B)"
                 });
                 index += 2;
                 continue;
@@ -1374,9 +1393,14 @@ mod tests {
     /// meaning both inside and outside a character class.
     #[test]
     fn re2_translation_preserves_meaning() {
-        for untouched in [r"[A-Z]{16}", r"sk-[A-Za-z0-9_-]{20,}", r"\bplain\b"] {
+        for untouched in [r"[A-Z]{16}", r"sk-[A-Za-z0-9_-]{20,}", r"plain"] {
             assert_eq!(re2_compatible_regex(untouched), untouched);
         }
+
+        // Word boundaries take RE2's ASCII meaning; inside a class `\b` is a
+        // backspace and is left alone.
+        assert_eq!(re2_compatible_regex(r"\bplain\B"), r"(?-u:\b)plain(?-u:\B)");
+        assert_eq!(re2_compatible_regex(r"[\b]"), r"[\b]");
 
         assert_eq!(
             re2_compatible_regex(r"^\$(?:\d+|{\d+})$"),
@@ -1407,7 +1431,7 @@ mod tests {
     }
 
     /// Upstream keywords are a precondition, not a hint. `sourcegraph-access-token`
-    /// accepts a bare 40-character hex string — which is every git SHA — and is
+    /// accepts a bare 40-character hex string, which is every git SHA, and is
     /// only safe because it never runs without its keyword nearby.
     #[test]
     fn keywords_gate_rules_that_would_otherwise_match_digests() {
@@ -1419,8 +1443,8 @@ mod tests {
     }
 
     /// `redact_text` calls `ranges` directly, never `is_match`, so the
-    /// keyword gate has to be enforced inside `ranges` itself — not just in
-    /// `is_match` — or a bare git SHA gets redacted (and, via
+    /// keyword gate has to be enforced inside `ranges` itself, not just in
+    /// `is_match`, or a bare git SHA gets redacted (and, via
     /// `redact_sensitive_values`, can quarantine whole records keyed by
     /// commit ids) without its keyword precondition ever holding.
     #[test]
@@ -1473,7 +1497,7 @@ mod tests {
 
     /// `regexTarget` steers the allowlist regexes only. A stopword read from the
     /// match instead of the secret lets the very keyword that triggered a rule
-    /// excuse it — "auth" is both this rule's trigger and one of its stopwords.
+    /// excuse it. "auth" is both this rule's trigger and one of its stopwords.
     #[test]
     fn allowlist_stopwords_read_the_secret_not_the_match() {
         let compiled = patterns(CredentialPatternProfile::Observation);

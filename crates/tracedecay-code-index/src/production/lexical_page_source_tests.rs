@@ -410,7 +410,7 @@ impl Drop for ForcedWorkerWidth {
 
 /// One `fill_admitted_window` call must batch `workers *
 /// LEXICAL_DECODE_WINDOW_FILES_PER_WORKER_V1` files, not a bare
-/// `workers`-sized fan-out — otherwise draining N files pays one
+/// `workers`-sized fan-out, otherwise draining N files pays one
 /// `code_index.workers.install` round trip (dispatch + barrier overhead)
 /// every `workers` files instead of every `workers * multiplier` files.
 #[test]

@@ -1,10 +1,10 @@
 /**
- * FACT TRUST HISTORY — why one fact's trust is where it is.
+ * FACT TRUST HISTORY, why one fact's trust is where it is.
  *
  * The fact inspector shows a trust gauge and a helpful/unhelpful split, and
  * both are terminal figures: they say where the score landed, not how. This
  * section renders `/fact/{id}/trust-history`, the append-only feedback audit,
- * and prints the events that moved it — as a small real-history line when
+ * and prints the events that moved it, as a small real-history line when
  * there are at least two of them, and always as the exact event rows.
  *
  * The read itself belongs to the inspector, which also reports the audit's
@@ -24,11 +24,12 @@ import type { EChartsOption } from 'echarts';
 
 import { PayloadBoundary } from '../../ui/ReadSection.tsx';
 import { StateChip } from '../../ui/StateChip.tsx';
+import { formatMicrosUtc } from '../../ui/format.ts';
 import { Readout } from '../../ui/instrument.tsx';
 import { Chart } from '../../viz/chart/Chart.tsx';
 import type { PayloadResult } from '../../data/query/payload.ts';
 import type { TrustHistoryEvent, TrustHistoryPayload } from '../../data/query/memory.ts';
-import { formatUtcMicros, trustDetailState, trustHistoryReading } from './memoryModel.ts';
+import { trustDetailState, trustHistoryReading } from './memoryModel.ts';
 
 export function TrustHistorySection({
   pending,
@@ -70,7 +71,7 @@ function TrustHistoryBody({ data }: { data: TrustHistoryPayload }) {
       {reading.count === 0 ? (
         <p className="text-2xs leading-relaxed text-text-secondary">
           {complete
-            ? 'no feedback has ever been recorded against this fact — its trust is the score it was stored with, not a score anything has moved'
+            ? 'no feedback has ever been recorded against this fact, its trust is the score it was stored with, not a score anything has moved'
             : 'no feedback events were returned in this partial window'}
         </p>
       ) : (
@@ -121,7 +122,7 @@ function TrustHistoryBody({ data }: { data: TrustHistoryPayload }) {
             <p className="text-3xs leading-relaxed text-text-muted">
               {reading.availability.redacted.toLocaleString()} of {reading.count.toLocaleString()}{' '}
               events had their detail withheld and {reading.availability.unknown.toLocaleString()}{' '}
-              never recorded whether they had one —{' '}
+              never recorded whether they had one, {' '}
               {complete
                 ? 'the trust arithmetic remains exact.'
                 : 'arithmetic is limited to the returned window.'}
@@ -131,7 +132,7 @@ function TrustHistoryBody({ data }: { data: TrustHistoryPayload }) {
             * and it scrolls once a fact has more than a handful of events. A
             * scrollable region has to be keyboard-operable (WCAG 2.1.1), so the
             * list itself takes the tab stop and carries its own accessible
-            * name — the name must sit on the node that actually scrolls, not on
+            * name, the name must sit on the node that actually scrolls, not on
             * an ancestor. */}
           <ol
             role="region"
@@ -150,7 +151,7 @@ function TrustHistoryBody({ data }: { data: TrustHistoryPayload }) {
 }
 
 /** The audit as a line: each event's resulting trust, in the order it was
- * recorded. Real history only — the series is exactly the `new_trust` column,
+ * recorded. Real history only, the series is exactly the `new_trust` column,
  * so a step is a feedback event and a flat run is the absence of one. The
  * exact rows beneath are the accessible reading of the same data. */
 function TrustTrace({ data }: { data: TrustHistoryPayload }) {
@@ -159,7 +160,7 @@ function TrustTrace({ data }: { data: TrustHistoryPayload }) {
     () => ({
       xAxis: {
         type: 'category',
-        data: events.map((event) => formatUtcMicros(event.timestamp)),
+        data: events.map((event) => formatMicrosUtc(event.timestamp)),
         axisLabel: { show: false },
         axisTick: { show: false },
       },
@@ -183,17 +184,17 @@ function TrustTrace({ data }: { data: TrustHistoryPayload }) {
   return (
     <figure className="flex flex-col gap-1" data-testid="trust-trace">
       <Chart
-        ariaLabel={`Trust after each of ${events.length} feedback events, from ${first.new_trust.toFixed(3)} at ${formatUtcMicros(first.timestamp)} to ${last.new_trust.toFixed(3)} at ${formatUtcMicros(last.timestamp)}; the exact events are listed below.`}
+        ariaLabel={`Trust after each of ${events.length} feedback events, from ${first.new_trust.toFixed(3)} at ${formatMicrosUtc(first.timestamp)} to ${last.new_trust.toFixed(3)} at ${formatMicrosUtc(last.timestamp)}; the exact events are listed below.`}
         height={56}
         option={option}
       />
       <figcaption className="flex justify-between text-3xs text-text-muted">
         <span className="td-value" data-cell="numeric">
-          {formatUtcMicros(first.timestamp).slice(0, 10)}
+          {formatMicrosUtc(first.timestamp).slice(0, 10)}
         </span>
         <span>trust after each event · 0 to 1</span>
         <span className="td-value" data-cell="numeric">
-          {formatUtcMicros(last.timestamp).slice(0, 10)}
+          {formatMicrosUtc(last.timestamp).slice(0, 10)}
         </span>
       </figcaption>
     </figure>
@@ -207,7 +208,7 @@ function TrustEventRow({ event }: { event: TrustHistoryEvent }) {
     <li className="flex flex-col gap-0.5 border-l-2 border-edge-subtle pl-2">
       <p className="flex flex-wrap items-baseline gap-x-2 text-3xs text-text-muted">
         <span className="td-value" data-cell="numeric">
-          {formatUtcMicros(event.timestamp)}
+          {formatMicrosUtc(event.timestamp)}
         </span>
         <span className="text-text-secondary">{event.action}</span>
         <span className="td-value" data-cell="numeric">

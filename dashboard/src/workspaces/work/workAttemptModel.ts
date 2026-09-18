@@ -23,7 +23,7 @@ import type { WorkResult } from './workApi.ts';
  * previously drew as named absences:
  *
  *   executors   who actually ran the attempt (`actual_route`), against who was
- *               asked (`requested_route`) — a fallback that took over is a
+ *               asked (`requested_route`), a fallback that took over is a
  *               divergence between the two and is counted as one
  *   lineages    the retry chain, followed through `recovery.source_attempt_id`
  *               rather than counted from repeated references
@@ -33,7 +33,7 @@ import type { WorkResult } from './workApi.ts';
  * What does NOT come out of it is a span. `WorkLeaseFenceV1` is
  * `{epoch, lease_id}` and `WorkAttemptProgressV1` is `{completed, total}`;
  * neither is a clock. A terminated attempt carries `terminal.observed_at`, so
- * this build can state the order things were observed to finish in — and still
+ * this build can state the order things were observed to finish in, and still
  * cannot state how long any of them took, because nothing records a start.
  * `terminalOrder` is that first fact; the wall-clock absence survives.
  *
@@ -68,7 +68,7 @@ export interface WorkAttemptPage {
 /**
  * One provider route, and how the attempts on it got there.
  *
- * Rows are keyed by the route that actually ran — `actual_route` when the
+ * Rows are keyed by the route that actually ran, `actual_route` when the
  * daemon observed one, and the requested route when it has not. Those two cases
  * are counted apart (`diverted`, `unobserved`) so an attributed row can never
  * hide how much of its attribution is observation and how much is the request.
@@ -77,7 +77,7 @@ export interface WorkExecutorReading {
   readonly providerId: string;
   readonly routeId: string;
   readonly attempts: number;
-  /** Attempts requested on another route that actually ran here — the fallback
+  /** Attempts requested on another route that actually ran here, the fallback
    * topology took over. */
   readonly diverted: number;
   /** Attempts requested here whose actual route this read has not observed. */
@@ -232,8 +232,8 @@ function executorReadings(attempts: readonly WorkAttemptV1[]): WorkExecutorReadi
  * descent: each root is an attempt that is `fresh` or whose source is off this
  * page, and the chain walks forward through the attempts that name it. An
  * attempt whose source is missing marks the lineage `truncated`, because the
- * chain provably started earlier than the window. Attempts left unreached — a
- * source cycle the store should never produce — are appended in the stable
+ * chain provably started earlier than the window. Attempts left unreached, a
+ * source cycle the store should never produce, are appended in the stable
  * order they arrived in rather than dropped.
  */
 function lineageReadings(attempts: readonly WorkAttemptV1[]): WorkAttemptLineage[] {
@@ -378,7 +378,7 @@ function attemptPage(list: Extract<WorkAttemptListV1, { state: 'listed' }>): Wor
  * The attempt list as a reading.
  *
  * `undefined` is the request still being in flight, which is distinct from
- * every answer the daemon can give — including `absent`, which is an answer.
+ * every answer the daemon can give, including `absent`, which is an answer.
  */
 export function workAttemptReading(
   result: WorkResult<WorkAttemptListV1> | undefined,

@@ -582,7 +582,7 @@ fn outgoing_target_visitor_streams_rows_and_observes_cancellation() {
 
 /// Plan 39 G7b: reverse adjacency must be readable in bulk through the graph
 /// store, with the same kind filter, batch shape, budget, and cancellation
-/// contract as the outgoing form — and it must actually read the opposite
+/// contract as the outgoing form, and it must actually read the opposite
 /// direction, not silently mirror the outgoing result.
 #[test]
 fn batch_incoming_reads_are_filtered_ordered_and_budgeted() {

@@ -1,4 +1,4 @@
-//! `tracedecay_remote_status` — Remote Brain operational-plane read.
+//! `tracedecay_remote_status`, Remote Brain operational-plane read.
 
 use std::path::Path;
 

@@ -605,7 +605,7 @@ fn codex_hook_command_invokes_tracedecay_is_a_safety_valve() {
 
 /// The install-output follow-up must stand until explicit, current trust is
 /// recorded for every managed hook (normally by the auto-trust sync, or by
-/// `/hooks` when the safety valve skipped a hook) — and clear the moment it is.
+/// `/hooks` when the safety valve skipped a hook), and clear the moment it is.
 #[test]
 fn codex_hook_trust_followup_clears_only_after_explicit_current_trust() {
     let home = tempfile::tempdir().expect("tempdir");
@@ -960,7 +960,7 @@ fn redeploy_preserves_foreign_discovery_and_support_bytes() {
 }
 
 /// Preflight still reports that the cache is not yet active; activation itself
-/// is no longer an interactive deferral — Codex CLI 0.147 drives `plugin add`.
+/// is no longer an interactive deferral. Codex CLI 0.147 drives `plugin add`.
 #[test]
 fn codex_preflight_reports_inactive_cache_without_interactive_guidance() {
     let home = tempfile::tempdir().unwrap();
@@ -983,7 +983,7 @@ fn codex_preflight_reports_inactive_cache_without_interactive_guidance() {
 fn prepare_stages_the_source_and_returns_ready_for_cli_activation() {
     let home = tempfile::tempdir().unwrap();
     // Pre-existing user config: preparation runs before the component
-    // transaction stages `config.toml`, so it must not write there — hook
+    // transaction stages `config.toml`, so it must not write there, hook
     // trust is recorded by activation, inside the rollback boundary.
     let config_path = codex_config_path(home.path());
     std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();

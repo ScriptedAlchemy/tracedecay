@@ -300,7 +300,7 @@ impl ApplicationInvocation {
 /// Invocation failure. Bare variants describe failures raised before the
 /// daemon produced an authoritative answer; once the daemon has answered with
 /// a typed [`ApplicationProblem`], that problem IS the failure and must reach
-/// the caller intact — `SafeDiagnostic` is already the sanctioned disclosure
+/// the caller intact, `SafeDiagnostic` is already the sanctioned disclosure
 /// surface, so carrying it here discloses nothing new.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InvocationError {

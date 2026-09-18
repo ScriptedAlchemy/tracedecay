@@ -1,8 +1,8 @@
 /**
  * Monoline event glyphs and the DOM legend for the temporal execution field.
  *
- * Every event kind has its own SHAPE, not just its own colour: colour is spent
- * on evidence grade, so kind has to be legible in monochrome and under
+ * Every event kind has its own SHAPE and its own colour. Colour is spent on
+ * evidence grade, so kind has to be legible in monochrome and under
  * forced-colors. Glyphs are drawn in a 16x16 box centred at the origin so the
  * scene can translate and scale them without knowing what they are.
  */

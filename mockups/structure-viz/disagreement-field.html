@@ -1,12 +1,12 @@
 <!doctype html>
 <!--
-  MOCKUP — not production code. Concept 3 of 3: DISAGREEMENT FIELD.
+  MOCKUP. Not production code. Concept 3 of 3: DISAGREEMENT FIELD.
 
   Chrome tokens copied verbatim from dashboard/src/theme/tokens.css and the
   @theme block of dashboard/src/theme/tailwind.css; kindColor() is a
   line-for-line port of dashboard/src/viz/graph/kindColor.ts.
 
-  Every value is INVENTED but honestly shaped — see notes/disagreement-field.md.
+  Every value is INVENTED but honestly shaped. See notes/disagreement-field.md.
   All three edge counts in the legend are COMPUTED from the edge list below, so
   the caption and the picture cannot disagree with each other.
 
@@ -15,7 +15,7 @@
 <html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8" />
-<title>Disagreement field — mockup</title>
+<title>Disagreement field, mockup</title>
 <style>
 :root {
   --raw-surface-0: oklch(0.145 0.003 260);
@@ -197,7 +197,7 @@ td, th { padding: 0; text-align: left; font-weight: inherit; }
           <span class="td-title">called, never co-touched</span>
         </div>
         <div style="font-size:var(--text-2xs);color:var(--raw-text-muted);margin-top:8px;line-height:1.45">
-          a real call edge that no captured session has ever crossed. Usually a settled interface —
+          a real call edge that no captured session has ever crossed. Usually a settled interface,
           occasionally a piece of code nobody has had to think about in months.
         </div>
       </div>
@@ -228,7 +228,7 @@ td, th { padding: 0; text-align: left; font-weight: inherit; }
            aria-label="Disagreement field: 25 symbols in four module clusters, with call edges and co-change edges overlaid in three distinct states. Seven pairs are co-changed with no call edge between them."></svg>
     </div>
     <figcaption>
-      node position = module cluster, hand-laid for legibility — <b style="color:var(--raw-text-secondary);font-weight:500">position
+      node position = module cluster, hand-laid for legibility, <b style="color:var(--raw-text-secondary);font-weight:500">position
       carries no magnitude here</b>, only membership, and the cluster label states which module ·
       node diameter = <b style="color:var(--raw-text-secondary);font-weight:500">sessions that edited this symbol</b>
       (1 → 9), which is the denominator every co-change claim rests on: a symbol touched once cannot co-change with anything ·
@@ -236,7 +236,7 @@ td, th { padding: 0; text-align: left; font-weight: inherit; }
       edge state = the three declared above; the loud state is drawn last and on top, because a finding that renders
       underneath the expected case is not a finding ·
       three symbols carry <b style="color:var(--raw-state-unknown);font-weight:500">no session attribution at all</b> and
-      are drawn hollow — their absence from the co-change layer is
+      are drawn hollow, their absence from the co-change layer is
       <b style="font-weight:500">unmeasured, not zero</b>, and collapsing that distinction is the easiest lie this
       chart could tell
     </figcaption>
@@ -269,7 +269,7 @@ td, th { padding: 0; text-align: left; font-weight: inherit; }
 </div>
 
 <script>
-/* kindColor — line-for-line port of dashboard/src/viz/graph/kindColor.ts. */
+/* kindColor, line-for-line port of dashboard/src/viz/graph/kindColor.ts. */
 function hashKind(kind) {
   let hash = 0;
   for (let i = 0; i < kind.length; i += 1) hash = (hash * 31 + kind.charCodeAt(i)) >>> 0;
@@ -288,7 +288,7 @@ const hue = (k) => kindColor(k, LIGHT);
 
 /* ---- 25 symbols. `s` = sessions that edited it (null = never seen in any
  *      captured session, which is NOT the same as zero co-change). `lp` is
- *      label placement, hand-set — a label-collision solver is exactly the
+ *      label placement, hand-set. A label-collision solver is exactly the
  *      kind of thing a mockup should not pretend to have. ---------------- */
 const N = [
   /* tracedecay-api */
@@ -335,7 +335,7 @@ const CLUSTERS = [
  *      `co`   = shared sessions with NO call edge in either direction.
  *      `n` on a co-change edge is how many sessions touched both. ------- */
 const E = [
-  /* coupled and called — agreement */
+  /* coupled and called, agreement */
   { a: 1,  b: 7,  t: 'both', n: 5 }, { a: 3,  b: 7,  t: 'both', n: 4 },
   { a: 7,  b: 8,  t: 'both', n: 5 }, { a: 7,  b: 11, t: 'both', n: 4 },
   { a: 9,  b: 12, t: 'both', n: 4 }, { a: 7,  b: 15, t: 'both', n: 3 },
@@ -350,7 +350,7 @@ const E = [
   { a: 16, b: 17, t: 'call' }, { a: 19, b: 16, t: 'call' }, { a: 7,  b: 21, t: 'call' },
   { a: 9,  b: 22, t: 'call' }, { a: 10, b: 25, t: 'call' }, { a: 14, b: 23, t: 'call' },
   { a: 21, b: 23, t: 'call' }, { a: 25, b: 20, t: 'call' }, { a: 16, b: 22, t: 'call' },
-  /* co-changed, NOT linked — the finding */
+  /* co-changed, NOT linked. The finding */
   { a: 2,  b: 22, t: 'co', n: 5 },
   { a: 9,  b: 15, t: 'co', n: 4 },
   { a: 13, b: 23, t: 'co', n: 4 },
@@ -369,7 +369,7 @@ const el = (tag, attrs, text) => {
 };
 const svg = document.getElementById('field');
 
-/* cluster names sit ON the field, at its margins — a separate legend box
+/* cluster names sit ON the field, at its margins. A separate legend box
  * would make the reader hold four colour-to-module bindings in their head */
 CLUSTERS.forEach((c) => {
   svg.appendChild(el('text', {

@@ -176,8 +176,8 @@ fn token_is_signature_blob(token: &str, min_chars: usize) -> bool {
         has_digit |= c.is_ascii_digit();
     }
     // Require real base64 entropy (mixed case and digits). A monotonous run of
-    // one repeated character — long padding, ASCII art, a giant single-case
-    // word — is not a signature blob and must not be dropped as noise.
+    // one repeated character, long padding, ASCII art, a giant single-case
+    // word, is not a signature blob and must not be dropped as noise.
     has_lower && has_upper && has_digit
 }
 

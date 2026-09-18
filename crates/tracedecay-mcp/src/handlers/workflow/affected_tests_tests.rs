@@ -902,7 +902,7 @@ fn cargo_test_args_keep_release_before_libtest_separator() {
 /// Fifteen symbols across a dozen files, so a file-scale budget (8) is far
 /// below the corpus while comfortably above the two requested files. Before
 /// the per-file index cutover, both scoped reads hydrated the whole corpus
-/// stream and refused this exact shape with a budget error — a 13-file PR
+/// stream and refused this exact shape with a budget error, a 13-file PR
 /// paid (and could not even complete) a full-corpus sweep.
 fn scoped_read_fixture() -> tracedecay_graph_query::VerifiedGraphQuery {
     let mut fixture_symbols = vec![

@@ -215,7 +215,7 @@ pub(crate) struct EndpointIdentityCache {
 
 impl EndpointIdentityCache {
     /// Takes the graph store rather than the database handle so bulk
-    /// enumerations — the recovered-generation proof in particular — can
+    /// enumerations, the recovered-generation proof in particular, can
     /// resolve endpoints from worker threads that share only the store.
     pub(crate) fn identity(
         &mut self,
@@ -866,7 +866,7 @@ pub(crate) fn retirement_page_record_reads() -> usize {
 /// page, not the projection: it reads owner-label candidates in index order
 /// and stops as soon as the page is full. Filtering every candidate first
 /// (the `labeled_projection_nodes_checked` shape) re-read the whole
-/// projection per page — measured at ~9.5 s per 4,096-row page against a
+/// projection per page, measured at ~9.5 s per 4,096-row page against a
 /// 3.4M-row staging release, an O(rows² / page) sweep that kept the
 /// publishing thread, and the serving seat behind it, busy for hours.
 #[hotpath::measure(label = "graph_db.projection.deletion_page")]

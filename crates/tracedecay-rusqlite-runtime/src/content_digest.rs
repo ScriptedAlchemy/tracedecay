@@ -2,7 +2,7 @@
 //!
 //! The digest is an admission/identity primitive: callers compare the SHA-256
 //! of a database's logical contents across runtimes and processes. The framing
-//! is therefore frozen — the domain tag, the table inventory order, the
+//! is therefore frozen. The domain tag, the table inventory order, the
 //! per-table row order, and the per-value encoding below are all part of the
 //! wire contract and must not be "improved" without a versioned domain tag.
 

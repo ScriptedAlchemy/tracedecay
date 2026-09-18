@@ -11,9 +11,9 @@
 //! frames of the recovered-generation digest
 //! ([`crate::generation`]'s `write_generation_identity_frames`). The bundle
 //! manifest records that identity digest plus one `(name, content digest,
-//! byte length)` row per artifact. Artifacts are independently optional — a
+//! byte length)` row per artifact. Artifacts are independently optional, a
 //! reader asks for the artifact it needs by name and treats the others as
-//! absent without error — so bundles written before a new artifact existed
+//! absent without error, so bundles written before a new artifact existed
 //! stay serveable.
 //!
 //! A missing or mismatched artifact is a TYPED state
@@ -73,8 +73,8 @@ pub struct SealedReadBundleManifestV1 {
     /// (`sha256:<hex>`, the same digest that names the sealed generation
     /// file).
     pub sealed_state_digest: String,
-    /// `sha256:<hex>` over the generation identity frames — projection,
-    /// generation, source generation, watermark, dependencies — in the exact
+    /// `sha256:<hex>` over the generation identity frames, projection,
+    /// generation, source generation, watermark, dependencies, in the exact
     /// canonical encoding of the recovered-generation digest.
     pub generation_identity_digest: String,
     /// Derived artifacts, each independently optional for readers.

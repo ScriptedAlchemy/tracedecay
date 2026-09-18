@@ -18,7 +18,7 @@ so the carrier is the retired-revision witness: every reader that
 authenticates or decodes a manifest refuses it with the typed superseded
 refusal naming revision 7, before reading a single segment. Only retention's
 descriptor projection abstains, so a store still holding a retired generation
-stays plannable. Nothing here may be re-sealed at the current revision — the
+stays plannable. Nothing here may be re-sealed at the current revision, the
 export predates the required generation census, so a current-revision wrapper
 around it could only fabricate one.
 

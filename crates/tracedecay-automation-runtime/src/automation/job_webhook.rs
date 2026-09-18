@@ -318,7 +318,7 @@ fn read_status<R: Read>(reader: &mut R) -> Result<u16> {
             }
             // A server that sends its full response and then closes abruptly can
             // surface the close as a read error before we observe the end of the
-            // headers — e.g. a Windows peer resets the connection (os error
+            // headers, e.g. a Windows peer resets the connection (os error
             // 10053) right after `write_all`. If a complete status line already
             // arrived the delivery succeeded, so parse what we have rather than
             // discarding it; only propagate the error when no status was read.
@@ -483,7 +483,7 @@ mod tests {
     }
 
     /// A reader that yields a canned buffer once, then fails every subsequent
-    /// read with `ConnectionAborted` — models a peer that sends its full
+    /// read with `ConnectionAborted`. It models a peer that sends its full
     /// response and then resets the socket (Windows os error 10053).
     struct ResetAfterResponse {
         response: Vec<u8>,
@@ -512,7 +512,7 @@ mod tests {
             sent: false,
         };
         // The trailing `\r\n\r\n` never arrives before the reset, so the loop
-        // hits the read error — but a full status line was already received.
+        // hits the read error, but a full status line was already received.
         let status = match read_status(&mut reader) {
             Ok(status) => status,
             Err(err) => panic!("read_status should succeed: {err}"),

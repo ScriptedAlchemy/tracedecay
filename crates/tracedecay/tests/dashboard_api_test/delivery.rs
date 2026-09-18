@@ -56,8 +56,7 @@ const DELIVERY_HTTP_PROXIMITY_ENCOUNTER: &str =
 /// A fake `DashboardDeliveryReadPortV1` that always returns two provider pull
 /// requests: one whose retained head matches the fixture's indexed head, one
 /// that does not. This proves `GET /api/delivery/inbox` admits only the
-/// head-matched pull request over real HTTP, not just in the application's
-/// own unit tests.
+/// head-matched pull request over real HTTP.
 struct FakeDeliveryReadPortV1;
 
 impl DashboardDeliveryReadPortV1 for FakeDeliveryReadPortV1 {
@@ -103,7 +102,7 @@ impl DashboardDeliveryReadPortV1 for DeliveryHttpAdmissionPort {
 
 /// Daemon proximity owner that returns one OverlappingEdit encounter naming
 /// the admitted indexed head. Mounted under the fixture root so the
-/// production delivery adapter must look it up, invoke, and fold evidence —
+/// production delivery adapter must look it up, invoke, and fold evidence,
 /// not a pre-folded Ready stub.
 struct DeliveryHttpProximityOwner {
     project_id: ProjectId,

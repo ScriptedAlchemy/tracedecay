@@ -1,6 +1,6 @@
 //! JSON-RPC 2.0 protocol types and the line-oriented transport contract.
 //!
-//! This crate owns no I/O, admission, or daemon authority — concrete
+//! This crate owns no I/O, admission, or daemon authority, concrete
 //! transports live with their runtime.
 
 #![forbid(unsafe_code)]
@@ -248,7 +248,7 @@ impl ErrorCode {
 // Transport abstraction (zero-cost via monomorphization)
 // ---------------------------------------------------------------------------
 
-/// Implementations are monomorphized at each call site — no dyn dispatch.
+/// Implementations are monomorphized at each call site, no dyn dispatch.
 pub trait McpTransport {
     /// Implementations MUST be cancellation-safe: every server read loop races
     /// this future against shutdown, cancellation, and handler completion in a

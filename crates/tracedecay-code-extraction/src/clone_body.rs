@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{NodeKind, SourceSpan};
@@ -71,11 +72,15 @@ pub struct ExtractedCloneBodyV1 {
     pub eligibility: CloneBodyEligibilityV1,
     pub tokenization_status: CloneBodyTokenizationStatusV1,
     pub tokenization_issues: Vec<CloneBodyTokenizationIssueV1>,
-    pub conservative_tokens: Vec<ConservativeCloneTokenV1>,
+    /// Shared with every payload built from this body: a token stream is
+    /// read, hashed, and persisted, never edited, and copying it per body
+    /// (one `String` per token) was the dominant allocation of the index
+    /// workers.
+    pub conservative_tokens: Arc<[ConservativeCloneTokenV1]>,
     pub rename_normalization_revision: Option<u16>,
     pub rename_status: CloneBodyRenameStatusV1,
     pub rename_issues: Vec<CloneBodyRenameIssueV1>,
-    pub rename_tokens: Option<Vec<ConservativeCloneTokenV1>>,
+    pub rename_tokens: Option<Arc<[ConservativeCloneTokenV1]>>,
 }
 
 impl ExtractedCloneBodyV1 {
@@ -186,7 +191,7 @@ fn extract_clone_body(
 }
 
 struct ConservativeFields {
-    tokens: Vec<ConservativeCloneTokenV1>,
+    tokens: Arc<[ConservativeCloneTokenV1]>,
     issues: Vec<CloneBodyTokenizationIssueV1>,
     token_count: u32,
     status: CloneBodyTokenizationStatusV1,
@@ -234,7 +239,7 @@ fn conservative_fields(
         CloneBodyEligibilityV1::Eligible
     };
     ConservativeFields {
-        tokens: emitter.tokens,
+        tokens: emitter.tokens.into(),
         issues: emitter.issues,
         token_count: emitter.token_count,
         status: tokenization_status,
@@ -246,7 +251,7 @@ struct RenameFields {
     revision: Option<u16>,
     status: CloneBodyRenameStatusV1,
     issues: Vec<CloneBodyRenameIssueV1>,
-    tokens: Option<Vec<ConservativeCloneTokenV1>>,
+    tokens: Option<Arc<[ConservativeCloneTokenV1]>>,
 }
 
 fn rename_fields(syntax: CallableSyntax<'_>, source: &str, language: &str) -> RenameFields {
@@ -269,7 +274,7 @@ fn rename_token_stream(
     source: &str,
     language: &str,
     replacements: &HashMap<(usize, usize), String>,
-) -> Vec<ConservativeCloneTokenV1> {
+) -> Arc<[ConservativeCloneTokenV1]> {
     let mut emitter = TokenEmitter {
         source: source.as_bytes(),
         language,
@@ -279,7 +284,7 @@ fn rename_token_stream(
         token_count: 0,
     };
     emitter.emit(body);
-    emitter.tokens
+    emitter.tokens.into()
 }
 
 struct TokenEmitter<'a> {

@@ -32,7 +32,7 @@ use tracedecay_store::GitIndexTransactionStore;
 /// roots through this form before mounting an assembler; snapshot capture must
 /// use the same resolution so alias paths (macOS `/tmp` → `/private/tmp`, and
 /// other symlink roots) do not produce equal repository state that fails as
-/// `stale_preview`. Comparison stays exact — callers must not loosen identity
+/// `stale_preview`. Comparison stays exact, callers must not loosen identity
 /// equality to paper over divergent path forms.
 pub fn canonicalize_repository_root(repository_root: &Path) -> std::io::Result<PathBuf> {
     repository_root.canonicalize()

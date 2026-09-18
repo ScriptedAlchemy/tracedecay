@@ -5,7 +5,7 @@ import type {
 } from '../../contracts/generated.ts';
 
 /**
- * SHARED CODE — the two verified exact match classes served by
+ * SHARED CODE. The two verified exact match classes served by
  * `GET /api/plugins/graph/shared-code/family` (code_read_api.rs).
  *
  * Each class is its own read: the daemon keys conservative and

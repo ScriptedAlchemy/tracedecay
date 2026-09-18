@@ -19,7 +19,7 @@ interface Body {
 /**
  * A realistically shaped envelope. The reducer's default `sizeOf` is
  * `JSON.stringify(event).length`, so these cases deliberately do NOT inject a
- * size estimator — the byte ceiling must be exercised through the same
+ * size estimator, the byte ceiling must be exercised through the same
  * accounting production uses.
  */
 function envelope(revision: number, filler = ""): SseEventEnvelope<Body> {
@@ -35,7 +35,7 @@ function envelope(revision: number, filler = ""): SseEventEnvelope<Body> {
   };
 }
 
-describe("SSE queue ceiling — 5,000 events / 10 MiB", () => {
+describe("SSE queue ceiling, 5,000 events / 10 MiB", () => {
   it("holds the queue at exactly 5,000 events when the render layer stalls", () => {
     const reducer = createSseReducer<Body>();
     const total = 10 * 1_000;
@@ -82,7 +82,7 @@ describe("SSE queue ceiling — 5,000 events / 10 MiB", () => {
     // Bytes bound first: the count ceiling was never the binding constraint.
     expect(accepted).toBeLessThan(MAX_QUEUED_EVENTS);
     expect(firstRejected).not.toBeNull();
-    // And the queue really was driven *to* the ceiling — the remaining headroom
+    // And the queue really was driven *to* the ceiling, the remaining headroom
     // is smaller than the event that was refused.
     const refusedSize = JSON.stringify(envelope(firstRejected!, filler)).length;
     expect(MAX_QUEUED_BYTES - stats.queuedBytes).toBeLessThan(refusedSize);
@@ -100,7 +100,7 @@ describe("SSE queue ceiling — 5,000 events / 10 MiB", () => {
 
     // One second at the peak rate, drained on the 100 ms grid. The stream picks
     // up at 10,000, well past the 5,000 the overflow refused, so the first tick
-    // honestly reports that jump as a gap — a reseed establishes a fresh
+    // honestly reports that jump as a gap, a reseed establishes a fresh
     // baseline for the projection, not amnesia about the revision sequence.
     let delivered = 0;
     let gapTicks = 0;
@@ -118,7 +118,7 @@ describe("SSE queue ceiling — 5,000 events / 10 MiB", () => {
   });
 });
 
-describe("SSE sustained throughput — two named rates", () => {
+describe("SSE sustained throughput, two named rates", () => {
   const rates = [
     { label: "100 events/s for ten minutes", perSecond: 100, seconds: 600 },
     { label: "1,000 events/s for ten seconds", perSecond: 1_000, seconds: 10 },

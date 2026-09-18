@@ -25,9 +25,9 @@ import { subagentElapsedSeconds } from './subagentTree.ts';
  * The sections are independent on purpose. The session store, the grant
  * store, the work-product graph and the analytics fold are four reads with
  * four states, and a reader looking at a session needs to see which of them
- * answered. Where an authority cannot be joined to a session at all — Work
+ * answered. Where an authority cannot be joined to a session at all, Work
  * handoffs are recorded against actor principals, attempts against tasks and
- * runs — the section says so as a typed gap rather than showing an empty list
+ * runs, the section says so as a typed gap rather than showing an empty list
  * that reads as "nothing happened".
  */
 
@@ -205,7 +205,7 @@ export function AgentInspector({
       <Section legend="Delegates to" grade={<EvidenceGrade grade="EXACT" source="RETAINED" />}>
         {outgoing.length === 0 && mark.foldedDescendants === 0 ? (
           <p className="text-2xs leading-relaxed text-text-muted">
-            none — the store records no session beneath this one
+            none, the store records no session beneath this one
           </p>
         ) : (
           <>
@@ -328,7 +328,7 @@ export function AgentInspector({
   );
 }
 
-/** The grant store's per-session frontier, as the page read it — or the
+/** The grant store's per-session frontier, as the page read it, or the
  * reason it did not. */
 function TokenFrontier({
   tokens,
@@ -341,7 +341,7 @@ function TokenFrontier({
     return (
       <Section legend="Token frontier" grade={<EvidenceGrade grade="UNAVAILABLE" source="GRANT STORE" />}>
         <p className="text-2xs leading-relaxed text-text-muted" data-agent-inspector-tokens="not-requested">
-          Not requested for this session. {mode === 'inspecting' ? 'Hover inspects only — ' : ''}
+          Not requested for this session. {mode === 'inspecting' ? 'Hover inspects only, ' : ''}
           select it (click or Enter) to read which handoff tokens are outstanding, lapsed or
           redeemed.
         </p>
@@ -431,7 +431,7 @@ function TokenFrontier({
   }
 }
 
-/** Recent hooks joined to the session by exact id — a bounded tape, not a
+/** Recent hooks joined to the session by exact id, a bounded tape, not a
  * history, and captioned as the tape it is. */
 function RecentHooks({
   diagnostics,

@@ -403,7 +403,7 @@ fn append_jsonl_line_locked(path: &Path, line: &str) -> std::io::Result<()> {
             }
             Ok(())
         })();
-        let unlock_result = fs2::FileExt::unlock(&lock);
+        let unlock_result = lock.unlock();
         write_result?;
         unlock_result?;
         Ok(())
@@ -972,8 +972,8 @@ fn validate_requested_task_key(task_key: &str) -> Result<()> {
 /// A read must not mint the dashboard directory: acquiring the lock creates
 /// it, and a root that does not exist has no ledger. Absence is therefore
 /// answered from `absent` alone. Running `read` there would open whatever a
-/// first writer created in the meantime — outside the lock and outside
-/// `ensure_no_exact_append_intent` — and expose a row whose publication has
+/// first writer created in the meantime, outside the lock and outside
+/// `ensure_no_exact_append_intent`, and expose a row whose publication has
 /// not settled; the directory's absence at the time of check says nothing
 /// about the ledger at the time of use.
 ///
@@ -1007,7 +1007,7 @@ fn with_run_ledger_read_lock<T>(
         })?;
         hotpath::measure_block!("automation.run_ledger.read_lock.body", read())
     })();
-    let unlock = fs2::FileExt::unlock(&lock).map_err(TraceDecayError::from);
+    let unlock = lock.unlock().map_err(TraceDecayError::from);
     result.and_then(|value| unlock.map(|()| value))
 }
 

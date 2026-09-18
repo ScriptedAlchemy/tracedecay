@@ -5,7 +5,7 @@
 **Goal:** make Codex CLI and Cursor use the canonical TraceDecay fact authority
 (`tracedecay_fact_store_*` plus trust feedback) as their agent memory for both
 **recall** (facts reach the model at the right moment) and **storage** (new
-durable facts get written), instead of — or layered on top of — each agent's
+durable facts get written), instead of, or layered on top of, each agent's
 native memory mechanism. Similarity and dedupe evidence must come from the
 bounded verified Grafeo projection with explicit generation and coverage, not
 from a host-local approximation.
@@ -32,7 +32,7 @@ materializes plain-markdown files under `~/.codex/memories/` (a git repo):
 
 | File | Role |
 | --- | --- |
-| `memory_summary.md` | Stage-2 consolidated "user profile + preferences + what's in memory" digest — the primary artifact injected into new sessions |
+| `memory_summary.md` | Stage-2 consolidated "user profile + preferences + what's in memory" digest, the primary artifact injected into new sessions |
 | `MEMORY.md` | Task-group organized durable entries (per-repo task groups, user preferences, reusable knowledge, failure post-mortems) with pointers into rollout summaries |
 | `raw_memories.md` | Stage-1 per-thread raw memory records (thread id, cwd, rollout path, keywords) |
 | `rollout_summaries/*.md` | One summary file per eligible past session (rollout) |
@@ -49,7 +49,7 @@ and the config reference):
   secrets are redacted.
 - **Recall** is controlled by `memories.use_memories` (default `true`): Codex
   injects existing memories into future sessions at startup. There is no
-  per-prompt retrieval — it is session-start injection of the consolidated
+  per-prompt retrieval, it is session-start injection of the consolidated
   summary plus a search-over-`MEMORY.md` affordance (the summary explicitly
   tells the model to "Search `MEMORY.md` first for …").
 - `memories.generate_memories` (default `true`) gates whether new threads
@@ -58,22 +58,22 @@ and the config reference):
   threads that used MCP/web-search from memory generation. Since tracedecay's
   MCP server is active in most sessions here, native memory generation
   currently *does* consume MCP-heavy threads (both systems learn from the same
-  sessions — duplication risk, see §5).
+  sessions, duplication risk, see §5).
 - Managed via `/memories` in the TUI and `codex debug clear-memories`.
 - `[features.memories] custom_tools = true` (nested form) additionally exposes
-  memories read/retrieval **tools** to the model — i.e. Codex is moving toward
+  memories read/retrieval **tools** to the model, i.e. Codex is moving toward
   model-invocable memory reads, which is exactly the slot a
   `tracedecay_fact_store_search` MCP tool already occupies.
 
 ### 1.2 Other context surfaces Codex reads at session start
 
-- **`AGENTS.md`** — project-doc mechanism, auto-loaded from repo root (and
+- **`AGENTS.md`**, project-doc mechanism, auto-loaded from repo root (and
   parent/`~/.codex/AGENTS.md` global variant). Stable, always read.
-- **Skills** (`~/.codex/skills/`, plus plugin-bundled skills) — frontmatter
+- **Skills** (`~/.codex/skills/`, plus plugin-bundled skills), frontmatter
   name/description always visible; body lazy-loaded on match.
-- **Plugins** (`~/.codex/plugins/cache/<marketplace>/<name>/<version>/`) —
+- **Plugins** (`~/.codex/plugins/cache/<marketplace>/<name>/<version>/`),
   bundle MCP servers, skills, and **lifecycle hooks**.
-- **Rules** (`~/.codex/rules/default.rules`) — command prefix allow/deny rules
+- **Rules** (`~/.codex/rules/default.rules`), command prefix allow/deny rules
   only, *not* a prompt-context surface (unlike Cursor rules).
 
 ### 1.3 Codex hook surface (the interception points)
@@ -122,7 +122,7 @@ Precedence: Team Rules → Project Rules → User Rules, merged.
 - **Project rules:** `.cursor/rules/*.mdc` (frontmatter `alwaysApply`,
   `globs`, `description`).
 - **Plugin rules:** plugins under `~/.cursor/plugins/local/<name>/rules/*.mdc`
-  are injected as always-applied workspace rules — this is how tracedecay's
+  are injected as always-applied workspace rules, this is how tracedecay's
   `tracedecay.mdc` rule reaches every session today.
 - **`AGENTS.md`** at repo root; User Rules in settings.
 - Community + Cursor-staff consensus (forum, 2026): *"`.cursor/rules` with
@@ -144,10 +144,10 @@ Context-injection capability per event (verified against host documentation):
 
 | Event | Injection field | Notes |
 | --- | --- | --- |
-| `sessionStart` | `additional_context` (+ `env`) | Documented "added to the conversation's initial system context". **Known reliability bugs** (forum reports of injected context being dropped due to a timing gap) — treat as best-effort |
+| `sessionStart` | `additional_context` (+ `env`) | Documented "added to the conversation's initial system context". **Known reliability bugs** (forum reports of injected context being dropped due to a timing gap), treat as best-effort |
 | `postToolUse` | `additional_context` | Works; also has reported plumbing gaps |
-| `beforeSubmitPrompt` | **none** — output schema is `{continue, user_message}` only | Receives the prompt + attachments, but **cannot** add context or modify the prompt (`updated_input` silently stripped). Per-prompt recall injection is architecturally impossible in Cursor today; there is an open feature request |
-| `stop` / `sessionEnd` / `afterAgentResponse` | none | Observation only — good for **storage** side-effects, not recall |
+| `beforeSubmitPrompt` | **none**, output schema is `{continue, user_message}` only | Receives the prompt + attachments, but **cannot** add context or modify the prompt (`updated_input` silently stripped). Per-prompt recall injection is architecturally impossible in Cursor today; there is an open feature request |
+| `stop` / `sessionEnd` / `afterAgentResponse` | none | Observation only, good for **storage** side-effects, not recall |
 | `preCompact` | none | Observation only |
 
 So for Cursor: **recall** may be returned as immediate daemon guidance on a
@@ -165,21 +165,21 @@ Writes the Cursor projection of the shared plugin bundle
 (`crates/tracedecay-agent-hosts/src/agents/plugin_bundle.rs::cursor_files`) to
 `~/.cursor/plugins/local/tracedecay/`:
 
-- **`mcp.json`** — stdio server `tracedecay serve --path ${workspaceFolder}`
+- **`mcp.json`**, stdio server `tracedecay serve --path ${workspaceFolder}`
   (all fact-store/memory/graph tools available to the model).
-- **`hooks/hooks.json`** — 8 hooks: `sessionStart`, `postToolUse`,
+- **`hooks/hooks.json`**, 8 hooks: `sessionStart`, `postToolUse`,
   `afterFileEdit`, `afterShellExecution`, `preCompact`, `sessionEnd`, `stop`,
   `workspaceOpen`, each shelling to
   `tracedecay hook-cursor-*` (dispatch: `src/hook_cmd.rs`, impls:
   `src/hooks/`).
-- **`rules/tracedecay.mdc`** — always-applied rule; its **Recall** bullet
+- **`rules/tracedecay.mdc`**, always-applied rule; its **Recall** bullet
   steers models to `tracedecay_message_search` / `tracedecay_fact_store_search`
   and the `project-memory` skill.
-- **`skills/`** — shared model-invocable skills, excluding the
+- **`skills/`**, shared model-invocable skills, excluding the
   `tracedecay-*` dispatcher skills that Cursor exposes as native commands.
-- **`commands/`** — Cursor-native workflow commands from
+- **`commands/`**. Cursor-native workflow commands from
   `plugin/overlays/cursor/commands/`.
-- **`agents/`** — Cursor agent definitions from
+- **`agents/`**. Cursor agent definitions from
   `plugin/overlays/cursor/agents/`.
 
 What the hooks currently do (all fail-open):
@@ -210,14 +210,14 @@ Installs the Codex projection of the shared plugin bundle
 marketplace entry (`install_codex_marketplace_entry`) and
 `[plugins."tracedecay@personal"] enabled = true` in `config.toml`:
 
-- **`.mcp.json`** (`codex_plugin_mcp`, `crates/tracedecay-agent-hosts/src/agents/codex.rs:563`) — same
+- **`.mcp.json`** (`codex_plugin_mcp`, `crates/tracedecay-agent-hosts/src/agents/codex.rs:563`), same
   stdio tracedecay server.
-- **`hooks/hooks.json`** (`codex_plugin_hooks`, `crates/tracedecay-agent-hosts/src/agents/codex.rs:582`) —
+- **`hooks/hooks.json`** (`codex_plugin_hooks`, `crates/tracedecay-agent-hosts/src/agents/codex.rs:582`),
   `SessionStart`, `UserPromptSubmit`, `SubagentStart`,
   `PostToolUse` (matcher `Bash|apply_patch`), `PostCompact`
   (matcher `auto|manual`), and `Stop`. Hooks require one-time `/hooks` trust
   (`print_hook_trust_guidance`); trusted hashes live in `[hooks.state]`.
-- **`skills/`** — shared skills from `plugin/skills/` plus the
+- **`skills/`**, shared skills from `plugin/skills/` plus the
   `agent-managed/` overlay.
 - **No rule surface exists in Codex.** `SessionStart` and `PostToolUse` may
   return only daemon-approved `additionalContext`; `UserPromptSubmit`,
@@ -287,7 +287,7 @@ surfaces on a schedule.
 | Facts stored | ✅ fact store (9 facts here) + LCM transcripts | same store |
 | Model *can* recall | ✅ MCP `tracedecay_fact_store_search` + skill | ✅ same |
 | Model is *told* to recall | ⚠️ daemon-approved SessionStart/PostToolUse guidance when available; `project-memory` skill matches only when the model thinks "recall" | ⚠️ one Recall bullet in `tracedecay.mdc`; same skill-match dependency |
-| Facts *pushed* into context | ❌ none — hook context is index status + hints only | ❌ none |
+| Facts *pushed* into context | ❌ none, hook context is index status + hints only | ❌ none |
 | Automatic storage | ⚠️ session_reflector exists but disabled by default; skills say "add facts **only when the user asks**" (`project-memory` guardrail) | same |
 | Native memory overlap | ⚠️ Codex memories **on** (`features.memories=true`), learning from the same threads in parallel | Unknown toggle state; server-side, uninspectable |
 
@@ -337,7 +337,7 @@ the host's fail-open response when that admission is unavailable.
 ### C. Rule/skill text: make storage proactive
 
 Today `project-memory`'s guardrail says add facts "**only when the
-user asks**" — the opposite of agent-memory behavior. Change the instruction
+user asks**", the opposite of agent-memory behavior. Change the instruction
 (rule Recall bullet in `plugin/rules/tracedecay.mdc` + the
 `plugin/skills/project-memory/SKILL.md` skill, shared across every host) to:
 
@@ -345,7 +345,7 @@ user asks**" — the opposite of agent-memory behavior. Change the instruction
   for prior decisions" (currently phrased as fallback, not default).
 - *Storage:* "when you learn a durable preference, decision, or pitfall
   (user corrections especially), store it with `tracedecay_fact_store_add` with
-  calibrated trust" — the add-path already defends against junk
+  calibrated trust", the add-path already defends against junk
   (near_duplicate / possible_conflict / secret rejection, §3.3).
 
 This mirrors Cursor's hybrid design (sidecar + tool calls), with the tool-call
@@ -366,7 +366,7 @@ construction:
 
 Pointers: `crates/tracedecay-agent-hosts/src/automation/config.rs` (defaults/validation),
 `crates/tracedecay-agent-hosts/src/automation/runner.rs::run_session_reflector_with_backend`,
-dashboard curation UI (concurrent work in `dashboard/` — coordinate, don't
+dashboard curation UI (concurrent work in `dashboard/`, coordinate, don't
 touch).
 
 ### E. Codex-native-memory coexistence policy
@@ -379,7 +379,7 @@ With `features.memories = true`, Codex builds a parallel memory in
    but two sources of truth drift.
 2. **Prefer TraceDecay:** recommend `memories.use_memories = false` (stop
    injection, keep generation) or `features.memories = false` in install
-   docs/doctor output once design A ships — A's injection replaces it with
+   docs/doctor output once design A ships. A's injection replaces it with
    curated, trust-scored, per-project recall. Do **not** silently edit the
    user's `config.toml`; make it a doctor suggestion.
 3. **Harvest:** one-way import of `~/.codex/memories/raw_memories.md` +
@@ -399,7 +399,7 @@ Scheduled materialization of facts into files agents read natively without
 any tool call: a `## Memory (generated by tracedecay)` fenced section in repo
 `AGENTS.md`, or a `~/.codex/memories/extensions/tracedecay/` entry (Codex
 reads the memories dir natively when the feature is on). Compared to B2 this
-reaches *every* agent (Claude, Gemini, etc. — `crates/tracedecay-agent-hosts/src/agents/` has 15
+reaches *every* agent (Claude, Gemini, etc., `crates/tracedecay-agent-hosts/src/agents/` has 15
 integrations) via one artifact, but it edits user/repo-owned files (needs
 fenced-section ownership, `.gitignore` questions, merge conflicts) and its
 freshness is only as good as the schedule. Recommend only as the
@@ -408,27 +408,27 @@ alongside D and reusing the managed-file conventions from the skill overlay.
 
 ### Non-options investigated and rejected
 
-- **Cursor `beforeSubmitPrompt` recall injection** — output schema is
+- **Cursor `beforeSubmitPrompt` recall injection**, output schema is
   `{continue, user_message}` only; `updated_input`/`additional_context` are
   silently stripped (confirmed by Cursor staff on the forum; open feature
   request). Revisit if Cursor ships the field.
-- **Rewriting the user prompt via `user_message`** — `user_message` is a
+- **Rewriting the user prompt via `user_message`**, `user_message` is a
   user-facing notice, not model context; abusing it shows UI noise.
-- **Intercepting Cursor native Memories** — server-side, no local artifact,
+- **Intercepting Cursor native Memories**, server-side, no local artifact,
   no hook. Only the on/off toggle exists.
-- **Codex `notify` mechanism** — fire-and-forget desktop notification hook;
+- **Codex `notify` mechanism**, fire-and-forget desktop notification hook;
   no context channel.
 
 ---
 
 ## 6. Historical recommended sequence
 
-1. **A** (daemon-owned memory and recovery work) — preserve the daemon as the
+1. **A** (daemon-owned memory and recovery work), preserve the daemon as the
    sole authority; hooks may only submit bounded native admissions.
-2. **C** (proactive storage wording) — update user-facing rule and skill text
+2. **C** (proactive storage wording), update user-facing rule and skill text
    without introducing a hook-local persistence path.
-3. **D** (reflector enablement UX) — config/doctor/dashboard nudge.
+3. **D** (reflector enablement UX), config/doctor/dashboard nudge.
 4. **E** (coexistence policy + optional Codex-memories harvest importer).
 5. **F** (generalized AGENTS.md materialization across all 15 agent
-   integrations) — only if A–C leave recall gaps for agents without hook
+   integrations), only if A–C leave recall gaps for agents without hook
    surfaces.

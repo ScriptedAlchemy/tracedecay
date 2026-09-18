@@ -205,8 +205,8 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     /// no writer transaction. Only `ActiveKeyMissing` enters the provisioning
     /// transaction, which rechecks under the writer so concurrent first-use
     /// callers mint exactly one key; the provider is then built from a fresh
-    /// read view that includes it. Every other read-side refusal — multiple
-    /// active keys, invalid id/version/material, retention — is returned as is
+    /// read view that includes it. Every other read-side refusal, multiple
+    /// active keys, invalid id/version/material, retention, is returned as is
     /// and never becomes a reason to mint a replacement.
     #[hotpath::skip]
     pub async fn load_session_cursor_key_provider_result(

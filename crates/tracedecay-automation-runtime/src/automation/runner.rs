@@ -405,8 +405,8 @@ impl RetainedCombinedReviewRun {
 /// whole combined run) and both evidence bundles must be available;
 /// otherwise the dispatch reports `NotCombined` and the caller runs the
 /// tasks sequentially as before. On a combined run, two ledger records are
-/// appended — one per task, so per-task last-run bookkeeping and the
-/// dashboard scheduler status stay coherent — sharing the combined request's
+/// appended, one per task, so per-task last-run bookkeeping and the
+/// dashboard scheduler status stay coherent, sharing the combined request's
 /// `input_hash` and a `combined_run_id` correlation in `report_ref`, with
 /// `prompt_version` set to the combined contract's version.
 #[hotpath::measure(label = "automation.run.combined_review", future = true)]

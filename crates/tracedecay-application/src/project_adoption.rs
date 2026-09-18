@@ -15,7 +15,7 @@
 //! explicit `tracedecay init` adopts only under [`MovedStoreAdoption::AdoptNamed`]
 //! or [`MovedStoreAdoption::AdoptUnique`]. The one exception that needs no
 //! flag is resuming an interrupted remap, where the store's own manifest
-//! already records the new root — positive linkage this module wrote under a
+//! already records the new root, positive linkage this module wrote under a
 //! previous explicit adoption.
 //!
 //! Known miss (documented, not a remap hazard): on a case-insensitive
@@ -34,8 +34,8 @@ use tracedecay_runtime_core::storage::{self, StoreLayout};
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MovedNongitCandidate {
     project_id: String,
-    /// The shard's own evidence already records the root being initialized —
-    /// an interrupted remap journal record, resumable without a flag.
+    /// The shard's own evidence already records the root being initialized.
+    /// An interrupted remap journal record, resumable without a flag.
     records_new_root: bool,
 }
 
@@ -293,8 +293,8 @@ fn paths_record_same_root(recorded: &Path, previous_root: &Path) -> bool {
 /// Store-side evidence (shard manifest, then config) is written first: a
 /// manifest recording the new root is the journal record an interrupted remap
 /// resumes from, because it is positive linkage between this store and the
-/// root. The registry upsert commits last — it is what makes the root resolve
-/// — so every intermediate state either still resolves the old registration
+/// root. The registry upsert commits last, it is what makes the root resolve,
+/// so every intermediate state either still resolves the old registration
 /// or resumes here on the next explicit init.
 #[hotpath::measure(label = "lifecycle.remap_moved_nongit", future = true)]
 async fn remap_moved_nongit_project(

@@ -313,7 +313,7 @@ pub(crate) fn store_root_identity(directory: &Dir) -> io::Result<StoreRootIdenti
 /// preserves and a replacement changes.
 ///
 /// Unix reads `st_dev`/`st_ino` from the capability's metadata. Windows must
-/// read the volume serial number and file index *by handle* — `cap_std`
+/// read the volume serial number and file index *by handle*, `cap_std`
 /// exposes them on `Metadata` only under the nightly `windows_by_handle`
 /// feature, so the stable build saw `None` and every fence capture failed with
 /// `InspectFailed`, which left every unregistered store unverifiable and every

@@ -20,7 +20,7 @@ archive.include = [
 [profile.ci.junit]
 path = "junit.xml"
 
-# Heavy daemon git-metadata-watcher tests do real work — 50 sequential `git
+# Heavy daemon git-metadata-watcher tests do real work. 50 sequential `git
 # commit`s, concurrent reconciliations, and the code-index-runtime watcher
 # unit suite. Their assertions are order-independent (final indexed state /
 # single sealed generation), so they are correct regardless of interleaving,

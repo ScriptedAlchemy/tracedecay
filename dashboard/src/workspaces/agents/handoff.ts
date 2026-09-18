@@ -67,7 +67,7 @@ export type AgentHandoffReading =
       readonly state: 'read';
       readonly handoffs: readonly AgentHandoff[];
       readonly actors: readonly AgentHandoffActor[];
-      /** Every task on the version that was read — the population the frontier
+      /** Every task on the version that was read, the population the frontier
        * is a subset of, and the only honest denominator for it. */
       readonly tasksRead: number;
       /** Tasks carrying at least one handoff. */
@@ -86,8 +86,8 @@ export type AgentHandoffReading =
  * The graph version a read carries.
  *
  * `current` and `as_of` answer with one entry. The two timeline modes answer
- * with a series, and this build reads the LAST of them — the newest version in
- * the window — rather than merging entries, because handoffs from two graph
+ * with a series, and this build reads the LAST of them, the newest version in
+ * the window, rather than merging entries, because handoffs from two graph
  * versions summed together would be a frontier that never existed at any one
  * instant. The dashboard only ever asks `current`; the other three are handled
  * because the contract admits them, not because they are requested.
@@ -151,8 +151,8 @@ export function handoffActors(
 /**
  * The frontier, from the Work views read.
  *
- * `undefined` is a read that has not landed — react-query has no data for a
- * query that is still in flight — and is reported as pending rather than as an
+ * `undefined` is a read that has not landed, react-query has no data for a
+ * query that is still in flight, and is reported as pending rather than as an
  * empty frontier, which is the whole point of keeping the two apart.
  */
 export function readHandoffFrontier(

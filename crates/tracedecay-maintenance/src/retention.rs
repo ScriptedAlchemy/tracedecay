@@ -3,9 +3,9 @@
 //!
 //! Three tables grow without bound and had no scheduled pruning:
 //!
-//! * `analytics_events` — hook/tool/skill telemetry. Derived, reconstructable
+//! * `analytics_events`, hook/tool/skill telemetry. Derived, reconstructable
 //!   signal, so it carries a **safe default retention of 180 days**.
-//! * `session_messages` and `lcm_raw_messages` — legacy session copies retained
+//! * `session_messages` and `lcm_raw_messages`, legacy session copies retained
 //!   for a six-month recovery horizon. Current session stores additionally use
 //!   projection-durability-aware retention in `tracedecay_lcm::retention`.
 //!

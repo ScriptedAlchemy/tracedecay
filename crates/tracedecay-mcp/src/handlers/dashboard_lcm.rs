@@ -250,7 +250,7 @@ impl DashboardLcmReadAdapter {
 
         let mut partial_description_count = 0_u64;
         // A session read's stats come from the canonical describe authority,
-        // addressed by the session's measured provider — taken from the
+        // addressed by the session's measured provider, taken from the
         // hydrated page itself, never a wildcard the exact-identity describe
         // reads would treat as a provider named "all".
         let session_request_id = match &request {
@@ -369,7 +369,7 @@ impl DashboardLcmReadAdapter {
         {
             // Only a session read has a subject that can be absent. An
             // aggregate read over a readable store with zero temporal
-            // results is a measured zero, served as a complete empty page —
+            // results is a measured zero, served as a complete empty page,
             // never collapsed into the Absent state.
             if let DashboardLcmReadRequestV1::Session { .. } = request {
                 return not_ready(DashboardLcmReadStateV1::Absent, "lcm_session_absent");

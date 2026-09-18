@@ -1,6 +1,6 @@
 //! Daemon client side: restart-grace connects and one-shot JSON-RPC tool
-//! calls against the daemon. Connection discovery — resolving the profile's
-//! authority record into an endpoint plus credential — lives in
+//! calls against the daemon. Connection discovery, resolving the profile's
+//! authority record into an endpoint plus credential, lives in
 //! `tracedecay-daemon-identity`; this module only consumes the
 //! [`ResolvedDaemonConnection`] it resolves.
 
@@ -31,8 +31,8 @@ use super::{
 ///
 /// The request deadline belongs to the daemon: it is what admission measures
 /// and what the retained owners settle against, and its whole purpose is to
-/// produce a typed terminal — a `PartialEffect` carrying a committed receipt, a
-/// typed timeout — rather than silence. Bounding the client's *read* by that
+/// produce a typed terminal, a `PartialEffect` carrying a committed receipt, a
+/// typed timeout, rather than silence. Bounding the client's *read* by that
 /// same instant made every one of those terminals unobservable through this
 /// transport: the client abandoned the connection moments before the envelope
 /// it had asked for arrived and reported "outcome may be unknown" while the
@@ -206,9 +206,9 @@ pub(crate) fn is_saturated_daemon_connect_error(kind: std::io::ErrorKind) -> boo
 
 pub(crate) fn daemon_connect_failure_advice(kind: std::io::ErrorKind) -> &'static str {
     if is_saturated_daemon_connect_error(kind) {
-        "The daemon is up but not accepting connections — likely overloaded. Retry shortly, or check `tracedecay daemon status`."
+        "The daemon is up but not accepting connections, likely overloaded. Retry shortly, or check `tracedecay daemon status`."
     } else {
-        "The daemon may be restarting (e.g. after `tracedecay update`) — retry shortly, or check `tracedecay daemon status`."
+        "The daemon may be restarting (e.g. after `tracedecay update`). Retry shortly, or check `tracedecay daemon status`."
     }
 }
 
@@ -514,7 +514,7 @@ fn tool_result_retry_after_delay(result: &serde_json::Value) -> Option<Duration>
 /// own cadence, and a completed result whose typed problem directs an
 /// after-delay retry, on the delay the directive names. Neither is retried
 /// past `deadline`: when the budget cannot hold the wait, the daemon's own
-/// typed state — a warming project, a still-mounting authority — is the
+/// typed state, a warming project, a still-mounting authority, is the
 /// truthful answer, not the client's deadline bookkeeping.
 fn project_open_retry_wait(
     result: &Result<serde_json::Value>,
@@ -611,8 +611,8 @@ pub async fn call_default_tool_within(
     call_tool_within(&socket_path, handshake, tool_name, arguments, deadline).await
 }
 
-/// Calls a daemon tool, waiting out a warming project — and the owners that
-/// mount behind its core publication — until `deadline`.
+/// Calls a daemon tool, waiting out a warming project, and the owners that
+/// mount behind its core publication, until `deadline`.
 ///
 /// Bootstrap callers deliberately trigger the cold open they are waiting for,
 /// so the warming hint is progress rather than an answer: `tracedecay init`

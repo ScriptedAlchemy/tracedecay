@@ -1,7 +1,7 @@
 //! Deterministic diversity-cap stage contracts (Plan 15 pipeline step 9:
 //! profile-owned caps per source namespace, source instance, repository,
 //! session/thread, logical-copy cluster, and evidence role apply after
-//! fusion; a cap must carry its locked evaluation anchor — absent evidence
+//! fusion; a cap must carry its locked evaluation anchor, absent evidence
 //! leaves the cap disabled except resource-safety ceilings).
 
 use std::collections::{BTreeMap, BTreeSet};

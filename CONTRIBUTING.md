@@ -21,7 +21,7 @@ is required. See [AGENTS.md](AGENTS.md) for checkout safety and shared-work rule
 
 The dashboard bundle at `dashboard/app-dist/` is generated output and is
 git-ignored, so a fresh clone has none. The CLI build script
-(`crates/tracedecay-cli/build.rs`) — the only crate that embeds the bundle —
+(`crates/tracedecay-cli/build.rs`), the only crate that embeds the bundle,
 builds the frontend into an immutable, digest-named copy under its own
 `OUT_DIR` rather than embedding `app-dist`: `npm ci` runs when
 `dashboard/node_modules` lacks the marker for the current `package-lock.json`,
@@ -44,7 +44,7 @@ Read [the V2 operating-model summary](docs/V2-OPERATING-MODEL.md) before
 changing storage, retrieval, or host ingestion, then follow the linked
 authoritative roadmap plans. `tracedecay-graph-db` is the sole final Grafeo
 boundary; SQLite is relational only. V2 persisted data is reset or recreated
-when incompatible—do not add a prior-store reader, conversion, backfill,
+when incompatible, do not add a prior-store reader, conversion, backfill,
 shadow path, or dual write.
 
 Tests and local validation must use isolated temporary home, profile, project,
@@ -162,7 +162,7 @@ Changes under `plugin/` or `crates/tracedecay-agent-hosts/` are covered
 by a layered validation system: vendored JSON-schema checks, per-host skill
 frontmatter contracts, cross-bundle sync/parity tests, and a CI
 schema-validation workflow. `plugin/skills/` is the shared source of truth for
-bundled skills — do not fork host-specific copies. Before submitting, run:
+bundled skills, do not fork host-specific copies. Before submitting, run:
 
 ```bash
 cargo nextest run -p tracedecay --features test-helpers --test agent_suite
@@ -190,7 +190,7 @@ npm run contracts:check      # what CI runs; exits 1 on any drift
 ```
 
 `contracts:check` is a blocking CI step in the `dashboard` job of `ci.yml`, not
-an advisory one. Do not hand-edit the generated files — the check will fail and
+an advisory one. Do not hand-edit the generated files. The check will fail and
 the fix is to regenerate and commit.
 
 The generated contract files (and the embedded Cursor extension bundle) are
@@ -244,10 +244,29 @@ behavior.
 - Target `master` for bug fixes and stable features.
 - Confirm the target branch with the maintainer for release-channel work; do not
   infer it from an archived plan or PR number.
-- Keep PRs focused — one logical change per PR.
+- Keep PRs focused. One logical change per PR.
 - Include test coverage for new behavior.
 - Do not hand-edit `CHANGELOG.md`; release automation generates it from
   conventional commit messages.
+
+### What CI spends on a pull request
+
+CI runs on GitHub's free hosted runners: 20 concurrent jobs for the whole
+account, 5 of them macOS. Every job a pull request queues is a job the
+integration branch waits behind, so a run spends only what its state earns:
+
+| State | Runs |
+|---|---|
+| Draft | Light gates only: scope gate, commit lint, release drift, benchmark-harness self-tests. |
+| Ready for review (or labelled `ci-full`) | The Linux lane: build, clippy, fmt, feature gates, dashboard, Linux test partitions, hotpath parity, PR dogfood. |
+| Labelled `ci-os` | Adds the macOS and Windows matrices. |
+| Labelled `ci-hosts` | Adds the stock Hermes / Claude Code / OpenCode integrations. |
+| Labelled `perf` | Runs the hotpath profile, coverage, and runtime-core workflows. |
+| Push to `master` | Everything. |
+
+Marking a PR ready or adding a label starts the run; a newer push cancels
+the one in flight, on every branch including `master`. Closing or merging a
+PR cancels its remaining runs and drops its Actions caches.
 
 ## Reporting Issues
 

@@ -11,7 +11,7 @@
  * Everything here is derived by parsing the generated contract types
  * (`ExplorerSourceProgressV1`, `ExplorerResultPageV1`, `ExplorerSourceOutcomeV1`)
  * rather than by poking at fields on an `unknown`. The one place the wire is
- * genuinely untyped — the result rows — is isolated in `narrowPageRows` below,
+ * genuinely untyped, the result rows, is isolated in `narrowPageRows` below,
  * which documents the backend change that would delete it.
  */
 import type { EvidenceQuality } from '../../ui/EvidencePattern.tsx';
@@ -50,7 +50,7 @@ export const LANE_SOURCE_ID: Record<SourceLaneId, ExplorerSourceIdV1> = {
  * `ExplorerSourceIdV1` names three sources and none of them is semantic
  * retrieval; the dense retrieval path was retired from the daemon. The lane
  * is still drawn, because a reader comparing four authorities must see that
- * the fourth did not answer for a reason — not find three columns and infer
+ * the fourth did not answer for a reason, not find three columns and infer
  * the fourth was never asked.
  */
 export const SEMANTIC_UNREGISTERED_DETAIL =
@@ -147,7 +147,7 @@ export type ExplorerLaneReadModel =
       readonly detail: string | null;
     }
   /** The client could not reach the daemon at all. A connectivity condition on
-   * this side of the wire — never a statement about the source. */
+   * this side of the wire, never a statement about the source. */
   | { readonly state: 'offline'; readonly lane: LaneId }
   /** The daemon accepted no identity for this read. */
   | { readonly state: 'unauthorized'; readonly lane: LaneId }
@@ -185,7 +185,7 @@ export function semanticLane(): ExplorerLaneReadModel {
  * Creating a run is a POST, and the project gateway refuses every non-read
  * request for a project that is not the active one. The controller consults
  * the scope authority before dispatching, so a refused scope is rendered from
- * its reason rather than from a 405 the daemon would have had to send back —
+ * its reason rather than from a 405 the daemon would have had to send back , 
  * and a scope the registry has not yet resolved is `unknown`, not refused.
  * Returns `null` when the scope is writable and the run may proceed.
  */
@@ -227,7 +227,7 @@ export function laneFromScope(
  * source did not send renders as missing rather than as a zero.
  *
  * Deleting this function needs `ExplorerResultPageV1.rows` to become a tagged
- * union in Rust — one variant per `ExplorerSourceIdV1`, wrapping the row types
+ * union in Rust, one variant per `ExplorerSourceIdV1`, wrapping the row types
  * that already generate today (`GraphNodeV1` for `CodeGraph`, `LcmMessageV1`
  * and `LcmSummaryNodeV1` for `Sessions`, `MemoryFactRowV1` for `Knowledge`).
  */
@@ -297,7 +297,7 @@ export function laneFromSourceProgress(
     case 'ready': {
       // `page` is nullable on every outcome in the Rust type, so a `ready`
       // source that arrived without one has genuinely returned nothing to
-      // show — which is not the same as an error, and not the same as never
+      // show, which is not the same as an error, and not the same as never
       // having answered.
       const page = source.page;
       if (page === null) {
@@ -417,7 +417,7 @@ export function laneFromTransport(
  * The lane's condition during a search, read off one coordinator response.
  *
  * `submittedQuery` is checked because a run that answered for an earlier query
- * is not an answer for this one — showing its rows would attribute another
+ * is not an answer for this one, showing its rows would attribute another
  * query's results to the text on screen.
  */
 export function searchLane(
@@ -483,7 +483,7 @@ export function laneHits(read: ExplorerLaneReadModel): readonly Hit[] {
   return read.state === 'ready' || read.state === 'partial' ? read.hits : [];
 }
 
-/** Whether the source answered with rows it stands behind — completely
+/** Whether the source answered with rows it stands behind, completely
  * (`ready`) or with stated omissions (`partial`). */
 export function laneAnswered(read: ExplorerLaneReadModel): boolean {
   return read.state === 'ready' || read.state === 'partial';
@@ -643,7 +643,7 @@ export function laneStateDetail(read: ExplorerLaneReadModel): string | undefined
  * Where a lane's quantity sits on the shared evidence axis.
  *
  * `measured` is reserved for a source that answered AND reported the size of
- * the matching set — the only case in which the number on screen has a real
+ * the matching set, the only case in which the number on screen has a real
  * denominator behind it. Rows without a reported total are `associated`: they
  * are genuine rows, but the surface cannot say what fraction of the truth they
  * are. Every other condition is `unknown`. `predicted` is deliberately

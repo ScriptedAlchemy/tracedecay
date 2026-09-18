@@ -104,7 +104,7 @@ impl McpServer {
             }
             HookEventPlan::AddBranch(branch) => {
                 // Project-root plans must revalidate live root + current branch
-                // immediately before effect — same strictness as AddBranchAt.
+                // immediately before effect, same strictness as AddBranchAt.
                 self.apply_branch_effect(root, root, branch).await
             }
             HookEventPlan::AddBranchAt {
@@ -114,7 +114,7 @@ impl McpServer {
             } => {
                 // Durable effect roots stay concrete (not hashed) and must be
                 // freshly normalized, canonicalized, and reauthorized before
-                // any write — admit-time membership/branch are never reused.
+                // any write, admit-time membership/branch are never reused.
                 self.apply_branch_effect(&effect_root, root, branch).await
             }
             HookEventPlan::SyncCurrentBranch { branch, agent: _ } => {

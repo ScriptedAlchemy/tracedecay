@@ -243,7 +243,7 @@ impl GraphSeatGateV1 {
 ///
 /// Preparation binds the complete generation and hands it to the serving
 /// swap; activation installs its native graph. The two used to share one
-/// gate, so refusing a redundant activation also refused the seat — a restart
+/// gate, so refusing a redundant activation also refused the seat, a restart
 /// that restored an owner whose graph was already Ready therefore left the
 /// serving slot empty forever while status read the same owner and reported
 /// Ready. Every arm here refuses activation only; the seat always happens.
@@ -338,7 +338,7 @@ impl ServingSwapOutcomeV1 {
                 // generation must not move the slot backwards.
                 return Self::Superseded;
             }
-            // Nothing active holds the slot — it is empty, or its incumbent
+            // Nothing active holds the slot, it is empty, or its incumbent
             // was superseded too. Either way this generation is no worse than
             // what is there, and refusing left the route wedged on a
             // generation the store no longer publishes.
@@ -734,8 +734,8 @@ pub struct MountedCodeIndexWorktreeV1 {
     /// passes or when a generation extracted this pass seats as the active
     /// publication; cleared when the probe fails or the slot is rewritten
     /// with an unproven generation. A background reconcile owns the scheduler
-    /// mutex for its whole pass — sealing a production-scale corpus holds it
-    /// for minutes — and verified graph reads re-prove the witness against
+    /// mutex for its whole pass, sealing a production-scale corpus holds it
+    /// for minutes, and verified graph reads re-prove the witness against
     /// the live checkout through that window instead of refusing.
     serving_source_witness: Arc<RwLock<Option<super::ServingSourceWitnessV1>>>,
     /// Immutable progress snapshot independently readable while the scheduler
@@ -846,7 +846,7 @@ const CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1: &str = "inspect the daemon l
 
 const CONVERGENCE_PARK_PUBLICATION_CORRUPTION_REMEDIATION_V1: &str = "the durable code-index \
      publication store is corrupt; retire this project route, replace or rebuild that store, \
-     then remount — `tracedecay sync` and ordinary wakes cannot clear it";
+     then remount, `tracedecay sync` and ordinary wakes cannot clear it";
 
 fn is_terminal_publication_authority_park(parked: &CodeIndexConvergenceParkedV1) -> bool {
     parked.blocked_reason == Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt)
@@ -1101,8 +1101,8 @@ mod terminal_publication_park_tests {
 
 /// The sealed-generation identity half of a freshness reading. Every other
 /// field is left at its default so callers can fill in the observation half
-/// with struct-update syntax, which keeps these seven — six of them
-/// `Option<String>` — matched by name rather than by position.
+/// with struct-update syntax, which keeps these seven, six of them
+/// `Option<String>`, matched by name rather than by position.
 fn dashboard_freshness_identity(
     latest: Option<&LatestCompleteCodeIndexV1>,
 ) -> tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
@@ -1159,10 +1159,8 @@ pub(super) fn dashboard_code_graph_serving(
 ///
 /// Refused graph activation remains terminal for text serving, preserving the
 /// existing status behavior; strict dogfood can distinguish it from Ready via
-/// the separate typed projection. Lane readiness is not seat identity: a
-/// publication installs the replacement text owner before the serving swap
-/// (`registry/mount.rs`), and search still answers the incumbent seat.
-/// [`dashboard_terminal_status`] is what freshness reads use.
+/// the separate typed projection. [`dashboard_terminal_status`] is what
+/// freshness reads use.
 fn dashboard_generation_is_ready(
     latest: Option<&LatestCompleteCodeIndexV1>,
     text_ready: bool,
@@ -1178,30 +1176,25 @@ fn dashboard_generation_is_ready(
 
 /// Whether the generation status advertises is the one search will serve.
 ///
-/// `advertised_text_generation_id` is `None` when no text owner is installed;
-/// freshness then names the serving seat, so there is no split to refuse.
+/// Status identity is taken from the text owner, but a publication installs
+/// the replacement text owner before the serving swap (`registry/mount.rs`),
+/// and a graph-on search answers from the decoded seat. Until the seat catches
+/// up, search serves the predecessor and the split is not terminal. A graph-off
+/// mount serves the text owner directly and deliberately never seats the
+/// decoded generation, so there is no seat to compare.
 pub(super) fn serving_seat_matches_advertised_generation(
+    graph_activation_enabled: bool,
     serving_generation_id: Option<&str>,
     advertised_text_generation_id: Option<&str>,
 ) -> bool {
     match advertised_text_generation_id {
-        None => true,
-        Some(advertised) => serving_generation_id == Some(advertised),
+        Some(advertised) if graph_activation_enabled => serving_generation_id == Some(advertised),
+        _ => true,
     }
 }
 
-pub(super) fn serving_seat_matches_advertised_text_owner(
-    serving: Option<&LatestCompleteCodeIndexV1>,
-    text: Option<&LatestCodeTextGenerationV1>,
-) -> bool {
-    serving_seat_matches_advertised_generation(
-        serving.map(|serving| serving.generation().manifest().generation_id.as_str()),
-        text.map(|text| text.metadata().manifest().generation_id.as_str()),
-    )
-}
-
-/// Terminal freshness: lane owners are ready and the serving seat is the
-/// generation status will advertise.
+/// Terminal freshness: lane owners are ready and search serves the generation
+/// status advertises.
 pub(super) fn dashboard_terminal_status(
     latest: Option<&LatestCompleteCodeIndexV1>,
     text: Option<&LatestCodeTextGenerationV1>,
@@ -1209,26 +1202,16 @@ pub(super) fn dashboard_terminal_status(
     graph_activation_enabled: bool,
     code_graph_serving: &Option<CodeGraphServingReadinessV1>,
 ) -> bool {
-    terminal_status_from_lanes(
-        dashboard_generation_is_ready(
-            latest,
-            text_ready,
-            graph_activation_enabled,
-            code_graph_serving,
-        ),
-        serving_seat_matches_advertised_text_owner(latest, text),
+    dashboard_generation_is_ready(
+        latest,
+        text_ready,
+        graph_activation_enabled,
+        code_graph_serving,
+    ) && serving_seat_matches_advertised_generation(
+        graph_activation_enabled,
+        latest.map(|latest| latest.generation().manifest().generation_id.as_str()),
+        text.map(|text| text.metadata().manifest().generation_id.as_str()),
     )
-}
-
-/// Lane readiness and seat identity are one freshness verdict.
-///
-/// The graph-rebuild receipt had ready lanes and a serving seat that still
-/// held the predecessor. That combination is not terminal.
-pub(super) fn terminal_status_from_lanes(
-    lanes_ready: bool,
-    serving_matches_advertised: bool,
-) -> bool {
-    lanes_ready && serving_matches_advertised
 }
 
 fn dashboard_text_freshness_identity(
@@ -1499,8 +1482,8 @@ type ReadyProbeServingPartsV1 = (
 );
 
 /// Typed verdict from a demand-driven reconcile wake (hooks, overflow, query
-/// admission). Callers must match this — especially
-/// [`Self::PublicationAuthorityCorrupt`] — instead of swallowing a bool and
+/// admission). Callers must match this, especially
+/// [`Self::PublicationAuthorityCorrupt`], instead of swallowing a bool and
 /// driving inline work against a terminal park.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CodeIndexReconcileAdmissionV1 {
@@ -2167,8 +2150,8 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Claim the pending wake as one reconcile's arrival, at the instant the
     /// scheduler dequeues it.
     ///
-    /// A reconcile with no pending wake — a follow-up pass draining work an
-    /// earlier wake already claimed — has no attributable arrival. Reporting the
+    /// A reconcile with no pending wake, a follow-up pass draining work an
+    /// earlier wake already claimed, has no attributable arrival. Reporting the
     /// dequeue or terminal instant instead would publish a fabricated zero queue
     /// delay, so the absence stays typed.
     fn take_pending_arrival(
@@ -2280,8 +2263,8 @@ impl CodeIndexSchedulerRegistryV1 {
             .map(|scheduler| (pass, scheduler))
     }
 
-    /// Drive one pass's text owner — a publication's replacement owner or the
-    /// restored retained owner — through its bounded projection, one blocking
+    /// Drive one pass's text owner, a publication's replacement owner or the
+    /// restored retained owner, through its bounded projection, one blocking
     /// advance at a time, until exact and lexical serving are ready or the
     /// projection stops typed.
     ///
@@ -2524,7 +2507,7 @@ impl CodeIndexSchedulerRegistryV1 {
         // A successful publication is the terminal outcome operators need to see
         // to know a rebuild window actually closed, so it is `info`, not `debug`:
         // the cadence receipt below is debug-level and was invisible in the
-        // journal during the live search outage. Identifiers and counters only —
+        // journal during the live search outage. Identifiers and counters only,
         // no project path.
         if let CodeIndexReconcileOutcomeV1::Published(evidence) = outcome {
             tracing::info!(
@@ -3484,8 +3467,8 @@ fn feedback_document_logical_path(
 ///
 /// The caller canonicalizes the mounted root; the client addresses a document
 /// by whatever path it opened. Those two spellings differ whenever any prefix
-/// of the root is a symlink — on macOS every `/var/folders/...` root the
-/// daemon holds as `/private/var/folders/...` — and a raw prefix strip
+/// of the root is a symlink, on macOS every `/var/folders/...` root the
+/// daemon holds as `/private/var/folders/...`, and a raw prefix strip
 /// refused every document under such a root as outside it.
 ///
 /// The document need not exist yet (an unsaved buffer), so the deepest

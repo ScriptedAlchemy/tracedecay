@@ -956,7 +956,7 @@ pub enum GraphReplayRetirementOutcomeV1 {
 /// Discard request for one exact pending journaled replay row: a publication
 /// journaled by an interrupted publisher that never advanced the verified
 /// head and deterministically refuses to complete. The row is named by both
-/// key and observed sequence so the discard is compare-and-swap shaped —
+/// key and observed sequence so the discard is compare-and-swap shaped,
 /// only the exact row the caller diagnosed is removed, never a row a
 /// concurrent publisher re-journaled since.
 #[derive(Clone, Debug, PartialEq, Eq)]

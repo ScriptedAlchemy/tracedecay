@@ -2,7 +2,7 @@
 // sets and restores process environment variables in-process.
 //! The production Work-loop journey, end to end, through the real daemon.
 //!
-//! Plans 09 and 24 both name one direct acceptance journey — seven steps that
+//! Plans 09 and 24 both name one direct acceptance journey, seven steps that
 //! have to hold together on a live surface rather than one at a time in unit
 //! isolation. Every leg of it already had a component test; nothing had ever
 //! run the whole loop through the daemon a client actually calls, so the
@@ -23,7 +23,7 @@
 //! accept a synthetic stand-in for an external provider's behaviour as
 //! acceptance evidence, and this test does not create one: it never parses,
 //! asserts on, or imitates provider semantics. What it does is exercise the
-//! spawn path — the thing the daemon owns — against a local executable pinned
+//! spawn path, the thing the daemon owns, against a local executable pinned
 //! through the production configuration control plane. That is the same
 //! mechanism the runtime uses for every provider (`PinnedWorkExecutable-
 //! BindingResolver`, `src/config/work_executable_binding.rs`): an executable id
@@ -934,7 +934,7 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
     // =====================================================================
     // The control plane is the display authority for what governs the task.
     // A sensitive setting is readable as an effective value with its snapshot
-    // identity and provenance, and the plaintext of a credential never is —
+    // identity and provenance, and the plaintext of a credential never is.
     // this reads the setting the provider step will later be pinned to.
     let resolved = fixture.payload(
         "configuration get (work executable bindings)",

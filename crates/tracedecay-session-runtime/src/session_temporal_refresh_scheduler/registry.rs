@@ -68,14 +68,14 @@ impl SessionTemporalRefreshPassReport {
 ///
 /// Every mounted project scheduler plus the profile scheduler owns one worker
 /// task, so a daemon serving N registered projects would otherwise run N + 1
-/// historical catch-up passes concurrently at startup — each pass is bounded,
+/// historical catch-up passes concurrently at startup, each pass is bounded,
 /// but the aggregate grew with the number of projects (the 11.6 GB catch-up
 /// incident). Daemon readiness never waits on this admission: catch-up is
 /// background work, and a worker that cannot acquire a permit defers its
 /// history pass as typed retryable state while projection serving continues.
 ///
 /// Two rather than one for the same reason as the code-index reconcile bound:
-/// a pass is not pure CPU — discovery, store writes, and projection drains are
+/// a pass is not pure CPU, discovery, store writes, and projection drains are
 /// I/O and lock phases that overlap a second pass's parsing at negligible
 /// cost, while race-to-idle finishes each backlog sooner than interleaving
 /// all of them.

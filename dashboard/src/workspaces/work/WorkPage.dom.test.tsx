@@ -166,7 +166,7 @@ describe('the Work page over mounted routes', () => {
     expect(container.querySelector('[data-work-board]')).toBeNull();
   });
 
-  /** An empty board is legitimate — but only when the daemon said the board was
+  /** An empty board is legitimate, but only when the daemon said the board was
    * complete and empty. */
   it('draws an empty board only from a current product graph that was empty', async () => {
     serve((url) =>

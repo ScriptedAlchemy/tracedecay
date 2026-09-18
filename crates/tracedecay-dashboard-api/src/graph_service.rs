@@ -666,7 +666,7 @@ pub async fn subgraph_payload(
             });
         }
         // The completed ranking already measured every symbol of the
-        // generation, so its examination count is the census size — no second
+        // generation, so its examination count is the census size, no second
         // full `all_symbols` scan is needed to know whether the budget cut.
         let census_size = ranking.symbols_examined;
         let selected = ranking

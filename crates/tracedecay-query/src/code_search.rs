@@ -361,7 +361,7 @@ impl CodeIndexSearchCoverageV1 {
 
     /// The progressive-degradation gate in one place: keep serving while any
     /// lane is ready, and surface the typed failure only when none is. It
-    /// never blocks — the decision is made from already-resolved lane state.
+    /// never blocks. The decision is made from already-resolved lane state.
     pub fn degraded_or_fail(
         self,
         reason: CodeIndexSearchUnavailableReasonV1,

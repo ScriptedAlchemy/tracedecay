@@ -859,7 +859,7 @@ fn project_open_problem(
     // this to `authority == "workflow"` sent every other caller down the
     // retryable-unavailable branch below, so a project whose relational shape
     // this binary refuses answered "the application service is unavailable,
-    // retry after 250ms" — and clients dutifully retried it until their whole
+    // retry after 250ms", and clients dutifully retried it until their whole
     // budget was gone, never learning that the only legal action is `reset`.
     if matches!(
         error,

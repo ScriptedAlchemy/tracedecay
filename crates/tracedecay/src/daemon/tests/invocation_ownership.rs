@@ -188,7 +188,7 @@ fn assert_work_routes_mounted<'a>(
         // verified version identity requires a real event sequence, so there
         // is no representable empty current graph to answer with: the mounted
         // owner answers the authorized absence as a concealed
-        // not-found-or-not-authorized. That still proves routing — an
+        // not-found-or-not-authorized. That still proves routing, an
         // unmounted owner never reaches the Work application and answers
         // `Problem::Unavailable` instead, exactly as the unregistered-project
         // test below asserts.
@@ -354,9 +354,9 @@ fn memory_status_request(request_id: &str) -> DaemonInvocationRequest {
 }
 
 /// The core route is admitted before the full server's owner phase registers
-/// the retained runtime. Hold that phase open — the configuration registration
+/// the retained runtime. Hold that phase open, the configuration registration
 /// pause sits in the same owner phase, just ahead of the retained registration
-/// — and prove that a retained request landing in the window reads as the
+///, and prove that a retained request landing in the window reads as the
 /// owner still mounting, retryable, and never as a scope that has no retained
 /// runtime. Once the phase completes the same request is answered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

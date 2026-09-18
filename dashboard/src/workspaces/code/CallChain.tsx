@@ -1,9 +1,9 @@
 /**
- * PATH — `GET /api/plugins/graph/call-chain`.
+ * PATH. `GET /api/plugins/graph/call-chain`.
  *
  * The trace field shows a neighbourhood: everything within two hops of the
  * focus. This answers the different question the field cannot, because the
- * answer is frequently longer than the picture — "is there a call path from
+ * answer is frequently longer than the picture, "is there a call path from
  * the focus to that symbol, and what is it?"
  *
  * Target selection comes from the symbols already on the field rather than a
@@ -11,8 +11,8 @@
  * can offer without a second search index are the ones it has already drawn.
  *
  * The honesty load here is carried by one field. `found: false` is a real
- * measurement — the producer searched to `max_depth` and there is no path
- * within it — and it is NOT the same as an error or an unmeasured read. But it
+ * measurement, the producer searched to `max_depth` and there is no path
+ * within it, and it is NOT the same as an error or an unmeasured read. But it
  * is also not proof that no path exists, because the search is depth-bounded.
  * So a negative result prints the depth it searched to. A bare "no path" would
  * be a stronger claim than the endpoint made.
@@ -105,7 +105,7 @@ function ChainReading({ measurement }: { measurement: CallChainMeasurementV1 }) 
       <p className="text-2xs leading-relaxed text-state-unknown">
         no {measurement.edge_kind} path within {measurement.max_depth} hops
         {measurement.directed ? ' following call direction' : ' in either direction'}. A
-        longer path is not excluded — the search is depth-bounded.
+        longer path is not excluded, the search is depth-bounded.
       </p>
     );
   }

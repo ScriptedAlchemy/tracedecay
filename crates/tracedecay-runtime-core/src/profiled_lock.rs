@@ -7,7 +7,7 @@
 //! fields spell the alias, construction sites spell the macro, and call sites
 //! are identical either way because the wrapper mirrors the std API.
 //!
-//! Instrument at the construction site rather than through a helper — the
+//! Instrument at the construction site rather than through a helper, the
 //! macros capture `file!()`/`line!()`, so wrapping them in a function would
 //! collapse every lock in the crate onto one source location. Pass a `label`
 //! as well, since that is what the `mutexes` and `rw_locks` reports key on.

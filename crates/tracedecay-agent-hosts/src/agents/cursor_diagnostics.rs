@@ -161,7 +161,7 @@ pub(crate) fn report_cursor_mcp_log_findings(dc: &mut DoctorCounters, home: &Pat
     }
     if !findings.scanned_any_log {
         // No Cursor MCP logs on this machine (different platform layout, or
-        // Cursor has not run) — nothing to report.
+        // Cursor has not run), nothing to report.
         return;
     }
     if !findings.has_findings() {
@@ -177,7 +177,7 @@ pub(crate) fn report_cursor_mcp_log_findings(dc: &mut DoctorCounters, home: &Pat
     }
     if findings.connection_failures > 0 {
         dc.warn(&format!(
-            "{} failed tracedecay MCP connection(s) in recent Cursor logs — Cursor never \
+            "{} failed tracedecay MCP connection(s) in recent Cursor logs. Cursor never \
              retries a failed MCP server, so affected sessions report \"Timed out waiting \
              for connection\" on every tool call",
             findings.connection_failures
@@ -202,7 +202,7 @@ pub(crate) fn report_cursor_mcp_log_findings(dc: &mut DoctorCounters, home: &Pat
     }
     dc.info(
         "    After fixing the cause, toggle the tracedecay MCP server in Cursor Settings → MCP \
-         or reload the Cursor window — Cursor does not retry a failed MCP scope on its own.",
+         or reload the Cursor window. Cursor does not retry a failed MCP scope on its own.",
     );
     for log in findings.affected_logs.iter().take(3) {
         dc.info(&format!("    log: {}", log.display()));
@@ -223,7 +223,7 @@ pub(crate) fn plugin_version_staleness(
     }
     Some(format!(
         "Cursor plugin bundle was rendered by tracedecay {plugin_version} but this binary is \
-         {binary_version} — run `tracedecay update-plugin`, then reload Cursor"
+         {binary_version}, run `tracedecay update-plugin`, then reload Cursor"
     ))
 }
 

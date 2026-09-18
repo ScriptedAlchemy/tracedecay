@@ -250,7 +250,7 @@ fn assemble_summary_expansion(
                 // (`session_temporal::operations::sources::prepare_raw_source`)
                 // proves every raw source exists and is session-owned before the
                 // lineage row is written, so a row that is missing at read time
-                // was removed afterwards — by the projection-durability retention
+                // was removed afterwards, by the projection-durability retention
                 // drop pass (plan 38 §3), whose whole premise is that the summary
                 // is the durable survivor. Report the source as retention-expired
                 // (plan 23 hydration state) and keep expanding; aborting the whole

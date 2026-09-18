@@ -460,7 +460,7 @@ fn sanitized_serializer_reason(error: &serde_json::Error) -> String {
 ///
 /// Persisting `canonical_envelope: null` would fabricate evidence, but a
 /// silently omitted key leaves the row byte-identical to one that never
-/// carried pairing evidence — "no pairing evidence" and "never had any" must
+/// carried pairing evidence, "no pairing evidence" and "never had any" must
 /// stay distinguishable. So a serializer failure is both reported to the
 /// operator log and marked on the row itself.
 fn insert_canonical_envelope(

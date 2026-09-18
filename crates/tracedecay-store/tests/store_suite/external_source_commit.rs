@@ -1100,8 +1100,8 @@ fn validation_memoization_preserves_encoding_and_verdicts() {
     let state = layered_state();
     let encoded = serde_json::to_string(&state).unwrap();
 
-    // The memo is never serialized, so durable bytes — and every digest taken
-    // over these records — are unchanged.
+    // The memo is never serialized, so durable bytes, and every digest taken
+    // over these records, are unchanged.
     assert!(!encoded.contains("verified"));
     assert!(state.validate().is_ok());
     assert_eq!(serde_json::to_string(&state).unwrap(), encoded);

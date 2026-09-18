@@ -129,7 +129,7 @@ function RetrievalReadModel({
  * The record ledger, resolved from its own read.
  *
  * A blocked diagnostics read renders the state and the daemon's own sentence
- * and *no ledger at all* — a table of seven em dashes would say the families
+ * and *no ledger at all*, a table of seven em dashes would say the families
  * produced nothing, which is not what an unreachable projector reported.
  */
 function RetrievalFamilies({

@@ -1,11 +1,11 @@
-//! `GET /api/events` — the dashboard's typed Server-Sent Events stream.
+//! `GET /api/events`, the dashboard's typed Server-Sent Events stream.
 //!
 //! The dashboard frontend replaces polling with one revision-monotone SSE path.
 //! Every event
 //! carries stream/run identity, a monotone event revision, an entity revision,
 //! exact scope, observation time, an optional source watermark, and coverage.
 //! The client reducer deduplicates by `(stream, event_revision)`, rejects stale
-//! generations, and refetches the canonical read model on a revision gap — so
+//! generations, and refetches the canonical read model on a revision gap, so
 //! this endpoint deliberately emits **coarse invalidation** events, never full
 //! read-model payloads. A periodic heartbeat (both a typed `heartbeat` event and
 //! transport-level keep-alive comment frames) proves liveness.
@@ -17,14 +17,14 @@
 //! Two kinds of source feed this endpoint.
 //!
 //! **Polled digests** (cheap, within dashboard territory):
-//! - `project_registry_changed` — polled from the project registry snapshot
+//! - `project_registry_changed`, polled from the project registry snapshot
 //!   digest (real end-to-end);
-//! - `storage_telemetry_invalidated` — polled coarsely from the summed store
+//! - `storage_telemetry_invalidated`, polled coarsely from the summed store
 //!   size (a real change signal that tells the client to refetch
 //!   `/api/storage/telemetry`).
 //!
 //! **Durable activity records** (via [`tracedecay_session_memory::event_lane`]): the daemon
-//! observes real agent work continuously — host hooks admitted on the MCP
+//! observes real agent work continuously, host hooks admitted on the MCP
 //! boundary, transcript messages persisted, touched paths queued for indexing,
 //! tool calls dispatched. Each producer durably publishes its own project
 //! scope before waking live consumers, and this endpoint turns those records into
@@ -35,7 +35,7 @@
 //! running many agents produces hook and index pulses far faster than any
 //! visualization can render, and the client's queue is bounded. So pulses
 //! accumulate into one bucket per `(family, project)` and flush on a fixed
-//! [`ACTIVITY_FLUSH_INTERVAL`] tick — at most **two events per second per family
+//! [`ACTIVITY_FLUSH_INTERVAL`] tick, at most **two events per second per family
 //! per project**, each carrying the coalesced `count`/`units` in its payload.
 //! Slow or lagged consumers replay from the persisted producer frontier.
 //! Retention eviction and rejected oversized records advance explicit drop and
@@ -396,7 +396,7 @@ impl EventStreamState {
 
     /// Resolve the registered project id for an observed project root. Prefers
     /// the id the producer already supplied; falls back to the registry map,
-    /// canonicalizing once (only here, at flush time — never on the producer's
+    /// canonicalizing once (only here, at flush time, never on the producer's
     /// hot path).
     fn resolve_project_id(&self, root: &Path, supplied: Option<String>) -> Option<String> {
         if supplied.is_some() {
@@ -412,7 +412,7 @@ impl EventStreamState {
     /// Turn one coalesced bucket into an envelope-disciplined event. `base` is
     /// the serving dashboard's scope: the observed project's id replaces
     /// `project_id`, while the storage identity stays the store this daemon
-    /// actually observed the work in — which is exactly where the observation
+    /// actually observed the work in, which is exactly where the observation
     /// was recorded.
     fn activity_event(
         &mut self,

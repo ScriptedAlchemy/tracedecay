@@ -14,8 +14,8 @@
 //!   parked at the commit boundary by the `test-transport` fact-commit barrier
 //!   (`crates/tracedecay-session-memory/src/fact_store/commit_barrier.rs`)
 //!   until that deadline has elapsed. The retained memory owner then observes
-//!   exactly what production observes when a commit outlives its budget —
-//!   commit started, deadline elapsed — and reports `PartialEffect` with a real
+//!   exactly what production observes when a commit outlives its budget,
+//!   commit started, deadline elapsed, and reports `PartialEffect` with a real
 //!   committed receipt and a `Reconcile`-only legal action
 //!   (`crates/tracedecay-contracts/src/retained_receipts.rs::complete_at`,
 //!   `src/daemon/retained_owner/memory.rs::execute_add_on_db`).
@@ -55,7 +55,7 @@ const FACT_COMMIT_BARRIER_DIR_ENV: &str = "TRACEDECAY_TEST_FACT_COMMIT_BARRIER_D
 const MAX_MARKER_TOKEN_BYTES: usize = 36;
 /// Request budget for the parked add. It must comfortably outlive a cold
 /// dispatch so the worker reaches the commit boundary while the budget is still
-/// live; the barrier — not this number — decides when settlement happens.
+/// live; the barrier, not this number, decides when settlement happens.
 const PARTIAL_EFFECT_DEADLINE: Duration = Duration::from_secs(8);
 const BARRIER_ARRIVAL_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -408,7 +408,7 @@ fn partial_effect_survives_physical_daemon_restart_via_cli() {
 /// (`src/daemon/project_open_orchestration.rs`) publishes the failed open
 /// instead of reporting warming forever, and `project_open_problem`
 /// (`src/daemon/invocation_dispatch.rs`) maps it to the `reset`-only legal
-/// action for every operation. This journey proves that settlement — and that
+/// action for every operation. This journey proves that settlement, and that
 /// a physical restart repeats it identically, because a restart is not a
 /// reset.
 #[test]

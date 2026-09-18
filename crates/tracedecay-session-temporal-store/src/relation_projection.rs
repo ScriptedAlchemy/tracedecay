@@ -165,7 +165,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             };
             // Concurrent publishers race this post-commit apply. Retry only
             // when the durable publication state provably moved past this
-            // attempt — a newer generation superseded the one just
+            // attempt, a newer generation superseded the one just
             // reconstructed, or a peer settled this generation's receipt
             // first. The retry re-reads the refreshed generation; a genuine
             // mismatch re-surfaces as soon as the state stops moving.

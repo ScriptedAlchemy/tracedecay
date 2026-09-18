@@ -858,7 +858,7 @@ fn analytics_api_uses_recent_durable_events_when_window_is_capped() {
 ///
 /// What survives is the part that was never about the duplication: each
 /// canonical read must carry its metrics with a genuine `temporal.horizon`
-/// rather than an absent or inverted window — enforced inside
+/// rather than an absent or inverted window, enforced inside
 /// `metric_parity_view`, which panics on a metric that omits one.
 #[test]
 fn canonical_observatory_and_costs_reads_stamp_real_observed_windows() {

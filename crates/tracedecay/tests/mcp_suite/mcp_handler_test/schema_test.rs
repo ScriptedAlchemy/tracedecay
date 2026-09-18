@@ -79,7 +79,7 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
     // Exact fact routes project only their operation-specific required fields;
     // the git, port, and context routes are here so that "the handler rejects a
     // call with no arguments" is checked together with "the schema told the
-    // caller which arguments were missing" — either half alone lets the two
+    // caller which arguments were missing", either half alone lets the two
     // drift apart.
     for (tool_name, required_args, expected_message) in [
         (

@@ -138,11 +138,11 @@ async fn production_fixture() -> ProductionFixture {
 /// every one of them is sized past [`SURFACE_PAGE_SIZE`] so the operation is
 /// forced to mint a cursor instead of answering in one page:
 ///
-/// * uniform free functions — symbol, signature, exact, and phrase reads;
-/// * one call sink with many callers and one caller with many callees —
+/// * uniform free functions, symbol, signature, exact, and phrase reads;
+/// * one call sink with many callers and one caller with many callees,
 ///   the relation and reference reads;
-/// * one trait with many implementors — the implementations read;
-/// * one function with many distinctly typed parameters — the type-definition
+/// * one trait with many implementors, the implementations read;
+/// * one function with many distinctly typed parameters, the type-definition
 ///   read.
 fn write_pagination_probe(project: &Path) {
     let destination = project.join("src");
@@ -503,7 +503,7 @@ fn terminal_disposition(value: &Value) -> (&str, &str) {
     let kind = problem["kind"]
         .as_str()
         .unwrap_or_else(|| panic!("typed application problem: {value:#}"));
-    // Every problem variant serializes a top-level `code` — the diagnostic
+    // Every problem variant serializes a top-level `code`, the diagnostic
     // code when a diagnostic exists, else the variant's canonical code
     // (`ApplicationProblemRecord::new` in `result/envelope.rs`). Variants like
     // `NotFoundOrNotAuthorized` structurally carry no diagnostic
@@ -981,8 +981,8 @@ async fn production_project_open_serves_a_paginated_symbol_graph_read() {
 
 /// The MCP, HTTP, and CLI surfaces must reach the same daemon-owned primitive.
 ///
-/// Each surface is entered through its own shipped entry point — the MCP and
-/// HTTP application resolvers in-process, and the CLI as the installed binary —
+/// Each surface is entered through its own shipped entry point, the MCP and
+/// HTTP application resolvers in-process, and the CLI as the installed binary,
 /// so a surface that stops routing to the daemon fails here.
 #[tokio::test(flavor = "multi_thread")]
 async fn production_primitive_reads_agree_across_mcp_http_and_cli() {

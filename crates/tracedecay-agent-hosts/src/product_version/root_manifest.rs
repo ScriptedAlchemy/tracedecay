@@ -25,7 +25,7 @@ pub fn manifest_path(repo_root: &std::path::Path) -> std::path::PathBuf {
 /// `[workspace.package]` has no unambiguous literal `version`.
 /// Every one of those means the value this crate would otherwise stamp is not
 /// the product version, so callers must fail loudly rather than substitute
-/// their own `CARGO_PKG_VERSION` — that substitution is precisely the silent
+/// their own `CARGO_PKG_VERSION`, that substitution is precisely the silent
 /// drift this module exists to prevent.
 pub fn resolve(repo_root: &std::path::Path) -> Option<String> {
     let manifest = std::fs::read_to_string(manifest_path(repo_root)).ok()?;

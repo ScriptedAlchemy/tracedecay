@@ -811,7 +811,7 @@ async fn zeroblob_content_is_covered_without_materializing_payload() {
                 );",
         )
         .unwrap();
-        // Generate the hostile value inside SQLite — never as a Rust String/Vec.
+        // Generate the hostile value inside SQLite, never as a Rust String/Vec.
         let hostile_bytes = MAX_HERMES_VALUE_BYTES.saturating_add(1);
         conn.execute(
             &format!(

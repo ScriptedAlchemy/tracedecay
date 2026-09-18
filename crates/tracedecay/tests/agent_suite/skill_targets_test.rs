@@ -12,7 +12,7 @@ use tracedecay_automation_runtime::automation::skill_targets::{
     install_managed_skills, remove_prompt_skill_index, remove_prompt_skill_index_for_target,
 };
 
-/// The production host I/O bundle prompt-index writes go through — the same
+/// The production host I/O bundle prompt-index writes go through the same
 /// value the host installers hand `skill_targets`.
 fn host_io() -> tracedecay_automation_runtime::automation::host_io::HostIo {
     tracedecay_agent_hosts::host_io()

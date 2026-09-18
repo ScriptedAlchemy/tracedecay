@@ -7,13 +7,13 @@ import type { Settings } from 'sigma/settings';
 
 /**
  * The renderer's interaction states, asserted as the colors they actually
- * paint — on both mediums.
+ * paint, on both mediums.
  *
  * Every state on the canvas is a response to something real: rest is measured
  * vitality, hover recolours the body to the hot accent and dims everything
  * outside the neighbourhood, a strike lerps toward the accent and swells, and
  * selection holds the accent. The regressions this file exists for are the
- * theme-blind ones — a body or hover pass that paints white (or any color not
+ * theme-blind ones, a body or hover pass that paints white (or any color not
  * derived from the theme box) reads as data on one medium and vanishes on the
  * other.
  */
@@ -165,7 +165,7 @@ describe('field renderer interaction states', () => {
       const harness = buildField(colors);
       const painted = paintedColor(harness, 'a');
       expect(painted).toBe(rgb(restingNodeTint(colors.substrate, KIND_RGB, 0.6, colors.light)));
-      // The ember rule: a resting body never dims past its own background —
+      // The ember rule: a resting body never dims past its own background,
       // lighter than a dark substrate, darker than a light one.
       const match = /rgb\((\d+), (\d+), (\d+)\)/.exec(painted);
       const paintedLuma = luma([

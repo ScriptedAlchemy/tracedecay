@@ -7,9 +7,9 @@ import type { WorkTaskLane } from './workProductView.ts';
  * The lane is the one typed lifecycle state the Work authority derives for a
  * task (`work_product_projection.rs::lane`), and it is printed as the word the
  * authority used. The swatch beside the word follows the design system's
- * typed-state families — green for served ready/complete, amber for measured
+ * typed-state families, green for served ready/complete, amber for measured
  * activity or attention, gray for disconnected or unknown, hollow for a
- * typed absence — and never carries the state alone.
+ * typed absence, and never carries the state alone.
  */
 export interface WorkLaneReading {
   /** Uppercase engraved label, exactly the authority's word. */

@@ -300,8 +300,8 @@ async fn memory_v2_rows_block_orphan_store_collection() {
     assert!(data_root.exists());
 }
 
-/// A durable memory table that exists but is empty must not block collection
-/// — only an actual row does.
+/// A durable memory table that exists but is empty must not block collection.
+/// Only an actual row does.
 #[tokio::test]
 async fn empty_memory_table_does_not_block_collection() {
     let tmp = tempfile::TempDir::new().unwrap();

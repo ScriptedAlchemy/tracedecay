@@ -2,7 +2,7 @@
 
 Mirrors the shape of `tools/rust.py`: returns `{tool_name: [args_dict, ...]}`
 with exactly 5 query variants per tool. Tools that don't apply to C (impls,
-derives, inheritance — C has no method tables or trait edges) still get five
+derives, inheritance. C has no method tables or trait edges) still get five
 plausible inputs so the matrix surfaces them as EMPTY rather than skipping
 them silently.
 """

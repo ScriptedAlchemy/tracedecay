@@ -14,18 +14,18 @@ repository `NOTICE` file.
 
 Every scenario follows the same shape:
 
-1. **Fixture** — a throwaway project directory is created, `tracedecay init`
+1. **Fixture**, a throwaway project directory is created, `tracedecay init`
    builds a real `.tracedecay/` store, and the scenario's setup block seeds
    facts (through the real `fact_store` write path, so canonical rows, lineage,
    and FTS stay consistent) plus optional workspace files. Trust scores,
    retrieval counts, and source labels are then pinned with SQL.
-2. **Drive** — either a scripted tool-call sequence (deterministic layer) or a
+2. **Drive**, either a scripted tool-call sequence (deterministic layer) or a
    real agent prompted over the generated tracedecay integration (real-model
    layer) exercises the memory write/recall/curation paths.
-3. **Assert** — end-state is checked with plain SQL against the fixture's
+3. **Assert**, end-state is checked with plain SQL against the fixture's
    `.tracedecay/tracedecay.db` plus terminal automation receipts for curation
    scenarios.
-4. **Cleanup** — the fixture directory is deleted; nothing touches the host
+4. **Cleanup**, the fixture directory is deleted; nothing touches the host
    project's stores.
 
 Scenario declarations live in [`evals/memory/scenarios/*.json`](../evals/memory/scenarios/)
@@ -35,20 +35,20 @@ drift apart.
 ### Deterministic layer (no LLM, runs in CI)
 
 `tests/memory_suite/memory_eval_test.rs` replays scripted tool-call sequences through the
-real `tracedecay` binary — the same code path MCP tool calls hit — and runs in
+real `tracedecay` binary, the same code path MCP tool calls hit, and runs in
 the normal `cargo nextest run --workspace --all-features --no-fail-fast` suite (so it is part
 of the existing CI test job on Linux/macOS/Windows; CI never calls a model).
 
 Each scenario runs up to two phases:
 
-- **Well-behaved phase** — the tool sequence a hygienic agent would issue must
+- **Well-behaved phase**, the tool sequence a hygienic agent would issue must
   leave a compliant end-state (all assertions pass).
-- **Violation phase** — a misbehaving sequence (storing the secret, adding the
+- **Violation phase**, a misbehaving sequence (storing the secret, adding the
   duplicate, skipping recall) is replayed against a fresh fixture. Depending
   on the scenario's `expectation`:
-  - `detect` — at least one assertion must fail, proving the assertion set
+  - `detect`, at least one assertion must fail, proving the assertion set
     can actually catch a misbehaving agent (instrument self-check).
-  - `defend-or-detect` — either the write path or deterministic curator
+  - `defend-or-detect`, either the write path or deterministic curator
     refuses/neutralizes the bad state (all assertions pass ⇒ defended), or the
     assertion set catches the violation. Stable-contract scenarios fail on
     "accepted + bad end-state" regressions.
@@ -94,14 +94,14 @@ usage claims can be audited.
 | `memory-supersede-without-dup` | stable | Preference pivots update the existing canonical fact without creating a pending proposal. |
 | `memory-multiturn-continuity` | stable | Facts stored in one session are recalled (with a real retrieval hit) in the next. |
 | `memory-feedback-trust` | stable | `fact_feedback` (helpful) raises `trust_score` above the seed and appends a `memory_feedback_events` audit row. |
-| `memory-ranking-retrieval-reinforcement` | stable | A frequently-retrieved fact out-ranks an equal-trust, never-retrieved rival — the `combined_score` usage boost, through the real search tool. |
+| `memory-ranking-retrieval-reinforcement` | stable | A frequently-retrieved fact out-ranks an equal-trust, never-retrieved rival, the `combined_score` usage boost, through the real search tool. |
 | `memory-ranking-feedback-promotes` | stable | Rating one fact `helpful` and an equally-relevant rival `unhelpful` flips their order in real search results (the full feedback → trust → rank loop). |
 
 ## Adding a scenario
 
 1. Drop a new `evals/memory/scenarios/<id>.json` (copy an existing one; keep
    `schema_version: 1`).
-2. Wire a `#[test]` for it in `tests/memory_suite/memory_eval_test.rs` — the
+2. Wire a `#[test]` for it in `tests/memory_suite/memory_eval_test.rs`, the
    `every_scenario_file_is_wired` test fails until you do.
 3. If it has a `real_model` block it is automatically runnable through
    `evals/memory/run_real_model.py`.
@@ -109,7 +109,7 @@ usage claims can be audited.
 ## Triggering & adoption scorecard
 
 The layers above test whether the memory *engine* behaves. They do **not** test
-whether a real model *chooses* to use memory unprompted — the behavior that
+whether a real model *chooses* to use memory unprompted, the behavior that
 actually determines whether durable memory helps a user. That is the
 **fact-store adoption scorecard**, built on the hermetic harness in
 [`evals/hermetic/`](../evals/hermetic/).
@@ -142,9 +142,9 @@ Cost note: `codex` uses the local subscription (no per-token API); `claude`
 
 ### Scoring rules (why they matter)
 
-- **Prompts are ambiguous, never leading.** They are ordinary user turns —
+- **Prompts are ambiguous, never leading.** They are ordinary user turns,
   state a preference, ask a question a stored fact answers, give a correction
-  that makes a fact stale — with **no** mention of memory/tools/rating. A prompt
+  that makes a fact stale, with **no** mention of memory/tools/rating. A prompt
   that says "remember this" or "rate that fact" measures *compliance*, not
   natural adoption, and is disallowed.
 - **Path-agnostic.** tracedecay is reachable via the MCP tools **or** the
@@ -159,11 +159,11 @@ Cost note: `codex` uses the local subscription (no per-token API); `claude`
 
 ### Findings (2026-07-06, codex CLI)
 
-- **Baseline: 40% overall adoption**, and **proactive-store 0%** — codex used
+- **Baseline: 40% overall adoption**, and **proactive-store 0%**, codex used
   *zero* memory tools when simply told a durable preference. Recall 50%,
   feedback 50%, precision 100%.
 - **Root cause:** codex's install shipped only the plugin bundle
-  (model-invoked skills) with **no always-on instruction** — the personal
+  (model-invoked skills) with **no always-on instruction**, the personal
   digest is bundle-excluded, and install had stopped writing a profile-level
   `AGENTS.md`. The model never *considered* memory. Sharpening the `fact_store`
   tool description did **not** help (the model never reached it).
@@ -173,7 +173,7 @@ Cost note: `codex` uses the local subscription (no per-token API); `claude`
 - **Result (n=1): proactive-store 0% → 100%, overall adoption 40% → 60%.**
 
 **The lever for adoption is the always-on, profile-level instruction the model
-sees every turn — not tool metadata.** The same behavioral memory rule belongs
+sees every turn, not tool metadata.** The same behavioral memory rule belongs
 in every host's always-on surface (`CLAUDE.md`, `AGENTS.md`,
 `STANDARD_PARAGRAPHS`). Treat single-run numbers as directional; use
 `run … --reps N` (scorecard aggregates rows across reps) for a confident

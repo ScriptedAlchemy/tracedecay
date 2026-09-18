@@ -54,10 +54,10 @@ JSON artifacts in the bundles are validated against vendored JSON Schemas in
 
 (The Cursor `marketplace.schema.json` stays vendored for refresh parity; the
 Claude marketplace uses its own schema above because Claude entries carry
-fields — `category`, `homepage` — that Cursor's marketplace schema rejects.)
+fields, `category`, `homepage`, that Cursor's marketplace schema rejects.)
 
 The tests use the `jsonschema` crate (dev-dependency only, no network
-resolvers — the schemas are self-contained draft-07, and the shipped binary
+resolvers, the schemas are self-contained draft-07, and the shipped binary
 never validates schemas at runtime).
 
 Beyond schema shape, `tests/agent_suite/plugin_manifest_schema_test.rs` also asserts that
@@ -78,7 +78,7 @@ host-specific keys, derived in the tests.
 
 There is one shared `plugin/skills/` tree, so the generic per-file contract is
 validated **once** by `tests/agent_suite/shared_skill_contract_test.rs` against
-the **intersection contract** — the rules a `SKILL.md` must satisfy to install
+the **intersection contract**, the rules a `SKILL.md` must satisfy to install
 cleanly on Claude, Codex, *and* Cursor:
 
 - **Intersection frontmatter whitelist.** Keys ⊆ `{name, description,
@@ -86,7 +86,7 @@ cleanly on Claude, Codex, *and* Cursor:
   `name` matches the directory (kebab-case, ≤64 chars, no reserved
   `claude`/`anthropic` prefix); `name` and `description` are required. A
   Cursor-only key (`disable-model-invocation`/`paths`) would break Codex/Claude,
-  so it fails here — that surface belongs in the native commands overlay.
+  so it fails here, that surface belongs in the native commands overlay.
 - **Description budget.** 50–320 characters, ≤45 words, trigger-first ("Use
   …"), ends with a period, no angle brackets, unique across the set.
 - **Body rules.** Exactly one plain-title H1 (never `# /slug`), no skipped
@@ -104,7 +104,7 @@ matching its file name) and the Cursor agent overlay.
 in the intersection: the aggregate 6,000-char metadata budget, the optional
 `agents/openai.yaml` marketplace contract, Codex `quick_validate.py`, and
 **byte-copy install parity** (installing the Cursor or Codex integration into a
-temp home must produce a byte-identical copy of the source skill tree — catches
+temp home must produce a byte-identical copy of the source skill tree, catches
 install-time mutation and missing embeds; see
 [Adding a skill](#adding-a-skill-correctly)).
 
@@ -157,7 +157,7 @@ Beyond validating the *source* bundles, install-time output is validated.
 `.cursor-plugin/plugin.json` inside the plugin root (per
 [cursor.com/docs/plugins](https://cursor.com/docs/plugins) and the official
 [cursor/plugins](https://github.com/cursor/plugins) marketplace repo). This
-repo already conforms — `plugin/.cursor-plugin/plugin.json` in source,
+repo already conforms, `plugin/.cursor-plugin/plugin.json` in source,
 and `crates/tracedecay-agent-hosts/src/agents/cursor.rs` renders it to
 `~/.cursor/plugins/local/tracedecay/.cursor-plugin/plugin.json`. The layout is
 pinned by existing assertions in `tests/agent_suite/agent_cursor_test.rs` and
@@ -186,7 +186,7 @@ test's module docs) include: frontmatter keys limited to Claude-Code-documented
 fields, kebab-case `name` matching the directory
 (≤ 64 chars, no XML tags, no reserved words `anthropic`/`claude`),
 `description` non-empty with no angle brackets (≤ 1,024 chars, and
-`description` + `when_to_use` ≤ 1,536 chars — Claude Code truncates listings
+`description` + `when_to_use` ≤ 1,536 chars. Claude Code truncates listings
 beyond that), and the shared 6,000-char per-bundle metadata budget.
 
 Cursor workflow dispatchers are native commands now, so shared skills do not
@@ -195,7 +195,7 @@ need Cursor-only `disable-model-invocation` frontmatter.
 ### 6. Checks outside the Rust test harness
 
 Most validation deliberately lives in `cargo test`, because the existing
-`ci.yml` `test` job is configured to run the full suite on every PR — a check
+`ci.yml` `test` job is configured to run the full suite on every PR, a check
 that can be a `#[test]` needs no new YAML. That describes what CI is wired to
 invoke, not a green baseline: the aggregate suite has not completed
 successfully on this branch, so a new `#[test]` joins a suite whose overall
@@ -210,7 +210,7 @@ limited to what cargo can't do:
   parse-checks every `*.json` in `plugin/`. The Codex manifest is only
   parse-checked here (its layout differs from Cursor's); its semantics are
   covered by the Rust tests. The workflow is path-filtered to bundle, schema,
-  and plugin-test paths, so it shows as *skipped* on unrelated PRs — account
+  and plugin-test paths, so it shows as *skipped* on unrelated PRs, account
   for that before making it a required check.
 - **MCP conformance smoke** (`scripts/mcp-conformance-smoke.sh`, run in CI by
   the `mcp-conformance-smoke` job of the same workflow). Drives a real
@@ -224,7 +224,7 @@ limited to what cargo can't do:
   binary and npx, which is why it isn't a plain `#[test]`. Run it directly,
   or with `TRACEDECAY_BIN=target/debug/tracedecay` to pin the binary. The
   official `@modelcontextprotocol/conformance` suite was evaluated and
-  rejected for now — it only connects over streamable HTTP and
+  rejected for now, it only connects over streamable HTTP and
   `tracedecay serve` is stdio-only; revisit if an HTTP transport lands.
 
 ---
@@ -256,7 +256,7 @@ The four schemas have two kinds of provenance:
   release that adds new events requires re-vendoring.
 
 After any refresh, run the schema tests; if the bundles no longer validate,
-fix the bundles in the same change — a schema refresh that breaks the shipped
+fix the bundles in the same change, a schema refresh that breaks the shipped
 manifests is a real finding, not test noise. (Exactly this happened when the
 schemas were first vendored: the manifests carried an `author.url` key the
 official schema rejects.)
@@ -266,7 +266,7 @@ official schema rejects.)
 ## Adding a skill correctly
 
 There is now one shared skill tree; there is no per-bundle mirroring to
-maintain, and skill files are embedded **recursively** by `build.rs` — you do
+maintain, and skill files are embedded **recursively** by `build.rs`, you do
 not hand-register `include_str!` entries.
 
 1. **Create the source skill:** a new directory
@@ -274,7 +274,7 @@ not hand-register `include_str!` entries.
    frontmatter. Keep the description trigger-first ("Use when …"), under 320
    characters and 45 words; keep the body under 500 lines. Use only allowed
    frontmatter keys (see layer 2 above). A skill directory may additionally
-   carry `scripts/`, `references/`, and `assets/` support files — these are
+   carry `scripts/`, `references/`, and `assets/` support files, these are
    embedded automatically by the recursive `build.rs` codegen
    (`GENERATED_SKILL_FILES`), so no table edit is needed.
 2. **Wire it into the model-invocable index (if model-invocable):** add the

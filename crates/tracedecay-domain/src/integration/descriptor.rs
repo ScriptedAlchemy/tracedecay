@@ -392,7 +392,7 @@ pub fn host_descriptor_v1(host: HostKindV1) -> HostDescriptorV1 {
         // `~/.copilot/mcp-config.json` itself. The one managed artifact is the
         // receipt-owned component descriptor under `.copilot/tracedecay/`,
         // which is why the assets are `ManagedEmbedded` and the activation is
-        // `Managed` — exactly Kiro's shape, for exactly Kiro's reason.
+        // `Managed`, exactly Kiro's shape, for exactly Kiro's reason.
         //
         // The project registration path is `Unavailable`: Copilot exposes no
         // project-scoped registry command, and the workspace surface that does

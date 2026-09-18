@@ -45,12 +45,12 @@ Exact-blob equality and temporal proximity do not establish semantic duplication
 
 Every node, edge, annotation, and inspector field uses one of the canonical evidence classes:
 
-1. `exact` — immutable source event or exact joined identity.
-2. `explicit` — persisted user/agent statement, task decision, or declared handoff.
-3. `inferred` — a correlation with a stated basis, never rendered as fact.
-4. `ambiguous` — multiple plausible identities or relationships remain.
-5. `stale` — the source was once available but is no longer fresh enough for the claim.
-6. `unavailable` — missing, private, inaccessible, or not ingested; no substitute is invented.
+1. `exact`. Immutable source event or exact joined identity.
+2. `explicit`, persisted user/agent statement, task decision, or declared handoff.
+3. `inferred`. A correlation with a stated basis, never rendered as fact.
+4. `ambiguous`, multiple plausible identities or relationships remain.
+5. `stale`. The source was once available but is no longer fresh enough for the claim.
+6. `unavailable`, missing, private, inaccessible, or not ingested; no substitute is invented.
 
 Private chain-of-thought is never a product input. Only visible persisted messages, summaries, decisions, tool events, tasks, code, and provider-visible evidence may appear.
 

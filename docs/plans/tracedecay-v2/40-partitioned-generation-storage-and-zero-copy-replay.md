@@ -1,4 +1,4 @@
-# 40 — Partitioned generation storage and zero-copy replay retirement
+# 40. Partitioned generation storage and zero-copy replay retirement
 
 Status: ACTIVE (decided 2026-08-22). Supersedes the monolithic sealed-generation
 envelope as the long-term storage design; stages 0–1 land first as compatible
@@ -16,9 +16,9 @@ as the original evidence, not as a description of the current tree.
 - One sealed code generation for this repository is a single
   `generation-<digest>.json` of **1.39 GB**, built fully in memory by
   `serde_json::to_vec` (`sealed_codec.rs`) before any I/O.
-- Cold activation parses that JSON **twice** — once for query serving
+- Cold activation parses that JSON **twice**, once for query serving
   (`decode_active_generation`) and once for graph projection
-  (`hydrate_sealed_code_generation`) — from **two byte-identical files**,
+  (`hydrate_sealed_code_generation`), from **two byte-identical files**,
   because graph publication eagerly stages a private copy into
   `<db>.graph-replay/` (`seals.rs::stage_project_graph_replay_seal`) as
   crash-recovery insurance against the retention sweep unlinking the source.
@@ -31,8 +31,8 @@ as the original evidence, not as a description of the current tree.
   structures in RAM from the JSON. Warmup on this repository read tens of GB,
   pinned the 8 GiB cgroup boundary, and starved queries.
 
-Master (pre-V2) proved the opposite trade-offs work — SQLite adjacency graph,
-per-file incremental sync, no stored body text, open-and-serve startup — but
+Master (pre-V2) proved the opposite trade-offs work. SQLite adjacency graph,
+per-file incremental sync, no stored body text, open-and-serve startup, but
 lacked what V2 genuinely adds: immutable digest-sealed generations,
 verify-then-publish with a watermark, exact branch/revision identity.
 Doc 39 already assigns the durable graph to Grafeo; the cutover never
@@ -45,10 +45,10 @@ Keep V2's invariants (sealed immutable generations, content addressing,
 verify-then-publish, bounded retention, branch identity). Change the physical
 representation and the replay economics:
 
-1. **Tiny atomic generation manifest** — identity, format revision, git
+1. **Tiny atomic generation manifest**, identity, format revision, git
    evidence, and the digest + location of every component. The manifest is the
    only whole-generation JSON.
-2. **Partitioned canonical segments** — per-file (or bucketed) compact
+2. **Partitioned canonical segments**, per-file (or bucketed) compact
    extraction segments, content-addressed so unchanged files' segments are
    shared across generations. Chunk text, exact terms, subtokens, symbols live
    here, not in one envelope. (The bounded lexical artifact layer on
@@ -65,7 +65,7 @@ representation and the replay economics:
 
 ## Staged delivery (each stage ships alone, oldest-first compatible)
 
-- **Stage 0 — zero-copy replay retirement** (this change set, three commits):
+- **Stage 0, zero-copy replay retirement** (this change set, three commits):
   - **0a** `hydrate_sealed_code_generation` resolves the sealed payload from
     the canonical `code-generations-v1/` root first and falls back to the
     replay pool. Readers become location-agnostic; digest verification on read
@@ -81,17 +81,17 @@ representation and the replay economics:
     (`install_project_graph_replay_seal_at` / `stage_project_graph_replay_seal`
     and the copy machinery in `seals.rs`). Steady state stages **zero bytes**;
     the pool only ever holds generations that were retired while still needed.
-- **Stage 1 — single-parse activation**: graph publication consumes the
+- **Stage 1, single-parse activation**: graph publication consumes the
   already-decoded active generation (the projection manifest already rides
   along on first publication; extend the same guarantee to the recovery
   branches via the Stage-0a fallback) so cold activation parses the sealed
   payload at most once.
-- **Stage 2 — manifest + segment split** (`format_revision` bump): split the
+- **Stage 2, manifest + segment split** (`format_revision` bump): split the
   sealed envelope per §Decision 1–2; integer-keyed, content-addressed
   segments; the 2 GiB whole-envelope bound and whole-file rewrite per
   generation disappear; unchanged-file segments are shared across
   generations.
-- **Stage 3 — Grafeo startup authority**: manifest ↔ Grafeo head validation
+- **Stage 3. Grafeo startup authority**: manifest ↔ Grafeo head validation
   replaces replay on clean startup per §Decision 3–4.
 
 ## Invariant mapping (old mechanism → new mechanism)
@@ -112,15 +112,15 @@ representation and the replay economics:
 - Stage 0 does not change `format_revision`; on-disk envelopes stay readable
   both directions across the stage-0 commits.
 
-## Dated amendment (2026-09-12, recorded decision): Stage 2b — shared, compressed segments
+## Dated amendment (2026-09-12, recorded decision): stage 2b, shared, compressed segments
 
 **Measured.** For one worktree of a 150 MB / 5,190-file repository the scoped
 store is 4.6 GB: a 2.76 GB text artifact whose term and ngram posting lists are
 stored twice (document-clustered table plus term-leading covering index),
 1.4 GB of per-file segment JSON (8x the source: chunk `sanitized_text` across
 overlapping grains is 1.43x the source and `subtokens` another ~0.6x), and two
-300 MB interactive read bundles. Each linked worktree — including the internal
-`branch-worktrees` the daemon creates for branch tracking — repeats the whole
+300 MB interactive read bundles. Each linked worktree, including the internal
+`branch-worktrees` the daemon creates for branch tracking, repeats the whole
 stack, and no bytes are shared: 52,463 segment files across nine worktree
 scopes had 52,435 distinct digests because every segment embeds
 `authority.worktree_id`.
@@ -158,7 +158,7 @@ what a segment is and where it lives, under one `format_revision` bump:
    two largest "segments" (344 MB each, one per retained generation) are not
    file segments at all but the incremental publication record for a
    generation in which 25 chunks changed and 11 were deleted. The record
-   enumerates the 413,743 *reused* chunk ids three times — as
+   enumerates the 413,743 *reused* chunk ids three times, as
    `projection_request.changes.reused` (117 MB), as one `Reused` receipt per
    chunk in `projection_receipt.receipts` (64 MB), and as 200,504 `unchanged`
    lineage candidates (163 MB) that each repeat the constant

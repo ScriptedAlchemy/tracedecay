@@ -354,7 +354,7 @@ pub(super) static MAXIMAL_DEFINITION_BUILDS: std::sync::atomic::AtomicUsize =
 ///
 /// Every input is static for the life of the process: the application catalog
 /// is a `LazyLock` snapshot and `ast_grep_available()` is a `OnceLock` host
-/// probe. Nothing session-scoped is frozen here — the per-session passes
+/// probe. Nothing session-scoped is frozen here, the per-session passes
 /// (`apply_context_budget`, `apply_context_warming_budget`, and the
 /// profile/capability filtering in
 /// `get_catalog_filtered_tool_definitions_with_budget`) all run on the *clone*

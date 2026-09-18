@@ -290,7 +290,7 @@ mod tests {
     }
 
     /// When graph activation never completes in-process, the composition
-    /// bind must stay a typed refusal at every dependent graph read — never
+    /// bind must stay a typed refusal at every dependent graph read, never
     /// a panic, a silent success, or an untyped empty result.
     #[tokio::test]
     async fn never_activated_graph_runtime_stays_typed_on_dependent_surfaces() {

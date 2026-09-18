@@ -78,7 +78,7 @@ pub const DAEMON_HANDSHAKE_REFUSAL_PROTOCOL: &str = "tracedecay.daemon.handshake
 #[serde(rename_all = "snake_case")]
 pub enum DaemonHandshakeRefusalReason {
     /// The handshake line was valid JSON but not this daemon's handshake
-    /// shape — the signature of wire drift between build revisions.
+    /// shape, the signature of wire drift between build revisions.
     UnsupportedRevision,
     /// The handshake line was not even JSON.
     InvalidHandshake,

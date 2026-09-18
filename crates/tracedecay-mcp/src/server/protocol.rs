@@ -5,13 +5,13 @@ use serde_json::{Value, json};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpMethod {
     Initialize,
-    /// `initialized` / `notifications/initialized` — compatibility no-ops.
+    /// `initialized` / `notifications/initialized`, compatibility no-ops.
     InitializedAck,
     ToolsList,
     ToolsCall,
     ResourcesList,
     ResourcesRead,
-    /// `ping` / `logging/setLevel` — acknowledged with an empty result.
+    /// `ping` / `logging/setLevel`, acknowledged with an empty result.
     TrivialAck,
     /// The daemon's internal hook-event notification.
     HookEvent,

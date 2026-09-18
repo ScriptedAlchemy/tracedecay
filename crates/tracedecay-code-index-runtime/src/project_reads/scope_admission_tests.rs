@@ -82,7 +82,7 @@ impl Fixture {
     }
 
     /// The same checkout under a branch label the retained scope has moved
-    /// past — the shape every request has after an ordinary `git switch`.
+    /// past, the shape every request has after an ordinary `git switch`.
     fn moved_label_scope(&self) -> ResolvedScope {
         ResolvedScope::new(
             self.retained_scope.project_id.clone(),
@@ -107,7 +107,7 @@ impl Fixture {
 /// A branch-label move on the same checkout must pass the port's scope
 /// admission. This fixture runs a bare scheduler registry with no persistent
 /// Grafeo activation authority, and interactive reads deliberately have no
-/// in-memory fallback — so a fully served read is unreachable here and both
+/// in-memory fallback, so a fully served read is unreachable here and both
 /// scopes terminate at the typed not-activated state. The assertion is the
 /// admission decision itself: the moved label reaches activation (the same
 /// terminal the retained scope gets) instead of the scope denial a foreign
@@ -165,7 +165,7 @@ async fn moved_branch_label_still_opens_the_exact_checkouts_graph_read() {
 /// generation stopped serving its exact scope the moment the next rebuild
 /// started. A new tip commit drifts the checkout, the ready gate's currency
 /// probe truthfully disproves the seat, and the background worker owns the
-/// scheduler for its whole 10–15 minute pass — but the seat still holds the
+/// scheduler for its whole 10–15 minute pass, but the seat still holds the
 /// last complete generation, and the serving contract ("retrieval serves the
 /// last complete generation while the scheduler rebuilds") applies to graph
 /// reads exactly as it does to search. The port must fall back to the seat

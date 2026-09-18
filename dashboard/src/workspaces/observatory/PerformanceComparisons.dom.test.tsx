@@ -7,7 +7,7 @@ import { PerformanceComparisons } from './PerformanceComparisons.tsx';
  * The Plan 26 `performance-comparisons` view.
  *
  * One rule dominates: exactly one disposition is asserted, and
- * `insufficient_evidence` is that disposition in its own right — not a quieter
+ * `insufficient_evidence` is that disposition in its own right, not a quieter
  * `reject`. The DOM has to make that distinguishable without reading prose, so
  * the reached disposition carries its own attribute and the two it is not are
  * marked as not reached.

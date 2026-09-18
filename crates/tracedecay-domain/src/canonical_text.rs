@@ -5,7 +5,7 @@
 //! characters. Callers add their own byte bound and, more importantly, their
 //! own rejection mapping: some contracts distinguish an empty value from a
 //! merely non-canonical one, others collapse both into a single rejection.
-//! Only the predicate is shared — never the error, so no contract's
+//! Only the predicate is shared, never the error, so no contract's
 //! accept/reject reporting changes by reusing it.
 
 use sha2::{Digest, Sha256};
@@ -91,7 +91,7 @@ pub const fn default_true() -> bool {
 /// Length-prefixed SHA-256 over a domain separator and an ordered list of
 /// parts, encoded as lowercase hex.
 ///
-/// Every frame — the domain tag included — is preceded by its big-endian
+/// Every frame, the domain tag included, is preceded by its big-endian
 /// `u64` byte length, so no two different splits of the same concatenated
 /// bytes can collide. This is an identity primitive: derived ids already
 /// written to disk depend on the exact framing, so the byte layout must never
@@ -101,7 +101,7 @@ pub fn canonical_framed_sha256(domain: &[u8], parts: &[&[u8]]) -> String {
     encode_lowercase_hex(&canonical_framed_sha256_bytes(domain, parts))
 }
 
-/// Lowercase-hex SHA-256 of `bytes` — the one digest-to-text encoding every
+/// Lowercase-hex SHA-256 of `bytes`, the one digest-to-text encoding every
 /// surface shares, so no call site re-rolls its own nibble table.
 #[must_use]
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -142,7 +142,7 @@ pub(crate) fn validate_canonical_string(
 
 /// Hex body of a `sha256:`-tagged digest, if the algorithm tag is present.
 ///
-/// This only strips the tag. It does not validate hex length or case — callers
+/// This only strips the tag. It does not validate hex length or case, callers
 /// that already hold a [`crate::ManifestDigest`] still need it, because that
 /// type also accepts `blake3:` and `sha512:`.
 #[must_use]
@@ -154,7 +154,7 @@ pub fn sha256_hex_suffix(value: &str) -> Option<&str> {
 ///
 /// Identities that embed a digest under their own namespace all need the
 /// encoding alone, and all reject an untagged digest as non-canonical under
-/// their own field name — so only the stripping is shared, not the field.
+/// their own field name, so only the stripping is shared, not the field.
 pub(crate) fn sha256_hex_body<'a>(
     value: &'a str,
     field: &'static str,

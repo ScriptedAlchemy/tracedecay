@@ -247,7 +247,7 @@ async fn setup_unsafe_block_fixture() -> (ProductionCompositionFixture, ()) {
             project.join("src/lib.rs"),
             r#"
 /// Reinterpret a total as a `usize` through a raw-pointer read. There is no
-/// memory-safety reason for this to be `unsafe` — exactly the needless kind a
+/// memory-safety reason for this to be `unsafe`, exactly the needless kind a
 /// safety audit should flag.
 pub fn raw_total_len(total: u64) -> usize {
     let ptr = &total as *const u64;
@@ -860,7 +860,7 @@ async fn test_port_status() {
 
 /// `port_status` must not match symbols purely on (name, kind_compat_group).
 /// Common method names like `new`, `process`, `fmt`, or `reset` produced
-/// wild cross-type "matches" — e.g. `Biquad::new` pairing with an unrelated
+/// wild cross-type "matches", e.g. `Biquad::new` pairing with an unrelated
 /// `Adaa::new`. The match key must also include the parent type so siblings
 /// of distinct owners stay unmatched.
 #[tokio::test]
@@ -911,7 +911,7 @@ async fn port_status_does_not_match_methods_of_different_parents() {
     // None of the source methods should match because the parent types differ.
     assert!(
         matched.is_empty(),
-        "Biquad::* and Adaa::* must not cross-match — got matches: {matched:?}"
+        "Biquad::* and Adaa::* must not cross-match, got matches: {matched:?}"
     );
     assert_eq!(
         output["matched"].as_u64(),
@@ -921,7 +921,7 @@ async fn port_status_does_not_match_methods_of_different_parents() {
 }
 
 /// Sanity: when the same parent type name exists in both dirs, methods do
-/// match — confirming the parent-aware key isn't too strict.
+/// match, confirming the parent-aware key isn't too strict.
 #[tokio::test]
 async fn port_status_matches_methods_with_same_parent_type() {
     let dir = test_temp_dir();
@@ -1224,8 +1224,8 @@ async fn test_gini() {
 }
 
 /// `details=true` must surface raw counts + interpretation per dimension,
-/// not just the scalar score, so callers don't have to compose six
-/// separate tools to reproduce the breakdown.
+/// so callers don't have to compose six separate tools to reproduce the
+/// breakdown.
 #[tokio::test]
 async fn test_health_detailed_includes_raw_signals() {
     let (cg, _dir) = setup_project().await;
@@ -1969,7 +1969,7 @@ async fn dependency_depth_excludes_implements_and_extends() {
     fs::create_dir_all(&project_root).unwrap();
     let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
-    // file_a derives Debug — extractor emits derives_macro and the
+    // file_a derives Debug, extractor emits derives_macro and the
     // resolver historically pollutes implements edges across files.
     fs::write(
         project.join("src/lib.rs"),
@@ -2081,8 +2081,8 @@ async fn diagnose_normalizes_absolute_and_backslash_paths() {
 /// The resolver's kind-compatibility filter must apply to the same-file
 /// blocklist branches too. Without it, common names like
 /// `new`/`default`/`clone` can still bind a `Calls` reference to a
-/// non-callable same-file symbol — e.g. a const literally named
-/// `default` — when it's the only same-file match for a blocklisted
+/// non-callable same-file symbol, e.g. a const literally named
+/// `default`, when it's the only same-file match for a blocklisted
 /// name.
 #[tokio::test]
 async fn resolver_blocklist_branch_respects_kind_filter() {
@@ -2297,7 +2297,7 @@ pub fn leaf() {}
         "expected at least 2 disjoint cycle groups; got {} entries: {cycles:?}",
         cycles.len()
     );
-    // No cycle entry should mix both (a,b) and (c,d) names — that would
+    // No cycle entry should mix both (a,b) and (c,d) names, that would
     // mean the fix didn't actually separate them. (Each symbol is now an
     // object: {name, kind, file, line, in_cycle_out_degree, ...}.)
     for c in cycles {
@@ -2814,7 +2814,7 @@ function helper() { return unrelated; }
     }
 }
 
-/// `tracedecay_circular` must emit *disjoint* SCCs — no file should appear
+/// `tracedecay_circular` must emit *disjoint* SCCs, no file should appear
 /// in more than one cycle entry. Cycles "sharing long tails" mean the SCC
 /// condensation step is broken. This stress test wires up many disjoint
 /// cycles plus DAG-style tails between them and asserts no file leaks into

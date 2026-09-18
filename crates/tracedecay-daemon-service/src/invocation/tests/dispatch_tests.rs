@@ -1006,7 +1006,7 @@ async fn feedback_handles_fail_closed_without_an_owner() {
         .await;
     // With no feedback owner registered the read service itself is absent,
     // so the daemon fails closed as an application-level Unavailable problem
-    // (not concealment — that only applies once the service exists and a
+    // (not concealment, that only applies once the service exists and a
     // caller names an unknown handle). See `execute_feedback`.
     let DaemonInvocationOutcome::ApplicationProblem { problem } = response.outcome else {
         panic!(

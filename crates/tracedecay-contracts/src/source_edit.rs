@@ -108,7 +108,7 @@ pub struct AstGrepResult {
 /// engine. Each hint points at a concrete file/line and carries a suggestion
 /// the caller (or a follow-up refactor) can act on. Hints are derived from graph
 /// edges (callers/callees) and parse-level facts (identifiers, `use` lines,
-/// module declarations) — never speculative noise.
+/// module declarations), never speculative noise.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct MoveHint {
     /// Taxonomy tag: `caller_reference`, `dependency_broken`, `import_needed`,
@@ -130,7 +130,7 @@ pub struct MoveHint {
 }
 
 /// Result of a `move_symbol` operation: the moved span, a dry-run diff of the
-/// source + destination files, and — the centerpiece — the impact report of
+/// source + destination files, and the centerpiece, the impact report of
 /// everything the move breaks or that needs attention.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct MoveResult {
@@ -156,7 +156,7 @@ pub struct MoveResult {
     /// what the move added.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub applied_imports: Vec<String>,
-    /// The impact report — every actionable finding. Empty on a truly clean
+    /// The impact report: every actionable finding. Empty on a truly clean
     /// move.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub impact: Vec<MoveHint>,

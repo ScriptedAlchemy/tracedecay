@@ -8,7 +8,7 @@ import type { DomainStateKind } from '../../ui/StateChip.tsx';
 import type { WorkResult, WorkRoute } from '../work/workApi.ts';
 
 /**
- * The handoff-TOKEN frontier — a different measure from the handoff frontier
+ * The handoff-TOKEN frontier, a different measure from the handoff frontier
  * in `handoff.ts`, and the two must not be conflated.
  *
  * `handoff.ts` reads `WorkItemV1.handoffs` off the work-product graph: the
@@ -18,8 +18,8 @@ import type { WorkResult, WorkRoute } from '../work/workApi.ts';
  *
  * This module reads the daemon's grant store instead, through
  * `operation.handoff.list_task_handoffs` (`POST /api/application/handoff/list-task`).
- * It answers what the graph cannot: which single-use tokens are OUTSTANDING —
- * issued and not yet redeemed — and which lapsed unredeemed. A dropped handoff
+ * It answers what the graph cannot: which single-use tokens are OUTSTANDING , 
+ * issued and not yet redeemed, and which lapsed unredeemed. A dropped handoff
  * leaves no work-graph record at all, so without this read it is invisible.
  *
  * Two properties of the route shape everything here.
@@ -29,7 +29,7 @@ import type { WorkResult, WorkRoute } from '../work/workApi.ts';
  * is none to leak.
  *
  * It is RECIPIENT-SCOPED. The daemon returns exactly the grants the caller
- * could itself redeem — same session, same authorization scope, same recipient
+ * could itself redeem, same session, same authorization scope, same recipient
  * principal that redemption checks. That is why listing grants no new
  * authority, and it is also why an empty answer here means "nothing was
  * addressed to this reader in this session", which is emphatically NOT "no
@@ -47,7 +47,7 @@ export const HANDOFF_LIST_TASK_ROUTE = {
 export type HandoffTokenReading =
   /** No session has been named yet, or the answer has not landed. */
   | { readonly state: 'pending' }
-  /** There is no session to ask about — not an empty frontier. */
+  /** There is no session to ask about, not an empty frontier. */
   | { readonly state: 'unasked'; readonly detail: string }
   | { readonly state: 'refused'; readonly chip: DomainStateKind; readonly detail: string }
   | {
@@ -76,7 +76,7 @@ export function readHandoffTokens(
     return {
       state: 'unasked',
       detail:
-        'no session is named on this page yet, so no token frontier has been requested — this is an unasked question, not an empty frontier',
+        'no session is named on this page yet, so no token frontier has been requested, this is an unasked question, not an empty frontier',
     };
   }
   if (result === undefined) return { state: 'pending' };

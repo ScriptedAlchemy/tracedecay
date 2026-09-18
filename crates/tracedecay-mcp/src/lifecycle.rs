@@ -211,7 +211,7 @@ struct StartupCatchUpTasksV1 {
 /// Dispatch and readiness live in the same state machine. The hazard that
 /// motivated it: the old completion flag defaulted to
 /// `true` so a server with no catch-up reported "settled", which forced the
-/// dispatch site to pre-clear them in a separate store *before* spawning —
+/// dispatch site to pre-clear them in a separate store *before* spawning,
 /// an ordering that was documented rather than enforced. Here, dispatch
 /// *is* the transition into [`Self::Syncing`], so no window exists in which
 /// a dispatched catch-up still reads as settled.
