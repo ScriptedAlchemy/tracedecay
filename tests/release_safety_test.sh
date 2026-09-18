@@ -106,6 +106,22 @@ if grep -q 'token: ${{ secrets.GITHUB_TOKEN }}' "$release_please"; then
   exit 1
 fi
 
+python3 - "$release_please" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+for required in (
+    "actions: write",
+    "steps.release.outputs.release_created",
+    "steps.release.outputs.tag_name",
+    'gh workflow run release-beta.yml --repo "$GITHUB_REPOSITORY" --ref master',
+    'gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref master',
+):
+    if required not in text:
+        raise SystemExit(f"{path} must dispatch release asset builds on master: {required}")
+PY
+
 python3 - "$release_please" "$release_stable" "$release_beta" <<'PY'
 import sys
 
@@ -200,6 +216,11 @@ for path, text in ((stable_path, stable), (beta_path, beta)):
             raise SystemExit(
                 f"{path} contains timestamp-sensitive packaging: {mutable_packager}"
             )
+    trigger = text.split("permissions:", 1)[0]
+    if "workflow_dispatch:" not in trigger or "\n  release:" in trigger:
+        raise SystemExit(
+            f"{path} must be dispatched on master, never triggered on a tag release"
+        )
     for required in (
         "scripts/plan-release-recovery.py",
         "scripts/verify-retained-release-assets.sh",
@@ -208,8 +229,9 @@ for path, text in ((stable_path, stable), (beta_path, beta)):
         "--signer-workflow",
         "--source-digest",
         "outputs.build_required",
-        'test "$GITHUB_REF" = "refs/tags/',
-        'test "$GITHUB_SHA" = "$source_sha"',
+        'test "$GITHUB_REF" = "refs/heads/master"',
+        'git merge-base --is-ancestor "$source_sha" "$GITHUB_SHA"',
+        "ref: ${{ env.RELEASE_TAG }}",
     ):
         if required not in text:
             raise SystemExit(

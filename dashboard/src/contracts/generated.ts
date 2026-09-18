@@ -5156,7 +5156,7 @@ export const SimilarCoverageV1Schema = z.discriminatedUnion("status", [z.object(
 }).strict(), z.object({
   status: z.literal("excluded_incomplete_tokenization"),
 }).strict(), z.object({
-  maximum_bytes: z.number().int().safe().min(0),
+  maximum_tokens: z.number().int().min(0),
   status: z.literal("excluded_too_large"),
 }).strict(), z.object({
   minimum_tokens: z.number().int().min(0),

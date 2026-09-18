@@ -257,8 +257,8 @@ integration branch waits behind, so a run spends only what its state earns:
 
 | State | Runs |
 |---|---|
-| Draft | Light gates only: scope gate, repository gates (commit lint, release guards, rustfmt), benchmark-harness self-tests. |
-| Ready for review (or labelled `ci-full`) | The Linux lane: build, clippy, feature gates, dashboard, Linux test partitions, PR dogfood with the MCP conformance smoke. |
+| Draft | Nothing. Mark it ready or add `ci-full` to run CI. |
+| Ready for review (or labelled `ci-full`) | Repository gates (commit lint, release guards, rustfmt), benchmark-harness self-tests, and the Linux lane: build, clippy, feature gates, dashboard, Linux test partitions, PR dogfood with the MCP conformance smoke. |
 | Labelled `ci-os` | Adds the macOS and Windows matrices. |
 | Labelled `ci-hosts` | Adds the stock Hermes / Claude Code / OpenCode integrations. |
 | Labelled `perf` | Adds hotpath parity and runs the hotpath profile, coverage, and runtime-core workflows. |

@@ -40,9 +40,7 @@ jobs:
   # * `run-heavy`: the Linux build/test/lint lane. Pushes always; pull
   #   requests only when trusted (this repository, or a fork targeting an
   #   integration branch) and either ready for review or labelled `ci-full`.
-  #   A draft gets the light gates (this job, commit lint, drift, harness)
-  #   and nothing else: with 20 free runner slots, a swarm of drafts each
-  #   spending ~30 jobs per push queued the integration branch for hours.
+  #   A draft runs no job at all (see the `if` below).
   # * `run-os`: the macOS and Windows matrices. Pushes, or a pull request
   #   labelled `ci-os`. macOS has its own 5-slot cap and Windows shards take
   #   7 jobs; both verify the same code the Linux lane already covers and
@@ -54,6 +52,11 @@ jobs:
   #   hotpath profile/coverage workflows.
   scope-gate:
     name: Scope gate
+    # A draft runs nothing at all. A swarm opened 130 drafts in ten minutes
+    # and even three light gates apiece queued the release behind ~400 jobs;
+    # a job that is skipped here costs no runner, and every guarded job reads
+    # this job's outputs, so skipping it skips them. `ci-full` opts a draft in.
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft || contains(github.event.pull_request.labels.*.name, 'ci-full') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -239,6 +242,7 @@ jobs:
 
   benchmark-harness:
     name: Benchmark harness self-tests
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft || contains(github.event.pull_request.labels.*.name, 'ci-full') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -256,6 +260,7 @@ jobs:
   # queue entries per push doing what one does.
   gates:
     name: Repository gates
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft || contains(github.event.pull_request.labels.*.name, 'ci-full') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
