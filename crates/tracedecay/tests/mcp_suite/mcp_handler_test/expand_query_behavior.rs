@@ -2,8 +2,8 @@
 //!
 //! Anchor ids and the authorized store path are process-local identity. They
 //! are removed before the payload is compared. Coverage stays: a hit is
-//! `partial` because the matched record's coverage is unknown, and a miss is
-//! `ok` with zero coverage.
+//! `partial` with `omitted: 1` because the matched record's coverage is unknown,
+//! and a miss is `ok` with `omitted: 0`.
 
 use crate::support::{
     activate_test_temporal_generation, extract_real_server_text, handle_real_server_tool_call,
