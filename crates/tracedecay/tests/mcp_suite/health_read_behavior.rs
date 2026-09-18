@@ -25,7 +25,7 @@ struct HealthProject {
     isolation: TestTempDir,
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn health_read_reports_ok_until_the_serving_database_is_gone() {
     let fixture = open_health_project().await;
 
@@ -98,7 +98,7 @@ async fn health_read_reports_ok_until_the_serving_database_is_gone() {
     fixture.harness.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn health_read_reports_read_only_when_the_serving_database_is_not_writable() {
     let writable = open_health_project().await;
     assert_eq!(
