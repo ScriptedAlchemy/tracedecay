@@ -1,9 +1,12 @@
 #![cfg(feature = "test-transport")]
 
 //! Behavioral proof of `tracedecay_fact_store_related` through the production
-//! MCP tool call. The tool returns facts that share an adjacent entity with
-//! the named entity, ranked by trust. It does not return an isolated fact
-//! whose only entity is unrelated.
+//! MCP tool call.
+//!
+//! The mounted project-memory graph expands the source fact's component after
+//! the trust floor is applied, so a co-occurring fact below that floor still
+//! comes back, ranked by trust. An entity with no stored fact returns no hits.
+//! A fact outside the component stays out of that page.
 
 use serde_json::{Value, json};
 
@@ -20,6 +23,17 @@ const SHARED_ENTITY: &str = "Rust Crates";
 const NEIGHBOR_ENTITY: &str = "Compiler Cache";
 const ISOLATED_ENTITY: &str = "Weather Desk";
 const SOURCE_WHY: &str = "entity/relation co-occurrence from Harbor Ledger";
+const FOLDED_WHY: &str = "entity/relation co-occurrence from harbor ledger";
+const ISOLATED_WHY: &str = "entity/relation co-occurrence from Weather Desk";
+
+fn component_graph(expanded_fact_count: usize) -> Value {
+    json!({
+        "kind": "complete",
+        "root_count": 1,
+        "relation_count": 8,
+        "expanded_fact_count": expanded_fact_count,
+    })
+}
 
 struct StoredFact {
     fact_id: String,
@@ -137,6 +151,28 @@ fn assert_related_page(page: &Value, owner: &Value, hits: Value, graph_coverage:
     );
 }
 
+fn component_hits(source_id: &str, neighbor_id: &str, quiet_id: &str, why: &str) -> Value {
+    json!([
+        expected_hit(
+            source_id,
+            SOURCE,
+            "decision",
+            &[SOURCE_ENTITY, SHARED_ENTITY],
+            910_000,
+            why,
+        ),
+        expected_hit(
+            neighbor_id,
+            NEIGHBOR,
+            "project",
+            &[NEIGHBOR_ENTITY, SHARED_ENTITY],
+            620_000,
+            why,
+        ),
+        expected_hit(quiet_id, QUIET, "decision", &[SHARED_ENTITY], 200_000, why),
+    ])
+}
+
 fn rejected_problem(error: &tracedecay_domain::errors::TraceDecayError) -> Value {
     let rendered = error.to_string();
     let json_start = rendered
@@ -168,30 +204,14 @@ async fn fact_store_related_lists_cooccurring_facts_and_omits_isolated_ones() {
     let quiet = store_fact(&fixture, QUIET, "decision", &[SHARED_ENTITY], 0.2).await;
     let isolated = store_fact(&fixture, ISOLATED, "decision", &[ISOLATED_ENTITY], 0.99).await;
 
-    let page = related(&fixture, json!({"entity": SOURCE_ENTITY, "limit": 10})).await;
-    assert_related_page(
-        &page,
-        &source.owner,
-        json!([
-            expected_hit(
-                &source.fact_id,
-                SOURCE,
-                "decision",
-                &[SOURCE_ENTITY, SHARED_ENTITY],
-                910_000,
-                SOURCE_WHY
-            ),
-            expected_hit(
-                &neighbor.fact_id,
-                NEIGHBOR,
-                "project",
-                &[SHARED_ENTITY, NEIGHBOR_ENTITY],
-                620_000,
-                SOURCE_WHY
-            ),
-        ]),
-        json!({"kind": "not_mounted"}),
+    let hits = component_hits(
+        &source.fact_id,
+        &neighbor.fact_id,
+        &quiet.fact_id,
+        SOURCE_WHY,
     );
+    let page = related(&fixture, json!({"entity": SOURCE_ENTITY, "limit": 10})).await;
+    assert_related_page(&page, &source.owner, hits.clone(), component_graph(1));
 
     let above_floor = related(
         &fixture,
@@ -201,15 +221,8 @@ async fn fact_store_related_lists_cooccurring_facts_and_omits_isolated_ones() {
     assert_related_page(
         &above_floor,
         &source.owner,
-        json!([expected_hit(
-            &source.fact_id,
-            SOURCE,
-            "decision",
-            &[SOURCE_ENTITY, SHARED_ENTITY],
-            910_000,
-            SOURCE_WHY
-        ),]),
-        json!({"kind": "not_mounted"}),
+        hits.clone(),
+        component_graph(2),
     );
 
     let below_default = related(
@@ -217,69 +230,39 @@ async fn fact_store_related_lists_cooccurring_facts_and_omits_isolated_ones() {
         json!({"entity": SOURCE_ENTITY, "min_trust": 0.1, "limit": 10}),
     )
     .await;
-    assert_related_page(
-        &below_default,
-        &source.owner,
-        json!([
-            expected_hit(
-                &source.fact_id,
-                SOURCE,
-                "decision",
-                &[SOURCE_ENTITY, SHARED_ENTITY],
-                910_000,
-                SOURCE_WHY
-            ),
-            expected_hit(
-                &neighbor.fact_id,
-                NEIGHBOR,
-                "project",
-                &[SHARED_ENTITY, NEIGHBOR_ENTITY],
-                620_000,
-                SOURCE_WHY
-            ),
-            expected_hit(
-                &quiet.fact_id,
-                QUIET,
-                "decision",
-                &[SHARED_ENTITY],
-                200_000,
-                SOURCE_WHY
-            ),
-        ]),
-        json!({"kind": "not_mounted"}),
-    );
+    assert_related_page(&below_default, &source.owner, hits, component_graph(0));
 
     let folded = related(&fixture, json!({"entity": "harbor ledger", "limit": 10})).await;
     assert_related_page(
         &folded,
         &source.owner,
-        json!([
-            expected_hit(
-                &source.fact_id,
-                SOURCE,
-                "decision",
-                &[SOURCE_ENTITY, SHARED_ENTITY],
-                910_000,
-                "entity/relation co-occurrence from harbor ledger"
-            ),
-            expected_hit(
-                &neighbor.fact_id,
-                NEIGHBOR,
-                "project",
-                &[SHARED_ENTITY, NEIGHBOR_ENTITY],
-                620_000,
-                "entity/relation co-occurrence from harbor ledger"
-            ),
-        ]),
-        json!({"kind": "not_mounted"}),
+        component_hits(
+            &source.fact_id,
+            &neighbor.fact_id,
+            &quiet.fact_id,
+            FOLDED_WHY,
+        ),
+        component_graph(1),
     );
 
     let isolated_page = related(&fixture, json!({"entity": ISOLATED_ENTITY, "limit": 10})).await;
     assert_related_page(
         &isolated_page,
         &isolated.owner,
-        json!([]),
-        json!({"kind": "not_mounted"}),
+        json!([expected_hit(
+            &isolated.fact_id,
+            ISOLATED,
+            "decision",
+            &[ISOLATED_ENTITY],
+            990_000,
+            ISOLATED_WHY,
+        )]),
+        json!({
+            "kind": "complete",
+            "root_count": 1,
+            "relation_count": 2,
+            "expanded_fact_count": 1,
+        }),
     );
 
     let missing = related(&fixture, json!({"entity": "Unlisted Beacon", "limit": 10})).await;
@@ -287,10 +270,20 @@ async fn fact_store_related_lists_cooccurring_facts_and_omits_isolated_ones() {
         &missing,
         &source.owner,
         json!([]),
-        json!({"kind": "not_mounted"}),
+        json!({
+            "kind": "complete",
+            "root_count": 0,
+            "relation_count": 0,
+            "expanded_fact_count": 0,
+        }),
     );
 
     let first_page = related(&fixture, json!({"entity": SOURCE_ENTITY, "limit": 1})).await;
+    assert_eq!(
+        first_page["graph_coverage"],
+        component_graph(1),
+        "{first_page}"
+    );
     assert_eq!(
         first_page["hits"]
             .as_array()
@@ -336,13 +329,47 @@ async fn fact_store_related_lists_cooccurring_facts_and_omits_isolated_ones() {
             &neighbor.fact_id,
             NEIGHBOR,
             "project",
-            &[SHARED_ENTITY, NEIGHBOR_ENTITY],
+            &[NEIGHBOR_ENTITY, SHARED_ENTITY],
             620_000,
             SOURCE_WHY,
         )],
         "second related page: {second_page}"
     );
-    assert_eq!(second_page["next_after"], Value::Null, "{second_page}");
+    assert_eq!(
+        second_page["next_after"]["score_millionths"], 620_000,
+        "{second_page}"
+    );
+    assert_eq!(
+        second_page["next_after"]["fact_id"], neighbor.fact_id,
+        "{second_page}"
+    );
+    let third_page = related(
+        &fixture,
+        json!({
+            "entity": SOURCE_ENTITY,
+            "limit": 1,
+            "after": second_page["next_after"],
+        }),
+    )
+    .await;
+    assert_eq!(
+        third_page["hits"]
+            .as_array()
+            .expect("third page hits")
+            .iter()
+            .map(observed_hit)
+            .collect::<Vec<_>>(),
+        vec![expected_hit(
+            &quiet.fact_id,
+            QUIET,
+            "decision",
+            &[SHARED_ENTITY],
+            200_000,
+            SOURCE_WHY,
+        )],
+        "third related page: {third_page}"
+    );
+    assert_eq!(third_page["next_after"], Value::Null, "{third_page}");
 
     let rejected = invoke_production_tool(
         &fixture,
