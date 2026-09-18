@@ -7,6 +7,8 @@ mod admin_test;
 mod automation_runs_test;
 mod bounded_analysis_test;
 #[cfg(feature = "test-transport")]
+mod branch_search_test;
+#[cfg(feature = "test-transport")]
 mod branch_sensitivity_test;
 mod context_test;
 mod dependency_hint_test;
