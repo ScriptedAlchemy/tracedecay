@@ -765,31 +765,46 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
         "known TraceDecay worktree must return its correlated session: {sessions_for}"
     );
 
-    let (search_elapsed, search) = timed_call(
-        &harness,
-        &project,
-        "tracedecay_message_search",
-        json!({
-            "query": DIRECT_USER_QUERY,
-            "message_type": "direct_user",
-            "since": since,
-            "limit": 5,
-            "format": "json",
-        }),
-    )
-    .await;
-    assert_under_budget(
-        "direct-user 12-hour message_search",
-        search_elapsed,
-        SEARCH_BUDGET,
-    );
-    let search_payload =
-        retained_payload(&resolved(&harness, &project, "tracedecay_message_search", search).await);
-    assert_ne!(
-        search_payload["status"],
-        json!("error"),
-        "direct-user search must stay typed, not a transport failure: {search_payload}"
-    );
+    // Discovery can be current while message search is still one generation
+    // behind. A stale empty page is lag, not a window decision. Each attempt
+    // still has to finish inside the product budget.
+    let search_deadline = Instant::now() + CONVERGENCE_WAIT;
+    let search_payload = loop {
+        let (search_elapsed, search) = timed_call(
+            &harness,
+            &project,
+            "tracedecay_message_search",
+            json!({
+                "query": DIRECT_USER_QUERY,
+                "message_type": "direct_user",
+                "since": since,
+                "limit": 5,
+                "format": "json",
+            }),
+        )
+        .await;
+        assert_under_budget(
+            "direct-user 12-hour message_search",
+            search_elapsed,
+            SEARCH_BUDGET,
+        );
+        let search_payload = retained_payload(
+            &resolved(&harness, &project, "tracedecay_message_search", search).await,
+        );
+        assert_ne!(
+            search_payload["status"],
+            json!("error"),
+            "direct-user search must stay typed, not a transport failure: {search_payload}"
+        );
+        if search_payload["outcome"] != json!("stale") {
+            break search_payload;
+        }
+        assert!(
+            Instant::now() < search_deadline,
+            "12-hour direct-user search never left typed staleness: {search_payload}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
     let searched_sessions = message_hit_session_ids(&search_payload);
     assert_window_side(
         "12-hour direct-user search",

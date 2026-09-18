@@ -1005,13 +1005,15 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
                     .expect("registered daemon ingest response text"),
             )
             .expect("registered daemon ingest payload");
-            if payload["completed"] != false {
+            if payload["status"] == "committed" {
                 break output;
             }
-            assert_eq!(
-                payload["admission"]["retryable"], true,
-                "incomplete ingest must carry a retryable admission: {response}"
-            );
+            if payload["completed"] == false {
+                assert_eq!(
+                    payload["admission"]["retryable"], true,
+                    "incomplete ingest must carry a retryable admission: {response}"
+                );
+            }
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             assert!(
