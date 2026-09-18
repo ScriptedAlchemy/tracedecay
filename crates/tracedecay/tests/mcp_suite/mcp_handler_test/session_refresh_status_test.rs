@@ -106,9 +106,32 @@ fn assert_status_contract(answer: &HostAnswer) {
 }
 
 fn assert_invalid_request(answer: &HostAnswer) {
+    assert_problem(
+        answer,
+        json!({
+            "kind": "invalid_request",
+            "code": "application.retained.invalid-request",
+            "message": "The retained operation request is invalid.",
+            "diagnostic": {
+                "code": "application.retained.invalid-request",
+                "message": "The retained operation request is invalid."
+            },
+            "retry": "never",
+            "retryable": false,
+            "retry_scope": null,
+            "legal_actions": ["correct_request"],
+            "terminality": "pre_admission",
+            "owning_layer": "application",
+            "revision": 1,
+            "committed_receipt": null
+        }),
+    );
+}
+
+fn assert_problem(answer: &HostAnswer, expected: Value) {
     assert!(
         answer.refused,
-        "an omitted or blank handle must refuse before a refresh is read: {}",
+        "this status call must refuse as an MCP tool error: {}",
         answer.body
     );
     assert_eq!(
@@ -126,23 +149,27 @@ fn assert_invalid_request(answer: &HostAnswer) {
             "revision": answer.body["problem"]["revision"],
             "committed_receipt": answer.body["problem"]["committed_receipt"],
         }),
+        expected
+    );
+}
+
+fn assert_not_found_or_not_authorized(answer: &HostAnswer) {
+    assert_problem(
+        answer,
         json!({
-            "kind": "invalid_request",
-            "code": "application.retained.invalid-request",
-            "message": "The retained operation request is invalid.",
-            "diagnostic": {
-                "code": "application.retained.invalid-request",
-                "message": "The retained operation request is invalid."
-            },
+            "kind": "not_found_or_not_authorized",
+            "code": "not_found_or_not_authorized",
+            "message": "The requested resource was not found or is not authorized",
+            "diagnostic": null,
             "retry": "never",
             "retryable": false,
             "retry_scope": null,
-            "legal_actions": ["correct_request"],
+            "legal_actions": [],
             "terminality": "pre_admission",
             "owning_layer": "application",
             "revision": 1,
             "committed_receipt": null
-        })
+        }),
     );
 }
 
@@ -165,9 +192,10 @@ fn assert_lookup(answer: &HostAnswer, outcome: &str, code: &str, message: &str) 
     );
 }
 
-/// Status reads the handle the host already holds. It does not begin a
-/// refresh, and a missing, unknown, stale, or foreign handle is a different
-/// typed answer.
+/// Status reads the handle the host already holds. A missing or blank handle
+/// is an invalid request. A handle that is not a refresh token is refused as
+/// not found. A well-formed token the daemon does not hold is stale evidence.
+/// Presenting a finished handle under another session id does not rebind it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_refresh_status_reports_the_handle_the_host_holds() {
     let _env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
@@ -226,12 +254,7 @@ async fn session_refresh_status_reports_the_handle_the_host_holds() {
         refresh_arguments(SESSION_ID, Some("refresh-handle")),
     )
     .await;
-    assert_lookup(
-        &unknown,
-        "not_found",
-        "refresh_handle_not_found",
-        "the refresh handle was not found",
-    );
+    assert_not_found_or_not_authorized(&unknown);
 
     let stale_token = format!("srh_{}", "0".repeat(64));
     let stale = call_tool(
@@ -273,20 +296,6 @@ async fn session_refresh_status_reports_the_handle_the_host_holds() {
         .unwrap_or_else(|| panic!("begin omitted the operation id: {begin_payload}"))
         .to_owned();
 
-    let foreign = call_tool(
-        &harness,
-        &project,
-        TOOL,
-        refresh_arguments(OTHER_SESSION_ID, Some(&handle)),
-    )
-    .await;
-    assert_lookup(
-        &foreign,
-        "wrong_scope",
-        "refresh_wrong_scope",
-        "the refresh handle does not belong to the requested scope",
-    );
-
     let completed = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let status = call_tool(
@@ -301,15 +310,19 @@ async fn session_refresh_status_reports_the_handle_the_host_holds() {
             match payload["outcome"].as_str() {
                 Some("complete") => break payload,
                 Some("running") => {
-                    assert_eq!(payload["scope"], "profile");
-                    assert_eq!(payload["tool"], TOOL);
-                    assert!(payload["receipt"].is_null(), "{payload}");
-                    assert!(payload["error"].is_null(), "{payload}");
-                    assert_eq!(payload["progress"]["operation_id"], operation_id);
-                    assert_eq!(payload["progress"]["session_id"], SESSION_ID);
                     assert_eq!(
-                        payload["progress"]["frontier"],
-                        json!({"observed_through": 0, "committed_through": 0}),
+                        json!({
+                            "scope": payload["scope"],
+                            "tool": payload["tool"],
+                            "receipt": payload["receipt"],
+                            "error": payload["error"],
+                        }),
+                        json!({
+                            "scope": "profile",
+                            "tool": TOOL,
+                            "receipt": null,
+                            "error": null,
+                        }),
                         "{payload}"
                     );
                     tokio::time::sleep(Duration::from_millis(25)).await;
@@ -340,6 +353,17 @@ async fn session_refresh_status_reports_the_handle_the_host_holds() {
                 "session_id": SESSION_ID,
                 "frontier": {"observed_through": 0, "committed_through": 0},
                 "coverage": {"visible": 0, "hidden": 0, "unknown": 0, "redacted": 0},
+                "source_coverage": [{
+                    "source_id": "session.status-proof:codex",
+                    "observed_frontier": 0,
+                    "committed_frontier": 0,
+                    "target_watermark": 0,
+                    "request": {"mode": {"kind": "current"}},
+                    "covered_intervals": [],
+                    "missing_intervals": [],
+                    "state": "fresh",
+                    "reason": {"kind": "caught_up"}
+                }],
                 "state": "complete",
                 "failure_code": null,
                 "terminal_at": terminal_at
@@ -360,6 +384,20 @@ async fn session_refresh_status_reports_the_handle_the_host_holds() {
         status_payload(&repeated),
         &completed,
         "a second status read must return the same terminal receipt"
+    );
+
+    let foreign = call_tool(
+        &harness,
+        &project,
+        TOOL,
+        refresh_arguments(OTHER_SESSION_ID, Some(&handle)),
+    )
+    .await;
+    assert_status_contract(&foreign);
+    assert_eq!(
+        status_payload(&foreign),
+        &completed,
+        "presenting the finished handle for another session returns the same receipt"
     );
 
     harness.shutdown().await;
