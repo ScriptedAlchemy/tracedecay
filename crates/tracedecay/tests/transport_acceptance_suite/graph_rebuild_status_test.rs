@@ -21,7 +21,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
-use tracedecay_mcp::JsonRpcResponse;
+
+use crate::common::mcp_response::tool_json;
 
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(90);
 
@@ -81,31 +82,8 @@ fn head(project: &Path) -> String {
         .to_owned()
 }
 
-fn tool_payload(response: &JsonRpcResponse) -> Value {
-    assert!(response.error.is_none(), "{response:?}");
-    let result = response.result.as_ref().expect("tool result");
-    assert_ne!(result["isError"], true, "tool effect failed: {result}");
-    let text = result["content"][0]["text"].as_str().expect("tool text");
-    serde_json::from_str(text)
-        .unwrap_or_else(|error| panic!("tool returned invalid JSON: {error}; text={text}"))
-}
-
-async fn tool(
-    harness: &ProductionProjectCompositionHarnessV1,
-    project: &Path,
-    name: &str,
-    arguments: Value,
-) -> Value {
-    tool_payload(
-        &harness
-            .call_tool(project, name, arguments)
-            .await
-            .unwrap_or_else(|error| panic!("{name} failed: {error}")),
-    )
-}
-
 async fn status(harness: &ProductionProjectCompositionHarnessV1, project: &Path) -> Value {
-    tool(
+    tool_json(
         harness,
         project,
         "tracedecay_status",
@@ -125,26 +103,13 @@ async fn search(
     project: &Path,
     query: &str,
 ) -> Value {
-    // One ranked candidate is all these journeys read, and the frame budget is
-    // why the page has to stay that small: every candidate carries several KiB
-    // of ranking provenance, so a three-result page rendered 18 084 characters
-    // against the 15 000-character response frame.
-    let payload = tool(
+    tool_json(
         harness,
         project,
         "tracedecay_search",
-        json!({"query": query, "limit": 1, "format": "json"}),
+        json!({"query": query, "limit": 3, "format": "json"}),
     )
-    .await;
-    // A truncated envelope moves `results` and `code_generation` inside
-    // `preview`, where every predicate below reads them as absent. That is a
-    // malformed observation, not a warming generation: the waits below would
-    // spin to their deadline against a generation that is already current.
-    assert!(
-        payload.get("truncated").is_none(),
-        "search exceeded the MCP response frame and was replaced by a retrieval handle: {payload}"
-    );
-    payload
+    .await
 }
 
 fn result_paths(search: &Value) -> Vec<&str> {
@@ -291,7 +256,7 @@ async fn background_refresh_and_reopen_report_only_servable_generations_inner() 
     install_background_batch(isolation.path(), &project);
     commit_all(&project, "install background refresh batch");
     let refreshed_revision = head(&project);
-    let receipt = tool(
+    let receipt = tool_json(
         &harness,
         &project,
         "tracedecay_admin_sync",
