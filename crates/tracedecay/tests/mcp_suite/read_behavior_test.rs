@@ -3,6 +3,8 @@
 //! Caller-visible `tracedecay_read` behavior through the production MCP
 //! `tools/call` path. Expected bodies, digests, and error strings are literals
 //! the test owns; they are not read back from the fixture writer or the tool.
+//! Context order is nearest-first. Map and signature order follows the graph
+//! page, so those assertions compare the symbol records, not their sequence.
 
 use std::fs;
 use std::path::Path;
