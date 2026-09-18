@@ -11,6 +11,8 @@ use std::path::Path;
 use std::process::Command;
 #[cfg(feature = "test-transport")]
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
+#[cfg(feature = "test-transport")]
+use tracedecay::project::TraceDecay;
 use tracedecay_domain::SessionId;
 #[cfg(feature = "test-transport")]
 use tracedecay_session_temporal_store::SessionTemporalStore;
@@ -762,4 +764,363 @@ async fn completed_session_import_immediately_searches_canonical_message() {
 
     production_codex_message_search(&harness, &project).await;
     harness.shutdown().await;
+}
+
+/// `tracedecay_message_search` reads already-admitted messages through MCP
+/// `tools/call`. A query that names a seeded message returns that message's
+/// text, id, session, provider, and role. Those observations carry an unknown
+/// valid time, so the hit is partial: one omitted record, coverage `unknown`
+/// 1 and `visible` 0, not a complete answer. A query that matches nothing, the
+/// wrong provider, an assistant message filtered as a tool result, and goals
+/// with no goals are empty complete answers. Omitting `query` outside goals
+/// mode, and naming an unknown provider, are typed invalid-request refusals.
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn message_search_returns_literal_seeded_messages() {
+    let dir = test_temp_dir();
+    let (cg, _env) = init_test_project(dir.path()).await;
+
+    seed_temporal_lcm_session_message(
+        &cg,
+        "proof-plum-session",
+        "proof-plum-message",
+        "The plum quartz regulator holds at 41 degrees",
+        1,
+    )
+    .await;
+    seed_temporal_lcm_session_message(
+        &cg,
+        "proof-amber-session",
+        "proof-amber-message",
+        "The amber lattice stays closed",
+        1,
+    )
+    .await;
+    seed_temporal_lcm_session_message_for_provider(
+        &cg,
+        "codex",
+        "proof-orchid-session",
+        "proof-orchid-message",
+        "The orchid spool tension is 12 newtons",
+        1,
+    )
+    .await;
+    seed_temporal_lcm_tool_result_message(
+        &cg,
+        "proof-zinc-session",
+        "proof-zinc-message",
+        "zinc spindle torque reading 17",
+        1,
+    )
+    .await;
+    for session_id in [
+        "proof-plum-session",
+        "proof-amber-session",
+        "proof-orchid-session",
+        "proof-zinc-session",
+    ] {
+        materialize_proof_session(&cg, session_id).await;
+    }
+
+    let plum = message_search_payload(
+        &cg,
+        json!({
+            "query": "plum quartz regulator",
+            "format": "json",
+        }),
+    )
+    .await;
+    assert_eq!(plum["query"], "plum quartz regulator");
+    assert_eq!(plum["outcome"], "partial");
+    assert_eq!(plum["status"], "partial");
+    assert_eq!(plum["count"], 1);
+    assert_eq!(plum["omitted"], 1);
+    assert_eq!(plum["provider"], "all");
+    assert_eq!(plum["requested_provider"], Value::Null);
+    assert_eq!(plum["scope"], "all");
+    assert_eq!(plum["message_type"], "all");
+    assert_eq!(plum["goals"], false);
+    assert_eq!(plum["catch_up"], false);
+    assert_eq!(plum["catch_up_performed"], false);
+    assert_eq!(plum["catch_up_provider"], "all");
+    assert_eq!(plum["include_subagents"], true);
+    assert_eq!(plum["refresh_required"], false);
+    assert_eq!(plum["store_scope"], "project");
+    assert_eq!(
+        plum["temporal"]["coverage"],
+        json!({"hidden": 0, "redacted": 0, "unknown": 1, "visible": 0})
+    );
+    assert_eq!(plum["temporal"]["freshness"], json!({"state": "fresh"}));
+    assert_eq!(plum["results"].as_array().map(Vec::len), Some(1));
+    let plum_hit = &plum["results"][0];
+    assert_eq!(
+        plum_hit["message"]["text"],
+        "The plum quartz regulator holds at 41 degrees"
+    );
+    assert_eq!(plum_hit["message"]["message_id"], "proof-plum-message");
+    assert_eq!(plum_hit["message"]["session_id"], "proof-plum-session");
+    assert_eq!(plum_hit["message"]["provider"], "cursor");
+    assert_eq!(plum_hit["message"]["role"], "assistant");
+    assert_eq!(plum_hit["message"]["model"], "test-model");
+    assert_eq!(plum_hit["session"]["session_id"], "proof-plum-session");
+    assert_eq!(plum_hit["session"]["provider"], "cursor");
+    assert_eq!(plum_hit["session"]["is_subagent"], false);
+
+    let amber = message_search_payload(
+        &cg,
+        json!({
+            "query": "amber lattice",
+            "format": "json",
+        }),
+    )
+    .await;
+    assert_eq!(amber["outcome"], "partial");
+    assert_eq!(amber["status"], "partial");
+    assert_eq!(amber["count"], 1);
+    assert_eq!(amber["omitted"], 1);
+    assert_eq!(
+        amber["results"][0]["message"]["text"],
+        "The amber lattice stays closed"
+    );
+    assert_eq!(
+        amber["results"][0]["message"]["message_id"],
+        "proof-amber-message"
+    );
+    assert_eq!(
+        amber["results"][0]["message"]["session_id"],
+        "proof-amber-session"
+    );
+    assert_eq!(amber["results"][0]["message"]["provider"], "cursor");
+    assert_eq!(amber["results"][0]["message"]["role"], "assistant");
+
+    let miss = message_search_payload(
+        &cg,
+        json!({
+            "query": "no such nautilus phrase",
+            "format": "json",
+        }),
+    )
+    .await;
+    assert_eq!(miss["query"], "no such nautilus phrase");
+    assert_eq!(miss["outcome"], "complete_zero");
+    assert_eq!(miss["status"], "ok");
+    assert_eq!(miss["count"], 0);
+    assert_eq!(miss["results"], json!([]));
+    assert_eq!(miss["provider"], "all");
+    assert_eq!(miss["refresh_required"], false);
+    assert_eq!(
+        miss["temporal"]["coverage"],
+        json!({"hidden": 0, "redacted": 0, "unknown": 0, "visible": 0})
+    );
+
+    let cursor_only = message_search_payload(
+        &cg,
+        json!({
+            "query": "orchid spool tension",
+            "provider": "cursor",
+            "format": "json",
+        }),
+    )
+    .await;
+    assert_eq!(cursor_only["provider"], "cursor");
+    assert_eq!(cursor_only["requested_provider"], "cursor");
+    assert_eq!(cursor_only["outcome"], "complete_zero");
+    assert_eq!(cursor_only["count"], 0);
+    assert_eq!(cursor_only["results"], json!([]));
+
+    let codex_only = message_search_payload(
+        &cg,
+        json!({
+            "query": "orchid spool tension",
+            "provider": "codex",
+            "format": "json",
+        }),
+    )
+    .await;
+    assert_eq!(codex_only["provider"], "codex");
+    assert_eq!(codex_only["requested_provider"], "codex");
+    assert_eq!(codex_only["outcome"], "partial");
+    assert_eq!(codex_only["status"], "partial");
+    assert_eq!(codex_only["count"], 1);
+    assert_eq!(codex_only["omitted"], 1);
+    assert_eq!(
+        codex_only["results"][0]["message"]["text"],
+        "The orchid spool tension is 12 newtons"
+    );
+    assert_eq!(
+        codex_only["results"][0]["message"]["message_id"],
+        "proof-orchid-message"
+    );
+    assert_eq!(codex_only["results"][0]["message"]["provider"], "codex");
+    assert_eq!(codex_only["results"][0]["message"]["role"], "assistant");
+    assert_eq!(
+        codex_only["results"][0]["message"]["session_id"],
+        "proof-orchid-session"
+    );
+    assert_eq!(codex_only["results"][0]["session"]["provider"], "codex");
+
+    let not_a_tool = message_search_payload(
+        &cg,
+        json!({
+            "query": "plum quartz regulator",
+            "message_type": "tool_result",
+            "format": "json",
+        }),
+    )
+    .await;
+    assert_eq!(not_a_tool["message_type"], "tool_result");
+    assert_eq!(not_a_tool["outcome"], "complete_zero");
+    assert_eq!(not_a_tool["count"], 0);
+    assert_eq!(not_a_tool["results"], json!([]));
+
+    let tool_hit = message_search_payload(
+        &cg,
+        json!({
+            "query": "zinc spindle torque",
+            "message_type": "tool_result",
+            "format": "json",
+        }),
+    )
+    .await;
+    assert_eq!(tool_hit["message_type"], "tool_result");
+    assert_eq!(tool_hit["outcome"], "partial");
+    assert_eq!(tool_hit["status"], "partial");
+    assert_eq!(tool_hit["count"], 1);
+    assert_eq!(tool_hit["omitted"], 1);
+    assert_eq!(
+        tool_hit["results"][0]["message"]["text"],
+        "zinc spindle torque reading 17"
+    );
+    assert_eq!(
+        tool_hit["results"][0]["message"]["message_id"],
+        "proof-zinc-message"
+    );
+    assert_eq!(tool_hit["results"][0]["message"]["role"], "tool");
+    assert_eq!(tool_hit["results"][0]["message"]["model"], Value::Null);
+    assert_eq!(tool_hit["results"][0]["message"]["provider"], "cursor");
+    assert_eq!(
+        tool_hit["results"][0]["message"]["session_id"],
+        "proof-zinc-session"
+    );
+
+    let goals = message_search_payload(
+        &cg,
+        json!({
+            "goals": true,
+            "format": "json",
+        }),
+    )
+    .await;
+    assert_eq!(goals["goals"], true);
+    assert_eq!(goals["query"], "");
+    assert_eq!(goals["outcome"], "complete_zero");
+    assert_eq!(goals["status"], "ok");
+    assert_eq!(goals["count"], 0);
+    assert_eq!(goals["results"], json!([]));
+
+    let missing_query = refusal_problem(&expect_tool_error(
+        handle_tool_call(
+            &cg,
+            "tracedecay_message_search",
+            json!({"format": "json"}),
+            None,
+            None,
+        )
+        .await,
+    ));
+    assert_eq!(missing_query["kind"], "invalid_request");
+    assert_eq!(
+        missing_query["code"],
+        "application.retained.invalid-request"
+    );
+    assert_eq!(
+        missing_query["message"],
+        "The retained operation request is invalid."
+    );
+    assert_eq!(
+        missing_query["diagnostic"]["code"],
+        "application.retained.invalid-request"
+    );
+    assert_eq!(
+        missing_query["diagnostic"]["message"],
+        "The retained operation request is invalid."
+    );
+    assert_eq!(missing_query["retry"], "never");
+    assert_eq!(missing_query["legal_actions"], json!(["correct_request"]));
+
+    let unknown_provider = refusal_problem(&expect_tool_error(
+        handle_tool_call(
+            &cg,
+            "tracedecay_message_search",
+            json!({
+                "query": "plum quartz regulator",
+                "provider": "unknown-agent",
+                "format": "json",
+            }),
+            None,
+            None,
+        )
+        .await,
+    ));
+    assert_eq!(unknown_provider["kind"], "invalid_request");
+    assert_eq!(
+        unknown_provider["code"],
+        "application.retained.message-search-provider-invalid"
+    );
+    assert_eq!(
+        unknown_provider["message"],
+        "unknown session provider 'unknown-agent' (expected all, cursor, claude, codex, vibe, cline, roo-code, kilo, kiro, kimi, opencode, or hermes)"
+    );
+    assert_eq!(
+        unknown_provider["diagnostic"]["message"],
+        "unknown session provider 'unknown-agent' (expected all, cursor, claude, codex, vibe, cline, roo-code, kilo, kiro, kimi, opencode, or hermes)"
+    );
+    assert_eq!(unknown_provider["retry"], "never");
+    assert_eq!(
+        unknown_provider["legal_actions"],
+        json!(["correct_request"])
+    );
+}
+
+#[cfg(feature = "test-transport")]
+async fn materialize_proof_session(cg: &TraceDecay, session_id: &str) {
+    let runtime = open_active_project_session_db(cg).await;
+    SessionTemporalStore::new(
+        runtime
+            .registered_database(HostAdmissionScope::Project)
+            .expect("registered project session database"),
+    )
+    .materialize_pending_session_refresh_for_test(
+        &SessionId::new(session_id).expect("fixture session id"),
+    )
+    .await
+    .expect("materialize canonical temporal session");
+}
+
+#[cfg(feature = "test-transport")]
+async fn message_search_payload(cg: &TraceDecay, arguments: Value) -> Value {
+    let result = handle_tool_call(cg, "tracedecay_message_search", arguments, None, None)
+        .await
+        .expect("tracedecay_message_search MCP call");
+    let envelope = extract_json(&result.value);
+    envelope
+        .pointer("/outcome/value/payload")
+        .cloned()
+        .unwrap_or(envelope)
+}
+
+#[cfg(feature = "test-transport")]
+fn refusal_problem(error: &str) -> Value {
+    const MARKER: &str = "answered with a retained refusal: ";
+    let json = error
+        .split_once(MARKER)
+        .unwrap_or_else(|| panic!("expected a retained refusal, got {error}"))
+        .1;
+    let envelope: Value = serde_json::from_str(json)
+        .unwrap_or_else(|parse_error| panic!("{parse_error} in retained refusal: {json}"));
+    envelope
+        .pointer("/Err/problem")
+        .cloned()
+        .or_else(|| envelope.get("problem").cloned())
+        .unwrap_or_else(|| panic!("retained refusal has no problem record: {envelope}"))
 }
