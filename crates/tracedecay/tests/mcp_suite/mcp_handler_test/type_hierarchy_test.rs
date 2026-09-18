@@ -1,3 +1,5 @@
+#![cfg(feature = "test-transport")]
+
 //! Production MCP behavior of `tracedecay_type_hierarchy`.
 //!
 //! The tool walks incoming `implements` and `extends` edges only. `max_depth`
@@ -275,19 +277,25 @@ async fn type_hierarchy_reports_literal_trees_and_typed_refusals() {
 
     assert_protocol_error(
         &call_tool(&fixture, json!({"format": "json"})).await,
-        "config error: missing required parameter: node_id",
+        -32602,
+        "missing required parameter: node_id",
+        Some("missing_required_parameter"),
     );
     assert_protocol_error(
         &call_tool(&fixture, json!({"node_id": "   ", "format": "json"})).await,
-        "config error: invalid parameter: node_id must not be empty",
+        -32603,
+        "tool execution failed: config error: invalid parameter: node_id must not be empty",
+        None,
     );
     assert_protocol_error(
         &call_tool(
             &fixture,
-            json!({"node_id": "not canonical id", "format": "json"}),
+            json!({"node_id": " not-canonical", "format": "json"}),
         )
         .await,
-        "config error: invalid node_id 'not canonical id': SymbolOccurrenceId is not canonical",
+        -32603,
+        "tool execution failed: config error: invalid node_id ' not-canonical': SymbolOccurrenceId is not canonical",
+        None,
     );
     assert_protocol_error(
         &call_tool(
@@ -295,7 +303,9 @@ async fn type_hierarchy_reports_literal_trees_and_typed_refusals() {
             json!({"node_id": "absent-symbol", "format": "json"}),
         )
         .await,
-        "config error: node not found in verified generation: absent-symbol",
+        -32602,
+        "node not found in verified generation: absent-symbol",
+        Some("not_found"),
     );
 
     fixture.harness.shutdown().await;
@@ -376,7 +386,12 @@ fn success_result(response: &JsonRpcResponse) -> &Value {
     result
 }
 
-fn assert_protocol_error(response: &JsonRpcResponse, message: &str) {
+fn assert_protocol_error(
+    response: &JsonRpcResponse,
+    code: i32,
+    message: &str,
+    reason_code: Option<&str>,
+) {
     assert!(
         response.result.is_none(),
         "refused type hierarchy must not carry a result: {response:?}"
@@ -385,8 +400,29 @@ fn assert_protocol_error(response: &JsonRpcResponse, message: &str) {
         .error
         .as_ref()
         .unwrap_or_else(|| panic!("missing protocol error: {response:?}"));
-    assert_eq!(error.code, -32603);
-    assert_eq!(error.message, message);
+    let data = error
+        .data
+        .as_ref()
+        .unwrap_or_else(|| panic!("protocol error missing data: {response:?}"));
+    assert_eq!(
+        json!({
+            "code": error.code,
+            "message": error.message,
+            "tool": data["tool"],
+            "reason_code": data["reason_code"],
+            "retryable": data.get("retryable"),
+            "detail": data.get("detail"),
+        }),
+        json!({
+            "code": code,
+            "message": message,
+            "tool": "tracedecay_type_hierarchy",
+            "reason_code": reason_code,
+            "retryable": reason_code.map(|_| false),
+            "detail": reason_code.map(|_| message),
+        }),
+        "protocol error mismatch: {response:?}"
+    );
 }
 
 async fn symbol_id(
