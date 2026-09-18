@@ -1,5 +1,6 @@
 #![cfg(feature = "test-transport")]
 
+mod diff_context_behavior;
 mod graph_readiness;
 
 use crate::common::fixture::git_run;
