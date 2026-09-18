@@ -669,6 +669,30 @@ async fn registry_feeds_publications_and_bounded_freshness_reads() {
     assert_ne!(changed.generation_id, initial.generation_id);
 }
 
+/// Wait until the mounted worker for `path` is idle with nothing queued.
+///
+/// [`wait_for_quiescent_owner_pass`] only reports that no pass is *running*.
+/// A pass that ends while a wake is already pending re-arms a busy follow-up
+/// whose receipt lands later, so a test pinning receipt accounting has to wait
+/// for the pending-wake slot as well.
+async fn wait_for_settled_owner(registry: &CodeIndexSchedulerRegistryV1, path: &Path) {
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    loop {
+        wait_for_quiescent_owner_pass(registry, path).await;
+        if registry.pending_wake_micros_for_root(path).await == Some(0)
+            && !registry.reconcile_in_progress_for_test(path).await
+        {
+            return;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "the owner for {} never settled",
+            path.display()
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
 /// Poll a mounted worktree's dashboard clone-index status until it reports
 /// ready coverage.
 ///
@@ -3821,10 +3845,13 @@ async fn unchanged_background_freshness_probe_posts_no_overflow_wake() {
         .await
         .expect("mount daemon-owned scheduler");
     wait_for_initial_generation(&registry, fixture.path()).await;
-    // The seat is published mid-pass and the receipt lands after the pass
-    // releases its in-progress guard, so sample the baseline only once the
-    // mount's own receipt exists, or it is charged to the probe below.
-    wait_for_quiescent_owner_pass(&registry, fixture.path()).await;
+    // The seat no longer waits for the clone successor, so the mount leaves
+    // pending backfill behind. Draining it is a wake of its own, and every
+    // wake posts its own receipt, so settle the whole mount-era chain first:
+    // a pass that ends with a wake still pending re-arms a busy follow-up
+    // whose receipt would otherwise land inside the probe's window below.
+    drain_clone_backfill(&registry, fixture.path()).await;
+    wait_for_settled_owner(&registry, fixture.path()).await;
     wait_for_event_to_ready(&registry).await;
     let canonical = fixture.path().canonicalize().expect("canonical fixture");
     {
@@ -3836,7 +3863,11 @@ async fn unchanged_background_freshness_probe_posts_no_overflow_wake() {
             .policy
             .staleness_threshold = Duration::ZERO;
     }
-    let receipts_before = registry.event_to_ready_receipts().len();
+    // Receipts are attributed by the arrival the pass claimed, not by list
+    // position: a mount-era wake claimed before this instant belongs to the
+    // mount even when its receipt lands during the window below. Only a wake
+    // accepted from here on is the probe's.
+    let probe_at = tracedecay_contracts::now_micros().0;
 
     assert_eq!(
         registry.probe_freshness_admission(fixture.path()).await,
@@ -3855,10 +3886,15 @@ async fn unchanged_background_freshness_probe_posts_no_overflow_wake() {
         Some(0),
         "matching Git/stat evidence must not become an overflow hint"
     );
-    assert_eq!(
-        registry.event_to_ready_receipts().len(),
-        receipts_before,
-        "a suppressed probe must not fabricate a reconcile receipt"
+    let receipts = registry.event_to_ready_receipts();
+    assert!(
+        receipts.iter().all(|receipt| {
+            receipt
+                .arrival
+                .wake_micros()
+                .is_none_or(|wake_micros| wake_micros < probe_at)
+        }),
+        "a suppressed probe must not fabricate a reconcile receipt: {receipts:#?}"
     );
     drop(mounted);
     registry.shutdown().await;
