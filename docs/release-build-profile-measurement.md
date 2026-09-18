@@ -55,16 +55,20 @@ build (19.9m, [run 35271070760](https://github.com/ScriptedAlchemy/tracedecay/ac
 | `opt-level = 2` for every unit | **18m 09s** | −0.3% |
 
 The serial `tracedecay` → `tracedecay-cli` tail, re-measured on its own by
-touching `crates/tracedecay/src/lib.rs`:
+touching `crates/tracedecay/src/lib.rs` so only those two units rebuild:
 
 | Configuration | Tail wall | Delta |
 | --- | ---: | ---: |
-| `tracedecay` at `opt-level = 3` | **4m 36s** | — |
-| `tracedecay` at `opt-level = 1` | **4m 30s** | −2% |
+| `tracedecay` at `opt-level = 3`, on the baseline tree | **4m 36s** | — |
+| `tracedecay` at `opt-level = 1`, on the `opt-level = 2` tree | **4m 30s** | −2% |
 
-Dropping the composition root from full optimization to `opt-level = 1` returns
-six seconds and makes the binary *larger* (503.0 MiB to 516.8 MiB). Optimization
-level is not the cost.
+The two tail runs sit on different bases, because each full tree had to be built
+to measure it, so `tracedecay-cli` is at 3 in the first row and 2 in the second.
+That is immaterial at the resolution being argued: the global 3-to-2 comparison
+above is already a wash, so the row-to-row difference is `tracedecay` itself
+going from 3 to 1, and it returns six seconds of 276. The binary also grew, from
+503.0 MiB for the whole tree at 2 to 516.8 MiB with the root dropped to 1.
+Optimization level is not the cost.
 
 ## Why the profile cannot help
 

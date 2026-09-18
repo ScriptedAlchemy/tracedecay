@@ -289,8 +289,8 @@ lever: all 148 tree-sitter and C units together are under 5 unit-minutes.
 
 Optimization semantics were measured rather than assumed, and they are not the
 cost: `opt-level = 2` across every unit returns 3 seconds of 18m12s, and
-`opt-level = 1` on the composition root returns 6 seconds of the 4m36s serial
-tail while making the binary larger. The confirmed driver is code volume,
+dropping the composition root to `opt-level = 1` returns 6 seconds of the 4m36s
+serial tail while growing the binary. The confirmed driver is code volume,
 380,869 monomorphized symbols, of which `serde` and `serde_json` instantiate
 60.1 MiB.
 
