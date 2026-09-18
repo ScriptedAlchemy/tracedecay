@@ -438,7 +438,7 @@ async fn workflows_query_surface_end_to_end() {
     cg.close();
 }
 
-const PHASE_JSON: &str = r#"[{"title":"Mine","detail":"harvest scenarios"},{"title":"Run","detail":"run it","model":"fable"}]"#;
+const PHASE_JSON: &str = r#"[{"detail":"harvest scenarios","title":"Mine"},{"detail":"run it","model":"fable","title":"Run"}]"#;
 const RESULT_SUMMARY: &str = "Mine real transcripts into a broad eval corpus then score them";
 const DESCRIPTION: &str = "Mine real transcripts into a broad eval corpus\nthen score them";
 const STARTED_TS: i64 = 1_783_142_254;
