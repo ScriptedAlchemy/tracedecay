@@ -29,7 +29,7 @@ const ALPHA_PROJECT_ID: &str = "project.mcp-cas-alpha";
 const BETA_PROJECT_ID: &str = "project.mcp-cas-beta";
 const BINDING_ID: &str = "binding.http.multi_root.scope_set_compare_and_swap.v1";
 const RESULT_SCHEMA_ID: &str = "schema.tracedecay.multi-root.scope-set-compare-and-swap-result.v1";
-const CALL_TIMEOUT: Duration = Duration::from_secs(60);
+const CALL_TIMEOUT: Duration = Duration::from_mins(1);
 
 #[test]
 fn multi_root_scope_set_compare_and_swap_reports_apply_conflict_and_refusal() {
