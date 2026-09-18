@@ -82,6 +82,8 @@ mod type_hierarchy_test;
 mod unmounted_files_test;
 mod unsafe_patterns_test;
 #[cfg(feature = "test-transport")]
+mod work_resume_attempts_test;
+#[cfg(feature = "test-transport")]
 mod work_test;
 #[cfg(all(feature = "test-transport", unix))]
 mod workflow_register_definition_test;
