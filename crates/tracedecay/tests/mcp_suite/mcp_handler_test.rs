@@ -23,6 +23,7 @@ mod edit_test;
 mod expand_query_behavior;
 mod graph_analysis_test;
 mod graph_query_test;
+mod health_behavior_test;
 mod impact_behavior_test;
 mod impls_behavior_test;
 mod largest_test;
