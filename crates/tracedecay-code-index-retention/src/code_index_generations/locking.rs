@@ -47,10 +47,7 @@ pub fn try_acquire_code_generation_store_read_lock(
 ) -> Result<Option<CodeGenerationStoreLockV1>, CodeGenerationRetentionErrorV1> {
     let store_root = canonical_store_root(store_root)?;
     let lock = open_lock_file(&store_root.join(STORE_LOCK_FILE))?;
-    match lock
-        .try_lock_shared()
-        .map_err(std::io::Error::from)
-    {
+    match lock.try_lock_shared().map_err(std::io::Error::from) {
         Ok(()) => Ok(Some(CodeGenerationStoreLockV1 {
             file: lock,
             store_root,
