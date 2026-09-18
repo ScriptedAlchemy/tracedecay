@@ -912,6 +912,10 @@ fn clone_status_distinguishes_unavailable_backfill_partial_ready_and_stale() {
     ));
 }
 
+// Holding the clone-successor slot across the await is the scenario, not an
+// oversight: the read under test must answer without joining the backfill that
+// owns the slot. The guard is released before shutdown.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn dashboard_freshness_does_not_join_a_clone_backfill_slice() {
     let fixture = GitFixture::new(&[(
