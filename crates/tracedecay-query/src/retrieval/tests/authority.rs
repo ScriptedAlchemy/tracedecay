@@ -304,6 +304,30 @@ fn task_session_selection_uses_the_accepted_federated_profile_without_fake_lanes
 }
 
 #[test]
+fn core_fallback_authority_ranks_task_session_without_changing_search_lanes() {
+    let authority = authority();
+    let request = request();
+    let outcome = RetrieverOutcome::Complete(RetrieverBatch::<TaskSessionLaneEvidenceV1> {
+        candidates: Vec::new(),
+        evidence_by_occurrence: BTreeMap::new(),
+        coverage: RetrieverCoverage::default(),
+        continuation: None,
+    });
+
+    let selected = authority
+        .select_task_session(&request, &query_view(), outcome, 8, None)
+        .expect("core fallback authority ranks the TaskSession lane");
+    assert!(selected.ranked_candidates().is_empty());
+    assert_eq!(
+        authority.task_session_score_domain().expect("score domain"),
+        id::<ScoreDomainId>(crate::retrieval::QUERY_TASK_SESSION_SCORE_DOMAIN_V1),
+    );
+    authority
+        .compose(&request, &query_view(), empty_foreground_lanes(), 8, None)
+        .expect("search lanes stay the checked-in fallback set");
+}
+
+#[test]
 fn federated_authority_rejects_missing_or_duplicate_lanes() {
     let authority = federated_authority();
     let request = request();

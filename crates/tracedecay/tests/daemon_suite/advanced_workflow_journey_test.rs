@@ -1402,15 +1402,9 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         &sealed_receipt,
     );
     let dashboard = task_session::DashboardProcess::start(&home, &project);
-    // Until `8e7952f9` ("retire dense FastEmbed path for lexical/graph") this
-    // journey returned early unless the caller had installed the byte-pinned
-    // FastEmbed distribution package, because only the evaluated federated
-    // profile that fixture activated could serve the TaskSession retrieval
-    // lane that the rest of this journey reads. That commit deleted the
-    // accepted-profile federated authority and the fixture gate together, so
-    // the tail below has no mounted authority to read. Keep the gate at the
-    // same boundary: everything above still runs, and the evidence tail runs
-    // once a federated authority is mounted again.
+    // `restart_and_wait_for_task_session` already waited for the deferred core
+    // query authority to hydrate TaskSession. A later probe that still omits
+    // the lane is a typed absence, not a reason to fail the proximity section.
     let Some(_task_session) = task_session::assert_available_over_sdk_mcp_and_dashboard(
         &home,
         &project,

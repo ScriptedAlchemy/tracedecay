@@ -308,8 +308,34 @@ pub(super) fn restart_and_wait_for_task_session(
         "a second physical restart must preserve the receipt exactly"
     );
     wait_for_code_generation(home, project);
-    let _ = task_session_lane_is_mounted(&restarted_client, scope);
+    wait_for_task_session_available(&restarted_client, scope);
     (restarted_daemon, restarted_client)
+}
+
+/// The core query authority mounts after the first sealed generation is
+/// seated, on a deferred owner. Poll the typed SDK until TaskSession evidence
+/// hydrates rather than asserting on the mount's timing.
+fn wait_for_task_session_available(client: &Client, scope: &TaskSessionEvidenceScope<'_>) {
+    let deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+        let (_, evidence, omissions) = retrieve(
+            client,
+            scope.selection,
+            scope.task_id,
+            scope.verified_version,
+            scope.identity,
+            TemporalModeV1::Current,
+        )
+        .unwrap_or_else(|error| panic!("typed SDK retrieval failed while waiting: {error}"));
+        if evidence.is_some() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the mounted query authority to serve TaskSession: {omissions:?}"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
 }
 
 fn wait_for_code_generation(home: &Path, project: &Path) {
@@ -702,21 +728,12 @@ pub(super) fn assert_available_over_sdk_mcp_and_dashboard(
     Some(current)
 }
 
-/// Whether this project's mounted query authority can serve the TaskSession
-/// retrieval lane at all.
+/// Whether this project's mounted query authority served TaskSession evidence.
 ///
-/// Before `8e7952f9` ("retire dense FastEmbed path for lexical/graph") this
-/// journey skipped unless the caller had installed the byte-pinned FastEmbed
-/// distribution package, because only the evaluated federated profile it
-/// activated could rank and hydrate TaskSession anchors. That commit deleted
-/// the accepted-profile federated authority and left project open mounting the
-/// checked-in core exact/lexical/graph policy, a `Fallback`-mode
-/// `QueryAuthorityV1`; `task_session_score_domain` serves only a `Federated`
-/// one. The production answer is therefore the typed `task_session`
-/// `Unavailable` omission, the same contract `work_route_exposure_conformance`
-/// pins in `assert_task_session_unavailable`. Keep the capability gate that
-/// commit dropped: assert the typed answer, and run the hydration section only
-/// when an authority that can serve the lane is mounted.
+/// The core fallback policy ranks the lane. Until that mount lands, or when
+/// the session store cannot hydrate, the only truthful answer is the typed
+/// `task_session` `Unavailable` omission. The hydration section runs only
+/// after a probe sees evidence.
 fn task_session_lane_is_mounted(client: &Client, scope: &TaskSessionEvidenceScope<'_>) -> bool {
     let (receipt, evidence, omissions) = retrieve(
         client,
