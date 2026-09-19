@@ -3772,6 +3772,144 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
     registry.shutdown().await;
 }
 
+/// A query that cannot join the owner must not schedule the verification the
+/// dashboard would then report as `Verifying`. The in-flight pass renews an
+/// expired proof before it releases the scheduler; a read that posts
+/// `BusyFollowUp` while that pass holds the lock is taken and immediately
+/// replaced by the next poll, so the ladder never settles to `Fresh`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn busy_query_does_not_rearm_dashboard_verification() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    wait_for_initial_generation(&registry, fixture.path()).await;
+    wait_for_dashboard_ready(&registry, fixture.path()).await;
+    drain_clone_backfill(&registry, fixture.path()).await;
+    settled_owner_with_idle_admission(&registry, fixture.path()).await;
+    let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
+    let canonical_root = fixture
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let scope = {
+        let mounted = registry.mounted.lock().await;
+        let worktree = mounted.get(&canonical_root).expect("mounted worktree");
+        tracedecay_contracts::ResolvedScope::new(
+            test_project_id(),
+            worktree.repository_id.clone(),
+            worktree.worktree_id.clone(),
+            None,
+        )
+        .expect("resolved scope")
+    };
+    clear_pending_wake_until_quiet(&registry, &scope).await;
+    let freshness = registry
+        .source_freshness_for_root(fixture.path())
+        .await
+        .expect("mounted freshness fence");
+    {
+        let mut state = freshness.state.lock().expect("freshness state");
+        state.last_reconciled_at = Instant::now()
+            .checked_sub(state.staleness_threshold + Duration::from_secs(1))
+            .expect("age the readiness proof");
+    }
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&canonical_root)
+                .expect("mounted worktree")
+                .scheduler,
+        )
+    };
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let scheduler_holder = tokio::task::spawn_blocking(move || {
+        let _scheduler_guard = scheduler.lock().expect("hold scheduler mutex");
+        let _ = locked_tx.send(());
+        let _ = release_rx.blocking_recv();
+    });
+    locked_rx.await.expect("scheduler mutex holder started");
+    for _ in 0..8 {
+        assert!(
+            registry
+                .latest_complete_fresh(fixture.path())
+                .await
+                .is_some(),
+            "a busy owner still serves the seated generation"
+        );
+    }
+    assert_eq!(
+        registry.pending_wake_micros_for_root(fixture.path()).await,
+        Some(0),
+        "a read blocked on the in-flight owner must not schedule another verification"
+    );
+    let projected = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("dashboard freshness while the owner holds the scheduler");
+    assert_eq!(
+        projected.staleness_state,
+        Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh),
+        "an owner that has not observed a source change is not Verifying"
+    );
+    let _ = release_tx.send(());
+    scheduler_holder
+        .await
+        .expect("scheduler mutex holder joined");
+
+    assert!(
+        registry
+            .latest_complete_fresh(fixture.path())
+            .await
+            .is_some(),
+        "the seated generation remains servable once the owner releases the scheduler"
+    );
+    assert!(
+        registry
+            .pending_wake_micros_for_root(fixture.path())
+            .await
+            .is_some_and(|pending| pending != 0),
+        "an uncontended read of an expired proof still requests one verification"
+    );
+    drop(admission);
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
+        loop {
+            let settled = registry
+                .dashboard_freshness(fixture.path())
+                .await
+                .is_some_and(|freshness| {
+                    freshness.staleness_state
+                        == Some(
+                            tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh,
+                        )
+                })
+                && registry
+                    .pending_wake_micros_for_root(fixture.path())
+                    .await
+                    == Some(0)
+                && !registry
+                    .reconcile_in_progress_for_test(fixture.path())
+                    .await;
+            if settled {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the single verification settles back to Fresh");
+    registry.shutdown().await;
+}
+
 // Two workers so the timeout timer stays live if a regression parks one
 // runtime worker on the scheduler mutex: the test then fails instead of
 // deadlocking against its own release channel.

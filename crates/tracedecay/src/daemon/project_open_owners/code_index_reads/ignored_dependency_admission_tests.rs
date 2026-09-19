@@ -388,16 +388,13 @@ async fn latest(
     // Lightweight publication precedes complete-generation seating. Demand
     // that complete state before using its imports as admission evidence. The
     // seat is background work behind the scheduler mutex; under a loaded CI
-    // runner it has taken over 5 s, so the bound is a minute.
-    // Poll the dashboard projection alone while the owner is busy: the
-    // query-admission read (`latest_complete_fresh`) leaves a coalesced wake
-    // behind whenever it finds the worker holding the scheduler with an
-    // expired proof, and polling it every 25 ms re-armed a no-op pass faster
-    // than the ladder could settle to `Fresh` (CI run 35419627712: one
-    // minute of `Verifying`, then 0.3 s on the retry). Read the generation
-    // only once the ladder has settled.
+    // runner it has taken over 5 s, so the bound is a minute. Polling the
+    // query read is safe: a read that finds the owner holding the scheduler
+    // does not schedule the successor the dashboard would project as
+    // `Verifying`.
     tokio::time::timeout(Duration::from_mins(1), async {
         loop {
+            let _ = registry.latest_complete_fresh(project_root).await;
             if registry
                 .dashboard_freshness(project_root)
                 .await
