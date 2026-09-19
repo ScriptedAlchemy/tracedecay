@@ -3160,3 +3160,22 @@ fn vanished_listed_generation_open_defers_instead_of_storage_loss() {
         "non-NotFound census I/O stays a storage failure: {storage_error:?}"
     );
 }
+
+#[test]
+fn missing_store_is_an_unpublished_plan_not_a_storage_failure() {
+    let missing = std::env::temp_dir().join(format!(
+        "tracedecay-missing-code-store-{}",
+        std::process::id()
+    ));
+    assert!(!missing.exists());
+    let plan = prepare_next_code_generation_retention_cancellable(
+        &missing,
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect("a store that has not been opened is unpublished");
+    assert_eq!(plan.active_generation_id, None);
+    assert!(plan.collectable_generations.is_empty());
+    assert!(!plan.has_collectable_work());
+}

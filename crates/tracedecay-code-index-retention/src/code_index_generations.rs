@@ -778,6 +778,25 @@ pub fn plan_code_generation_retention_with_verification(
     )
 }
 
+/// A store directory that does not exist yet has nothing to collect. The
+/// sealer creates that directory on open; until then the census is the same
+/// unpublished plan an empty directory with no pointer produces.
+fn unpublished_store_plan(
+    vector_readable_sources: &BTreeSet<CodeGenerationId>,
+) -> CodeGenerationRetentionPlanV1 {
+    CodeGenerationRetentionPlanV1 {
+        active_generation_id: None,
+        vector_readable_sources: vector_readable_sources.clone(),
+        superseded_generations: Vec::new(),
+        collectable_generations: Vec::new(),
+        collectable_text_artifacts: Vec::new(),
+        collectable_generation_segments: GenerationSegmentCensusV1::NoneFound,
+        text_artifact_inventory_bytes: 0,
+        verification: GenerationDigestVerificationV1::Full,
+        active_pointer: None,
+    }
+}
+
 /// Recover any bounded prior apply, then build the next fully verified
 /// collection unit while preserving the caller's cancellation authority.
 ///
@@ -794,6 +813,25 @@ pub fn prepare_next_code_generation_retention_cancellable(
 ) -> Result<CodeGenerationRetentionPlanV1, CodeGenerationRetentionErrorV1> {
     if observe_cancel(is_cancelled) {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
+    }
+    // The serving seat can name a generation before the scoped store directory
+    // exists: cold open creates it inside the worker, and a waiter that only
+    // saw `latest_generation_id` plans against a path canonicalize then
+    // reports as `Storage(NotFound)`. That is an unpublished store, the same
+    // typed state as a directory with no pointer, not a storage failure the
+    // failure ceiling then retries.
+    match std::fs::metadata(store_root) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(unpublished_store_plan(vector_readable_sources));
+        }
+        Ok(_) => {
+            return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                "code-generation store '{}' is not a directory",
+                store_root.display()
+            )));
+        }
+        Err(error) => return Err(storage(error)),
     }
     recover_code_generation_retention_cancellable(
         store_root,
