@@ -716,8 +716,9 @@ def _mounting_producer_call(
                     f"{tool} producer omitted the enabled _meta.duration_us receipt"
                 )
             return response
+        # Must match tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE.
         if (
-            row["problem_code"] != "application.surface.unavailable"
+            row["problem_code"] != "application.runtime.mounting"
             or time.monotonic() >= ends_at
         ):
             raise SweepError(

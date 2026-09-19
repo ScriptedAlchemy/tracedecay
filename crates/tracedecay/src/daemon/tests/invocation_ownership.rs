@@ -421,7 +421,10 @@ async fn retained_invocation_while_owners_mount_is_retryable_not_unmounted() {
     let diagnostic = problem
         .diagnostic()
         .expect("a mounting retained owner carries a diagnostic");
-    assert_eq!(diagnostic.code, "application.surface.unavailable");
+    assert_eq!(
+        diagnostic.code,
+        tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE
+    );
     assert!(
         !diagnostic
             .message

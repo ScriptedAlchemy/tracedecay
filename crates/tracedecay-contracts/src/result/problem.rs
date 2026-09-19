@@ -5,6 +5,15 @@ use tracedecay_domain::errors::TraceDecayError;
 use super::{CancellationStage, EffectReceipt, EffectTermination};
 use crate::error::ApplicationContractError;
 
+/// Diagnostic code for an admitted route whose owner is still registering
+/// behind the core publication.
+///
+/// The one-shot client re-sends the same request only while this code is the
+/// problem: the next observation can be the owner's answer. Every other
+/// completed problem, including a retryable authority unavailable, is already
+/// the daemon's answer and must not be reconnected.
+pub const RUNTIME_MOUNTING_REASON_CODE: &str = "application.runtime.mounting";
+
 /// Safe adapter-independent retry instruction. Adapters preserve it verbatim.
 #[derive(
     Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
