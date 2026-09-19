@@ -116,10 +116,12 @@ async fn mounted_code_generation_retention_continues_capped_segment_reclamation(
         );
     let graph_replay_pool_root = graph.db().database_path().with_extension("graph-replay");
     // The planner probes the generation-store lock and answers
-    // `GenerationStoreBusy` whenever a writer owns the store; production
-    // maintenance defers that tick and comes back. This route stays mounted,
-    // so the pass tail that publishes the edits above can still own the store
-    // here. Consume the same typed answer instead of reading it as a failure.
+    // `GenerationStoreBusy` whenever a writer owns the store, and the same
+    // probe over the graph replay pool answers `GraphReplayPoolBusy`;
+    // production maintenance defers both and comes back. This route stays
+    // mounted, so the pass tail that publishes the edits above can still own
+    // either lock here. Consume the same typed answers instead of reading
+    // them as failures.
     let plan = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             match prepare_next_code_generation_retention_cancellable(
@@ -129,7 +131,10 @@ async fn mounted_code_generation_retention_continues_capped_segment_reclamation(
                 Some(&graph_replay_pool_root),
             ) {
                 Ok(plan) => return plan,
-                Err(CodeGenerationRetentionErrorV1::GenerationStoreBusy) => {
+                Err(
+                    CodeGenerationRetentionErrorV1::GenerationStoreBusy
+                    | CodeGenerationRetentionErrorV1::GraphReplayPoolBusy,
+                ) => {
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 }
                 Err(error) => panic!("code generation retention plan: {error:?}"),

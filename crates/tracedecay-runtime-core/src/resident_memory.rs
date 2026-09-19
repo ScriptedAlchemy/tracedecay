@@ -23,8 +23,8 @@ pub const DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1: NonZeroU64 =
 /// Environment override for the process resident-memory admission limit, in
 /// bytes. Unset, unparseable, or zero values fall back to the RAM-derived
 /// authority. The code-index worker pool derives its reservation from this
-/// same limit, so raising it can both admit and widen indexing, up to any
-/// finite cgroup-v2 memory ceiling.
+/// same limit, so raising it can both admit and widen indexing, up to the
+/// hard cgroup ceiling (`memory.max`, or `memory.high` when max is unlimited).
 pub const PROCESS_RESIDENT_MEMORY_LIMIT_ENV_V1: &str = "TRACEDECAY_RESIDENT_MEMORY_LIMIT_BYTES";
 
 const PROC_SELF_CGROUP_V1: &str = "/proc/self/cgroup";
@@ -85,15 +85,41 @@ fn finite_cgroup_memory_value_v1(path: &Path) -> Option<u64> {
     value.parse::<u64>().ok().map(|value| value.max(1))
 }
 
-fn cgroup_v2_memory_limit_v1(proc_self_cgroup: &Path, cgroup_root: &Path) -> Option<u64> {
+/// The two cgroup-v2 memory controls on this process, walked to the mount root.
+///
+/// `memory.max` is the kernel kill line. `memory.high` is the reclaim line
+/// underneath it. They stay separate so each is used for what it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CgroupMemoryCeilingV1 {
+    max_bytes: Option<u64>,
+    high_bytes: Option<u64>,
+}
+
+/// Hard service ceiling: `memory.max` when it is finite, otherwise `memory.high`.
+///
+/// A lone `memory.high` is the ceiling because the operator left no band above
+/// the reclaim line. When both are finite, high is pressure, not a tighter max.
+fn cgroup_service_ceiling_bytes(ceiling: CgroupMemoryCeilingV1) -> Option<u64> {
+    ceiling.max_bytes.or(ceiling.high_bytes)
+}
+
+fn tighten(bound: Option<u64>, limit: u64) -> u64 {
+    bound.map_or(limit, |current| current.min(limit))
+}
+
+fn cgroup_v2_memory_ceiling_v1(
+    proc_self_cgroup: &Path,
+    cgroup_root: &Path,
+) -> Option<CgroupMemoryCeilingV1> {
     let mut directory = cgroup_v2_process_directory_v1(proc_self_cgroup, cgroup_root)?;
-    let mut effective_limit = None;
+    let mut max_bytes = None;
+    let mut high_bytes = None;
     loop {
-        for filename in ["memory.max", "memory.high"] {
-            if let Some(limit) = finite_cgroup_memory_value_v1(&directory.join(filename)) {
-                effective_limit =
-                    Some(effective_limit.map_or(limit, |current: u64| current.min(limit)));
-            }
+        if let Some(limit) = finite_cgroup_memory_value_v1(&directory.join("memory.max")) {
+            max_bytes = Some(tighten(max_bytes, limit));
+        }
+        if let Some(limit) = finite_cgroup_memory_value_v1(&directory.join("memory.high")) {
+            high_bytes = Some(tighten(high_bytes, limit));
         }
         if directory == cgroup_root {
             break;
@@ -104,7 +130,10 @@ fn cgroup_v2_memory_limit_v1(proc_self_cgroup: &Path, cgroup_root: &Path) -> Opt
         }
         directory = parent.to_path_buf();
     }
-    effective_limit
+    Some(CgroupMemoryCeilingV1 {
+        max_bytes,
+        high_bytes,
+    })
 }
 
 fn effective_memory_bytes_v1(total_memory_bytes: u64, cgroup_limit: Option<u64>) -> u64 {
@@ -115,68 +144,99 @@ fn effective_memory_bytes_v1(total_memory_bytes: u64, cgroup_limit: Option<u64>)
     }
 }
 
-fn process_resident_memory_limit_v1(
+struct ResidentMemoryAuthorityV1 {
+    limit_bytes: NonZeroU64,
+    /// `memory.high` when it sits strictly below the hard admission ceiling.
+    reclaim_watermark_bytes: Option<u64>,
+}
+
+fn finite_nonzero_bytes(value: u64) -> NonZeroU64 {
+    NonZeroU64::new(value).unwrap_or(DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1)
+}
+
+/// Admission ceiling for one host and one cgroup reading.
+///
+/// Host reserve (one quarter of physical RAM) and the cgroup service ceiling
+/// are alternative protections, not stacked discounts. The reserve applies
+/// when the process can otherwise spend the machine. A finite cgroup already
+/// reserved the rest of the machine, so the hard ceiling is
+/// `min(host allowance, memory.max)` — or `memory.high` only when max is
+/// unlimited. `memory.high` below that ceiling is the reclaim watermark, not
+/// a second cut. An explicit override replaces the host reserve and is still
+/// capped by the hard ceiling.
+fn resident_memory_authority_v1(
     total_memory_bytes: u64,
-    cgroup_limit: Option<u64>,
+    cgroup: Option<CgroupMemoryCeilingV1>,
     override_limit: Option<NonZeroU64>,
-) -> NonZeroU64 {
-    // Retain one quarter of physical RAM for the OS and other processes, then
-    // respect the operator's cgroup ceiling as-is. Applying the quarter again
-    // *after* taking min(host, cgroup) double-discounted a deliberately sized
-    // service: 128 GiB host, memory.high=26 GiB became 19.5 GiB even though
-    // memory.max=30 GiB already retained the safety margin. An 18 GiB serving
-    // graph could then never admit its 2.6 GiB replacement builder.
-    let host_limit = (total_memory_bytes != 0)
+) -> ResidentMemoryAuthorityV1 {
+    let cgroup = cgroup.unwrap_or(CgroupMemoryCeilingV1 {
+        max_bytes: None,
+        high_bytes: None,
+    });
+    let service_ceiling = cgroup_service_ceiling_bytes(cgroup);
+    let host_allowance = (total_memory_bytes != 0)
         .then(|| process_resident_memory_limit_for_system_v1(total_memory_bytes));
-    let automatic_limit = match (host_limit, cgroup_limit) {
-        (Some(host), Some(cgroup)) => NonZeroU64::new(host.get().min(cgroup))
-            .unwrap_or(DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1),
+    let automatic_limit = match (host_allowance, service_ceiling) {
+        (Some(host), Some(ceiling)) => finite_nonzero_bytes(host.get().min(ceiling)),
         (Some(host), None) => host,
-        (None, Some(cgroup)) => {
-            NonZeroU64::new(cgroup).unwrap_or(DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1)
-        }
+        (None, Some(ceiling)) => finite_nonzero_bytes(ceiling),
         (None, None) => DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
     };
-    override_limit.map_or(automatic_limit, |override_limit| {
-        cgroup_limit.map_or(override_limit, |cgroup_limit| {
-            NonZeroU64::new(override_limit.get().min(cgroup_limit))
-                .unwrap_or(DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1)
-        })
-    })
+    let limit_bytes = match override_limit {
+        Some(override_limit) => match service_ceiling {
+            Some(ceiling) => finite_nonzero_bytes(override_limit.get().min(ceiling)),
+            None => override_limit,
+        },
+        None => automatic_limit,
+    };
+    let reclaim_watermark_bytes = cgroup.high_bytes.filter(|high| *high < limit_bytes.get());
+    ResidentMemoryAuthorityV1 {
+        limit_bytes,
+        reclaim_watermark_bytes,
+    }
 }
 
 /// Size the shared resident-allocation authority for this process.
 ///
-/// The automatic authority retains one quarter of physical RAM, then takes the
-/// lower of that host allowance and this process's finite cgroup-v2
-/// `memory.max` / `memory.high`. A cgroup is already an operator-sized service
-/// allowance and is not discounted a second time.
+/// The automatic authority is the lower of the host reserve and this
+/// process's hard cgroup ceiling (`memory.max`, or `memory.high` when max is
+/// unlimited). A finite `memory.high` below that ceiling is the pressure
+/// watermark, not a further discount of the ceiling.
 /// [`PROCESS_RESIDENT_MEMORY_LIMIT_ENV_V1`] can lower or raise the automatic
-/// authority, but a finite cgroup ceiling remains an upper bound. The resulting
-/// authority throttles simultaneous scratch ownership; it never limits
-/// repository bytes on disk.
+/// authority, but the hard cgroup ceiling remains an upper bound. The
+/// resulting authority throttles simultaneous scratch ownership; it never
+/// limits repository bytes on disk.
 #[must_use]
 pub fn detected_process_resident_memory_limit_v1() -> NonZeroU64 {
+    read_resident_memory_authority_v1().limit_bytes
+}
+
+fn read_resident_memory_authority_v1() -> ResidentMemoryAuthorityV1 {
     let system = System::new_with_specifics(
         RefreshKind::new().with_memory(MemoryRefreshKind::new().with_ram()),
     );
     let total_memory_bytes = system.total_memory();
     let proc_self_cgroup = Path::new(PROC_SELF_CGROUP_V1);
     let cgroup_root = Path::new(CGROUP_V2_ROOT_V1);
-    let cgroup_limit = cgroup_v2_memory_limit_v1(proc_self_cgroup, cgroup_root);
-    let effective_memory_bytes = effective_memory_bytes_v1(total_memory_bytes, cgroup_limit);
-    let limit = process_resident_memory_limit_v1(
+    let cgroup = cgroup_v2_memory_ceiling_v1(proc_self_cgroup, cgroup_root);
+    let service_ceiling = cgroup.and_then(cgroup_service_ceiling_bytes);
+    let effective_memory_bytes = effective_memory_bytes_v1(total_memory_bytes, service_ceiling);
+    let authority = resident_memory_authority_v1(
         total_memory_bytes,
-        cgroup_limit,
+        cgroup,
         process_resident_memory_limit_override_v1(),
     );
     hotpath::gauge!("resident_memory.system_total_bytes").set(total_memory_bytes as f64);
     hotpath::gauge!("resident_memory.effective_total_bytes").set(effective_memory_bytes as f64);
-    if let Some(cgroup_limit) = cgroup_limit {
-        hotpath::gauge!("resident_memory.cgroup_limit_bytes").set(cgroup_limit as f64);
+    if let Some(high_bytes) = cgroup.and_then(|ceiling| ceiling.high_bytes) {
+        hotpath::gauge!("resident_memory.cgroup_high_bytes").set(high_bytes as f64);
     }
-    hotpath::gauge!("resident_memory.admission_limit_bytes").set(limit.get() as f64);
-    limit
+    if let Some(service_ceiling) = service_ceiling {
+        hotpath::gauge!("resident_memory.cgroup_limit_bytes").set(service_ceiling as f64);
+    }
+    hotpath::gauge!("resident_memory.admission_limit_bytes")
+        .set(authority.limit_bytes.get() as f64);
+    authority
 }
 
 /// Fraction of the configured limit, in permille, at or above which *measured*
@@ -343,15 +403,36 @@ impl fmt::Debug for ResidentMemoryPressureV1 {
 impl ResidentMemoryPressureV1 {
     #[must_use]
     pub fn new(limit_bytes: NonZeroU64) -> Self {
-        let high_watermark_bytes = resident_memory_watermark_bytes_v1(
+        Self::with_reclaim_line(limit_bytes, None)
+    }
+
+    /// `reclaim_watermark_bytes` is a cgroup `memory.high` that sits strictly
+    /// below `limit_bytes`. It replaces the percentage high watermark so the
+    /// operator's band down to `memory.max` is not discounted again. Absent,
+    /// zero, or not strictly below the ceiling, the percentage watermarks stand.
+    fn with_reclaim_line(limit_bytes: NonZeroU64, reclaim_watermark_bytes: Option<u64>) -> Self {
+        let percentage_high = resident_memory_watermark_bytes_v1(
             limit_bytes,
             RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1,
         );
-        let low_watermark_bytes = resident_memory_watermark_bytes_v1(
+        let percentage_low = resident_memory_watermark_bytes_v1(
             limit_bytes,
             RESIDENT_MEMORY_PRESSURE_LOW_WATERMARK_PERMILLE_V1,
         )
-        .min(high_watermark_bytes);
+        .min(percentage_high);
+        let (high_watermark_bytes, low_watermark_bytes) = match reclaim_watermark_bytes {
+            Some(reclaim) if reclaim > 0 && reclaim < limit_bytes.get() => {
+                let low = u64::try_from(
+                    u128::from(reclaim)
+                        * u128::from(RESIDENT_MEMORY_PRESSURE_LOW_WATERMARK_PERMILLE_V1)
+                        / u128::from(RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1),
+                )
+                .unwrap_or(u64::MAX)
+                .min(reclaim);
+                (reclaim, low)
+            }
+            _ => (percentage_high, percentage_low),
+        };
         Self {
             limit_bytes,
             high_watermark_bytes,
@@ -547,8 +628,10 @@ static PROCESS_RESIDENT_MEMORY_PRESSURE_V1: OnceLock<Arc<ResidentMemoryPressureV
 #[must_use]
 pub fn process_resident_memory_pressure_v1() -> &'static Arc<ResidentMemoryPressureV1> {
     PROCESS_RESIDENT_MEMORY_PRESSURE_V1.get_or_init(|| {
-        Arc::new(ResidentMemoryPressureV1::new(
-            detected_process_resident_memory_limit_v1(),
+        let authority = read_resident_memory_authority_v1();
+        Arc::new(ResidentMemoryPressureV1::with_reclaim_line(
+            authority.limit_bytes,
+            authority.reclaim_watermark_bytes,
         ))
     })
 }

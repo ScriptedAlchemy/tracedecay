@@ -1338,14 +1338,11 @@ async fn settled_owner_with_idle_admission(
 /// done disturbing it.
 ///
 /// The caller must already hold the single background admission, so no further
-/// pass can start. One pass can still be finishing: the worker releases that
-/// admission halfway through its body and drops its `reconcile_pass` guard
-/// before the branches that call `note_worker_continuation`, so both
-/// `reconcile_in_progress` and the slot read quiet while the tail is still
-/// about to stamp `BusyFollowUp` into it. [`wait_for_settled_owner`] samples
-/// exactly those two, so it cannot see that tail. With the admission held the
-/// tail is finite and unrepeatable, so clearing until the slot survives a quiet
-/// window is the proof the settle cannot give.
+/// pass can start. A pass stamps `BusyFollowUp` before it drops
+/// `reconcile_in_progress`, but a notify already banked by that pass can still
+/// be claimed the moment the permit is released. Clearing until the slot
+/// survives a quiet window is the proof the settle cannot give once that
+/// release is the next thing that happens.
 async fn clear_pending_wake_until_quiet(
     registry: &CodeIndexSchedulerRegistryV1,
     scope: &tracedecay_contracts::ResolvedScope,

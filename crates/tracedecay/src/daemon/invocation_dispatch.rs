@@ -118,9 +118,11 @@ fn lsp_project_open_wait_response(
 ) -> Option<DaemonInvocationResponse> {
     match outcome {
         ProjectOpenWaitOutcome::Completed | ProjectOpenWaitOutcome::NotTracked => None,
-        ProjectOpenWaitOutcome::Failed(error) => Some(DaemonInvocationResponse::problem(
+        ProjectOpenWaitOutcome::Failed(error) => Some(project_open_refusal_response(
             request_id.to_owned(),
-            project_open_problem(&error, workflow_application, git_operation),
+            &error,
+            workflow_application,
+            git_operation,
         )),
         ProjectOpenWaitOutcome::Cancelled => Some(DaemonInvocationResponse::application_problem(
             request_id.to_owned(),
@@ -228,9 +230,11 @@ async fn open_scope_set_cas_projects<'a>(
             Ok(Ok(_)) => {}
             Ok(Err(error)) => {
                 record_project_open_refusal("multi_root_scope_set_compare_and_swap", &error);
-                return Err(DaemonInvocationResponse::problem(
+                return Err(project_open_refusal_response(
                     request_id.to_owned(),
-                    project_open_problem(&error, false, false),
+                    &error,
+                    false,
+                    false,
                 ));
             }
             Err(problem) => {
@@ -272,9 +276,11 @@ async fn open_scope_set_cas_projects<'a>(
             Ok(Ok(project_server)) => servers.push(project_server),
             Ok(Err(error)) => {
                 record_project_open_refusal("multi_root_scope_set_compare_and_swap", &error);
-                return Err(DaemonInvocationResponse::problem(
+                return Err(project_open_refusal_response(
                     request_id.to_owned(),
-                    project_open_problem(&error, false, false),
+                    &error,
+                    false,
+                    false,
                 ));
             }
             Err(problem) => {
@@ -362,9 +368,11 @@ pub(super) async fn execute_portable_daemon_invocation(
         );
         if let Err(error) = project_server {
             record_project_open_refusal(request.operation().as_str(), &error);
-            return DaemonInvocationResponse::problem(
+            return project_open_refusal_response(
                 request_id,
-                project_open_problem(&error, workflow_application, git_operation),
+                &error,
+                workflow_application,
+                git_operation,
             );
         }
         let project_route = project_route_for_handshake(handshake);
@@ -423,9 +431,11 @@ pub(super) async fn execute_portable_daemon_invocation(
                 }
             };
             if let Err(error) = project_server {
-                return DaemonInvocationResponse::problem(
+                return project_open_refusal_response(
                     request_id,
-                    project_open_problem(&error, workflow_application, git_operation),
+                    &error,
+                    workflow_application,
+                    git_operation,
                 );
             }
             let Ok((canonical_project_path, _)) = project_route_for_handshake(handshake) else {
@@ -728,9 +738,11 @@ pub(super) async fn execute_daemon_invocation(
         );
         if let Err(error) = project_server {
             record_project_open_refusal(request.operation().as_str(), &error);
-            return DaemonInvocationResponse::problem(
+            return project_open_refusal_response(
                 request_id,
-                project_open_problem(&error, workflow_application, git_operation),
+                &error,
+                workflow_application,
+                git_operation,
             );
         }
         let project_route = DaemonEngine::project_route(handshake);
@@ -779,9 +791,11 @@ pub(super) async fn execute_daemon_invocation(
                 }
             };
             if let Err(error) = project_server {
-                return DaemonInvocationResponse::problem(
+                return project_open_refusal_response(
                     request_id,
-                    project_open_problem(&error, workflow_application, git_operation),
+                    &error,
+                    workflow_application,
+                    git_operation,
                 );
             }
             let Ok((canonical_project_path, _)) = DaemonEngine::project_route(handshake) else {
@@ -849,6 +863,37 @@ pub(super) async fn execute_daemon_invocation(
     .await
 }
 
+/// A still-opening project is the mounting refusal the typed CLI re-sends
+/// until its deadline.
+///
+/// The 500 ms open bound answers "has this route published yet" and leaves
+/// the open running. Mapping that miss to [`DaemonInvocationProblem::Unavailable`]
+/// republishes `application.surface.unavailable`, which the typed client treats
+/// as the answer, so a cold `storage_status` or configuration write fails the
+/// moment the bound elapses. Terminal open failures stay on that problem.
+fn project_open_refusal_response(
+    request_id: String,
+    error: &tracedecay_domain::errors::TraceDecayError,
+    workflow_application: bool,
+    git_operation: bool,
+) -> DaemonInvocationResponse {
+    if error_is_project_open_retryable(error) {
+        return DaemonInvocationResponse::application_problem(
+            request_id,
+            tracedecay_contracts::ApplicationProblem::unavailable(
+                tracedecay_contracts::SafeDiagnostic {
+                    code: tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE.to_owned(),
+                    message: "The project runtime for this operation is still mounting".to_owned(),
+                },
+            ),
+        );
+    }
+    DaemonInvocationResponse::problem(
+        request_id,
+        project_open_problem(error, workflow_application, git_operation),
+    )
+}
+
 fn project_open_problem(
     error: &tracedecay_domain::errors::TraceDecayError,
     workflow_application: bool,
@@ -911,6 +956,24 @@ mod workflow_reset_tests {
         assert_eq!(
             project_open_problem(&warming, false, false),
             DaemonInvocationProblem::Unavailable
+        );
+    }
+
+    #[test]
+    fn warming_project_open_is_a_mounting_refusal_the_client_resends() {
+        let warming = project_warming_error(Path::new("/tmp/surface-fixture"));
+        let response =
+            project_open_refusal_response("request.warming".to_owned(), &warming, false, false);
+        let tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem { problem } =
+            response.outcome
+        else {
+            panic!("warming open must be an application problem, got {response:?}");
+        };
+        assert_eq!(
+            problem
+                .diagnostic()
+                .map(|diagnostic| diagnostic.code.as_str()),
+            Some(tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE)
         );
     }
 

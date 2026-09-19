@@ -72,6 +72,13 @@ pub struct CandidateWorkloadV1 {
     pub execution_contract: EvaluationExecutionContractV1,
     pub corpus: Vec<CorpusDocumentV1>,
     pub profile_matrix: Vec<ProfileSpecV1>,
+    /// Observed ranking receipts for `train` and `validation`.
+    ///
+    /// These bind ordered ranking rows and public lane coverage. They are not
+    /// workload inputs: [`compute_workload_digest`] omits them, so re-pinning a
+    /// receipt does not rewrite the packaged workload identity. Generation and
+    /// extractor-revision changes reseal candidate occurrence ids without
+    /// changing those rows, and must not move this field either.
     pub expected_query_fallback_digests: BTreeMap<String, String>,
     pub queries: Vec<WorkloadQueryV1>,
 }
@@ -393,7 +400,12 @@ pub fn load_candidate_workload(path: &Path) -> Result<CandidateWorkloadV1, Candi
 pub fn compute_workload_digest(
     workload: &CandidateWorkloadV1,
 ) -> Result<String, CandidateOutputError> {
-    canonical_sha256(workload)
+    // Ranking receipts observe the run. Including them made a receipt re-pin
+    // look like a different workload, including when only a sealed generation
+    // id moved.
+    let mut identity = workload.clone();
+    identity.expected_query_fallback_digests.clear();
+    canonical_sha256(&("tracedecay.search-eval.workload-identity.v1", &identity))
 }
 
 pub fn compute_profile_material_digest(
@@ -1011,6 +1023,24 @@ mod need_provenance_tests {
         assert_eq!(
             workload.profile_matrix[0].profile_id,
             crate::search_quality::evaluate::QUERY_BASELINE_PROFILE
+        );
+    }
+
+    #[test]
+    fn ranking_receipt_edits_do_not_move_workload_identity() {
+        let workload = workload();
+        let identity = super::compute_workload_digest(&workload).expect("workload identity");
+        assert_eq!(identity, packaged::WORKLOAD_SHA256);
+        let mut moved = workload;
+        let train = moved
+            .expected_query_fallback_digests
+            .get_mut("train")
+            .expect("train receipt");
+        *train = format!("sha256:{}", "ab".repeat(32));
+        assert_eq!(
+            super::compute_workload_digest(&moved).expect("moved identity"),
+            identity,
+            "re-pinning a ranking receipt must not rewrite the workload identity"
         );
     }
 

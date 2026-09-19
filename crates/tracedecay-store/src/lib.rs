@@ -33,7 +33,8 @@ pub mod session;
 pub mod transcript;
 
 pub use canonical_projection::{
-    canonical_fact_text, derive_canonical_projection, workflow_semantic_kind,
+    canonical_fact_text, derive_canonical_projection, stored_message_is_shipped_release_rendering,
+    workflow_semantic_kind,
 };
 pub use codex_goal_context::{
     CodexGoalContext, CodexGoalContextCorrelation, CodexGoalContextSource,

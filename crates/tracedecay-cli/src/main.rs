@@ -523,9 +523,14 @@ fn hotpath_guard() -> hotpath::HotpathGuard {
     // CPU sampling remains available only by explicit operator request:
     // `HOTPATH_REPORT` (e.g. `functions-cpu`) takes precedence over this
     // default exclusion.
-    hotpath::HotpathGuardBuilder::new("tracedecay")
-        .sections_exclude(vec![hotpath::Section::FunctionsCpu])
-        .build()
+    // Hotpath 0.24 reads HOTPATH_FUNCTIONS_LIMIT only when the exit report is
+    // built. Live functions_timing and functions_alloc use the builder limit
+    // captured when this guard starts, so the same env is applied here.
+    tracedecay_hotpath_guard::with_functions_display_limit(
+        hotpath::HotpathGuardBuilder::new("tracedecay")
+            .sections_exclude(vec![hotpath::Section::FunctionsCpu]),
+    )
+    .build()
 }
 
 #[cfg(feature = "hotpath")]

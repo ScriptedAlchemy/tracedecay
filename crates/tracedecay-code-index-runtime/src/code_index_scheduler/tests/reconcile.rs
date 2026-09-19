@@ -851,7 +851,7 @@ fn retained_stale_rust_extractor_generation_is_refused_and_rebuilt() {
             .iter()
             .find(|(language, _)| language.as_str() == "rust")
             .map(|(_, revision)| revision.as_str()),
-        Some("extractor.rust.v10")
+        Some("extractor.rust.v11")
     );
 }
 
@@ -3769,6 +3769,144 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
     scheduler_holder
         .await
         .expect("scheduler mutex holder joined");
+    registry.shutdown().await;
+}
+
+/// A query that cannot join the owner must not schedule the verification the
+/// dashboard would then report as `Verifying`. The in-flight pass renews an
+/// expired proof before it releases the scheduler; a read that posts
+/// `BusyFollowUp` while that pass holds the lock is taken and immediately
+/// replaced by the next poll, so the ladder never settles to `Fresh`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn busy_query_does_not_rearm_dashboard_verification() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    wait_for_initial_generation(&registry, fixture.path()).await;
+    wait_for_dashboard_ready(&registry, fixture.path()).await;
+    drain_clone_backfill(&registry, fixture.path()).await;
+    settled_owner_with_idle_admission(&registry, fixture.path()).await;
+    let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
+    let canonical_root = fixture
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let scope = {
+        let mounted = registry.mounted.lock().await;
+        let worktree = mounted.get(&canonical_root).expect("mounted worktree");
+        tracedecay_contracts::ResolvedScope::new(
+            test_project_id(),
+            worktree.repository_id.clone(),
+            worktree.worktree_id.clone(),
+            None,
+        )
+        .expect("resolved scope")
+    };
+    clear_pending_wake_until_quiet(&registry, &scope).await;
+    let freshness = registry
+        .source_freshness_for_root(fixture.path())
+        .await
+        .expect("mounted freshness fence");
+    {
+        let mut state = freshness.state.lock().expect("freshness state");
+        state.last_reconciled_at = Instant::now()
+            .checked_sub(state.staleness_threshold + Duration::from_secs(1))
+            .expect("age the readiness proof");
+    }
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&canonical_root)
+                .expect("mounted worktree")
+                .scheduler,
+        )
+    };
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let scheduler_holder = tokio::task::spawn_blocking(move || {
+        let _scheduler_guard = scheduler.lock().expect("hold scheduler mutex");
+        let _ = locked_tx.send(());
+        let _ = release_rx.blocking_recv();
+    });
+    locked_rx.await.expect("scheduler mutex holder started");
+    for _ in 0..8 {
+        assert!(
+            registry
+                .latest_complete_fresh(fixture.path())
+                .await
+                .is_some(),
+            "a busy owner still serves the seated generation"
+        );
+    }
+    assert_eq!(
+        registry.pending_wake_micros_for_root(fixture.path()).await,
+        Some(0),
+        "a read blocked on the in-flight owner must not schedule another verification"
+    );
+    let projected = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("dashboard freshness while the owner holds the scheduler");
+    assert_eq!(
+        projected.staleness_state,
+        Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh),
+        "an owner that has not observed a source change is not Verifying"
+    );
+    let _ = release_tx.send(());
+    scheduler_holder
+        .await
+        .expect("scheduler mutex holder joined");
+
+    assert!(
+        registry
+            .latest_complete_fresh(fixture.path())
+            .await
+            .is_some(),
+        "the seated generation remains servable once the owner releases the scheduler"
+    );
+    assert!(
+        registry
+            .pending_wake_micros_for_root(fixture.path())
+            .await
+            .is_some_and(|pending| pending != 0),
+        "an uncontended read of an expired proof still requests one verification"
+    );
+    drop(admission);
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
+        loop {
+            let settled = registry
+                .dashboard_freshness(fixture.path())
+                .await
+                .is_some_and(|freshness| {
+                    freshness.staleness_state
+                        == Some(
+                            tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh,
+                        )
+                })
+                && registry
+                    .pending_wake_micros_for_root(fixture.path())
+                    .await
+                    == Some(0)
+                && !registry
+                    .reconcile_in_progress_for_test(fixture.path())
+                    .await;
+            if settled {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the single verification settles back to Fresh");
     registry.shutdown().await;
 }
 
@@ -8173,6 +8311,139 @@ fn graph_off_stale_witness_reconciles_unchanged_source_without_full_decode() {
     );
 }
 
+/// The disk freshness witness names whichever generation last persisted it.
+/// A later seal of the same bytes used to return `None` the moment that id
+/// disagreed, and the graph-on caller then decoded and resealed. Under load
+/// that reseal outlived the admission window, the swap cleared the witness,
+/// and the newer generation never became current. Unchanged sealed bytes
+/// keep the generation and rewrite the witness onto it. Moved bytes still
+/// refuse, without publishing a substitute.
+#[test]
+fn predecessor_freshness_witness_keeps_the_sealed_generation() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let seeded = published(scheduler.reconcile_now().expect("seed retained generation"));
+    let metadata = scheduler
+        .servable_retained_text_generation()
+        .expect("publication store")
+        .expect("authenticated retained text generation")
+        .metadata()
+        .clone();
+    let generation_id = metadata.manifest().generation_id.clone();
+    let mut witness =
+        RestoreFreshnessWitnessV1::load(store.path()).expect("the seal persisted a proof");
+    assert_eq!(witness.generation_id, generation_id.as_str());
+    witness.generation_id = "generation.predecessor".to_owned();
+    witness.persist(store.path());
+    let index_path = fixture.path().join(".git/index");
+    let index_mtime = std::fs::metadata(&index_path)
+        .expect("git index metadata")
+        .modified()
+        .expect("git index mtime");
+    filetime::set_file_mtime(
+        &index_path,
+        filetime::FileTime::from_system_time(index_mtime + Duration::from_secs(2)),
+    )
+    .expect("advance only the git index mtime");
+
+    let decodes_before = scheduler.sealed_decode_count();
+    let outcome = scheduler
+        .reconcile_retained_text_generation_with(&metadata, false)
+        .expect("graph-on retained reconcile")
+        .expect("unchanged sealed bytes must not be dropped");
+    let CodeIndexReconcileOutcomeV1::Noop(evidence) = outcome else {
+        panic!("predecessor proof must not reseal the same snapshot: {outcome:?}");
+    };
+    assert_eq!(
+        evidence.snapshot_content_identity, seeded.snapshot_content_identity,
+        "the noop names the generation that was already sealed"
+    );
+    assert_eq!(
+        scheduler.sealed_decode_count(),
+        decodes_before,
+        "keeping the sealed generation must not decode it again"
+    );
+    assert_eq!(
+        RestoreFreshnessWitnessV1::load(store.path())
+            .expect("rebound proof")
+            .generation_id,
+        generation_id.as_str(),
+        "the disk proof must name the sealed generation, not the predecessor"
+    );
+    assert_eq!(
+        scheduler
+            .source_currency_witness_for(&generation_id, &metadata.snapshot().content_identity,)
+            .map(|witness| witness.generation_id),
+        Some(generation_id.clone()),
+        "the in-memory proof must admit the sealed generation"
+    );
+
+    fixture.edit(
+        "src/lib.rs",
+        "pub fn changed_after_predecessor_proof() -> u32 { 2 }\n",
+    );
+    let refused = scheduler
+        .reconcile_retained_text_generation_with(&metadata, false)
+        .expect("changed source is a typed refusal, not an error");
+    assert!(
+        refused.is_none(),
+        "moved bytes must not keep the sealed generation: {refused:?}"
+    );
+    assert_eq!(
+        scheduler
+            .publication
+            .read_publication_pointer()
+            .expect("read pointer")
+            .expect("active pointer")
+            .generation_id,
+        generation_id.as_str(),
+        "refusing the moved bytes must not publish a substitute generation"
+    );
+}
+
+/// Clone backfill and the seal itself outlive the 30s admission window. Expiry
+/// is a request to re-check the sealed digests, not a reason to drop the
+/// generation those digests already name. A byte change after expiry still drops it.
+#[test]
+fn expired_proof_keeps_the_sealed_generation_until_bytes_move() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let seeded = published(scheduler.reconcile_now().expect("seed retained generation"));
+    scheduler.expire_source_proof_for_test();
+    assert_eq!(
+        scheduler
+            .currency_witness_for_sealed_snapshot(
+                &seeded.generation_id,
+                &seeded.snapshot_content_identity,
+            )
+            .map(|witness| witness.generation_id),
+        Some(seeded.generation_id.clone()),
+        "an expired proof must keep the generation whose sealed bytes still match"
+    );
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 9 }\n");
+    scheduler.expire_source_proof_for_test();
+    assert!(
+        scheduler
+            .currency_witness_for_sealed_snapshot(
+                &seeded.generation_id,
+                &seeded.snapshot_content_identity,
+            )
+            .is_none(),
+        "an expired proof must drop the generation once its sealed bytes moved"
+    );
+}
+
 /// A query freshness probe against a restored owner that no pass has verified
 /// yet must report "not current", the restart's first pass is still the
 /// remedy, without minting an observed source change: no overflow hint and no
@@ -10375,5 +10646,68 @@ fn serving_swap_seats_a_generation_whose_publication_moved_while_it_activated() 
         !ServingSwapOutcomeV1::decide(false, true, true).installs()
             && !ServingSwapOutcomeV1::decide(true, true, false).installs(),
         "neither refusing arm writes the serving slot"
+    );
+}
+
+/// Unchanged source bytes are not a reason to keep a generation the checkout
+/// has committed past. An empty (or docs-only) commit moves HEAD without
+/// touching one indexed byte, and `finish_retained_reconcile` rebuilds on
+/// exactly that `source_revision` drift because branch-scoped reads resolve
+/// generations by the commit they sealed. Accepting the sealed snapshot here
+/// would pin the stale attribution for as long as the bytes hold still.
+#[test]
+fn a_moved_commit_refuses_the_sealed_generation_despite_identical_bytes() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("seed retained generation"));
+    let metadata = scheduler
+        .servable_retained_text_generation()
+        .expect("publication store")
+        .expect("authenticated retained text generation")
+        .metadata()
+        .clone();
+    let sealed_revision = metadata
+        .snapshot()
+        .source_revision
+        .clone()
+        .expect("a clean seed seals its commit");
+    git(
+        fixture.path(),
+        &["commit", "-qm", "docs only", "--allow-empty"],
+    );
+    let moved_head =
+        CommitId::new(git_stdout(fixture.path(), &["rev-parse", "HEAD"])).expect("moved HEAD");
+    assert_ne!(sealed_revision, moved_head, "the fixture must move HEAD");
+
+    let refused = scheduler
+        .reconcile_retained_text_generation_with(&metadata, false)
+        .expect("graph-on retained reconcile");
+    assert!(
+        refused.is_none(),
+        "a moved commit must not keep the generation sealed at {sealed_revision:?}: {refused:?}"
+    );
+
+    // The refusal is what hands the pass to the authoritative capture, and
+    // that capture is what re-attributes the generation to the new commit.
+    published(
+        scheduler
+            .reconcile_now()
+            .expect("rebuild at the moved commit"),
+    );
+    assert_eq!(
+        scheduler
+            .servable_retained_text_generation()
+            .expect("publication store")
+            .expect("authenticated retained text generation")
+            .metadata()
+            .snapshot()
+            .source_revision,
+        Some(moved_head),
+        "the rebuilt generation must name the commit the checkout is on"
     );
 }

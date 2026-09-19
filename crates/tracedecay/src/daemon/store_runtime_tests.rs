@@ -1206,7 +1206,7 @@ async fn retained_runtime_ledger_replays_during_bounded_background_convergence()
             .observation_store()
             .advance_source_cursor(rereasoned_advance)
             .await
-            .expect("classify a re-reasoned retained cursor while convergence is pending"),
+            .expect("a later reason does not unseat the owned frontier"),
         CursorAdvanceOutcome::ExactDuplicate
     );
 
@@ -1261,7 +1261,7 @@ async fn retained_runtime_ledger_replays_during_bounded_background_convergence()
             .get::<i64>(0)
             .expect("decode committed cursor effect count"),
         2,
-        "the retained replay and collision must not create another cursor effect"
+        "the retained replay and the later reason must not create another cursor effect"
     );
     let mut receipts = snapshot
         .query(

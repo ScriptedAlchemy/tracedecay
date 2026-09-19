@@ -1312,15 +1312,29 @@ impl DaemonCodeTextArtifactStoreV1 {
         }
         let _lock = self.acquire_store_write_lock()?;
         checkpoint_text_artifact_control(control)?;
-        let metadata = staging_path
-            .symlink_metadata()
-            .map_err(text_artifact_unavailable)?;
-        if !metadata.file_type().is_file() {
-            return Err(RetrievalPortError::Contract(
-                "incompatible text-artifact staging path is not a regular file".to_owned(),
-            ));
+        match staging_path.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                retire_text_artifact_staging_family(staging_path)
+                    .map_err(text_artifact_unavailable)?;
+            }
+            Ok(_) => {
+                return Err(RetrievalPortError::Contract(
+                    "incompatible text-artifact staging path is not a regular file".to_owned(),
+                ));
+            }
+            // A concurrent build may retire this staging file first. Discard
+            // wants it gone, so finding it already gone is the end state, not
+            // an unavailable authority: reporting one aborts the caller's
+            // reopen and the clone lane answers a non-retryable failure for a
+            // state that has already resolved. Sidecars can outlive the
+            // database after a crash, so sweep them the way
+            // `prepare_absent_text_artifact_staging` does.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                clear_text_artifact_staging_sidecars(staging_path)
+                    .map_err(text_artifact_unavailable)?;
+            }
+            Err(error) => return Err(text_artifact_unavailable(error)),
         }
-        retire_text_artifact_staging_family(staging_path).map_err(text_artifact_unavailable)?;
         DaemonCodeIndexPublicationStoreV1::sync_directory(&artifacts_root)
             .map_err(text_artifact_unavailable)
     }
@@ -3273,7 +3287,7 @@ impl LatestCodeTextGenerationV1 {
             ));
         };
         drop(slot);
-        let mut publish_claim = TextHeadOpenClaimV1::new(&self.text_projection_build);
+        let _publish_claim = TextHeadOpenClaimV1::new(&self.text_projection_build);
         let CodeTextArtifactBuildV1 {
             builder,
             source,
@@ -3312,7 +3326,6 @@ impl LatestCodeTextGenerationV1 {
         )
         .map_err(map_text_artifact_error)?;
         let needs_clone_successor = !reader.has_clone_fingerprints();
-        let prior = reader.verified_artifact().clone();
         // Match the cold-open path: install owners first, then publish Ready.
         // Publishing Ready before a failed install (admission ceiling / shrink)
         // would leave dashboard/MCP progress claiming a ready generation that
@@ -3320,10 +3333,16 @@ impl LatestCodeTextGenerationV1 {
         self.install_artifact_owners(reader, reader_reservation)?;
         self.publish_text_progress_phase(CodeIndexBuildPhaseV1::Ready, 0, 0);
         if needs_clone_successor {
-            let source = store.open_sealed_source(&sealed_identity, control)?;
-            let build =
-                self.begin_clone_successor(descriptor, prior, sealed_identity, source, control)?;
-            drop(publish_claim.install(TextHeadOpenBuildV1::CloneSuccessor(build)));
+            // `begin_clone_successor` copies the whole prior lexical artifact
+            // before the first page walk. Doing that here kept this advance,
+            // and the publication pass awaiting it, inside `reconcile_in_progress`
+            // for the copy. Exact and lexical serving are already installed;
+            // the copy is not a freshness precondition. Leave the slot pending
+            // so the retained driver starts the successor after the seat,
+            // without the receipt guard. The claim stays armed: its drop
+            // restores only `HeadOpening`, so `CloneSuccessorPending` survives
+            // and parked wakes are notified.
+            self.text_projection_build.retain_clone_successor_retry()?;
             return Ok(false);
         }
         Ok(true)

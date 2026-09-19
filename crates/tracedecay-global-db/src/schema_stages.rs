@@ -848,6 +848,22 @@ async fn install_registered_schema_stage_sequence(
         .execute_batch(RUNTIME_LEDGER_SCHEMA)
         .await
         .map_err(|error| global_db_operation_error("initialize runtime writer ledger", error))?;
+    // Projection raw-twin triggers sit on `lcm_raw_messages`. The table has to
+    // exist before those triggers are created, including on a fresh store
+    // whose authority triggers are installed in this same transaction.
+    tracedecay_lcm::schema::ensure_lcm_schema_in_transaction(transaction)
+        .await
+        .map_err(|error| match error {
+            tracedecay_lcm::LcmError::ProfileResetRequired {
+                found_version,
+                required_version,
+            } => tracedecay_domain::errors::TraceDecayError::ProfileResetRequired {
+                component: "LCM",
+                found_version,
+                required_version,
+            },
+            error => global_db_operation_error("initialize LCM schema", error),
+        })?;
     // `force_exhaustive` means admission observed damaged or missing guard
     // triggers (for example a dropped guarded table takes its triggers with
     // it). Reinstall them here so the post-commit contract validation sees a
@@ -865,20 +881,6 @@ async fn install_registered_schema_stage_sequence(
             ));
         }
     }
-
-    tracedecay_lcm::schema::ensure_lcm_schema_in_transaction(transaction)
-        .await
-        .map_err(|error| match error {
-            tracedecay_lcm::LcmError::ProfileResetRequired {
-                found_version,
-                required_version,
-            } => tracedecay_domain::errors::TraceDecayError::ProfileResetRequired {
-                component: "LCM",
-                found_version,
-                required_version,
-            },
-            error => global_db_operation_error("initialize LCM schema", error),
-        })?;
     tracedecay_sessions::runtime::git_correlation::ensure_git_correlation_receipt_schema_in_transaction(
             transaction,
         )

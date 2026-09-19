@@ -66,13 +66,13 @@ pub async fn resolve_cli_application_surface(
     execute_application_surface(operation, dispatched, executor).await
 }
 
-/// Delay before re-sending the same CLI application request when its typed
-/// pre-admission problem explicitly directs an after-delay retry.
+/// Delay before re-sending the same CLI application request when its completed
+/// problem is the publication-window mounting refusal.
 pub(crate) fn surface_retry_delay(result: &ApplicationSurfaceInvocationResult) -> Option<Duration> {
     result
         .result
         .as_ref()
         .err()?
         .problem
-        .pre_admission_retry_delay()
+        .owner_mount_resend_delay()
 }

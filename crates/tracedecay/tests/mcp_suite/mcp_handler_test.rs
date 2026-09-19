@@ -95,6 +95,7 @@ mod project_search_behavior_test;
 mod rank_behavior_test;
 #[cfg(all(feature = "test-transport", unix))]
 mod release_placement_test;
+mod remote_status_test;
 mod rename_preview_test;
 #[cfg(feature = "test-transport")]
 mod rename_symbol_test;
