@@ -428,6 +428,7 @@ async fn capture_codex_project(
         messages_upserted,
         source_deferred: admitted.deferred,
         observations_committed: admitted.observations_committed,
+        exact_duplicate: admitted.exact_duplicate,
         ..TranscriptCaptureOutcome::default()
     })
 }

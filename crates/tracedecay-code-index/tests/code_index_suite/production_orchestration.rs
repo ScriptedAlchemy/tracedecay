@@ -4548,19 +4548,42 @@ fn rss_scaled_request(file_count: usize) -> CodeIndexBuildRequestV1 {
     }
 }
 
-/// Decode `manifest`, serving every segment read from `segments`, and return
-/// the peak RSS growth over a freshly reset high water mark.
-fn rss_measure_decode(label: &str, manifest: &[u8], segments: &BTreeMap<String, Vec<u8>>) -> u64 {
+/// What one decode of a generation observed: the shape of the segment reads
+/// the restore issued, and the peak RSS it grew over a freshly reset high
+/// water mark.
+struct RssDecodeProbeV1 {
+    hwm_delta_kib: u64,
+    evidence_reads: usize,
+    evidence_read_whole: bool,
+    largest_evidence_read: u64,
+    largest_evidence_buffer: usize,
+}
+
+/// Decode `manifest`, serving every segment read from `segments`, and report
+/// both the read shape and the peak RSS growth.
+fn rss_measure_decode(
+    label: &str,
+    manifest: &[u8],
+    segments: &BTreeMap<String, Vec<u8>>,
+    evidence_digest: &str,
+) -> RssDecodeProbeV1 {
     assert!(rss_reset_peak(), "reset VmHWM");
     let hwm_before = rss_proc_kib("VmHWM").expect("VmHWM");
     let mut whole_reads = 0_usize;
     let mut ranged_reads = 0_usize;
+    let mut probe = RssDecodeProbeV1 {
+        hwm_delta_kib: 0,
+        evidence_reads: 0,
+        evidence_read_whole: false,
+        largest_evidence_read: 0,
+        largest_evidence_buffer: 0,
+    };
     let restored =
         CodeIndexPublishedGenerationV1::decode_partitioned_sealed(manifest, |request, buffer| {
-            let (digest, offset, length) = match request {
+            let (digest, offset, length, whole) = match request {
                 SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
                     whole_reads += 1;
-                    (digest, 0, size_bytes)
+                    (digest, 0, size_bytes, true)
                 }
                 SealedGenerationSegmentReadV1::Range {
                     digest,
@@ -4569,9 +4592,15 @@ fn rss_measure_decode(label: &str, manifest: &[u8], segments: &BTreeMap<String, 
                     ..
                 } => {
                     ranged_reads += 1;
-                    (digest, offset, length)
+                    (digest, offset, length, false)
                 }
             };
+            let evidence = digest.as_str() == evidence_digest;
+            if evidence {
+                probe.evidence_reads += 1;
+                probe.evidence_read_whole |= whole;
+                probe.largest_evidence_read = probe.largest_evidence_read.max(length);
+            }
             let bytes = segments.get(digest.as_str()).ok_or_else(|| {
                 CodeIndexProductionErrorV1::Contract("measured segment is missing".to_owned())
             })?;
@@ -4579,6 +4608,12 @@ fn rss_measure_decode(label: &str, manifest: &[u8], segments: &BTreeMap<String, 
             let end = start + usize::try_from(length).expect("segment length");
             buffer.clear();
             buffer.extend_from_slice(&bytes[start..end]);
+            if evidence {
+                // The restore owns this buffer and reuses it across reads, so
+                // its capacity is the segment bytes the restore holds at once.
+                probe.largest_evidence_buffer =
+                    probe.largest_evidence_buffer.max(buffer.capacity());
+            }
             Ok(())
         })
         .expect("measured manifest decodes")
@@ -4586,55 +4621,36 @@ fn rss_measure_decode(label: &str, manifest: &[u8], segments: &BTreeMap<String, 
     let hwm_after = rss_proc_kib("VmHWM").expect("VmHWM");
     let file_count = restored.snapshot().files.len();
     drop(restored);
-    let hwm_delta = hwm_after.saturating_sub(hwm_before);
+    probe.hwm_delta_kib = hwm_after.saturating_sub(hwm_before);
     println!(
         "rss_probe form={label} files={file_count} whole_reads={whole_reads} \
-ranged_reads={ranged_reads} hwm_before_kib={hwm_before} hwm_after_kib={hwm_after} \
-hwm_delta_kib={hwm_delta}"
+ranged_reads={ranged_reads} evidence_reads={} evidence_read_whole={} \
+largest_evidence_read={} largest_evidence_buffer={} hwm_before_kib={hwm_before} \
+hwm_after_kib={hwm_after} hwm_delta_kib={}",
+        probe.evidence_reads,
+        probe.evidence_read_whole,
+        probe.largest_evidence_read,
+        probe.largest_evidence_buffer,
+        probe.hwm_delta_kib,
     );
-    hwm_delta
+    probe
 }
 
-/// Restoring a pre-paging generation must not materialize its evidence
-/// segment.
-///
-/// The shipped restore read the whole segment, parsed a `serde_json::Value`
-/// from it, rewrote identities in that tree and deserialized the tree again:
-/// peak memory was 2.35x the on-disk generation and grew with the corpus. The
-/// paged restore of the same generation runs first here as the control: both
-/// forms pay the restored generation's own memory, so the legacy restore's
-/// peak growth beyond the control is the extra cost of the pre-paging path
-/// alone, and it must stay far below the evidence segment rather than
-/// scaling with it.
-#[test]
-fn legacy_generation_restore_does_not_materialize_its_evidence_segment() {
-    const RSS_CHILD: &str = "TD_LEGACY_RSS_CHILD";
-    const RSS_TEST: &str = concat!(
-        "production_orchestration::",
-        "legacy_generation_restore_does_not_materialize_its_evidence_segment"
-    );
+/// The same generation encoded both ways, with the segments both forms read.
+struct LegacyRssFixtureV1 {
+    paged_manifest: Vec<u8>,
+    legacy_manifest: Vec<u8>,
+    segments: BTreeMap<String, Vec<u8>>,
+    evidence_digest: String,
+    evidence_bytes: usize,
+    generation_bytes: usize,
+    file_count: usize,
+}
 
-    // VmHWM and `clear_refs` are Linux-only; elsewhere there is nothing to read.
-    if rss_proc_kib("VmHWM").is_none() || !rss_reset_peak() {
-        return;
-    }
-    // VmHWM is process-wide, so the reading only means anything while nothing
-    // else is allocating: take it in a child that runs this test alone.
-    if std::env::var_os(RSS_CHILD).is_none() {
-        let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
-            .args([RSS_TEST, "--exact", "--nocapture", "--test-threads=1"])
-            .env(RSS_CHILD, "1")
-            .status()
-            .expect("run the peak-RSS measurement alone");
-        assert!(status.success(), "isolated peak-RSS measurement failed");
-        return;
-    }
-
-    let file_count: usize = std::env::var("TD_LEGACY_RSS_FILES")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(300);
-
+/// Publish one generation, then rewrite its descriptor into the pre-paging
+/// shape a historical writer emitted: one whole authenticated evidence
+/// segment, no page table.
+fn legacy_rss_fixture(file_count: usize) -> LegacyRssFixtureV1 {
     let store = SharedPublicationStore::default();
     let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
         .expect("rss fixture owner");
@@ -4669,8 +4685,6 @@ fn legacy_generation_restore_does_not_materialize_its_evidence_segment() {
         })
         .expect("rss fixture encodes");
 
-    // Rewrite the descriptor into the pre-paging shape a historical writer
-    // emitted: one whole authenticated evidence segment, no page table.
     let mut envelope: serde_json::Value =
         serde_json::from_slice(&paged_manifest).expect("manifest JSON");
     envelope["generation"]["generation_evidence"]
@@ -4696,13 +4710,160 @@ fn legacy_generation_restore_does_not_materialize_its_evidence_segment() {
     drop(generation);
     drop(owner);
 
+    LegacyRssFixtureV1 {
+        paged_manifest,
+        legacy_manifest,
+        segments,
+        evidence_digest,
+        evidence_bytes,
+        generation_bytes,
+        file_count,
+    }
+}
+
+/// Restoring a pre-paging generation must not materialize its evidence
+/// segment.
+///
+/// The shipped restore read the whole segment, parsed a `serde_json::Value`
+/// from it, rewrote identities in that tree and deserialized the tree again:
+/// peak memory was 2.35x the on-disk generation and grew with the corpus.
+///
+/// The proof is the read shape the restore asks the caller for, not its
+/// memory footprint. A restore that materializes the segment has to hold it,
+/// so it must ask for the whole segment in one read or for a range that grows
+/// with the segment - the restore states its own peak segment residency in the
+/// requests it issues. The paged form of the identical generation is the
+/// reference: the pre-paging form must ask for the same bounded ranges into
+/// the same bounded buffer. That is exact, needs no memory reading, and holds
+/// on every platform.
+///
+/// Peak RSS follows only as a loose ceiling on the whole restore, and it is
+/// deliberately not the proof. VmHWM cannot see an allocation that fits inside
+/// the heap the restored generation already made resident, so it does not
+/// detect retention on its own: injecting a copy of every evidence page into a
+/// buffer held for the decode moves it by a fifth of the segment or less, well
+/// inside the clean band. What it does see is additive noise - a trimmed
+/// allocator makes the next probe fault fresh pages, which on a loaded runner
+/// cost more than the segment under test - so each form is measured over
+/// several alternating rounds and the smallest growth is taken as its cost.
+/// A restore that materializes pays that cost on every round, so the minimum
+/// keeps whatever signal RSS carries and drops the noise that made a single
+/// pair of probes flaky.
+#[test]
+fn legacy_generation_restore_does_not_materialize_its_evidence_segment() {
+    const RSS_CHILD: &str = "TD_LEGACY_RSS_CHILD";
+    const RSS_TEST: &str = concat!(
+        "production_orchestration::",
+        "legacy_generation_restore_does_not_materialize_its_evidence_segment"
+    );
+    /// Alternating paged/legacy rounds behind the discarded warm-up.
+    const RSS_ROUNDS: usize = 4;
+
+    // VmHWM and `clear_refs` are Linux-only. The read-shape guard needs
+    // neither, so run it alone elsewhere rather than skipping the test.
+    let rss_readable = rss_proc_kib("VmHWM").is_some() && rss_reset_peak();
+
+    // VmHWM is process-wide, so the reading only means anything while nothing
+    // else is allocating: take it in a child that runs this test alone.
+    if rss_readable && std::env::var_os(RSS_CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([RSS_TEST, "--exact", "--nocapture", "--test-threads=1"])
+            .env(RSS_CHILD, "1")
+            .status()
+            .expect("run the peak-RSS measurement alone");
+        assert!(
+            status.success(),
+            "the isolated restore measurement failed; its own failure is above"
+        );
+        return;
+    }
+
+    let file_count: usize = std::env::var("TD_LEGACY_RSS_FILES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(300);
+    let fixture = legacy_rss_fixture(file_count);
+
+    let paged = rss_measure_decode(
+        "paged",
+        &fixture.paged_manifest,
+        &fixture.segments,
+        &fixture.evidence_digest,
+    );
+    let legacy = rss_measure_decode(
+        "legacy",
+        &fixture.legacy_manifest,
+        &fixture.segments,
+        &fixture.evidence_digest,
+    );
+
+    // --- Guard 1: the read shape, exact. ------------------------------------
+    assert!(
+        !paged.evidence_read_whole && paged.evidence_reads > 1,
+        "the paged control must itself page the evidence segment: \
+         evidence_reads={} evidence_read_whole={}",
+        paged.evidence_reads,
+        paged.evidence_read_whole
+    );
+    assert!(
+        !legacy.evidence_read_whole,
+        "restoring a pre-paging generation asked for its whole \
+         {}-byte evidence segment in one read: the segment is being materialized",
+        fixture.evidence_bytes
+    );
+    assert!(
+        legacy.largest_evidence_read <= paged.largest_evidence_read,
+        "restoring a pre-paging generation read up to {} bytes of its \
+         {}-byte evidence segment at once, beyond the {}-byte bound the paged \
+         restore of the same generation holds to",
+        legacy.largest_evidence_read,
+        fixture.evidence_bytes,
+        paged.largest_evidence_read
+    );
+    assert!(
+        legacy.largest_evidence_buffer <= paged.largest_evidence_buffer,
+        "restoring a pre-paging generation held a {}-byte evidence buffer, \
+         beyond the {}-byte buffer the paged restore of the same generation \
+         holds to: the segment is being materialized",
+        legacy.largest_evidence_buffer,
+        paged.largest_evidence_buffer
+    );
+    assert_eq!(
+        legacy.evidence_reads, paged.evidence_reads,
+        "the pre-paging restore must read the evidence segment in the same \
+         bounded chunks the page table would have named"
+    );
+
+    // --- Guard 2: peak RSS, noise-tolerant. ---------------------------------
+    if !rss_readable {
+        return;
+    }
     // The first restore in a process pays a cold-start cost (the arena a
     // restored generation needs) that has nothing to do with the form being
-    // restored. Spend it on a discarded probe so the two measured probes
-    // start from the same allocator state and stay comparable.
-    rss_measure_decode("warmup", &paged_manifest, &segments);
-    let paged_hwm = rss_measure_decode("paged", &paged_manifest, &segments);
-    let legacy_hwm = rss_measure_decode("legacy", &legacy_manifest, &segments);
+    // restored; the two probes above spent it. Alternate from here so neither
+    // form is systematically the one that inherits a trimmed allocator.
+    let mut paged_hwm = u64::MAX;
+    let mut legacy_hwm = u64::MAX;
+    for _ in 0..RSS_ROUNDS {
+        paged_hwm = paged_hwm.min(
+            rss_measure_decode(
+                "paged",
+                &fixture.paged_manifest,
+                &fixture.segments,
+                &fixture.evidence_digest,
+            )
+            .hwm_delta_kib,
+        );
+        legacy_hwm = legacy_hwm.min(
+            rss_measure_decode(
+                "legacy",
+                &fixture.legacy_manifest,
+                &fixture.segments,
+                &fixture.evidence_digest,
+            )
+            .hwm_delta_kib,
+        );
+    }
     // The paged decode of the same generation is the control, not a warm-up:
     // both forms restore the identical generation, so only the difference is
     // the pre-paging path's own cost. An absolute peak is not a usable
@@ -4712,23 +4873,28 @@ fn legacy_generation_restore_does_not_materialize_its_evidence_segment() {
     let legacy_extra_bytes = legacy_hwm.saturating_sub(paged_hwm) * 1024;
 
     println!(
-        "rss_summary files={file_count} generation_on_disk_bytes={generation_bytes} \
-evidence_segment_bytes={evidence_bytes} paged_hwm_delta_kib={paged_hwm} \
+        "rss_summary files={} generation_on_disk_bytes={} \
+evidence_segment_bytes={} rounds={RSS_ROUNDS} paged_hwm_delta_kib={paged_hwm} \
 legacy_hwm_delta_kib={legacy_hwm} legacy_extra_bytes={legacy_extra_bytes} \
 legacy_extra_over_evidence={:.3}",
-        legacy_extra_bytes as f64 / evidence_bytes as f64,
+        fixture.file_count,
+        fixture.generation_bytes,
+        fixture.evidence_bytes,
+        legacy_extra_bytes as f64 / fixture.evidence_bytes as f64,
     );
 
-    // A restore that materializes the segment holds all of it at once and
-    // parses it on top, so it costs at least the segment; the streaming
-    // restore costs one bounded page buffer plus allocator slack, measured
-    // at a fifth to a third of the segment. The bound sits between them, and
-    // is tighter than the half-the-whole-generation bound it replaces (which
-    // permitted two and a half times this segment).
+    // The read-shape guard above already refused a restore that holds the
+    // segment. This is the ceiling on the rest of the restore: the pre-paging
+    // path must not cost a segment's worth of anything over the paged path.
+    // The bound is the segment because that is the size the guard is about,
+    // not a threshold tuned to the noise - the minimum over the rounds is
+    // what removes the noise.
     assert!(
-        legacy_extra_bytes < evidence_bytes as u64,
+        legacy_extra_bytes < fixture.evidence_bytes as u64,
         "restoring a pre-paging generation cost {legacy_extra_bytes} bytes of peak RSS beyond the \
-         paged restore of the same {generation_bytes}-byte generation, which is not far below its \
-         {evidence_bytes}-byte evidence segment: the segment is being materialized"
+         paged restore of the same {}-byte generation, which is not far below its \
+         {}-byte evidence segment: the segment is being materialized",
+        fixture.generation_bytes,
+        fixture.evidence_bytes
     );
 }

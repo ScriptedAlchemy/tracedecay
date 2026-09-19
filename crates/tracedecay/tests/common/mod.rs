@@ -1089,6 +1089,13 @@ pub fn spawn_tracedecay_daemon_with(
     spawn_tracedecay_daemon_process(&home, &binary, configure)
 }
 
+/// How long a replacement daemon waits for a stopped predecessor's endpoint to
+/// stop accepting before reporting it as still live.
+///
+/// Generous on purpose: the wait only costs time when a predecessor is
+/// genuinely still reachable, and a real leak still fails rather than hangs.
+const PREDECESSOR_DAEMON_VACATE_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn spawn_tracedecay_daemon_process(
     home: &Path,
     binary: &Path,
@@ -1111,17 +1118,42 @@ fn spawn_tracedecay_daemon_process(
             })
             .is_some_and(|address| TcpStream::connect(address).is_ok())
     };
-    #[cfg(unix)]
-    assert!(
-        std::os::unix::net::UnixStream::connect(&socket_path).is_err(),
-        "refusing to replace a live test daemon at {}",
-        socket_path.display()
-    );
-    #[cfg(not(unix))]
-    assert!(
-        !portable_daemon_connectable(),
-        "refusing to replace a live test daemon recorded at {}",
-        authority_path.display()
+    // Stopping a predecessor daemon is asynchronous with respect to its
+    // endpoint: `kill` plus `wait` reaps the PID the harness spawned, but the
+    // kernel keeps the listening socket alive while *any* duplicate of that
+    // descriptor survives, including one a subprocess inherited across `fork`
+    // and still holds because it has not reached its own `exec` yet. Asserting
+    // instantaneously therefore reports an ordinary teardown tail as a live
+    // daemon, which is what `init_project_fixture` journeys (spawn, init, drop,
+    // spawn again) hit on a loaded runner. Wait a bounded time for the endpoint
+    // to stop accepting; a daemon that keeps accepting still fails with the
+    // same refusal.
+    poll_until(
+        Instant::now() + PREDECESSOR_DAEMON_VACATE_TIMEOUT,
+        Duration::from_millis(25),
+        || {
+            #[cfg(unix)]
+            let live = std::os::unix::net::UnixStream::connect(&socket_path).is_ok();
+            #[cfg(not(unix))]
+            let live = portable_daemon_connectable();
+            (!live).then_some(())
+        },
+        || {
+            #[cfg(unix)]
+            {
+                format!(
+                    "refusing to replace a live test daemon at {}",
+                    socket_path.display()
+                )
+            }
+            #[cfg(not(unix))]
+            {
+                format!(
+                    "refusing to replace a live test daemon recorded at {}",
+                    authority_path.display()
+                )
+            }
+        },
     );
 
     let mut command = Command::new(binary);

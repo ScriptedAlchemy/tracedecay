@@ -98,6 +98,30 @@ fn lcm_convergence_admission(
 /// projection serving continues unblocked.
 pub(super) const HISTORY_ADMISSION_SATURATED_REASON: &str = "history_admission_saturated";
 
+/// How the worker schedules the pass after one that still needs history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HistoryContinuation {
+    /// The window admitted work and yielded. Run the next window now.
+    Immediate,
+    /// The pass needs another window but admitted nothing. Back off.
+    Backoff,
+    /// History does not need another pass.
+    Settled,
+}
+
+/// A Codex catch-up yields after one rollout. That yield is progress, so the
+/// continuation must not pay the no-progress retry delay or a corpus larger
+/// than one window misses the import deadline.
+fn history_continuation(outcome: Option<SessionHistoricalIngestOutcome>) -> HistoryContinuation {
+    match outcome {
+        Some(SessionHistoricalIngestOutcome::Pending {
+            made_progress: true,
+        }) => HistoryContinuation::Immediate,
+        Some(outcome) if outcome.needs_another_pass() => HistoryContinuation::Backoff,
+        _ => HistoryContinuation::Settled,
+    }
+}
+
 pub(super) async fn run_session_temporal_refresh_scheduler(
     database: RegisteredGlobalDbLeaseV1,
     state: Arc<SessionTemporalRefreshWakeState>,
@@ -386,7 +410,21 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             } else if history_needs_another_pass {
                 state.mark_running();
                 retry_attempt = 0;
-                state.update_history_retry_state(true);
+                match history_continuation(history_outcome) {
+                    // A bounded window that admitted work already yielded. The
+                    // next window is continuation of that import, not a failure
+                    // retry: the 250ms backoff below is only for passes that
+                    // made no progress. Sleeping on every successful window
+                    // makes a multi-window corpus miss the import deadline.
+                    HistoryContinuation::Immediate => {
+                        state.update_history_retry_state(false);
+                        state.wake_history();
+                    }
+                    HistoryContinuation::Backoff => {
+                        state.update_history_retry_state(true);
+                    }
+                    HistoryContinuation::Settled => {}
+                }
             } else {
                 if history_outcome.is_some() {
                     state.update_history_retry_state(false);
@@ -1102,6 +1140,34 @@ mod tests {
         state.cancel();
         assert!(!state.dirty.load(Ordering::Acquire));
         assert!(!state.has_pending_work());
+    }
+
+    #[test]
+    fn a_progressing_history_window_continues_without_the_retry_backoff() {
+        assert_eq!(
+            history_continuation(Some(SessionHistoricalIngestOutcome::Pending {
+                made_progress: true,
+            })),
+            HistoryContinuation::Immediate
+        );
+        assert_eq!(
+            history_continuation(Some(SessionHistoricalIngestOutcome::Pending {
+                made_progress: false,
+            })),
+            HistoryContinuation::Backoff
+        );
+        assert_eq!(
+            history_continuation(Some(SessionHistoricalIngestOutcome::Retryable {
+                reason_code: "history_admission_saturated",
+                made_progress: true,
+            })),
+            HistoryContinuation::Backoff,
+            "a retryable failure keeps the backoff even when the pass wrote rows"
+        );
+        assert_eq!(
+            history_continuation(Some(SessionHistoricalIngestOutcome::Complete)),
+            HistoryContinuation::Settled
+        );
     }
 
     #[test]

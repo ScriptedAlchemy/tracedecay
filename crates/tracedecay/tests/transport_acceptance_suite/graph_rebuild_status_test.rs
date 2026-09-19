@@ -279,12 +279,15 @@ async fn wait_for_background_refresh(
 ///
 /// The batch only has to keep one refresh observable across a few status polls.
 /// At 768 files it instead indexed 98,304 symbols into 455 million lexical
-/// units and 645 MB on disk, which on a four-core runner takes ~61s to commit
-/// and then pushes the reopen past the composition harness's own 20s publish
-/// gate: no `RECEIPT_TIMEOUT` can rescue that, the journey simply cannot finish.
-/// 96 files still take seconds, so `partial_refresh_in_progress` is sampled
-/// many times over at [`POLL_INTERVAL`], and every later open stays inside its
-/// gate.
+/// units and 645 MB on disk, which on a four-core runner takes ~61s to commit:
+/// no `RECEIPT_TIMEOUT` can rescue that, the journey simply cannot finish. 96
+/// files of 16 symbols still take seconds, so `partial_refresh_in_progress` is
+/// sampled many times over at [`POLL_INTERVAL`]; the 128 symbols a file used to
+/// carry bought no extra samples and cost eight times the commit.
+///
+/// The batch is also retired in the offline commit before the first reopen, so
+/// its weight is paid by the refresh it exists for and not again by two reopens
+/// bounded by a publish gate this journey cannot raise.
 const REFRESH_BATCH_FILES: u32 = 96;
 
 fn install_background_batch(isolation_root: &Path, project: &Path) {
@@ -292,7 +295,7 @@ fn install_background_batch(isolation_root: &Path, project: &Path) {
     fs::create_dir_all(&staging).expect("background batch staging directory");
     for file_index in 0..REFRESH_BATCH_FILES {
         let mut source = String::new();
-        for symbol_index in 0..128_u32 {
+        for symbol_index in 0..16_u32 {
             writeln!(
                 source,
                 "pub fn refresh_probe_{file_index:04}_{symbol_index:03}(input: u32) -> u32 {{ input + {symbol_index} }}"
@@ -360,12 +363,25 @@ async fn background_refresh_and_reopen_report_only_servable_generations_inner() 
     );
     harness.shutdown().await;
 
+    // The batch has done its only job: one background refresh stayed
+    // observable across many status polls. Leaving it installed makes every
+    // later reopen re-index the whole batch inside
+    // `ProductionProjectCompositionHarnessV1::open`'s fixed 20s publish gate, a
+    // budget this journey neither controls nor asserts on: on a contended
+    // four-core runner that reopen exhausts the gate and the open fails before
+    // any reopen assertion runs. Retiring the batch in the same offline commit
+    // keeps both reopen assertions exact -- a source change the closed daemon
+    // never saw, then a quiet checkout -- at the cost they actually need.
+    fs::remove_dir_all(project.join("src/refresh_batch")).expect("retire the background batch");
     fs::write(
         project.join("src/after_reopen.rs"),
         "pub fn after_reopen() -> &'static str { \"current\" }\n",
     )
     .expect("post-shutdown source");
-    commit_all(&project, "change source while daemon is closed");
+    commit_all(
+        &project,
+        "retire the batch and change source while daemon is closed",
+    );
     let reopened_revision = head(&project);
 
     let reopened = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
