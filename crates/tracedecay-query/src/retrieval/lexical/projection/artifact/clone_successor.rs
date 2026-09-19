@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -559,11 +560,112 @@ fn verify_copied_source_page(
     Ok(())
 }
 
+type CloneExactRowV1 = (i64, i64, String, String);
+
+/// Postings for one page's occurrences, read with one scan per table.
+///
+/// `clone_exact_postings` and `clone_fingerprint_postings` are
+/// `WITHOUT ROWID` tables keyed from `class`/`language`, so a
+/// `WHERE symbol_occurrence_id = ?` lookup has no index to use and scans the
+/// whole table. Issuing one per body made resume verification quadratic in
+/// the postings a repository has: a daemon spent eleven hours inside
+/// `verify_clone_fingerprint_page_rows` on one mount without recording a
+/// single scheduler pass. Scanning once per page and bucketing by occurrence
+/// keeps the comparisons byte-identical while paying the scan once.
+struct ClonePagePostingsV1 {
+    exact: HashMap<String, Vec<CloneExactRowV1>>,
+    fingerprints: HashMap<String, Vec<CloneFingerprintRowV1>>,
+}
+
+impl ClonePagePostingsV1 {
+    fn read(
+        connection: &Connection,
+        occurrences: &HashSet<&str>,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        let mut exact: HashMap<String, Vec<CloneExactRowV1>> = HashMap::new();
+        let mut statement = connection
+            .prepare(
+                "SELECT symbol_occurrence_id, class, normalization_revision, digest, payload_digest FROM clone_exact_postings",
+            )
+            .map_err(sqlite_error)?;
+        let mut rows = statement.query([]).map_err(sqlite_error)?;
+        while let Some(row) = rows.next().map_err(sqlite_error)? {
+            let occurrence: String = row.get(0).map_err(sqlite_error)?;
+            if !occurrences.contains(occurrence.as_str()) {
+                continue;
+            }
+            exact.entry(occurrence).or_default().push((
+                row.get(1).map_err(sqlite_error)?,
+                row.get(2).map_err(sqlite_error)?,
+                row.get(3).map_err(sqlite_error)?,
+                row.get(4).map_err(sqlite_error)?,
+            ));
+        }
+        drop(rows);
+        drop(statement);
+        checkpoint(control)?;
+
+        let mut fingerprints: HashMap<String, Vec<CloneFingerprintRowV1>> = HashMap::new();
+        let mut statement = connection
+            .prepare(
+                "SELECT symbol_occurrence_id, language, class, normalization_revision, fingerprint, token_position, payload_digest, body_digest FROM clone_fingerprint_postings",
+            )
+            .map_err(sqlite_error)?;
+        let mut rows = statement.query([]).map_err(sqlite_error)?;
+        while let Some(row) = rows.next().map_err(sqlite_error)? {
+            let occurrence: String = row.get(0).map_err(sqlite_error)?;
+            if !occurrences.contains(occurrence.as_str()) {
+                continue;
+            }
+            fingerprints.entry(occurrence).or_default().push((
+                row.get(1).map_err(sqlite_error)?,
+                row.get(2).map_err(sqlite_error)?,
+                row.get(3).map_err(sqlite_error)?,
+                row.get(4).map_err(sqlite_error)?,
+                row.get(5).map_err(sqlite_error)?,
+                row.get(6).map_err(sqlite_error)?,
+                row.get(7).map_err(sqlite_error)?,
+            ));
+        }
+        drop(rows);
+        drop(statement);
+        checkpoint(control)?;
+
+        // Each table's primary key is unique within one occurrence, so sorting
+        // a bucket reproduces the `ORDER BY` the per-body queries used.
+        for rows in exact.values_mut() {
+            rows.sort();
+        }
+        for rows in fingerprints.values_mut() {
+            rows.sort();
+        }
+        Ok(Self {
+            exact,
+            fingerprints,
+        })
+    }
+
+    fn exact_for(&self, occurrence: &str) -> &[CloneExactRowV1] {
+        self.exact.get(occurrence).map_or(&[], Vec::as_slice)
+    }
+
+    fn fingerprints_for(&self, occurrence: &str) -> &[CloneFingerprintRowV1] {
+        self.fingerprints.get(occurrence).map_or(&[], Vec::as_slice)
+    }
+}
+
 fn verify_clone_page_rows(
     connection: &Connection,
     page: &VerifiedSealedLexicalPageV1,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let occurrences = page
+        .clone_bodies()
+        .iter()
+        .map(|body| body.occurrence.symbol_occurrence_id.as_str())
+        .collect::<HashSet<_>>();
+    let postings = ClonePagePostingsV1::read(connection, &occurrences, control)?;
     for body in page.clone_bodies() {
         checkpoint(control)?;
         let expected_payload = serde_json::to_vec(&body.payload)
@@ -631,24 +733,12 @@ fn verify_clone_page_rows(
                 )
             })
             .collect::<Vec<_>>();
-        let mut statement = connection
-            .prepare(
-                "SELECT class, normalization_revision, digest, payload_digest FROM clone_exact_postings WHERE symbol_occurrence_id = ?1 ORDER BY class, normalization_revision, digest",
-            )
-            .map_err(sqlite_error)?;
-        let stored_postings = statement
-            .query_map([body.occurrence.symbol_occurrence_id.as_str()], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-            })
-            .map_err(sqlite_error)?
-            .collect::<Result<Vec<(i64, i64, String, String)>, _>>()
-            .map_err(sqlite_error)?;
-        if stored_postings != expected_postings {
+        if postings.exact_for(body.occurrence.symbol_occurrence_id.as_str()) != expected_postings {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "resumed clone postings differ from their sealed source page".to_owned(),
             ));
         }
-        verify_clone_fingerprint_page_rows(connection, body)?;
+        verify_clone_fingerprint_page_rows(&postings, body)?;
     }
     Ok(())
 }
@@ -656,7 +746,7 @@ fn verify_clone_page_rows(
 type CloneFingerprintRowV1 = (String, i64, i64, i64, i64, String, String);
 
 fn verify_clone_fingerprint_page_rows(
-    connection: &Connection,
+    postings: &ClonePagePostingsV1,
     body: &CodeIndexCloneBodyV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let mut expected = Vec::new();
@@ -679,26 +769,7 @@ fn verify_clone_fingerprint_page_rows(
         }
     }
     expected.sort();
-    let mut statement = connection
-        .prepare(
-            "SELECT language, class, normalization_revision, fingerprint, token_position, payload_digest, body_digest FROM clone_fingerprint_postings WHERE symbol_occurrence_id = ?1 ORDER BY language, class, normalization_revision, fingerprint, token_position",
-        )
-        .map_err(sqlite_error)?;
-    let stored = statement
-        .query_map([body.occurrence.symbol_occurrence_id.as_str()], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-            ))
-        })
-        .map_err(sqlite_error)?
-        .collect::<Result<Vec<CloneFingerprintRowV1>, _>>()
-        .map_err(sqlite_error)?;
+    let stored = postings.fingerprints_for(body.occurrence.symbol_occurrence_id.as_str());
     if stored != expected {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
             "resumed clone fingerprints differ from their sealed source page".to_owned(),
