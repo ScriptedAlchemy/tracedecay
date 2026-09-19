@@ -2769,11 +2769,36 @@ impl LatestCodeTextGenerationV1 {
                 self.install_artifact_owners(reader, reader_reservation)?;
                 self.publish_text_progress_snapshot(ready_progress);
                 if needs_clone_successor {
-                    self.text_projection_build.retain_clone_successor_retry()?;
-                    return self
-                        .begin_clone_successor(descriptor, prior, sealed_identity, source, control)
-                        .map(TextHeadOpenOutcomeV1::BuildCloneSuccessor)
-                        .map(Some);
+                    // `begin_clone_successor` copies the whole prior lexical
+                    // artifact with the slot lock released, so this wake's
+                    // head-open claim has to span it. Parking
+                    // `CloneSuccessorPending` before the copy published a
+                    // takeable state mid-claim: `advance_artifact_text_serving`
+                    // leaves its park loop on that state, so a concurrent wake
+                    // took a second `HeadOpening` on top of this open and both
+                    // drove the same staging database. Whichever open resolved
+                    // second then found the slot already reset and failed the
+                    // clone lane closed. A successful begin resolves the claim
+                    // to `BuildingCloneSuccessor` anyway, so only a failed one
+                    // needs the retry marker: the owners installed above would
+                    // otherwise let the next wake short-circuit on a plain
+                    // `Idle` and never owe the successor again.
+                    return match self.begin_clone_successor(
+                        descriptor,
+                        prior,
+                        sealed_identity,
+                        source,
+                        control,
+                    ) {
+                        Ok(build) => Ok(Some(TextHeadOpenOutcomeV1::BuildCloneSuccessor(build))),
+                        Err(error) => {
+                            // The claim still owns `HeadOpening`, so this only
+                            // parks the marker; the begin failure is the one
+                            // worth reporting.
+                            let _ = self.text_projection_build.retain_clone_successor_retry();
+                            Err(error)
+                        }
+                    };
                 }
                 drop(source);
                 Ok(Some(TextHeadOpenOutcomeV1::Served))
