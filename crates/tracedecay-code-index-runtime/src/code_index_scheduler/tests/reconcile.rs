@@ -30,11 +30,12 @@ use super::{
     quiesced_background_reconcile_admission, replace_scheduler_chunker_revision,
     replace_scheduler_policy_revision, rewrite_active_rust_extractor_revision,
     rewrite_preserving_stat, scheduler, scheduler_with_policy, served_lexical_texts,
-    test_project_id, wait_for_dashboard_ready, wait_for_event_to_ready, wait_for_generation_change,
-    wait_for_initial_generation, wait_for_live_complete_generation,
-    wait_for_live_complete_generation_by_polling, wait_for_queryable_text_generation,
-    wait_for_queryable_text_generation_change, wait_for_queryable_text_generation_id,
-    wait_for_quiescent_owner_pass, wait_for_settled_owner, wait_until_serving_seat, write,
+    settled_owner_with_idle_admission, test_project_id, wait_for_dashboard_ready,
+    wait_for_event_to_ready, wait_for_generation_change, wait_for_initial_generation,
+    wait_for_live_complete_generation, wait_for_live_complete_generation_by_polling,
+    wait_for_queryable_text_generation, wait_for_queryable_text_generation_change,
+    wait_for_queryable_text_generation_id, wait_for_quiescent_owner_pass, wait_for_settled_owner,
+    wait_until_serving_seat, write,
 };
 use crate::{
     code_index::{
@@ -2868,7 +2869,11 @@ async fn ignored_dependency_waits_for_global_admission_before_publication_gate()
     let store = TempDir::new().expect("store root");
     let (registry, _) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
     let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    // Draining leaves the busy follow-up wake armed, and every pass it starts
+    // owns the single global admission permit this test needs idle. Settle
+    // that chain and burn the banked permit behind it before sampling.
     drain_clone_backfill(&registry, fixture.path()).await;
+    settled_owner_with_idle_admission(&registry, fixture.path()).await;
     let generation = latest.generation();
     let verified_import = generation
         .imports()
@@ -3670,7 +3675,10 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
         .collect::<Vec<_>>();
     let fixture = GitFixture::new(&borrowed);
     let store = TempDir::new().expect("store root");
-    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    // One background permit, so holding it is what parks the owner: the
+    // default bound is the host core count and a single held permit would
+    // leave the other passes free to run under the sample below.
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
     registry
         .mount_worktree(
             test_project_id(),
@@ -3681,6 +3689,16 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
         .expect("mount daemon-owned scheduler");
     wait_for_initial_generation(&registry, fixture.path()).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
+    // `refresh_in_flight` is the pass counter *or* the pending-wake slot, and
+    // `wait_for_dashboard_ready` only joins the running pass. The seat no
+    // longer waits for the clone successor, so the mount leaves backfill work
+    // behind, and the wakes that drain it leave a banked permit whose no-op
+    // pass projects Verifying instead of Fresh. Settle the whole mount-era
+    // chain, then hold the admission so no further pass can start under the
+    // sample below.
+    drain_clone_backfill(&registry, fixture.path()).await;
+    settled_owner_with_idle_admission(&registry, fixture.path()).await;
+    let _quiet_owner = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     let canonical_root = fixture
         .path()
         .canonicalize()
