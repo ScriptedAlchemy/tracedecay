@@ -4160,7 +4160,9 @@ async fn diagnostics_change_generation_advances_for_out_of_band_git_drift() {
 async fn elapsed_freshness_window_alone_does_not_make_dashboard_state_stale() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
-    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    // Single-permit admission: holding it below parks the background worker,
+    // which the host's default bound cannot do.
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
     registry
         .mount_worktree(
             test_project_id(),
@@ -4171,18 +4173,33 @@ async fn elapsed_freshness_window_alone_does_not_make_dashboard_state_stale() {
         .expect("mount daemon-owned scheduler");
     wait_for_initial_generation(&registry, fixture.path()).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
+    // The mount leaves clone backfill behind, and the wakes that drain it
+    // leave a banked permit whose no-op pass projects `Verifying` instead of
+    // `Fresh` (CI run 35425541839). Settle the mount-era chain, hold the
+    // admission so no pass can start under the sample, and prove the
+    // pending-wake slot stays empty, exactly as the text-progress test does.
+    drain_clone_backfill(&registry, fixture.path()).await;
+    settled_owner_with_idle_admission(&registry, fixture.path()).await;
+    let _quiet_owner = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     let canonical = fixture.path().canonicalize().expect("canonical fixture");
-    {
+    let scope = {
         let mounted = registry.mounted.lock().await;
-        mounted
-            .get(&canonical)
-            .expect("mounted worktree")
+        let worktree = mounted.get(&canonical).expect("mounted worktree");
+        worktree
             .scheduler
             .lock()
             .expect("scheduler")
             .policy
             .staleness_threshold = Duration::ZERO;
-    }
+        tracedecay_contracts::ResolvedScope::new(
+            test_project_id(),
+            worktree.repository_id.clone(),
+            worktree.worktree_id.clone(),
+            None,
+        )
+        .expect("resolved scope")
+    };
+    clear_pending_wake_until_quiet(&registry, &scope).await;
 
     let projected = registry
         .dashboard_freshness(fixture.path())
