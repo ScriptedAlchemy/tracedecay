@@ -121,8 +121,6 @@ const PROFILE_REGISTRY_TOOLS: &[&str] = &[
     "tracedecay_project_context",
 ];
 
-const MAX_SURFACE_ATTEMPTS: usize = 3;
-
 fn tool_deadline_range_error() -> TraceDecayError {
     TraceDecayError::Config {
         message: format!(
@@ -429,17 +427,13 @@ fn dispatch_cli_application_surface_inner(
         let handshake =
             tracedecay::daemon::handshake_for_current_client(project, None, false, false)?;
         let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
-        // A cold daemon answers a retryable pre-admission problem while the
-        // project open still warms in the background (bounded by the daemon's
-        // foreground open wait). The compatibility tool path rides that state out
-        // through its project-open retry loop; the typed surface path must present
-        // the same transport behavior, so re-send the same request per the
-        // envelope's own retry directive, bounded by both the CLI deadline and
-        // three attempts so a persistent refusal remains visible to callers.
+        // A cold daemon answers the mounting refusal while the project open
+        // still warms in the background. The compatibility tool path rides
+        // that state out through its project-open retry loop; the typed
+        // surface path re-sends only that same refusal, until the CLI
+        // deadline. Every other completed problem is the answer.
         let mut next_request = Some(request);
-        let mut attempts = 0usize;
         let result = loop {
-            attempts += 1;
             let request = match next_request.take() {
                 Some(request) => request,
                 None => parse_application_surface_request(operation, tool_args.clone()).map_err(
@@ -486,27 +480,16 @@ fn dispatch_cli_application_surface_inner(
                     message: error.to_string(),
                 },
             })?;
-            let Some(delay) = bounded_surface_retry_delay(
-                crate::cli::dispatch::surface_retry_delay(&result),
-                attempts,
-                deadline,
-            ) else {
+            let Some(delay) = crate::cli::dispatch::surface_retry_delay(&result) else {
                 break result;
             };
+            if deadline.saturating_duration_since(Instant::now()) <= delay {
+                break result;
+            }
             tokio::time::sleep(delay).await;
         };
         print_cli_application_surface(result, requested_format == RequestedOutputFormat::Json)
     })
-}
-
-fn bounded_surface_retry_delay(
-    delay: Option<Duration>,
-    attempts: usize,
-    deadline: Instant,
-) -> Option<Duration> {
-    let delay = delay?;
-    (attempts < MAX_SURFACE_ATTEMPTS && deadline.saturating_duration_since(Instant::now()) > delay)
-        .then_some(delay)
 }
 
 fn print_cli_application_surface(

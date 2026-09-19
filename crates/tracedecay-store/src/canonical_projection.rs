@@ -10,16 +10,75 @@ use tracedecay_domain::{
 
 use crate::cursor_dispatch::{cursor_dispatch_model, dispatch_text, is_subagent_dispatch_tool};
 use crate::provider_descriptor::{
-    provider_message_semantics, synthesizes_native_record_id, tool_metadata_normalizer,
+    ProviderMessageSemantics, provider_message_semantics, synthesizes_native_record_id,
+    tool_metadata_normalizer,
 };
 use crate::{
     ObservationProjection, ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
     SessionMessageRecord, SessionRecord, WorkflowFactRecord,
 };
 
-#[hotpath::measure(label = "store.projection.derive_canonical")]
+/// Which projector rendering to derive.
+///
+/// Releases through v0.1.0-beta.37 wrote `ShippedRelease`. The reducer is
+/// otherwise unchanged; only Codex goal-context semantics were added after
+/// that tag.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CanonicalRendering {
+    Current,
+    ShippedRelease,
+}
+
+/// Codex goal-context semantics are the only post-release rendering. A shipped
+/// derivation withholds them. Every other field is this reducer.
+fn rendering_message_semantics(
+    rendering: CanonicalRendering,
+    provider: &str,
+    native_record_kind: &str,
+    role: &str,
+    content: &serde_json::Value,
+    has_native_item_identity: bool,
+) -> Option<ProviderMessageSemantics> {
+    match rendering {
+        CanonicalRendering::ShippedRelease => None,
+        CanonicalRendering::Current => provider_message_semantics(
+            provider,
+            native_record_kind,
+            role,
+            content,
+            has_native_item_identity,
+        ),
+    }
+}
+
 pub fn derive_canonical_projection(
     observation: &DurableObservationV1,
+) -> ProjectionStoreResult<ObservationProjection> {
+    derive_canonical_projection_for(observation, CanonicalRendering::Current)
+}
+
+/// Whether `stored` is the message row a shipped release wrote for `observation`.
+///
+/// A current-provenance row that still holds that rendering is an interrupted
+/// write. Any other body, including a derivation that does not complete, is not.
+pub fn stored_message_is_shipped_release_rendering(
+    observation: &DurableObservationV1,
+    stored: &SessionMessageRecord,
+) -> bool {
+    let Ok(released) =
+        derive_canonical_projection_for(observation, CanonicalRendering::ShippedRelease)
+    else {
+        return false;
+    };
+    released
+        .messages()
+        .any(|projection| projection.message() == stored)
+}
+
+#[hotpath::measure(label = "store.projection.derive_canonical")]
+fn derive_canonical_projection_for(
+    observation: &DurableObservationV1,
+    rendering: CanonicalRendering,
 ) -> ProjectionStoreResult<ObservationProjection> {
     let envelope =
         CanonicalObservationEnvelopeV1::deserialize(observation.payload()).map_err(|_| {
@@ -42,7 +101,7 @@ pub fn derive_canonical_projection(
         ));
     }
 
-    let mut projected = canonical_message_fields(&envelope)?;
+    let mut projected = canonical_message_fields_for(rendering, &envelope)?;
     let session_fields = if envelope.provider().as_str() == "claude" {
         None
     } else {
@@ -115,7 +174,8 @@ pub fn derive_canonical_projection(
     let ordinal = i64::try_from(ordinal).map_err(|_| {
         ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
     })?;
-    let metadata_json = canonical_message_metadata(
+    let metadata_json = canonical_message_metadata_for(
+        rendering,
         &envelope,
         (!session_metadata.is_empty()).then_some(&session_metadata),
     )?;
@@ -310,7 +370,16 @@ fn canonical_session_metadata(
     serialize_metadata_map(&canonical_session_metadata_map(provider, session))
 }
 
+#[cfg(test)]
 fn canonical_message_metadata(
+    envelope: &CanonicalObservationEnvelopeV1,
+    session_metadata: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> ProjectionStoreResult<String> {
+    canonical_message_metadata_for(CanonicalRendering::Current, envelope, session_metadata)
+}
+
+fn canonical_message_metadata_for(
+    rendering: CanonicalRendering,
     envelope: &CanonicalObservationEnvelopeV1,
     session_metadata: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> ProjectionStoreResult<String> {
@@ -333,7 +402,8 @@ fn canonical_message_metadata(
         .facts()
         .iter()
         .find(|fact| matches!(fact, CanonicalObservationFactV1::Message { .. }))
-        && let Some(semantics) = provider_message_semantics(
+        && let Some(semantics) = rendering_message_semantics(
+            rendering,
             envelope.provider().as_str(),
             envelope.native_record_kind(),
             canonical_role(*role),
@@ -687,7 +757,15 @@ fn canonical_cursor_compatibility_message_fields(
     Ok((primary_message_id, derived))
 }
 
+#[cfg(test)]
 fn canonical_message_fields(
+    envelope: &CanonicalObservationEnvelopeV1,
+) -> ProjectionStoreResult<Option<CanonicalMessageFields>> {
+    canonical_message_fields_for(CanonicalRendering::Current, envelope)
+}
+
+fn canonical_message_fields_for(
+    rendering: CanonicalRendering,
     envelope: &CanonicalObservationEnvelopeV1,
 ) -> ProjectionStoreResult<Option<CanonicalMessageFields>> {
     let facts = envelope.facts();
@@ -711,7 +789,8 @@ fn canonical_message_fields(
     {
         let role = canonical_role(*role);
         let text = canonical_fact_text(content)?;
-        if let Some(semantics) = provider_message_semantics(
+        if let Some(semantics) = rendering_message_semantics(
+            rendering,
             envelope.provider().as_str(),
             envelope.native_record_kind(),
             role,

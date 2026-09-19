@@ -868,7 +868,14 @@ mod tests {
         let duplicate_prepares = Arc::new(AtomicUsize::new(0));
         let owner_cancelled = Arc::new(tokio::sync::Notify::new());
         let release_owner = Arc::new(tokio::sync::Notify::new());
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        // This owner is released by the test rather than resolving on its own,
+        // so it is the one case here that needs a *real* background budget. A
+        // deadline shorter than the reserves behind that phase floors its
+        // deadline at `now` (`DaemonShutdownBudget::phase`), and the owner then
+        // reports `TimedOut` whenever its first poll precedes the release by a
+        // timer tick. That makes the receipt retryable, which legitimately
+        // re-prepares shutdown and hides the ownership contract under test.
+        let deadline = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE;
 
         let first_lifecycle = lifecycle.clone();
         let first_cancellations = Arc::clone(&cancellations);

@@ -218,6 +218,27 @@ impl CursorSourceAdmissionTally {
     }
 }
 
+/// Fold one hook pass's admission over the projection drain it happened to run.
+///
+/// The projection queue is per scope. The project catch-up drains it too, so
+/// `drain.source_deferred`, `drain.exact_duplicate`, and `drain.messages_upserted`
+/// describe whoever last touched that queue, not this pass. A residual there
+/// must not hide a commit, invent a duplicate, or turn a byte-finished pass
+/// into backpressure. Admission is the commit.
+fn account_hook_admission(
+    mut drain: projection::CursorTranscriptIngestStats,
+    observations_committed: u64,
+    fully_replayed: bool,
+    admission_deferred: bool,
+    bytes_consumed: u64,
+) -> projection::CursorTranscriptIngestStats {
+    drain.bytes_consumed = bytes_consumed;
+    drain.source_deferred = admission_deferred;
+    drain.observations_committed = observations_committed;
+    drain.exact_duplicate = observations_committed == 0 && fully_replayed;
+    drain
+}
+
 // Cursor JSONL admission chokepoint: the whole per-file admission future is
 // boxed here so the per-file sweep loop no longer pins each call, keeping the
 // debug poll frame bounded through the deep ingest recursion chain.
@@ -631,19 +652,19 @@ pub async fn try_ingest_cursor_transcript_event_capped_with_admission(
         admitted.record(&progress);
         budget.record_progress(progress.bytes_consumed, progress.source_deferred);
     }
-    let mut stats = drain_cursor_observation_projections(
+    let drain = drain_cursor_observation_projections(
         admission,
         &scope,
         &ObservationCancellation::default(),
     )
     .await?;
-    stats.bytes_consumed = budget.consumed();
-    stats.source_deferred |= budget.deferred();
-    stats.observations_committed = admitted.observations_committed;
-    stats.exact_duplicate |= stats.messages_upserted == 0
-        && stats.observations_committed == 0
-        && admitted.fully_replayed();
-    Ok(stats)
+    Ok(account_hook_admission(
+        drain,
+        admitted.observations_committed,
+        admitted.fully_replayed(),
+        budget.deferred(),
+        budget.consumed(),
+    ))
 }
 
 pub async fn ingest_cursor_user_transcript_event_capped(
@@ -781,19 +802,19 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_admission(
         admitted.record(&progress);
         budget.record_progress(progress.bytes_consumed, progress.source_deferred);
     }
-    let mut stats = drain_cursor_observation_projections(
+    let drain = drain_cursor_observation_projections(
         admission,
         &scope,
         &ObservationCancellation::default(),
     )
     .await?;
-    stats.bytes_consumed = budget.consumed();
-    stats.source_deferred |= budget.deferred();
-    stats.observations_committed = admitted.observations_committed;
-    stats.exact_duplicate |= stats.messages_upserted == 0
-        && stats.observations_committed == 0
-        && admitted.fully_replayed();
-    Ok(stats)
+    Ok(account_hook_admission(
+        drain,
+        admitted.observations_committed,
+        admitted.fully_replayed(),
+        budget.deferred(),
+        budget.consumed(),
+    ))
 }
 
 pub(in crate::runtime) fn try_ingest_cursor_project_sweep_capped_with_session_ids<

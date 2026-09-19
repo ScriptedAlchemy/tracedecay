@@ -231,6 +231,14 @@ test-transport = [
     "tracedecay-code-index-runtime/test-transport",
 ]
 
+# The evaluator library is the only selector of `tracedecay-query/search-eval`,
+# the eval-only in-memory lexical projection. Cargo rejects optional
+# dev-dependencies, and an unconditional one unifies this feature into every
+# test target, so the transport suites compile that projection. Journeys that
+# compare the CLI receipt to the library enable this feature. `test-transport`
+# and `production` must not.
+search-eval = ["dep:tracedecay-search-eval"]
+
 # The typed RMCP benchmark is the only consumer of the client-side RMCP
 # transport. Keep that surface out of ordinary integration-fixture builds:
 # the benchmark enables its complete client/runtime dependency set explicitly.
@@ -340,6 +348,10 @@ keyring = { version = "4.1.5", features = ["v1"] }
 tempfile = "3"
 futures-util = "0.3.33"
 rmcp = { version = "3.0.1", default-features = false, features = ["server"] }
+# Opt-in. Cargo rejects optional dev-dependencies, and an unconditional one
+# unifies `tracedecay-query/search-eval` into every test target. Default and
+# `production` builds leave it off, so the shipped CLI does not link it.
+tracedecay-search-eval = { path = "../tracedecay-search-eval", version = "0.1.0", optional = true }
 
 # `kill(2)` for the daemon integration suites' physical-restart journeys
 # (tests/daemon_suite). Store-locality detection moved with the locator
@@ -348,7 +360,6 @@ rmcp = { version = "3.0.1", default-features = false, features = ["server"] }
 libc = "0.2"
 
 [dev-dependencies]
-tracedecay-search-eval = { path = "../tracedecay-search-eval", version = "0.1.0" }
 tree-sitter = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

@@ -160,8 +160,9 @@ async fn host_call(server: &McpServer, mut args: Value) -> HostCall {
             .unwrap_or_else(|| {
                 panic!("tracedecay_sessions_for returned no JSON content: {response}")
             });
-        if text.pointer("/problem/code").and_then(Value::as_str)
-            == Some("application.surface.unavailable")
+        let code = text.pointer("/problem/code").and_then(Value::as_str);
+        if code == Some(tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE)
+            || code == Some("application.surface.unavailable")
         {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             continue;

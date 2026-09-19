@@ -203,6 +203,10 @@ impl ProjectHostAdmissionReplayWorker {
                         );
                         break;
                     }
+                    ReplayPassDecision::TerminalNoop => {
+                        consecutive_retryable = 0;
+                        break;
+                    }
                     ReplayPassDecision::Requeue => {
                         consecutive_retryable = 0;
                         if self.dirty.load(Ordering::Acquire) || pending_after > 0 {
@@ -267,6 +271,42 @@ mod tests {
         })
         .await
         .expect("project replay must attempt the pending record");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert_eq!(passes.load(Ordering::Acquire), 1);
+        assert_eq!(task.pass_count(), 1);
+        assert_eq!(task.backoff_count(), 0);
+        task.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn not_applicable_pending_record_stops_without_backoff() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let (runtime, _) = tracedecay_host_admission::HostAdmissionRuntime::open(
+            temp.path(),
+            tracedecay_host_admission::SpoolBounds::default(),
+        )
+        .unwrap();
+        let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
+        broker.admit("test:pending", b"pending").await.unwrap();
+        let passes = Arc::new(AtomicUsize::new(0));
+        let passes_for_run = Arc::clone(&passes);
+        let pass: PassFn = Arc::new(move || {
+            let passes = Arc::clone(&passes_for_run);
+            Box::pin(async move {
+                passes.fetch_add(1, Ordering::AcqRel);
+                HostAdmissionOutcome::not_applicable("code_index_not_applicable")
+            })
+        });
+        let task = ProjectHostAdmissionReplayTask::start(broker, pass);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while task.pass_count() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("project replay must attempt the not-applicable record");
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         assert_eq!(passes.load(Ordering::Acquire), 1);

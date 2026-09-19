@@ -104,6 +104,10 @@ pub struct PlainValue;
     .await
 }
 
+fn clone_family_lane_still_publishing(error: &str) -> bool {
+    error.contains("generation_unverified")
+}
+
 async fn shutdown_graph_fixture(fixture: GraphQueryFixture) {
     fixture.production.harness.shutdown().await;
 }
@@ -1577,28 +1581,57 @@ async fn redundancy_pull_request_scope_shares_one_budget_and_resumes_changed_fam
         .server(fixture.project_root())
         .expect("production graph-query server");
     warm_code_index_search(&server, "generation_bump").await;
-    let stale = call_production_tool(
-        &fixture,
-        "tracedecay_redundancy",
-        json!({
-            "project_id": project_id,
-            "repository_id": repository_id,
-            "match_classes": ["conservative_exact"],
-            "scope": scope,
-            "include_generated_paths": true,
-            "family_limit": 10,
-            "member_limit": 10,
-            "work_limit": 4,
-            "cursor": stale_cursor,
-        }),
-        None,
-        None,
-    )
-    .await
-    .expect_err("a prior-generation pull-request cursor must be stale");
+    let stale_args = json!({
+        "project_id": project_id,
+        "repository_id": repository_id,
+        "match_classes": ["conservative_exact"],
+        "scope": scope,
+        "include_generated_paths": true,
+        "family_limit": 10,
+        "member_limit": 10,
+        "work_limit": 4,
+        "cursor": stale_cursor,
+    });
+    // Search lane coverage can seal while clone-family publication is still
+    // retiring the previous generation. That window answers `search_failed`
+    // or `generation_unverified`; the stale cursor's terminal is
+    // `generation_unavailable` once the successor artifact can be read.
+    let mut last = String::new();
+    for _ in 0..40 {
+        match call_production_tool(
+            &fixture,
+            "tracedecay_redundancy",
+            stale_args.clone(),
+            None,
+            None,
+        )
+        .await
+        {
+            Err(error) => {
+                let rendered = error.to_string();
+                if rendered.contains("generation_unavailable") {
+                    last = rendered;
+                    break;
+                }
+                if clone_family_lane_still_publishing(&rendered) {
+                    last = rendered;
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    continue;
+                }
+                panic!("stale pull-request cursor failed closed: {rendered}");
+            }
+            Ok(value) => {
+                last = format!(
+                    "successor still served the prior cursor: {}",
+                    extract_text(&value.value)
+                );
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+    }
     assert!(
-        stale.to_string().contains("generation_unavailable"),
-        "{stale}"
+        last.contains("generation_unavailable"),
+        "prior-generation pull-request cursor must be stale, last={last}"
     );
 
     shutdown_graph_fixture(fixture).await;

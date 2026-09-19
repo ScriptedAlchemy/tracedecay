@@ -105,6 +105,8 @@ pub(super) fn spawn_project_daemon(home: &Path, project: &Path) -> common::Daemo
         .spawn()
         .expect("advanced workflow daemon should start");
     let mut daemon = common::DaemonProcess::new(child);
+    #[cfg(unix)]
+    daemon.release_socket_on_stop(common::daemon_socket_path(home));
     let daemon_pid = u64::from(daemon.id());
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {

@@ -554,15 +554,15 @@ pub enum UpgradeOutcome {
         /// binary: `which_tracedecay()`'s current-exe-first order can point
         /// at the OLD binary (e.g. a stale Homebrew keg) after an upgrade.
         binary: Option<PathBuf>,
-        /// Version of the freshly installed binary: the release-manifest
-        /// version for GitHub-release installs, the linked binary's
-        /// self-reported version for package-manager installs. Daemon restore
-        /// validates this version, the binary it actually restarts, instead
-        /// of the one that was running before the upgrade. `None` only when
-        /// the manager's install could not be interrogated; restore
-        /// verification then validates the pre-upgrade version and, if a new
-        /// daemon really was installed, fails with a typed identity mismatch
-        /// rather than silently passing.
+        /// Version the installed binary reports for itself (`--version`),
+        /// `{release}+{sha}[.dirty]`. Daemon restore compares this string to
+        /// the daemon's advertised build identity exactly, so a release tag
+        /// is not a substitute: the tag and the binary differ by build
+        /// metadata, and that mismatch is what failed `tracedecay update`'s
+        /// readiness wait. `None` only when the binary could not be
+        /// interrogated; restore then validates the pre-upgrade version and,
+        /// if a new daemon really was installed, fails with a typed identity
+        /// mismatch rather than accepting a less specific name.
         version: Option<String>,
     },
     /// Already on the latest version. The binary was not replaced.
@@ -794,11 +794,20 @@ fn run_versioned_upgrade(current: &str, is_beta: bool) -> Result<UpgradeOutcome>
     eprintln!("Upgrading v{current} → v{latest}...");
     let binary = install_upgrade_version(latest, is_beta)?;
     record_previous_version();
-    eprintln!("\x1b[32m✔\x1b[0m Successfully upgraded to v{latest}!");
-    Ok(UpgradeOutcome::Installed {
-        binary,
-        version: Some(latest.to_owned()),
-    })
+    Ok(finish_versioned_upgrade(latest, binary))
+}
+
+/// Completes a GitHub-release install.
+///
+/// `catalog_version` is the release name shown to the operator. It is not
+/// the installed identity: the published binary names itself
+/// `{release}+{sha}` and the daemon advertises that same string. Readiness
+/// compares the two exactly, so recording the catalog tag refuses the binary
+/// this function just installed.
+fn finish_versioned_upgrade(catalog_version: &str, binary: Option<PathBuf>) -> UpgradeOutcome {
+    let version = probed_installed_version(binary.as_deref(), "installed release");
+    eprintln!("\x1b[32m✔\x1b[0m Successfully upgraded to v{catalog_version}!");
+    UpgradeOutcome::Installed { binary, version }
 }
 
 /// Atomically replaces `target` with the contents of `source`: the bytes are
@@ -971,6 +980,25 @@ fn installed_binary_version_within(
     parse_version_output(&text).ok_or(VersionProbeError::Unrecognized(text))
 }
 
+/// The version `binary` reports for itself, or `None` when there is nothing
+/// to ask or it does not answer.
+///
+/// A missing answer is not filled in from a release tag. The tag omits the
+/// commit the binary and the daemon both name, and readiness treats that
+/// omission as a different identity.
+fn probed_installed_version(binary: Option<&Path>, owner: &str) -> Option<String> {
+    match installed_binary_version(binary?) {
+        Ok(version) => Some(version),
+        Err(reason) => {
+            eprintln!(
+                "  \x1b[33mwarning:\x1b[0m could not read the {owner} binary's version \
+                 ({reason}); daemon restore will not invent an identity"
+            );
+            None
+        }
+    }
+}
+
 /// Whether a delegated manager upgrade was a no-op: the binary the manager
 /// links reports exactly the build version this process is running, which
 /// is the same file unless the manager installed something. `None`
@@ -1024,17 +1052,8 @@ fn run_delegated_upgrade(
             None
         }
     };
-    let installed_version = match binary.as_deref().map(installed_binary_version) {
-        Some(Ok(version)) => Some(version),
-        Some(Err(reason)) => {
-            eprintln!(
-                "  \x1b[33mwarning:\x1b[0m could not read the {label}-installed binary's version \
-                 ({reason}); assuming a new install so the refresh chain runs"
-            );
-            None
-        }
-        None => None,
-    };
+    let installed_version =
+        probed_installed_version(binary.as_deref(), &format!("{label}-installed"));
     if delegated_upgrade_was_noop(
         crate::product_runtime::PRODUCT_BUILD_VERSION,
         installed_version.as_deref(),
@@ -1234,7 +1253,8 @@ mod tests {
         use tracedecay_runtime_core::git::GitCommandError;
 
         use super::super::{
-            VersionProbeError, installed_binary_version, installed_binary_version_within,
+            UpgradeOutcome, VersionProbeError, finish_versioned_upgrade, installed_binary_version,
+            installed_binary_version_within,
         };
 
         fn script(dir: &Path, body: &str) -> PathBuf {
@@ -1367,6 +1387,47 @@ mod tests {
                 started.elapsed() < Duration::from_secs(5),
                 "a successful parent exit does not close an inherited pipe; the deadline must"
             );
+        }
+
+        /// The observed update failure: GitHub names the release `0.1.0-beta.47`
+        /// and the binary that release ships names
+        /// `0.1.0-beta.47+<sha>`. Readiness compares those strings exactly, so
+        /// the catalog tag must not be the version the outcome records.
+        #[test]
+        fn a_release_install_reports_the_binary_identity_not_the_catalog_tag() {
+            let dir = tempfile::tempdir().unwrap();
+            let sha = "84598a0b9c841b914565f46b20bb6c765706e8e5";
+            let identity = format!("0.1.0-beta.47+{sha}");
+            let binary = script(dir.path(), &format!("printf 'tracedecay {identity}\\n'"));
+            let catalog = "0.1.0-beta.47";
+
+            let outcome = finish_versioned_upgrade(catalog, Some(binary));
+
+            let UpgradeOutcome::Installed { version, .. } = outcome else {
+                panic!("a published release is an install, got {outcome:?}");
+            };
+            assert_eq!(version.as_deref(), Some(identity.as_str()));
+            assert_ne!(
+                version.as_deref(),
+                Some(catalog),
+                "the catalog tag is not the identity the daemon advertises"
+            );
+        }
+
+        /// A binary that cannot be asked must not be labeled with the release
+        /// tag. Restore then fails closed against the pre-upgrade identity
+        /// instead of waiting for a version the new daemon will never report.
+        #[test]
+        fn an_unreadable_release_binary_is_not_labeled_with_the_catalog_tag() {
+            let catalog = "0.1.0-beta.47";
+            let missing = PathBuf::from("/nonexistent/tracedecay-release");
+
+            let outcome = finish_versioned_upgrade(catalog, Some(missing));
+
+            let UpgradeOutcome::Installed { version, .. } = outcome else {
+                panic!("a published release is an install, got {outcome:?}");
+            };
+            assert_eq!(version, None);
         }
     }
 

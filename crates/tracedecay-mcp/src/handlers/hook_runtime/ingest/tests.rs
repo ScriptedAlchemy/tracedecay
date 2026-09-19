@@ -1,8 +1,98 @@
 use super::super::*;
 use crate::structured_hook_error_data;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionStatus};
 
 use super::*;
+
+fn status_for(account: &IngestCommitAccount) -> HostAdmissionStatus {
+    let verdict = ingest_commit_verdict(account);
+    complete_ingest_admission(
+        HostAdmissionOutcome::accepted_for_replay(),
+        verdict.authority_changed,
+        verdict.exact_duplicate,
+        false,
+    )
+    .status
+}
+
+/// A shared-queue residual is not this pass's commit. Nine projected rows
+/// left by a peer, or by another provider on the same scope queue, must stay
+/// `accepted_for_replay` when admission persisted nothing and cannot prove a
+/// duplicate.
+#[test]
+fn drain_residual_does_not_commit_an_admission_owned_pass() {
+    let status = status_for(&IngestCommitAccount {
+        admission_owns_commit: true,
+        observations_committed: 0,
+        route_exact_duplicate: false,
+        messages_upserted: 9,
+        snapshot_messages_upserted: 0,
+        claude_observations_committed: 0,
+        claude_cursor_advances: 0,
+        claude_observation_duplicates: 0,
+        claude_cursor_duplicates: 0,
+    });
+
+    assert_eq!(status, HostAdmissionStatus::AcceptedForReplay);
+}
+
+/// The pass persisted two observations and the drain found nothing. The
+/// commit still stands.
+#[test]
+fn admission_commit_stands_when_the_drain_is_empty() {
+    let status = status_for(&IngestCommitAccount {
+        admission_owns_commit: true,
+        observations_committed: 2,
+        route_exact_duplicate: false,
+        messages_upserted: 0,
+        snapshot_messages_upserted: 4,
+        claude_observations_committed: 1,
+        claude_cursor_advances: 1,
+        claude_observation_duplicates: 0,
+        claude_cursor_duplicates: 0,
+    });
+
+    assert_eq!(status, HostAdmissionStatus::Committed);
+}
+
+/// A peer already admitted the source. Residual projected rows must not
+/// rewrite that duplicate into a fresh commit.
+#[test]
+fn drain_residual_does_not_promote_an_exact_duplicate() {
+    let status = status_for(&IngestCommitAccount {
+        admission_owns_commit: true,
+        observations_committed: 0,
+        route_exact_duplicate: true,
+        messages_upserted: 3,
+        snapshot_messages_upserted: 0,
+        claude_observations_committed: 0,
+        claude_cursor_advances: 0,
+        claude_observation_duplicates: 0,
+        claude_cursor_duplicates: 0,
+    });
+
+    assert_eq!(status, HostAdmissionStatus::ExactDuplicate);
+}
+
+/// Hermes and the other routes that have no admission tally still commit
+/// from the messages they themselves upserted.
+#[test]
+fn message_counted_route_still_commits_from_its_own_upserts() {
+    let status = status_for(&IngestCommitAccount {
+        admission_owns_commit: false,
+        observations_committed: 0,
+        route_exact_duplicate: false,
+        messages_upserted: 1,
+        snapshot_messages_upserted: 0,
+        claude_observations_committed: 0,
+        claude_cursor_advances: 0,
+        claude_observation_duplicates: 0,
+        claude_cursor_duplicates: 0,
+    });
+
+    assert_eq!(status, HostAdmissionStatus::Committed);
+}
 
 #[test]
 fn cursor_compaction_response_matches_hook_contract() {

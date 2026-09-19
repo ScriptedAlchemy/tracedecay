@@ -125,6 +125,11 @@ pub(super) struct TranscriptCaptureOutcome {
     /// `messages_upserted` counts only the projections this pass drained
     /// itself, which a peer drainer can legitimately take first.
     pub(super) observations_committed: u64,
+    /// This route's admission tally is the commit. The projection drain is a
+    /// shared per-scope queue, so its residual must not enter the terminal
+    /// status. Routes that have no admission tally leave this false and keep
+    /// using their own message counts.
+    pub(super) admission_owns_commit: bool,
     /// The route committed nothing because its observations were already
     /// durable. Kept apart from `messages_upserted == 0`, which cannot tell an
     /// already-committed replay from a pass that captured nothing.
@@ -429,6 +434,7 @@ async fn capture_codex_project(
         source_deferred: admitted.deferred,
         observations_committed: admitted.observations_committed,
         exact_duplicate: admitted.exact_duplicate,
+        admission_owns_commit: true,
         ..TranscriptCaptureOutcome::default()
     })
 }
@@ -457,6 +463,7 @@ fn cursor_capture_outcome(
         source_deferred: stats.source_deferred,
         observations_committed: stats.observations_committed,
         exact_duplicate: stats.exact_duplicate,
+        admission_owns_commit: true,
         ..TranscriptCaptureOutcome::default()
     }
 }

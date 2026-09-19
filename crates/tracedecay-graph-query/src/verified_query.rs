@@ -18,7 +18,8 @@ use tracedecay_contracts::{
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{
-    CodeGenerationId, RelationEdgeKindV1, SanitizedCodeFileV1, SymbolOccurrenceId,
+    CanonicalRelationEdgeV1, CodeGenerationId, RelationEdgeKindV1, SanitizedCodeFileV1,
+    SymbolOccurrenceId,
 };
 use tracedecay_graph_db::GraphCancellation;
 
@@ -555,7 +556,7 @@ impl VerifiedGraphQuery {
         occurrences: &[SymbolOccurrenceId],
         kinds: &[RelationEdgeKindV1],
         max_relations: usize,
-    ) -> Result<Vec<CodeGraphSemanticEdgeV1>> {
+    ) -> Result<Vec<CanonicalRelationEdgeV1>> {
         self.refuse_if_bound_closed()?;
         self.reader
             .edges_among(
@@ -684,8 +685,8 @@ impl VerifiedGraphQuery {
                 max_relations,
             )?
             .into_iter()
-            .filter(|edge| test_markers.contains(&edge.edge.from_occurrence))
-            .filter_map(|edge| paths.get(&edge.edge.to_occurrence).cloned())
+            .filter(|edge| test_markers.contains(&edge.from_occurrence))
+            .filter_map(|edge| paths.get(&edge.to_occurrence).cloned())
             .filter(|path| logical_paths.is_none_or(|requested| requested.contains(path)))
             .collect())
     }

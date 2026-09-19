@@ -394,3 +394,44 @@ fn async_commit_drop_after_admission_preserves_committed_data() {
         );
     });
 }
+
+/// Two outstanding writer replies must not take the whole runtime down with
+/// them.
+///
+/// The synchronous storage ports wait for the writer actor from inside Tokio
+/// tasks. When that wait parks its worker, two concurrent waits on a
+/// two-worker runtime leave nothing to poll anything else, and every other
+/// request on that runtime runs out its deadline instead of being served.
+#[test]
+fn outstanding_writer_replies_leave_the_runtime_able_to_poll_other_tasks() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (reply, waiting) = mpsc::channel();
+    let (progress, observed) = mpsc::channel();
+    let mut senders = Vec::new();
+
+    for _ in 0..2 {
+        let (sender, response) = async_channel::bounded::<()>(1);
+        senders.push(sender);
+        let entering = reply.clone();
+        runtime.spawn(async move {
+            entering.send(()).unwrap();
+            let _ = recv_writer_reply(response);
+        });
+    }
+    for _ in 0..2 {
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+
+    runtime.spawn(async move { progress.send(()).unwrap() });
+
+    observed
+        .recv_timeout(Duration::from_secs(5))
+        .expect("a task must still be polled while two writer replies are outstanding");
+    for sender in senders {
+        let _ = sender.send_blocking(());
+    }
+}
