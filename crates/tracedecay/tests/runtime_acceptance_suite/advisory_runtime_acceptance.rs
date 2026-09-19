@@ -1115,9 +1115,18 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
             .expect("registered daemon stop response text"),
     )
     .expect("registered daemon stop payload");
-    assert_eq!(
-        stop_payload["status"], "committed",
-        "registered daemon stop ingest did not commit: {stop_response}"
+    // Same durable-terminal contract as the Cursor ingest above. The project
+    // catch-up can admit the rollout first; the hook then reports
+    // `exact_duplicate`. A drain residual on the shared projection queue must
+    // not be what flips that into `committed`, and `accepted_for_replay`
+    // still proves neither a commit nor a duplicate.
+    assert!(
+        matches!(
+            stop_payload["status"].as_str(),
+            Some("committed" | "exact_duplicate")
+        ),
+        "registered daemon stop ingest did not commit: {stop_response}\ndaemon log:\n{}",
+        std::fs::read_to_string(&daemon_log).expect("read isolated advisory daemon log"),
     );
 
     let advisory_args = json!({

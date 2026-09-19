@@ -509,6 +509,52 @@ async fn replayed_cursor_ingest_reports_an_exact_duplicate_not_a_bare_replay() {
     );
 }
 
+/// The shared projection queue's residual is not this pass. A deferred drain
+/// with leftover rows does not defer the pass, invent a duplicate, or hide
+/// the frames admission persisted.
+#[test]
+fn hook_admission_ignores_a_shared_drain_residual() {
+    let committed = account_hook_admission(
+        CursorTranscriptIngestStats {
+            messages_upserted: 9,
+            source_deferred: true,
+            exact_duplicate: true,
+            ..CursorTranscriptIngestStats::default()
+        },
+        2,
+        false,
+        false,
+        40,
+    );
+    assert_eq!(committed.observations_committed, 2);
+    assert_eq!(committed.bytes_consumed, 40);
+    assert_eq!(committed.messages_upserted, 9);
+    assert!(!committed.source_deferred);
+    assert!(!committed.exact_duplicate);
+
+    let replayed = account_hook_admission(
+        CursorTranscriptIngestStats {
+            messages_upserted: 4,
+            source_deferred: true,
+            exact_duplicate: false,
+            ..CursorTranscriptIngestStats::default()
+        },
+        0,
+        true,
+        false,
+        0,
+    );
+    assert_eq!(replayed.observations_committed, 0);
+    assert!(replayed.exact_duplicate);
+    assert!(!replayed.source_deferred);
+
+    let deferred =
+        account_hook_admission(CursorTranscriptIngestStats::default(), 0, false, true, 8);
+    assert!(deferred.source_deferred);
+    assert!(!deferred.exact_duplicate);
+    assert_eq!(deferred.observations_committed, 0);
+}
+
 /// The duplicate verdict is evidence, not a default: a source this pass has
 /// never opened carries no proof that anything was committed before.
 #[tokio::test]
