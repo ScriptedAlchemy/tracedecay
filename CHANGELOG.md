@@ -1710,6 +1710,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- *(admission)* `NotApplicable` is a terminal no-op. Replay no longer backs
+  off on that closed status, and the MCP hook-runtime boundary returns a
+  successful no-op instead of a JSON-RPC failure.
+
 - *(code-index)* the background worker consults the typed publication-authority
   park instead of a loop-local bool, so a park it has not yet observed still
   stops reconcile. Branch publication handles `NotApplicable` as a closed
