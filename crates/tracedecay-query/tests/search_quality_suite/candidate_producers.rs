@@ -1453,6 +1453,15 @@ fn v16_clone_payloads_are_content_addressed_and_postings_page() {
         .append_page(&pages[0], &control)
         .expect("append first clone page");
     drop(successor);
+    // A successor staged before occurrence indexes existed must still verify
+    // on resume. Dropping them here is that shipped shape.
+    rusqlite::Connection::open(&successor_path)
+        .expect("open successor before index backfill")
+        .execute_batch(
+            "DROP INDEX IF EXISTS clone_exact_postings_by_occurrence;
+             DROP INDEX IF EXISTS clone_fingerprint_postings_by_occurrence;",
+        )
+        .expect("drop occurrence indexes");
     let mut successor = CodeLexicalCloneSuccessorV1::open_or_create(
         &legacy_path,
         &successor_path,
@@ -1461,6 +1470,9 @@ fn v16_clone_payloads_are_content_addressed_and_postings_page() {
         CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
     )
     .expect("resume clone-only successor");
+    successor
+        .verify_resumed_page(&pages[0], &control)
+        .expect("resumed clone page verifies through the occurrence index");
     assert_eq!(
         successor
             .next_cursor()

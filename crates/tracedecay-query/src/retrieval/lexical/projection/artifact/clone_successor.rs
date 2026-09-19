@@ -80,6 +80,7 @@ impl CodeLexicalCloneSuccessorV1 {
                 "clone successor does not match its prior artifact or metadata".to_owned(),
             ));
         }
+        ensure_clone_occurrence_indexes(&connection)?;
         Ok(Self {
             connection,
             mutation_gate,
@@ -528,6 +529,25 @@ fn append_clone_fingerprints(
     Ok(())
 }
 
+/// `clone_exact_postings` and `clone_fingerprint_postings` are `WITHOUT ROWID`
+/// tables whose primary keys start at `class` and `language`. Resume
+/// verification looks up one `symbol_occurrence_id`, which that key cannot
+/// serve. These secondary indexes are the lookup; without them each body
+/// scans every posting already written and the successor never finishes.
+const CLONE_OCCURRENCE_INDEXES_SQL: &str = "\
+CREATE INDEX IF NOT EXISTS clone_exact_postings_by_occurrence \
+ON clone_exact_postings(symbol_occurrence_id);
+CREATE INDEX IF NOT EXISTS clone_fingerprint_postings_by_occurrence \
+ON clone_fingerprint_postings(symbol_occurrence_id);";
+
+fn ensure_clone_occurrence_indexes(
+    connection: &Connection,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    connection
+        .execute_batch(CLONE_OCCURRENCE_INDEXES_SQL)
+        .map_err(sqlite_error)
+}
+
 fn verify_copied_source_page(
     connection: &Connection,
     page: &VerifiedSealedLexicalPageV1,
@@ -633,7 +653,7 @@ fn verify_clone_page_rows(
             .collect::<Vec<_>>();
         let mut statement = connection
             .prepare(
-                "SELECT class, normalization_revision, digest, payload_digest FROM clone_exact_postings WHERE symbol_occurrence_id = ?1 ORDER BY class, normalization_revision, digest",
+                "SELECT class, normalization_revision, digest, payload_digest FROM clone_exact_postings INDEXED BY clone_exact_postings_by_occurrence WHERE symbol_occurrence_id = ?1 ORDER BY class, normalization_revision, digest",
             )
             .map_err(sqlite_error)?;
         let stored_postings = statement
@@ -681,7 +701,7 @@ fn verify_clone_fingerprint_page_rows(
     expected.sort();
     let mut statement = connection
         .prepare(
-            "SELECT language, class, normalization_revision, fingerprint, token_position, payload_digest, body_digest FROM clone_fingerprint_postings WHERE symbol_occurrence_id = ?1 ORDER BY language, class, normalization_revision, fingerprint, token_position",
+            "SELECT language, class, normalization_revision, fingerprint, token_position, payload_digest, body_digest FROM clone_fingerprint_postings INDEXED BY clone_fingerprint_postings_by_occurrence WHERE symbol_occurrence_id = ?1 ORDER BY language, class, normalization_revision, fingerprint, token_position",
         )
         .map_err(sqlite_error)?;
     let stored = statement
