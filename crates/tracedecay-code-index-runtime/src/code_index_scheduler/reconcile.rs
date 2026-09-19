@@ -2889,11 +2889,10 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// Bind a sealed snapshot to the source proof, renewing an expired clock
     /// when the sealed digests still match.
     ///
-    /// The admission window is 30s. A graph seal and the clone-fingerprint
-    /// backfill both outlive it under load. Treating that expiry as "this
-    /// generation is not the proof" cleared the serving witness and the next
-    /// pass resealed the same snapshot. A hook epoch or a digest mismatch
-    /// still refuses; only an unchanged sealed snapshot keeps its generation.
+    /// The admission window is 30s. This does not move the clone-successor
+    /// copy off the publication advance. It only stops an expired clock, or a
+    /// predecessor disk witness, from clearing the generation those digests
+    /// already name. A hook epoch or a digest mismatch still refuses.
     pub(super) fn currency_witness_for_sealed_snapshot(
         &self,
         generation_id: &CodeGenerationId,
