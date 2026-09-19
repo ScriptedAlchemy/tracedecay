@@ -3706,14 +3706,26 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
         .path()
         .canonicalize()
         .expect("canonical fixture root");
-    let (scheduler, progress_slot) = {
+    let (scheduler, progress_slot, scope) = {
         let mounted = registry.mounted.lock().await;
         let worktree = mounted.get(&canonical_root).expect("mounted worktree");
         (
             Arc::clone(&worktree.scheduler),
             Arc::clone(&worktree.build_progress),
+            tracedecay_contracts::ResolvedScope::new(
+                test_project_id(),
+                worktree.repository_id.clone(),
+                worktree.worktree_id.clone(),
+                None,
+            )
+            .expect("resolved scope"),
         )
     };
+    // `refresh_in_flight` also reads the pending-wake slot, and the settled
+    // owner's pass tail can still stamp `BusyFollowUp` into it after every
+    // settle check above (CI run 35412193695). With the admission held that
+    // tail is finite: empty the slot until it stays empty.
+    clear_pending_wake_until_quiet(&registry, &scope).await;
     let expected = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Some(progress) = progress_slot.read().expect("progress slot").snapshot() {
