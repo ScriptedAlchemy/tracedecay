@@ -11,7 +11,8 @@ use super::journey_test_support::git;
 use super::*;
 use crate::daemon::maintenance::project_store_maintenance_lease;
 use tracedecay_code_index_retention::code_index_generations::{
-    MAX_CODE_GENERATION_RETENTION_BATCH_V1, prepare_next_code_generation_retention_cancellable,
+    CodeGenerationRetentionErrorV1, MAX_CODE_GENERATION_RETENTION_BATCH_V1,
+    prepare_next_code_generation_retention_cancellable,
 };
 use tracedecay_maintenance::tick::{MaintenanceContinuation, MaintenanceTickOutcome};
 
@@ -114,13 +115,29 @@ async fn mounted_code_generation_retention_continues_capped_segment_reclamation(
             &canonical_root,
         );
     let graph_replay_pool_root = graph.db().database_path().with_extension("graph-replay");
-    let plan = prepare_next_code_generation_retention_cancellable(
-        &code_store_root,
-        &BTreeSet::new(),
-        &|| false,
-        Some(&graph_replay_pool_root),
-    )
-    .expect("code generation retention plan");
+    // The planner probes the generation-store lock and answers
+    // `GenerationStoreBusy` whenever a writer owns the store; production
+    // maintenance defers that tick and comes back. This route stays mounted,
+    // so the pass tail that publishes the edits above can still own the store
+    // here. Consume the same typed answer instead of reading it as a failure.
+    let plan = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match prepare_next_code_generation_retention_cancellable(
+                &code_store_root,
+                &BTreeSet::new(),
+                &|| false,
+                Some(&graph_replay_pool_root),
+            ) {
+                Ok(plan) => return plan,
+                Err(CodeGenerationRetentionErrorV1::GenerationStoreBusy) => {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                Err(error) => panic!("code generation retention plan: {error:?}"),
+            }
+        }
+    })
+    .await
+    .expect("code generation retention plan converges");
     let first_candidate = plan
         .collectable_generations
         .iter()
