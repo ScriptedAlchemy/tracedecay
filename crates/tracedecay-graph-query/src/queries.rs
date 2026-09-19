@@ -166,11 +166,20 @@ impl<'a> GraphQueryManager<'a> {
         Ok(CodeGraphSymbolPageV1 { symbols, has_more })
     }
 
+    /// Symbols no indexed relation reaches, narrowed to `path_prefix` before
+    /// `limit` truncates the page.
+    ///
+    /// `path_prefix` scopes what is reported, never what counts as a reference:
+    /// liveness is decided over every indexed symbol, so a call from outside
+    /// the prefix still keeps a symbol inside it alive. Filtering the census
+    /// before the relation scan would drop those incoming edges and report
+    /// live symbols as dead.
     #[hotpath::measure(label = "usecases.graph.dead_code", future = true)]
     pub async fn find_dead_code(
         &self,
         kinds: &[NodeKind],
         include_public: bool,
+        path_prefix: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
         let symbols = hotpath::measure_block!("usecases.graph.dead_code.symbols", {
@@ -241,7 +250,14 @@ impl<'a> GraphQueryManager<'a> {
                 let Some(metadata) = symbol.metadata.as_ref() else {
                     return false;
                 };
-                (kind_filter.is_empty() || kind_filter.contains(metadata.kind.as_str()))
+                symbol
+                    .binding
+                    .as_ref()
+                    .and_then(|binding| binding.logical_path.as_deref())
+                    .is_some_and(|path| {
+                        tracedecay_runtime_core::path_scope::path_matches_scope(path, path_prefix)
+                    })
+                    && (kind_filter.is_empty() || kind_filter.contains(metadata.kind.as_str()))
                     && (include_public || metadata.visibility != "public")
                     && metadata.simple_name != "main"
                     && !metadata.simple_name.starts_with("test")
@@ -972,5 +988,258 @@ mod path_scope_tests {
         assert_eq!(aggregates.len(), 1);
         assert_eq!(aggregates[0].function_methods, 1);
         assert_eq!(aggregates[0].dead_function_methods, 0);
+    }
+}
+
+#[cfg(test)]
+mod dead_code_scope_tests {
+    use std::collections::HashMap;
+    use std::fmt::Debug;
+    use std::sync::Arc;
+
+    use tracedecay_code_index::graph_projection::HermeticCodeGraphProjectionStore;
+    use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
+    use tracedecay_contracts::CancellationSignal;
+    use tracedecay_domain::{
+        BoundedSanitizedText, CanonicalRelationEdgeV1, CodeGenerationId, CodeSearchChunkAnchorV1,
+        CodeSearchChunkGrainV1, CodeSearchChunkV1, ComplexityAnalysisV1, EdgeAuthorityV1,
+        FileOccurrenceId, LanguageId, RelationEdgeKindV1, SanitizedCodeFileV1, SensitivityDecision,
+        SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan, SymbolOccurrenceId,
+    };
+    use tracedecay_graph_db::NeverCancelled;
+
+    use super::{CodeGraphInteractiveReader, GraphQueryManager, NodeKind};
+
+    /// One unreferenced function the census should consider dead.
+    struct FixtureSymbol {
+        path: &'static str,
+        name: &'static str,
+    }
+
+    fn fixture_id<T>(value: impl Into<String>) -> T
+    where
+        T: TryFrom<String>,
+        T::Error: Debug,
+    {
+        T::try_from(value.into()).expect("valid fixture identity")
+    }
+
+    fn fixture_digest<T>(ordinal: usize) -> T
+    where
+        T: TryFrom<String>,
+        T::Error: Debug,
+    {
+        fixture_id(format!("sha256:{ordinal:064x}"))
+    }
+
+    /// Publishes `symbols` into an in-memory generation, drawing a `Calls` edge
+    /// for every `(caller, callee)` index pair, and returns a reader over it.
+    fn fixture_reader(
+        symbols: &[FixtureSymbol],
+        calls: &[(usize, usize)],
+    ) -> CodeGraphInteractiveReader {
+        let generation: CodeGenerationId = fixture_id("generation.dead-code-scope.1");
+        let mut files = Vec::new();
+        let mut file_occurrences = HashMap::<&str, FileOccurrenceId>::new();
+        let mut records = Vec::new();
+        let mut chunks = Vec::new();
+        let mut occurrences = Vec::new();
+
+        for (ordinal, fixture) in symbols.iter().enumerate() {
+            let file = file_occurrences
+                .entry(fixture.path)
+                .or_insert_with(|| {
+                    let occurrence: FileOccurrenceId = fixture_id(format!("file.{}", files.len()));
+                    files.push(SanitizedCodeFileV1 {
+                        file_occurrence_id: occurrence.clone(),
+                        logical_path: fixture.path.to_owned(),
+                        language: Some(LanguageId::new("rust").expect("fixture language")),
+                        content_digest: fixture_digest(5_000 + files.len()),
+                        disposition: SnapshotFileDispositionV1::Present,
+                    });
+                    occurrence
+                })
+                .clone();
+            let occurrence: SymbolOccurrenceId = fixture_id(format!("symbol.{ordinal}"));
+            records.push(Arc::new(LineageSymbolRecordV1 {
+                occurrence: occurrence.clone(),
+                identity: fixture_digest(1_000 + ordinal),
+                qualified_name: fixture.name.to_owned(),
+                simple_name: fixture.name.to_owned(),
+                kind: "function".to_owned(),
+                visibility: "private".to_owned(),
+                branches: 0,
+                loops: 0,
+                max_nesting: 0,
+                complexity_analysis: ComplexityAnalysisV1::Complete,
+                line_span: 1,
+                start_line: u32::try_from(ordinal).expect("fixture line") + 1,
+                signature: None,
+                docstring: None,
+                is_async: false,
+                derives: Vec::new(),
+                skip_test_coverage: false,
+                file_identity: fixture_digest(3_000 + ordinal),
+                content_digest: fixture_digest(2_000 + ordinal),
+            }));
+            chunks.push(Arc::new(CodeSearchChunkV1 {
+                id: fixture_id(format!("chunk.{ordinal}")),
+                anchor: CodeSearchChunkAnchorV1 {
+                    generation_id: generation.clone(),
+                    file_occurrence_id: file,
+                    symbol_occurrence_id: Some(occurrence.clone()),
+                    parent_chunk_id: None,
+                    source_span: SourceSpan {
+                        start_byte: ordinal as u64,
+                        end_byte: ordinal as u64 + 1,
+                    },
+                    grain: CodeSearchChunkGrainV1::SymbolBody,
+                    ordinal: u32::try_from(ordinal).expect("fixture ordinal"),
+                },
+                content_digest: fixture_digest(4_000 + ordinal),
+                language_descriptor_revision: fixture_id("language.rust.fixture.v1"),
+                chunker_revision: fixture_id("chunker.fixture.v1"),
+                sanitizer_revision: fixture_id("sanitizer.fixture.v1"),
+                sensitivity: SensitivityDecision {
+                    level: SensitivityLevelV1::Public,
+                    policy_revision: fixture_id("policy.fixture.v1"),
+                },
+                exact_terms: Vec::new(),
+                subtokens: Vec::new(),
+                sanitized_text: BoundedSanitizedText::new("fixture symbol")
+                    .expect("bounded fixture text"),
+            }));
+            occurrences.push(occurrence);
+        }
+
+        let edges = calls
+            .iter()
+            .map(|(caller, callee)| CanonicalRelationEdgeV1 {
+                from_occurrence: occurrences[*caller].clone(),
+                to_occurrence: occurrences[*callee].clone(),
+                kind: RelationEdgeKindV1::Calls,
+                authority: EdgeAuthorityV1::SyntaxExact,
+                evidence_span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: 1,
+                },
+            })
+            .collect::<Vec<_>>();
+        let index = GenerationSymbolIndexV1::new(generation.clone(), records)
+            .expect("fixture symbol index");
+        let cancellation =
+            CancellationSignal::active("cancel.dead-code-scope").expect("fixture cancellation");
+        let store =
+            HermeticCodeGraphProjectionStore::memory(&cancellation).expect("fixture projection");
+        store
+            .publish_indexed_with_cancellation(
+                &generation,
+                &edges,
+                &chunks,
+                &files,
+                &index,
+                Arc::new(NeverCancelled),
+            )
+            .expect("publish fixture generation");
+        store
+            .verified_store(&generation)
+            .expect("open fixture generation")
+            .interactive_reader_with_cancellation(&generation, Arc::new(NeverCancelled))
+            .expect("fixture reader")
+    }
+
+    fn reported_paths(symbols: &[super::CodeGraphSymbolSummaryV1]) -> Vec<&str> {
+        symbols
+            .iter()
+            .map(|symbol| {
+                symbol
+                    .binding
+                    .as_ref()
+                    .and_then(|binding| binding.logical_path.as_deref())
+                    .expect("reported symbol carries its logical path")
+            })
+            .collect()
+    }
+
+    /// A fixture corpus that sorts ahead of product source used to consume the
+    /// whole page: the limit was applied to the unfiltered census, so no
+    /// `crates/` symbol was ever reported.
+    #[tokio::test]
+    async fn path_prefix_bounds_the_limit_to_the_filtered_symbols() {
+        let reader = fixture_reader(
+            &[
+                FixtureSymbol {
+                    path: "benchmark_data/index-bench/a.rs",
+                    name: "bench_alpha",
+                },
+                FixtureSymbol {
+                    path: "benchmark_data/index-bench/b.rs",
+                    name: "bench_beta",
+                },
+                FixtureSymbol {
+                    path: "crates/product/src/lib.rs",
+                    name: "orphan_gamma",
+                },
+            ],
+            &[],
+        );
+        let manager = GraphQueryManager::new(&reader, Arc::new(NeverCancelled));
+
+        let unscoped = manager
+            .find_dead_code(&[NodeKind::Function], false, None, Some(2))
+            .await
+            .expect("unscoped dead-code census");
+        assert_eq!(
+            reported_paths(&unscoped),
+            vec![
+                "benchmark_data/index-bench/a.rs",
+                "benchmark_data/index-bench/b.rs"
+            ],
+            "an unscoped census keeps reporting the whole graph in path order"
+        );
+
+        let scoped = manager
+            .find_dead_code(&[NodeKind::Function], false, Some("crates"), Some(2))
+            .await
+            .expect("scoped dead-code census");
+        assert_eq!(
+            reported_paths(&scoped),
+            vec!["crates/product/src/lib.rs"],
+            "the prefix must be applied before the limit truncates the page"
+        );
+    }
+
+    /// Scoping the report must not turn an outside caller into no caller.
+    #[tokio::test]
+    async fn path_prefix_does_not_discard_callers_outside_the_prefix() {
+        let reader = fixture_reader(
+            &[
+                FixtureSymbol {
+                    path: "benchmark_data/index-bench/a.rs",
+                    name: "bench_caller",
+                },
+                FixtureSymbol {
+                    path: "crates/product/src/lib.rs",
+                    name: "called_from_the_corpus",
+                },
+                FixtureSymbol {
+                    path: "crates/product/src/orphan.rs",
+                    name: "orphan_delta",
+                },
+            ],
+            &[(0, 1)],
+        );
+        let manager = GraphQueryManager::new(&reader, Arc::new(NeverCancelled));
+
+        let scoped = manager
+            .find_dead_code(&[NodeKind::Function], false, Some("crates"), Some(10))
+            .await
+            .expect("scoped dead-code census");
+
+        assert_eq!(
+            reported_paths(&scoped),
+            vec!["crates/product/src/orphan.rs"],
+            "a symbol called only from outside the prefix is still alive"
+        );
     }
 }
