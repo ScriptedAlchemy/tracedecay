@@ -67,11 +67,15 @@ rustflags = ["-C", "split-debuginfo=unpacked"]
 #
 # `test-ci` is the hosted acceptance selection: nextest's `ci` policy
 # (.config/nextest.toml: fail-fast off, one retry that still fails flaky
-# results, 8 threads, slow-timeout termination) and only the root fixture
-# feature. `.github/workflows/ci.yml` runs this exact alias, and its support
-# binaries/archives are built with `--profile perf` so they share artifacts
-# with it. Extra flags append: `cargo test-ci --locked -E 'binary(=x)'`.
-test-ci = "nextest run --workspace --profile ci --features tracedecay/test-helpers --cargo-profile perf"
+# results, 8 threads, slow-timeout termination), the root fixture feature and
+# `search-eval`, which is what compiles the evaluator acceptance suites (the
+# root crate's dependency on the evaluator is optional so the Linux transport
+# partition does not build the eval-only lexical projection; a `--workspace`
+# run resolves the evaluator anyway). `.github/workflows/ci.yml` runs this
+# exact alias, and its support binaries/archives are built with `--profile
+# perf` so they share artifacts with it. Extra flags append: `cargo test-ci
+# --locked -E 'binary(=x)'`.
+test-ci = "nextest run --workspace --profile ci --features tracedecay/test-helpers,tracedecay/search-eval --cargo-profile perf"
 # Deliberately broader than CI: every optional feature (test-transport
 # acceptance suites, hotpath, …) under the same cargo profile, with the
 # default nextest policy (no retries).

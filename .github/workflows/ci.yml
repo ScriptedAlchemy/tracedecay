@@ -741,7 +741,12 @@ jobs:
           shared-key: ci-test-full-windows-msvc-lld
           cache-on-failure: true
 
-      # Acceptance tests execute the ordinary evaluator binaries. Match the
+      # Acceptance tests execute the ordinary evaluator binaries, and
+      # `tracedecay/search-eval` is what compiles the suites that check the
+      # CLI receipt against the library. This lane builds `--workspace`, so
+      # the evaluator and `tracedecay-query/search-eval` already resolve here
+      # and the feature adds no compilation; the Linux partitions split the
+      # package selection, which is why it is per-partition there. Match the
       # archive's features and perf profile to reuse dependency artifacts;
       # nextest's archive.include carries the executables to every shard.
       # `--tests` keeps the binaries in the dev-dependency graph the archive
@@ -750,14 +755,14 @@ jobs:
       # lane).
       - name: Build workspace binaries and tests for the Windows test lane
         shell: pwsh
-        run: cargo build --workspace --bins --tests --locked --profile perf --features tracedecay/test-helpers
+        run: cargo build --workspace --bins --tests --locked --profile perf --features tracedecay/test-helpers,tracedecay/search-eval
 
       # `--workspace`, not `-p tracedecay-cli`: the package selection decides
       # feature unification, and the narrower one recompiles the code-index
       # and extraction crates in a second configuration (see the Linux lane).
       - name: Build Windows host-CLI test fixture
         shell: pwsh
-        run: cargo build --workspace --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers
+        run: cargo build --workspace --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers,tracedecay/search-eval
 
       # The controlled-workload Hotpath parity helpers are provisioned and
       # verified by the `hotpath-parity` job. Building them here would put a
@@ -768,7 +773,7 @@ jobs:
       # archive alias, so the arguments are spelled out here once.
       - name: Build nextest archive
         shell: pwsh
-        run: cargo nextest archive --workspace --profile ci --locked --features tracedecay/test-helpers --cargo-profile perf --timings --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
+        run: cargo nextest archive --workspace --profile ci --locked --features tracedecay/test-helpers,tracedecay/search-eval --cargo-profile perf --timings --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
 
       - name: Upload Windows archive build timings
         if: always()
