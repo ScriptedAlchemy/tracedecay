@@ -2691,6 +2691,13 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
 
     // Exercise the ordinary expiry path too. The existing seat keeps its exact
     // witness while the source-verification Noop renews the proof.
+    //
+    // A pass that re-proves the seat rebinds the admission clock, so an
+    // unfenced window between ageing the proof and reading it is a race with
+    // the worker, not an expiry test. Hold the single background admission
+    // across both: that parks the worker at its dequeue point and its
+    // acquisition already waited for any pass in flight to finish.
+    let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     {
         let mut state = source_freshness
             .state
@@ -2709,6 +2716,7 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
             .is_none(),
         "the expired proof declines before the worker renews it"
     );
+    drop(admission);
     assert_eq!(
         wait_until_serving_seat(&registry, fixture.path(), Duration::from_secs(10), || {
             registry.latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
