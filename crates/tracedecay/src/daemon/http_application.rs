@@ -400,7 +400,10 @@ async fn provision_remote_node(
     .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(_) => StatusCode::CONFLICT.into_response(),
+        Err(error) => {
+            tracing::error!(%error, "remote node provision failed");
+            (StatusCode::CONFLICT, error.to_string()).into_response()
+        }
     }
 }
 

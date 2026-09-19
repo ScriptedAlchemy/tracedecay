@@ -2690,7 +2690,11 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
     drain_clone_backfill(&registry, fixture.path()).await;
 
     // Exercise the ordinary expiry path too. The existing seat keeps its exact
-    // witness while the source-verification Noop renews the proof.
+    // witness while the source-verification Noop renews the proof. Hold the
+    // worker out until the decline is observed: a pass that wins the race
+    // renews the proof before this assert and the configured fail-on-flake
+    // gate treats that as a failure.
+    let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     {
         let mut state = source_freshness
             .state
@@ -2709,6 +2713,7 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
             .is_none(),
         "the expired proof declines before the worker renews it"
     );
+    drop(admission);
     assert_eq!(
         wait_until_serving_seat(&registry, fixture.path(), Duration::from_secs(10), || {
             registry.latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)

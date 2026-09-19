@@ -36,10 +36,18 @@ class SdkPublishWorkflowPolicyTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 self.checker.main()
 
-    def test_rejects_dropping_the_release_trigger(self) -> None:
+    def test_rejects_dropping_the_release_dispatch(self) -> None:
         mutated = self.workflow.replace(
-            "on:\n  release:\n    types: [published]\n  workflow_dispatch:",
-            "on:\n  workflow_dispatch:",
+            "on:\n"
+            "  workflow_dispatch:\n"
+            "    inputs:\n"
+            "      release_tag:\n"
+            '        description: "Stable release tag to build or recover"\n'
+            "        required: true\n"
+            "        type: string\n",
+            "on:\n"
+            "  push:\n"
+            "    branches: [master]\n",
             1,
         )
         self.assert_rejected(mutated)
