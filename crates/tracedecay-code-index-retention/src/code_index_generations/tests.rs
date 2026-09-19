@@ -997,6 +997,52 @@ fn text_artifact_retention_collects_staging_database_sidecars_with_their_owner()
     );
 }
 
+/// The inventory scans the artifact root without the generation-store lock, so
+/// the text-artifact builder can retire a `.staging` family between the
+/// directory listing and the stat. A vanished entry is already reclaimed and
+/// must leave the plan intact rather than failing it with a storage error.
+#[test]
+fn text_artifact_inventory_skips_an_entry_reclaimed_during_the_scan() {
+    let store = tempfile::TempDir::new().expect("artifact store");
+    let artifacts_root = code_text_artifacts_root(store.path());
+    std::fs::create_dir_all(&artifacts_root).expect("create artifact root");
+    let staging_family = ["a", "b", "c"]
+        .into_iter()
+        .map(|seed| {
+            let path = artifacts_root.join(format!(".text-artifact-{}.staging", seed.repeat(64)));
+            std::fs::write(&path, b"staging").expect("write staging evidence");
+            path
+        })
+        .collect::<Vec<_>>();
+
+    // The scan probes cancellation once on entry and once per directory entry,
+    // before it takes that entry. Retiring from the third probe on leaves the
+    // listing already taken and one entry already inspected, so every further
+    // name the scan holds names a file that is gone from disk.
+    let probes = std::sync::atomic::AtomicUsize::new(0);
+    let retire_during_the_scan = || {
+        if probes.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 2 {
+            for path in &staging_family {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        false
+    };
+
+    let inventory = plan_collectable_text_artifacts_cancellable(
+        store.path(),
+        None,
+        GenerationDigestVerificationV1::Full,
+        &retire_during_the_scan,
+    )
+    .expect("an entry reclaimed mid-scan leaves the store plannable");
+    assert!(
+        inventory.candidates.len() < staging_family.len(),
+        "an entry that vanished before its stat is reclaimed, not planned: {:?}",
+        inventory.candidates
+    );
+}
+
 #[test]
 fn applied_retention_refuses_a_busy_generation_store_and_retries() {
     let (store, _) = fixture_store(2);
