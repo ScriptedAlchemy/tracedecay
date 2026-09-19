@@ -1260,38 +1260,98 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "durable code-generation index exceeds its retention bounds",
             ));
         }
-        *self
+        let mut memo = self
             .pointer_memo
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(PublicationPointerMemoV1 {
-            mtime,
-            size,
-            digest,
-            pointer: pointer.clone(),
-        });
+            .unwrap_or_else(PoisonError::into_inner);
+        // Install only when the file is still the bytes just parsed. A rename
+        // that landed during validation owns the memo.
+        if std::fs::read(&self.active_path).ok().as_deref() == Some(bytes.as_slice()) {
+            *memo = Some(PublicationPointerMemoV1 {
+                mtime,
+                size,
+                digest,
+                pointer: pointer.clone(),
+            });
+        }
         Ok(Some(pointer))
     }
 
     fn remember_publication_pointer(&self, pointer: &DurablePublicationPointerV1, bytes: &[u8]) {
-        let metadata = match std::fs::metadata(&self.active_path) {
-            Ok(metadata) => metadata,
-            Err(_) => {
-                *self
-                    .pointer_memo
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner) = None;
-                return;
-            }
-        };
-        *self
+        let mut memo = self
             .pointer_memo
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(PublicationPointerMemoV1 {
-            mtime: metadata.modified().ok(),
-            size: metadata.len(),
-            digest: Self::state_digest(bytes),
-            pointer: pointer.clone(),
-        });
+            .unwrap_or_else(PoisonError::into_inner);
+        // The memo and the file it names are one critical section. A publisher
+        // that observed older bytes must not install them over a newer file.
+        match std::fs::read(&self.active_path) {
+            Ok(current) if current == bytes => {
+                let metadata = std::fs::metadata(&self.active_path).ok();
+                *memo = Some(PublicationPointerMemoV1 {
+                    mtime: metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.modified().ok()),
+                    size: metadata.map_or(0, |metadata| metadata.len()),
+                    digest: Self::state_digest(bytes),
+                    pointer: pointer.clone(),
+                });
+            }
+            Ok(_) => {}
+            Err(_) => *memo = None,
+        }
+    }
+
+    /// Replace the active pointer only when it is still the exact bytes this
+    /// publication observed under the store lock.
+    ///
+    /// `rename(2)` replaces whatever occupies the path, including a truncated
+    /// or rewritten pointer. The observation is the compare-and-swap token:
+    /// a mismatch is a refusal, not a rewrite. `lock` is the witness that
+    /// this critical section is the exclusive owner of the store.
+    pub(super) fn commit_observed_pointer(
+        &self,
+        _lock: &CodeGenerationStoreLockV1,
+        observed: Option<&[u8]>,
+        pointer: &DurablePublicationPointerV1,
+        bytes: &[u8],
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        // Refuse a directory (or any non-file) before the read and the
+        // `rename(2)`. Reading one returns EISDIR, which is not a
+        // publication-family fault.
+        self.require_regular_pointer_slot()?;
+        let current = match std::fs::read(&self.active_path) {
+            Ok(current) => Some(current),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(Self::unavailable(error)),
+        };
+        if current.as_deref() != observed {
+            return Err(match current {
+                Some(current)
+                    if serde_json::from_slice::<DurablePublicationPointerV1>(&current).is_err() =>
+                {
+                    Self::corruption("active code-generation pointer is corrupt")
+                }
+                _ => CodeIndexPublicationStoreErrorV1::CompareAndSwap,
+            });
+        }
+        let temporary = self
+            .active_path
+            .with_extension(format!("json.{}.tmp", std::process::id()));
+        if temporary.exists() {
+            std::fs::remove_file(&temporary).map_err(Self::unavailable)?;
+        }
+        Self::write_durable(&temporary, bytes)?;
+        if let Err(error) = std::fs::rename(&temporary, &self.active_path) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(Self::map_pointer_io(error));
+        }
+        Self::sync_directory(
+            self.active_path
+                .parent()
+                .ok_or_else(|| Self::unavailable("active pointer has no parent directory"))?,
+        )?;
+        self.remember_publication_pointer(pointer, bytes);
+        Ok(())
     }
 
     pub(super) fn read_retained_partitioned_segment(
@@ -2204,6 +2264,15 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         } else {
             self.read_publication_pointer()?
         };
+        // The bytes behind `prior_pointer`, captured under the store lock.
+        // The commit below refuses to rename unless the file is still these
+        // exact bytes, so a pointer that changed after this observation is
+        // not overwritten.
+        let prior_bytes = if prior_pointer.is_some() {
+            Some(std::fs::read(&self.active_path).map_err(Self::unavailable)?)
+        } else {
+            None
+        };
         if undecoded_expectation.is_none()
             && prior_pointer
                 .as_ref()
@@ -2581,25 +2650,8 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         } else {
             None
         };
-        let temporary = self
-            .active_path
-            .with_extension(format!("json.{}.tmp", std::process::id()));
-        if temporary.exists() {
-            std::fs::remove_file(&temporary).map_err(Self::unavailable)?;
-        }
         hotpath::measure_block!("code_index.generation.publish.pointer_commit", {
-            // Refuse a directory (or any non-file) before `rename(2)`. Replacing
-            // one returns EISDIR, which is not a publication-family fault.
-            self.require_regular_pointer_slot()?;
-            Self::write_durable(&temporary, &bytes)?;
-            std::fs::rename(&temporary, &self.active_path).map_err(Self::map_pointer_io)?;
-            Self::sync_directory(
-                self.active_path
-                    .parent()
-                    .ok_or_else(|| Self::unavailable("active pointer has no parent directory"))?,
-            )?;
-            self.remember_publication_pointer(&pointer, &bytes);
-            Ok::<(), CodeIndexPublicationStoreErrorV1>(())
+            self.commit_observed_pointer(&_store_lock, prior_bytes.as_deref(), &pointer, &bytes)
         })?;
         drop(source_fence);
         let mut state = self.cache.lock_state()?;

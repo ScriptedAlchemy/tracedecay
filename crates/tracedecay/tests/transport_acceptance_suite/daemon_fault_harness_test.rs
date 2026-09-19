@@ -358,7 +358,7 @@ else:
         .process_group(0);
     let child = command.spawn().expect("python listener should start");
     let mut owner = common::TestChildProcess::new(child);
-    owner.own_unix_endpoint(socket_path.clone());
+    owner.release_socket_on_stop(socket_path.clone());
 
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {

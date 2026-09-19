@@ -17,6 +17,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
+#[cfg(unix)]
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -657,9 +659,14 @@ pub fn http_agent_with_timeout(timeout: Duration) -> ureq::Agent {
 /// panic while the child is still running, `Drop` force-stops and reaps it.
 pub struct TestChildProcess {
     child: Child,
-    /// Unix socket this child bound. Retired once the child is reaped so a
-    /// descriptor a subprocess inherited cannot keep the path connectable.
-    owned_unix_endpoint: Option<PathBuf>,
+    /// Whether this child has been waited on. A reaped pid belongs to the
+    /// kernel again, so it must never be used to address a process group.
+    reaped: bool,
+    /// Path of a Unix socket this child published. Released after the process
+    /// group is reaped so a descendant that still holds the listen descriptor
+    /// cannot keep the path accepting.
+    #[cfg(unix)]
+    release_socket: Option<PathBuf>,
 }
 
 /// Daemon-specific name retained for test fixtures that keep a daemon alive.
@@ -669,36 +676,48 @@ impl TestChildProcess {
     pub fn new(child: Child) -> Self {
         Self {
             child,
-            owned_unix_endpoint: None,
+            reaped: false,
+            #[cfg(unix)]
+            release_socket: None,
         }
     }
 
-    /// Record the Unix socket this child bound.
+    /// Unlink the socket this child published once it has been reaped.
     ///
-    /// `SIGKILL` skips the daemon's own endpoint cleanup (`drop(listener)` then
-    /// unlink). A subprocess that inherited the listen descriptor across `fork`
-    /// still accepts on that path after the owner is reaped, which is a leaked
-    /// descriptor, not a live daemon. Retiring the path with the owner is what
-    /// the graceful shutdown already does, and what a forced stop must do too.
+    /// `process_group(0)` makes the child a group leader. Stopping only that
+    /// pid leaves descendants that still hold the listen socket. Group-kill
+    /// closes those descriptors; unlinking the path is what makes a later
+    /// `connect` fail even if the kernel has not finished the last close.
+    ///
+    /// Recording claims the path: a restart journey reassigns its handle
+    /// (`daemon = spawn(..)`), so the successor is already publishing when
+    /// the predecessor is dropped, and only the current publisher may unlink.
+    /// File identity is not enough for that - the successor's socket routinely
+    /// lands on the inode the predecessor's shutdown just freed.
     #[cfg(unix)]
-    pub fn own_unix_endpoint(&mut self, path: PathBuf) {
-        self.owned_unix_endpoint = Some(path);
+    pub fn release_socket_on_stop(&mut self, path: PathBuf) {
+        claim_published_socket(&path, self.child.id());
+        self.release_socket = Some(path);
     }
 
-    /// Unlink the recorded endpoint, but only after a stop this call forced.
-    ///
-    /// A child that exited on its own already ran its own endpoint cleanup, so
-    /// the path is either gone or has since been rebound by a replacement. The
-    /// restart journeys reassign the guard (`daemon = spawn_...`), which drops
-    /// the predecessor *after* the successor has bound the same path; unlinking
-    /// there would retire a live daemon's socket.
-    fn retire_owned_unix_endpoint(&mut self, forced: bool) {
-        let path = self.owned_unix_endpoint.take();
-        if !forced {
+    #[cfg(unix)]
+    fn release_recorded_socket(&mut self) {
+        let Some(path) = self.release_socket.take() else {
+            return;
+        };
+        if !release_published_socket_claim(&path, self.child.id()) {
+            // A successor publishes here now; its socket is not ours to unlink.
             return;
         }
-        if let Some(path) = path {
-            let _ = std::fs::remove_file(path);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                panic!(
+                    "failed to release daemon socket '{}': {error}",
+                    path.display()
+                )
+            }
         }
     }
 
@@ -711,7 +730,9 @@ impl TestChildProcess {
     }
 
     pub fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
-        self.child.try_wait()
+        let status = self.child.try_wait()?;
+        self.reaped |= status.is_some();
+        Ok(status)
     }
 
     pub fn wait_for_exit(&mut self, timeout: Duration) -> std::io::Result<Option<ExitStatus>> {
@@ -787,13 +808,15 @@ impl TestChildProcess {
     /// Force-stops the daemon and reaps its process before returning.
     ///
     /// `Child::kill` maps to `SIGKILL` on Unix and the platform termination
-    /// primitive elsewhere, keeping fault-injection tests portable. The owned
-    /// Unix endpoint, when recorded, is unlinked only after that reap.
+    /// primitive elsewhere, keeping fault-injection tests portable. On Unix
+    /// the child's process group is signaled first, then the published socket
+    /// path is unlinked.
     pub fn kill_and_wait(&mut self) -> std::io::Result<ExitStatus> {
-        let forced = self.is_running();
-        let status = terminate_and_reap(&mut self.child)?;
-        self.retire_owned_unix_endpoint(forced);
-        Ok(status)
+        let status = terminate_and_reap(&mut self.child, !self.reaped);
+        self.reaped = true;
+        #[cfg(unix)]
+        self.release_recorded_socket();
+        status
     }
 
     fn drain_stderr(&mut self) {
@@ -817,30 +840,38 @@ impl TestChildProcess {
 
 impl Drop for TestChildProcess {
     fn drop(&mut self) {
-        let forced = self.is_running();
-        if terminate_and_reap(&mut self.child).is_ok() {
-            self.retire_owned_unix_endpoint(forced);
-        }
+        let _ = terminate_and_reap(&mut self.child, !self.reaped);
+        self.reaped = true;
+        #[cfg(unix)]
+        self.release_recorded_socket();
     }
 }
 
-/// Stop the child and the process group it leads.
+/// Stop a child that was detached with `process_group(0)`.
 ///
-/// Test daemons are started with `process_group(0)`, so the spawned pid is the
-/// group leader and is outside the test's group. `Child::kill` signals only
-/// that pid. A child still between `fork` and `exec` inherits the listen
-/// descriptor and stays in the leader's group, so the path keeps accepting
-/// after the leader is reaped. Signal that group first, while the pid is still
-/// the live leader, then reap the leader. Do not signal after `try_wait` has
-/// reaped: the pid can be recycled. A child that left the group (its own
-/// `process_group(0)`) is not this signal's target; unlinking the owned socket
-/// retires the path those descriptors were bound to.
-fn terminate_and_reap(child: &mut Child) -> std::io::Result<ExitStatus> {
-    let pid = child.id();
+/// The child is the leader of its own group. `SIGKILL` of that pid alone
+/// leaves descendants in the group. Those descendants keep any descriptor they
+/// inherited, including a listen socket, so the path stays connectable after
+/// `wait` returns. Signaling the group first closes those descriptors; the
+/// leader kill still covers a child whose `setpgid` has not run yet.
+///
+/// `signal_group` must be false once this child has been waited on: a reaped
+/// pid is the kernel's to reissue, so negating it could address a process
+/// group this harness never created.
+fn terminate_and_reap(child: &mut Child, signal_group: bool) -> std::io::Result<ExitStatus> {
+    // Signal the group before reaping. A leader that has already exited still
+    // names the group while it is an unreaped zombie; returning on `try_wait`
+    // first would leave descendants holding the listen socket.
+    #[cfg(unix)]
+    if signal_group {
+        signal_child_process_group(child.id());
+    }
+    #[cfg(not(unix))]
+    let _ = signal_group;
+
     if let Ok(Some(status)) = child.try_wait() {
         return Ok(status);
     }
-    signal_owned_process_group(pid);
 
     if let Err(kill_err) = child.kill() {
         if let Some(status) = child.try_wait()? {
@@ -852,22 +883,49 @@ fn terminate_and_reap(child: &mut Child) -> std::io::Result<ExitStatus> {
     child.wait()
 }
 
+/// The child pid currently publishing each recorded socket path.
 #[cfg(unix)]
-fn signal_owned_process_group(pid: u32) {
+static PUBLISHED_SOCKETS: Mutex<Vec<(PathBuf, u32)>> = Mutex::new(Vec::new());
+
+#[cfg(unix)]
+fn claim_published_socket(path: &Path, pid: u32) {
+    let mut claims = PUBLISHED_SOCKETS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    claims.retain(|(claimed, _)| claimed != path);
+    claims.push((path.to_path_buf(), pid));
+}
+
+/// True when `pid` is still the publisher of `path`, dropping the claim.
+#[cfg(unix)]
+fn release_published_socket_claim(path: &Path, pid: u32) -> bool {
+    let mut claims = PUBLISHED_SOCKETS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let Some(index) = claims
+        .iter()
+        .position(|(claimed, owner)| claimed == path && *owner == pid)
+    else {
+        return false;
+    };
+    claims.swap_remove(index);
+    true
+}
+
+#[cfg(unix)]
+fn signal_child_process_group(pid: u32) {
     let Ok(pid) = i32::try_from(pid) else {
         return;
     };
-    if pid <= 0 {
+    if pid == 0 {
         return;
     }
-    // Safety: `pid` is the still-live child returned by `Child::id` before
-    // `try_wait` reaps it, and `process_group(0)` made that pid the group id.
-    // A non-positive argument would signal this process's own group.
+    // SAFETY: `pid` is the spawned child's id. Negating it addresses the
+    // process group `process_group(0)` created with that pid as leader.
+    // `ESRCH` is ignored: the child may not be a group leader, and the pid
+    // kill in `terminate_and_reap` still stops it.
     let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
 }
-
-#[cfg(not(unix))]
-fn signal_owned_process_group(_pid: u32) {}
 
 /// Detach a test child from the test process group.
 ///
@@ -1182,9 +1240,9 @@ fn spawn_tracedecay_daemon_process(
             })
             .is_some_and(|address| TcpStream::connect(address).is_ok())
     };
-    // A reaped predecessor has already unlinked its socket. A path that still
-    // accepts is a daemon this call did not stop, and replacing it would bind
-    // over a live owner.
+    // A predecessor stopped through this harness has already had its process
+    // group reaped and its socket path unlinked. A path that still accepts is
+    // a daemon this spawn does not own.
     #[cfg(unix)]
     assert!(
         std::os::unix::net::UnixStream::connect(&socket_path).is_err(),
@@ -1212,7 +1270,7 @@ fn spawn_tracedecay_daemon_process(
     let child = command.spawn().expect("tracedecay daemon should start");
     let mut daemon = DaemonProcess::new(child);
     #[cfg(unix)]
-    daemon.own_unix_endpoint(socket_path.clone());
+    daemon.release_socket_on_stop(socket_path.clone());
 
     let deadline = Instant::now() + Duration::from_secs(10);
     poll_until(
