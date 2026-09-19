@@ -267,18 +267,18 @@ fn qualified_field_scope(
     let all_owners = edges
         .iter()
         .filter(|edge| {
-            edge.edge.kind == RelationEdgeKindV1::Contains
-                && field_occurrences.contains(&edge.edge.to_occurrence)
+            edge.kind == RelationEdgeKindV1::Contains
+                && field_occurrences.contains(&edge.to_occurrence)
         })
-        .map(|edge| edge.edge.from_occurrence.clone())
+        .map(|edge| edge.from_occurrence.clone())
         .collect::<HashSet<_>>();
     let selected_owners = edges
         .iter()
         .filter(|edge| {
-            edge.edge.kind == RelationEdgeKindV1::Contains
-                && selected_fields.contains(&edge.edge.to_occurrence)
+            edge.kind == RelationEdgeKindV1::Contains
+                && selected_fields.contains(&edge.to_occurrence)
         })
-        .map(|edge| edge.edge.from_occurrence.clone())
+        .map(|edge| edge.from_occurrence.clone())
         .collect::<HashSet<_>>();
     if selected_owners.is_empty() {
         return Err(verified_analysis_unavailable(
@@ -289,13 +289,11 @@ fn qualified_field_scope(
 
     let mut enclosing_owners = HashMap::<SymbolOccurrenceId, HashSet<SymbolOccurrenceId>>::new();
     for edge in &edges {
-        if edge.edge.kind == RelationEdgeKindV1::TypeOf
-            && all_owners.contains(&edge.edge.to_occurrence)
-        {
+        if edge.kind == RelationEdgeKindV1::TypeOf && all_owners.contains(&edge.to_occurrence) {
             enclosing_owners
-                .entry(edge.edge.from_occurrence.clone())
+                .entry(edge.from_occurrence.clone())
                 .or_default()
-                .insert(edge.edge.to_occurrence.clone());
+                .insert(edge.to_occurrence.clone());
         }
     }
     let owner_names = symbols
@@ -322,11 +320,11 @@ fn qualified_field_scope(
         })
         .collect::<HashMap<_, _>>();
     for edge in &edges {
-        if edge.edge.kind == RelationEdgeKindV1::Contains
-            && let Some(owner) = impl_owners.get(&edge.edge.from_occurrence)
+        if edge.kind == RelationEdgeKindV1::Contains
+            && let Some(owner) = impl_owners.get(&edge.from_occurrence)
         {
             enclosing_owners
-                .entry(edge.edge.to_occurrence.clone())
+                .entry(edge.to_occurrence.clone())
                 .or_default()
                 .insert(owner.clone());
         }

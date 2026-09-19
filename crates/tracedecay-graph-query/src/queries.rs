@@ -8,7 +8,9 @@ use tracedecay_code_index::graph_projection::{
 };
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_domain::{CodeGenerationId, RelationEdgeKindV1, SymbolOccurrenceId};
+use tracedecay_domain::{
+    CanonicalRelationEdgeV1, CodeGenerationId, RelationEdgeKindV1, SymbolOccurrenceId,
+};
 use tracedecay_graph_db::GraphCancellation;
 
 use super::map_projection_error;
@@ -233,15 +235,15 @@ impl<'a> GraphQueryManager<'a> {
         let test_annotated = edges
             .iter()
             .filter(|edge| {
-                edge.edge.kind == RelationEdgeKindV1::Annotates
-                    && test_markers.contains(&edge.edge.from_occurrence)
+                edge.kind == RelationEdgeKindV1::Annotates
+                    && test_markers.contains(&edge.from_occurrence)
             })
-            .map(|edge| edge.edge.to_occurrence.clone())
+            .map(|edge| edge.to_occurrence.clone())
             .collect::<HashSet<_>>();
         let live_targets = edges
             .iter()
-            .filter(|edge| edge.edge.kind != RelationEdgeKindV1::Annotates)
-            .map(|edge| edge.edge.to_occurrence.clone())
+            .filter(|edge| edge.kind != RelationEdgeKindV1::Annotates)
+            .map(|edge| edge.to_occurrence.clone())
             .collect::<HashSet<_>>();
         let kind_filter = kinds.iter().map(NodeKind::as_str).collect::<HashSet<_>>();
         let mut dead = symbols
@@ -443,7 +445,10 @@ impl<'a> GraphQueryManager<'a> {
                     &symbols,
                     &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Uses],
                 )
-            })?;
+            })?
+            .into_iter()
+            .map(|edge| edge.edge)
+            .collect::<Vec<_>>();
             return Ok(file_adjacency(logical_paths, &symbols, &edges));
         }
         Ok(self
@@ -519,7 +524,8 @@ impl<'a> GraphQueryManager<'a> {
                 .filter(|path| path_is_within(path, prefix))
                 .collect::<HashSet<_>>()
         });
-        let (symbols, edges) = self.health_evidence(logical_paths.as_ref())?;
+        let (symbols, edges, external_test_markers) =
+            self.health_evidence(logical_paths.as_ref())?;
         let metadata = health_symbol_metadata(&symbols)?;
         let mut adjacency = files
             .into_iter()
@@ -527,13 +533,13 @@ impl<'a> GraphQueryManager<'a> {
             .collect::<HashMap<_, _>>();
         for edge in edges.iter().filter(|edge| {
             matches!(
-                edge.edge.kind,
+                edge.kind,
                 RelationEdgeKindV1::Calls | RelationEdgeKindV1::Uses
             )
         }) {
             let (Some((source, _)), Some((target, _))) = (
-                metadata.get(&edge.edge.from_occurrence),
-                metadata.get(&edge.edge.to_occurrence),
+                metadata.get(&edge.from_occurrence),
+                metadata.get(&edge.to_occurrence),
             ) else {
                 continue;
             };
@@ -554,7 +560,12 @@ impl<'a> GraphQueryManager<'a> {
         });
         Ok(VerifiedHealthInputsV1 {
             adjacency,
-            aggregates: fold_health_aggregates(metadata, &edges, path_prefix),
+            aggregates: fold_health_aggregates(
+                metadata,
+                &edges,
+                external_test_markers,
+                path_prefix,
+            ),
         })
     }
 
@@ -577,15 +588,29 @@ impl<'a> GraphQueryManager<'a> {
             ),
             None => None,
         };
-        let (symbols, edges) = self.health_evidence(logical_paths.as_ref())?;
+        let (symbols, edges, external_test_markers) =
+            self.health_evidence(logical_paths.as_ref())?;
         let metadata = health_symbol_metadata(&symbols)?;
-        Ok(fold_health_aggregates(metadata, &edges, path_prefix))
+        Ok(fold_health_aggregates(
+            metadata,
+            &edges,
+            external_test_markers,
+            path_prefix,
+        ))
     }
 
+    /// Health symbols, the induced edge set, and the test markers only the
+    /// scoped `callers` walk can see: its far endpoints legitimately sit
+    /// outside the scoped symbol census, so their marker metadata cannot be
+    /// recovered from `symbols` the way the whole-generation branch's can.
     fn health_evidence(
         &self,
         logical_paths: Option<&HashSet<String>>,
-    ) -> Result<(Vec<CodeGraphSymbolSummaryV1>, Vec<CodeGraphSemanticEdgeV1>)> {
+    ) -> Result<(
+        Vec<CodeGraphSymbolSummaryV1>,
+        Vec<CanonicalRelationEdgeV1>,
+        HashSet<SymbolOccurrenceId>,
+    )> {
         let symbols = hotpath::measure_block!("usecases.graph.health.symbols", {
             match logical_paths {
                 Some(paths) => self
@@ -606,14 +631,31 @@ impl<'a> GraphQueryManager<'a> {
             .iter()
             .map(|symbol| symbol.occurrence.clone())
             .collect::<Vec<_>>();
-        let edges = hotpath::measure_block!("usecases.graph.health.edges", {
-            if logical_paths.is_some() {
-                self.incoming_edges(&symbols, &HEALTH_EDGE_KINDS)
-            } else {
-                self.edges_among(&occurrences, &HEALTH_EDGE_KINDS)
-            }
-        })?;
-        Ok((symbols, edges))
+        let (edges, external_test_markers) =
+            hotpath::measure_block!("usecases.graph.health.edges", {
+                if logical_paths.is_some() {
+                    self.incoming_edges(&symbols, &HEALTH_EDGE_KINDS)
+                        .map(|edges| {
+                            let markers = edges
+                                .iter()
+                                .filter(|edge| {
+                                    edge.neighbor.occurrence == edge.edge.from_occurrence
+                                        && edge
+                                            .neighbor
+                                            .metadata
+                                            .as_ref()
+                                            .is_some_and(is_test_marker)
+                                })
+                                .map(|edge| edge.edge.from_occurrence.clone())
+                                .collect();
+                            (edges.into_iter().map(|edge| edge.edge).collect(), markers)
+                        })
+                } else {
+                    self.edges_among(&occurrences, &HEALTH_EDGE_KINDS)
+                        .map(|edges| (edges, HashSet::new()))
+                }
+            })?;
+        Ok((symbols, edges, external_test_markers))
     }
 
     fn incoming_edges(
@@ -643,7 +685,7 @@ impl<'a> GraphQueryManager<'a> {
         &self,
         occurrences: &[SymbolOccurrenceId],
         kinds: &[RelationEdgeKindV1],
-    ) -> Result<Vec<CodeGraphSemanticEdgeV1>> {
+    ) -> Result<Vec<CanonicalRelationEdgeV1>> {
         if occurrences.is_empty() {
             return Ok(Vec::new());
         }
@@ -661,7 +703,7 @@ impl<'a> GraphQueryManager<'a> {
 fn file_adjacency(
     logical_paths: HashSet<String>,
     symbols: &[CodeGraphSymbolSummaryV1],
-    edges: &[CodeGraphSemanticEdgeV1],
+    edges: &[CanonicalRelationEdgeV1],
 ) -> HashMap<String, HashSet<String>> {
     let paths = symbols
         .iter()
@@ -678,8 +720,8 @@ fn file_adjacency(
         .collect::<HashMap<_, _>>();
     for edge in edges {
         let (Some(source), Some(target)) = (
-            paths.get(&edge.edge.from_occurrence),
-            paths.get(&edge.edge.to_occurrence),
+            paths.get(&edge.from_occurrence),
+            paths.get(&edge.to_occurrence),
         ) else {
             continue;
         };
@@ -732,35 +774,28 @@ fn fold_health_aggregates(
             &tracedecay_code_index::lineage::LineageSymbolRecordV1,
         ),
     >,
-    edges: &[CodeGraphSemanticEdgeV1],
+    edges: &[CanonicalRelationEdgeV1],
+    external_test_markers: HashSet<SymbolOccurrenceId>,
     path_prefix: Option<&str>,
 ) -> Vec<VerifiedHealthFileAggregateV1> {
     let live_targets = edges
         .iter()
-        .filter(|edge| edge.edge.kind != RelationEdgeKindV1::Annotates)
-        .map(|edge| edge.edge.to_occurrence.clone())
+        .filter(|edge| edge.kind != RelationEdgeKindV1::Annotates)
+        .map(|edge| edge.to_occurrence.clone())
         .collect::<HashSet<_>>();
     let test_markers = metadata
         .iter()
         .filter(|(_, (_, record))| is_test_marker(record))
         .map(|(occurrence, _)| occurrence.clone())
-        .chain(
-            edges
-                .iter()
-                .filter(|edge| {
-                    edge.neighbor.occurrence == edge.edge.from_occurrence
-                        && edge.neighbor.metadata.as_ref().is_some_and(is_test_marker)
-                })
-                .map(|edge| edge.edge.from_occurrence.clone()),
-        )
+        .chain(external_test_markers)
         .collect::<HashSet<_>>();
     let test_annotated = edges
         .iter()
         .filter(|edge| {
-            edge.edge.kind == RelationEdgeKindV1::Annotates
-                && test_markers.contains(&edge.edge.from_occurrence)
+            edge.kind == RelationEdgeKindV1::Annotates
+                && test_markers.contains(&edge.from_occurrence)
         })
-        .map(|edge| edge.edge.to_occurrence.clone())
+        .map(|edge| edge.to_occurrence.clone())
         .collect::<HashSet<_>>();
     let mut by_file = HashMap::<String, VerifiedHealthFileAggregateV1>::new();
     for (occurrence, (file_path, record)) in metadata {
@@ -831,7 +866,7 @@ mod path_scope_tests {
     use std::fmt::Debug;
 
     use tracedecay_code_index::graph_projection::{
-        CodeGraphSemanticEdgeV1, CodeGraphSymbolBindingV1, CodeGraphSymbolSummaryV1,
+        CodeGraphSymbolBindingV1, CodeGraphSymbolSummaryV1,
     };
     use tracedecay_code_index::lineage::LineageSymbolRecordV1;
     use tracedecay_domain::{
@@ -891,19 +926,16 @@ mod path_scope_tests {
     fn edge(
         from: &CodeGraphSymbolSummaryV1,
         to: &CodeGraphSymbolSummaryV1,
-    ) -> CodeGraphSemanticEdgeV1 {
-        CodeGraphSemanticEdgeV1 {
-            edge: CanonicalRelationEdgeV1 {
-                from_occurrence: from.occurrence.clone(),
-                to_occurrence: to.occurrence.clone(),
-                kind: RelationEdgeKindV1::Calls,
-                authority: EdgeAuthorityV1::SyntaxExact,
-                evidence_span: SourceSpan {
-                    start_byte: 0,
-                    end_byte: 1,
-                },
+    ) -> CanonicalRelationEdgeV1 {
+        CanonicalRelationEdgeV1 {
+            from_occurrence: from.occurrence.clone(),
+            to_occurrence: to.occurrence.clone(),
+            kind: RelationEdgeKindV1::Calls,
+            authority: EdgeAuthorityV1::SyntaxExact,
+            evidence_span: SourceSpan {
+                start_byte: 0,
+                end_byte: 1,
             },
-            neighbor: from.clone(),
         }
     }
 
@@ -975,13 +1007,14 @@ mod path_scope_tests {
         let mut marker = symbol("symbol.test_marker", "src/outside.rs");
         marker.metadata = Some(marker_record);
         let mut annotation = edge(&marker, &inside);
-        annotation.edge.kind = RelationEdgeKindV1::Annotates;
+        annotation.kind = RelationEdgeKindV1::Annotates;
         let aggregates = fold_health_aggregates(
             HashMap::from([(
                 inside.occurrence.clone(),
                 ("src/scoped/inside.rs".to_owned(), &inside_record),
             )]),
             &[annotation],
+            HashSet::from([marker.occurrence.clone()]),
             Some("src/scoped"),
         );
 
