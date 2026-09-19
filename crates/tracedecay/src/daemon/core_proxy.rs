@@ -909,7 +909,7 @@ fn daemon_version_skew_warning_for_request(
     client_version: &str,
 ) -> Option<String> {
     let daemon_version = proxy_initialize_metadata_for_request(request, responses).daemon_version?;
-    if daemon_version == client_version {
+    if tracedecay_daemon_protocol::versions_name_same_build(&daemon_version, client_version) {
         return None;
     }
     let action = version_skew_action(&daemon_version, client_version);

@@ -59,6 +59,10 @@ struct SeamSpyAdmission {
     capture_calls: AtomicU64,
     capture_collision_dispositions: Mutex<Vec<ObservationIdentityCollisionDispositionV1>>,
     cover_past_advances: Mutex<Vec<ObservationCursorAdvance>>,
+    /// Commit the next capture through the shared store and then report the
+    /// cursor CAS as lost, the way a live hook ingest wins the race a sweep
+    /// was still trying to write.
+    peer_wins_next_cursor_cas: AtomicBool,
 }
 
 #[tokio::test]
@@ -651,6 +655,14 @@ impl SeamSpyAdmission {
         *self.scripted_capture_error.lock().unwrap() = Some(outcome);
     }
 
+    fn script_peer_wins_next_cursor_cas(&self) {
+        self.peer_wins_next_cursor_cas.store(true, Ordering::SeqCst);
+    }
+
+    fn peer_won_cursor_cas(&self) -> bool {
+        self.peer_wins_next_cursor_cas.swap(false, Ordering::SeqCst)
+    }
+
     fn script_batch_error(&self, outcome: HostAdmissionOutcome) {
         *self.scripted_batch_error.lock().unwrap() = Some(outcome);
     }
@@ -683,6 +695,12 @@ impl HostAdmission for SeamSpyAdmission {
                 .lock()
                 .unwrap()
                 .push(request.identity_collision_disposition());
+            if self.peer_won_cursor_cas() {
+                let _ = self.inner.capture_observation(request).await;
+                return Err(HostAdmissionOutcome::retained_backpressured(
+                    "cursor_conflict",
+                ));
+            }
             if let Some(outcome) = self.scripted_capture_error_once.lock().unwrap().take() {
                 return Err(outcome);
             }
@@ -703,6 +721,12 @@ impl HostAdmission for SeamSpyAdmission {
                     .iter()
                     .map(CaptureObservationRequest::identity_collision_disposition),
             );
+            if self.peer_won_cursor_cas() {
+                let _ = self.inner.capture_observations(requests).await;
+                return Err(HostAdmissionOutcome::retained_backpressured(
+                    "cursor_conflict",
+                ));
+            }
             if let Some(outcome) = self.scripted_batch_error.lock().unwrap().take() {
                 return Err(outcome);
             }
@@ -895,6 +919,68 @@ async fn retryable_admission_failures_keep_their_own_verdict() {
         "retryable races must not be laundered into a terminal record verdict: {error:?}"
     );
     assert!(spy.cover_past_advances().is_empty());
+    assert!(stored_cursor(&spy).await.is_none());
+}
+
+/// Live hook ingest and the catch-up sweep own the same `(source, scope)`
+/// cursor, so one of them loses the store's compare-and-swap. When the winner
+/// already covered the range the loser was writing, the loser's work is
+/// durable and the pass is a no-op, not a failed source: reporting it as a
+/// failure produced a "Cursor transcript catch-up failed" WARN roughly every
+/// ten seconds on a live daemon for work that was already committed.
+#[tokio::test]
+async fn cursor_cas_lost_to_a_peer_that_covered_the_range_is_a_no_op() {
+    let (_temp, path, len) = rollout_fixture();
+    let spy = SeamSpyAdmission::default();
+    spy.script_peer_wins_next_cursor_cas();
+
+    let stats =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect("a CAS the peer already covered must not fail the source pass");
+
+    assert_eq!(
+        stored_cursor(&spy).await.map(|cursor| cursor.position()),
+        Some(len),
+        "the pass must adopt the winner's frontier"
+    );
+    assert!(
+        !spy.inner.observations().is_empty(),
+        "the peer's commit is the durable record this pass stopped duplicating"
+    );
+    assert_eq!(
+        stats.frames_accepted, 0,
+        "the loser accepts nothing of its own"
+    );
+    assert!(
+        stats.frames_skipped > 0,
+        "the covered frames are counted as skipped, not lost"
+    );
+}
+
+/// The same lost CAS with nothing behind it stays a typed retryable block:
+/// adopting a frontier the winner never reached would skip real records.
+#[tokio::test]
+async fn cursor_cas_lost_without_peer_coverage_stays_a_typed_block() {
+    let (_temp, path, _len) = rollout_fixture();
+    let spy = SeamSpyAdmission::default();
+    spy.script_capture_error(HostAdmissionOutcome::retained_backpressured(
+        "cursor_conflict",
+    ));
+
+    let error =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect_err("an uncovered race must surface for another pass");
+
+    assert!(matches!(
+        error,
+        TranscriptIngestError::HostAdmission {
+            reason: "cursor_conflict",
+            retryable: true,
+            ..
+        }
+    ));
     assert!(stored_cursor(&spy).await.is_none());
 }
 
@@ -1175,6 +1261,11 @@ async fn content_refusals_cover_past_so_the_stream_converges() {
 
 #[tokio::test]
 async fn codex_session_meta_prefix_is_decoded_once_across_consumers() {
+    // The shared metadata cache retains entries up to
+    // `shared_jsonl_preparation_capacity()`, so this test only observes the
+    // shared decode once the preparation authority is installed: without it the
+    // capacity is the degraded fallback of one entry.
+    super::install_test_shared_jsonl_preparation_authority();
     let (_temp, path, _) = rollout_fixture();
     let first = SeamSpyAdmission::default();
     let second = SeamSpyAdmission::default();
