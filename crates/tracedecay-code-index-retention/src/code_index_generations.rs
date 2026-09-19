@@ -885,7 +885,10 @@ fn plan_code_generation_retention_with_verification_cancellable(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && active_pointer.is_none() => {
             None
         }
-        Err(error) => return Err(deferred_if_absent(error)),
+        // A pointer is only durable once its generation directory is, so a
+        // live pointer over an absent directory is loss, not a publisher
+        // race, and must stay loud.
+        Err(error) => return Err(storage(error)),
     };
     let mut generations = BTreeMap::new();
     let mut active_state_digest = None;
@@ -1745,7 +1748,7 @@ fn read_active_pointer(
     store_root: &Path,
 ) -> Result<DurablePublicationPointerV1, CodeGenerationRetentionErrorV1> {
     let path = store_root.join(ACTIVE_POINTER_FILE);
-    let bytes = std::fs::read(&path).map_err(deferred_if_absent)?;
+    let bytes = std::fs::read(&path).map_err(storage)?;
     serde_json::from_slice(&bytes).map_err(|error| {
         CodeGenerationRetentionErrorV1::UnsafeState(format!(
             "active pointer '{}' is corrupt: {error}",
