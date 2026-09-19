@@ -23,7 +23,7 @@ use super::unavailable_error;
 use super::{
     BrokerStream, DaemonAuthPreface, DaemonClientDeadline, DaemonHandshake, JsonRpcError,
     JsonRpcRequest, JsonRpcResponse, PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, Result,
-    TraceDecayError, error_is_project_open_retryable,
+    TraceDecayError, error_is_project_open_retryable, tool_call_transport_error_is_retryable,
 };
 
 /// Completed retryable problem results to observe before returning the typed
@@ -467,8 +467,15 @@ pub async fn call_tool_within(
     .await
 }
 
+/// Transport errors the one-shot client rides out on its own cadence: a
+/// project open that has not finished (warming, deferred discovery, a
+/// saturated open queue) and a retained project server retired mid-response
+/// during a composition upgrade. The daemon types every one of these
+/// `retryable: true`; a client that honours only the open subset reports the
+/// upgrade window as a hard failure, which is what the reset-recovery journey
+/// saw (`project_server_response_revoked` surfaced by `tracedecay tool`).
 fn is_project_open_retryable_error(error: &TraceDecayError) -> bool {
-    error_is_project_open_retryable(error)
+    error_is_project_open_retryable(error) || tool_call_transport_error_is_retryable(error)
 }
 
 /// Reconstruct a typed daemon tool refusal from the JSON-RPC error frame.
@@ -725,6 +732,18 @@ mod tests {
             ))
         );
         assert!(tool_call_transport_error_is_retryable(&revoked));
+        assert!(
+            super::is_project_open_retryable_error(&revoked),
+            "the one-shot client rides out a mid-response retirement like a warming open"
+        );
+        assert!(
+            super::project_open_retry_wait(
+                &Err(revoked),
+                tokio::time::Instant::now() + std::time::Duration::from_secs(5)
+            )
+            .is_some(),
+            "a revoked response is re-sent, not returned"
+        );
     }
 
     #[test]
