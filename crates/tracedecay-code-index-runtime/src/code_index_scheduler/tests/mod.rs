@@ -1288,6 +1288,42 @@ async fn quiesced_background_reconcile_admission(
     admission
 }
 
+/// Hold background admission only once no pass and no wake are outstanding.
+///
+/// [`quiesced_background_reconcile_admission`] can win the permit while text
+/// seating still owns `reconcile_in_progress`: that seating is a real refresh,
+/// and a freshness read then reports `Verifying` even though the scheduler
+/// mutex is free. A caller that must attribute `Verifying` to something other
+/// than an unrelated mutex holder has to sample after both that guard and any
+/// coalesced wake are clear, and keep the permit so a successor cannot start
+/// under the sample.
+async fn hold_settled_background_admission(
+    registry: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
+) -> tokio::sync::OwnedSemaphorePermit {
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    loop {
+        let admission = registry
+            .background_reconcile_admission()
+            .acquire_owned()
+            .await
+            .expect("hold background worker at its dequeue point");
+        wait_for_quiescent_owner_pass(registry, project_root).await;
+        let pending_wake = registry.pending_wake_micros_for_root(project_root).await;
+        let in_progress = registry.reconcile_in_progress_for_test(project_root).await;
+        if pending_wake == Some(0) && !in_progress {
+            return admission;
+        }
+        drop(admission);
+        assert!(
+            Instant::now() <= deadline,
+            "the owner for {} never settled before a freshness sample",
+            project_root.display()
+        );
+        wait_for_settled_owner(registry, project_root).await;
+    }
+}
+
 const CALLER_STAR: usize = 2_000;
 const CALLER_STAR_FILES: usize = 8;
 const CALLER_PAGE: u32 = 10;

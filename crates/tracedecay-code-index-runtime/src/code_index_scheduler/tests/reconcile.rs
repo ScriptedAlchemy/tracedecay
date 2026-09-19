@@ -25,16 +25,17 @@ use tracedecay_runtime_core::resident_memory::{
 use super::{
     ALPHA_LIB_V1, GitFixture, RETAINED_REVISION_0, SERVING_SEAT_FAILURE_CEILING,
     advance_pointer_to_unseated_successor, application_context, committed_capture_corpus_files,
-    core_search_request, drain_clone_backfill, git, git_stdout, mounted_core_query_worktree,
-    mounted_core_query_worktree_with_one_permit, published, query_authority, query_meta,
-    quiesced_background_reconcile_admission, replace_scheduler_chunker_revision,
-    replace_scheduler_policy_revision, rewrite_active_rust_extractor_revision,
-    rewrite_preserving_stat, scheduler, scheduler_with_policy, served_lexical_texts,
-    test_project_id, wait_for_dashboard_ready, wait_for_event_to_ready, wait_for_generation_change,
-    wait_for_initial_generation, wait_for_live_complete_generation,
-    wait_for_live_complete_generation_by_polling, wait_for_queryable_text_generation,
-    wait_for_queryable_text_generation_change, wait_for_queryable_text_generation_id,
-    wait_for_quiescent_owner_pass, wait_for_settled_owner, wait_until_serving_seat, write,
+    core_search_request, drain_clone_backfill, git, git_stdout, hold_settled_background_admission,
+    mounted_core_query_worktree, mounted_core_query_worktree_with_one_permit, published,
+    query_authority, query_meta, quiesced_background_reconcile_admission,
+    replace_scheduler_chunker_revision, replace_scheduler_policy_revision,
+    rewrite_active_rust_extractor_revision, rewrite_preserving_stat, scheduler,
+    scheduler_with_policy, served_lexical_texts, test_project_id, wait_for_dashboard_ready,
+    wait_for_event_to_ready, wait_for_generation_change, wait_for_initial_generation,
+    wait_for_live_complete_generation, wait_for_live_complete_generation_by_polling,
+    wait_for_queryable_text_generation, wait_for_queryable_text_generation_change,
+    wait_for_queryable_text_generation_id, wait_for_quiescent_owner_pass, wait_for_settled_owner,
+    wait_until_serving_seat, write,
 };
 use crate::{
     code_index::{
@@ -2899,13 +2900,37 @@ async fn ignored_dependency_waits_for_global_admission_before_publication_gate()
         )
     };
     let global_admission = registry.background_reconcile_admission();
+    // `drain_clone_backfill` drops the permit it held, and the worker may
+    // already be inside the pass that follows. That pass owns the only
+    // permit, so the assertion below is a race unless setup waits for the
+    // worker to release it — and drops this gate if the worker is blocked on
+    // it — before the request under test is admitted.
     registry.clear_pending_wake_for_scope(&scope).await;
-    let publication = publication_gate.lock().await;
-    assert_eq!(
-        global_admission.available_permits(),
-        1,
-        "test setup requires an idle global admission"
-    );
+    let idle_deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    let publication = loop {
+        while global_admission.available_permits() == 0
+            || registry
+                .reconcile_in_progress_for_test(fixture.path())
+                .await
+        {
+            assert!(
+                Instant::now() <= idle_deadline,
+                "background worker must release global admission before the publication gate is held"
+            );
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        registry.clear_pending_wake_for_scope(&scope).await;
+        let publication = publication_gate.lock().await;
+        let available = global_admission.available_permits();
+        if available == 1 {
+            break publication;
+        }
+        drop(publication);
+        assert!(
+            Instant::now() <= idle_deadline,
+            "test setup requires an idle global admission"
+        );
+    };
 
     let request_registry = registry.clone();
     let project_root = fixture.path().to_path_buf();
@@ -3681,6 +3706,10 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
         .expect("mount daemon-owned scheduler");
     wait_for_initial_generation(&registry, fixture.path()).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
+    // Clone backfill posts its own wakes after the seat. Drain them before
+    // the progress sample so a successor pass cannot look like this test's
+    // unrelated scheduler-mutex holder.
+    drain_clone_backfill(&registry, fixture.path()).await;
     let canonical_root = fixture
         .path()
         .canonicalize()
@@ -3703,6 +3732,10 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
     })
     .await
     .expect("background text build publishes progress");
+    // Text seating keeps `reconcile_in_progress` after it releases the
+    // scheduler mutex. Sampling in that window reports Verifying for a real
+    // pass, which is not this test's unrelated holder.
+    let _admission = hold_settled_background_admission(&registry, fixture.path()).await;
 
     let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
