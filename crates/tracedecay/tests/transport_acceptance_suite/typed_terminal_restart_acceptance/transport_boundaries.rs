@@ -105,6 +105,39 @@ fn http_mount(home: &Path) -> HttpMount {
     }
 }
 
+/// Posts to the daemon's HTTP mount, repeating while the daemon answers with a
+/// pre-admission problem whose own retry directive is `after_delay`.
+///
+/// The authority record can be published before a restarted daemon has opened
+/// the project, and the reply for that window is a typed, retryable
+/// `unavailable`, not a verdict on the project. The first observation a
+/// journey asserts on is the first one the daemon *admitted*, which is what a
+/// production client that honours the directive sees.
+fn post_application_once_admitted(
+    mount: &HttpMount,
+    project_id: &str,
+    route: &str,
+    body: &Value,
+) -> (u16, Value) {
+    let deadline = Instant::now() + AUTHORITY_TIMEOUT;
+    loop {
+        let (status, payload) = post_application(mount, project_id, route, body, None);
+        let problem = [&payload, &payload["value"], &payload["data"]]
+            .into_iter()
+            .map(|candidate| &candidate["problem"])
+            .find(|problem| problem.is_object())
+            .filter(|problem| problem["terminality"] == "pre_admission")
+            .filter(|problem| problem["retry"] == "after_delay");
+        match problem {
+            Some(problem) if Instant::now() < deadline => {
+                let millis = problem["retry_after_millis"].as_u64().unwrap_or(250);
+                std::thread::sleep(Duration::from_millis(millis));
+            }
+            _ => return (status, payload),
+        }
+    }
+}
+
 /// Opens the exact project through the same daemon-owned route as a production
 /// CLI client and returns the identity the daemon admitted. HTTP cannot infer
 /// this identity locally: its route accepts only the daemon's public ID.
@@ -617,12 +650,11 @@ fn reset_required_survives_http_mcp_and_rust_sdk_across_restart() {
 
     let storage_status_body = json!({ "include_details": false });
 
-    let (http_status, http_body) = post_application(
+    let (http_status, http_body) = post_application_once_admitted(
         &mount,
         &identity,
         STORAGE_STATUS_ROUTE,
         &storage_status_body,
-        None,
     );
     super::assert_reset_required(
         &problem_envelope(&http_body, "HTTP reset required"),
