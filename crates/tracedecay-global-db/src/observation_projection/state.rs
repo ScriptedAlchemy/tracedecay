@@ -796,6 +796,9 @@ pub(in super::super) struct ProjectionRawTwin {
     pub(in super::super) session_id: String,
     pub(in super::super) storage_kind: String,
     pub(in super::super) content: String,
+    pub(in super::super) content_hash: String,
+    pub(in super::super) snippet_text: String,
+    pub(in super::super) index_text: String,
 }
 
 pub(in super::super) struct ProjectionRowsBatch {
@@ -899,7 +902,8 @@ pub(in super::super) async fn read_projection_rows_batch(
         let mut rows = conn
             .query(
                 "SELECT raw.provider, raw.message_id, raw.session_id, raw.storage_kind,
-                        COALESCE(raw.content, '')
+                        COALESCE(raw.content, ''), raw.content_hash, raw.snippet_text,
+                        raw.index_text
                  FROM json_each(?1) AS requested
                  CROSS JOIN lcm_raw_messages AS raw
                  WHERE raw.provider = json_extract(requested.value, '$.provider')
@@ -930,6 +934,15 @@ pub(in super::super) async fn read_projection_rows_batch(
                         .map_err(|error| storage("decode projected raw twins", error))?,
                     content: row
                         .get(4)
+                        .map_err(|error| storage("decode projected raw twins", error))?,
+                    content_hash: row
+                        .get(5)
+                        .map_err(|error| storage("decode projected raw twins", error))?,
+                    snippet_text: row
+                        .get(6)
+                        .map_err(|error| storage("decode projected raw twins", error))?,
+                    index_text: row
+                        .get(7)
                         .map_err(|error| storage("decode projected raw twins", error))?,
                 },
             );

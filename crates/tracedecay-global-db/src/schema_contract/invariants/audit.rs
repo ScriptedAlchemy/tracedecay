@@ -932,9 +932,17 @@ fn owned_raw_twin_needs_rewrite(
     let Some(raw) = rows.raw_twin(&message.provider, &message.message_id) else {
         return Ok(true);
     };
+    // The derived columns are pure functions of the same sanitized body, so a
+    // twin whose content matches can still carry a hash that fails hydration
+    // with `PayloadIntegrityMismatch` or retrieval text the projector never
+    // wrote. Compare what a fresh write stores, not content alone.
     Ok(raw.storage_kind != "inline"
         || raw.session_id != message.session_id
-        || raw.content != expected)
+        || raw.content != expected
+        || raw.content_hash != tracedecay_lcm::retrieval_content::projected_content_hash(&expected)
+        || raw.snippet_text
+            != tracedecay_lcm::retrieval_content::derived_text_for_snippet(&expected)
+        || raw.index_text != tracedecay_lcm::retrieval_content::derived_text_for_index(&expected))
 }
 
 #[allow(clippy::too_many_arguments)]
