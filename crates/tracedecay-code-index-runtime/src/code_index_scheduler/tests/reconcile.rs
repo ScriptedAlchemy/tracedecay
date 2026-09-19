@@ -24,18 +24,18 @@ use tracedecay_runtime_core::resident_memory::{
 
 use super::{
     ALPHA_LIB_V1, GitFixture, RETAINED_REVISION_0, SERVING_SEAT_FAILURE_CEILING,
-    advance_pointer_to_unseated_successor, application_context, committed_capture_corpus_files,
-    core_search_request, drain_clone_backfill, git, git_stdout, mounted_core_query_worktree,
-    mounted_core_query_worktree_with_one_permit, published, query_authority, query_meta,
-    quiesced_background_reconcile_admission, replace_scheduler_chunker_revision,
-    replace_scheduler_policy_revision, rewrite_active_rust_extractor_revision,
-    rewrite_preserving_stat, scheduler, scheduler_with_policy, served_lexical_texts,
-    settled_owner_with_idle_admission, test_project_id, wait_for_dashboard_ready,
-    wait_for_event_to_ready, wait_for_generation_change, wait_for_initial_generation,
-    wait_for_live_complete_generation, wait_for_live_complete_generation_by_polling,
-    wait_for_queryable_text_generation, wait_for_queryable_text_generation_change,
-    wait_for_queryable_text_generation_id, wait_for_quiescent_owner_pass, wait_for_settled_owner,
-    wait_until_serving_seat, write,
+    advance_pointer_to_unseated_successor, application_context, clear_pending_wake_until_quiet,
+    committed_capture_corpus_files, core_search_request, drain_clone_backfill, git, git_stdout,
+    mounted_core_query_worktree, mounted_core_query_worktree_with_one_permit, published,
+    query_authority, query_meta, quiesced_background_reconcile_admission,
+    replace_scheduler_chunker_revision, replace_scheduler_policy_revision,
+    rewrite_active_rust_extractor_revision, rewrite_preserving_stat, scheduler,
+    scheduler_with_policy, served_lexical_texts, settled_owner_with_idle_admission,
+    test_project_id, wait_for_dashboard_ready, wait_for_event_to_ready, wait_for_generation_change,
+    wait_for_initial_generation, wait_for_live_complete_generation,
+    wait_for_live_complete_generation_by_polling, wait_for_queryable_text_generation,
+    wait_for_queryable_text_generation_change, wait_for_queryable_text_generation_id,
+    wait_for_quiescent_owner_pass, wait_for_settled_owner, wait_until_serving_seat, write,
 };
 use crate::{
     code_index::{
@@ -5221,11 +5221,13 @@ async fn concurrent_query_admissions_claim_one_pending_wake_before_worker_coales
     // about simultaneous query admissions, so finish that independent
     // production journey before establishing the empty-slot precondition.
     drain_clone_backfill(&registry, fixture.path()).await;
-    let admission = registry
-        .background_reconcile_admission()
-        .acquire_owned()
-        .await
-        .expect("background reconcile admission");
+    // Take the shared admission first, through the helper that also waits out
+    // an in-flight pass: from here no new pass can start, so the quiet window
+    // established below stays quiet. A raw `acquire_owned` returns the instant
+    // a running pass releases the admission mid-body, and that pass's tail then
+    // stamps `BusyFollowUp` over the empty slot this test set up, which makes
+    // every claim below decline.
+    let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     let scheduler = {
         let mounted = registry.mounted.lock().await;
         Arc::clone(
@@ -5235,8 +5237,11 @@ async fn concurrent_query_admissions_claim_one_pending_wake_before_worker_coales
                 .scheduler,
         )
     };
+    // The tail of the pass the admission was taken from also publishes text
+    // owners, so empty the wake slot and prove it stays empty before clearing
+    // the generations this test needs absent.
+    clear_pending_wake_until_quiet(&registry, &scope).await;
     registry.clear_serving_generation_for_scope(&scope).await;
-    registry.clear_pending_wake_for_scope(&scope).await;
     let held = scheduler
         .lock()
         .expect("hold the scheduler as a rebuild would");
@@ -5461,7 +5466,10 @@ async fn foreign_wake_keeps_pending_arrival_when_query_claim_is_released() {
     let store = TempDir::new().expect("store root");
     let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
     let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
-    registry.clear_pending_wake_for_scope(&scope).await;
+    // A `BusyFollowUp` stamp from the finishing pass's tail would make the
+    // request below decline before it ever reaches the claim gate, and
+    // `wait_for_query_claim` would then hang instead of failing.
+    clear_pending_wake_until_quiet(&registry, &scope).await;
     registry.install_query_claim_gate(&scope);
 
     let request = {
@@ -5511,7 +5519,9 @@ async fn foreign_wake_arriving_during_query_claim_drop_is_retained() {
     // reaches the claim gate under test; settle the backfill first.
     drain_clone_backfill(&registry, fixture.path()).await;
     let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
-    registry.clear_pending_wake_for_scope(&scope).await;
+    // Same hang: a tail's `BusyFollowUp` stamp declines the request before the
+    // claim gate this test waits on.
+    clear_pending_wake_until_quiet(&registry, &scope).await;
     registry.install_query_claim_gate(&scope);
     registry.install_pending_wake_drop_gate(&scope).await;
 

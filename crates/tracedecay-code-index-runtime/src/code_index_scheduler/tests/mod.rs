@@ -1334,6 +1334,37 @@ async fn settled_owner_with_idle_admission(
     }
 }
 
+/// Empty the coalesced pending-wake slot and prove the owner's pass tail is
+/// done disturbing it.
+///
+/// The caller must already hold the single background admission, so no further
+/// pass can start. One pass can still be finishing: the worker releases that
+/// admission halfway through its body and drops its `reconcile_pass` guard
+/// before the branches that call `note_worker_continuation`, so both
+/// `reconcile_in_progress` and the slot read quiet while the tail is still
+/// about to stamp `BusyFollowUp` into it. [`wait_for_settled_owner`] samples
+/// exactly those two, so it cannot see that tail. With the admission held the
+/// tail is finite and unrepeatable, so clearing until the slot survives a quiet
+/// window is the proof the settle cannot give.
+async fn clear_pending_wake_until_quiet(
+    registry: &CodeIndexSchedulerRegistryV1,
+    scope: &tracedecay_contracts::ResolvedScope,
+) {
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    loop {
+        registry.clear_pending_wake_for_scope(scope).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        if registry.pending_wake_micros_for_scope(scope).await == Some(0) {
+            return;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "the pending-wake slot for {:?} never stayed empty",
+            scope.worktree_id
+        );
+    }
+}
+
 const CALLER_STAR: usize = 2_000;
 const CALLER_STAR_FILES: usize = 8;
 const CALLER_PAGE: u32 = 10;
