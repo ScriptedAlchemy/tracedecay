@@ -30,7 +30,7 @@ use tracedecay_session_memory::memory::{
 };
 use tracedecay_store::{
     CursorAdvanceOutcome, FactReadControl, FactWriteControl, ObservationCoverageReason,
-    ObservationCursorAdvance, ObservationStore, ObservationStoreError, ProjectId,
+    ObservationCursorAdvance, ObservationStore, ProjectId,
     ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1,
     RetainedGraphStoreLeaseV1, StoreShardIdV1,
 };
@@ -1198,14 +1198,14 @@ async fn retained_runtime_ledger_replays_during_bounded_background_convergence()
         "retired",
         ObservationCoverageReason::BlankFrame,
     );
-    assert!(matches!(
+    assert_eq!(
         database
             .observation_store()
             .advance_source_cursor(conflicting_advance)
             .await
-            .expect_err("classify retained cursor collision while convergence is pending"),
-        ObservationStoreError::CursorAdvanceCollision
-    ));
+            .expect("a later reason does not unseat the owned frontier"),
+        CursorAdvanceOutcome::ExactDuplicate
+    );
 
     let fresh_advance =
         runtime_cursor_advance(&project_id, "fresh", ObservationCoverageReason::OutOfScope);
@@ -1258,7 +1258,7 @@ async fn retained_runtime_ledger_replays_during_bounded_background_convergence()
             .get::<i64>(0)
             .expect("decode committed cursor effect count"),
         2,
-        "the retained replay and collision must not create another cursor effect"
+        "the retained replay and the later reason must not create another cursor effect"
     );
     let mut receipts = snapshot
         .query(

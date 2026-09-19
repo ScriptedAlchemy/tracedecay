@@ -1485,8 +1485,16 @@ impl ObservationStore for GlobalDbObservationStore {
             advance.next_cursor().source(),
             advance.next_cursor().scope(),
         )?;
-        let existed_at_next = actual_cursor.as_ref() == Some(advance.next_cursor());
-        if !existed_at_next && actual_cursor.as_ref() != advance.expected_cursor() {
+        // One owner per frontier. A cursor that already reached `next` has
+        // recorded the range; a second reason must not become a permanent
+        // collision that both ingest owners then warn on forever.
+        if actual_cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.reached(advance.next_cursor()))
+        {
+            return Ok(CursorAdvanceOutcome::ExactDuplicate);
+        }
+        if actual_cursor.as_ref() != advance.expected_cursor() {
             return Err(ObservationStoreError::CursorConflict {
                 expected: Box::new(advance.expected_cursor().cloned()),
                 actual: Box::new(actual_cursor),
@@ -1498,6 +1506,7 @@ impl ObservationStore for GlobalDbObservationStore {
             "coverage": advance.coverage(),
         });
         let key = format!("cursor.{}", canonical_runtime_digest(&identity)?);
+        let next_cursor = advance.next_cursor().clone();
         let payload = RepositoryWritePayloadV1::ObservationCursorAdvance(Box::new(advance));
         let (command_bytes, command_digest) = canonical_json_bytes_and_sha256(
             &runtime_command_value(&payload)?,
@@ -1516,18 +1525,25 @@ impl ObservationStore for GlobalDbObservationStore {
         .await;
         match outcome? {
             RuntimeSubmitOutcomeV1::Committed { .. }
-            | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
-                if existed_at_next =>
-            {
-                Ok(CursorAdvanceOutcome::ExactDuplicate)
-            }
-            RuntimeSubmitOutcomeV1::Committed { .. }
             | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. } => {
                 Ok(CursorAdvanceOutcome::Committed)
             }
             RuntimeSubmitOutcomeV1::ExactReplay { .. } => Ok(CursorAdvanceOutcome::ExactDuplicate),
+            // The other owner committed this coverage key between the
+            // pre-check and the writer lookup. If the frontier moved, that
+            // owner already holds the range; the different command digest is
+            // not a durable collision.
             RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } => {
-                Err(ObservationStoreError::CursorAdvanceCollision)
+                let raced =
+                    read_runtime_source_cursor(runtime, next_cursor.source(), next_cursor.scope())?;
+                if raced
+                    .as_ref()
+                    .is_some_and(|cursor| cursor.reached(&next_cursor))
+                {
+                    Ok(CursorAdvanceOutcome::ExactDuplicate)
+                } else {
+                    Err(ObservationStoreError::CursorAdvanceCollision)
+                }
             }
             other => Err(runtime_storage_error(
                 "advance observation source cursor",
