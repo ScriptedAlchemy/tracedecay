@@ -44,28 +44,6 @@ fn value_has_semantic_error(value: &Value) -> bool {
         })
 }
 
-/// Successful MCP tool result for a closed `NotApplicable` admission.
-///
-/// The status already means the demand does not apply. Publishing it as a
-/// JSON-RPC error makes hosts retry a terminal no-op.
-fn hook_runtime_not_applicable_noop(error: &TraceDecayError) -> Option<Value> {
-    let status = error.hook_runtime_status()?;
-    if HostAdmissionStatus::from_wire(status) != Some(HostAdmissionStatus::NotApplicable) {
-        return None;
-    }
-    let (reason_code, _, _) = error.hook_runtime_context()?;
-    let body = json!({
-        "tool": "tracedecay_hook_runtime",
-        "status": status,
-        "reason_code": reason_code,
-        "retryable": false,
-    });
-    Some(json!({
-        "content": [{ "type": "text", "text": body.to_string() }],
-        "isError": false,
-    }))
-}
-
 /// Projects a hook-runtime error onto the structured JSON-RPC data object.
 ///
 /// The status is whatever the admission authority reported, carried through
@@ -190,11 +168,6 @@ pub fn tool_error_response(id: Value, tool_name: &str, error: &TraceDecayError) 
             ),
             Some(data),
         );
-    }
-    if tool_name == "tracedecay_hook_runtime"
-        && let Some(result) = hook_runtime_not_applicable_noop(error)
-    {
-        return JsonRpcResponse::success(id, result);
     }
     if tool_name == "tracedecay_hook_runtime"
         && let Some(data) = structured_hook_error_data(error)
@@ -369,7 +342,7 @@ pub fn serialize_response_line(resp: &JsonRpcResponse) -> String {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{Value, json};
+    use serde_json::json;
     use tracedecay_domain::errors::TraceDecayError;
 
     use super::tool_error_response;
@@ -393,54 +366,5 @@ mod tests {
             wire["error"]["data"]["code"],
             "application_surface_invalid_request"
         );
-    }
-
-    #[test]
-    fn not_applicable_hook_runtime_is_a_successful_noop_and_other_statuses_stay_errors() {
-        use tracedecay_sessions::admission::HostAdmissionStatus;
-
-        let closed = TraceDecayError::hook_runtime_with_status(
-            "code_index_not_applicable",
-            true,
-            "projectless Hermes receipt host admission failed",
-            HostAdmissionStatus::NotApplicable.as_wire(),
-        );
-        let wire = serde_json::to_value(tool_error_response(
-            json!(4),
-            "tracedecay_hook_runtime",
-            &closed,
-        ))
-        .expect("JSON-RPC wire response");
-
-        assert_eq!(wire["jsonrpc"], "2.0");
-        assert_eq!(wire["id"], 4);
-        assert!(wire.get("error").is_none());
-        assert_eq!(wire["result"]["isError"], false);
-        let text = wire["result"]["content"][0]["text"]
-            .as_str()
-            .expect("tool text");
-        let body: Value = serde_json::from_str(text).expect("noop body");
-        assert_eq!(body["tool"], "tracedecay_hook_runtime");
-        assert_eq!(body["status"], "not_applicable");
-        assert_eq!(body["reason_code"], "code_index_not_applicable");
-        assert_eq!(body["retryable"], false);
-        assert!(body.get("error").is_none());
-        assert!(!text.contains("failed"));
-
-        let unavailable = TraceDecayError::hook_runtime_with_status(
-            "authority_unavailable",
-            true,
-            "host admission authority is unavailable",
-            HostAdmissionStatus::Unavailable.as_wire(),
-        );
-        let failure = serde_json::to_value(tool_error_response(
-            json!(5),
-            "tracedecay_hook_runtime",
-            &unavailable,
-        ))
-        .expect("JSON-RPC wire response");
-        assert!(failure.get("result").is_none());
-        assert_eq!(failure["error"]["code"], -32603);
-        assert_eq!(failure["error"]["data"]["status"], "unavailable");
     }
 }
