@@ -1835,9 +1835,10 @@ impl CodeIndexSchedulerRegistryV1 {
                             // has verified *this* sealed snapshot is what makes
                             // the binding truthful for a seat this pass did not
                             // publish. An expired clock, or a git-index sample
-                            // this seal moved, is not a different snapshot:
-                            // dropping the witness here is how a newer
-                            // generation stayed unserved through clone backfill.
+                            // this seal moved, is not a different snapshot.
+                            // Dropping the witness here cleared the newer
+                            // generation. The lexical full-copy is not decided
+                            // on this swap.
                             let sealed_currency = scheduler.currency_witness_for_sealed_snapshot(
                                 &latest.generation().manifest().generation_id,
                                 &latest.generation().snapshot().content_identity,
