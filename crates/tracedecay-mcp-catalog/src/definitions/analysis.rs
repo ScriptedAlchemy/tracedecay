@@ -15,10 +15,16 @@ pub(super) fn def_dead_code() -> ToolDefinition {
          Always excludes `main` and `test*` functions. By default also excludes \
          `pub` items (they may be referenced outside the indexed scope), pass \
          `include_public: true` to audit pub items with zero indexed callers, \
-         which is what you want for workspace-internal cleanup.",
+         which is what you want for workspace-internal cleanup. Pass `path` to \
+         report only one directory prefix, which keeps a fixture or benchmark \
+         corpus from consuming the whole page; the prefix is applied before \
+         `limit`, and references from outside it still count as callers.",
         json!({
             "type": "object",
             "properties": {
+                "path": string_property(
+                    "Filter reported symbols to files under this directory path (e.g. 'crates/tracedecay-mcp'). Omit for the entire codebase."
+                ),
                 "kinds": {
                     "type": "array",
                     "items": { "type": "string" },
@@ -404,4 +410,30 @@ pub(super) fn def_unsafe_patterns() -> ToolDefinition {
             }
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::def_dead_code;
+
+    /// Without an advertised `path` an agent cannot scope the report, and a
+    /// fixture corpus consumes the whole page before any product source is
+    /// reported.
+    #[test]
+    fn dead_code_advertises_an_optional_path_filter_like_its_siblings() {
+        let definition = def_dead_code();
+
+        assert_eq!(
+            definition.input_schema["properties"]["path"]["type"],
+            "string"
+        );
+        assert!(
+            definition.input_schema.get("required").is_none(),
+            "every dead-code parameter stays optional"
+        );
+        assert!(
+            definition.description.contains("`path`"),
+            "the description documents the filter it accepts"
+        );
+    }
 }

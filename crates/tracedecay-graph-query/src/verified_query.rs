@@ -264,12 +264,15 @@ impl VerifiedGraphQuery {
         &self,
         kinds: &[NodeKind],
         include_public: bool,
+        path_prefix: Option<&str>,
         limit: usize,
     ) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
-        self.await_bound(
-            self.manager()
-                .find_dead_code(kinds, include_public, Some(limit)),
-        )
+        self.await_bound(self.manager().find_dead_code(
+            kinds,
+            include_public,
+            path_prefix,
+            Some(limit),
+        ))
         .await
     }
 
