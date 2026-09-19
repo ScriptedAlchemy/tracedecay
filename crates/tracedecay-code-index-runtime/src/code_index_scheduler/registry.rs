@@ -1266,11 +1266,17 @@ enum ColdMountAdmissionV1 {
 
 /// One exact worktree's pending worker wake. `micros == 0` means no pending
 /// arrival, and every nonzero arrival is held by one nonzero owner token.
+///
+/// `attributable` is false for a worker-owned continuation: the slot stays
+/// nonzero so freshness still sees the follow-up, but the instant is not an
+/// external wake. Publishing it as [`CodeIndexArrivalV1::Observed`] fabricated
+/// an event-to-ready receipt for a pass nobody requested.
 struct PendingWakeStateV1 {
     micros: u64,
     trigger: u64,
     owner: u64,
     next_owner: u64,
+    attributable: bool,
 }
 
 /// The single synchronization authority for one worktree's coalesced wake.
@@ -1348,6 +1354,7 @@ impl Default for PendingWakeStateV1 {
             trigger: 0,
             owner: 0,
             next_owner: 1,
+            attributable: false,
         }
     }
 }
@@ -1385,6 +1392,7 @@ impl PendingWakeClaimV1 {
         let claimed_micros = u64::try_from(now_micros().0).unwrap_or(u64::MAX);
         let owner = state.next_owner();
         state.micros = claimed_micros;
+        state.attributable = true;
         state.owner = owner;
         drop(state);
         Some(Self {
@@ -1426,6 +1434,7 @@ impl Drop for PendingWakeClaimV1 {
                 state.micros = 0;
                 state.trigger = 0;
                 state.owner = 0;
+                state.attributable = false;
             }
         }
     }
@@ -1878,6 +1887,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 pending_wake.micros = 0;
                 pending_wake.owner = 0;
                 pending_wake.trigger = 0;
+                pending_wake.attributable = false;
             }
         }
     }
@@ -2065,9 +2075,13 @@ impl CodeIndexSchedulerRegistryV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.owner = state.next_owner();
-        if state.micros == 0 {
+        // A worker continuation occupies the slot without an external instant.
+        // This wake is the arrival; keep an already-observed one so a later
+        // stamp cannot shorten the wait that wake already took.
+        if state.micros == 0 || !state.attributable {
             state.micros = wake_micros;
         }
+        state.attributable = true;
         state.trigger = Self::pack_trigger(trigger);
         drop(state);
         wake.notify_one();
@@ -2085,28 +2099,46 @@ impl CodeIndexSchedulerRegistryV1 {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.micros != 0 {
+        // An unattributable continuation is not an arrival. Upgrade it: the
+        // caller that just proved work is the event the receipt must name.
+        if state.micros != 0 && state.attributable {
             return false;
         }
         state.owner = state.next_owner();
         state.micros = wake_micros;
+        state.attributable = true;
         state.trigger = Self::pack_trigger(trigger);
         drop(state);
         wake.notify_one();
         true
     }
 
-    /// Queue worker-owned continuation work through the same pending-arrival
-    /// authority as external wakes. This keeps readiness truthful while the
-    /// continuation waits for shared admission; a bare `Notify` permit is not
-    /// observable by freshness readers.
+    /// Queue worker-owned continuation work so freshness still sees it.
+    ///
+    /// A bare `Notify` permit is not observable by freshness readers, so the
+    /// slot is stamped like an arrival. It is not one. The worker decided to
+    /// continue work an earlier wake already claimed. `attributable = false`
+    /// keeps that stamp out of the event-to-ready receipt, which otherwise
+    /// charged a suppressed freshness probe that raced it.
     fn note_worker_continuation(pending_wake: &PendingWakeV1, wake: &tokio::sync::Notify) {
-        if !Self::note_wake_if_idle(pending_wake, wake, CodeIndexCadenceTriggerV1::BusyFollowUp) {
-            // This pass may have consumed the permit for an arrival it has not
-            // claimed yet. Keep that observable arrival and replenish its
-            // coalesced permit so the continuation cannot sleep behind it.
+        let mut state = pending_wake
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.micros != 0 {
+            // An arrival is already queued, or a continuation already occupies
+            // the slot. Replenish the coalesced permit so the worker cannot
+            // sleep behind work it has not claimed.
+            drop(state);
             wake.notify_one();
+            return;
         }
+        state.owner = state.next_owner();
+        state.micros = u64::try_from(now_micros().0).unwrap_or(u64::MAX);
+        state.attributable = false;
+        state.trigger = Self::pack_trigger(CodeIndexCadenceTriggerV1::BusyFollowUp);
+        drop(state);
+        wake.notify_one();
     }
 
     /// Stamp a continuation while `reconcile_in_progress` still reports this pass.
@@ -2135,20 +2167,27 @@ impl CodeIndexSchedulerRegistryV1 {
         pending_wake: &PendingWakeV1,
         default_trigger: CodeIndexCadenceTriggerV1,
     ) -> (CodeIndexArrivalV1, CodeIndexCadenceTriggerV1) {
-        let (wake_micros, packed_trigger) = {
+        let (wake_micros, packed_trigger, attributable) = {
             let mut state = pending_wake
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let wake_micros = state.micros;
             let packed_trigger = state.trigger;
+            let attributable = state.attributable;
             state.micros = 0;
             state.trigger = 0;
             state.owner = 0;
-            (wake_micros, packed_trigger)
+            state.attributable = false;
+            (wake_micros, packed_trigger, attributable)
         };
-        if wake_micros == 0 {
-            return (CodeIndexArrivalV1::Unavailable, default_trigger);
+        if wake_micros == 0 || !attributable {
+            let trigger = if wake_micros == 0 {
+                default_trigger
+            } else {
+                Self::unpack_trigger(packed_trigger)
+            };
+            return (CodeIndexArrivalV1::Unavailable, trigger);
         }
         let trigger = Self::unpack_trigger(packed_trigger);
         match i64::try_from(wake_micros) {
@@ -2178,12 +2217,14 @@ impl CodeIndexSchedulerRegistryV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // A wake that arrived while this pass ran is newer, so the restored
-        // arrival remains the earliest and stays authoritative.
-        if state.micros != 0 && state.micros <= wake_micros {
+        // arrival remains the earliest and stays authoritative. A continuation
+        // occupying the slot is not an arrival and must not hide this one.
+        if state.attributable && state.micros != 0 && state.micros <= wake_micros {
             return;
         }
         state.owner = state.next_owner();
         state.micros = wake_micros;
+        state.attributable = true;
         state.trigger = Self::pack_trigger(trigger);
     }
 
@@ -3557,7 +3598,9 @@ mod feedback_document_path_tests {
 
 #[cfg(test)]
 mod text_slice_fairness_tests {
-    use super::{CodeIndexCadenceTriggerV1, CodeIndexSchedulerRegistryV1, PendingWakeV1};
+    use super::{
+        CodeIndexArrivalV1, CodeIndexCadenceTriggerV1, CodeIndexSchedulerRegistryV1, PendingWakeV1,
+    };
 
     #[test]
     fn pending_reconcile_is_serviced_between_bounded_text_slices() {
@@ -3586,6 +3629,58 @@ mod text_slice_fairness_tests {
             CodeIndexSchedulerRegistryV1::incomplete_text_slice_may_continue(&pending),
             "text continuation resumes only after reconcile claims the pending arrival"
         );
+    }
+
+    #[test]
+    fn worker_continuation_stays_pending_without_an_observed_arrival() {
+        let pending = PendingWakeV1::default();
+        let wake = tokio::sync::Notify::new();
+        CodeIndexSchedulerRegistryV1::note_worker_continuation(&pending, &wake);
+        assert!(
+            pending.has_pending_arrival(),
+            "freshness must still see the continuation while it waits"
+        );
+
+        let (arrival, trigger) = CodeIndexSchedulerRegistryV1::take_pending_arrival(
+            &pending,
+            CodeIndexCadenceTriggerV1::Mount,
+        );
+        assert_eq!(
+            arrival,
+            CodeIndexArrivalV1::Unavailable,
+            "a worker continuation is not an external wake and must not publish \
+             an event-to-ready sample"
+        );
+        assert_eq!(trigger, CodeIndexCadenceTriggerV1::BusyFollowUp);
+        assert!(
+            !pending.has_pending_arrival(),
+            "claiming the continuation clears the slot"
+        );
+    }
+
+    #[test]
+    fn an_external_wake_replaces_an_unattributable_continuation() {
+        let pending = PendingWakeV1::default();
+        let wake = tokio::sync::Notify::new();
+        CodeIndexSchedulerRegistryV1::note_worker_continuation(&pending, &wake);
+        assert!(
+            CodeIndexSchedulerRegistryV1::note_wake_if_idle(
+                &pending,
+                &wake,
+                CodeIndexCadenceTriggerV1::QueryAdmission,
+            ),
+            "a real wake must replace the continuation placeholder"
+        );
+
+        let (arrival, trigger) = CodeIndexSchedulerRegistryV1::take_pending_arrival(
+            &pending,
+            CodeIndexCadenceTriggerV1::Mount,
+        );
+        assert!(
+            matches!(arrival, CodeIndexArrivalV1::Observed { wake_micros } if wake_micros > 1),
+            "the receipt names the external wake, not the continuation slot: {arrival:?}"
+        );
+        assert_eq!(trigger, CodeIndexCadenceTriggerV1::QueryAdmission);
     }
 }
 
