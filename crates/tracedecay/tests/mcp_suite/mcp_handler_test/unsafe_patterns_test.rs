@@ -428,7 +428,11 @@ fn attributed_test() { Some(4).unwrap(); }
     wait_for_current_graph(&server).await;
 
     let shared_line = "#[test] fn adjacent_test() { Some(5).unwrap(); } pub fn adjacent_production() { panic!(); }";
-    let shared_enclosing = "src/lib.rs::adjacent_test";
+    // Two declarations share this line, so each site is attributed by where it
+    // sits in the line: the unwrap is inside the test fn, the panic is inside
+    // the production fn that follows it.
+    let unwrap_enclosing = "src/lib.rs::adjacent_test";
+    let panic_enclosing = "src/lib.rs::adjacent_production";
     let included_matches = vec![
         site(
             "unwrap",
@@ -467,7 +471,7 @@ fn attributed_test() { Some(4).unwrap(); }
             "src/lib.rs",
             17,
             shared_line,
-            shared_enclosing,
+            unwrap_enclosing,
             false,
         ),
         site(
@@ -475,7 +479,7 @@ fn attributed_test() { Some(4).unwrap(); }
             "src/lib.rs",
             17,
             shared_line,
-            shared_enclosing,
+            panic_enclosing,
             false,
         ),
     ];
@@ -511,7 +515,7 @@ fn attributed_test() { Some(4).unwrap(); }
             "src/lib.rs",
             17,
             shared_line,
-            shared_enclosing,
+            unwrap_enclosing,
             false,
         ),
         site(
@@ -519,7 +523,7 @@ fn attributed_test() { Some(4).unwrap(); }
             "src/lib.rs",
             17,
             shared_line,
-            shared_enclosing,
+            panic_enclosing,
             false,
         ),
     ];
