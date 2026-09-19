@@ -2,7 +2,9 @@
 
 ## Decision
 
-Simplify the release architecture before tuning rustc or caches.
+Adopt the slim one-compile release architecture from
+[#1584](https://github.com/ScriptedAlchemy/tracedecay/pull/1584) before tuning
+rustc or caches.
 
 The beta artifact job should do only the work that proves and produces the
 artifact for its target:
@@ -44,10 +46,18 @@ estimates.
 | x86_64 Windows | 5.1m | skipped | 55.7m | distribution acceptance failed after 0.5m |
 | x86_64 Linux | 4.3m | not reached | not reached | release distribution test 143.6m, then failed |
 
+The census totals the serial release compile work at 68.5m on aarch64 Linux
+(24.9 + 19.9 + 23.7) and 120.6m on aarch64 macOS
+(45.5 + 35.2 + 39.9). Within the x86_64 Linux step, two Hotpath helper builds
+took 9.1m and 6.2m before the workspace test spent 126.7m reaching its first
+suite and another 1.1m reaching SIGABRT.
+
 The duplicate release-automation checkout took 0.15-0.25m. Rust cache lookup
 took 0.03-0.10m, but every target reported `No cache found`. The profile
 resolver repeated two `cargo tree` traversals before cache restore in every
 target job and took 3.9-5.1m again in the in-progress beta.41 run.
+Dashboard work was 0.1-0.3m and Rust cache save was 0.2-1.4m for
+498 MiB-1.2 GiB entries. Neither is a primary wall-clock sink.
 
 Two static properties explain the largest opportunities:
 
@@ -57,13 +67,15 @@ Two static properties explain the largest opportunities:
 - `scripts/check-distribution-acceptance.sh` discovers the runner host with
   `rustc -vV` and performs host builds, packaged-crate tests, an install,
   consumer builds, MCP smoke, and LSP smoke. It does not test the matrix target
-  archive that the surrounding job eventually uploads.
+  archive that the surrounding job eventually uploads. Its opening
+  `cargo build --workspace --release` writes to implicit `target/release`;
+  nothing reads that result, while the packaging binary already exists under
+  `target/<triple>/release`.
 
-The repository already has a pre-tag
-`Release PR distribution acceptance (x86_64-linux)` workflow. Its stated
-purpose is to stop an unshippable release before release-please creates a tag.
-That is the correct lifecycle boundary for pre-release confidence work, though
-the beta and stable policies should differ.
+At baseline the repository had a pre-tag
+`Release PR distribution acceptance (x86_64-linux)` workflow. PR #1587 renamed
+that authority into the periodic crate-extract battery because the work does
+not stamp the release artifact.
 
 Sibling evidence:
 
@@ -72,7 +84,13 @@ Sibling evidence:
   126.7m of the x86_64 Linux step in the cold all-feature workspace test
   compile and another 15.3m in two Hotpath helper builds. It also confirms
   that packaging, upload, dashboard, and cache save are not the wall.
-- Single-compile draft
+- Acceptance analysis, merged
+  [#1588](https://github.com/ScriptedAlchemy/tracedecay/pull/1588) confirms
+  that the acceptance opening build never supplies the packaging binary. It
+  consumed 23m34s on aarch64 Linux and 39m30s on macOS. It also decomposes the
+  x86_64 Linux 127m sink into a 33m17s all-feature workspace-bin build and a
+  93m23s workspace release-test harness compile.
+- Migration step 1, closed after broader implementation
   [#1582](https://github.com/ScriptedAlchemy/tracedecay/pull/1582) deletes the
   standalone beta all-feature CLI compile and leaves the production packaging
   build as the sole artifact compile. Its dependency comparison found that the
@@ -80,20 +98,27 @@ Sibling evidence:
   all-feature graph intentionally differs.
 - Cache/toolchain draft
   [#1585](https://github.com/ScriptedAlchemy/tracedecay/pull/1585) finds that
-  all beta.40 release caches missed. Tag cache scope, a full 10 GiB repository
-  cache budget, a floating unused stable toolchain, cargo running before
-  restore, and the duplicate checkout all prevent reliable reuse.
-- Simpler-release draft
-  [#1584](https://github.com/ScriptedAlchemy/tracedecay/pull/1584) independently
-  arrives at the one-production-compile beta pipeline and estimates slim cold
-  jobs at 25-35m for aarch64 Linux, 25-40m for x86_64 Linux, 40-55m for
-  aarch64 macOS, and 55-65m for Windows.
-- Acceptance-reuse draft
+  all beta.40 release caches missed. A new tag cannot restore a cache written
+  by a previous tag. The only cross-tag restore path is a cache seeded from
+  `master` under the same shared key and environment hash. A full 10 GiB
+  repository cache budget, a floating unused stable toolchain, cargo running
+  before restore, and the duplicate checkout further prevent reliable reuse.
+- Lead architecture, merged
+  [#1584](https://github.com/ScriptedAlchemy/tracedecay/pull/1584) defines the
+  one-production-compile beta pipeline and estimates slim cold jobs at 25-35m
+  for aarch64 Linux, 25-40m for x86_64 Linux, 40-55m for aarch64 macOS, and
+  55-65m for Windows.
+- Broader ship-path implementation, merged
   [#1587](https://github.com/ScriptedAlchemy/tracedecay/pull/1587) proves the
   first 23m34s of aarch64 Linux acceptance was a cold production workspace
   rebuild into implicit `target/release`, while the shipping binary already
   existed under the matrix target directory. Staging and packaging then took
-  about three seconds before an isolated language check failed.
+  about three seconds before an isolated language check failed. Its merged
+  implementation removes distribution acceptance, the x86_64 Linux workspace
+  release tests, the all-feature CLI compile, nextest setup, and macOS
+  acceptance Bash from beta and stable ship jobs. It replaces the release-PR
+  gate with one daily stock `ubuntu-latest` crate-extract battery plus manual
+  dispatch.
 
 The preceding all-feature build does not warm the production graph enough to
 justify its 24.9m Linux and 45.5m macOS cost. Compiler-profile savings remain
@@ -145,35 +170,32 @@ job for historical profile discovery.
 ### Stable
 
 Use the same one-compile artifact pipeline so stable artifacts do not pay for
-duplicate compiles either. Stable remains stricter before tagging:
+duplicate compiles either. Stable adds its real channel responsibilities:
+npm publication, `server.json`, the `latest` designation, and stable
+provenance. It does not regain a heavy compile matrix or block on the
+crate-extract battery, because that battery does not stamp the binary,
+archive, or MCPB.
 
-- a stable release PR must pass the heavy x86_64 Linux release battery on a
-  free stock runner;
-- the battery may include all-feature workspace tests and the full
-  extracted-crate distribution acceptance journey; and
-- the post-tag stable target jobs still perform only direct target-artifact
-  work.
-
-This makes beta lighter without making stable artifacts follow a separate
-packaging implementation.
+This keeps one packaging implementation. Beta remains lighter through its
+smaller publication surface, not by making stable repeat unrelated Rust
+builds.
 
 ### Periodic
 
-Run the full release battery as one periodic x86_64 Linux job and retain manual
-dispatch. Reuse the current release-PR acceptance implementation instead of
-creating a second battery.
+Run the full crate-extract battery as one daily stock `ubuntu-latest` job and
+retain manual dispatch. Rename and reuse the current release-PR acceptance
+implementation; this is deferred work, not another release shard.
 
-Periodic or stable-pre-tag work owns:
+Periodic work owns:
 
-- all-feature workspace release build and tests;
-- controlled-workload Hotpath parity;
 - packaging every workspace crate;
 - extracted library, CLI, query, LSP, MCP, install, and consumer tests; and
 - production/default feature-graph equivalence.
 
 The periodic run is visibility, not evidence that a later tagged SHA passed.
-Stable still requires its pre-tag battery. Beta relies on ordinary required CI,
-the most recent periodic signal, and direct checks of every produced artifact.
+Existing required CI owns workspace tests and Hotpath parity. Beta and stable
+ship paths rely on that CI plus direct checks of every produced artifact; they
+do not wait for the periodic crate-extract result.
 
 Expected cold target-job envelopes after A, before compiler or cache wins:
 
@@ -193,14 +215,63 @@ Savings are per affected job on the existing stock runners. They are not all
 additive: removing an all-feature build can make the remaining production
 build colder.
 
-### A. Simplify workflow shape
+### A. Adopt #1584's slim one-compile release architecture
 
-#### A1. Remove general release testing from post-tag beta jobs
+PR #1584 is the architecture authority: release jobs produce artifacts rather
+than acting as a second CI system. Each target checks out once, compiles the
+production CLI once, verifies that exact binary, packages it as the archive and
+MCPB, and uploads it. Existing CI owns workspace and Hotpath tests; one
+periodic stock Linux runner owns crate-extract rehearsal.
 
-Move `Test release distribution` and deep distribution acceptance to the
-periodic/stable-pre-tag battery.
+#### A1. Migration step 1: delete the all-feature verify compile
 
-Estimated cut:
+PR #1582 is the minimal first migration from the beta.40 workflow. Delete the
+standalone all-feature CLI build and retain the production packaging build as
+the only artifact compile.
+
+Measured cut:
+
+- aarch64 Linux: 24.9m;
+- aarch64 macOS: 45.5m;
+- x86_64 Windows: 0m because the step was already skipped; and
+- x86_64 Linux: approximately 0m because its preceding all-feature workspace
+  build had already produced the same compile coverage.
+
+PR #1582 is now closed because merged PR #1587 subsumed this deletion across
+both beta and stable. Keep A1 as the migration boundary, but do not reopen or
+land the overlapping branch.
+
+#### A2. Migration step 2: delete the Linux workspace release test
+
+Deleting A1 alone leaves the largest sink intact. Census PR #1583 measured
+15.3m in two Hotpath helper builds and 126.7m before the first
+`cargo test --workspace --release --all-features` suite started. Existing CI
+already owns those tests and Hotpath parity.
+
+Acceptance analysis PR #1588 independently locates the 127m inside
+`Test release distribution`: 33m17s in the all-feature workspace-bin build and
+93m23s compiling the workspace release-test harness before tests ran. This is
+not distribution packaging time.
+
+Required cut: remove `Test release distribution` from the x86_64 Linux ship
+job. Merged PR #1587 has done so; current `master` contains neither that step
+nor the workspace release-test command. The next Release Beta must confirm the
+127m sink is absent at runtime.
+
+#### A3. Migration step 3: move crate-extract acceptance off the ship path
+
+Merged PR #1587 removes distribution acceptance, nextest setup, and macOS
+acceptance Bash from beta and stable ship jobs. It replaces the release-PR
+battery with one periodic stock Linux crate-extract authority.
+
+PR #1588 confirms why this is an architecture cut rather than a cache tweak:
+the acceptance script's opening workspace build writes to
+`target/release`, the target packaging build writes to
+`target/<triple>/release`, and the later extracted CLI uses a third target
+directory. The opening result is never read. Removing it cuts 23m34s on
+aarch64 Linux and 39m30s on macOS before any unmeasured acceptance tail.
+
+This architecture cut has the following measured components:
 
 - x86_64 Linux: 100-120m net. The removed test step consumed 143.6m before
   failing: 15.3m in Hotpath helper builds and 126.7m before the first workspace
@@ -211,34 +282,10 @@ Estimated cut:
 - x86_64 Windows: unquantified. The observed 0.5m was only an early failure,
   not a healthy acceptance run.
 
-Make this the main architecture wave immediately after the ready
-single-compile deletion. It removes the most work and places failures before
-tagging or directly against the artifact they concern.
+The periodic journey and the first slim Release Beta remain unverified. Those
+production runs, not source-shape checks, decide whether A is complete.
 
-PR #1587 is a measured fallback if deep acceptance cannot leave the release
-job immediately: reuse the exact shipping binary and keep only cheap package
-and feature-wiring checks outside the full Linux battery. It is not the target
-architecture. Its new acceptance modes add transitional surface that should be
-deleted when the heavy battery moves to periodic/stable-pre-tag ownership.
-
-#### A2. Compile exactly one shipping feature set per target
-
-Delete the all-feature CLI release build from artifact jobs. Compile
-`tracedecay-cli` once with production features and package that exact output.
-All-feature compile coverage remains in CI and the heavy battery.
-
-Estimated cut, supported by the beta.40 timings and the sibling dependency
-comparison:
-
-- aarch64 Linux: 24.9m;
-- aarch64 macOS: 45.5m;
-- x86_64 Windows: 0m because beta.40 already performed one binary build; and
-- x86_64 Linux: unquantified until A1 lets the shipping build complete.
-
-PR #1582 is the ready beta implementation slice. Apply the same one-compile
-rule to stable after its beta release evidence is green.
-
-#### A3. Remove release-time feature-graph resolution
+#### A4. Remove release-time feature-graph resolution
 
 For current releases, pass the reviewed production arguments directly. Run the
 two-graph equivalence proof in ordinary CI and the heavy battery, once per
@@ -251,7 +298,7 @@ The target argument is currently ignored by
 `production_release_features`, so repeating the proof per target provides no
 target-specific evidence.
 
-#### A4. Remove duplicate source checkout and repeated harness self-tests
+#### A5. Remove duplicate source checkout and repeated harness self-tests
 
 Invoke release scripts from the immutable source checkout. Keep script unit
 tests in CI; release jobs should execute the reviewed scripts, not retest their
@@ -265,7 +312,7 @@ Keep the dashboard build in beta for now. It costs seconds and its bytes are
 embedded into the binary. Centralizing it would add artifact ceremony for
 little critical-path gain.
 
-#### A5. Pin one Rust toolchain and embed the already-built dashboard
+#### A6. Pin one Rust toolchain and embed the already-built dashboard
 
 Install the `rust-toolchain.toml` channel rather than an additional floating
 `stable`, and pass the validated dashboard digest to the CLI build's existing
@@ -286,7 +333,11 @@ call.
 
 Estimated cut to pursue: 5-15m on the 55.7m Windows build and 3-10m on Unix.
 These are targets for measured dependency/feature pruning, not established
-savings.
+savings. The census also observed the ordinary Windows workspace build at
+106.5m and 64.8m on a warmer runner despite a 637 MiB Rust cache hit, while the
+macOS root-suites job took 57.1m. Those CI measurements reinforce that compile
+graph size and stock-runner variance remain B concerns after release
+duplication is removed; they are not additive release savings.
 
 Do not begin by changing optimization semantics. The workspace has no custom
 release LTO setting, release debuginfo is already disabled, Linux already uses
@@ -308,7 +359,7 @@ acceptance noise will obscure the treatment.
 
 ### C. Cache
 
-#### C1. Make the existing cache eligible to hit
+#### C1. Secondary only: make the existing cache eligible to hit
 
 Apply the key hygiene from PR #1585: use only the pinned toolchain, remove the
 duplicate checkout from the hash inputs, and restore before the first Cargo
@@ -320,12 +371,15 @@ Estimated direct cut: 0-1m after A removes the 4m pre-cache `cargo tree`
 operation. A compatible default-branch dependency cache could avoid an
 estimated 6-20m on Linux, and potentially more on macOS, but beta.40 provides
 no hit measurement. GitHub cannot restore a previous tag's cache into a new
-tag, and the current repository cache inventory already exceeds the 10 GiB
+tag. A `master` writer using the exact release shared key is the only restore
+path, and the current repository cache inventory already exceeds the 10 GiB
 budget before eviction.
 
-Reuse a compatible cache written by existing required master work only if its
-profile and key already match. Do not add a cache-warming compile or another
-job merely to manufacture a hit.
+Cache is not the hour fix: it cannot delete the measured 126.7m workspace test,
+15.3m Hotpath helpers, or duplicate release graphs. Reuse a compatible cache
+written by existing required `master` work only if its profile, shared key,
+toolchain, and environment hash match. Do not add a cache-warming compile or
+another job merely to manufacture a hit.
 
 Do not add sccache, remote cache infrastructure, self-hosted runners, or paid
 cache services.
@@ -360,23 +414,29 @@ cache services.
 
 ## Landing order
 
-1. Land the focused one-compile beta deletion from PR #1582. It is the
-   smallest ready part of A and removes 24.9-45.5m from affected target jobs.
-2. Fold the no-second-checkout, pinned-toolchain, and dashboard-digest parts of
-   PR #1585 into the same target shape. Treat cache hits as unverified until a
-   compatible default-branch writer and a release restore are both observed.
-3. Land the rest of A as a coherent workflow cut: define the light beta path,
-   keep the heavy battery periodic and stable-pre-tag, and remove post-tag
-   general testing and repeated release-time validation.
-   If policy blocks that move, use PR #1587's exact-binary reuse as a bounded
-   intermediate and remove the extra modes during the final cutover.
-4. Do not land the sibling timing and architecture docs as parallel plan
+1. Treat merged PR #1584 as the A architecture authority and merged PR #1587
+   as its implementation baseline. The slim one-compile job replaces the
+   triple-compile path; do not optimize the old shape.
+2. Record PR #1582 as migration step 1: delete the all-feature verify compile.
+   Do not land its closed branch after #1587, which already applied the cut.
+3. Require migration step 2 in the same architecture wave: delete the x86_64
+   Linux workspace release test measured at 127m by #1583 and decomposed by
+   #1588. PR #1587 applied the deletion; verify it on the next Release Beta.
+4. Keep migration step 3 on one periodic stock runner: crate-extract
+   acceptance is visibility, not a release shard or artifact gate. #1588
+   proves its opening 24-40m build never supplied the packaging binary.
+5. Treat PR #1585 as secondary C work after the #1584 architecture and #1583
+   census. Its rebased head preserves #1587 while adding the non-overlapping
+   no-second-checkout, pinned-toolchain, dashboard-digest, and cache-order
+   changes. Treat cache hits as unverified until a same-key `master` writer
+   and a release restore are both observed.
+6. Do not land the sibling timing and architecture docs as parallel plan
    authorities. This document consolidates #1583 and #1584.
-5. Run the next Release Beta and establish successful single-build timings for
+7. Run the next Release Beta and establish successful single-build timings for
    all four targets.
-6. Land measured B changes one at a time, starting with the Windows production
+8. Land measured B changes one at a time, starting with the Windows production
    graph because its single build was 55.7m.
-7. Re-evaluate C only after two comparable successful runs show persistent
+9. Re-evaluate C only after two comparable successful runs show persistent
    dependency recompilation.
 
 ## Verification on the next Release Beta
