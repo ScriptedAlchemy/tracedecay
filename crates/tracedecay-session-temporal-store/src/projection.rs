@@ -36,8 +36,6 @@ pub(super) use receipts::validate_final_projection_receipt;
 
 const DISCOVER_REFRESH: &str = "discover session temporal refresh";
 const MATERIALIZE_REFRESH: &str = "materialize session temporal refresh";
-const MAX_BASELINE_RELATION_ITEMS: usize = 100_000;
-
 pub struct SessionTemporalRefreshDiscoveryPage {
     requests: Vec<SessionRefreshBeginOrJoinRequestV1>,
     active_scanned_through: Option<SessionId>,
@@ -279,16 +277,13 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 let (scope, relation_store) = self
                     .session_relation_store()
                     .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
-                match relation_store.load_projection(
+                match relation_store.logical_copy_count(
                     &scope,
                     recovery.session_id(),
                     recovery.frozen_watermarks().active_generation().value(),
-                    MAX_BASELINE_RELATION_ITEMS,
-                    MAX_BASELINE_RELATION_ITEMS,
                     Arc::new(NeverCancelled),
                 ) {
-                    Ok(projection) => u64::try_from(projection.logical_copies.len())
-                        .map_err(|error| storage(MATERIALIZE_REFRESH, error))?,
+                    Ok(copies) => copies,
                     Err(SessionRelationError::NotFound) => {
                         let mut rows = snapshot
                             .query(

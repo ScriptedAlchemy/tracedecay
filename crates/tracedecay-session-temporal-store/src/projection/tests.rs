@@ -1583,6 +1583,17 @@ async fn explicit_copy_survives_reconstruction_in_the_native_relation_graph() {
         )
         .unwrap();
     assert_eq!(
+        relation_store
+            .logical_copy_count(
+                &scope,
+                &session_id,
+                batch.generation().value(),
+                Arc::new(NeverCancelled),
+            )
+            .expect("paged logical copy count"),
+        loaded.logical_copies.len() as u64
+    );
+    assert_eq!(
         loaded.logical_copies,
         vec![crate::relations::LogicalCopyRelation {
             occurrence_id: expected_copy.occurrence_id,
