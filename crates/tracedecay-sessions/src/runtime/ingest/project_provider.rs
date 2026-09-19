@@ -260,7 +260,7 @@ impl<'a> ProjectProviderRun<'a> {
         let mut deferred = discovery.is_truncated();
         let mut frontier_committable = true;
         let mut outcome = ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
-        for (path_index, path) in discovery.paths.iter().enumerate() {
+        for path in &discovery.paths {
             if remaining == 0 {
                 deferred = true;
                 frontier_committable = false;
@@ -286,10 +286,15 @@ impl<'a> ProjectProviderRun<'a> {
                     frontier_committable &=
                         !progress.source_deferred && progress.bytes_consumed <= remaining;
                     remaining = remaining.saturating_sub(progress.bytes_consumed);
-                    if progress.bytes_consumed > 0
-                        && (progress.source_deferred
-                            || path_index.saturating_add(1) < discovery.paths.len())
-                    {
+                    // Only a source the admission left mid-window ends the
+                    // pass: it owns the next one, and no discovery frontier may
+                    // commit past it. An exhausted source must not, or a pass
+                    // admits at most one source however much budget is left,
+                    // never commits a frontier, and the next pass rediscovers
+                    // and re-reads every source it already finished. The byte
+                    // budget above is the pass bound here, exactly as it is in
+                    // the profile-scope loop.
+                    if progress.source_deferred {
                         deferred = true;
                         frontier_committable = false;
                         break;
