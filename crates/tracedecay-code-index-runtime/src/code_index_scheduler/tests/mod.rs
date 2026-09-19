@@ -1265,6 +1265,55 @@ async fn drain_clone_backfill(registry: &CodeIndexSchedulerRegistryV1, path: &Pa
     }
 }
 
+/// Hold one mounted root's scheduler mutex until released, so no worker step
+/// can renew the source proof meanwhile.
+///
+/// The admission permit and the pass counter cannot fence this. The worker
+/// releases the permit after source reconciliation and drops its pass guard
+/// before the graph tail, whose renewing steps
+/// (`reconcile_retained_text_generation_with` and the serving swap's
+/// `currency_witness_for_sealed_snapshot`) take a guard only once a blocking
+/// thread reaches their closure. Both signals read idle in that gap while a
+/// renewal is already committed to run. Every renewing step takes this mutex
+/// and no read does.
+struct HeldSchedulerV1 {
+    release: Option<tokio::sync::oneshot::Sender<()>>,
+    held: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl HeldSchedulerV1 {
+    async fn release(mut self) {
+        drop(self.release.take());
+        if let Some(held) = self.held.take() {
+            held.await.expect("scheduler holder task");
+        }
+    }
+}
+
+async fn hold_scheduler_for_root(
+    registry: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
+) -> HeldSchedulerV1 {
+    let scheduler = registry
+        .scheduler_for_root(project_root)
+        .await
+        .expect("mounted scheduler");
+    let (release, released) = tokio::sync::oneshot::channel();
+    let (acquired, holding) = tokio::sync::oneshot::channel();
+    let held = tokio::task::spawn_blocking(move || {
+        let _scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        acquired.send(()).expect("report the held scheduler");
+        let _ = released.blocking_recv();
+    });
+    holding.await.expect("acquire the scheduler mutex");
+    HeldSchedulerV1 {
+        release: Some(release),
+        held: Some(held),
+    }
+}
+
 /// Hold the background worker out of a new pass, then wait for the in-flight
 /// pass to finish, and keep the admission permit.
 ///
