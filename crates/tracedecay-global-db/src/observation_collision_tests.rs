@@ -55,7 +55,8 @@ use tracedecay_domain::{
 use tracedecay_store::observation::ObservationIdentityCollisionDispositionV1;
 use tracedecay_store::{
     AnchoredObservationWrite, CursorAdvanceLedgerReasonV1, CursorAdvanceLedgerReceiptIdV1,
-    ObservationCoverageReason, ObservationCursorAdvance, ObservationPersistOutcome,
+    CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
+    ObservationPersistOutcome,
     ObservationProjectionStore, ObservationStore, ObservationStoreError, ObservationWrite,
     ProjectionPersistOutcome, ProjectionSkipReason, SESSION_MESSAGE_PROJECTOR_VERSION,
 };
@@ -3071,6 +3072,130 @@ async fn runtime_cursor_replay_without_a_ledger_row_keeps_generic_collision_sema
         store.advance_source_cursor(advance).await.unwrap_err(),
         ObservationStoreError::CursorAdvanceCollision
     ));
+}
+
+/// Overwrites the durable cursor for one source, the shape a retained-history
+/// rescan sees when it resumes behind the admitted frontier.
+async fn rewind_source_cursor(
+    runtime: &HostAdmissionTestRuntimeV1,
+    cursor: &ObservationSourceCursorV1,
+) {
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            COMMIT_SOURCE_CURSOR_SQL,
+            params![
+                serde_json::to_string(cursor.source()).unwrap().as_str(),
+                serde_json::to_string(cursor.scope()).unwrap().as_str(),
+                serde_json::to_string(cursor).unwrap().as_str()
+            ],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+}
+
+/// A cursor advance is idempotency-keyed by its coverage, not by the whole
+/// command, so a retained-history rescan replays an already-admitted coverage
+/// with different command bytes: the `expected_cursor` it resumed from carries
+/// a freshly computed resume checkpoint. The writer answers with a conflict
+/// against the earlier receipt, and treating that as a permanent collision is
+/// what wedges retained ingest. The durable cursor already sits exactly at
+/// `next_cursor`, so the coverage is applied and the replay is a duplicate.
+/// A conflict that leaves the cursor somewhere else is still a collision.
+#[tokio::test]
+async fn already_positioned_cursor_replay_with_new_command_bytes_is_a_duplicate() {
+    const FILE_IDENTITY: u64 = 41;
+
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let source = ObservationSourceIdentityV1::for_provider(
+        ProviderId::new(COLLISION_PROVIDER).unwrap(),
+        SessionId::new("session.cursor-replay-new-command-bytes").unwrap(),
+    )
+    .unwrap();
+    let generation = ObservationSourceGenerationV1::new(7).unwrap();
+    let cursor_at = |offset: u64, resume_fingerprint: u64| {
+        ObservationSourceCursorV1::new(
+            source.clone(),
+            ObservationScopeV1::Profile,
+            generation,
+            offset,
+        )
+        .unwrap()
+        .with_resume_checkpoint(FILE_IDENTITY, resume_fingerprint)
+    };
+    let advance_over = |expected: Option<ObservationSourceCursorV1>,
+                        covered: (u64, u64),
+                        resume_fingerprint: u64| {
+        ObservationCursorAdvance::new(
+            source.clone(),
+            ObservationScopeV1::Profile,
+            generation,
+            expected,
+            ObservationSourceRangeV1::new(covered.0, covered.1).unwrap(),
+            ObservationCoverageReason::BlankFrame,
+        )
+        .unwrap()
+        .with_resume_checkpoint(FILE_IDENTITY, resume_fingerprint)
+    };
+
+    assert_eq!(
+        store
+            .advance_source_cursor(advance_over(None, (0, 5), 11))
+            .await
+            .unwrap(),
+        CursorAdvanceOutcome::Committed
+    );
+    let admitted = advance_over(Some(cursor_at(5, 11)), (5, 10), 22);
+    assert_eq!(
+        store.advance_source_cursor(admitted.clone()).await.unwrap(),
+        CursorAdvanceOutcome::Committed
+    );
+
+    let replay = advance_over(Some(cursor_at(5, 33)), (5, 10), 22);
+    assert_eq!(
+        replay.coverage(),
+        admitted.coverage(),
+        "the replay must reuse the admitted coverage idempotency key"
+    );
+    assert_ne!(
+        replay, admitted,
+        "the replay must carry different command bytes"
+    );
+    assert_eq!(
+        store.advance_source_cursor(replay).await.unwrap(),
+        CursorAdvanceOutcome::ExactDuplicate,
+        "a coverage replay whose cursor is already at next must not wedge history"
+    );
+    assert_eq!(
+        store
+            .get_source_cursor(&source, &ObservationScopeV1::Profile)
+            .await
+            .unwrap(),
+        Some(cursor_at(10, 22)),
+        "a duplicate advance must leave the admitted frontier untouched"
+    );
+
+    rewind_source_cursor(&runtime, &cursor_at(5, 11)).await;
+    assert!(
+        matches!(
+            store
+                .advance_source_cursor(advance_over(Some(cursor_at(5, 11)), (5, 10), 44))
+                .await
+                .unwrap_err(),
+            ObservationStoreError::CursorAdvanceCollision
+        ),
+        "a conflicting replay that does not leave the cursor at next stays a collision"
+    );
 }
 
 #[tokio::test]

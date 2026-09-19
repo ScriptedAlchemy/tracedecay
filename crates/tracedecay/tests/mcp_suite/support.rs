@@ -211,6 +211,20 @@ pub(crate) async fn handle_real_server_tool_call_raw(
             .entry("format".to_string())
             .or_insert_with(|| json!("json"));
     }
+    dispatch_mcp_tool_call(server, tool_name, arguments).await
+}
+
+/// JSON-RPC `tools/call` with the caller's arguments left intact.
+///
+/// [`handle_real_server_tool_call_raw`] inserts `format: "json"` when the
+/// caller omitted it. Production default is markdown, so a journey that
+/// proves that default must dispatch the arguments as the client sent them.
+#[cfg(feature = "test-transport")]
+pub(crate) async fn dispatch_mcp_tool_call(
+    server: &McpServer,
+    tool_name: &str,
+    arguments: Value,
+) -> Value {
     let request = json!({
         "jsonrpc": "2.0",
         "id": 1,
