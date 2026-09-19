@@ -62,13 +62,16 @@ def assert_actions_pinned(name: str, job: dict[str, Any]) -> None:
             fail(f"'{name}' uses unpinned action {uses!r}")
 
 
-def assert_release_trigger(workflow: dict[str, Any]) -> None:
+def assert_master_dispatch_trigger(workflow: dict[str, Any]) -> None:
     triggers = workflow.get("on", workflow.get(True, {}))
-    if not isinstance(triggers, dict) or set(triggers) != {"release", "workflow_dispatch"}:
-        fail("npm publication must ride the GitHub Release trigger plus tag recovery only")
-    release = triggers.get("release")
-    if not isinstance(release, dict) or release.get("types") != ["published"]:
-        fail("the release trigger must fire on published releases only")
+    # A run whose ref is the release tag cannot restore the previous release's
+    # Actions cache. release-please dispatches this workflow on master after
+    # the immutable tag exists, so a `release` trigger is not an allowed path.
+    if not isinstance(triggers, dict) or set(triggers) != {"workflow_dispatch"}:
+        fail(
+            "npm publication must be dispatched on master after the immutable "
+            "tag exists; a tag-ref run cannot restore the release cache"
+        )
     dispatch = triggers.get("workflow_dispatch")
     inputs = dispatch.get("inputs") if isinstance(dispatch, dict) else None
     if not isinstance(inputs, dict) or set(inputs) != {"release_tag"}:
@@ -204,7 +207,7 @@ def main() -> None:
             )
 
     workflow = yaml.safe_load(text)
-    assert_release_trigger(workflow)
+    assert_master_dispatch_trigger(workflow)
 
     if workflow.get("permissions") != {"contents": "read"}:
         fail("top-level permissions must grant contents: read only")
