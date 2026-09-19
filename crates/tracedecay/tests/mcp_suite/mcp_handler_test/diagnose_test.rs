@@ -9,12 +9,14 @@
 #![cfg(feature = "test-transport")]
 
 use std::fs;
-use std::time::Duration;
 
 use serde_json::{Value, json};
 use tracedecay_mcp::JsonRpcResponse;
 
-use crate::support::{ProductionCompositionFixture, production_composition_fixture_with_sources};
+use crate::support::{
+    ProductionCompositionFixture, production_composition_fixture_with_sources,
+    warm_code_index_search,
+};
 
 const SOURCE: &str = "pub fn target() {}\npub fn caller() { target(); }\n";
 
@@ -347,58 +349,13 @@ async fn open_indexed_project() -> ProductionCompositionFixture {
         fs::write(project.join("src/lib.rs"), SOURCE).unwrap();
     })
     .await;
-    wait_for_graph(&fixture).await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("diagnose fixture server");
+    warm_code_index_search(&server, "target").await;
+    drop(server);
     fixture
-}
-
-async fn wait_for_graph(fixture: &ProductionCompositionFixture) {
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            let response = fixture
-                .harness
-                .call_tool(
-                    &fixture.project_root,
-                    "tracedecay_status",
-                    json!({
-                        "format": "json",
-                        "include_branch_diagnostics": false,
-                        "include_storage_health": false,
-                        "include_session_ingest": false,
-                        "include_staleness": false,
-                    }),
-                )
-                .await
-                .expect("status while the graph is publishing");
-            assert!(
-                response.error.is_none(),
-                "status failed: {:?}",
-                response.error
-            );
-            let status = json_text(&response);
-            let freshness = &status["code_index_freshness"];
-            let serving = &freshness["worktree"]["code_graph_serving"];
-            match (
-                freshness["status"].as_str(),
-                serving["state"].as_str(),
-                serving["reason"].as_str(),
-                freshness["worktree"]["staleness_state"].as_str(),
-            ) {
-                (Some("current"), Some("ready"), _, _) => break,
-                (Some("warming"), _, _, _)
-                | (Some("stale"), Some("ready"), _, Some("verifying"))
-                | (_, Some("pending"), _, _)
-                | (_, Some("unavailable"), Some("generation_unavailable"), _) => {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-                (_, Some("refused"), _, _) | (_, _, Some("activation_disabled"), _) => {
-                    panic!("graph readiness was refused: {status}");
-                }
-                actual => panic!("graph readiness became {actual:?}: {status}"),
-            }
-        }
-    })
-    .await
-    .expect("graph did not become current within the publication budget");
 }
 
 async fn exact_symbol_id(fixture: &ProductionCompositionFixture, name: &str) -> String {
