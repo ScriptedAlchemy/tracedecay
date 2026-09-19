@@ -99,6 +99,7 @@ pub use contract::{
 pub use handshake::{
     DAEMON_HANDSHAKE_REFUSAL_PROTOCOL, DaemonHandshake, DaemonHandshakeRefusal,
     DaemonHandshakeRefusalReason, MovedStoreAdoption, client_version_skew, version_skew_action,
+    versions_name_same_build,
 };
 pub use lsp_wire::{
     ConnectionLocalRequestSequence, FramePoll, FrameSend, LspFrame, LspSessionAccess,
