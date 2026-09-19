@@ -1,7 +1,11 @@
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
-use super::{CodeGenerationRetentionErrorV1, SCOPE_RETENTION_LOCK_FILE, STORE_LOCK_FILE, storage};
+use super::{
+    CodeGenerationRetentionErrorV1, GRAPH_REPLAY_POOL_ACQUIRE_BUDGET,
+    GRAPH_REPLAY_POOL_ACQUIRE_POLL, SCOPE_RETENTION_LOCK_FILE, STORE_LOCK_FILE, storage,
+};
 
 pub struct CodeGenerationStoreLockV1 {
     file: File,
@@ -36,7 +40,33 @@ impl Drop for CodeGenerationStoreLockV1 {
 pub fn acquire_code_generation_store_lock(
     store_root: &Path,
 ) -> Result<CodeGenerationStoreLockV1, CodeGenerationRetentionErrorV1> {
-    lock_file(store_root, STORE_LOCK_FILE, true)
+    acquire_code_generation_store_lock_checked(
+        store_root,
+        Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET,
+        &|| false,
+    )
+}
+
+/// Exclusive generation-store lock that stops at `deadline` or cancellation.
+///
+/// A free lock is taken even when the deadline has already elapsed, so a
+/// caller that only needs one uncontended critical section is not refused.
+/// A held lock returns [`CodeGenerationRetentionErrorV1::GenerationStoreBusy`]
+/// or [`CodeGenerationRetentionErrorV1::Cancelled`] instead of blocking in
+/// `File::lock`, which cannot observe either signal.
+pub fn acquire_code_generation_store_lock_checked(
+    store_root: &Path,
+    deadline: Instant,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CodeGenerationStoreLockV1, CodeGenerationRetentionErrorV1> {
+    lock_file_checked(
+        store_root,
+        STORE_LOCK_FILE,
+        true,
+        deadline,
+        is_cancelled,
+        CodeGenerationRetentionErrorV1::GenerationStoreBusy,
+    )
 }
 
 /// Try to hold the generation store as a reader for one bounded read of
@@ -81,24 +111,63 @@ pub fn try_acquire_code_generation_store_lock(
 pub(super) fn acquire_scope_retention_lock(
     store_root: &Path,
 ) -> Result<CodeGenerationStoreLockV1, CodeGenerationRetentionErrorV1> {
-    lock_file(store_root, SCOPE_RETENTION_LOCK_FILE, false)
+    acquire_scope_retention_lock_checked(
+        store_root,
+        Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET,
+        &|| false,
+    )
+}
+
+pub(super) fn acquire_scope_retention_lock_checked(
+    store_root: &Path,
+    deadline: Instant,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CodeGenerationStoreLockV1, CodeGenerationRetentionErrorV1> {
+    lock_file_checked(
+        store_root,
+        SCOPE_RETENTION_LOCK_FILE,
+        false,
+        deadline,
+        is_cancelled,
+        CodeGenerationRetentionErrorV1::GenerationStoreBusy,
+    )
 }
 
 #[hotpath::measure(label = "code_index_retention.lock")]
-fn lock_file(
+fn lock_file_checked(
     store_root: &Path,
     lock_file: &str,
     generation_store: bool,
+    deadline: Instant,
+    is_cancelled: &dyn Fn() -> bool,
+    busy: CodeGenerationRetentionErrorV1,
 ) -> Result<CodeGenerationStoreLockV1, CodeGenerationRetentionErrorV1> {
     let store_root = canonical_store_root(store_root)?;
-    let lock = open_lock_file(&store_root.join(lock_file))?;
-    lock.lock().map_err(storage)?;
-    Ok(CodeGenerationStoreLockV1 {
-        file: lock,
-        store_root,
-        generation_store,
-        shared: false,
-    })
+    let deadline = deadline.min(Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET);
+    loop {
+        if is_cancelled() {
+            return Err(CodeGenerationRetentionErrorV1::Cancelled);
+        }
+        let lock = open_lock_file(&store_root.join(lock_file))?;
+        match lock.try_lock().map_err(std::io::Error::from) {
+            Ok(()) => {
+                return Ok(CodeGenerationStoreLockV1 {
+                    file: lock,
+                    store_root,
+                    generation_store,
+                    shared: false,
+                });
+            }
+            Err(error) if tracedecay_private_fs::is_lock_contended(&error) => {
+                if Instant::now() >= deadline {
+                    return Err(busy);
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                std::thread::park_timeout(remaining.min(GRAPH_REPLAY_POOL_ACQUIRE_POLL));
+            }
+            Err(error) => return Err(storage(error)),
+        }
+    }
 }
 
 fn canonical_store_root(store_root: &Path) -> Result<PathBuf, CodeGenerationRetentionErrorV1> {
