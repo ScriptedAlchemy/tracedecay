@@ -2116,11 +2116,10 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Queue worker-owned continuation work so freshness still sees it.
     ///
     /// A bare `Notify` permit is not observable by freshness readers, so the
-    /// pending slot stays nonzero. That slot is not an external arrival: the
-    /// worker decided to continue work an earlier wake already claimed.
-    /// Stamping a wall-clock instant here made the follow-up pass publish an
-    /// event-to-ready receipt, and a suppressed freshness probe that raced the
-    /// stamp was charged with it.
+    /// slot is stamped like an arrival. It is not one. The worker decided to
+    /// continue work an earlier wake already claimed. `attributable = false`
+    /// keeps that stamp out of the event-to-ready receipt, which otherwise
+    /// charged a suppressed freshness probe that raced it.
     fn note_worker_continuation(pending_wake: &PendingWakeV1, wake: &tokio::sync::Notify) {
         let mut state = pending_wake
             .state

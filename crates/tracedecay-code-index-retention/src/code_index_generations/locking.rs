@@ -54,19 +54,12 @@ pub fn acquire_code_generation_store_lock(
 /// A held lock returns [`CodeGenerationRetentionErrorV1::GenerationStoreBusy`]
 /// or [`CodeGenerationRetentionErrorV1::Cancelled`] instead of blocking in
 /// `File::lock`, which cannot observe either signal.
-pub fn acquire_code_generation_store_lock_checked(
+pub(super) fn acquire_code_generation_store_lock_checked(
     store_root: &Path,
     deadline: Instant,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CodeGenerationStoreLockV1, CodeGenerationRetentionErrorV1> {
-    lock_file_checked(
-        store_root,
-        STORE_LOCK_FILE,
-        true,
-        deadline,
-        is_cancelled,
-        CodeGenerationRetentionErrorV1::GenerationStoreBusy,
-    )
+    lock_file(store_root, STORE_LOCK_FILE, true, deadline, is_cancelled)
 }
 
 /// Try to hold the generation store as a reader for one bounded read of
@@ -111,36 +104,22 @@ pub fn try_acquire_code_generation_store_lock(
 pub(super) fn acquire_scope_retention_lock(
     store_root: &Path,
 ) -> Result<CodeGenerationStoreLockV1, CodeGenerationRetentionErrorV1> {
-    acquire_scope_retention_lock_checked(
+    lock_file(
         store_root,
+        SCOPE_RETENTION_LOCK_FILE,
+        false,
         Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET,
         &|| false,
     )
 }
 
-pub(super) fn acquire_scope_retention_lock_checked(
-    store_root: &Path,
-    deadline: Instant,
-    is_cancelled: &dyn Fn() -> bool,
-) -> Result<CodeGenerationStoreLockV1, CodeGenerationRetentionErrorV1> {
-    lock_file_checked(
-        store_root,
-        SCOPE_RETENTION_LOCK_FILE,
-        false,
-        deadline,
-        is_cancelled,
-        CodeGenerationRetentionErrorV1::GenerationStoreBusy,
-    )
-}
-
 #[hotpath::measure(label = "code_index_retention.lock")]
-fn lock_file_checked(
+fn lock_file(
     store_root: &Path,
     lock_file: &str,
     generation_store: bool,
     deadline: Instant,
     is_cancelled: &dyn Fn() -> bool,
-    busy: CodeGenerationRetentionErrorV1,
 ) -> Result<CodeGenerationStoreLockV1, CodeGenerationRetentionErrorV1> {
     let store_root = canonical_store_root(store_root)?;
     let deadline = deadline.min(Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET);
@@ -160,7 +139,7 @@ fn lock_file_checked(
             }
             Err(error) if tracedecay_private_fs::is_lock_contended(&error) => {
                 if Instant::now() >= deadline {
-                    return Err(busy);
+                    return Err(CodeGenerationRetentionErrorV1::GenerationStoreBusy);
                 }
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 std::thread::park_timeout(remaining.min(GRAPH_REPLAY_POOL_ACQUIRE_POLL));

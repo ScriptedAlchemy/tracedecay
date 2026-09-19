@@ -72,9 +72,9 @@ const BEGIN_ACQUIRE_BUDGET: Duration = Duration::from_millis(64);
 /// Pause between admission retries, matching the writer's own busy pause.
 const BEGIN_BUSY_RETRY_PAUSE: Duration = Duration::from_millis(1);
 
-/// Runs `attempt` until it answers, the budget is spent, or the caller is
-/// interrupted. `Ok(None)` means no answer within the budget; the caller owns
-/// what that means for its own operation.
+/// Runs `attempt` until it answers or the caller is interrupted.
+/// `Ok(None)` means no value: the budget expired under `Busy`, or the attempt
+/// failed outright. The caller owns what that means for its own operation.
 fn acquire_within_begin_budget<T>(
     context: &GraphPublicationOperationContextV1<'_>,
     mut attempt: impl FnMut() -> Result<T, ExactSqlError>,
@@ -88,9 +88,7 @@ fn acquire_within_begin_budget<T>(
                 return Ok(Some(value));
             }
             Err(ExactSqlError::Busy) => {
-                if let Some(reason) = context.interruption() {
-                    return Err(GraphPublicationStoreErrorV1::Interrupted(reason));
-                }
+                ensure_not_interrupted(context)?;
                 if Instant::now() >= deadline {
                     return Ok(None);
                 }
