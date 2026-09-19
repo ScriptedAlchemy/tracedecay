@@ -246,8 +246,7 @@ pub(super) async fn read_observations(
                 // ceiling. Split until a single observation remains; that
                 // observation is then a typed storage failure, not a retry
                 // that looks like a busy source.
-                if observation_prefetch_exceeded_materialization_limit(&error) && chunk.len() > 1
-                {
+                if observation_prefetch_exceeded_materialization_limit(&error) && chunk.len() > 1 {
                     let mid = start + chunk.len() / 2;
                     pending.push((mid, end));
                     pending.push((start, mid));
@@ -289,11 +288,18 @@ fn observation_prefetch_exceeded_materialization_limit(error: &SessionStoreError
     }
 }
 
+/// The error `read_observation` raises for an id the store does not hold, reused
+/// by callers that resolve prefetched observations out of a batch map.
+pub(super) fn missing_observation(observation_id: &CanonicalObservationIdV1) -> SessionStoreError {
+    storage_message(
+        PERSIST_OPERATION,
+        format!("source observation {} is missing", observation_id.as_str()),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{
-        PERSIST_OPERATION, observation_prefetch_exceeded_materialization_limit, storage,
-    };
+    use super::{PERSIST_OPERATION, observation_prefetch_exceeded_materialization_limit, storage};
 
     #[test]
     fn materialization_limit_is_the_prefetch_split_signal() {
@@ -308,15 +314,8 @@ mod tests {
         assert!(observation_prefetch_exceeded_materialization_limit(
             &exceeded
         ));
-        assert!(!observation_prefetch_exceeded_materialization_limit(&locked));
+        assert!(!observation_prefetch_exceeded_materialization_limit(
+            &locked
+        ));
     }
-}
-
-/// The error `read_observation` raises for an id the store does not hold, reused
-/// by callers that resolve prefetched observations out of a batch map.
-pub(super) fn missing_observation(observation_id: &CanonicalObservationIdV1) -> SessionStoreError {
-    storage_message(
-        PERSIST_OPERATION,
-        format!("source observation {} is missing", observation_id.as_str()),
-    )
 }
