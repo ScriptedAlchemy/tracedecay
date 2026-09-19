@@ -739,12 +739,19 @@ async fn single_analytics_append_commits_in_one_writer_dispatch() {
         metadata_json: None,
     };
 
-    let append = harness.registered.append_analytics_event(&event);
-    tokio::pin!(append);
-    assert!(matches!(
-        futures_util::poll!(&mut append),
-        std::task::Poll::Pending
-    ));
+    // One poll hands the INSERT to the writer thread, which autocommits it and
+    // only afterwards answers the reply channel. Whether that answer has already
+    // arrived when the poll returns is a race with that thread, so the poll's own
+    // result is not the contract; abandoning the future before anyone reads the
+    // reply is. A single-dispatch autocommit survives that; a transaction-framed
+    // append would roll back and never reach the inspection connection below.
+    {
+        let append = harness.registered.append_analytics_event(&event);
+        tokio::pin!(append);
+        if let std::task::Poll::Ready(result) = futures_util::poll!(&mut append) {
+            result.expect("single analytics append");
+        }
+    }
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
     loop {
@@ -758,7 +765,7 @@ async fn single_analytics_append_commits_in_one_writer_dispatch() {
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "single append did not autocommit while its future remained unpolled"
+            "single append did not autocommit after its future was abandoned"
         );
         std::thread::sleep(std::time::Duration::from_millis(5));
     }

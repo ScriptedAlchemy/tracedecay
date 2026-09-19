@@ -269,17 +269,23 @@ impl Default for CodexReplayIndex {
 }
 
 #[cfg(test)]
-static CODEX_REPLAY_INDEX_ENTRIES_VISITED: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+thread_local! {
+    /// Per-thread, because `indexed_replay_pass` runs entirely on its caller's
+    /// thread and the one test that measures B-tree traversal shares the
+    /// process with every other test replaying an index in parallel. A global
+    /// counter measures the whole suite's traversal, not this pass's.
+    static CODEX_REPLAY_INDEX_ENTRIES_VISITED: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
 
 #[cfg(test)]
 fn reset_replay_index_entries_visited_for_test() {
-    CODEX_REPLAY_INDEX_ENTRIES_VISITED.store(0, std::sync::atomic::Ordering::Release);
+    CODEX_REPLAY_INDEX_ENTRIES_VISITED.with(|visited| visited.set(0));
 }
 
 #[cfg(test)]
 fn replay_index_entries_visited_for_test() -> u64 {
-    CODEX_REPLAY_INDEX_ENTRIES_VISITED.load(std::sync::atomic::Ordering::Acquire)
+    CODEX_REPLAY_INDEX_ENTRIES_VISITED.with(std::cell::Cell::get)
 }
 
 fn indexed_replay_pass(
@@ -295,7 +301,8 @@ fn indexed_replay_pass(
     let lower = position.map_or(Bound::Unbounded, Bound::Excluded);
     for indexed in index.paths.range((lower, Bound::Unbounded)) {
         #[cfg(test)]
-        CODEX_REPLAY_INDEX_ENTRIES_VISITED.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        CODEX_REPLAY_INDEX_ENTRIES_VISITED
+            .with(|visited| visited.set(visited.get().saturating_add(1)));
         let path_bytes =
             u64::try_from(crate::runtime::source::path_byte_len(&indexed.path)).unwrap_or(u64::MAX);
         if paths.len() >= bounds.max_files.max(1)
