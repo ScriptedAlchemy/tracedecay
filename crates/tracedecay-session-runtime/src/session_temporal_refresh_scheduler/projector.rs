@@ -119,11 +119,11 @@ impl SessionTemporalRefreshProjector for CanonicalSessionTemporalProjector {
                 // Empty remaining range is a durable no-op: terminalize with an
                 // empty complete progress batch instead of deferring forever.
                 Ok(None) => canonical_noop_complete_effect(&recovery),
-                Err(error) if error.is_storage() => Err(
-                    SessionTemporalRefreshProjectorError::retryable(format!(
+                Err(error) if error.is_storage() => {
+                    Err(SessionTemporalRefreshProjectorError::retryable(format!(
                         "source_busy: {error}"
-                    )),
-                ),
+                    )))
+                }
                 Err(_) => Err(SessionTemporalRefreshProjectorError::terminal(
                     "projector_failed",
                 )),
