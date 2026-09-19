@@ -633,13 +633,6 @@ pub(super) async fn apply_session(
     }
 }
 
-/// Writes the projection-derived raw row through the canonical LCM raw
-/// authority so it carries the content-bound sanitization receipt that
-/// hydration requires; a receipt-less raw row is unreadable, not raw storage.
-///
-/// A deterministic sanitization refusal keeps its typed class: mapping it to
-/// `Storage` would schedule an endless environmental retry for content that
-/// can never succeed, permanently poisoning the sequential projection queue.
 /// Aligns a provenance-owned raw twin onto the projection's session before
 /// the content upsert.
 ///
@@ -668,6 +661,13 @@ async fn adopt_owned_projection_raw_session(
     .map_err(|error| storage("adopt projection raw session", error))
 }
 
+/// Writes the projection-derived raw row through the canonical LCM raw
+/// authority so it carries the content-bound sanitization receipt that
+/// hydration requires; a receipt-less raw row is unreadable, not raw storage.
+///
+/// A deterministic sanitization refusal keeps its typed class: mapping it to
+/// `Storage` would schedule an endless environmental retry for content that
+/// can never succeed, permanently poisoning the sequential projection queue.
 async fn upsert_projected_raw_message(
     conn: &impl Executor,
     message: &SessionMessageRecord,
