@@ -4992,7 +4992,7 @@ fn enter_digest_phase(
     Ok(())
 }
 
-fn with_cancellable_sqlite_statement<T>(
+pub(super) fn with_cancellable_sqlite_statement<T>(
     transaction: &Transaction<'_>,
     control: &dyn CodeIndexExecutionControlV1,
     operation: impl FnOnce() -> Result<T, CodeLexicalArtifactErrorV1>,

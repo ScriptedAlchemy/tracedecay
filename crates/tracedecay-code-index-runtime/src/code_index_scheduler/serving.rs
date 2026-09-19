@@ -3497,7 +3497,7 @@ impl LatestCodeTextGenerationV1 {
         self.observe_clone_page_scratch(page)?;
         let verification = build
             .builder
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| {
                 RetrievalPortError::Contract("clone-successor builder is missing".to_owned())
             })?

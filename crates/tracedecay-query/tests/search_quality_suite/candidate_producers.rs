@@ -1468,6 +1468,9 @@ fn v16_clone_payloads_are_content_addressed_and_postings_page() {
             .expect("accepted page cursor"),
         pages[0].next_cursor().clone()
     );
+    successor
+        .verify_resumed_page(&pages[0], &control)
+        .expect("resumed clone page matches its sealed source");
     for page in &pages[1..] {
         successor
             .append_page(page, &control)

@@ -15,6 +15,7 @@ use super::super::CodeLexicalProjectionMetadataV1;
 use super::builder::{
     BuilderMutationGuardV1, compute_clone_section_digests, install_clone_freeze,
     register_builder_mutation_gate, sqlite_file_size, verify_clone_rows,
+    with_cancellable_sqlite_statement,
 };
 use super::format::{
     RECEIPT_RESERVATION_BYTES, VerifiedCodeLexicalArtifactV1, artifact_digest,
@@ -181,13 +182,13 @@ impl CodeLexicalCloneSuccessorV1 {
     }
 
     pub fn verify_resumed_page(
-        &self,
+        &mut self,
         page: &VerifiedSealedLexicalPageV1,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<(), CodeLexicalArtifactErrorV1> {
         checkpoint(control)?;
         verify_copied_source_page(&self.connection, page)?;
-        verify_clone_page_rows(&self.connection, page, control)
+        verify_clone_page_rows(&mut self.connection, page, control)
     }
 
     pub fn finish(
@@ -560,10 +561,11 @@ fn verify_copied_source_page(
 }
 
 fn verify_clone_page_rows(
-    connection: &Connection,
+    connection: &mut Connection,
     page: &VerifiedSealedLexicalPageV1,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
+    ensure_clone_posting_occurrence_index(connection, control)?;
     for body in page.clone_bodies() {
         checkpoint(control)?;
         let expected_payload = serde_json::to_vec(&body.payload)
@@ -631,18 +633,8 @@ fn verify_clone_page_rows(
                 )
             })
             .collect::<Vec<_>>();
-        let mut statement = connection
-            .prepare(
-                "SELECT class, normalization_revision, digest, payload_digest FROM clone_exact_postings WHERE symbol_occurrence_id = ?1 ORDER BY class, normalization_revision, digest",
-            )
-            .map_err(sqlite_error)?;
-        let stored_postings = statement
-            .query_map([body.occurrence.symbol_occurrence_id.as_str()], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-            })
-            .map_err(sqlite_error)?
-            .collect::<Result<Vec<(i64, i64, String, String)>, _>>()
-            .map_err(sqlite_error)?;
+        let stored_postings =
+            stored_exact_postings(connection, body.occurrence.symbol_occurrence_id.as_str())?;
         if stored_postings != expected_postings {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "resumed clone postings differ from their sealed source page".to_owned(),
@@ -653,7 +645,107 @@ fn verify_clone_page_rows(
     Ok(())
 }
 
+type CloneExactPostingRowV1 = (i64, i64, String, String);
 type CloneFingerprintRowV1 = (String, i64, i64, i64, i64, String, String);
+
+const SELECT_CLONE_EXACT_POSTINGS_FOR_OCCURRENCE_SQL: &str = "
+SELECT class, normalization_revision, digest, payload_digest
+FROM clone_exact_postings_by_occurrence
+WHERE symbol_occurrence_id = ?1
+ORDER BY class, normalization_revision, digest";
+
+const SELECT_CLONE_FINGERPRINT_POSTINGS_FOR_OCCURRENCE_SQL: &str = "
+SELECT language, class, normalization_revision, fingerprint, token_position, payload_digest, body_digest
+FROM clone_fingerprint_postings_by_occurrence
+WHERE symbol_occurrence_id = ?1
+ORDER BY language, class, normalization_revision, fingerprint, token_position";
+
+/// Resume verification looks up postings by `symbol_occurrence_id`, but the
+/// serving tables are `WITHOUT ROWID` and clustered by fingerprint or class,
+/// so that predicate has no key and each body scanned the corpus. Copy each
+/// table once into a connection-local occurrence-leading temp table. The
+/// published file stays clustered for search; later pages on this connection
+/// seek the copy.
+fn ensure_clone_posting_occurrence_index(
+    connection: &mut Connection,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let ready: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_temp_schema WHERE type = 'table' AND name IN ('clone_exact_postings_by_occurrence', 'clone_fingerprint_postings_by_occurrence')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(sqlite_error)?;
+    if ready == 2 {
+        return Ok(());
+    }
+    let transaction = connection.transaction().map_err(sqlite_error)?;
+    let built = with_cancellable_sqlite_statement(&transaction, control, || {
+        hotpath::measure_block!(
+            "query.artifact.clone_successor.posting_occurrence_index",
+            transaction
+                .execute_batch(LOAD_CLONE_POSTING_OCCURRENCE_INDEX_SQL)
+                .map_err(sqlite_error)
+        )
+    });
+    match built {
+        Ok(()) => transaction.commit().map_err(sqlite_error),
+        Err(error) => Err(error),
+    }
+}
+
+const LOAD_CLONE_POSTING_OCCURRENCE_INDEX_SQL: &str = "
+DROP TABLE IF EXISTS temp.clone_exact_postings_by_occurrence;
+DROP TABLE IF EXISTS temp.clone_fingerprint_postings_by_occurrence;
+CREATE TEMP TABLE clone_exact_postings_by_occurrence (
+    symbol_occurrence_id TEXT NOT NULL,
+    class INTEGER NOT NULL,
+    normalization_revision INTEGER NOT NULL,
+    digest TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    PRIMARY KEY(symbol_occurrence_id, class, normalization_revision, digest)
+) WITHOUT ROWID;
+CREATE TEMP TABLE clone_fingerprint_postings_by_occurrence (
+    symbol_occurrence_id TEXT NOT NULL,
+    language TEXT NOT NULL,
+    class INTEGER NOT NULL,
+    normalization_revision INTEGER NOT NULL,
+    fingerprint INTEGER NOT NULL,
+    token_position INTEGER NOT NULL,
+    payload_digest TEXT NOT NULL,
+    body_digest TEXT NOT NULL,
+    PRIMARY KEY(symbol_occurrence_id, language, class, normalization_revision, fingerprint, token_position)
+) WITHOUT ROWID;
+INSERT INTO clone_exact_postings_by_occurrence(
+    symbol_occurrence_id, class, normalization_revision, digest, payload_digest
+)
+SELECT symbol_occurrence_id, class, normalization_revision, digest, payload_digest
+FROM main.clone_exact_postings
+ORDER BY symbol_occurrence_id, class, normalization_revision, digest;
+INSERT INTO clone_fingerprint_postings_by_occurrence(
+    symbol_occurrence_id, language, class, normalization_revision, fingerprint, token_position, payload_digest, body_digest
+)
+SELECT symbol_occurrence_id, language, class, normalization_revision, fingerprint, token_position, payload_digest, body_digest
+FROM main.clone_fingerprint_postings
+ORDER BY symbol_occurrence_id, language, class, normalization_revision, fingerprint, token_position;
+";
+
+fn stored_exact_postings(
+    connection: &Connection,
+    occurrence_id: &str,
+) -> Result<Vec<CloneExactPostingRowV1>, CodeLexicalArtifactErrorV1> {
+    let mut statement = connection
+        .prepare(SELECT_CLONE_EXACT_POSTINGS_FOR_OCCURRENCE_SQL)
+        .map_err(sqlite_error)?;
+    statement
+        .query_map([occurrence_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .map_err(sqlite_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sqlite_error)
+}
 
 fn verify_clone_fingerprint_page_rows(
     connection: &Connection,
@@ -679,13 +771,25 @@ fn verify_clone_fingerprint_page_rows(
         }
     }
     expected.sort();
+    let stored =
+        stored_fingerprint_postings(connection, body.occurrence.symbol_occurrence_id.as_str())?;
+    if stored != expected {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "resumed clone fingerprints differ from their sealed source page".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn stored_fingerprint_postings(
+    connection: &Connection,
+    occurrence_id: &str,
+) -> Result<Vec<CloneFingerprintRowV1>, CodeLexicalArtifactErrorV1> {
     let mut statement = connection
-        .prepare(
-            "SELECT language, class, normalization_revision, fingerprint, token_position, payload_digest, body_digest FROM clone_fingerprint_postings WHERE symbol_occurrence_id = ?1 ORDER BY language, class, normalization_revision, fingerprint, token_position",
-        )
+        .prepare(SELECT_CLONE_FINGERPRINT_POSTINGS_FOR_OCCURRENCE_SQL)
         .map_err(sqlite_error)?;
-    let stored = statement
-        .query_map([body.occurrence.symbol_occurrence_id.as_str()], |row| {
+    statement
+        .query_map([occurrence_id], |row| {
             Ok((
                 row.get(0)?,
                 row.get(1)?,
@@ -697,14 +801,8 @@ fn verify_clone_fingerprint_page_rows(
             ))
         })
         .map_err(sqlite_error)?
-        .collect::<Result<Vec<CloneFingerprintRowV1>, _>>()
-        .map_err(sqlite_error)?;
-    if stored != expected {
-        return Err(CodeLexicalArtifactErrorV1::Corrupt(
-            "resumed clone fingerprints differ from their sealed source page".to_owned(),
-        ));
-    }
-    Ok(())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sqlite_error)
 }
 
 fn verify_source_receipt(
@@ -738,4 +836,279 @@ fn derive_clone_fingerprint_counts(
              GROUP BY language, class, normalization_revision, fingerprint;",
         )
         .map_err(sqlite_error)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use rusqlite::Connection;
+
+    use super::super::open_builder_connection;
+    use super::{
+        ensure_clone_posting_occurrence_index, stored_exact_postings, stored_fingerprint_postings,
+    };
+
+    struct IdleControl;
+
+    impl tracedecay_code_index::production::CodeIndexExecutionControlV1 for IdleControl {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
+
+    const POSTING_TABLES_SQL: &str = "
+        CREATE TABLE clone_exact_postings (
+            class INTEGER NOT NULL,
+            normalization_revision INTEGER NOT NULL,
+            digest TEXT NOT NULL,
+            symbol_occurrence_id TEXT NOT NULL,
+            payload_digest TEXT NOT NULL,
+            PRIMARY KEY(class, normalization_revision, digest, symbol_occurrence_id)
+        ) WITHOUT ROWID;
+        CREATE TABLE clone_fingerprint_postings (
+            language TEXT NOT NULL,
+            class INTEGER NOT NULL,
+            normalization_revision INTEGER NOT NULL,
+            fingerprint INTEGER NOT NULL,
+            symbol_occurrence_id TEXT NOT NULL,
+            token_position INTEGER NOT NULL,
+            payload_digest TEXT NOT NULL,
+            body_digest TEXT NOT NULL,
+            PRIMARY KEY(language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position)
+        ) WITHOUT ROWID;
+    ";
+
+    fn posting_connection() -> (tempfile::TempDir, Connection) {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let connection = open_builder_connection(
+            &directory.path().join("successor.sqlite"),
+            128 * 1024 * 1024,
+        )
+        .expect("open builder connection");
+        connection
+            .execute_batch(POSTING_TABLES_SQL)
+            .expect("create posting tables");
+        (directory, connection)
+    }
+
+    struct OpcodeProbe {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl OpcodeProbe {
+        fn start(connection: &Connection) -> Self {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let recorded = Arc::clone(&calls);
+            connection
+                .progress_handler(
+                    1,
+                    Some(move || {
+                        recorded.fetch_add(1, Ordering::Relaxed);
+                        false
+                    }),
+                )
+                .expect("install progress handler");
+            Self { calls }
+        }
+
+        fn finish(self, connection: &Connection) -> usize {
+            connection
+                .progress_handler(1, None::<fn() -> bool>)
+                .expect("clear progress handler");
+            self.calls.load(Ordering::Relaxed)
+        }
+    }
+
+    #[test]
+    fn resumed_clone_posting_lookup_seeks_one_occurrence() {
+        const ROWS: i32 = 48_000;
+        const STRIDE: i32 = 600;
+        const OCCURRENCE: i32 = 7;
+        let (_directory, mut connection) = posting_connection();
+        {
+            let transaction = connection.transaction().expect("insert transaction");
+            let mut exact = transaction
+                .prepare(
+                    "INSERT INTO clone_exact_postings(class, normalization_revision, digest, symbol_occurrence_id, payload_digest) VALUES (?1, 1, ?2, ?3, 'payload')",
+                )
+                .expect("prepare exact insert");
+            let mut fingerprint = transaction
+                .prepare(
+                    "INSERT INTO clone_fingerprint_postings(language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position, payload_digest, body_digest) VALUES ('rust', 1, 1, ?1, ?2, 0, 'payload', 'body')",
+                )
+                .expect("prepare fingerprint insert");
+            for row in 0..ROWS {
+                let occurrence = format!("occ-{}", row % STRIDE);
+                exact
+                    .execute((i64::from(row % 3), format!("d{row}"), &occurrence))
+                    .expect("insert exact posting");
+                fingerprint
+                    .execute((i64::from(row), &occurrence))
+                    .expect("insert fingerprint posting");
+            }
+            drop(exact);
+            drop(fingerprint);
+            transaction.commit().expect("commit postings");
+        }
+
+        let occurrence = format!("occ-{OCCURRENCE}");
+        let expected_len = usize::try_from(ROWS / STRIDE).expect("row count");
+        let fingerprint_probe = OpcodeProbe::start(&connection);
+        let mut scan_fingerprint = connection
+            .prepare(
+                "SELECT language, class, normalization_revision, fingerprint, token_position, payload_digest, body_digest FROM main.clone_fingerprint_postings WHERE symbol_occurrence_id = ?1 ORDER BY language, class, normalization_revision, fingerprint, token_position",
+            )
+            .expect("prepare scanning fingerprint query");
+        let scanned = scan_fingerprint
+            .query_map([&occurrence], |row| row.get::<_, i64>(3))
+            .expect("scan query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("scan rows");
+        drop(scan_fingerprint);
+        let scan_ops = fingerprint_probe.finish(&connection);
+        assert_eq!(scanned.len(), expected_len);
+
+        ensure_clone_posting_occurrence_index(&mut connection, &IdleControl)
+            .expect("materialize occurrence index");
+        let main_indexes: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('clone_exact_postings_by_occurrence', 'clone_fingerprint_postings_by_occurrence')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("main schema");
+        assert_eq!(
+            main_indexes, 0,
+            "occurrence copies must not land in the published schema"
+        );
+
+        let seek_probe = OpcodeProbe::start(&connection);
+        let stored = stored_fingerprint_postings(&connection, &occurrence)
+            .expect("seek fingerprint postings");
+        let seek_ops = seek_probe.finish(&connection);
+        let expected = (0..ROWS)
+            .filter(|row| row % STRIDE == OCCURRENCE)
+            .map(|row| {
+                (
+                    "rust".to_owned(),
+                    1,
+                    1,
+                    i64::from(row),
+                    0,
+                    "payload".to_owned(),
+                    "body".to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stored, expected);
+        assert!(
+            seek_ops.saturating_mul(8) < scan_ops,
+            "occurrence lookup ran {seek_ops} opcodes; the unkeyed scan ran {scan_ops}"
+        );
+
+        let exact_seek_probe = OpcodeProbe::start(&connection);
+        let stored_exact = stored_exact_postings(&connection, &occurrence).expect("seek exact");
+        let exact_seek_ops = exact_seek_probe.finish(&connection);
+        let mut expected_exact = (0..ROWS)
+            .filter(|row| row % STRIDE == OCCURRENCE)
+            .map(|row| {
+                (
+                    i64::from(row % 3),
+                    1,
+                    format!("d{row}"),
+                    "payload".to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        expected_exact.sort();
+        assert_eq!(stored_exact, expected_exact);
+
+        let exact_scan_probe = OpcodeProbe::start(&connection);
+        let mut exact_scan = connection
+            .prepare("SELECT class FROM main.clone_exact_postings WHERE symbol_occurrence_id = ?1")
+            .expect("prepare exact scan");
+        let scanned_exact = exact_scan
+            .query_map([&occurrence], |row| row.get::<_, i64>(0))
+            .expect("exact scan")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("exact scan rows");
+        drop(exact_scan);
+        let scan_exact = exact_scan_probe.finish(&connection);
+        assert_eq!(scanned_exact.len(), expected_len);
+        assert!(
+            exact_seek_ops.saturating_mul(8) < scan_exact,
+            "exact occurrence lookup ran {exact_seek_ops} opcodes; the unkeyed scan ran {scan_exact}"
+        );
+
+        let fingerprint_sql = super::SELECT_CLONE_FINGERPRINT_POSTINGS_FOR_OCCURRENCE_SQL;
+        let plan = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {fingerprint_sql}"))
+            .expect("prepare plan")
+            .query_map([&occurrence], |row| row.get::<_, String>(3))
+            .expect("query plan")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("plan rows");
+        let plan = plan.join("\n");
+        assert!(
+            plan.contains("SEARCH") && plan.contains("clone_fingerprint_postings_by_occurrence"),
+            "lookup plan was {plan}"
+        );
+        assert!(
+            !plan.contains("SCAN clone_fingerprint_postings"),
+            "lookup plan was {plan}"
+        );
+    }
+
+    #[test]
+    fn resumed_clone_posting_lookup_reads_the_persisted_row() {
+        let (_directory, mut connection) = posting_connection();
+        connection
+            .execute(
+                "INSERT INTO clone_fingerprint_postings(language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position, payload_digest, body_digest) VALUES ('rust', 1, 1, 4, 'symbol.alpha', 2, 'payload-a', 'body-a')",
+                [],
+            )
+            .expect("insert fingerprint");
+        connection
+            .execute(
+                "UPDATE clone_fingerprint_postings SET payload_digest = 'payload-tampered', token_position = 9 WHERE symbol_occurrence_id = 'symbol.alpha'",
+                [],
+            )
+            .expect("tamper fingerprint");
+        connection
+            .execute(
+                "INSERT INTO clone_exact_postings(class, normalization_revision, digest, symbol_occurrence_id, payload_digest) VALUES (1, 1, 'sha256:aa', 'symbol.alpha', 'payload-tampered')",
+                [],
+            )
+            .expect("insert exact");
+        ensure_clone_posting_occurrence_index(&mut connection, &IdleControl)
+            .expect("materialize occurrence index");
+        assert_eq!(
+            stored_fingerprint_postings(&connection, "symbol.alpha").expect("read fingerprints"),
+            vec![(
+                "rust".to_owned(),
+                1,
+                1,
+                4,
+                9,
+                "payload-tampered".to_owned(),
+                "body-a".to_owned(),
+            )]
+        );
+        assert_eq!(
+            stored_exact_postings(&connection, "symbol.alpha").expect("read exact postings"),
+            vec![(1, 1, "sha256:aa".to_owned(), "payload-tampered".to_owned())]
+        );
+        assert_eq!(
+            stored_fingerprint_postings(&connection, "symbol.missing")
+                .expect("missing occurrence")
+                .len(),
+            0
+        );
+    }
 }
