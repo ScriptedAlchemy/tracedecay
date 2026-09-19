@@ -31,6 +31,7 @@ use super::{
 
 mod bootstrap;
 mod code_index_hydration;
+mod feedback_impact;
 mod handshake;
 mod invocation_ownership;
 mod lifecycle;

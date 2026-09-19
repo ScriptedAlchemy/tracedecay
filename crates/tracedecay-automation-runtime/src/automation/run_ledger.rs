@@ -553,7 +553,12 @@ pub fn canonical_record_completion_micros(record: &AutomationRunLedgerRecord) ->
     .map(|(_, completed_at_micros)| completed_at_micros)
 }
 
-pub(super) fn canonical_record_started_at_seconds(
+/// Schema-aware start instant in Unix seconds.
+///
+/// Schema v1 rows store RFC3339. Schema v2 rows store nonnegative Unix
+/// seconds. Callers that window the ledger, including analytics, must use
+/// this instead of assuming one textual form.
+pub fn canonical_record_started_at_seconds(
     record: &AutomationRunLedgerRecord,
     label: &str,
 ) -> Result<i64> {
