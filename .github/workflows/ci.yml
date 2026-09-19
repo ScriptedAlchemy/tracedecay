@@ -431,10 +431,14 @@ jobs:
   # `--lib` / `--test <name>` / `--bins` decide what compiles, and a filterset
   # would compile everything and skip at run time. The three root partitions
   # share one package selection (`tracedecay`, `tracedecay-cli`,
-  # `tracedecay-search-eval`) with the root fixture feature, so they resolve
-  # one identical dependency graph and every cargo invocation inside a job
-  # (the test build, the executables the suites spawn) is a cache hit against
-  # it. `scripts/linux-test-partitions.py check` proves, from `cargo
+  # `tracedecay-search-eval`) with the root fixture feature. Journeys also
+  # enable `tracedecay/search-eval`, the only link from the root crate to the
+  # evaluator library. It stays off every other partition: an unconditional
+  # dependency unifies `tracedecay-query/search-eval` into every test
+  # target of the package, and the transport suites then compile the eval-only
+  # lexical projection. Every cargo invocation inside a job (the test build,
+  # the executables the suites spawn) is a cache hit against that job's
+  # resolution. `scripts/linux-test-partitions.py check` proves, from `cargo
   # metadata`, that every test target in the workspace is selected by exactly
   # one partition or listed under `not_run` with a reason, so a new crate or
   # suite cannot fall out of the lane silently; `scope-gate` derives the

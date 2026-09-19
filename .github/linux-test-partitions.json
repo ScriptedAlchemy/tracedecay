@@ -68,7 +68,8 @@
         "example:tracedecay-host-cli-fixture"
       ],
       "features": [
-        "tracedecay/test-helpers"
+        "tracedecay/test-helpers",
+        "tracedecay/search-eval"
       ]
     },
     {
