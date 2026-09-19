@@ -899,8 +899,11 @@ fn plan_code_generation_retention_with_verification_cancellable(
         let Some(file_name) = generation_file_name(&path) else {
             continue;
         };
-        let (format_revision, manifest, raw_state_digest, size_bytes) =
-            read_generation_metadata(&path, verification, is_cancelled)?;
+        let Some((format_revision, manifest, raw_state_digest, size_bytes)) =
+            read_generation_metadata(&path, verification, is_cancelled)?
+        else {
+            continue;
+        };
         let expected_file = format!(
             "generation-{}.json",
             sha256_hex_suffix(&raw_state_digest).unwrap_or(&raw_state_digest)
@@ -1212,13 +1215,18 @@ fn sweep_unreferenced_generation_segments(
                     })?
                     .to_owned()
             };
-            if read_generation_format_revision(&path, is_cancelled)?
-                != SEALED_GENERATION_FORMAT_REVISION_V1
-            {
+            let Some(revision) = read_generation_format_revision(&path, is_cancelled)? else {
+                continue;
+            };
+            if revision != SEALED_GENERATION_FORMAT_REVISION_V1 {
                 continue;
             }
             let mut reader = CancellableGenerationManifestReaderV1 {
-                file: File::open(&path).map_err(storage)?,
+                file: match File::open(&path) {
+                    Ok(file) => file,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(storage(error)),
+                },
                 hasher: Sha256::new(),
                 is_cancelled,
                 cancelled: false,
@@ -1281,7 +1289,11 @@ fn sweep_unreferenced_generation_segments(
         if live_segments.contains(&format!("sha256:{digest}")) {
             continue;
         }
-        let metadata = path.symlink_metadata().map_err(storage)?;
+        let metadata = match path.symlink_metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(storage(error)),
+        };
         if !metadata.file_type().is_file() {
             return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
                 "generation segment '{}' is not a regular file",

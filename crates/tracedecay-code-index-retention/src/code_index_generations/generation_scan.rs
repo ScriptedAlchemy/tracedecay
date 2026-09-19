@@ -15,8 +15,14 @@ const MAX_FORMAT_REVISION_PREFIX_BYTES: usize = 4 * 1024;
 pub(super) fn read_generation_format_revision(
     path: &Path,
     is_cancelled: &dyn Fn() -> bool,
-) -> Result<u32, CodeGenerationRetentionErrorV1> {
-    let mut file = File::open(path).map_err(storage)?;
+) -> Result<Option<u32>, CodeGenerationRetentionErrorV1> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        // The directory entry was removed between listing and open. That is
+        // concurrent publication, not a broken store.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(storage(error)),
+    };
     let mut prefix = vec![0_u8; MAX_FORMAT_REVISION_PREFIX_BYTES];
     let bytes_read = file.read(&mut prefix).map_err(storage)?;
     crate::hotpath_observe::retention_inspected(bytes_read as u64);
@@ -25,12 +31,14 @@ pub(super) fn read_generation_format_revision(
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
     prefix.truncate(bytes_read);
-    parse_json_u32_field(&prefix, b"format_revision").ok_or_else(|| {
-        CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "generation file '{}' has no readable format revision in its bounded prefix",
-            path.display()
-        ))
-    })
+    parse_json_u32_field(&prefix, b"format_revision")
+        .ok_or_else(|| {
+            CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                "generation file '{}' has no readable format revision in its bounded prefix",
+                path.display()
+            ))
+        })
+        .map(Some)
 }
 
 #[hotpath::measure(label = "usecases.retention.read_metadata")]
@@ -38,9 +46,15 @@ pub(super) fn read_generation_metadata(
     path: &Path,
     verification: GenerationDigestVerificationV1,
     is_cancelled: &dyn Fn() -> bool,
-) -> Result<(u32, SealedGenerationManifestMetadataV1, String, u64), CodeGenerationRetentionErrorV1>
-{
-    let mut file = File::open(path).map_err(storage)?;
+) -> Result<
+    Option<(u32, SealedGenerationManifestMetadataV1, String, u64)>,
+    CodeGenerationRetentionErrorV1,
+> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(storage(error)),
+    };
     let size_bytes = file.metadata().map_err(storage)?.len();
     let mut hasher = Sha256::new();
     let mut prefix = Vec::with_capacity(MAX_GENERATION_METADATA_PREFIX_BYTES);
@@ -91,7 +105,7 @@ pub(super) fn read_generation_metadata(
         }
         GenerationDigestVerificationV1::MetadataOnly => named_state_digest(path)?,
     };
-    Ok((format_revision, manifest, state_digest, size_bytes))
+    Ok(Some((format_revision, manifest, state_digest, size_bytes)))
 }
 
 fn named_state_digest(path: &Path) -> Result<String, CodeGenerationRetentionErrorV1> {

@@ -394,7 +394,14 @@ pub(super) fn plan_collectable_text_artifacts_cancellable(
             )
         })?;
         let path = entry.path();
-        let metadata = std::fs::symlink_metadata(&path).map_err(storage)?;
+        // SQLite deletes staging sidecars when a builder commits. A name that
+        // was listed and is already gone is not a storage failure and not a
+        // candidate; the next census sees whatever remains.
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(storage(error)),
+        };
         if !metadata.file_type().is_file() {
             return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
                 "code text artifact inventory path '{}' is not a regular file",
@@ -418,13 +425,15 @@ pub(super) fn plan_collectable_text_artifacts_cancellable(
                 } else {
                     verification
                 };
-                verify_unreferenced_completed_text_artifact(
+                if !verify_unreferenced_completed_text_artifact(
                     &path,
                     digest,
                     metadata.len(),
                     candidate_verification,
                     is_cancelled,
-                )?;
+                )? {
+                    continue;
+                }
                 Some(CodeTextArtifactRetentionCandidateV1 {
                     artifact_file: file_name,
                     kind: CodeTextArtifactRetentionKindV1::Completed,
@@ -530,13 +539,19 @@ pub(super) fn verify_completed_text_artifact(
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
     let digest = sha256_file_component(&descriptor.artifact_digest, "text artifact")?;
-    verify_unreferenced_completed_text_artifact(
+    if !verify_unreferenced_completed_text_artifact(
         path,
         digest,
         descriptor.artifact_size_bytes,
         verification,
         is_cancelled,
-    )
+    )? {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "code text artifact '{}' disappeared while its identity was being verified",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 /// A content-addressed path is trusted only after the open file and its path
@@ -549,15 +564,23 @@ pub(super) fn verify_unreferenced_completed_text_artifact(
     expected_size_bytes: u64,
     verification: GenerationDigestVerificationV1,
     is_cancelled: &dyn Fn() -> bool,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
-    let before = std::fs::symlink_metadata(path).map_err(storage)?;
+) -> Result<bool, CodeGenerationRetentionErrorV1> {
+    let before = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(storage(error)),
+    };
     if !before.file_type().is_file() || before.len() != expected_size_bytes {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
             "code text artifact '{}' has an invalid regular-file identity",
             path.display()
         )));
     }
-    let file = File::open(path).map_err(storage)?;
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(storage(error)),
+    };
     if !path_still_names_open_file(path, &file, &before)? {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
             "code text artifact '{}' changed while its identity was being verified",
@@ -578,7 +601,7 @@ pub(super) fn verify_unreferenced_completed_text_artifact(
             path.display()
         )));
     }
-    Ok(())
+    Ok(true)
 }
 
 /// `active_pointer` is the pointer the store carries *now*, which is not
@@ -837,13 +860,18 @@ pub(super) fn stage_collectable_text_artifacts_cancellable(
                     } else {
                         GenerationDigestVerificationV1::Full
                     };
-                    verify_unreferenced_completed_text_artifact(
+                    if !verify_unreferenced_completed_text_artifact(
                         &source,
                         digest,
                         candidate.size_bytes,
                         candidate_verification,
                         is_cancelled,
-                    )?;
+                    )? {
+                        return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                            "text-artifact candidate '{}' disappeared before quarantine",
+                            candidate.artifact_file
+                        )));
+                    }
                 }
                 if observe_cancel(is_cancelled) {
                     return Err(CodeGenerationRetentionErrorV1::Cancelled);

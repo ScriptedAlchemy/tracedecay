@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::time::Duration;
 
 use tracedecay_store::{
     GraphDependencyGenerationIdentityV1, GraphGenerationIdV1, GraphNamespaceV1,
@@ -27,8 +26,6 @@ use super::{
     ExactPublicationRead, ExactQueryAuthority, REPLAY_COLUMNS, REPLAY_METADATA_COLUMNS,
     REPLAY_READER_ACQUIRE_SLICE, TOMBSTONE_COLUMNS,
 };
-
-const BEGIN_BUSY_ATTEMPT_BUDGET: u32 = 64;
 
 /// Maximum owner sequences bound into one `IN (...)` dependency lookup.
 ///
@@ -64,29 +61,33 @@ pub(super) fn begin(
     handle: &ExactSqlHandle,
     context: &GraphPublicationOperationContextV1<'_>,
 ) -> GraphPublicationStoreResultV1<ExactSqlTransaction> {
-    let mut busy_attempts = 0_u32;
-    loop {
-        ensure_not_interrupted(context)?;
-        match hotpath::measure_block!("rusqlite.graph_publication.begin_immediate", {
-            handle.begin_immediate()
-        }) {
-            Ok(transaction) => {
-                ensure_not_interrupted(context)?;
-                return Ok(transaction);
-            }
-            Err(ExactSqlError::Busy) => {
-                busy_attempts = busy_attempts.saturating_add(1);
-                if busy_attempts >= BEGIN_BUSY_ATTEMPT_BUDGET {
-                    return Err(GraphPublicationStoreErrorV1::Infrastructure);
-                }
-                std::thread::sleep(Duration::from_millis(1));
-                ensure_not_interrupted(context)?;
-            }
-            Err(_) => {
-                ensure_not_interrupted(context)?;
-                return Err(GraphPublicationStoreErrorV1::Infrastructure);
-            }
+    // `begin_immediate` already waits the writer lock budget and observes
+    // channel close. Repeating that wait multiplied a 64ms acquire into
+    // several seconds and reported `Infrastructure` after the caller's
+    // deadline or cancellation had already fired between sleeps. One attempt
+    // is the lock answer; interruption stays `Interrupted`.
+    ensure_not_interrupted(context)?;
+    match hotpath::measure_block!("rusqlite.graph_publication.begin_immediate", {
+        handle.begin_immediate()
+    }) {
+        Ok(transaction) => {
+            ensure_not_interrupted(context)?;
+            Ok(transaction)
         }
+        Err(ExactSqlError::Busy) => Err(busy_after_deadline(context)),
+        Err(_) => {
+            ensure_not_interrupted(context)?;
+            Err(GraphPublicationStoreErrorV1::Infrastructure)
+        }
+    }
+}
+
+fn busy_after_deadline(
+    context: &GraphPublicationOperationContextV1<'_>,
+) -> GraphPublicationStoreErrorV1 {
+    match context.interruption() {
+        Some(reason) => GraphPublicationStoreErrorV1::Interrupted(reason),
+        None => GraphPublicationStoreErrorV1::Infrastructure,
     }
 }
 
@@ -128,28 +129,21 @@ pub(super) fn begin_read(
     handle: &ExactSqlHandle,
     context: &GraphPublicationOperationContextV1<'_>,
 ) -> GraphPublicationStoreResultV1<ExactPublicationRead> {
-    let mut busy_attempts = 0_u32;
-    loop {
-        ensure_not_interrupted(context)?;
-        match hotpath::measure_block!("rusqlite.graph_publication.begin_read_snapshot", {
-            handle.begin_read_snapshot(REPLAY_READER_ACQUIRE_SLICE)
-        }) {
-            Ok(snapshot) => {
-                ensure_not_interrupted(context)?;
-                return Ok(ExactPublicationRead::Snapshot(snapshot));
+    ensure_not_interrupted(context)?;
+    match hotpath::measure_block!("rusqlite.graph_publication.begin_read_snapshot", {
+        handle.begin_read_snapshot(REPLAY_READER_ACQUIRE_SLICE)
+    }) {
+        Ok(snapshot) => {
+            ensure_not_interrupted(context)?;
+            return Ok(ExactPublicationRead::Snapshot(snapshot));
+        }
+        Err(ExactSqlError::Busy) => {
+            if let Some(reason) = context.interruption() {
+                return Err(GraphPublicationStoreErrorV1::Interrupted(reason));
             }
-            Err(ExactSqlError::Busy) => {
-                busy_attempts = busy_attempts.saturating_add(1);
-                if busy_attempts >= BEGIN_BUSY_ATTEMPT_BUDGET {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(1));
-                ensure_not_interrupted(context)?;
-            }
-            Err(_) => {
-                ensure_not_interrupted(context)?;
-                break;
-            }
+        }
+        Err(_) => {
+            ensure_not_interrupted(context)?;
         }
     }
     hotpath::measure_block!("rusqlite.graph_publication.begin_deferred", {
