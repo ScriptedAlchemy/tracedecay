@@ -987,10 +987,7 @@ fn installed_binary_version_within(
 /// commit the binary and the daemon both name, and readiness treats that
 /// omission as a different identity.
 fn probed_installed_version(binary: Option<&Path>, owner: &str) -> Option<String> {
-    let Some(path) = binary else {
-        return None;
-    };
-    match installed_binary_version(path) {
+    match installed_binary_version(binary?) {
         Ok(version) => Some(version),
         Err(reason) => {
             eprintln!(
