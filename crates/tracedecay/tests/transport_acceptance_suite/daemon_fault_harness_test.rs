@@ -321,6 +321,75 @@ fn configured_daemon_can_be_killed_and_reaped() {
     }
 }
 
+/// A listen descriptor inherited across `fork` must not outlive its owner.
+///
+/// `branch_search_serves_a_committed_generation_behind_dirty_worktree_state`
+/// drops the init daemon and immediately spawns the next one. Killing only the
+/// leader leaves the inherited listener accepting on the same path, so the
+/// next spawn reports a live daemon. The owner is the group leader; retiring
+/// its socket with it makes that path refuse the moment the owner is reaped.
+#[cfg(unix)]
+#[test]
+fn reaped_owner_releases_an_inherited_listen_socket() {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let home = tempdir_or_panic();
+    let socket_path = home.path().join("inherited-listen.sock");
+    let script = r#"
+import os, socket, sys, time
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.bind(sys.argv[1])
+sock.listen(1)
+if os.fork() == 0:
+    time.sleep(60)
+else:
+    time.sleep(60)
+"#;
+    let mut command = std::process::Command::new("python3");
+    command
+        .arg("-c")
+        .arg(script)
+        .arg(&socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+    let child = command.spawn().expect("python listener should start");
+    let mut owner = common::TestChildProcess::new(child);
+    owner.own_unix_endpoint(socket_path.clone());
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
+            break;
+        }
+        if let Some(status) = owner
+            .try_wait()
+            .expect("listener status should be readable")
+        {
+            panic!("listener exited before accepting: {status}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "inherited listener never accepted on {}",
+            socket_path.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    drop(owner);
+    assert!(
+        std::os::unix::net::UnixStream::connect(&socket_path).is_err(),
+        "an inherited listen descriptor must not keep the owner's path accepting"
+    );
+    assert!(
+        !socket_path.exists(),
+        "reaping the owner must unlink the socket it bound"
+    );
+}
+
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
 async fn assert_daemon_crash_stage(
     barrier_stage: &str,
