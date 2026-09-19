@@ -95,6 +95,12 @@ impl From<tracedecay_rusqlite_runtime::exact_sql::ExactSqlError> for Error {
             ExactSqlError::RequestLimitExceeded => {
                 Self::InvalidOperation("SQL request exceeds migration limits".to_owned())
             }
+            // A materialization ceiling is a property of the submitted
+            // statement, not of the engine: the untyped `Runtime` fallback
+            // made callers read it as a transient storage fault and replay it.
+            ExactSqlError::QueryLimitExceeded => Self::InvalidOperation(
+                "exact SQL query materialization exceeded its limit".to_owned(),
+            ),
             ExactSqlError::AuthorityDenied(message) => Self::InvalidOperation(message),
             ExactSqlError::Sqlite {
                 operation,
@@ -142,4 +148,23 @@ impl Error {
             _ => None,
         }
     }
+
+    /// True when replaying this exact statement can never succeed.
+    ///
+    /// A `SQLITE_CONSTRAINT` abort is a schema-contract trigger or constraint
+    /// refusing this exact row, and `InvalidOperation` is an admission or
+    /// materialization ceiling refusing this exact statement. Neither is a
+    /// transient engine condition, so a caller that retries one spins until
+    /// something else changes the durable state.
+    #[hotpath::skip]
+    pub const fn is_deterministic_refusal(&self) -> bool {
+        match self {
+            Self::InvalidOperation(_) => true,
+            Self::StatementBatch { source, .. } => source.is_deterministic_refusal(),
+            _ => matches!(self.sqlite_code(), Some(SQLITE_CONSTRAINT)),
+        }
+    }
 }
+
+/// `SQLITE_CONSTRAINT`: a constraint or `RAISE(ABORT)` trigger refused the row.
+const SQLITE_CONSTRAINT: i32 = 19;
