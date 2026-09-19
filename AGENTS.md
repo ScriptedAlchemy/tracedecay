@@ -157,8 +157,7 @@ unauthorized external action after completing independent, authorized work.
   production behavior. Wire it now or omit it truthfully.
 - Comments and docs explain invariants and why; remove narration, stale PR
   language, and superseded plan authority. `00-plan-set-index.md` is the sole
-  roadmap precedence; `NEXT.md` records current outcomes only, while historical
-  plans and benchmarks are archival.
+  roadmap precedence; historical plans and benchmarks are archival.
 - Name production modules, APIs, tests, scripts, and CI jobs for durable product
   capabilities, not PR numbers, milestones, phases, or temporary gates. Keep
   PR/milestone labels only in clearly archival plans and benchmark provenance.
