@@ -226,7 +226,8 @@ fn finite_ancestor_limit_bounds_an_unlimited_process_cgroup() {
 /// The slice owns `memory.max` and the service owns `memory.high`.
 ///
 /// On a 128 GiB host those are 30 GiB and 26 GiB. RSS at 24 GiB is still under
-/// the reclaim line, and a 3 GiB replacement fits in the 4 GiB band down to it.
+/// the reclaim line, so the authority admits growth instead of latching at a
+/// percentage of a ceiling the operator never set.
 #[test]
 fn slice_max_and_service_high_keep_the_reclaim_band_usable() {
     let gib = 1024 * 1024 * 1024;
@@ -277,19 +278,25 @@ fn slice_max_and_service_high_keep_the_reclaim_band_usable() {
             key("project-a", "worktree-a", "generation-a", "text-build"),
             bytes(3 * gib),
         )
-        .expect("a 3 GiB replacement is admitted at 24 GiB RSS");
+        .expect("the process authority admits a 3 GiB reservation at 24 GiB RSS");
 
+    // Text-artifact admission spends the band down to the reclaim line, never
+    // down to memory.max: `text_artifact_admitted_build_budget` subtracts the
+    // same watermark headroom it charges, so its growth budget reduces to
+    // `high_watermark - observed`. At 24 GiB observed that is 2 GiB, clearing
+    // the 1536 MiB builder floor. The 90%-of-26 GiB watermark left 0 and
+    // deadlocked the replacement build.
     let headroom = detected
         .limit_bytes
         .get()
         .saturating_sub(pressure.high_watermark_bytes());
-    let available = detected
+    let available_for_growth = detected
         .limit_bytes
         .get()
-        .saturating_sub(22 * gib)
+        .saturating_sub(24 * gib)
         .saturating_sub(headroom);
-    assert_eq!(available, 4 * gib);
-    assert!(available >= 1536 * 1024 * 1024);
+    assert_eq!(available_for_growth, 2 * gib);
+    assert!(available_for_growth >= 1536 * 1024 * 1024);
 
     assert!(
         pressure
