@@ -944,6 +944,24 @@ impl StoreAdministration {
         registry.mounted_session_databases().await
     }
 
+    /// The profile's session-runtime registry map and its canonical root,
+    /// taken without locking either.
+    ///
+    /// Branch publication resolves the project's durable cursor-key authority
+    /// through this inside its own background task, so an explicitly published
+    /// branch can mount its own query authority without the admitting caller
+    /// paying for a registry lock it never reads.
+    #[cfg(unix)]
+    pub(super) fn session_runtime_registries(
+        &self,
+    ) -> Option<(SharedSessionRuntimeRegistries, std::path::PathBuf)> {
+        let profile_root = self
+            .profile_identity()
+            .and_then(|identity| authority::canonical_identity_path(identity.profile_root()))
+            .ok()?;
+        Some((Arc::clone(&self.session_runtime_registries), profile_root))
+    }
+
     #[hotpath::measure(label = "daemon.branch_admin.mounted_project_servers", future = true)]
     pub(super) async fn mounted_project_servers(&self) -> Vec<Arc<crate::mcp::McpServer>> {
         let Ok(profile_root) = self

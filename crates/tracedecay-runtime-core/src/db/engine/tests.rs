@@ -386,3 +386,43 @@ async fn transaction_statement_batch_reports_the_exact_failed_statement() {
 }
 
 mod async_writer;
+
+#[test]
+fn deterministic_refusals_are_distinguished_from_transient_engine_faults() {
+    use tracedecay_rusqlite_runtime::exact_sql::ExactSqlError;
+
+    // A schema-contract trigger abort refuses this exact row for good.
+    let constraint = Error::Sqlite {
+        operation: "execute",
+        code: Some(19),
+        extended_code: Some(1811),
+        message: "invalid session refresh progress".to_owned(),
+    };
+    assert!(constraint.is_deterministic_refusal());
+    assert!(
+        Error::StatementBatch {
+            index: 0,
+            source: Box::new(constraint),
+        }
+        .is_deterministic_refusal()
+    );
+
+    // A materialization ceiling refuses this exact statement for good, and
+    // must not arrive as an untyped `Runtime` message.
+    let limit = Error::from(ExactSqlError::QueryLimitExceeded);
+    assert!(matches!(limit, Error::InvalidOperation(_)));
+    assert!(limit.is_deterministic_refusal());
+
+    // Contention and I/O faults stay retryable.
+    assert!(!Error::Busy.is_deterministic_refusal());
+    assert!(!Error::Runtime("writer restarted".to_owned()).is_deterministic_refusal());
+    assert!(
+        !Error::Sqlite {
+            operation: "execute",
+            code: Some(5),
+            extended_code: Some(5),
+            message: "database is locked".to_owned(),
+        }
+        .is_deterministic_refusal()
+    );
+}

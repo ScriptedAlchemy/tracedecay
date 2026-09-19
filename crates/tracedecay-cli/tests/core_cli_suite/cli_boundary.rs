@@ -17,6 +17,10 @@ fn shipped_binary_stops_quietly_when_a_pipeline_reader_exits() {
     let output = Command::new("sh")
         .args(["-c", r#""$TRACEDECAY_BIN" tool | head -n 4"#])
         .env("TRACEDECAY_BIN", env!("CARGO_BIN_EXE_tracedecay"))
+        // A hotpath-enabled binary binds its metrics port on start; when a
+        // sibling test's daemon already holds it, the bind failure lands on
+        // stderr and breaks the quiet-pipeline assertion below.
+        .env("HOTPATH_METRICS_SERVER_OFF", "true")
         .output()
         .expect("tracedecay tool pipeline should run");
 
