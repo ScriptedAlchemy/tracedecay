@@ -782,8 +782,16 @@ impl Drop for TestChildProcess {
     }
 }
 
-/// PID-directed stop: survives `process_group(0)` / `setsid` detachment.
+/// Stop a test child that was detached with `process_group(0)`.
+///
+/// The child is its own process-group leader. Killing only that pid leaves
+/// helper children that still hold the listen socket (they inherited it
+/// across `fork`, and `FD_CLOEXEC` has not run yet). Signal the group first,
+/// while the pid is still unreaped, then reap the leader.
 fn terminate_and_reap(child: &mut Child) -> std::io::Result<ExitStatus> {
+    #[cfg(unix)]
+    tracedecay_runtime_core::process_tree::signal_process_group(child.id());
+
     if let Ok(Some(status)) = child.try_wait() {
         return Ok(status);
     }
@@ -1118,16 +1126,10 @@ fn spawn_tracedecay_daemon_process(
             })
             .is_some_and(|address| TcpStream::connect(address).is_ok())
     };
-    // Stopping a predecessor daemon is asynchronous with respect to its
-    // endpoint: `kill` plus `wait` reaps the PID the harness spawned, but the
-    // kernel keeps the listening socket alive while *any* duplicate of that
-    // descriptor survives, including one a subprocess inherited across `fork`
-    // and still holds because it has not reached its own `exec` yet. Asserting
-    // instantaneously therefore reports an ordinary teardown tail as a live
-    // daemon, which is what `init_project_fixture` journeys (spawn, init, drop,
-    // spawn again) hit on a loaded runner. Wait a bounded time for the endpoint
-    // to stop accepting; a daemon that keeps accepting still fails with the
-    // same refusal.
+    // `terminate_and_reap` has already signalled the daemon's process group.
+    // A helper that inherited the listen socket across `fork` is dead or
+    // dying, but that signal is not synchronous with `wait` of the leader.
+    // A predecessor that is still accepting after the bound is a real leak.
     poll_until(
         Instant::now() + PREDECESSOR_DAEMON_VACATE_TIMEOUT,
         Duration::from_millis(25),
