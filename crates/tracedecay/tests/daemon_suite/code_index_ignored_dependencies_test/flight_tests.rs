@@ -283,8 +283,39 @@ async fn coalesced_publication_failure_preserves_the_scheduler_error_family() {
             &fixture.path().canonicalize().expect("canonical fixture"),
         );
     let pointer_path = scoped_store.join("active-code-generation-v1.json");
-    let pointer_bytes = std::fs::read(&pointer_path).expect("read active pointer");
-    std::fs::write(&pointer_path, b"{").expect("corrupt active pointer");
+    // Every production writer of the active pointer reads it, edits it in
+    // memory and renames a temporary over it while holding the exclusive
+    // generation-store lock. Corrupting the file without that lock races an
+    // in-flight read-modify-write whose rename then restores a valid pointer,
+    // and this owner publishes instead of failing closed. The racer is the
+    // background pass tail: it releases the background admission permit this
+    // owner then takes (registry/mount.rs, "release the background admission
+    // permit before HeadOpening / graph work") and keeps attaching the
+    // generation's text artifact afterwards, so neither the held admission
+    // nor the held scheduler mutex proves the store is quiet. Taking the
+    // store lock does: being granted it means no writer is mid-transaction,
+    // and any writer that starts after it is released reads the corruption
+    // under the lock and refuses instead of overwriting it.
+    let pointer_bytes = {
+        use tracedecay_code_index_retention::code_index_generations::try_acquire_code_generation_store_lock;
+
+        let store_lock = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(lock) = try_acquire_code_generation_store_lock(&scoped_store)
+                    .expect("generation store lock")
+                {
+                    break lock;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("no generation-store writer is mid-transaction");
+        let pointer_bytes = std::fs::read(&pointer_path).expect("read active pointer");
+        std::fs::write(&pointer_path, b"{").expect("corrupt active pointer");
+        drop(store_lock);
+        pointer_bytes
+    };
     owner_control.release();
     hold.release();
 
