@@ -936,9 +936,9 @@ impl CodeIndexSchedulerRegistryV1 {
             .active_publication_covers(serving.generation())
             .ok()?
         {
-            *serving_source_witness
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            // A read may decline a seat it cannot cover. Withdrawing the
+            // witness here fabricates a source disproof the retained pass has
+            // not made; only that pass may clear it.
             return None;
         }
         // Checkout-identity gate: the ready probe (or its recorded witness)
