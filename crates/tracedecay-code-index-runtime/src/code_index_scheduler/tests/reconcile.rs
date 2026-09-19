@@ -2156,7 +2156,10 @@ async fn unchanged_git_watcher_probe_does_not_enqueue_authoritative_capture() {
         .acquire_owned()
         .await
         .expect("hold background reconcile admission");
-    registry.clear_pending_wake_for_scope(&scope).await;
+    // The settle above cannot see a pass tail that has dropped its guard and
+    // not yet stamped its `BusyFollowUp` follow-up, so prove the slot stays
+    // empty before asserting that nothing queued a capture pass.
+    clear_pending_wake_until_quiet(&registry, &scope).await;
     assert_eq!(
         scheduler
             .lock()
@@ -6949,7 +6952,9 @@ async fn text_freshness_query_during_owner_work_is_current_when_source_is_unchan
         .acquire_owned()
         .await
         .expect("hold background reconcile admission");
-    registry.clear_pending_wake_for_scope(&scope).await;
+    // A pass tail that stamps `BusyFollowUp` after this clear would fail the
+    // "no wake" assertion below, so prove the empty slot holds.
+    clear_pending_wake_until_quiet(&registry, &scope).await;
     // Stand in for a worker pass re-observing an unchanged tree: in-progress,
     // scheduler mutex free, nothing moved on disk or in git.
     let owner_pass = registry
@@ -9137,7 +9142,8 @@ async fn graph_off_remount_preserves_an_unhinted_source_reconcile() {
         .acquire_owned()
         .await
         .expect("hold worker after remount dequeue");
-    registry.clear_pending_wake_for_scope(&scope).await;
+    // Same tail: its stamp would look like the unhinted edit's own wake below.
+    clear_pending_wake_until_quiet(&registry, &scope).await;
     fixture.edit("src/lib.rs", "pub fn beta() -> usize { 2 }\n");
     git(fixture.path(), &["commit", "-qam", "unhinted remount edit"]);
 
