@@ -44,11 +44,12 @@ use tracedecay_domain::{
     EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision, ExactClass, FileOccurrenceId,
     LanguageId, ManifestDigest, PolicyRevisionId, PrincipalId, PrivacyDomainId, ProjectId,
     ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
-    ProjectionOutcomeV1, PublicRetrieverStatus, QueryNormalizationRevision, RelationEdgeKindV1,
-    RepositoryDirtyStateV1, RepositoryId, RetrievalFailure, RetrievalRequest, RetrievalScope,
-    RetrievalSnapshot, RetrieverKind, RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1,
-    SanitizedCodeSnapshotV1, SanitizerRevision, SingleRootScopeV1, SnapshotFileDispositionV1,
-    SymbolOccurrenceId, TemporalModeV1, UtcMicros, VectorWatermark,
+    ProjectionOutcomeV1, PublicRetrieverStatus, QueryFallbackSubpayload,
+    QueryNormalizationRevision, RelationEdgeKindV1, RepositoryDirtyStateV1, RepositoryId,
+    RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind,
+    RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SanitizerRevision, SingleRootScopeV1, SnapshotFileDispositionV1, SymbolOccurrenceId,
+    TemporalModeV1, UtcMicros, VectorWatermark,
 };
 use tracedecay_query::native_git::NativeHistoricalBlobReaderV1;
 use tracedecay_query::retrieval::exact::{
@@ -599,6 +600,18 @@ fn generate_partition_output(
         let composed = compose_production_query(published, profile, query)?;
         let ranked = map_ranked_candidates(published, &composed)?;
         let coverage = query_lane_coverage(&composed);
+        // The subpayload's digest is unfit as a ranking pin; its contract is
+        // not. Constructing it still proves canonical `final_ordinal` order,
+        // per-candidate validity, and query-fallback-only contributions for
+        // every composed query.
+        QueryFallbackSubpayload::new(
+            composed.profile_id.clone(),
+            composed.ranked_candidates.clone(),
+            coverage.clone(),
+            composed.freshness.clone(),
+            None,
+        )
+        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
         let receipt = ranking_receipt_digest(
             composed.profile_id.as_str(),
             query.query_id.as_str(),
