@@ -565,6 +565,17 @@ fn map_execution_error(
         SessionTemporalExecutionError::Denied => SessionRetrievalOutcome::Denied,
         SessionTemporalExecutionError::Unavailable => SessionRetrievalOutcome::Unavailable,
         SessionTemporalExecutionError::ResetRequired => SessionRetrievalOutcome::ResetRequired,
+        // A partial generation is still converging: the cohort is empty because
+        // the relation receipt is not applied yet. That is Partial, the same
+        // refusal `map_report` already makes for an empty ranked page.
+        // CompleteZero would say the absence is final.
+        SessionTemporalExecutionError::Empty {
+            freshness: freshness @ SessionDataFreshness::Partial { generation_lag },
+        } => SessionRetrievalOutcome::Partial {
+            items: Vec::new(),
+            freshness,
+            omitted: generation_lag.max(1),
+        },
         SessionTemporalExecutionError::Empty { freshness } => {
             SessionRetrievalOutcome::CompleteZero { freshness }
         }
@@ -1019,6 +1030,29 @@ mod tests {
         ] {
             assert_eq!(map_kernel_error(error), expected);
         }
+    }
+
+    #[test]
+    fn partial_generation_empty_execution_is_never_an_authoritative_zero() {
+        let freshness = SessionDataFreshness::Partial { generation_lag: 1 };
+        assert_eq!(
+            map_execution_error(SessionTemporalExecutionError::Empty { freshness }),
+            SessionRetrievalOutcome::Partial {
+                items: Vec::new(),
+                freshness,
+                omitted: 1,
+            }
+        );
+        // A finished generation with no hits is still an authoritative zero.
+        // Partial is the only freshness that means "still converging".
+        assert_eq!(
+            map_execution_error(SessionTemporalExecutionError::Empty {
+                freshness: SessionDataFreshness::Stored { generation_lag: 4 },
+            }),
+            SessionRetrievalOutcome::CompleteZero {
+                freshness: SessionDataFreshness::Stored { generation_lag: 4 },
+            }
+        );
     }
 
     #[test]

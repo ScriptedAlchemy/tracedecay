@@ -697,6 +697,19 @@ impl DaemonSessionRetrievalService {
                     freshness: SessionDataFreshness::Stored { generation_lag },
                 }
             }
+            // Same refusal as the retrieval boundary: a converging generation
+            // has no published cohort yet, so an empty page is partial, not an
+            // authoritative zero the caller should treat as final.
+            SessionTemporalExecutionError::Empty {
+                freshness: freshness @ SessionDataFreshness::Partial { generation_lag },
+            } => SessionRetrievalServiceOutcome::Partial {
+                page: SessionRetrievalPageView {
+                    results: Vec::new(),
+                    temporal: self.empty_temporal(),
+                },
+                freshness,
+                omitted: generation_lag.max(1),
+            },
             SessionTemporalExecutionError::Empty { freshness } => {
                 SessionRetrievalServiceOutcome::CompleteZero {
                     temporal: self.empty_temporal(),

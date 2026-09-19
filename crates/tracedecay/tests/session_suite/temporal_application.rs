@@ -316,6 +316,12 @@ impl SessionTemporalExecutionPort for FakeExecutionPort {
                 }),
             }),
             "execution-cancelled" => Some(SessionTemporalExecutionError::Cancelled),
+            "execution-partial-empty" => Some(SessionTemporalExecutionError::Empty {
+                freshness: SessionDataFreshness::Partial { generation_lag: 1 },
+            }),
+            "execution-stored-empty" => Some(SessionTemporalExecutionError::Empty {
+                freshness: SessionDataFreshness::Stored { generation_lag: 4 },
+            }),
             _ => None,
         };
         if let Some(error) = execution_error {
@@ -1745,6 +1751,37 @@ async fn coverage_matrix_preserves_partial_locked_and_cancelled_outcomes() {
         SessionRetrievalOutcome::Cancelled
     ));
     assert_eq!(locked_port.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn empty_partial_generation_is_partial_not_complete_zero() {
+    let port = FakeExecutionPort::empty();
+    let service =
+        SessionRetrievalService::new(AllowAuthorizer, &port, Words("words-v1"), configuration());
+    assert_eq!(
+        retrieve(
+            &service,
+            &context("root.one"),
+            query("execution-partial-empty"),
+        )
+        .await,
+        SessionRetrievalOutcome::Partial {
+            items: Vec::new(),
+            freshness: SessionDataFreshness::Partial { generation_lag: 1 },
+            omitted: 1,
+        }
+    );
+    assert_eq!(
+        retrieve(
+            &service,
+            &context("root.one"),
+            query("execution-stored-empty"),
+        )
+        .await,
+        SessionRetrievalOutcome::CompleteZero {
+            freshness: SessionDataFreshness::Stored { generation_lag: 4 },
+        }
+    );
 }
 
 #[tokio::test]

@@ -83,6 +83,51 @@ async fn production_codex_message_search(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
 ) -> Value {
+    // A partial generation is the store saying the relation receipt is not
+    // applied yet. Re-read it. Every other outcome, including an empty
+    // `complete_zero`, answers now and still fails the assertions below.
+    let payload = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let payload = production_codex_message_search_once(harness, project).await;
+            if payload["outcome"] != "partial"
+                || payload["results"]
+                    .as_array()
+                    .is_some_and(|results| !results.is_empty())
+            {
+                break payload;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("production Codex message search convergence deadline");
+    assert!(
+        payload["results"].as_array().is_some_and(|results| {
+            results.iter().any(|result| {
+                result["message"]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("cobalt orchard scheduler migration"))
+            })
+        }),
+        "production Codex message search was empty after completed ingest: {payload}"
+    );
+    assert!(
+        payload["results"].as_array().is_some_and(|results| {
+            results.iter().any(|result| {
+                result["message"]["text"].as_str()
+                    == Some("The cobalt orchard scheduler migration is ready for review")
+            })
+        }),
+        "production Codex message search did not hydrate the exact assistant message: {payload}"
+    );
+    payload
+}
+
+#[cfg(feature = "test-transport")]
+async fn production_codex_message_search_once(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+) -> Value {
     let response = harness
         .call_tool(
             project,
@@ -108,30 +153,10 @@ async fn production_codex_message_search(
     .expect("production message search JSON");
     // Retained tools respond with the full evidence envelope; the search
     // payload the assertions consume lives under `outcome.value.payload`.
-    let payload = envelope
+    envelope
         .pointer("/outcome/value/payload")
         .cloned()
-        .unwrap_or(envelope);
-    assert!(
-        payload["results"].as_array().is_some_and(|results| {
-            results.iter().any(|result| {
-                result["message"]["text"]
-                    .as_str()
-                    .is_some_and(|text| text.contains("cobalt orchard scheduler migration"))
-            })
-        }),
-        "production Codex message search was empty after completed ingest: {payload}"
-    );
-    assert!(
-        payload["results"].as_array().is_some_and(|results| {
-            results.iter().any(|result| {
-                result["message"]["text"].as_str()
-                    == Some("The cobalt orchard scheduler migration is ready for review")
-            })
-        }),
-        "production Codex message search did not hydrate the exact assistant message: {payload}"
-    );
-    payload
+        .unwrap_or(envelope)
 }
 
 #[cfg(feature = "test-transport")]
