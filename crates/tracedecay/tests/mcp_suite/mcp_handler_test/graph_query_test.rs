@@ -1838,6 +1838,193 @@ async fn doc_coverage_distinguishes_documented_and_undocumented_enum_variants() 
     );
 }
 
+fn census_without_ids(payload: &Value) -> Value {
+    let mut payload = payload.clone();
+    let Some(files) = payload.get_mut("files").and_then(Value::as_array_mut) else {
+        return payload;
+    };
+    for file in files {
+        let Some(symbols) = file.get_mut("symbols").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for symbol in symbols {
+            if let Some(object) = symbol.as_object_mut() {
+                let id = object.get("id").and_then(Value::as_str).unwrap_or("");
+                assert!(
+                    !id.is_empty(),
+                    "doc coverage symbol is missing its id: {symbol}"
+                );
+                object.remove("id");
+            }
+        }
+    }
+    payload
+}
+
+async fn doc_coverage_census(fixture: &GraphQueryFixture, args: Value) -> Value {
+    let result = call_production_tool(fixture, "tracedecay_doc_coverage", args, None, None)
+        .await
+        .unwrap_or_else(|error| panic!("tracedecay_doc_coverage failed: {error}"));
+    let text = extract_text(&result.value);
+    serde_json::from_str(text).unwrap_or_else(|error| {
+        panic!("tracedecay_doc_coverage payload was not JSON: {error}\n{text}")
+    })
+}
+
+#[tokio::test]
+async fn doc_coverage_lists_undocumented_public_symbols_and_honors_path_and_limit() {
+    let (fixture, _root) = graph_query_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        // Item lines are the declaration line, not the doc comment above it.
+        fs::write(
+            project.join("src/lib.rs"),
+            "/// Ready for callers.\n\
+             pub fn ready() -> u32 {\n\
+                 1\n\
+             }\n\
+             \n\
+             pub fn missing() -> u32 {\n\
+                 2\n\
+             }\n\
+             \n\
+             fn hidden() -> u32 {\n\
+                 3\n\
+             }\n\
+             \n\
+             pub(crate) fn crate_local() -> u32 {\n\
+                 4\n\
+             }\n\
+             \n\
+             ///   \n\
+             pub fn blank_doc() -> u32 {\n\
+                 5\n\
+             }\n\
+             \n\
+             /// Counted.\n\
+             pub const COUNTED: u32 = 1;\n\
+             \n\
+             pub const UNCOUNTED: u32 = 2;\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("src/other.rs"),
+            "pub fn elsewhere() -> u32 {\n    9\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("src/done.rs"),
+            "/// Finished.\npub fn finished() -> u32 {\n    7\n}\n",
+        )
+        .unwrap();
+    })
+    .await;
+
+    let lib = doc_coverage_census(&fixture, json!({"path": "src/lib.rs", "limit": 50})).await;
+    assert_eq!(
+        census_without_ids(&lib),
+        json!({
+            "path_filter": "src/lib.rs",
+            "total_undocumented": 3,
+            "returned_count": 3,
+            "omitted_count": 0,
+            "complete": true,
+            "limit": 50,
+            "file_count": 1,
+            "files": [{
+                "file": "src/lib.rs",
+                "count": 3,
+                "symbols": [
+                    {
+                        "name": "missing",
+                        "kind": "function",
+                        "line": 6,
+                        "signature": "pub fn missing() -> u32"
+                    },
+                    {
+                        "name": "blank_doc",
+                        "kind": "function",
+                        "line": 19,
+                        "signature": "pub fn blank_doc() -> u32"
+                    },
+                    {
+                        "name": "UNCOUNTED",
+                        "kind": "const",
+                        "line": 26,
+                        "signature": "pub const UNCOUNTED: u32 = 2;"
+                    }
+                ]
+            }]
+        }),
+        "documented, private, and pub(crate) symbols must stay out: {lib}"
+    );
+
+    let other = doc_coverage_census(&fixture, json!({"path": "src/other.rs", "limit": 50})).await;
+    assert_eq!(
+        census_without_ids(&other),
+        json!({
+            "path_filter": "src/other.rs",
+            "total_undocumented": 1,
+            "returned_count": 1,
+            "omitted_count": 0,
+            "complete": true,
+            "limit": 50,
+            "file_count": 1,
+            "files": [{
+                "file": "src/other.rs",
+                "count": 1,
+                "symbols": [{
+                    "name": "elsewhere",
+                    "kind": "function",
+                    "line": 1,
+                    "signature": "pub fn elsewhere() -> u32"
+                }]
+            }]
+        }),
+        "a file path must not leak symbols from other files: {other}"
+    );
+
+    let done = doc_coverage_census(&fixture, json!({"path": "src/done.rs", "limit": 50})).await;
+    assert_eq!(
+        done,
+        json!({
+            "path_filter": "src/done.rs",
+            "total_undocumented": 0,
+            "returned_count": 0,
+            "omitted_count": 0,
+            "complete": true,
+            "limit": 50,
+            "file_count": 0,
+            "files": []
+        }),
+        "a file whose public symbols are documented reports an empty census: {done}"
+    );
+
+    let limited = doc_coverage_census(&fixture, json!({"path": "src", "limit": 1})).await;
+    assert_eq!(
+        census_without_ids(&limited),
+        json!({
+            "path_filter": "src",
+            "total_undocumented": 4,
+            "returned_count": 1,
+            "omitted_count": 3,
+            "complete": false,
+            "limit": 1,
+            "file_count": 1,
+            "files": [{
+                "file": "src/lib.rs",
+                "count": 1,
+                "symbols": [{
+                    "name": "missing",
+                    "kind": "function",
+                    "line": 6,
+                    "signature": "pub fn missing() -> u32"
+                }]
+            }]
+        }),
+        "limit keeps path-then-line order and reports the omitted tail: {limited}"
+    );
+}
+
 #[tokio::test]
 async fn test_files_public_path_filters() {
     let (cg, _dir) = production_graph_query_fixture().await;
