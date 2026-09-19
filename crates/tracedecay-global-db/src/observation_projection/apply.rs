@@ -1051,7 +1051,11 @@ async fn apply_rows(
         }
     };
     if projected_message.provider != "hermes" && !preserve_protected_payload {
-        if existing.is_some() {
+        // Message-row presence is not projector ownership. An equal
+        // pre-existing row with no output state is retained without this
+        // projector ever having claimed the output, so its twin keeps the
+        // upsert's session guard and a disagreement stays a typed refusal.
+        if state.is_some_and(|state| state.projector_owned) {
             adopt_owned_projection_raw_session(conn, projected_message).await?;
         }
         upsert_projected_raw_message(conn, projected_message).await?;
