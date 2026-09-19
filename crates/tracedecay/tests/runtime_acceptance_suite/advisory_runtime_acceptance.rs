@@ -1088,37 +1088,70 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
         "format": "json",
     })
     .to_string();
-    let stop_output = common::tracedecay_command_with_home(environment.home())
-        .args([
-            "tool",
-            "--project",
-            project_arg.as_str(),
-            "tracedecay_hook_runtime",
-            "--args",
-            stop_args.as_str(),
-            "--json",
-        ])
-        .current_dir(&project)
-        .output()
-        .expect("invoke registered daemon stop path");
-    assert!(
-        stop_output.status.success(),
-        "registered daemon stop ingest failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&stop_output.stdout),
-        String::from_utf8_lossy(&stop_output.stderr)
-    );
-    let stop_response: Value =
-        serde_json::from_slice(&stop_output.stdout).expect("registered daemon stop response");
-    let stop_payload: Value = serde_json::from_str(
-        stop_response["content"][0]["text"]
-            .as_str()
-            .expect("registered daemon stop response text"),
-    )
-    .expect("registered daemon stop payload");
-    assert_eq!(
-        stop_payload["status"], "committed",
-        "registered daemon stop ingest did not commit: {stop_response}"
-    );
+    // The project catch-up sweep races this pass for the rollout just written.
+    // Admission is the durable commit. A sweep that admits it first leaves the
+    // hook with nothing new to persist and reports `exact_duplicate`. Both
+    // terminals prove the transcript is durable; `accepted_for_replay` proves
+    // neither. A deferred or still-warming pass is the same typed progress the
+    // Cursor ingest above rides out.
+    let stop_deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let stop_output = common::tracedecay_command_with_home(environment.home())
+            .args([
+                "tool",
+                "--project",
+                project_arg.as_str(),
+                "tracedecay_hook_runtime",
+                "--args",
+                stop_args.as_str(),
+                "--json",
+            ])
+            .current_dir(&project)
+            .output()
+            .expect("invoke registered daemon stop path");
+        if stop_output.status.success() {
+            let stop_response: Value = serde_json::from_slice(&stop_output.stdout)
+                .expect("registered daemon stop response");
+            let stop_payload: Value = serde_json::from_str(
+                stop_response["content"][0]["text"]
+                    .as_str()
+                    .expect("registered daemon stop response text"),
+            )
+            .expect("registered daemon stop payload");
+            if stop_payload["completed"] != false {
+                assert!(
+                    matches!(
+                        stop_payload["status"].as_str(),
+                        Some("committed" | "exact_duplicate")
+                    ),
+                    "registered daemon stop ingest proved neither a commit nor a duplicate: {stop_response}\ndaemon log:\n{}",
+                    std::fs::read_to_string(&daemon_log)
+                        .expect("read isolated advisory daemon log"),
+                );
+                break;
+            }
+            assert_eq!(
+                stop_payload["admission"]["retryable"], true,
+                "incomplete stop ingest must carry a retryable admission: {stop_response}"
+            );
+        } else {
+            let stderr = String::from_utf8_lossy(&stop_output.stderr).into_owned();
+            assert!(
+                stderr.contains("is warming in the background"),
+                "registered daemon stop ingest failed\nstdout:\n{}\nstderr:\n{stderr}\ndaemon log:\n{}",
+                String::from_utf8_lossy(&stop_output.stdout),
+                std::fs::read_to_string(&daemon_log).expect("read isolated advisory daemon log"),
+            );
+        }
+        assert!(
+            std::time::Instant::now() < stop_deadline,
+            "registered daemon stop ingest did not complete before its deadline\nstdout:\n{}\nstderr:\n{}\ndaemon log:\n{}",
+            String::from_utf8_lossy(&stop_output.stdout),
+            String::from_utf8_lossy(&stop_output.stderr),
+            std::fs::read_to_string(&daemon_log).expect("read isolated advisory daemon log"),
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 
     let advisory_args = json!({
         // Serialized as a file URL rather than concatenated: a Windows native
