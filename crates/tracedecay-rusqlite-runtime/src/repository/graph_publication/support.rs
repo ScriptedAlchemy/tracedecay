@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tracedecay_store::{
     GraphDependencyGenerationIdentityV1, GraphGenerationIdV1, GraphNamespaceV1,
@@ -27,8 +27,6 @@ use super::{
     ExactPublicationRead, ExactQueryAuthority, REPLAY_COLUMNS, REPLAY_METADATA_COLUMNS,
     REPLAY_READER_ACQUIRE_SLICE, TOMBSTONE_COLUMNS,
 };
-
-const BEGIN_BUSY_ATTEMPT_BUDGET: u32 = 64;
 
 /// Maximum owner sequences bound into one `IN (...)` dependency lookup.
 ///
@@ -59,35 +57,64 @@ const BEGIN_BUSY_ATTEMPT_BUDGET: u32 = 64;
 /// exceeded the row cap in one chunk.
 const GRAPH_REPLAY_DEPENDENCY_BATCH: usize = 38;
 
+/// Wall-clock budget for one begin acquisition, retries included.
+///
+/// `ExactSqlError::Busy` answers two different questions with one variant: the
+/// exact-SQL command queue was full (`map_writer_send_error`), or the writer's
+/// own `EXACT_SQL_WRITE_LOCK_ACQUIRE_LIMIT` lock loop was exhausted. Only the
+/// first is worth another attempt. A wall-clock budget separates them without a
+/// second error variant: an exhausted lock attempt has already spent this whole
+/// window inside `begin_immediate`, so it gets exactly one attempt and its
+/// 64ms answer is never multiplied into seconds, while a queue refusal returns
+/// at once and still has the window to drain in.
+const BEGIN_ACQUIRE_BUDGET: Duration = Duration::from_millis(64);
+
+/// Pause between admission retries, matching the writer's own busy pause.
+const BEGIN_BUSY_RETRY_PAUSE: Duration = Duration::from_millis(1);
+
+/// Runs `attempt` until it answers, the budget is spent, or the caller is
+/// interrupted. `Ok(None)` means no answer within the budget; the caller owns
+/// what that means for its own operation.
+fn acquire_within_begin_budget<T>(
+    context: &GraphPublicationOperationContextV1<'_>,
+    mut attempt: impl FnMut() -> Result<T, ExactSqlError>,
+) -> GraphPublicationStoreResultV1<Option<T>> {
+    let deadline = Instant::now() + BEGIN_ACQUIRE_BUDGET;
+    loop {
+        ensure_not_interrupted(context)?;
+        match attempt() {
+            Ok(value) => {
+                ensure_not_interrupted(context)?;
+                return Ok(Some(value));
+            }
+            Err(ExactSqlError::Busy) => {
+                if let Some(reason) = context.interruption() {
+                    return Err(GraphPublicationStoreErrorV1::Interrupted(reason));
+                }
+                if Instant::now() >= deadline {
+                    return Ok(None);
+                }
+                std::thread::sleep(BEGIN_BUSY_RETRY_PAUSE);
+            }
+            Err(_) => {
+                ensure_not_interrupted(context)?;
+                return Ok(None);
+            }
+        }
+    }
+}
+
 #[hotpath::measure(label = "rusqlite.graph_publication.begin")]
 pub(super) fn begin(
     handle: &ExactSqlHandle,
     context: &GraphPublicationOperationContextV1<'_>,
 ) -> GraphPublicationStoreResultV1<ExactSqlTransaction> {
-    let mut busy_attempts = 0_u32;
-    loop {
-        ensure_not_interrupted(context)?;
-        match hotpath::measure_block!("rusqlite.graph_publication.begin_immediate", {
+    acquire_within_begin_budget(context, || {
+        hotpath::measure_block!("rusqlite.graph_publication.begin_immediate", {
             handle.begin_immediate()
-        }) {
-            Ok(transaction) => {
-                ensure_not_interrupted(context)?;
-                return Ok(transaction);
-            }
-            Err(ExactSqlError::Busy) => {
-                busy_attempts = busy_attempts.saturating_add(1);
-                if busy_attempts >= BEGIN_BUSY_ATTEMPT_BUDGET {
-                    return Err(GraphPublicationStoreErrorV1::Infrastructure);
-                }
-                std::thread::sleep(Duration::from_millis(1));
-                ensure_not_interrupted(context)?;
-            }
-            Err(_) => {
-                ensure_not_interrupted(context)?;
-                return Err(GraphPublicationStoreErrorV1::Infrastructure);
-            }
-        }
-    }
+        })
+    })?
+    .ok_or(GraphPublicationStoreErrorV1::Infrastructure)
 }
 
 pub(super) fn ensure_owner(
@@ -128,30 +155,16 @@ pub(super) fn begin_read(
     handle: &ExactSqlHandle,
     context: &GraphPublicationOperationContextV1<'_>,
 ) -> GraphPublicationStoreResultV1<ExactPublicationRead> {
-    let mut busy_attempts = 0_u32;
-    loop {
-        ensure_not_interrupted(context)?;
-        match hotpath::measure_block!("rusqlite.graph_publication.begin_read_snapshot", {
+    if let Some(snapshot) = acquire_within_begin_budget(context, || {
+        hotpath::measure_block!("rusqlite.graph_publication.begin_read_snapshot", {
             handle.begin_read_snapshot(REPLAY_READER_ACQUIRE_SLICE)
-        }) {
-            Ok(snapshot) => {
-                ensure_not_interrupted(context)?;
-                return Ok(ExactPublicationRead::Snapshot(snapshot));
-            }
-            Err(ExactSqlError::Busy) => {
-                busy_attempts = busy_attempts.saturating_add(1);
-                if busy_attempts >= BEGIN_BUSY_ATTEMPT_BUDGET {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(1));
-                ensure_not_interrupted(context)?;
-            }
-            Err(_) => {
-                ensure_not_interrupted(context)?;
-                break;
-            }
-        }
+        })
+    })? {
+        return Ok(ExactPublicationRead::Snapshot(snapshot));
     }
+    // The deferred fallback waits the writer without consulting `context`, so
+    // this is the last point that can answer a cancelled or expired caller.
+    ensure_not_interrupted(context)?;
     hotpath::measure_block!("rusqlite.graph_publication.begin_deferred", {
         handle
             .begin_deferred()

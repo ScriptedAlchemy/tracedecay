@@ -3118,3 +3118,26 @@ fn recovery_completes_a_committed_rewrite_that_never_reached_the_pointer() {
     plan_code_generation_retention(fixture.store.path(), &BTreeSet::new())
         .expect("a recovered store must stay plannable");
 }
+
+/// The census opens every name `read_dir` just returned. Publication can
+/// unlink that name first. `NotFound` is absence, not a storage failure the
+/// maintenance tick must treat as a broken store. Any other open failure
+/// stays storage.
+#[test]
+fn vanished_listed_generation_open_is_absent_not_storage_loss() {
+    let root = tempfile::tempdir().expect("census root");
+    let missing = root.path().join(format!("generation-{:064x}.json", 1));
+    let opened = super::generation_scan::read_generation_format_revision(&missing, &|| false)
+        .expect("a vanished listed generation is absent, not a storage failure");
+    assert_eq!(opened, None);
+
+    let directory = root.path().join("not-a-generation-file");
+    std::fs::create_dir(&directory).expect("directory where a file was listed");
+    let storage_error =
+        super::generation_scan::read_generation_format_revision(&directory, &|| false)
+            .expect_err("a directory is not a vanished file");
+    assert!(
+        matches!(storage_error, CodeGenerationRetentionErrorV1::Storage(_)),
+        "non-NotFound census I/O stays a storage failure: {storage_error:?}"
+    );
+}
