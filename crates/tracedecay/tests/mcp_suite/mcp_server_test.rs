@@ -7,6 +7,7 @@
 //! helpers live in `mcp_server_test/support.rs`.
 
 mod analytics_test;
+mod branch_list_test;
 mod hooks_branch_test;
 mod protocol_test;
 pub(crate) mod support;
