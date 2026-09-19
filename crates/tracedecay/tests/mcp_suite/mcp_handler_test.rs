@@ -38,6 +38,8 @@ mod skills_automation_test;
 mod status_runtime_test;
 #[cfg(feature = "test-transport")]
 mod test_map_test;
+#[cfg(feature = "test-transport")]
+mod test_risk_behavior_test;
 mod unsafe_patterns_test;
 #[cfg(feature = "test-transport")]
 mod work_test;
