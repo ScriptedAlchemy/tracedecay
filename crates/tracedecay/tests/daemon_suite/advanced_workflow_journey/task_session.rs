@@ -455,8 +455,8 @@ pub(super) fn assert_available_over_sdk_mcp_and_dashboard(
 ) -> Option<WorkTaskSessionEvidenceV1> {
     if !task_session_lane_is_mounted(client, &scope) {
         eprintln!(
-            "skipping the mounted fan-out TaskSession evidence section; no evaluated federated \
-             query authority is mounted for this project"
+            "skipping the mounted fan-out TaskSession evidence section; the mounted query \
+             authority did not serve TaskSession for this project"
         );
         return None;
     }
@@ -799,7 +799,8 @@ fn retrieve_over_sdk_mcp_and_dashboard(
     )
     .expect("canonical MCP Work evidence payload");
     assert_eq!(
-        mcp, sdk,
+        normalized_cursors(&mcp),
+        normalized_cursors(&sdk),
         "typed SDK and real tracedecay serve must expose the same Work payload"
     );
     let (status, dashboard_envelope) = dashboard.retrieve_evidence(&request);
@@ -820,10 +821,52 @@ fn retrieve_over_sdk_mcp_and_dashboard(
     )
     .expect("canonical dashboard Work evidence payload");
     assert_eq!(
-        dashboard, sdk,
+        normalized_cursors(&dashboard),
+        normalized_cursors(&sdk),
         "dashboard, SDK, and MCP must preserve the same TaskSession page"
     );
     sdk
+}
+
+/// The same page read over three transports, with every continuation cursor
+/// replaced by a marker for its presence.
+///
+/// A retrieval cursor is authenticated with the issuing wall clock, not the
+/// snapshot time (`query_cursor_ttl_uses_wall_clock_instead_of_snapshot_time`),
+/// so three independent reads of one page necessarily mint three different
+/// cursor payloads. Everything the transports must actually agree on -
+/// evidence, sources, coverage, omissions, freshness, and whether each
+/// continuation exists at all - still compares byte for byte.
+fn normalized_cursors(payload: &WorkEvidenceRetrievalV1) -> WorkEvidenceRetrievalV1 {
+    let mut payload = payload.clone();
+    for source in &mut payload.sources {
+        if let WorkEvidenceSourceV1::TaskSession { evidence, .. } = source
+            && let Some(continuation) = evidence.continuation.as_mut()
+        {
+            normalize_task_session_cursors(continuation);
+        }
+    }
+    for continuation in &mut payload.continuations {
+        match continuation {
+            WorkEvidenceContinuationV1::Anchor { cursor, .. } => *cursor = cursor_marker(),
+            WorkEvidenceContinuationV1::TaskSession { continuation } => {
+                normalize_task_session_cursors(continuation);
+            }
+        }
+    }
+    payload
+}
+
+fn normalize_task_session_cursors(
+    continuation: &mut tracedecay_contracts::WorkTaskSessionContinuationV1,
+) {
+    continuation.temporal_cursor = continuation.temporal_cursor.take().map(|_| cursor_marker());
+    continuation.ranking_cursor = continuation.ranking_cursor.take().map(|_| cursor_marker());
+}
+
+fn cursor_marker() -> tracedecay_contracts::OpaqueCursor {
+    tracedecay_contracts::OpaqueCursor::new("cursor.normalized-for-transport-parity".to_owned())
+        .expect("normalized cursor marker")
 }
 
 fn serve_tool_call(home: &Path, project: &Path, tool_name: &str, arguments: Value) -> Value {
