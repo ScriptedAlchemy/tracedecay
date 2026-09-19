@@ -144,13 +144,15 @@ pub async fn handle_grep(
     let truncated = scan.truncated || hits.len() > max_results;
     hits.truncate(max_results);
 
-    let graph_error = match graph {
-        Ok(graph) => {
-            enrich_hits_from_graph(graph, &mut hits)?;
-            None
-        }
-        Err(error) => Some(error),
+    // Enrichment is the same optional accelerator as the open itself: a
+    // published occurrence graph still refuses catalog-backed lookups while
+    // its interactive catalog warms, and that refusal is retryable state the
+    // one-shot caller never re-sends. Report it beside the lexical answer.
+    let enrichment_error = match graph {
+        Ok(graph) => enrich_hits_from_graph(graph, &mut hits).err(),
+        Err(_) => None,
     };
+    let graph_error = enrichment_error.as_ref().or_else(|| graph.err());
     let touched_files = unique_file_paths(hits.iter().map(|hit| hit.file.as_str()));
     let mut output_value = build_output_value(
         &hits,
