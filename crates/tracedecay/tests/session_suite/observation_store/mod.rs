@@ -1480,12 +1480,16 @@ async fn cursor_only_progress_persists_non_payload_receipt_and_retries_idempoten
 /// finds the durable cursor already at its `next_cursor`: the coverage it
 /// wanted to record is applied, so the replay is a duplicate, not a
 /// collision that blocks ingest (#1842). The committed reason stays.
-async fn cursor_only_retry_with_same_cursor_and_different_reason_is_a_duplicate() {
+async fn cursor_already_owned_keeps_the_first_reason_for_a_later_owner() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
     let store = runtime
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
 
     store
         .advance_source_cursor(cursor_advance(
@@ -1513,10 +1517,24 @@ async fn cursor_only_retry_with_same_cursor_and_different_reason_is_a_duplicate(
         store.get_source_cursor(&source(), &scope()).await.unwrap(),
         Some(cursor(10))
     );
+    let conn = rusqlite::Connection::open(&database_path).unwrap();
+    let reason: String = conn
+        .query_row("SELECT reason FROM source_cursor_advances", (), |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(reason, "blank_frame");
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM source_cursor_advances", (), |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap(),
+        1
+    );
 }
 
 #[tokio::test]
-async fn cursor_only_retry_rejects_same_cursor_with_different_coverage() {
+async fn cursor_already_past_a_narrower_range_keeps_the_owned_frontier() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
     let store = runtime
@@ -1533,7 +1551,7 @@ async fn cursor_only_retry_rejects_same_cursor_with_different_coverage() {
         .await
         .unwrap();
 
-    assert!(matches!(
+    assert_eq!(
         store
             .advance_source_cursor(cursor_advance(
                 Some(cursor(5)),
@@ -1541,9 +1559,10 @@ async fn cursor_only_retry_rejects_same_cursor_with_different_coverage() {
                 10,
                 NonDurableFrameReason::BlankFrame,
             ))
-            .await,
-        Err(ObservationStoreError::CursorAdvanceCollision)
-    ));
+            .await
+            .unwrap(),
+        CursorAdvanceOutcome::ExactDuplicate
+    );
     assert_eq!(
         store.get_source_cursor(&source(), &scope()).await.unwrap(),
         Some(cursor(10))
