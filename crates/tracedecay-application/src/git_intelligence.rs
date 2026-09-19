@@ -1762,6 +1762,14 @@ mod tests {
                 "user.email=fixture@example.com",
                 "-c",
                 "commit.gpgsign=false",
+                // `git commit` spawns a detached `git maintenance run --auto`
+                // that holds `.git/objects/maintenance.lock` after the commit
+                // returns; the byte-identical snapshot must not see it appear
+                // or vanish between its two walks.
+                "-c",
+                "maintenance.auto=false",
+                "-c",
+                "gc.auto=0",
             ])
             .args(args)
             .current_dir(self.path())
