@@ -406,13 +406,13 @@ pub fn verified_test_evidence(
     let mut calls = Vec::new();
     let mut test_annotated = HashSet::new();
     for edge in edges {
-        match edge.edge.kind {
+        match edge.kind {
             RelationEdgeKindV1::Calls => calls.push((
-                edge.edge.from_occurrence.as_str().to_owned(),
-                edge.edge.to_occurrence.as_str().to_owned(),
+                edge.from_occurrence.as_str().to_owned(),
+                edge.to_occurrence.as_str().to_owned(),
             )),
-            RelationEdgeKindV1::Annotates if test_markers.contains(&edge.edge.from_occurrence) => {
-                test_annotated.insert(edge.edge.to_occurrence.as_str().to_owned());
+            RelationEdgeKindV1::Annotates if test_markers.contains(&edge.from_occurrence) => {
+                test_annotated.insert(edge.to_occurrence.as_str().to_owned());
             }
             _ => {}
         }
@@ -430,7 +430,7 @@ fn scoped_test_edges(
     occurrences: &[SymbolOccurrenceId],
     files: &mut HashMap<String, String>,
     test_markers: &mut HashSet<SymbolOccurrenceId>,
-) -> Result<Vec<tracedecay_code_index::graph_projection::CodeGraphSemanticEdgeV1>> {
+) -> Result<Vec<tracedecay_domain::CanonicalRelationEdgeV1>> {
     let mut edges = Vec::new();
     let mut seen = occurrences.iter().cloned().collect::<HashSet<_>>();
     let mut frontier = occurrences.to_vec();
@@ -468,7 +468,7 @@ fn scoped_test_edges(
                 test_markers.insert(edge.neighbor.occurrence.clone());
             }
         }
-        edges.extend(incoming);
+        edges.extend(incoming.into_iter().map(|edge| edge.edge));
         frontier = next;
     }
     if seen.is_empty() {
@@ -504,7 +504,7 @@ fn scoped_test_edges(
             test_markers.insert(edge.neighbor.occurrence.clone());
         }
     }
-    edges.extend(annotated);
+    edges.extend(annotated.into_iter().map(|edge| edge.edge));
     Ok(edges)
 }
 
