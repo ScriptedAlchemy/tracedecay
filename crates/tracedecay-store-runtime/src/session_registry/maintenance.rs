@@ -664,7 +664,14 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    // The held destructor below parks one worker thread for the whole test, and
+    // `begin_shutdown` injects both aborts at once. A worker drains
+    // `inject.len() / worker_threads + 1` notifications in one batch, so with two
+    // workers the one that blocks can also capture the second shard's abort into
+    // its local queue, where the surviving worker never gets notified to steal it
+    // and the second retirement hangs instead of running slowly. Four workers keep
+    // that batch at one task each and leave spare capacity for the blocked one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn cancelled_shutdown_retains_incomplete_future_drop_and_independent_retirement() {
         struct HeldDrop {
             started: Arc<Notify>,
