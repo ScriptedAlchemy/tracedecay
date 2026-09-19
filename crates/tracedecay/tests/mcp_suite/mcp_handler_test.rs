@@ -101,6 +101,7 @@ mod rename_symbol_test;
 #[cfg(feature = "test-transport")]
 mod replace_symbol_test;
 mod retrieve_truncation_test;
+mod runtime_behavior_test;
 mod schema_test;
 mod search_behavior_test;
 mod session_refresh_begin_test;
