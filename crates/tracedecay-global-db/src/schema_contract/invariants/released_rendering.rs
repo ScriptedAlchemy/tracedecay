@@ -33,7 +33,10 @@
 //! that owns the transaction. A row disagreeing on identity, anchor, receipt,
 //! output provider or message id, or carrying a digest that matches neither
 //! this binary's output nor its own output row is not a rendering difference,
-//! and stays refused, named.
+//! and stays refused, named. A current digest over a mutable row that is still
+//! that shipped rendering is the same admission: the write that stamped the
+//! digest did not finish. A row that matches neither rendering is tamper and
+//! stays refused.
 //!
 //! Convergence has two outcomes because rendering does. Some released
 //! renderings are content the current LCM privacy sanitizer withholds, a
@@ -660,6 +663,60 @@ mod tests {
 
         let snapshot = database.read_snapshot().await.unwrap();
         assert_eq!(stored_output(&snapshot, RECORD_ID).await, current);
+    }
+
+    /// The repair above is the shipped rendering, not any disagreement under
+    /// current provenance. A body neither this binary nor a release wrote is
+    /// tamper: the audit refuses it and does not rewrite the row.
+    #[tokio::test]
+    async fn current_provenance_refuses_a_tampered_output_row() {
+        let directory = TempDir::new().unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .unwrap();
+        seed(&runtime, &observation()).await.unwrap();
+        let database = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+
+        let transaction = database
+            .runtime_database()
+            .begin_write_transaction("tamper the projected message body")
+            .await
+            .unwrap();
+        let updated = transaction
+            .execute(
+                "UPDATE session_messages SET text = 'tampered projection body'
+                 WHERE provider = 'codex' AND message_id = ?1",
+                tracedecay_runtime_core::params![RECORD_ID],
+            )
+            .await
+            .expect("tamper projected message");
+        assert_eq!(updated, 1);
+        transaction
+            .execute("DELETE FROM authority_audit_checkpoints", ())
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        let error =
+            super::super::ensure_authority_invariants(database.runtime_database(), true, false)
+                .await
+                .expect_err(
+                    "a tampered projected message under current provenance must stay refused",
+                );
+        let message = error.to_string();
+        assert!(
+            message.contains("projection output rows disagree with deterministic output"),
+            "{message}"
+        );
+
+        let snapshot = database.read_snapshot().await.unwrap();
+        assert_eq!(
+            stored_output(&snapshot, RECORD_ID).await.text,
+            "tampered projection body",
+            "refusal must not rewrite the tampered row"
+        );
     }
 
     #[tokio::test]

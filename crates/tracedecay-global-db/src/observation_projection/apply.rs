@@ -820,13 +820,14 @@ pub(in super::super) enum ConvergedRendering {
 /// deterministic rendering, keeping the historical `message_created` flag the
 /// releases wrote.
 ///
-/// Reached only from the authority audit, which has already proven the stored
-/// provenance row is the digest of the output row this store holds, the
-/// rendering a release wrote, rather than a row disagreeing with its own
-/// output. The message row and its LCM raw twin are pure derivations of the
-/// durable observation, so rewriting them loses nothing; the digest is
-/// re-stamped last so an interrupted transaction leaves the released pairing
-/// intact.
+/// Reached only from the authority audit, which has already admitted the row
+/// as a shipped rendering: provenance still carries the digest of the output
+/// this store holds, or it carries this binary's digest while the mutable row
+/// is still that shipped rendering. A row that matches neither is refused
+/// before this write. The message row and its LCM raw twin are pure
+/// derivations of the durable observation, so rewriting them loses nothing;
+/// the digest is re-stamped last so an interrupted transaction leaves the
+/// released pairing intact.
 ///
 /// When the LCM privacy sanitizer withholds this binary's rendering, that
 /// verdict *is* the current rendering: the output is retired to the disposition

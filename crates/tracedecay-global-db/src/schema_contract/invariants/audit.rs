@@ -5,6 +5,7 @@ use tracedecay_domain::DurableObservationV1;
 use tracedecay_store::{
     ObservationProjection, ProjectionSkipReason, ProjectionStoreError,
     SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageProjection, WorkflowFactProjection,
+    stored_message_is_shipped_release_rendering,
 };
 
 use crate::observation_projection::{ProjectionOutputAuthority, ProjectionRowsBatch};
@@ -834,14 +835,20 @@ async fn validate_message_projection_row(
                 message_id,
             }) if output_row_present
                 && provider == owner_projection.message().provider
-                && message_id == owner_projection.message().message_id =>
+                && message_id == owner_projection.message().message_id
+                && resolved
+                    .projection_rows
+                    .message(&provider, &message_id)
+                    .is_some_and(|stored| {
+                        stored_message_is_shipped_release_rendering(&authority.canonical, stored)
+                    }) =>
             {
-                // Ownership was validated above, the immutable observation
-                // re-derived this projection, and its provenance already
-                // carries the projection's current digest. The mutable output
-                // row is the only stale member, an interrupted/older write
-                // shape observed in ProfileSessions. Finish that write in the
-                // same convergence ledger used for released renderings.
+                // Provenance already carries this binary's digest, and the
+                // mutable row is still the rendering a shipped release wrote
+                // for this observation: the write that stamped the digest did
+                // not finish. Finish it on the released-rendering ledger. A
+                // body that matches neither rendering is tamper and falls
+                // through to the hard failure below.
                 resolved.released.record(&owner_projection);
             }
             Err(ProjectionStoreError::SessionOutputCollision {
