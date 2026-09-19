@@ -1238,6 +1238,93 @@ fn make() -> Vec<i32> { Vec::new() }
 }
 
 #[test]
+fn trait_bound_calls_name_the_trait_without_a_bare_method() {
+    let source = r#"
+trait Processor {
+    fn process(&self, input: u32) -> u32;
+    fn via_self(&self, input: u32) -> u32 {
+        self.process(input)
+    }
+}
+trait Other {
+    fn process(&self, input: u32) -> u32;
+}
+struct Doubler;
+impl Doubler {
+    fn kick(&self, input: u32) -> u32 {
+        self.process(input)
+    }
+}
+impl Processor for Doubler {
+    fn process(&self, input: u32) -> u32 {
+        input * 2
+    }
+}
+fn via_dyn(processor: &dyn Processor, input: u32) -> u32 {
+    processor.process(input)
+}
+fn via_impl(processor: impl Processor + 'static, input: u32) -> u32 {
+    processor.process(input)
+}
+fn via_bound<T: Processor>(processor: &T, input: u32) -> u32 {
+    processor.process(input)
+}
+fn via_where<T>(processor: &T, input: u32) -> u32
+where
+    T: Processor,
+{
+    processor.process(input)
+}
+fn ambiguous<T: Processor + Other>(processor: &T, input: u32) -> u32 {
+    processor.process(input)
+}
+"#;
+    let result = RustExtractor.extract("src/lib.rs", source);
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    let from = |name: &str| {
+        let function = result
+            .nodes
+            .iter()
+            .find(|node| {
+                matches!(node.kind, NodeKind::Function | NodeKind::Method) && node.name == name
+            })
+            .unwrap_or_else(|| panic!("{name} is extracted"));
+        result
+            .unresolved_refs
+            .iter()
+            .filter(|reference| {
+                reference.reference_kind == EdgeKind::Calls && reference.from_node_id == function.id
+            })
+            .map(|reference| reference.reference_name.as_str())
+            .collect::<Vec<_>>()
+    };
+
+    for owner in ["via_self", "via_dyn", "via_impl", "via_bound", "via_where"] {
+        let names = from(owner);
+        assert!(
+            names.contains(&"Processor::process"),
+            "{owner} must name the trait callee: {names:?}"
+        );
+        assert!(
+            !names.contains(&"process"),
+            "{owner} must not reintroduce the bare method name: {names:?}"
+        );
+    }
+    let kick = from("kick");
+    assert!(
+        kick.contains(&"Doubler::process") && !kick.contains(&"Processor::process"),
+        "self in an inherent impl stays the type, not the trait: {kick:?}"
+    );
+    assert!(!kick.contains(&"process"), "{kick:?}");
+    let ambiguous = from("ambiguous");
+    assert!(
+        !ambiguous.iter().any(|name| name.contains("::process")),
+        "two trait bounds must not pick a callee: {ambiguous:?}"
+    );
+    assert!(!ambiguous.contains(&"process"), "{ambiguous:?}");
+}
+
+#[test]
 fn wildcard_imports_retain_unresolved_dependencies_alongside_named_bindings() {
     let result = RustExtractor.extract(
         "src/lib.rs",

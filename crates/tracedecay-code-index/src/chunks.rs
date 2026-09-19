@@ -4453,6 +4453,71 @@ pub fn real_symbol() {}
     }
 
     #[test]
+    fn trait_bound_method_call_binds_the_trait_callee() {
+        let source = concat!(
+            "pub trait Processor {\n",
+            "    fn process(&self, input: u32) -> u32;\n",
+            "    fn via_self(&self, input: u32) -> u32 { self.process(input) }\n",
+            "}\n",
+            "pub trait Other { fn process(&self, input: u32) -> u32; }\n",
+            "pub struct Doubler;\n",
+            "impl Doubler { fn kick(&self, input: u32) -> u32 { self.process(input) } }\n",
+            "impl Processor for Doubler { fn process(&self, input: u32) -> u32 { input * 2 } }\n",
+            "pub fn via_dyn(processor: &dyn Processor, input: u32) -> u32 { processor.process(input) }\n",
+            "pub fn via_impl(processor: impl Processor + 'static, input: u32) -> u32 { processor.process(input) }\n",
+            "pub fn via_bound<T: Processor>(processor: &T, input: u32) -> u32 { processor.process(input) }\n",
+            "pub fn via_where<T>(processor: &T, input: u32) -> u32 where T: Processor { processor.process(input) }\n",
+            "pub fn ambiguous<T: Processor + Other>(processor: &T, input: u32) -> u32 { processor.process(input) }\n",
+        );
+        let file = validated_file("src/lib.rs", source.as_bytes());
+        let batch = batch_for(&file, ParseOutcomeV1::Complete);
+        let artifacts = chunker()
+            .index_file(&file, &batch, &rust_descriptor(), &NeverCancelled)
+            .expect("indexing succeeds");
+        let qualified = |occurrence: &SymbolOccurrenceId| {
+            artifacts
+                .symbols
+                .iter()
+                .find(|symbol| &symbol.occurrence == occurrence)
+                .map(|symbol| symbol.qualified_name.as_str())
+                .unwrap_or("<missing>")
+        };
+        let mut calls = artifacts
+            .edges
+            .iter()
+            .filter(|edge| edge.kind == RelationEdgeKindV1::Calls)
+            .map(|edge| {
+                (
+                    qualified(&edge.from_occurrence).to_owned(),
+                    qualified(&edge.to_occurrence).to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        calls.sort();
+
+        let trait_method = "src/lib.rs::Processor::process";
+        let impl_method = "src/lib.rs::<Doubler as Processor>::process";
+        assert_eq!(
+            calls,
+            vec![
+                (
+                    "src/lib.rs::Doubler::kick".to_owned(),
+                    impl_method.to_owned()
+                ),
+                (
+                    "src/lib.rs::Processor::via_self".to_owned(),
+                    trait_method.to_owned()
+                ),
+                ("src/lib.rs::via_bound".to_owned(), trait_method.to_owned()),
+                ("src/lib.rs::via_dyn".to_owned(), trait_method.to_owned()),
+                ("src/lib.rs::via_impl".to_owned(), trait_method.to_owned()),
+                ("src/lib.rs::via_where".to_owned(), trait_method.to_owned()),
+            ],
+            "a unique trait bound is the callee; two bounds and a bare method name are not: {calls:?}"
+        );
+    }
+
+    #[test]
     fn rust_type_path_alias_parses_ufcs_trait_impl_methods() {
         assert_eq!(
             rust_type_path_alias_for_trait_impl_method("<WalkEventIter as From<WalkDir>>::from")
