@@ -363,6 +363,31 @@ fn build_claude_capture_request(
     .with_resume_checkpoint(context.file_identity, frame.resume_fingerprint))
 }
 
+/// A cursor advance collision means the ledger cannot prove this command, not
+/// that the source is behind. If the durable cursor already covers the range,
+/// the position is applied and catch-up must continue instead of blocking
+/// every later source.
+async fn already_applied_cursor<A: HostAdmission + ?Sized>(
+    admission: &A,
+    error: &TranscriptIngestError,
+    source: &ObservationSourceIdentityV1,
+    scope: &ObservationScopeV1,
+    generation: ObservationSourceGenerationV1,
+    end: u64,
+) -> Option<ObservationSourceCursorV1> {
+    if !matches!(
+        error,
+        TranscriptIngestError::HostAdmission {
+            reason: "observation_cursor_advance_collision",
+            ..
+        }
+    ) {
+        return None;
+    }
+    let durable = admission.get_source_cursor(source, scope).await.ok()??;
+    (durable.generation() == generation && durable.byte_offset() >= end).then_some(durable)
+}
+
 /// Sanitize and commit one already-framed record before any V1 sink.
 async fn capture_frame<A: HostAdmission + ?Sized>(
     admission: &A,
@@ -371,11 +396,29 @@ async fn capture_frame<A: HostAdmission + ?Sized>(
     context: &FrameCaptureContext,
 ) -> Result<FrameCaptureOutcome, ClaudeObservationIngestError> {
     let request = build_claude_capture_request(frame, expected_cursor, context)?;
-    match admission
-        .capture_observation(request)
-        .await
-        .map_err(|outcome| host_admission_error("claude", outcome))?
-    {
+    let captured = match admission.capture_observation(request).await {
+        Ok(captured) => captured,
+        Err(error) => {
+            let mapped = host_admission_error("claude", error);
+            if let Some(durable) = already_applied_cursor(
+                admission,
+                &mapped,
+                &context.source,
+                &context.scope,
+                context.generation,
+                frame.end_offset,
+            )
+            .await
+            {
+                return Ok(FrameCaptureOutcome::Persisted(CapturedClaudeFrame {
+                    committed_cursor: durable,
+                    exact_duplicate: true,
+                }));
+            }
+            return Err(mapped.into());
+        }
+    };
+    match captured {
         CaptureClaudeObservationOutcome::Persisted {
             outcome,
             sanitized_record,
@@ -449,10 +492,30 @@ async fn advance_non_durable_covered_range<A: HostAdmission + ?Sized>(
         )?,
     }
     .with_resume_checkpoint(context.file_identity, resume_fingerprint);
-    let outcome = admission
+    let outcome = match admission
         .advance_non_durable_source_cursor(advance, context.cancellation.clone())
         .await
-        .map_err(|outcome| host_admission_error("claude", outcome))?;
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let mapped = host_admission_error("claude", error);
+            if let Some(durable) = already_applied_cursor(
+                admission,
+                &mapped,
+                &context.source,
+                &context.scope,
+                context.generation,
+                end,
+            )
+            .await
+            {
+                *observation_cursor = Some(durable);
+                stats.cursor_duplicates = stats.cursor_duplicates.saturating_add(1);
+                return Ok(());
+            }
+            return Err(mapped.into());
+        }
+    };
     *observation_cursor = Some(cursor_at(
         &context.source,
         &context.scope,
