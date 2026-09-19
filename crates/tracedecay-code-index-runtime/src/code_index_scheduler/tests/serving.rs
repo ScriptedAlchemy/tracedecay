@@ -4148,6 +4148,30 @@ async fn root_graph_ready_does_not_depend_on_the_publication_decode_cache() {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .hold_active_decode();
 
+    // `waiter_count` counts every task parked on this store's active decode,
+    // not this call's. The owner's settle pass decodes the active generation
+    // inside graph prepare and drops its reconcile-pass guard before it gets
+    // there, so no admission or quiescence helper can fence it out of the
+    // hold, and against a bare `== 0` its park reads as a readiness park.
+    //
+    // Park the owner first and take its count as the floor instead. A park
+    // cannot end while the hold is up and the owner is blocked in the step it
+    // parked in, so every later rise is a readiness call joining the flight.
+    registry.request_complete_generation(fixture.path()).await;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let parked_owner = loop {
+        let parked = held_decode.waiter_count();
+        if parked > 0 {
+            break parked;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "the owner's settle pass never reached the held decode, so its park \
+             cannot be sequenced ahead of the readiness calls"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    };
+
     let ready = tokio::time::timeout(
         Duration::from_secs(30),
         registry.latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope),
@@ -4162,7 +4186,7 @@ async fn root_graph_ready_does_not_depend_on_the_publication_decode_cache() {
     );
     assert_eq!(
         held_decode.waiter_count(),
-        0,
+        parked_owner,
         "root graph readiness must not join the publication decode flight"
     );
 
@@ -4180,7 +4204,7 @@ async fn root_graph_ready_does_not_depend_on_the_publication_decode_cache() {
     );
     assert_eq!(
         held_decode.waiter_count(),
-        0,
+        parked_owner,
         "scope query readiness must not join the publication decode flight"
     );
 

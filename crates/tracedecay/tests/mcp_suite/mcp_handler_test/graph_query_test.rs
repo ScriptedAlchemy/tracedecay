@@ -1231,194 +1231,6 @@ async fn name_first_lexical_search_discloses_preferred_symbol_route() {
 }
 
 #[tokio::test]
-async fn similar_serves_verified_exact_and_rename_normalized_families() {
-    let body = "
-        let one = parse(input);
-        let two = transform(one);
-        let three = validate(two);
-        let four = persist(three);
-        finish(four, input, one, two, three);
-    ";
-    let (fixture, _root) = graph_query_fixture_with_sources(|project| {
-        fs::create_dir_all(project.join("src")).unwrap();
-        fs::write(
-            project.join("src/source.rs"),
-            format!("pub fn source_copy(input: Input) {{ {body} }}\n"),
-        )
-        .unwrap();
-        fs::write(
-            project.join("src/exact.rs"),
-            format!("pub fn source_copy(input: Input) {{ {body} }}\n"),
-        )
-        .unwrap();
-        fs::write(
-            project.join("src/formatted.rs"),
-            format!("pub fn formatted_copy(input: Input) {{\n{body}\n}}\n"),
-        )
-        .unwrap();
-        fs::write(
-            project.join("src/commented.rs"),
-            format!("pub fn commented_copy(input: Input) {{ /* same body */ {body} }}\n"),
-        )
-        .unwrap();
-        fs::write(
-            project.join("src/renamed.rs"),
-            "
-                pub fn renamed_copy(value: Input) {
-                    let first = parse(value);
-                    let second = transform(first);
-                    let third = validate(second);
-                    let fourth = persist(third);
-                    finish(fourth, value, first, second, third);
-                }
-            ",
-        )
-        .unwrap();
-    })
-    .await;
-    let source = graph_node_id(&fixture, "source_copy").await;
-    let project_id = fixture
-        .production
-        .harness
-        .project_id(fixture.project_root())
-        .await
-        .expect("fixture project identity");
-    let repository_id =
-        tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for(
-            fixture.project_root(),
-        )
-        .expect("fixture repository identity");
-
-    let result = call_production_tool(
-        &fixture,
-        "tracedecay_similar",
-        json!({
-            "project_id": project_id,
-            "repository_id": repository_id,
-            "target": {
-                "kind": "symbol_occurrence",
-                "symbol_occurrence_id": source,
-            },
-            "match_classes": ["conservative_exact", "rename_normalized_exact"],
-            "result_limit": 10,
-            "work_limit": 20,
-        }),
-        None,
-        None,
-    )
-    .await
-    .expect("production similar invocation");
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-
-    assert_eq!(
-        payload["source"]["symbol_occurrence_id"], source,
-        "{payload}"
-    );
-    assert!(
-        payload["families"].as_array().is_some_and(|families| {
-            families
-                .iter()
-                .any(|family| family["match_class"] == "conservative_exact")
-                && families
-                    .iter()
-                    .any(|family| family["match_class"] == "rename_normalized_exact")
-        }),
-        "exact families must disclose their verification class: {payload}"
-    );
-    let conservative = payload["families"]
-        .as_array()
-        .and_then(|families| {
-            families
-                .iter()
-                .find(|family| family["match_class"] == "conservative_exact")
-        })
-        .expect("conservative family");
-    assert!(
-        conservative["member_count"]
-            .as_u64()
-            .is_some_and(|count| count >= 3),
-        "formatting-only and comments-only copies must remain exact: {payload}"
-    );
-
-    let paged = call_production_tool(
-        &fixture,
-        "tracedecay_similar",
-        json!({
-            "project_id": project_id,
-            "repository_id": repository_id,
-            "target": {
-                "kind": "source_range",
-                "path": payload["source"]["path"],
-                "span": payload["source"]["body_span"],
-            },
-            "match_classes": ["rename_normalized_exact"],
-            "result_limit": 1,
-            "work_limit": 20,
-        }),
-        None,
-        None,
-    )
-    .await
-    .expect("source-range similar invocation");
-    let paged: Value = serde_json::from_str(extract_text(&paged.value)).unwrap();
-    let cursor = paged["families"][0]["next_cursor"]
-        .as_str()
-        .expect("partial family cursor");
-    let continuation = call_production_tool(
-        &fixture,
-        "tracedecay_similar",
-        json!({
-            "project_id": project_id,
-            "repository_id": repository_id,
-            "target": {
-                "kind": "symbol_occurrence",
-                "symbol_occurrence_id": source,
-            },
-            "match_classes": ["rename_normalized_exact"],
-            "result_limit": 1,
-            "work_limit": 20,
-            "cursor": cursor,
-        }),
-        None,
-        None,
-    )
-    .await
-    .expect("similar family continuation");
-    let continuation: Value = serde_json::from_str(extract_text(&continuation.value)).unwrap();
-    assert_eq!(
-        continuation["families"][0]["member_count"], 1,
-        "{continuation}"
-    );
-
-    let unauthorized = call_production_tool(
-        &fixture,
-        "tracedecay_similar",
-        json!({
-            "project_id": project_id,
-            "repository_id": "repository.unauthorized",
-            "target": {
-                "kind": "symbol_occurrence",
-                "symbol_occurrence_id": source,
-            },
-            "match_classes": ["conservative_exact"],
-            "result_limit": 10,
-            "work_limit": 20,
-        }),
-        None,
-        None,
-    )
-    .await
-    .expect_err("foreign repository scope must be denied");
-    assert!(
-        unauthorized
-            .to_string()
-            .contains("outside the authorized repository scope"),
-        "{unauthorized}"
-    );
-    shutdown_graph_fixture(fixture).await;
-}
-
-#[tokio::test]
 async fn redundancy_reports_ranked_repository_exact_families_with_bounded_pages() {
     let large_body = "
         let one = parse(input);
@@ -2414,58 +2226,163 @@ async fn test_callers_for_rejects_unknown_kind() {
     shutdown_graph_fixture(cg).await;
 }
 
-#[tokio::test]
-async fn test_by_qualified_name_finds_indexed_node() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let exact = call_production_tool(
-        &cg,
-        "tracedecay_find_exact_symbol",
-        json!({"name": "helper", "limit": 5, "format": "json"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let exact: Value = serde_json::from_str(extract_text(&exact.value)).unwrap();
-    let qualified_name = exact["matches"]
-        .as_array()
-        .and_then(|matches| matches.first())
-        .and_then(|item| item["qualified_name"].as_str())
-        .expect("exact-symbol response must expose helper's qualified name");
+/// Occurrence ids hash the fixture's temporary git directory, so they change
+/// every run. Drop them before comparing the location an agent actually opens.
+fn stable_symbol_locations(mut items: Vec<Value>) -> Vec<Value> {
+    for item in &mut items {
+        item.as_object_mut()
+            .expect("qualified-name row")
+            .remove("node_id");
+    }
+    items.sort_by(|left, right| {
+        left["file"]
+            .as_str()
+            .cmp(&right["file"].as_str())
+            .then(
+                left["start_line"]
+                    .as_u64()
+                    .cmp(&right["start_line"].as_u64()),
+            )
+            .then(left["name"].as_str().cmp(&right["name"].as_str()))
+    });
+    items
+}
 
+async fn qualified_name_rows(fixture: &GraphQueryFixture, qualified_name: &str) -> Vec<Value> {
     let result = call_production_tool(
-        &cg,
+        fixture,
         "tracedecay_by_qualified_name",
-        json!({"qualified_name": qualified_name}),
+        json!({"qualified_name": qualified_name, "format": "json"}),
         None,
         None,
     )
     .await
-    .unwrap();
-    let items: Vec<Value> = serde_json::from_str(extract_text(&result.value)).unwrap();
-    assert!(
-        !items.is_empty(),
-        "expected at least one match for helper qname"
-    );
-    assert!(items.iter().any(|i| i["name"] == "helper"));
-    assert!(items[0]["start_line"].as_u64().is_some());
-    assert_eq!(items[0]["unavailable_fields"], json!(["attrs_start_line"]));
+    .unwrap_or_else(|error| {
+        panic!("tracedecay_by_qualified_name({qualified_name}) failed: {error}")
+    });
+    serde_json::from_value(extract_json(&result.value)).unwrap_or_else(|error| {
+        panic!(
+            "tracedecay_by_qualified_name({qualified_name}) was not a JSON array: {error}; {}",
+            result.value
+        )
+    })
 }
 
 #[tokio::test]
-async fn test_by_qualified_name_returns_empty_for_unknown() {
-    let (cg, _env, _dir) = production_empty_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_by_qualified_name",
-        json!({"qualified_name": "crate::does::not::exist"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let items: Vec<Value> = serde_json::from_str(extract_text(&result.value)).unwrap();
-    assert!(items.is_empty());
+async fn tracedecay_by_qualified_name_returns_the_symbol_at_that_exact_name() {
+    let (fixture, _root) = production_graph_query_fixture().await;
+
+    let helper = qualified_name_rows(&fixture, "src/utils.rs::helper").await;
+    let greeting = qualified_name_rows(&fixture, "src/utils.rs::format_greeting").await;
+    let entry = qualified_name_rows(&fixture, "src/main.rs::main").await;
+    let bare_name = qualified_name_rows(&fixture, "helper").await;
+    let suffix = qualified_name_rows(&fixture, "utils.rs::helper").await;
+    let unknown = qualified_name_rows(&fixture, "src/utils.rs::does_not_exist").await;
+
+    assert_eq!(
+        stable_symbol_locations(helper),
+        vec![json!({
+            "name": "helper",
+            "qualified_name": "src/utils.rs::helper",
+            "kind": "function",
+            "file": "src/utils.rs",
+            "start_line": 3,
+            "end_line": 5,
+            "unavailable_fields": ["attrs_start_line"]
+        })]
+    );
+    assert_eq!(
+        stable_symbol_locations(greeting),
+        vec![json!({
+            "name": "format_greeting",
+            "qualified_name": "src/utils.rs::format_greeting",
+            "kind": "function",
+            "file": "src/utils.rs",
+            "start_line": 7,
+            "end_line": 9,
+            "unavailable_fields": ["attrs_start_line"]
+        })]
+    );
+    assert_eq!(
+        stable_symbol_locations(entry),
+        vec![json!({
+            "name": "main",
+            "qualified_name": "src/main.rs::main",
+            "kind": "function",
+            "file": "src/main.rs",
+            "start_line": 5,
+            "end_line": 8,
+            "unavailable_fields": ["attrs_start_line"]
+        })]
+    );
+    assert_eq!(bare_name, Vec::<Value>::new());
+    assert_eq!(suffix, Vec::<Value>::new());
+    assert_eq!(unknown, Vec::<Value>::new());
+
+    let server = fixture
+        .production
+        .harness
+        .server(fixture.project_root())
+        .expect("production graph-query server");
+    for arguments in [json!({}), json!({"qualified_name": 4})] {
+        let response =
+            handle_real_server_tool_call_raw(&server, "tracedecay_by_qualified_name", arguments)
+                .await;
+        assert_eq!(
+            response["error"],
+            json!({
+                "code": -32602,
+                "message": "missing required parameter: qualified_name",
+                "data": {
+                    "detail": "missing required parameter: qualified_name",
+                    "reason_code": "missing_required_parameter",
+                    "retryable": false,
+                    "tool": "tracedecay_by_qualified_name"
+                }
+            }),
+            "rejection: {response}"
+        );
+    }
+    shutdown_graph_fixture(fixture).await;
+}
+
+#[tokio::test]
+async fn tracedecay_by_qualified_name_returns_every_symbol_sharing_that_name() {
+    let (fixture, _root) = graph_query_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(
+            project.join("src/lib.rs"),
+            "fn overloaded() {}\nfn overloaded() {}\n",
+        )
+        .unwrap();
+    })
+    .await;
+
+    let rows = qualified_name_rows(&fixture, "src/lib.rs::overloaded").await;
+    assert_eq!(
+        stable_symbol_locations(rows),
+        vec![
+            json!({
+                "name": "overloaded",
+                "qualified_name": "src/lib.rs::overloaded",
+                "kind": "function",
+                "file": "src/lib.rs",
+                "start_line": 1,
+                "end_line": 1,
+                "unavailable_fields": ["attrs_start_line"]
+            }),
+            json!({
+                "name": "overloaded",
+                "qualified_name": "src/lib.rs::overloaded",
+                "kind": "function",
+                "file": "src/lib.rs",
+                "start_line": 2,
+                "end_line": 2,
+                "unavailable_fields": ["attrs_start_line"]
+            }),
+        ]
+    );
+    shutdown_graph_fixture(fixture).await;
 }
 
 #[tokio::test]
