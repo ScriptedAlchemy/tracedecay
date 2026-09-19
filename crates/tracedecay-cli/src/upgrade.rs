@@ -558,11 +558,12 @@ pub enum UpgradeOutcome {
         /// `tracedecay --version` prints and the daemon advertises as
         /// `build_version()`. That is `{release}+{sha}[.dirty]`, not the
         /// GitHub release tag. Daemon restore compares it to the answering
-        /// process with exact equality. `None` when the binary could not be
-        /// read: restore then keeps the pre-upgrade identity and fails with
-        /// a typed mismatch if a different daemon starts, instead of
-        /// substituting the bare release tag and refusing the binary that
-        /// was just installed.
+        /// process with `versions_name_same_build`, which ignores build
+        /// metadata a side omits, so a bare release tag would accept ANY
+        /// build of that release. `None` when the binary could not be read:
+        /// restore then keeps the pre-upgrade identity and fails with a
+        /// typed mismatch if a different daemon starts, rather than
+        /// widening the window to a whole release.
         version: Option<String>,
     },
     /// Already on the latest version. The binary was not replaced.
@@ -797,8 +798,8 @@ fn run_versioned_upgrade(current: &str, is_beta: bool) -> Result<UpgradeOutcome>
     eprintln!("\x1b[32m✔\x1b[0m Successfully upgraded to v{latest}!");
     Ok(UpgradeOutcome::Installed {
         // The release tag is the bare semver the operator downloaded. The
-        // daemon advertises `{release}+{sha}`, and readiness compares those
-        // strings exactly, so the window must expect the binary's own
+        // daemon advertises `{release}+{sha}`, and a bare tag matches every
+        // build of that release, so the window must expect the binary's own
         // identity rather than `latest`.
         version: installed_protocol_identity(binary.as_deref()),
         binary,
@@ -956,12 +957,15 @@ fn installed_binary_version(path: &Path) -> std::result::Result<String, VersionP
 /// Protocol identity of a binary this process just published.
 ///
 /// Readiness and the handshake compare this value to the daemon's
-/// `build_version()` with exact string equality. A GitHub release tag is
-/// only the release (`0.1.0-beta.47`); the binary the tag installs names
-/// itself `0.1.0-beta.47+<sha>`. Reporting the tag made `tracedecay update`
-/// refuse the daemon it had just started. An unreadable binary is `None`,
-/// never the tag: inventing a less specific identity is what produced the
-/// mismatch.
+/// `build_version()` with `versions_name_same_build` (5e03dfa9c5), which
+/// treats a side that names no commit as less specific rather than
+/// different. A GitHub release tag is only the release
+/// (`0.1.0-beta.47`); the binary the tag installs names itself
+/// `0.1.0-beta.47+<sha>`. Reporting the tag therefore made the maintenance
+/// window accept any build of that release, disabling the same-release
+/// different-commit skew detection 367a44ad00 added. An unreadable binary
+/// is `None`, never the tag: a less specific identity is what widened the
+/// window in the first place.
 fn installed_protocol_identity(binary: Option<&Path>) -> Option<String> {
     match binary.map(installed_binary_version) {
         Some(Ok(version)) => Some(version),
@@ -1287,9 +1291,9 @@ mod tests {
         }
 
         /// The `tracedecay update` failure: the release tag is `0.1.0-beta.47`
-        /// and the binary that tag installs names itself with `+<sha>`.
-        /// Readiness compares those strings exactly, so the maintenance
-        /// window must be handed the binary's identity.
+        /// and the binary that tag installs names itself with `+<sha>`. A
+        /// bare tag names every build of that release, so the maintenance
+        /// window must be handed the binary's own identity.
         #[test]
         fn a_direct_install_reports_the_binary_identity_not_the_release_tag() {
             let dir = tempfile::tempdir().unwrap();
