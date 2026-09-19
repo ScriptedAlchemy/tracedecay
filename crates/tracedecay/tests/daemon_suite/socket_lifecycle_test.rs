@@ -9,7 +9,16 @@ use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::common::TestChildProcess;
+use crate::common::{TestChildProcess, poll_until};
+
+/// How long the released descendant has to finish dying.
+///
+/// The group signal is delivered to a process the harness cannot `wait` on -
+/// the descendant is reparented, not a child - so its descriptors close when
+/// the kernel finishes tearing it down, not when the leader's `wait` returns.
+/// A descendant that was never signaled keeps accepting past this deadline,
+/// which is the regression this proof exists to catch.
+const DESCENDANT_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
 
 const HOLDER: &str = r#"
 import os, socket, time
@@ -58,10 +67,16 @@ fn group_stop_releases_an_inherited_listen_socket() {
         socket.exists(),
         "this proof must not delete the socket path"
     );
-    let refused = UnixStream::connect(&socket);
-    assert!(
-        refused.is_err(),
-        "process-group stop must release the inherited listen socket, connect returned {refused:?}"
+    poll_until(
+        Instant::now() + DESCENDANT_RELEASE_TIMEOUT,
+        Duration::from_millis(20),
+        || UnixStream::connect(&socket).is_err().then_some(()),
+        || {
+            format!(
+                "process-group stop must release the inherited listen socket at {}",
+                socket.display()
+            )
+        },
     );
 }
 
