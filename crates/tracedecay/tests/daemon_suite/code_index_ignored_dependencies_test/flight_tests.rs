@@ -2,7 +2,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 
 use tracedecay_code_index::production::CodeIndexProductionErrorV1;
-use tracedecay_code_index_retention::code_index_generations::try_acquire_code_generation_store_lock;
 
 use super::*;
 
@@ -158,32 +157,6 @@ fn assert_publication_error(error: CodeIndexSchedulerErrorV1) {
     );
 }
 
-/// Hold the only background permit once no pass is in flight.
-///
-/// Text seating keeps `reconcile_in_progress` after it drops the scheduler
-/// mutex, and that pass can still rename a valid active pointer. A truncated
-/// pointer written in that window is not a closed fault. Occupying the permit
-/// while the owner has not entered its pass stops that rewrite.
-async fn hold_idle_background_admission(
-    registry: &CodeIndexSchedulerRegistryV1,
-) -> tokio::sync::OwnedSemaphorePermit {
-    let admission = registry.background_reconcile_admission();
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if registry.memory_stats().await.reconciling_worktrees == 0
-            && let Ok(permit) = admission.clone().try_acquire_owned()
-            && registry.memory_stats().await.reconciling_worktrees == 0
-        {
-            return permit;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "background reconcile did not go idle before publication fault injection"
-        );
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn aborted_flight_owner_wakes_follower_and_allows_a_fresh_owner() {
     let fixture = fixture();
@@ -269,8 +242,6 @@ async fn coalesced_publication_failure_preserves_the_scheduler_error_family() {
     let registry = Arc::new(mount(fixture.path(), &store, 1).await);
     let baseline = latest(&registry, fixture.path()).await;
     let request = request_for(&baseline, "pkg");
-    let idle_admission = hold_idle_background_admission(&registry).await;
-    registry.clear_pending_wake_for_scope(&request.scope).await;
     let hold = SchedulerHold::acquire(&registry, fixture.path()).await;
     let (owner_control, owner_entered) = BlockingNthControl::new(4);
 
@@ -326,6 +297,8 @@ async fn coalesced_publication_failure_preserves_the_scheduler_error_family() {
     // and any writer that starts after it is released reads the corruption
     // under the lock and refuses instead of overwriting it.
     let pointer_bytes = {
+        use tracedecay_code_index_retention::code_index_generations::try_acquire_code_generation_store_lock;
+
         let store_lock = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if let Some(lock) = try_acquire_code_generation_store_lock(&scoped_store)
@@ -343,7 +316,6 @@ async fn coalesced_publication_failure_preserves_the_scheduler_error_family() {
         drop(store_lock);
         pointer_bytes
     };
-    drop(idle_admission);
     owner_control.release();
     hold.release();
 
