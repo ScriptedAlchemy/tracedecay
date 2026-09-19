@@ -282,8 +282,10 @@ impl SessionRefreshProgressV1 {
         }
         let current = self.coverage;
         let candidate = next.coverage;
+        // The insert trigger admits a successor only when committed_through
+        // strictly advances. An equal frontier is the row that trigger aborts.
         if self.frontier.observed_through != next.frontier.observed_through
-            || next.frontier.committed_through < self.frontier.committed_through
+            || next.frontier.committed_through <= self.frontier.committed_through
             || next.committed_batches < self.committed_batches
             || next.committed_records < self.committed_records
             || candidate.visible < current.visible

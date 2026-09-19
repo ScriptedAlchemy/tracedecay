@@ -385,4 +385,59 @@ async fn transaction_statement_batch_reports_the_exact_failed_statement() {
     );
 }
 
+#[test]
+fn deterministic_refusals_are_not_transient_engine_faults() {
+    use tracedecay_rusqlite_runtime::exact_sql::ExactSqlError;
+
+    // Schema-contract RAISE(ABORT). Primary code 19 is not enough: a primary-key
+    // collision under a second writer can clear on retry.
+    let trigger = Error::Sqlite {
+        operation: "execute",
+        code: Some(19),
+        extended_code: Some(1811),
+        message: "invalid session refresh progress".to_owned(),
+    };
+    assert!(trigger.is_deterministic_refusal());
+    assert!(
+        Error::StatementBatch {
+            index: 0,
+            source: Box::new(trigger),
+        }
+        .is_deterministic_refusal()
+    );
+    assert!(
+        !Error::Sqlite {
+            operation: "execute",
+            code: Some(19),
+            extended_code: Some(1555),
+            message: "UNIQUE constraint failed: session_refresh_progress.session_id".to_owned(),
+        }
+        .is_deterministic_refusal()
+    );
+
+    let limit = Error::from(ExactSqlError::QueryLimitExceeded);
+    assert!(matches!(limit, Error::QueryLimitExceeded));
+    assert!(limit.is_deterministic_refusal());
+
+    // Registered commit maps every TraceDecayError, including a busy writer,
+    // onto InvalidOperation. That bucket stays retryable.
+    assert!(
+        !Error::invalid_operation(
+            "database error: failed to commit isolated writer transaction: SQLite runtime is busy (operation: commit write transaction)"
+        )
+        .is_deterministic_refusal()
+    );
+    assert!(!Error::Busy.is_deterministic_refusal());
+    assert!(!Error::Runtime("writer restarted".to_owned()).is_deterministic_refusal());
+    assert!(
+        !Error::Sqlite {
+            operation: "execute",
+            code: Some(5),
+            extended_code: Some(5),
+            message: "database is locked".to_owned(),
+        }
+        .is_deterministic_refusal()
+    );
+}
+
 mod async_writer;

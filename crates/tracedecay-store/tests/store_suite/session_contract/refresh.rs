@@ -225,6 +225,22 @@ fn refresh_frontiers_and_progress_are_monotonic_and_terminal() {
         })
     ));
 
+    let stalled = SessionRefreshProgressV1::new(
+        operation_id(),
+        session_id.clone(),
+        SessionRefreshFrontierV1::new(10, 8).unwrap(),
+        coverage(),
+        2,
+        8,
+        UtcMicros(101),
+    );
+    assert!(matches!(
+        initial.validate_successor(&stalled),
+        Err(SessionStoreError::InvalidStateTransition {
+            context: "refresh progress successor"
+        })
+    ));
+
     let terminal = SessionRefreshReceiptV1::completed(
         SessionRefreshCompletionRequestV1::new(
             operation_id(),

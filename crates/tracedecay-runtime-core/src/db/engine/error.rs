@@ -24,6 +24,9 @@ pub enum Error {
     },
     Busy,
     InvalidOperation(String),
+    /// The submitted statement's materialization ceiling. Replaying it unchanged
+    /// cannot succeed; this is not a transient engine fault.
+    QueryLimitExceeded,
     StatementBatch {
         index: usize,
         source: Box<Error>,
@@ -58,6 +61,9 @@ impl fmt::Display for Error {
             } => write!(formatter, "SQLite {operation} failed: {message}"),
             Self::Busy => formatter.write_str("SQLite runtime is busy"),
             Self::InvalidOperation(message) => formatter.write_str(message),
+            Self::QueryLimitExceeded => {
+                formatter.write_str("exact SQL query materialization exceeded its limit")
+            }
             Self::StatementBatch { index, source } => {
                 write!(
                     formatter,
@@ -108,6 +114,9 @@ impl From<tracedecay_rusqlite_runtime::exact_sql::ExactSqlError> for Error {
                 message,
             },
             ExactSqlError::Busy => Self::Busy,
+            // The untyped `Runtime` fallback made callers read a materialization
+            // ceiling as a transient storage fault and replay the same statement.
+            ExactSqlError::QueryLimitExceeded => Self::QueryLimitExceeded,
             error => Self::Runtime(error.to_string()),
         }
     }
@@ -142,4 +151,28 @@ impl Error {
             _ => None,
         }
     }
+
+    /// True when replaying this exact statement against unchanged durable state
+    /// cannot succeed.
+    ///
+    /// A `SQLITE_CONSTRAINT_TRIGGER` abort is a schema-contract `RAISE(ABORT)`
+    /// refusing this row. A materialization ceiling refuses this statement.
+    /// `InvalidOperation` is not in that set: the registered commit adapter
+    /// flattens every `TraceDecayError`, including a busy writer, into that
+    /// variant. Treating the whole variant as terminal turns contention into a
+    /// durable refresh failure.
+    #[hotpath::skip]
+    pub const fn is_deterministic_refusal(&self) -> bool {
+        match self {
+            Self::QueryLimitExceeded => true,
+            Self::StatementBatch { source, .. } => source.is_deterministic_refusal(),
+            Self::Sqlite { extended_code, .. } => {
+                matches!(extended_code, Some(SQLITE_CONSTRAINT_TRIGGER))
+            }
+            _ => false,
+        }
+    }
 }
+
+/// `SQLITE_CONSTRAINT_TRIGGER`: a `RAISE(ABORT, …)` schema trigger refused the row.
+const SQLITE_CONSTRAINT_TRIGGER: i32 = 1811;

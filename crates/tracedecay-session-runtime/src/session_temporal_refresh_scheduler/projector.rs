@@ -3,9 +3,10 @@ use std::pin::Pin;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::{TemporalCoverageCountsV1, UtcMicros};
+use tracedecay_runtime_core::db::engine::Error as EngineError;
 use tracedecay_store::{
     SessionRefreshFailureCodeV1, SessionRefreshFailureRequestV1, SessionRefreshFrontierV1,
-    SessionRefreshProgressV1, SessionTemporalProjectionBatchV1,
+    SessionRefreshProgressV1, SessionStoreError, SessionTemporalProjectionBatchV1,
 };
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -119,7 +120,7 @@ impl SessionTemporalRefreshProjector for CanonicalSessionTemporalProjector {
                 // Empty remaining range is a durable no-op: terminalize with an
                 // empty complete progress batch instead of deferring forever.
                 Ok(None) => canonical_noop_complete_effect(&recovery),
-                Err(error) if error.is_storage() => Err(
+                Err(error) if storage_failure_is_retryable(&error) => Err(
                     SessionTemporalRefreshProjectorError::retryable("source_busy"),
                 ),
                 Err(_) => Err(SessionTemporalRefreshProjectorError::terminal(
@@ -197,6 +198,20 @@ fn canonical_noop_complete_effect(
     .and_then(|batch| batch.with_checkpoint(next_batch, committed, committed))
     .map_err(|_| SessionTemporalRefreshProjectorError::terminal("projector_failed"))?;
     Ok(SessionTemporalRefreshEffect::Projection { progress, batch })
+}
+
+/// True when replaying this store failure unchanged could still succeed.
+///
+/// `is_storage` only names the adapter. A schema-contract trigger abort and a
+/// query materialization ceiling are not transient. `InvalidOperation` stays
+/// retryable because registered commit flattens busy and I/O faults into it.
+pub(super) fn storage_failure_is_retryable(error: &SessionStoreError) -> bool {
+    let SessionStoreError::Storage { source, .. } = error else {
+        return false;
+    };
+    source
+        .downcast_ref::<EngineError>()
+        .is_none_or(|engine| !engine.is_deterministic_refusal())
 }
 
 pub fn durable_projector_failure_code(code: &str) -> String {

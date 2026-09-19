@@ -7,7 +7,7 @@ use std::time::Duration;
 use tracedecay_lcm::LcmError;
 use tracedecay_store::{
     SessionRefreshCompletionRequestV1, SessionRefreshFailureRequestV1, SessionRefreshFrontierV1,
-    SessionRefreshProgressV1, SessionRefreshStore, SessionStoreError,
+    SessionRefreshProgressV1, SessionRefreshStore,
 };
 
 use super::history::{
@@ -17,7 +17,7 @@ use super::history::{
 use super::projector::{
     SessionTemporalRefreshEffect, SessionTemporalRefreshPolicy, SessionTemporalRefreshProjector,
     SessionTemporalRefreshProjectorError, SessionTemporalRefreshProjectorErrorClass,
-    durable_projector_failure_code, zero_refresh_coverage,
+    durable_projector_failure_code, storage_failure_is_retryable, zero_refresh_coverage,
 };
 use super::registry::{SessionTemporalRefreshPassReport, session_refresh_retry_delay};
 use super::wake::{
@@ -634,14 +634,6 @@ async fn session_projection_refresh(
     run_session_temporal_refresh_pass(database, state, projector, policy).await
 }
 
-fn classify_store_error(error: &SessionStoreError) -> SessionTemporalRefreshRetryClass {
-    if error.is_storage() {
-        SessionTemporalRefreshRetryClass::Storage
-    } else {
-        SessionTemporalRefreshRetryClass::Projector
-    }
-}
-
 pub async fn process_refresh_begin_requests(
     store: &SessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
     state: &SessionTemporalRefreshWakeState,
@@ -667,7 +659,7 @@ pub async fn process_refresh_begin_requests(
                     tracedecay_store::SessionRefreshDispositionV1::Joined => report.joined += 1,
                 }
             }
-            Err(error) if error.is_storage() => {
+            Err(error) if storage_failure_is_retryable(&error) => {
                 report.last_error = Some(format!("{error:?}"));
                 report.retryable_errors += 1;
                 report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
@@ -709,7 +701,7 @@ pub async fn begin_admitted_session_refreshes(
     {
         Ok(page) => page,
         Err(error) => {
-            if classify_store_error(&error) == SessionTemporalRefreshRetryClass::Storage {
+            if storage_failure_is_retryable(&error) {
                 report.last_error = Some(format!("{error:?}"));
                 report.retryable_errors += 1;
                 report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
@@ -767,7 +759,7 @@ async fn complete_ready_refresh(
         Ok(_) => {
             report.completed += 1;
         }
-        Err(error) if error.is_storage() => {
+        Err(error) if storage_failure_is_retryable(&error) => {
             report.last_error = Some(format!("{error:?}"));
             report.retryable_errors += 1;
             report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
@@ -796,6 +788,44 @@ fn record_projector_error(
     }
 }
 
+const REFRESH_PROGRESS_REFUSED: &str = "refresh_progress_refused";
+
+fn durable_failure_request(
+    recovery: &SessionRefreshRecoveryV1,
+    failure_code: String,
+) -> Option<SessionRefreshFailureRequestV1> {
+    let (frontier, coverage) = match recovery.progress() {
+        Some(progress) => (progress.frontier(), *progress.coverage()),
+        None => (
+            SessionRefreshFrontierV1::new(
+                recovery.target_frontier().observed_through(),
+                recovery.source_frontier(),
+            )
+            .ok()?,
+            zero_refresh_coverage(),
+        ),
+    };
+    let request = SessionRefreshFailureRequestV1::new(
+        recovery.operation_id().clone(),
+        recovery.session_id().clone(),
+        frontier,
+        coverage,
+        failure_code,
+    )
+    .ok()?;
+    Some(
+        match recovery
+            .progress()
+            .and_then(SessionRefreshProgressV1::source_coverage)
+            .cloned()
+            .or_else(|| recovery.source_coverage(frontier.committed_through()).ok())
+        {
+            Some(source_coverage) => request.with_source_coverage(source_coverage),
+            None => request,
+        },
+    )
+}
+
 pub async fn apply_refresh_effect(
     store: &SessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
     state: &SessionTemporalRefreshWakeState,
@@ -814,40 +844,61 @@ pub async fn apply_refresh_effect(
                 .await
             {
                 Ok(_) => report.projected_batches += 1,
-                Err(error) if error.is_storage() => {
+                Err(error) if storage_failure_is_retryable(&error) => {
                     report.last_error = Some(format!("{error:?}"));
                     report.retryable_errors += 1;
                     report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
                 }
                 Err(error) => {
+                    // The next pass rebuilds this row from the same durable
+                    // state. Leave the operation running and it is resubmitted
+                    // forever. Retire it so discovery can admit a fresh refresh.
                     report.last_error = Some(format!("{error:?}"));
-                    report.terminal_errors += 1;
+                    match durable_failure_request(
+                        recovery,
+                        durable_projector_failure_code(REFRESH_PROGRESS_REFUSED),
+                    ) {
+                        Some(request) => {
+                            apply_fail_effect(store, state, recovery, request, report).await;
+                        }
+                        None => report.terminal_errors += 1,
+                    }
                 }
             }
         }
         SessionTemporalRefreshEffect::Fail(request) => {
-            if !state.claim_terminal_attempt(recovery) {
-                return;
-            }
-            let mut attempt = TerminalAttemptGuard::new(state, recovery);
-            match store.fail_session_refresh(request).await {
-                Ok(_) => {
-                    report.failed += 1;
-                    state.record_terminal_discovery_failure(recovery);
-                }
-                Err(error) if error.is_storage() => {
-                    report.last_error = Some(format!("{error:?}"));
-                    report.retryable_errors += 1;
-                    report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
-                }
-                Err(error) => {
-                    attempt.retain();
-                    report.last_error = Some(format!("{error:?}"));
-                    report.terminal_errors += 1;
-                }
-            }
+            apply_fail_effect(store, state, recovery, request, report).await;
         }
         SessionTemporalRefreshEffect::Deferred => report.deferred += 1,
+    }
+}
+
+async fn apply_fail_effect(
+    store: &SessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
+    state: &SessionTemporalRefreshWakeState,
+    recovery: &SessionRefreshRecoveryV1,
+    request: SessionRefreshFailureRequestV1,
+    report: &mut SessionTemporalRefreshPassReport,
+) {
+    if !state.claim_terminal_attempt(recovery) {
+        return;
+    }
+    let mut attempt = TerminalAttemptGuard::new(state, recovery);
+    match store.fail_session_refresh(request).await {
+        Ok(_) => {
+            report.failed += 1;
+            state.record_terminal_discovery_failure(recovery);
+        }
+        Err(error) if storage_failure_is_retryable(&error) => {
+            report.last_error = Some(format!("{error:?}"));
+            report.retryable_errors += 1;
+            report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
+        }
+        Err(error) => {
+            attempt.retain();
+            report.last_error = Some(format!("{error:?}"));
+            report.terminal_errors += 1;
+        }
     }
 }
 
@@ -894,35 +945,7 @@ async fn project_running_refresh(
         Err(error) => {
             let failure_code = durable_projector_failure_code(&error.code);
             report.last_error = Some(failure_code.clone());
-            let (frontier, coverage) = if let Some(progress) = recovery.progress() {
-                (progress.frontier(), *progress.coverage())
-            } else {
-                let Ok(frontier) = SessionRefreshFrontierV1::new(
-                    recovery.target_frontier().observed_through(),
-                    recovery.source_frontier(),
-                ) else {
-                    report.terminal_errors += 1;
-                    return;
-                };
-                (frontier, zero_refresh_coverage())
-            };
-            let request = if let Ok(request) = SessionRefreshFailureRequestV1::new(
-                recovery.operation_id().clone(),
-                recovery.session_id().clone(),
-                frontier,
-                coverage,
-                failure_code,
-            ) {
-                match recovery
-                    .progress()
-                    .and_then(SessionRefreshProgressV1::source_coverage)
-                    .cloned()
-                    .or_else(|| recovery.source_coverage(frontier.committed_through()).ok())
-                {
-                    Some(source_coverage) => request.with_source_coverage(source_coverage),
-                    None => request,
-                }
-            } else {
+            let Some(request) = durable_failure_request(recovery, failure_code) else {
                 report.terminal_errors += 1;
                 return;
             };
@@ -960,7 +983,7 @@ async fn running_refreshes(
         Ok(recoveries) => Some(recoveries),
         Err(error) => {
             report.last_error = Some(format!("{error:?}"));
-            if classify_store_error(&error) == SessionTemporalRefreshRetryClass::Storage {
+            if storage_failure_is_retryable(&error) {
                 report.retryable_errors += 1;
                 report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
             } else {
@@ -1117,9 +1140,59 @@ pub async fn run_session_temporal_refresh_pass(
 mod tests {
     use super::*;
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
+    use tracedecay_runtime_core::db::engine::Error as EngineError;
     use tracedecay_runtime_core::db::engine::params;
     use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
-    use tracedecay_store::ParseOffset;
+    use tracedecay_store::{ParseOffset, SessionStoreError};
+
+    use super::storage_failure_is_retryable;
+
+    #[test]
+    fn deterministic_storage_refusals_are_not_retryable() {
+        let refused = SessionStoreError::storage(
+            "persist session refresh progress",
+            EngineError::Sqlite {
+                operation: "execute",
+                code: Some(19),
+                extended_code: Some(1811),
+                message: "invalid session refresh progress".to_owned(),
+            },
+        );
+        assert!(!storage_failure_is_retryable(&refused));
+
+        let materialization = SessionStoreError::storage(
+            "persist session refresh progress",
+            EngineError::from(
+                tracedecay_rusqlite_runtime::exact_sql::ExactSqlError::QueryLimitExceeded,
+            ),
+        );
+        assert!(!storage_failure_is_retryable(&materialization));
+
+        assert!(storage_failure_is_retryable(&SessionStoreError::storage(
+            "persist session refresh progress",
+            EngineError::Busy,
+        )));
+        assert!(storage_failure_is_retryable(&SessionStoreError::storage(
+            "persist session refresh progress",
+            EngineError::invalid_operation(
+                "database error: failed to commit isolated writer transaction: SQLite runtime is busy (operation: commit write transaction)",
+            ),
+        )));
+        assert!(storage_failure_is_retryable(&SessionStoreError::storage(
+            "persist session refresh progress",
+            EngineError::Sqlite {
+                operation: "execute",
+                code: Some(19),
+                extended_code: Some(1555),
+                message: "UNIQUE constraint failed".to_owned(),
+            },
+        )));
+        assert!(!storage_failure_is_retryable(
+            &SessionStoreError::InvalidStateTransition {
+                context: "refresh progress successor",
+            }
+        ));
+    }
 
     #[test]
     fn dropping_worker_instrumentation_clears_pending_state_once() {
