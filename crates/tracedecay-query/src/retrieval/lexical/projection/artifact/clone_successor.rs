@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -60,6 +61,7 @@ impl CodeLexicalCloneSuccessorV1 {
         memory_budget_bytes: usize,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
         let connection = open_builder_connection(staging_path, memory_budget_bytes)?;
+        ensure_clone_occurrence_indexes(&connection)?;
         let mutation_gate = register_builder_mutation_gate(&connection)?;
         let (prior_digest, format_revision): (String, i64) = connection
             .query_row(
@@ -80,7 +82,6 @@ impl CodeLexicalCloneSuccessorV1 {
                 "clone successor does not match its prior artifact or metadata".to_owned(),
             ));
         }
-        ensure_clone_occurrence_indexes(&connection)?;
         Ok(Self {
             connection,
             mutation_gate,
@@ -431,6 +432,24 @@ fn reset_clone_tables(connection: &Connection) -> Result<(), CodeLexicalArtifact
         .map_err(sqlite_error)
 }
 
+/// Lookup indexes for resume verification, which reads postings by
+/// occurrence. Both postings tables are keyed from `class`/`language`, so
+/// without these every per-occurrence read is a full table scan; replaying N
+/// committed pages after a restart then costs N scans of every posting the
+/// repository has, and a daemon sat inside that replay for hours. A prior
+/// artifact copied from a build that predates the indexes gains them here,
+/// and nothing digests or enumerates the index schema.
+fn ensure_clone_occurrence_indexes(
+    connection: &Connection,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    connection
+        .execute_batch(
+            "CREATE INDEX IF NOT EXISTS clone_exact_postings_by_occurrence ON clone_exact_postings(symbol_occurrence_id);
+             CREATE INDEX IF NOT EXISTS clone_fingerprint_postings_by_occurrence ON clone_fingerprint_postings(symbol_occurrence_id);",
+        )
+        .map_err(sqlite_error)
+}
+
 fn append_clone_rows(
     transaction: &rusqlite::Transaction<'_>,
     page: &VerifiedSealedLexicalPageV1,
@@ -529,25 +548,6 @@ fn append_clone_fingerprints(
     Ok(())
 }
 
-/// `clone_exact_postings` and `clone_fingerprint_postings` are `WITHOUT ROWID`
-/// tables whose primary keys start at `class` and `language`. Resume
-/// verification looks up one `symbol_occurrence_id`, which that key cannot
-/// serve. These secondary indexes are the lookup; without them each body
-/// scans every posting already written and the successor never finishes.
-const CLONE_OCCURRENCE_INDEXES_SQL: &str = "\
-CREATE INDEX IF NOT EXISTS clone_exact_postings_by_occurrence \
-ON clone_exact_postings(symbol_occurrence_id);
-CREATE INDEX IF NOT EXISTS clone_fingerprint_postings_by_occurrence \
-ON clone_fingerprint_postings(symbol_occurrence_id);";
-
-fn ensure_clone_occurrence_indexes(
-    connection: &Connection,
-) -> Result<(), CodeLexicalArtifactErrorV1> {
-    connection
-        .execute_batch(CLONE_OCCURRENCE_INDEXES_SQL)
-        .map_err(sqlite_error)
-}
-
 fn verify_copied_source_page(
     connection: &Connection,
     page: &VerifiedSealedLexicalPageV1,
@@ -579,11 +579,106 @@ fn verify_copied_source_page(
     Ok(())
 }
 
+type CloneExactRowV1 = (i64, i64, String, String);
+
+/// Postings for one page's occurrences, read through the occurrence indexes
+/// `ensure_clone_occurrence_indexes` installs and bucketed by occurrence.
+///
+/// The postings tables are keyed from `class`/`language`; before those
+/// indexes existed a per-occurrence read scanned the whole table, and a
+/// daemon spent eleven hours replaying committed pages after a restart.
+struct ClonePagePostingsV1 {
+    exact: HashMap<String, Vec<CloneExactRowV1>>,
+    fingerprints: HashMap<String, Vec<CloneFingerprintRowV1>>,
+}
+
+impl ClonePagePostingsV1 {
+    fn read(
+        connection: &Connection,
+        occurrences: &HashSet<&str>,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        let mut exact: HashMap<String, Vec<CloneExactRowV1>> = HashMap::new();
+        let mut statement = connection
+            .prepare(
+                "SELECT class, normalization_revision, digest, payload_digest FROM clone_exact_postings WHERE symbol_occurrence_id = ?1",
+            )
+            .map_err(sqlite_error)?;
+        for occurrence in occurrences {
+            checkpoint(control)?;
+            let mut rows = statement.query([occurrence]).map_err(sqlite_error)?;
+            while let Some(row) = rows.next().map_err(sqlite_error)? {
+                exact.entry((*occurrence).to_owned()).or_default().push((
+                    row.get(0).map_err(sqlite_error)?,
+                    row.get(1).map_err(sqlite_error)?,
+                    row.get(2).map_err(sqlite_error)?,
+                    row.get(3).map_err(sqlite_error)?,
+                ));
+            }
+        }
+        drop(statement);
+
+        let mut fingerprints: HashMap<String, Vec<CloneFingerprintRowV1>> = HashMap::new();
+        let mut statement = connection
+            .prepare(
+                "SELECT language, class, normalization_revision, fingerprint, token_position, payload_digest, body_digest FROM clone_fingerprint_postings WHERE symbol_occurrence_id = ?1",
+            )
+            .map_err(sqlite_error)?;
+        for occurrence in occurrences {
+            checkpoint(control)?;
+            let mut rows = statement.query([occurrence]).map_err(sqlite_error)?;
+            while let Some(row) = rows.next().map_err(sqlite_error)? {
+                fingerprints
+                    .entry((*occurrence).to_owned())
+                    .or_default()
+                    .push((
+                        row.get(0).map_err(sqlite_error)?,
+                        row.get(1).map_err(sqlite_error)?,
+                        row.get(2).map_err(sqlite_error)?,
+                        row.get(3).map_err(sqlite_error)?,
+                        row.get(4).map_err(sqlite_error)?,
+                        row.get(5).map_err(sqlite_error)?,
+                        row.get(6).map_err(sqlite_error)?,
+                    ));
+            }
+        }
+        drop(statement);
+        checkpoint(control)?;
+
+        // Each table's primary key is unique within one occurrence, so sorting
+        // a bucket reproduces the `ORDER BY` the per-body queries used.
+        for rows in exact.values_mut() {
+            rows.sort();
+        }
+        for rows in fingerprints.values_mut() {
+            rows.sort();
+        }
+        Ok(Self {
+            exact,
+            fingerprints,
+        })
+    }
+
+    fn exact_for(&self, occurrence: &str) -> &[CloneExactRowV1] {
+        self.exact.get(occurrence).map_or(&[], Vec::as_slice)
+    }
+
+    fn fingerprints_for(&self, occurrence: &str) -> &[CloneFingerprintRowV1] {
+        self.fingerprints.get(occurrence).map_or(&[], Vec::as_slice)
+    }
+}
+
 fn verify_clone_page_rows(
     connection: &Connection,
     page: &VerifiedSealedLexicalPageV1,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let occurrences = page
+        .clone_bodies()
+        .iter()
+        .map(|body| body.occurrence.symbol_occurrence_id.as_str())
+        .collect::<HashSet<_>>();
+    let postings = ClonePagePostingsV1::read(connection, &occurrences, control)?;
     for body in page.clone_bodies() {
         checkpoint(control)?;
         let expected_payload = serde_json::to_vec(&body.payload)
@@ -651,24 +746,12 @@ fn verify_clone_page_rows(
                 )
             })
             .collect::<Vec<_>>();
-        let mut statement = connection
-            .prepare(
-                "SELECT class, normalization_revision, digest, payload_digest FROM clone_exact_postings INDEXED BY clone_exact_postings_by_occurrence WHERE symbol_occurrence_id = ?1 ORDER BY class, normalization_revision, digest",
-            )
-            .map_err(sqlite_error)?;
-        let stored_postings = statement
-            .query_map([body.occurrence.symbol_occurrence_id.as_str()], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-            })
-            .map_err(sqlite_error)?
-            .collect::<Result<Vec<(i64, i64, String, String)>, _>>()
-            .map_err(sqlite_error)?;
-        if stored_postings != expected_postings {
+        if postings.exact_for(body.occurrence.symbol_occurrence_id.as_str()) != expected_postings {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "resumed clone postings differ from their sealed source page".to_owned(),
             ));
         }
-        verify_clone_fingerprint_page_rows(connection, body)?;
+        verify_clone_fingerprint_page_rows(&postings, body)?;
     }
     Ok(())
 }
@@ -676,7 +759,7 @@ fn verify_clone_page_rows(
 type CloneFingerprintRowV1 = (String, i64, i64, i64, i64, String, String);
 
 fn verify_clone_fingerprint_page_rows(
-    connection: &Connection,
+    postings: &ClonePagePostingsV1,
     body: &CodeIndexCloneBodyV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let mut expected = Vec::new();
@@ -699,26 +782,7 @@ fn verify_clone_fingerprint_page_rows(
         }
     }
     expected.sort();
-    let mut statement = connection
-        .prepare(
-            "SELECT language, class, normalization_revision, fingerprint, token_position, payload_digest, body_digest FROM clone_fingerprint_postings INDEXED BY clone_fingerprint_postings_by_occurrence WHERE symbol_occurrence_id = ?1 ORDER BY language, class, normalization_revision, fingerprint, token_position",
-        )
-        .map_err(sqlite_error)?;
-    let stored = statement
-        .query_map([body.occurrence.symbol_occurrence_id.as_str()], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-            ))
-        })
-        .map_err(sqlite_error)?
-        .collect::<Result<Vec<CloneFingerprintRowV1>, _>>()
-        .map_err(sqlite_error)?;
+    let stored = postings.fingerprints_for(body.occurrence.symbol_occurrence_id.as_str());
     if stored != expected {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
             "resumed clone fingerprints differ from their sealed source page".to_owned(),

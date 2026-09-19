@@ -394,7 +394,22 @@ pub(super) fn plan_collectable_text_artifacts_cancellable(
             )
         })?;
         let path = entry.path();
-        let metadata = std::fs::symlink_metadata(&path).map_err(storage)?;
+        // This inventory reads the artifact root without the generation-store
+        // lock, so an entry the listing just named can already be gone: the
+        // text-artifact builder retires a `.staging` family (the staging
+        // database and its `-journal`/`-wal`/`-shm` sidecars) under that lock
+        // while this scan runs. A vanished entry is reclaimed, which is what
+        // this inventory would have planned anyway, so it is not a candidate
+        // and not a failure. Failing the plan here turned every publish that
+        // raced a maintenance tick into a loud `retention_plan_failed` pass
+        // (master run 35422072661, `Storage("No such file or directory")`).
+        // A completed artifact the durable index *references* is verified
+        // above, before this scan, and stays fail-closed if it disappears.
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(storage(error)),
+        };
         if !metadata.file_type().is_file() {
             return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
                 "code text artifact inventory path '{}' is not a regular file",
