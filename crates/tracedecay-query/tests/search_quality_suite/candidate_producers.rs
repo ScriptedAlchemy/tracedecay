@@ -54,10 +54,11 @@ use tracedecay_query::retrieval::exact::{
 use tracedecay_query::retrieval::lexical::{
     CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
-    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CloneFingerprintCancellationPointV1,
-    CloneFingerprintPartialReasonV1, CloneNearMatchExtentV1, CloneSelectedBlockContainmentClassV1,
-    CloneSelectedBlockV1, CodeLexicalArtifactBatchLimitV1, CodeLexicalArtifactBuilderV1,
-    CodeLexicalArtifactErrorV1, CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CODE_LEXICAL_ARTIFACT_SQLITE_CACHE_BYTES_V1,
+    CloneFingerprintCancellationPointV1, CloneFingerprintPartialReasonV1, CloneNearMatchExtentV1,
+    CloneSelectedBlockContainmentClassV1, CloneSelectedBlockV1, CodeLexicalArtifactBatchLimitV1,
+    CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
+    CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
     CodeLexicalArtifactWriterRevisionV1, CodeLexicalCloneSuccessorV1,
     CodeLexicalProjectionAdapterV1, CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
     CodeLexicalProjectionMetadataV1, LexicalFieldFilterV1, LexicalFieldV1, LexicalLane,
@@ -1468,6 +1469,9 @@ fn v16_clone_payloads_are_content_addressed_and_postings_page() {
             .expect("accepted page cursor"),
         pages[0].next_cursor().clone()
     );
+    successor
+        .verify_resumed_page(&pages[0], &control)
+        .expect("resumed clone postings match the sealed source page");
     for page in &pages[1..] {
         successor
             .append_page(page, &control)
@@ -1786,6 +1790,428 @@ fn v16_clone_payloads_are_content_addressed_and_postings_page() {
         ),
         Err(CodeLexicalArtifactErrorV1::Incompatible(_))
     ));
+}
+
+const UNREFERENCED_CLONE_POSTINGS_V1: i64 = 128_000;
+const UNREFERENCED_POSTING_PREFIX_V1: &str = "unreferenced-posting-";
+
+fn open_successor_staging(path: &Path) -> rusqlite::Connection {
+    let connection = rusqlite::Connection::open(path).expect("open clone successor staging");
+    connection
+        .pragma_update(
+            None,
+            "cache_size",
+            -i64::try_from(CODE_LEXICAL_ARTIFACT_SQLITE_CACHE_BYTES_V1 / 1024)
+                .expect("successor cache fits i64"),
+        )
+        .expect("match the successor page cache");
+    connection
+        .pragma_update(None, "mmap_size", 0_i64)
+        .expect("match the successor mmap policy");
+    connection
+}
+
+fn suspend_clone_posting_gates(connection: &rusqlite::Connection) {
+    connection
+        .execute_batch(
+            "DROP TRIGGER IF EXISTS builder_gate_clone_exact_postings_insert;
+             DROP TRIGGER IF EXISTS builder_gate_clone_fingerprint_postings_insert;
+             DROP TRIGGER IF EXISTS immutable_clone_exact_postings_delete;
+             DROP TRIGGER IF EXISTS immutable_clone_fingerprint_postings_delete;",
+        )
+        .expect("suspend clone posting gates");
+}
+
+fn restore_clone_posting_gates(connection: &rusqlite::Connection) {
+    connection
+        .execute_batch(
+            "CREATE TRIGGER builder_gate_clone_exact_postings_insert BEFORE INSERT ON clone_exact_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+             CREATE TRIGGER builder_gate_clone_fingerprint_postings_insert BEFORE INSERT ON clone_fingerprint_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+             CREATE TRIGGER immutable_clone_exact_postings_delete BEFORE DELETE ON clone_exact_postings BEGIN SELECT RAISE(ABORT, 'immutable clone exact postings'); END;
+             CREATE TRIGGER immutable_clone_fingerprint_postings_delete BEFORE DELETE ON clone_fingerprint_postings BEGIN SELECT RAISE(ABORT, 'immutable clone fingerprint postings'); END;",
+        )
+        .expect("restore clone posting gates");
+}
+
+fn insert_unreferenced_clone_postings(connection: &mut rusqlite::Connection, rows: i64) {
+    let transaction = connection
+        .transaction()
+        .expect("unreferenced posting transaction");
+    let mut exact = transaction
+        .prepare(
+            "INSERT INTO clone_exact_postings(class, normalization_revision, digest, symbol_occurrence_id, payload_digest) VALUES (1, 1, 'unreferenced', ?1, 'unreferenced-payload')",
+        )
+        .expect("prepare unreferenced exact postings");
+    let mut fingerprints = transaction
+        .prepare(
+            "INSERT INTO clone_fingerprint_postings(language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position, payload_digest, body_digest) VALUES ('typescript', 1, 1, ?1, ?2, 0, 'unreferenced-payload', 'unreferenced-body')",
+        )
+        .expect("prepare unreferenced fingerprint postings");
+    for index in 0..rows {
+        let occurrence = format!("{UNREFERENCED_POSTING_PREFIX_V1}{index}");
+        exact
+            .execute(rusqlite::params![occurrence.as_str()])
+            .expect("insert unreferenced exact posting");
+        fingerprints
+            .execute(rusqlite::params![index, occurrence.as_str()])
+            .expect("insert unreferenced fingerprint posting");
+    }
+    drop(exact);
+    drop(fingerprints);
+    transaction
+        .commit()
+        .expect("commit unreferenced clone postings");
+}
+
+fn warm_clone_posting_pages(path: &Path) {
+    let connection = open_successor_staging(path);
+    connection
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(LENGTH(symbol_occurrence_id)), 0) FROM clone_exact_postings",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("warm exact postings");
+    connection
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(LENGTH(symbol_occurrence_id)), 0) FROM clone_fingerprint_postings",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("warm fingerprint postings");
+}
+
+fn delete_unreferenced_clone_postings(connection: &rusqlite::Connection) {
+    let like = format!("{UNREFERENCED_POSTING_PREFIX_V1}%");
+    connection
+        .execute(
+            "DELETE FROM clone_exact_postings WHERE symbol_occurrence_id LIKE ?1",
+            [like.as_str()],
+        )
+        .expect("delete unreferenced exact postings");
+    connection
+        .execute(
+            "DELETE FROM clone_fingerprint_postings WHERE symbol_occurrence_id LIKE ?1",
+            [like.as_str()],
+        )
+        .expect("delete unreferenced fingerprint postings");
+}
+
+/// The pre-fix resume path: one full-table lookup per clone body.
+fn time_per_body_posting_scans(
+    path: &Path,
+    pages: &[VerifiedSealedLexicalPageV1],
+) -> std::time::Duration {
+    let connection = open_successor_staging(path);
+    let started = Instant::now();
+    for page in pages {
+        for body in page.clone_bodies() {
+            let occurrence = body.occurrence.symbol_occurrence_id.as_str();
+            let mut exact = connection
+                .prepare(
+                    "SELECT class, normalization_revision, digest, payload_digest FROM clone_exact_postings WHERE symbol_occurrence_id = ?1 ORDER BY class, normalization_revision, digest",
+                )
+                .expect("prepare per-body exact scan");
+            let _exact = exact
+                .query_map([occurrence], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })
+                .expect("scan exact postings per body")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("read exact postings per body");
+            let mut fingerprints = connection
+                .prepare(
+                    "SELECT language, class, normalization_revision, fingerprint, token_position, payload_digest, body_digest FROM clone_fingerprint_postings WHERE symbol_occurrence_id = ?1 ORDER BY language, class, normalization_revision, fingerprint, token_position",
+                )
+                .expect("prepare per-body fingerprint scan");
+            let _fingerprints = fingerprints
+                .query_map([occurrence], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                })
+                .expect("scan fingerprint postings per body")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("read fingerprint postings per body");
+        }
+    }
+    started.elapsed()
+}
+
+fn time_resumed_page_verification(
+    successor: &CodeLexicalCloneSuccessorV1,
+    pages: &[VerifiedSealedLexicalPageV1],
+    control: &ArtifactControl,
+) -> std::time::Duration {
+    let started = Instant::now();
+    for page in pages {
+        successor
+            .verify_resumed_page(page, control)
+            .expect("resumed page postings match the sealed source");
+    }
+    started.elapsed()
+}
+
+#[test]
+fn resumed_clone_postings_page_seals_the_source_tip() {
+    let body = "one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten();";
+    let mut sources = String::new();
+    for index in 0..24 {
+        let _ = write!(sources, "export function f{index}() {{ {body} }}\n");
+    }
+    let fixture = real_lexical_source_fixture_from_sources(vec![(
+        "file.clone.dense".to_owned(),
+        "src/clones.ts".to_owned(),
+        sources.into_bytes(),
+    )]);
+    let (pages, receipt) = drain_verified_pages(&fixture, 128);
+    let bodies = pages
+        .iter()
+        .map(|page| page.clone_bodies().len())
+        .sum::<usize>();
+    let densest_page = pages
+        .iter()
+        .map(|page| page.clone_bodies().len())
+        .max()
+        .unwrap_or(0);
+    assert!(
+        densest_page >= 8,
+        "one resumed page must carry enough clone bodies to expose a per-body scan, got {densest_page} of {bodies}"
+    );
+    assert!(
+        pages
+            .iter()
+            .flat_map(VerifiedSealedLexicalPageV1::clone_bodies)
+            .all(|body| !body
+                .occurrence
+                .symbol_occurrence_id
+                .as_str()
+                .starts_with(UNREFERENCED_POSTING_PREFIX_V1)),
+        "injected posting ids must not collide with sealed occurrences"
+    );
+
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let control = ArtifactControl { cancelled: false };
+    let legacy_path = directory.path().join("lexical-artifact-v14.sqlite");
+    let tip_path = directory.path().join("lexical-artifact-v16.sqlite");
+    let legacy_verified = {
+        let mut builder = CodeLexicalArtifactBuilderV1::create_with_format_revision(
+            &legacy_path,
+            fixture.metadata.clone(),
+            CodeLexicalArtifactWriterRevisionV1::V14,
+        )
+        .expect("create V14 predecessor");
+        for page in &pages {
+            builder
+                .append_page(page, &control)
+                .expect("append V14 page");
+        }
+        finish_staged_artifact(&mut builder, &receipt, &control)
+    };
+    let tip = {
+        let mut builder = CodeLexicalArtifactBuilderV1::create(&tip_path, fixture.metadata.clone())
+            .expect("create V16 tip");
+        for page in &pages {
+            builder
+                .append_page(page, &control)
+                .expect("append V16 page");
+        }
+        finish_staged_artifact(&mut builder, &receipt, &control)
+    };
+
+    let successor_path = directory.path().join("lexical-artifact-successor.sqlite");
+    let mut successor = CodeLexicalCloneSuccessorV1::open_or_create(
+        &legacy_path,
+        &successor_path,
+        legacy_verified.clone(),
+        fixture.metadata.clone(),
+        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+    )
+    .expect("create clone successor");
+    for page in &pages {
+        successor
+            .append_page(page, &control)
+            .expect("append sealed source page");
+    }
+    assert_eq!(
+        successor
+            .next_cursor()
+            .expect("successor cursor")
+            .expect("cursor after every source page")
+            .next_page_ordinal(),
+        receipt.page_count()
+    );
+    drop(successor);
+
+    let mut staging = open_successor_staging(&successor_path);
+    suspend_clone_posting_gates(&staging);
+    insert_unreferenced_clone_postings(&mut staging, UNREFERENCED_CLONE_POSTINGS_V1);
+    drop(staging);
+    warm_clone_posting_pages(&successor_path);
+
+    let successor = CodeLexicalCloneSuccessorV1::open_or_create(
+        &legacy_path,
+        &successor_path,
+        legacy_verified.clone(),
+        fixture.metadata.clone(),
+        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+    )
+    .expect("resume successor over the stalled posting table");
+    let resumed = time_resumed_page_verification(&successor, &pages, &control);
+    drop(successor);
+    // The per-body scan runs second, on the warmer cache, so a passing ratio
+    // is not an artifact of which reader touched the file first.
+    let per_body = time_per_body_posting_scans(&successor_path, &pages);
+    assert!(
+        per_body.as_millis() > resumed.as_millis() && resumed.saturating_mul(3) < per_body,
+        "one scan per resumed page must beat a scan per clone body: resumed={}ms per_body={}ms bodies={bodies}",
+        resumed.as_millis(),
+        per_body.as_millis()
+    );
+
+    let staging = open_successor_staging(&successor_path);
+    let tampered: (String, i64, i64, i64, String, i64, String, String) = staging
+        .query_row(
+            "SELECT language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position, payload_digest, body_digest FROM clone_fingerprint_postings WHERE symbol_occurrence_id NOT LIKE ?1 ORDER BY symbol_occurrence_id LIMIT 1",
+            [format!("{UNREFERENCED_POSTING_PREFIX_V1}%")],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            },
+        )
+        .expect("real fingerprint posting");
+    staging
+        .execute(
+            "DELETE FROM clone_fingerprint_postings WHERE language = ?1 AND class = ?2 AND normalization_revision = ?3 AND fingerprint = ?4 AND symbol_occurrence_id = ?5 AND token_position = ?6",
+            rusqlite::params![
+                tampered.0,
+                tampered.1,
+                tampered.2,
+                tampered.3,
+                tampered.4,
+                tampered.5
+            ],
+        )
+        .expect("remove the real fingerprint");
+    staging
+        .execute(
+            "INSERT INTO clone_fingerprint_postings(language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position, payload_digest, body_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'tampered-body')",
+            rusqlite::params![
+                tampered.0,
+                tampered.1,
+                tampered.2,
+                tampered.3,
+                tampered.4,
+                tampered.5,
+                tampered.6
+            ],
+        )
+        .expect("replace the fingerprint body digest");
+    drop(staging);
+
+    let successor = CodeLexicalCloneSuccessorV1::open_or_create(
+        &legacy_path,
+        &successor_path,
+        legacy_verified.clone(),
+        fixture.metadata.clone(),
+        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+    )
+    .expect("reopen tampered successor");
+    let tampered_page = pages
+        .iter()
+        .find(|page| {
+            page.clone_bodies()
+                .iter()
+                .any(|body| body.occurrence.symbol_occurrence_id.as_str() == tampered.4)
+        })
+        .expect("tampered occurrence belongs to a sealed page");
+    assert!(
+        matches!(
+            successor.verify_resumed_page(tampered_page, &control),
+            Err(CodeLexicalArtifactErrorV1::Corrupt(_))
+        ),
+        "resume verification must refuse a posting the sealed page did not write"
+    );
+    drop(successor);
+
+    let staging = open_successor_staging(&successor_path);
+    staging
+        .execute(
+            "DELETE FROM clone_fingerprint_postings WHERE language = ?1 AND class = ?2 AND normalization_revision = ?3 AND fingerprint = ?4 AND symbol_occurrence_id = ?5 AND token_position = ?6",
+            rusqlite::params![
+                tampered.0,
+                tampered.1,
+                tampered.2,
+                tampered.3,
+                tampered.4,
+                tampered.5
+            ],
+        )
+        .expect("remove the tampered fingerprint");
+    staging
+        .execute(
+            "INSERT INTO clone_fingerprint_postings(language, class, normalization_revision, fingerprint, symbol_occurrence_id, token_position, payload_digest, body_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                tampered.0,
+                tampered.1,
+                tampered.2,
+                tampered.3,
+                tampered.4,
+                tampered.5,
+                tampered.6,
+                tampered.7
+            ],
+        )
+        .expect("restore the sealed fingerprint");
+    delete_unreferenced_clone_postings(&staging);
+    restore_clone_posting_gates(&staging);
+    drop(staging);
+
+    let mut successor = CodeLexicalCloneSuccessorV1::open_or_create(
+        &legacy_path,
+        &successor_path,
+        legacy_verified,
+        fixture.metadata.clone(),
+        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+    )
+    .expect("reopen restored successor");
+    for page in &pages {
+        successor
+            .verify_resumed_page(page, &control)
+            .expect("restored postings match every sealed page");
+    }
+    assert_eq!(
+        successor
+            .next_cursor()
+            .expect("restored cursor")
+            .expect("cursor still at the source tip")
+            .next_page_ordinal(),
+        receipt.page_count()
+    );
+    let sealed = successor
+        .finish(&receipt, &control)
+        .expect("seal the resumed successor at the source tip");
+    assert_eq!(sealed.section_digests(), tip.section_digests());
+    assert_eq!(sealed.artifact_digest(), tip.artifact_digest());
 }
 
 #[test]
