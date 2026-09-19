@@ -871,6 +871,33 @@ impl DaemonCodeIndexPublicationStoreV1 {
         CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(error.to_string())
     }
 
+    /// A pointer slot that is not a regular file is a corrupt authority.
+    ///
+    /// `read(2)` and `rename(2)` both report that shape as `EISDIR`. Mapping
+    /// the OS error to `Unavailable` (or letting it surface as a raw I/O
+    /// fault) misclassifies a broken publication pointer. Callers in the
+    /// scheduler publication family must see reset-required corruption.
+    fn corrupt_non_file_pointer() -> CodeIndexPublicationStoreErrorV1 {
+        Self::corruption("active code-generation pointer is not a regular file")
+    }
+
+    fn map_pointer_io(error: std::io::Error) -> CodeIndexPublicationStoreErrorV1 {
+        if error.kind() == std::io::ErrorKind::IsADirectory {
+            Self::corrupt_non_file_pointer()
+        } else {
+            Self::unavailable(error)
+        }
+    }
+
+    fn require_regular_pointer_slot(&self) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        match std::fs::metadata(&self.active_path) {
+            Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+            Ok(_) => Err(Self::corrupt_non_file_pointer()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(Self::map_pointer_io(error)),
+        }
+    }
+
     fn acquire_generation_read_lock(
         &self,
     ) -> Result<CodeGenerationStoreLockV1, CodeIndexPublicationStoreErrorV1> {
@@ -1089,8 +1116,11 @@ impl DaemonCodeIndexPublicationStoreV1 {
                     .unwrap_or_else(PoisonError::into_inner) = None;
                 return Ok(None);
             }
-            Err(error) => return Err(Self::unavailable(error)),
+            Err(error) => return Err(Self::map_pointer_io(error)),
         };
+        if !metadata.file_type().is_file() {
+            return Err(Self::corrupt_non_file_pointer());
+        }
         if metadata.len() > MAX_DURABLE_PUBLICATION_POINTER_BYTES {
             return Err(Self::corruption(
                 "durable code-generation index exceeds its byte bound",
@@ -1102,7 +1132,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         // a fixed-width pointer through another path, and a 1-second mtime
         // filesystem can leave both unchanged while the bytes move. The memo
         // is reused only when the file digest matches.
-        let bytes = std::fs::read(&self.active_path).map_err(Self::unavailable)?;
+        let bytes = std::fs::read(&self.active_path).map_err(Self::map_pointer_io)?;
         let digest = Self::state_digest(&bytes);
         {
             let mut memo = self
@@ -2558,8 +2588,11 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             std::fs::remove_file(&temporary).map_err(Self::unavailable)?;
         }
         hotpath::measure_block!("code_index.generation.publish.pointer_commit", {
+            // Refuse a directory (or any non-file) before `rename(2)`. Replacing
+            // one returns EISDIR, which is not a publication-family fault.
+            self.require_regular_pointer_slot()?;
             Self::write_durable(&temporary, &bytes)?;
-            std::fs::rename(&temporary, &self.active_path).map_err(Self::unavailable)?;
+            std::fs::rename(&temporary, &self.active_path).map_err(Self::map_pointer_io)?;
             Self::sync_directory(
                 self.active_path
                     .parent()

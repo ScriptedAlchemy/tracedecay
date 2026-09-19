@@ -1745,7 +1745,27 @@ fn read_active_pointer(
     store_root: &Path,
 ) -> Result<DurablePublicationPointerV1, CodeGenerationRetentionErrorV1> {
     let path = store_root.join(ACTIVE_POINTER_FILE);
-    let bytes = std::fs::read(&path).map_err(storage)?;
+    // A directory in the pointer slot makes `read(2)` return EISDIR. That is
+    // the same corrupt authority the publication store refuses; do not let the
+    // OS error replace the typed unsafe-state.
+    match std::fs::metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+                "active code-generation pointer is not a regular file".to_owned(),
+            ));
+        }
+        Err(error) => return Err(storage(error)),
+    }
+    let bytes = std::fs::read(&path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::IsADirectory {
+            CodeGenerationRetentionErrorV1::UnsafeState(
+                "active code-generation pointer is not a regular file".to_owned(),
+            )
+        } else {
+            storage(error)
+        }
+    })?;
     serde_json::from_slice(&bytes).map_err(|error| {
         CodeGenerationRetentionErrorV1::UnsafeState(format!(
             "active pointer '{}' is corrupt: {error}",
