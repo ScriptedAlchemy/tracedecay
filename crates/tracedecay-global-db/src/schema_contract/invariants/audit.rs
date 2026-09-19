@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use futures_util::future::try_join_all;
 use tracedecay_domain::DurableObservationV1;
+use tracedecay_privacy::sanitize_lcm_payload_text;
 use tracedecay_store::{
     ObservationProjection, ProjectionSkipReason, ProjectionStoreError,
     SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageProjection, WorkflowFactProjection,
@@ -825,7 +826,22 @@ async fn validate_message_projection_row(
             .message(&owner_message.provider, &owner_message.message_id)
             .is_some();
         match verify_owner_output_rows(conn, resolved, &owner_projection).await {
-            Ok(()) => {}
+            Ok(()) => {
+                // Message equality is not the whole output. The raw twin is
+                // derived from the same observation and is not covered by the
+                // digest, so a matching message can still sit on a stale twin.
+                // Protected rows are not this arm: their stored message differs
+                // from the projection, and that compatibility already checked
+                // the twin.
+                if resolved
+                    .projection_rows
+                    .message(&owner_message.provider, &owner_message.message_id)
+                    .is_some_and(|stored| stored == owner_message)
+                    && owned_raw_twin_needs_rewrite(&owner_projection, &resolved.projection_rows)?
+                {
+                    resolved.released.record(&owner_projection);
+                }
+            }
             Err(ProjectionStoreError::OutputCollision {
                 provider,
                 message_id,
@@ -896,6 +912,45 @@ async fn verify_owner_output_rows(
             .message(&message.provider, &message.message_id),
     )
     .await
+}
+
+/// Whether the LCM raw twin of a message that already matches this projection
+/// is not the twin a fresh projection write would store.
+///
+/// Hermes projections have no raw twin. A sanitizer quarantine is itself the
+/// current rendering, so the caller records the projection for the same
+/// converge path a fresh capture uses. A sanitizer fault stays a typed refusal.
+fn owned_raw_twin_needs_rewrite(
+    projection: &SessionMessageProjection,
+    rows: &ProjectionRowsBatch,
+) -> tracedecay_domain::errors::Result<bool> {
+    let message = projection.message();
+    if message.provider == "hermes" {
+        return Ok(false);
+    }
+    let expected = match sanitize_lcm_payload_text(&message.text) {
+        Ok(sanitized) => sanitized.sanitized_text().to_owned(),
+        Err(error) if error.is_quarantine_verdict() => return Ok(true),
+        Err(error) => {
+            return Err(authority_violation(format!(
+                "projection raw twin sanitizer failed: {error}"
+            )));
+        }
+    };
+    let Some(raw) = rows.raw_twin(&message.provider, &message.message_id) else {
+        return Ok(true);
+    };
+    // The derived columns are pure functions of the same sanitized body, so a
+    // twin whose content matches can still carry a hash that fails hydration
+    // with `PayloadIntegrityMismatch` or retrieval text the projector never
+    // wrote. Compare what a fresh write stores, not content alone.
+    Ok(raw.storage_kind != "inline"
+        || raw.session_id != message.session_id
+        || raw.content != expected
+        || raw.content_hash != tracedecay_lcm::retrieval_content::projected_content_hash(&expected)
+        || raw.snippet_text
+            != tracedecay_lcm::retrieval_content::derived_text_for_snippet(&expected)
+        || raw.index_text != tracedecay_lcm::retrieval_content::derived_text_for_index(&expected))
 }
 
 #[allow(clippy::too_many_arguments)]

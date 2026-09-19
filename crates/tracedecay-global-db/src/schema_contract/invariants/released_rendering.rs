@@ -665,6 +665,118 @@ mod tests {
         assert_eq!(stored_output(&snapshot, RECORD_ID).await, current);
     }
 
+    /// The digest covers the message, not its LCM raw twin. A twin can be
+    /// rewritten under a still-current message and provenance; reopen has to
+    /// restore the twin a fresh projection write stores.
+    #[tokio::test]
+    async fn current_provenance_repairs_a_stale_raw_twin() {
+        let directory = TempDir::new().unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .unwrap();
+        seed(&runtime, &observation()).await.unwrap();
+        let database = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        let snapshot = database.read_snapshot().await.unwrap();
+        let current = stored_output(&snapshot, RECORD_ID).await;
+        drop(snapshot);
+
+        let transaction = database
+            .runtime_database()
+            .begin_write_transaction("stale the raw twin under current provenance")
+            .await
+            .unwrap();
+        let updated = transaction
+            .execute(
+                "UPDATE lcm_raw_messages
+                 SET content = 'stale raw body', content_hash = 'stale',
+                     snippet_text = 'stale raw body', index_text = 'stale raw body'
+                 WHERE provider = 'codex' AND message_id = ?1",
+                tracedecay_runtime_core::params![RECORD_ID],
+            )
+            .await
+            .expect("stale the raw twin");
+        assert_eq!(updated, 1);
+        transaction.commit().await.unwrap();
+
+        let snapshot = database.read_snapshot().await.unwrap();
+        let stale = stored_output(&snapshot, RECORD_ID).await;
+        drop(snapshot);
+        assert_eq!(stale.digest, current.digest);
+        assert_eq!(stale.text, current.text);
+        assert_eq!(stale.raw_index_text, "stale raw body");
+
+        super::super::ensure_authority_invariants(database.runtime_database(), false, false)
+            .await
+            .expect("current provenance must repair its stale raw twin");
+
+        let snapshot = database.read_snapshot().await.unwrap();
+        assert_eq!(stored_output(&snapshot, RECORD_ID).await, current);
+    }
+
+    /// A twin whose content survived but whose derived columns did not still
+    /// fails hydration with `PayloadIntegrityMismatch`. Content equality alone
+    /// is not the twin a fresh projection write stores.
+    #[tokio::test]
+    async fn current_provenance_repairs_a_raw_twin_with_a_stale_hash() {
+        let directory = TempDir::new().unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .unwrap();
+        seed(&runtime, &observation()).await.unwrap();
+        let database = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        let snapshot = database.read_snapshot().await.unwrap();
+        let current = stored_output(&snapshot, RECORD_ID).await;
+        drop(snapshot);
+
+        let transaction = database
+            .runtime_database()
+            .begin_write_transaction("stale the raw twin derivations")
+            .await
+            .unwrap();
+        let updated = transaction
+            .execute(
+                "UPDATE lcm_raw_messages
+                 SET content_hash = 'stale', index_text = 'stale index'
+                 WHERE provider = 'codex' AND message_id = ?1",
+                tracedecay_runtime_core::params![RECORD_ID],
+            )
+            .await
+            .expect("stale the derived columns");
+        assert_eq!(updated, 1);
+        transaction.commit().await.unwrap();
+
+        super::super::ensure_authority_invariants(database.runtime_database(), false, false)
+            .await
+            .expect("current provenance must repair a twin with stale derivations");
+
+        let snapshot = database.read_snapshot().await.unwrap();
+        assert_eq!(stored_output(&snapshot, RECORD_ID).await, current);
+        let mut rows = snapshot
+            .query(
+                "SELECT content_hash, content FROM lcm_raw_messages
+                 WHERE provider = 'codex' AND message_id = ?1",
+                tracedecay_runtime_core::params![RECORD_ID],
+            )
+            .await
+            .expect("read the repaired twin");
+        let row = rows
+            .next()
+            .await
+            .expect("read the repaired twin")
+            .expect("raw twin row");
+        assert_eq!(
+            row.get::<String>(0).unwrap(),
+            tracedecay_lcm::retrieval_content::projected_content_hash(
+                &row.get::<String>(1).unwrap()
+            ),
+            "the repaired twin must carry the hash its content hydrates against"
+        );
+    }
+
     /// The repair above is the shipped rendering, not any disagreement under
     /// current provenance. A body neither this binary nor a release wrote is
     /// tamper: the audit refuses it and does not rewrite the row.
