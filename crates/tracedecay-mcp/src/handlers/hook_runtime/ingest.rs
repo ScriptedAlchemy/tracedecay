@@ -123,6 +123,8 @@ async fn admit_codex_project_rollouts(
     let mut budget = max_new_bytes;
     let mut deferred = false;
     let mut observations_committed = 0_u64;
+    let mut scanned = 0_u64;
+    let mut replayed = 0_u64;
     let mut paths = source.transcript_paths(project_root).into_iter().peekable();
     while let Some(path) = paths.next() {
         let progress =
@@ -138,6 +140,10 @@ async fn admit_codex_project_rollouts(
             .map_err(|error| map_transcript_ingest_error(&error))?;
         deferred |= progress.source_deferred;
         observations_committed = observations_committed.saturating_add(progress.frames_persisted);
+        scanned = scanned.saturating_add(1);
+        if progress.resumed && progress.frames_persisted == 0 {
+            replayed = replayed.saturating_add(1);
+        }
         if let Some(remaining) = budget.as_mut() {
             *remaining = remaining.saturating_sub(progress.bytes_consumed);
             if *remaining == 0 {
@@ -148,6 +154,10 @@ async fn admit_codex_project_rollouts(
     }
     Ok(CodexRolloutAdmission {
         deferred,
+        // Only when every scanned rollout was a pure replay. One rollout with
+        // new frames makes the pass a commit, not a duplicate, and a pass that
+        // scanned nothing has nothing to call durable.
+        exact_duplicate: scanned > 0 && scanned == replayed,
         observations_committed,
     })
 }
@@ -157,6 +167,11 @@ async fn admit_codex_project_rollouts(
 /// with the project catch-up sweep, which can consume these rows first.
 pub(super) struct CodexRolloutAdmission {
     pub(super) deferred: bool,
+    /// Every scanned rollout resumed at its stored cursor with nothing new to
+    /// persist, so the transcript was already durable when this pass ran.
+    /// `JsonlObservationAdmissionProgress::resumed` is what separates that from
+    /// an empty source, so a first-ever scan is never called a duplicate.
+    pub(super) exact_duplicate: bool,
     pub(super) observations_committed: u64,
 }
 

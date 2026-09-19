@@ -1288,6 +1288,83 @@ async fn quiesced_background_reconcile_admission(
     admission
 }
 
+/// Settle the owner *and* burn the coalesced wake permit a settled owner can
+/// still be holding, so the global admission is idle and stays idle.
+///
+/// [`wait_for_settled_owner`] proves the pending-arrival slot is empty now, but
+/// emptiness is not the whole queue: `note_worker_continuation` replenishes the
+/// `Notify` permit whenever it cannot claim the slot, and `note_wake` posts a
+/// permit of its own for an arrival a running pass then claims. Either leaves a
+/// banked permit behind a settled owner, and the no-op pass it starts owns the
+/// single background admission while it runs. A test that reads
+/// `available_permits`, or one that reads the freshness ladder (whose
+/// `refresh_in_flight` is the pass counter *or* the pending slot), samples that
+/// pass and not the quiet worktree it set up.
+///
+/// Holding the permit parks such a pass at its dequeue point, before it claims
+/// an arrival or enters its guard. Releasing it hands it straight over, so the
+/// drain is done only once a release leaves the permit free.
+///
+/// The registry must be single-permit
+/// ([`CodeIndexSchedulerRegistryV1::with_background_reconcile_permits`]): with
+/// the host's default bound, one held permit parks nothing.
+async fn settled_owner_with_idle_admission(
+    registry: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
+) {
+    let admission = registry.background_reconcile_admission();
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    loop {
+        drop(quiesced_background_reconcile_admission(registry, project_root).await);
+        // A banked permit is claimed by the worker's very next `notified()`,
+        // whose first act is to take this admission. Give that claim its turn,
+        // then settle: a pass that did start moves the guard or the slot this
+        // wait joins, and the free permit afterwards is the proof none is left.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        wait_for_settled_owner(registry, project_root).await;
+        if admission.available_permits() == 1 {
+            return;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "the admission for {} never went idle",
+            project_root.display()
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
+/// Empty the coalesced pending-wake slot and prove the owner's pass tail is
+/// done disturbing it.
+///
+/// The caller must already hold the single background admission, so no further
+/// pass can start. One pass can still be finishing: the worker releases that
+/// admission halfway through its body and drops its `reconcile_pass` guard
+/// before the branches that call `note_worker_continuation`, so both
+/// `reconcile_in_progress` and the slot read quiet while the tail is still
+/// about to stamp `BusyFollowUp` into it. [`wait_for_settled_owner`] samples
+/// exactly those two, so it cannot see that tail. With the admission held the
+/// tail is finite and unrepeatable, so clearing until the slot survives a quiet
+/// window is the proof the settle cannot give.
+async fn clear_pending_wake_until_quiet(
+    registry: &CodeIndexSchedulerRegistryV1,
+    scope: &tracedecay_contracts::ResolvedScope,
+) {
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    loop {
+        registry.clear_pending_wake_for_scope(scope).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        if registry.pending_wake_micros_for_scope(scope).await == Some(0) {
+            return;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "the pending-wake slot for {:?} never stayed empty",
+            scope.worktree_id
+        );
+    }
+}
+
 const CALLER_STAR: usize = 2_000;
 const CALLER_STAR_FILES: usize = 8;
 const CALLER_PAGE: u32 = 10;
