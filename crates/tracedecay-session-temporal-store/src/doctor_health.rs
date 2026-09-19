@@ -1362,7 +1362,6 @@ mod registered_tests {
         )
         .await
         .expect("drop required index");
-        drop(writer);
 
         let database = SessionTemporalRegisteredDb::db_path(&harness.registered);
         std::fs::OpenOptions::new()
