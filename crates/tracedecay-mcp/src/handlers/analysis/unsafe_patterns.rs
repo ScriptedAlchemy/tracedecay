@@ -8,7 +8,8 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::VerifiedGraphQuery;
 
 use super::{
-    VerifiedAnalysisSymbol, path_is_rust, verified_analysis_symbols, verified_analysis_unavailable,
+    VerifiedAnalysisSymbol, enclosing_declaration, path_is_rust, verified_analysis_symbols,
+    verified_analysis_unavailable,
 };
 use crate::ToolResult;
 use crate::handlers::support::{effective_path, rendered_tool_result};
@@ -108,22 +109,6 @@ fn contains_unsafe_block_start(line: &str) -> Option<usize> {
         start = abs + "unsafe".len();
     }
     None
-}
-
-/// Innermost declaration whose source range covers `match_byte`.
-///
-/// Byte containment, not line containment: an attribute such as `#[test]` and
-/// the two functions on `#[test] fn a() {…} fn b() {…}` all sit on one line,
-/// and only the byte range says which of them the site is inside. Selecting by
-/// line also had no stable order to break ties with, since symbols arrive in
-/// occurrence order and occurrence ids are per-project digests.
-fn enclosing_declaration(nodes: &[VerifiedAnalysisSymbol], match_byte: u64) -> Option<String> {
-    nodes
-        .iter()
-        .filter_map(|node| node.source_span.map(|span| (node, span)))
-        .filter(|(_, span)| span.start_byte <= match_byte && match_byte < span.end_byte)
-        .min_by_key(|(_, span)| span.end_byte.saturating_sub(span.start_byte))
-        .map(|(node, _)| node.metadata.qualified_name.clone())
 }
 
 fn path_looks_like_test(path: &str) -> bool {
@@ -258,7 +243,8 @@ pub async fn handle_unsafe_patterns(
                         if let Some(column) = line_matches_unsafe_kind(masked_line, kind) {
                             let nodes = symbols_by_file.get(file).map_or(&[][..], Vec::as_slice);
                             let enclosing =
-                                enclosing_declaration(nodes, (line_offset + column) as u64);
+                                enclosing_declaration(nodes, (line_offset + column) as u64)
+                                    .map(|node| node.metadata.qualified_name.clone());
                             *by_kind.entry(kind.clone()).or_insert(0) += 1;
                             matches.push(json!({
                                 "kind": kind,

@@ -77,6 +77,25 @@ impl VerifiedAnalysisSymbol {
     }
 }
 
+/// Innermost declaration whose source range covers `match_byte`.
+///
+/// Byte containment, not line containment: an attribute such as `#[test]` and
+/// the two functions on `#[test] fn a() {…} fn b() {…}` all sit on one line,
+/// and only the byte range says which of them the site is inside. Selecting by
+/// line also had no stable order to break ties with, since symbols arrive in
+/// occurrence order and occurrence ids are per-project digests.
+fn enclosing_declaration(
+    nodes: &[VerifiedAnalysisSymbol],
+    match_byte: u64,
+) -> Option<&VerifiedAnalysisSymbol> {
+    nodes
+        .iter()
+        .filter_map(|node| node.source_span.map(|span| (node, span)))
+        .filter(|(_, span)| span.start_byte <= match_byte && match_byte < span.end_byte)
+        .min_by_key(|(_, span)| span.end_byte.saturating_sub(span.start_byte))
+        .map(|(node, _)| node)
+}
+
 fn verified_analysis_symbols(
     graph: &VerifiedGraphQuery,
     scope_prefix: Option<&str>,
