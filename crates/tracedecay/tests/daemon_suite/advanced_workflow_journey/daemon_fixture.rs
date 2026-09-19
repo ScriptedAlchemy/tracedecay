@@ -12,7 +12,7 @@ use tracedecay_contracts::configuration::{
 use tracedecay_contracts::{WorkAttemptListRequestV1, WorkflowRunGetRequest};
 use tracedecay_domain::RunId;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
-use tracedecay_sdk::client::{Client, ClientError, ConnectionMode};
+use tracedecay_sdk::client::{Client, ClientError, ConnectionMode, ProblemError};
 use tracedecay_sdk::operations::{
     ApplicationConfigurationObservedState, WorkListAttempts, WorkflowGetRun,
 };
@@ -33,16 +33,20 @@ pub(super) fn sdk_client(home: &Path, project_id: &str) -> Client {
         .expect("canonical SDK client")
 }
 
+fn mount_still_publishing(problem: &ProblemError) -> bool {
+    // `owner_failed` is the publish race: the route exists, the runtime has
+    // not seated, and the problem itself says to reopen.
+    problem.kind == "not_found_or_not_authorized"
+        || problem.kind == "unavailable"
+        || problem.code == "application.runtime.owner_failed"
+}
+
 pub(super) fn wait_for_application_mount(client: &Client) -> Vec<ComponentConfigurationState> {
     wait_until("project application mount", || match client
         .execute::<ApplicationConfigurationObservedState>(&ConfigurationObservedStateRequestV1 {})
     {
         Ok(response) => Some(response.result),
-        Err(ClientError::Problem(problem))
-            if problem.kind == "not_found_or_not_authorized" || problem.kind == "unavailable" =>
-        {
-            None
-        }
+        Err(ClientError::Problem(problem)) if mount_still_publishing(&problem) => None,
         Err(error) => panic!("project application mount failed: {error}"),
     })
 }
@@ -54,12 +58,7 @@ pub(super) fn wait_for_work_mount(client: &Client) {
             cursor: None,
         }) {
             Ok(_) => Some(()),
-            Err(ClientError::Problem(problem))
-                if problem.kind == "not_found_or_not_authorized"
-                    || problem.kind == "unavailable" =>
-            {
-                None
-            }
+            Err(ClientError::Problem(problem)) if mount_still_publishing(&problem) => None,
             Err(error) => panic!("project Work runtime mount failed: {error}"),
         }
     });
@@ -71,12 +70,7 @@ pub(super) fn wait_for_workflow_mount(client: &Client, run_id: &RunId) {
             run_id: run_id.clone(),
         }) {
             Ok(_) => Some(()),
-            Err(ClientError::Problem(problem))
-                if problem.kind == "not_found_or_not_authorized"
-                    || problem.kind == "unavailable" =>
-            {
-                None
-            }
+            Err(ClientError::Problem(problem)) if mount_still_publishing(&problem) => None,
             Err(error) => panic!("project Workflow runtime mount failed: {error}"),
         }
     });
