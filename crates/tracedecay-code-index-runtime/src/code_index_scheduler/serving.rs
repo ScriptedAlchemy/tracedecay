@@ -1312,15 +1312,29 @@ impl DaemonCodeTextArtifactStoreV1 {
         }
         let _lock = self.acquire_store_write_lock()?;
         checkpoint_text_artifact_control(control)?;
-        let metadata = staging_path
-            .symlink_metadata()
-            .map_err(text_artifact_unavailable)?;
-        if !metadata.file_type().is_file() {
-            return Err(RetrievalPortError::Contract(
-                "incompatible text-artifact staging path is not a regular file".to_owned(),
-            ));
+        match staging_path.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                retire_text_artifact_staging_family(staging_path)
+                    .map_err(text_artifact_unavailable)?;
+            }
+            Ok(_) => {
+                return Err(RetrievalPortError::Contract(
+                    "incompatible text-artifact staging path is not a regular file".to_owned(),
+                ));
+            }
+            // A concurrent build may retire this staging file first. Discard
+            // wants it gone, so finding it already gone is the end state, not
+            // an unavailable authority: reporting one aborts the caller's
+            // reopen and the clone lane answers a non-retryable failure for a
+            // state that has already resolved. Sidecars can outlive the
+            // database after a crash, so sweep them the way
+            // `prepare_absent_text_artifact_staging` does.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                clear_text_artifact_staging_sidecars(staging_path)
+                    .map_err(text_artifact_unavailable)?;
+            }
+            Err(error) => return Err(text_artifact_unavailable(error)),
         }
-        retire_text_artifact_staging_family(staging_path).map_err(text_artifact_unavailable)?;
         DaemonCodeIndexPublicationStoreV1::sync_directory(&artifacts_root)
             .map_err(text_artifact_unavailable)
     }
