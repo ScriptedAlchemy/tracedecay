@@ -614,58 +614,6 @@ fn active_project_and_storage_status_tools_are_advertised_readonly() {
     }
 }
 
-#[tokio::test]
-async fn active_project_tool_reports_resolved_store_metadata() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let project_root = cg.project_root().display().to_string();
-    let graph_db_path = cg.db_path().display().to_string();
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_active_project",
-        json!({}),
-        Some(json!({"transport": "stdio"})),
-        Some("src"),
-    )
-    .await
-    .unwrap();
-
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-    assert_eq!(
-        payload["project_id"].as_str(),
-        cg.store_layout().identity.project_id.as_deref()
-    );
-    assert!(
-        payload["repository_id"]
-            .as_str()
-            .is_some_and(|identity| identity.starts_with("repository.daemon.")),
-        "active project must expose its admitted repository identity: {payload}"
-    );
-    assert_eq!(
-        payload["project_root"].as_str(),
-        Some(project_root.as_str())
-    );
-    assert_eq!(payload["scope_prefix"].as_str(), Some("src"));
-    assert_eq!(
-        payload["resolution_source"].as_str(),
-        Some("active_project")
-    );
-    assert_eq!(payload["storage"]["class"].as_str(), Some("code_project"));
-    assert_eq!(payload["storage"]["mode"].as_str(), Some("profile_sharded"));
-    assert_eq!(
-        payload["storage"]["graph_db_path"].as_str(),
-        Some(graph_db_path.as_str())
-    );
-    assert!(
-        payload["storage"]["data_root"]
-            .as_str()
-            .is_some_and(|path| path.contains(".tracedecay") && path.contains("projects"))
-    );
-    assert_eq!(payload["storage"]["graph_db_exists"].as_bool(), Some(true));
-    assert!(payload["branch"].get("serving_db_path").is_none());
-    assert!(payload["branch"].get("serving_db_exists").is_none());
-}
-
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn storage_status_tool_summarizes_active_project_store_health() {
