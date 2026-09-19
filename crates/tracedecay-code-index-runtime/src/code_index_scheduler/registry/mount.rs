@@ -1801,8 +1801,6 @@ impl CodeIndexSchedulerRegistryV1 {
                     let text_generation = Arc::clone(&worker_text_generation);
                     let serving_seats = Arc::clone(&worker_serving_seats);
                     let serving_generation_changed = worker_serving_generation_changed.clone();
-                    let source_freshness = worker_source_freshness.clone();
-                    let project_root = worker_project_root.clone();
                     let text_latest = latest.clone();
                     let latest = latest.clone();
                     let shutting_down = Arc::clone(&worker_shutting_down);
@@ -1836,13 +1834,14 @@ impl CodeIndexSchedulerRegistryV1 {
                             // proofs to the seat. Asking the fence whether it
                             // has verified *this* sealed snapshot is what makes
                             // the binding truthful for a seat this pass did not
-                            // publish.
-                            let pass_proves_latest = source_freshness
-                                .serves_recently_verified_source(
-                                    &latest.generation().snapshot().content_identity,
-                                    &project_root,
-                                    &shutting_down,
-                                );
+                            // publish. An expired clock, or a git-index sample
+                            // this seal moved, is not a different snapshot:
+                            // dropping the witness here is how a newer
+                            // generation stayed unserved through clone backfill.
+                            let sealed_currency = scheduler.currency_witness_for_sealed_snapshot(
+                                &latest.generation().manifest().generation_id,
+                                &latest.generation().snapshot().content_identity,
+                            );
                             let mut serving = serving_generation
                                 .write()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1883,17 +1882,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                     *serving_source_witness
                                         .write()
                                         .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                        pass_proves_latest
-                                            .then(|| {
-                                                source_freshness.source_currency_witness_for(
-                                                    &latest.generation().manifest().generation_id,
-                                                    &latest
-                                                        .generation()
-                                                        .snapshot()
-                                                        .content_identity,
-                                                )
-                                            })
-                                            .flatten();
+                                        sealed_currency;
                                 }
                                 // The durable pointer names a successor, so no
                                 // proof of this seat's currency exists to bind.
