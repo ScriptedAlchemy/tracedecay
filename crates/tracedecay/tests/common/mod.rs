@@ -685,8 +685,19 @@ impl TestChildProcess {
         self.owned_unix_endpoint = Some(path);
     }
 
-    fn retire_owned_unix_endpoint(&mut self) {
-        if let Some(path) = self.owned_unix_endpoint.take() {
+    /// Unlink the recorded endpoint, but only after a stop this call forced.
+    ///
+    /// A child that exited on its own already ran its own endpoint cleanup, so
+    /// the path is either gone or has since been rebound by a replacement. The
+    /// restart journeys reassign the guard (`daemon = spawn_...`), which drops
+    /// the predecessor *after* the successor has bound the same path; unlinking
+    /// there would retire a live daemon's socket.
+    fn retire_owned_unix_endpoint(&mut self, forced: bool) {
+        let path = self.owned_unix_endpoint.take();
+        if !forced {
+            return;
+        }
+        if let Some(path) = path {
             let _ = std::fs::remove_file(path);
         }
     }
@@ -779,8 +790,9 @@ impl TestChildProcess {
     /// primitive elsewhere, keeping fault-injection tests portable. The owned
     /// Unix endpoint, when recorded, is unlinked only after that reap.
     pub fn kill_and_wait(&mut self) -> std::io::Result<ExitStatus> {
+        let forced = self.is_running();
         let status = terminate_and_reap(&mut self.child)?;
-        self.retire_owned_unix_endpoint();
+        self.retire_owned_unix_endpoint(forced);
         Ok(status)
     }
 
@@ -805,8 +817,9 @@ impl TestChildProcess {
 
 impl Drop for TestChildProcess {
     fn drop(&mut self) {
+        let forced = self.is_running();
         if terminate_and_reap(&mut self.child).is_ok() {
-            self.retire_owned_unix_endpoint();
+            self.retire_owned_unix_endpoint(forced);
         }
     }
 }
