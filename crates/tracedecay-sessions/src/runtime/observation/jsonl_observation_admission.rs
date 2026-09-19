@@ -483,10 +483,18 @@ pub(in crate::runtime) fn install_test_shared_jsonl_preparation_authority() {
     use std::num::NonZeroUsize;
     use tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1;
 
+    // One process-wide budget serves the whole suite, so every test thread
+    // holding a `SHARED_JSONL_WORKER_RESERVATION_BYTES` page charges it at
+    // once. At 32 GiB a wide harness drove the derived preparation capacity
+    // down to two entries, which is the shared metadata cache's degraded mode,
+    // not the product's: a production process meters one ingest workload
+    // against the machine. Size the budget past what the harness's own
+    // parallelism can reserve so capacity stays CPU-bound, the way the
+    // composition root installs it.
     static MEMORY: OnceLock<Arc<ProcessResidentMemoryV1>> = OnceLock::new();
     let memory = Arc::clone(MEMORY.get_or_init(|| {
         Arc::new(ProcessResidentMemoryV1::new(
-            NonZeroU64::new(32 * 1024 * 1024 * 1024).unwrap(),
+            NonZeroU64::new(1024 * 1024 * 1024 * 1024).unwrap(),
         ))
     }));
     let background_cpu = Arc::new(ProcessBackgroundCpuV1::new(NonZeroUsize::new(48).unwrap()));
@@ -1849,10 +1857,19 @@ impl ActiveAdmission<'_> {
         .with_resume_checkpoint(self.file_identity, checkpoint.resume_fingerprint);
         hotpath::gauge!("jsonl_admission_coverage_frames").inc(1.0);
         hotpath::gauge!("jsonl_admission_writer_submits").inc(1.0);
-        self.admission
+        if let Err(outcome) = self
+            .admission
             .advance_non_durable_source_cursor(advance, self.cancellation.clone())
             .await
-            .map_err(|outcome| {
+        {
+            if is_lost_cursor_cas(&outcome)
+                && self
+                    .peer_already_covered(expected_cursor, checkpoint.end_offset)
+                    .await
+            {
+                return Ok(());
+            }
+            return Err({
                 if is_admission_cancellation(&outcome, &self.cancellation) {
                     TranscriptIngestError::Cancelled {
                         provider: self.provider,
@@ -1874,10 +1891,45 @@ impl ActiveAdmission<'_> {
                             .unwrap_or("non_durable_cursor_advance_failed"),
                     }
                 }
-            })?;
+            });
+        }
         *expected_cursor =
             Some(self.cursor_at(checkpoint.end_offset, checkpoint.resume_fingerprint)?);
         Ok(())
+    }
+
+    /// Whether the peer that won a cursor CAS already covered this range.
+    ///
+    /// Live hook ingest and the catch-up sweep own the same `(source, scope)`
+    /// cursor and routinely read the same transcript at once; the store's
+    /// compare-and-swap is what keeps them honest, so one of them loses. The
+    /// loser's frames are almost always already durable behind the winner's
+    /// cursor, and re-reading that cursor is enough to prove it. Adopt the
+    /// winner's cursor and let the pass continue instead of failing the whole
+    /// source over work that is already committed.
+    ///
+    /// A read failure, a different generation, or a cursor short of this frame
+    /// all answer "not covered", which keeps the caller's typed block.
+    #[hotpath::skip]
+    async fn peer_already_covered(
+        &self,
+        expected_cursor: &mut Option<ObservationSourceCursorV1>,
+        end_offset: u64,
+    ) -> bool {
+        let Ok(actual) = self
+            .admission
+            .get_source_cursor(&self.source, &self.scope)
+            .await
+        else {
+            return false;
+        };
+        let covered = actual.as_ref().is_some_and(|cursor| {
+            cursor.generation() == self.generation && cursor.position() >= end_offset
+        });
+        if covered {
+            *expected_cursor = actual;
+        }
+        covered
     }
 
     fn capture_request(
@@ -1986,6 +2038,13 @@ impl ActiveAdmission<'_> {
             Err(outcome) => {
                 if outcome.status == HostAdmissionStatus::Backpressured {
                     hotpath::gauge!("jsonl_admission_backpressure_writer").inc(1.0);
+                }
+                if is_lost_cursor_cas(&outcome)
+                    && self
+                        .peer_already_covered(expected_cursor, checkpoint.end_offset)
+                        .await
+                {
+                    return Ok(DurableFrameDisposition::AlreadyDurable);
                 }
                 if is_admission_cancellation(&outcome, &self.cancellation) {
                     Err(TranscriptIngestError::Cancelled {
@@ -2171,6 +2230,21 @@ impl ActiveAdmission<'_> {
                             return Err(CaptureWindowError::ScalarFallback(recovery));
                         }
                     }
+                }
+                // The batch is atomic: nothing in this window committed. When
+                // the peer that won the CAS is already past the window's last
+                // frame, every frame in it is durable behind the winner's
+                // cursor, so this is a no-op rather than a failed source pass.
+                if is_lost_cursor_cas(&outcome)
+                    && let Some(last) = checkpoints.last()
+                    && self
+                        .peer_already_covered(expected_cursor, last.end_offset)
+                        .await
+                {
+                    progress.frames_skipped = progress
+                        .frames_skipped
+                        .saturating_add(checkpoints.len() as u64);
+                    return Ok(());
                 }
                 if is_admission_cancellation(&outcome, &self.cancellation) {
                     Err(CaptureWindowError::Ingest(
@@ -2852,7 +2926,14 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
 /// unbound authorities, retryable races, says nothing about the record and
 /// must surface as a typed block instead of writing coverage over a commit
 /// that never landed (or one that already landed and advanced the cursor).
-fn is_deterministic_content_refusal(outcome: &HostAdmissionOutcome) -> bool {
+/// A cursor compare-and-swap lost to a peer that owns the same
+/// `(source, scope)` cursor. Retryable by construction; whether it is a
+/// failure at all depends on what the winner already covered.
+fn is_lost_cursor_cas(outcome: &HostAdmissionOutcome) -> bool {
+    outcome.reason_code == Some("cursor_conflict")
+}
+
+pub(in crate::runtime) fn is_deterministic_content_refusal(outcome: &HostAdmissionOutcome) -> bool {
     matches!(
         outcome.recovery,
         Some(HostAdmissionRecovery::DeterministicContentRefusal)
