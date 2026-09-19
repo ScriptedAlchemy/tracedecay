@@ -1134,6 +1134,57 @@ impl ProcessResidentMemoryV1 {
         Ok(())
     }
 
+    /// Move one reservation's contribution onto `to_component` and keep only
+    /// `measured_bytes`, under the same lock.
+    ///
+    /// [`Self::reserve`] re-checks measured RSS. Dropping a charge and
+    /// reserving again is a gap: an overlapping consumer can sit on the
+    /// watermark and the new admission is refused even though these bytes
+    /// were already held. The ledger move does not ask for a new admission.
+    fn transfer_component(
+        &self,
+        from: &ResidentMemoryKeyV1,
+        to_component: ResidentMemoryComponentIdV1,
+        reserved_bytes: u64,
+        measured_bytes: u64,
+    ) -> Result<(), ResidentMemoryAdjustmentFailureV1> {
+        if measured_bytes > reserved_bytes {
+            return Err(ResidentMemoryAdjustmentFailureV1 {
+                reserved_bytes,
+                measured_bytes,
+            });
+        }
+        let mut state = self.lock_state();
+        let remove_source = {
+            let Some(charge) = state.charges.get_mut(from) else {
+                return Err(ResidentMemoryAdjustmentFailureV1 {
+                    reserved_bytes,
+                    measured_bytes,
+                });
+            };
+            if *charge < reserved_bytes {
+                return Err(ResidentMemoryAdjustmentFailureV1 {
+                    reserved_bytes: *charge,
+                    measured_bytes,
+                });
+            }
+            *charge -= reserved_bytes;
+            *charge == 0
+        };
+        if remove_source {
+            state.charges.remove(from);
+        }
+        let released_bytes = reserved_bytes - measured_bytes;
+        state.used_bytes -= released_bytes;
+        hotpath::gauge!("runtime_core.resident.used_bytes").set(state.used_bytes as f64);
+        if measured_bytes > 0 {
+            let mut to = from.clone();
+            to.component = to_component;
+            *state.charges.entry(to).or_default() += measured_bytes;
+        }
+        Ok(())
+    }
+
     fn release(&self, key: &ResidentMemoryKeyV1, reserved_bytes: u64) {
         if reserved_bytes == 0 {
             return;
@@ -1227,6 +1278,29 @@ impl ResidentMemoryReservationV1 {
     ) -> Result<(), ResidentMemoryAdjustmentFailureV1> {
         self.authority
             .shrink(&self.key, self.reserved_bytes, measured_bytes)?;
+        self.reserved_bytes = measured_bytes;
+        Ok(())
+    }
+
+    /// Keep this charge and name it `component`, shrinking to `measured_bytes`
+    /// when the held amount is larger.
+    ///
+    /// The bytes stay in the ledger for the whole move. Callers that instead
+    /// drop this reservation and [`ProcessResidentMemoryV1::reserve`] the
+    /// destination open a gap where measured RSS can refuse a charge that
+    /// was already admitted.
+    pub fn transfer_component(
+        &mut self,
+        component: ResidentMemoryComponentIdV1,
+        measured_bytes: u64,
+    ) -> Result<(), ResidentMemoryAdjustmentFailureV1> {
+        self.authority.transfer_component(
+            &self.key,
+            component,
+            self.reserved_bytes,
+            measured_bytes,
+        )?;
+        self.key.component = component;
         self.reserved_bytes = measured_bytes;
         Ok(())
     }

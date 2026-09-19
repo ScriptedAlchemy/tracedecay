@@ -38,6 +38,45 @@ use super::{
     publication_authority_is_terminal, retained_noop_requires_follow_up_wake,
 };
 
+/// Runtime that polls code-index workers, separate from the daemon's serving
+/// runtime.
+///
+/// The first reconcile of a cold checkout is the strict-readiness critical
+/// path. Sharing the daemon runtime left that worker unpolled for minutes
+/// while project-open tasks occupied every serving thread: the pass log then
+/// showed a 226s queue delay with the gates themselves taking 15µs, and the
+/// dogfood deadline expired still inside text projection, graph never seated.
+/// A process-wide runtime keeps indexing scheduled as soon as the wake is
+/// posted. The future is already boxed, so the stack only has to poll it.
+///
+/// Tests do not use this. The suite mounts many registries in one process;
+/// a few shared threads then hold a waiter behind every other mount until
+/// the per-test deadline. Each test already has a runtime that is not the
+/// daemon's serving runtime.
+#[cfg(not(test))]
+fn code_index_worker_runtime() -> Result<&'static tokio::runtime::Runtime, CodeIndexSchedulerErrorV1>
+{
+    static RUNTIME: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
+    match RUNTIME.get_or_init(|| {
+        let workers = std::thread::available_parallelism()
+            .map_or(2, usize::from)
+            .clamp(2, 4);
+        tokio::runtime::Builder::new_multi_thread()
+            .thread_name("td-code-index")
+            .worker_threads(workers)
+            .max_blocking_threads(workers.saturating_add(8))
+            .thread_stack_size(8 * 1024 * 1024)
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())
+    }) {
+        Ok(runtime) => Ok(runtime),
+        Err(error) => Err(CodeIndexSchedulerErrorV1::Identity(format!(
+            "code-index worker runtime failed to start: {error}"
+        ))),
+    }
+}
+
 impl CodeIndexSchedulerRegistryV1 {
     #[cfg(test)]
     pub fn open_worktree(
@@ -2332,7 +2371,13 @@ impl CodeIndexSchedulerRegistryV1 {
                 let _ = result;
             }
         });
+        #[cfg(test)]
         let task = tokio::spawn(hotpath::future!(
+            worker_loop,
+            label = "daemon.code_index.scheduler_worker"
+        ));
+        #[cfg(not(test))]
+        let task = code_index_worker_runtime()?.spawn(hotpath::future!(
             worker_loop,
             label = "daemon.code_index.scheduler_worker"
         ));
