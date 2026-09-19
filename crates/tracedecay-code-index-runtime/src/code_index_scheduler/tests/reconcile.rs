@@ -2577,6 +2577,9 @@ async fn graph_read_during_reconcile_records_a_busy_follow_up() {
         .hold_reconcile_pass_for_test(fixture.path())
         .await
         .expect("mounted worktree");
+    // The permit and the pass guard leave the graph tail's renewals free to
+    // run (see `hold_scheduler_for_root`).
+    let scheduler = hold_scheduler_for_root(&registry, fixture.path()).await;
     let source_freshness = registry
         .source_freshness_for_root(fixture.path())
         .await
@@ -2598,6 +2601,7 @@ async fn graph_read_during_reconcile_records_a_busy_follow_up() {
             .is_none(),
         "an expired graph proof abstains while the owner pass is in flight"
     );
+    scheduler.release().await;
     drop(owner_pass);
     drop(admission);
 
