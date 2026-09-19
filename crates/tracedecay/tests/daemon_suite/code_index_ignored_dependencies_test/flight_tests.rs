@@ -367,10 +367,9 @@ async fn coalesced_publication_failure_preserves_the_scheduler_error_family() {
         .expect_err("follower publication fails closed");
     assert_publication_error(owner_error);
     assert_publication_error(follower_error);
-    assert_eq!(
-        std::fs::read(&pointer_path).expect("faulted pointer remains"),
-        b"{",
-        "publication must not replace a pointer it did not observe"
+    assert!(
+        pointer_path.is_dir(),
+        "publication must not replace a directory pointer it did not observe"
     );
 
     std::fs::remove_dir_all(&pointer_path).expect("remove faulted pointer node");
