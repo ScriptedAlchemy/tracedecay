@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
 
 use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1};
@@ -685,6 +686,26 @@ async fn message_projection(
         })
         .cloned()
         .ok_or(ProjectionStoreError::ProvenanceCollision)
+}
+
+/// Session row the output verification compares against.
+///
+/// The projection-row batch loads sessions from message rows it found. A
+/// missing or relocated message therefore has no batch entry even when the
+/// expected session row is durable. That absence is not `row_missing`; the
+/// single-output path's [`read_session`] is the authority for it.
+pub(in super::super) async fn load_verified_session<'a>(
+    conn: &impl QueryExecutor,
+    rows: &'a ProjectionRowsBatch,
+    provider: &str,
+    session_id: &str,
+) -> ProjectionStoreResult<Option<Cow<'a, SessionRecord>>> {
+    if let Some(session) = rows.session(provider, session_id) {
+        return Ok(Some(Cow::Borrowed(session)));
+    }
+    Ok(read_session(conn, provider, session_id)
+        .await?
+        .map(Cow::Owned))
 }
 
 pub(in super::super) async fn verify_projection_rows(
@@ -1396,14 +1417,26 @@ pub(super) async fn protected_message_rows_compatible(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod reconcile_tests {
-    #[cfg(unix)]
+    use std::collections::BTreeSet;
+
     use crate::tests::harness::RegisteredGlobalDbHarness;
+    use tracedecay_domain::{
+        CanonicalObservationEnvelopeV1, ComponentVersion, ObservationId,
+        ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+        ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+        PayloadReferenceV1, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
+        SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+    };
     #[cfg(unix)]
     use tracedecay_runtime_core::db::engine::params;
-    use tracedecay_store::SessionRecord;
+    use tracedecay_store::{
+        ObservationProjection, ProjectionStoreError, SessionMessageRecord, SessionRecord,
+    };
 
-    use super::canonicalize_session_project_paths;
-    use super::reconcile_session_rows_detailed;
+    use super::{
+        canonicalize_session_project_paths, load_verified_session, read_projection_rows_batch,
+        reconcile_session_rows_detailed, verify_projection_rows_from_records,
+    };
 
     fn record(project_path: &str) -> SessionRecord {
         SessionRecord {
@@ -1607,5 +1640,148 @@ mod reconcile_tests {
             .expect_err("different transcript identities must not merge");
 
         assert_eq!(conflict.field(), "transcript_path");
+    }
+
+    #[tokio::test]
+    async fn missing_message_is_an_output_collision_not_a_missing_session() {
+        let mut fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/provider_normalization/codex/agent_message.expected_envelope.json"
+        ))
+        .unwrap();
+        fixture["stable_record_id"] =
+            serde_json::Value::String("record.missing-message".to_owned());
+        fixture["relations"]["session_id"] =
+            serde_json::Value::String("session.missing-message".to_owned());
+        fixture["relations"]["thread_id"] =
+            serde_json::Value::String("session.missing-message".to_owned());
+        fixture["relations"]["message_id"] =
+            serde_json::Value::String("record.missing-message".to_owned());
+        let envelope: CanonicalObservationEnvelopeV1 = serde_json::from_value(fixture).unwrap();
+        let source = ObservationSourceIdentityV1::for_provider(
+            envelope.provider().clone(),
+            envelope.relations().session_id().clone(),
+        )
+        .unwrap();
+        let payload = serde_json::to_value(&envelope).unwrap();
+        let receipt = SanitizationReceiptV1::new(
+            SanitizationReceiptRefV1::new(
+                SanitizationReceiptId::new("receipt.missing-message").unwrap(),
+                ComponentVersion::new("sanitizer.missing-message.v1").unwrap(),
+            )
+            .unwrap(),
+            SanitizerDispositionV1::Accepted,
+            SensitivityV1::NonSensitive,
+            Some(PayloadReferenceV1::for_payload(&payload).unwrap()),
+        )
+        .unwrap();
+        let observation = tracedecay_domain::DurableObservationV1::new(
+            ObservationIdentityMaterialV1::for_native_record(
+                source,
+                ObservationScopeV1::Profile,
+                ObservationSourceGenerationV1::new(1).unwrap(),
+                ObservationSourceRangeV1::new(0, 100).unwrap(),
+                ObservationOrderingDomainV1::FileBytes,
+                ObservationId::new("record.missing-message").unwrap(),
+            )
+            .unwrap(),
+            receipt,
+            RetentionClass::new("retention.missing-message").unwrap(),
+            payload,
+        )
+        .unwrap();
+        let session = SessionRecord {
+            provider: "codex".to_owned(),
+            session_id: "session.missing-message".to_owned(),
+            project_key: "user".to_owned(),
+            project_path: "user".to_owned(),
+            title: None,
+            started_at: Some(1),
+            ended_at: Some(2),
+            transcript_path: None,
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        };
+        let message = SessionMessageRecord {
+            provider: "codex".to_owned(),
+            message_id: "record.missing-message".to_owned(),
+            session_id: "session.missing-message".to_owned(),
+            role: "assistant".to_owned(),
+            timestamp: Some(1),
+            ordinal: 0,
+            text: "The billing pipeline regression is fixed.".to_owned(),
+            kind: None,
+            model: None,
+            tool_names: None,
+            source_path: None,
+            source_offset: None,
+            metadata_json: None,
+        };
+        let projection = ObservationProjection::for_message(&observation, session, message)
+            .unwrap()
+            .message()
+            .expect("explicit message projection")
+            .clone();
+        let message = projection.message();
+        let session = projection.session();
+        assert_eq!(message.provider, "codex");
+        assert_eq!(message.message_id, "record.missing-message");
+        assert_eq!(session.session_id, "session.missing-message");
+        let outputs = BTreeSet::from([(message.provider.clone(), message.message_id.clone())]);
+
+        let harness = RegisteredGlobalDbHarness::open("missing-message-collision").await;
+        let absent = harness.registered.read_snapshot().await.unwrap();
+        let batch = read_projection_rows_batch(&absent, &outputs).await.unwrap();
+        assert!(batch.message("codex", "record.missing-message").is_none());
+        assert!(
+            load_verified_session(&absent, &batch, "codex", "session.missing-message")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let missing_session = verify_projection_rows_from_records(&absent, &projection, None, None)
+            .await
+            .expect_err("a projection with no stored session is a session collision");
+        assert!(matches!(
+            missing_session,
+            ProjectionStoreError::SessionOutputCollision {
+                field: "row_missing",
+                ..
+            }
+        ));
+
+        assert!(harness.registered.upsert_session(session).await);
+        let present = harness.registered.read_snapshot().await.unwrap();
+        let batch = read_projection_rows_batch(&present, &outputs)
+            .await
+            .unwrap();
+        assert!(
+            batch.session("codex", "session.missing-message").is_none(),
+            "the message-keyed batch still does not see a session the message row never named"
+        );
+        let loaded = load_verified_session(&present, &batch, "codex", "session.missing-message")
+            .await
+            .unwrap()
+            .expect("the durable session row is not missing");
+        let missing_message = verify_projection_rows_from_records(
+            &present,
+            &projection,
+            Some(loaded.as_ref()),
+            batch.message("codex", "record.missing-message"),
+        )
+        .await
+        .expect_err("a missing message with a live session is an output collision");
+        match missing_message {
+            ProjectionStoreError::OutputCollision {
+                provider,
+                message_id,
+            } => {
+                assert_eq!(provider, "codex");
+                assert_eq!(message_id, "record.missing-message");
+            }
+            other => panic!("missing message classified as {other}"),
+        }
     }
 }

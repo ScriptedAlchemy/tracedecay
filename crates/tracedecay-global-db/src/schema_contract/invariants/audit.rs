@@ -816,12 +816,8 @@ async fn validate_message_projection_row(
     )? == StoredProvenanceRendering::Current
     {
         // Convergence supersedes an existing output row; it never inserts one.
-        // Both repair arms below therefore require the row to be there: a
-        // vanished output stays the hard failure #1775 and #1781 both promised,
-        // instead of a recorded repair that writes nothing. The batch also
-        // derives its session keys from the message rows it found, so a missing
-        // message is reported as a missing *session* row, which is why this
-        // guard has to cover the session arm too.
+        // A vanished message stays a hard failure. Session repair is only the
+        // uniquely owned current output whose session row is absent.
         let owner_message = owner_projection.message();
         let output_row_present = resolved
             .projection_rows
@@ -877,12 +873,17 @@ async fn verify_owner_output_rows(
 ) -> std::result::Result<(), ProjectionStoreError> {
     let session = owner.session();
     let message = owner.message();
+    let session_row = crate::observation_projection::load_verified_session(
+        conn,
+        &resolved.projection_rows,
+        &session.provider,
+        &session.session_id,
+    )
+    .await?;
     crate::observation_projection::verify_projection_rows_from_records(
         conn,
         owner,
-        resolved
-            .projection_rows
-            .session(&session.provider, &session.session_id),
+        session_row.as_deref(),
         resolved
             .projection_rows
             .message(&message.provider, &message.message_id),
