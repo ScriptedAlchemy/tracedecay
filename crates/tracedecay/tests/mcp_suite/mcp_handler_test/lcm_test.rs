@@ -286,10 +286,21 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         "{described_payload}"
     );
     assert_eq!(described_payload["description"]["raw_message_count"], 1);
+    let preview = described_payload["description"]["raw_messages"][0]["content_preview"]
+        .as_str()
+        .expect("describe preview");
     assert!(
-        described_payload["description"]["raw_messages"][0]
-            .get("content_preview")
-            .is_some()
+        preview.starts_with("orchard dispatch"),
+        "describe returned an empty preview: {preview:?}"
+    );
+    assert!(
+        preview.chars().count() < full_text.chars().count(),
+        "describe echoed the full payload body"
+    );
+    assert_eq!(
+        described_payload["description"]["raw_messages"][0]["content_range"]["total_chars"],
+        full_text.chars().count() as u64,
+        "describe must name the captured message length, not the preview stub"
     );
     assert!(
         described_payload["description"]["raw_messages"][0]
