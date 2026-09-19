@@ -767,15 +767,15 @@ async fn authority_reopen_accepts_historical_generation_after_supersession() {
     );
 }
 
-/// A projected message row is derived state, not authority: the immutable
-/// observation plus its uniquely owned current provenance re-derive it exactly.
-/// Since #1775 (`c55058a3ac`) the reopen audit therefore repairs a diverged
-/// output row through the released-rendering convergence ledger instead of
-/// degrading the profile forever. Provenance identity, digests that match
-/// neither the current nor the stored output, foreign ownership, and
-/// conflicting session fields remain hard failures.
+/// A projected message body that matches neither this binary's rendering nor
+/// the rendering a shipped release wrote is tamper. Profile reopen must name
+/// that disagreement and leave the row untouched. An interrupted write whose
+/// row is still the shipped rendering is a different admission and is not this
+/// case. Provenance identity, digests that match neither the current nor the
+/// stored output, foreign ownership, missing rows, and conflicting session
+/// fields remain hard failures as well.
 #[tokio::test]
-async fn projected_message_update_is_repaired_on_reopen() {
+async fn projected_message_update_invalidates_audit_and_fails_reopen() {
     let tmp = audited_projection_fixture("session-audit-update", "message-audit-update").await;
     let runtime = profile_runtime(&tmp).await;
     let database_path = runtime
@@ -793,19 +793,25 @@ async fn projected_message_update_is_repaired_on_reopen() {
         .unwrap();
     drop(raw_conn);
 
-    let reopened = HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
-        .await
-        .expect("a diverged output row must be repaired, not refused");
-    drop(reopened);
+    let Err(error) = HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay")).await
+    else {
+        panic!("a tampered projected message must fail profile reopen");
+    };
+    let message = error.to_string();
     assert!(
-        projected_message_texts(&tmp).await[0].contains("audited projection body"),
-        "reopen accepted the tampered body instead of re-projecting it"
+        message.contains("projection output rows disagree with deterministic output"),
+        "{message}"
+    );
+    assert!(
+        projected_message_texts(&tmp).await[0].contains("tampered projection body"),
+        "profile reopen rewrote the tampered body instead of refusing it"
     );
 }
 
-/// The repair above covers a diverged row, never a vanished one: nothing in the
-/// convergence ledger inserts a missing message row, so a store whose projected
-/// output disappeared still has to be named rather than silently admitted.
+/// A vanished projected output is the same hard failure: the convergence
+/// ledger rewrites a shipped rendering it can see, and never inserts a missing
+/// message row, so a store whose projected output disappeared still has to be
+/// named rather than silently admitted.
 #[tokio::test]
 async fn projected_message_delete_invalidates_audit_and_fails_reopen() {
     let tmp = audited_projection_fixture("session-audit-delete", "message-audit-delete").await;
