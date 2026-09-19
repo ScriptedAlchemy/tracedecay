@@ -714,7 +714,9 @@ impl CodeGraphInteractiveReader {
     ///
     /// Every caller reads the edge alone, so the walk stops at the edge
     /// payload instead of hydrating a summary for each far endpoint the way
-    /// `semantic_neighbors` does for callers, callees and impact.
+    /// `semantic_neighbors` does for callers, callees and impact. The edge
+    /// entities come back decoded with the traversal that found them, so a
+    /// whole-repo census pays no per-edge point read either.
     pub fn edges_among(
         &self,
         occurrences: &[SymbolOccurrenceId],
@@ -735,7 +737,7 @@ impl CodeGraphInteractiveReader {
         let mut edges: Vec<CanonicalRelationEdgeV1> = Vec::new();
         for chunk in occurrences.chunks(SEMANTIC_NEIGHBOR_SEED_CHUNK) {
             let starts = entity_ids(chunk)?;
-            let per_seed = self.snapshot.outgoing_relations(
+            let per_seed = self.snapshot.outgoing_relation_targets(
                 &starts,
                 &source_relation_kinds()?,
                 max_relations,
@@ -746,17 +748,17 @@ impl CodeGraphInteractiveReader {
                     "code graph adjacency batch shape does not match its seeds".to_owned(),
                 ));
             }
-            for (seed, relations) in chunk.iter().zip(per_seed) {
-                for relation in relations {
+            for (seed, targets) in chunk.iter().zip(per_seed) {
+                for target in targets {
                     if cancellation.is_cancelled() {
                         return Err(CodeGraphProjectionError::Cancelled);
                     }
-                    let edge = self.hydrate_edge_record(
-                        seed,
-                        &relation,
-                        AdjacencyDirection::Outgoing,
-                        Arc::clone(&cancellation),
-                    )?;
+                    let edge = load_edge_record(&target.target)?;
+                    if edge.from_occurrence != *seed {
+                        return Err(CodeGraphProjectionError::Corrupt(
+                            "code graph edge endpoint does not match its adjacency seed".to_owned(),
+                        ));
+                    }
                     if !admitted.is_empty() && !admitted.contains(&edge.kind) {
                         continue;
                     }
