@@ -56,9 +56,9 @@ use tracedecay_store::observation::ObservationIdentityCollisionDispositionV1;
 use tracedecay_store::{
     AnchoredObservationWrite, CursorAdvanceLedgerReasonV1, CursorAdvanceLedgerReceiptIdV1,
     CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
-    ObservationPersistOutcome,
-    ObservationProjectionStore, ObservationStore, ObservationStoreError, ObservationWrite,
-    ProjectionPersistOutcome, ProjectionSkipReason, SESSION_MESSAGE_PROJECTOR_VERSION,
+    ObservationPersistOutcome, ObservationProjectionStore, ObservationStore, ObservationStoreError,
+    ObservationWrite, ProjectionPersistOutcome, ProjectionSkipReason,
+    SESSION_MESSAGE_PROJECTOR_VERSION,
 };
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
