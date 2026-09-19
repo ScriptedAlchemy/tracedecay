@@ -9,7 +9,9 @@ use tracedecay_contracts::retrieval::catalog::primitive_read_operation;
 use tracedecay_contracts::{
     ApplicationOperation, CallableCodeOperationKind, callable_code_operation,
 };
-use tracedecay_domain::{ComplexityAnalysisV1, RelationEdgeKindV1, SymbolOccurrenceId};
+use tracedecay_domain::{
+    CanonicalRelationEdgeV1, ComplexityAnalysisV1, RelationEdgeKindV1, SymbolOccurrenceId,
+};
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_graph_query::{
     CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadRequest,
@@ -328,7 +330,7 @@ pub async fn overview_payload(
     let mut edges_by_kind = BTreeMap::<String, i64>::new();
     for edge in &edges {
         *edges_by_kind
-            .entry(edge.edge.kind.as_str().to_owned())
+            .entry(edge.kind.as_str().to_owned())
             .or_default() += 1;
     }
     let mut files_by_language = BTreeMap::<String, i64>::new();
@@ -560,8 +562,8 @@ pub async fn neighbors_payload(
         *merged.entry(kind).or_default() += count;
     }
     let mut edges = Vec::with_capacity(callers.len() + callees.len());
-    edges.extend(callers.iter().map(edge_from_semantic));
-    edges.extend(callees.iter().map(edge_from_semantic));
+    edges.extend(callers.iter().map(|edge| edge_from_semantic(&edge.edge)));
+    edges.extend(callees.iter().map(|edge| edge_from_semantic(&edge.edge)));
     Ok(GraphServiceReadV1 {
         payload: Some(GraphNeighborsPayloadV1 {
             node_id: node_id.to_owned(),
@@ -946,13 +948,13 @@ fn non_negative_usize(value: i64, field: &'static str) -> Result<usize, CodeGrap
     })
 }
 
-fn edge_from_semantic(edge: &CodeGraphSemanticEdgeV1) -> GraphEdgeV1 {
-    let source = &edge.edge.from_occurrence;
-    let target = &edge.edge.to_occurrence;
+fn edge_from_semantic(edge: &CanonicalRelationEdgeV1) -> GraphEdgeV1 {
+    let source = &edge.from_occurrence;
+    let target = &edge.to_occurrence;
     GraphEdgeV1 {
         source: source.as_str().to_owned(),
         target: target.as_str().to_owned(),
-        kind: edge.edge.kind.as_str().to_owned(),
+        kind: edge.kind.as_str().to_owned(),
         line: None,
         source_name: None,
         target_name: None,

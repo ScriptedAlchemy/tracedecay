@@ -711,15 +711,20 @@ impl CodeGraphInteractiveReader {
 
     /// Semantic edges induced among a symbol set: edges whose endpoints are
     /// both members. `max_relations` bounds the batch-wide fan-out examined.
+    ///
+    /// Every caller reads the edge alone, so the walk stops at the edge
+    /// payload instead of hydrating a summary for each far endpoint the way
+    /// `semantic_neighbors` does for callers, callees and impact.
     pub fn edges_among(
         &self,
         occurrences: &[SymbolOccurrenceId],
         kinds: &[RelationEdgeKindV1],
         max_relations: usize,
         request_cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<Vec<CodeGraphSemanticEdgeV1>, CodeGraphProjectionError> {
+    ) -> Result<Vec<CanonicalRelationEdgeV1>, CodeGraphProjectionError> {
         let cancellation = self.read_cancellation(request_cancellation)?;
-        let members: BTreeSet<_> = occurrences.iter().cloned().collect();
+        let members: BTreeSet<&SymbolOccurrenceId> = occurrences.iter().collect();
+        let admitted: BTreeSet<RelationEdgeKindV1> = kinds.iter().copied().collect();
         // Seeds are chunked because the store bounds one batch traversal's
         // starts (`MAX_BATCH_TRAVERSAL_STARTS`, 100k). A whole-repo census -
         // dead code, unused symbols - legitimately has more seeds than that,
@@ -727,24 +732,41 @@ impl CodeGraphInteractiveReader {
         // The bound exists to cap one call's working set, which chunking
         // preserves: each traversal still costs at most one chunk, and the
         // per-seed relation budget is unchanged.
-        let mut edges: Vec<CodeGraphSemanticEdgeV1> = Vec::new();
+        let mut edges: Vec<CanonicalRelationEdgeV1> = Vec::new();
         for chunk in occurrences.chunks(SEMANTIC_NEIGHBOR_SEED_CHUNK) {
-            let per_seed = self.semantic_neighbors(
-                chunk,
-                kinds,
-                AdjacencyDirection::Outgoing,
+            let starts = entity_ids(chunk)?;
+            let per_seed = self.snapshot.outgoing_relations(
+                &starts,
+                &source_relation_kinds()?,
                 max_relations,
                 Arc::clone(&cancellation),
-                RelationFanoutOverflow::Refuse,
             )?;
-            edges.extend(
-                per_seed
-                    .into_iter()
-                    .flatten()
-                    .filter(|edge| members.contains(&edge.edge.to_occurrence)),
-            );
+            if per_seed.len() != chunk.len() {
+                return Err(CodeGraphProjectionError::Corrupt(
+                    "code graph adjacency batch shape does not match its seeds".to_owned(),
+                ));
+            }
+            for (seed, relations) in chunk.iter().zip(per_seed) {
+                for relation in relations {
+                    if cancellation.is_cancelled() {
+                        return Err(CodeGraphProjectionError::Cancelled);
+                    }
+                    let edge = self.hydrate_edge_record(
+                        seed,
+                        &relation,
+                        AdjacencyDirection::Outgoing,
+                        Arc::clone(&cancellation),
+                    )?;
+                    if !admitted.is_empty() && !admitted.contains(&edge.kind) {
+                        continue;
+                    }
+                    if members.contains(&edge.to_occurrence) {
+                        edges.push(edge);
+                    }
+                }
+            }
         }
-        edges.sort_by(|left, right| compare_edges(&left.edge, &right.edge));
+        edges.sort_by(compare_edges);
         edges.dedup();
         Ok(edges)
     }
