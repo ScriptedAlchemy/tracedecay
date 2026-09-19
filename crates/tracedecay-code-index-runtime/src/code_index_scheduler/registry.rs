@@ -2109,6 +2109,21 @@ impl CodeIndexSchedulerRegistryV1 {
         }
     }
 
+    /// Stamp a continuation while `reconcile_in_progress` still reports this pass.
+    ///
+    /// Callers that already released the worker's pass guard use this so a
+    /// reader waiting for the counter to hit zero cannot observe an empty
+    /// slot and then lose to `BusyFollowUp`. The stamp is the idle boundary;
+    /// the guard lives only for the note.
+    fn note_visible_worker_continuation(
+        passes: &Arc<AtomicUsize>,
+        pending_wake: &PendingWakeV1,
+        wake: &tokio::sync::Notify,
+    ) {
+        let _visible = super::ReconcilePassGuard::enter(passes);
+        Self::note_worker_continuation(pending_wake, wake);
+    }
+
     /// Claim the pending wake as one reconcile's arrival, at the instant the
     /// scheduler dequeues it.
     ///
