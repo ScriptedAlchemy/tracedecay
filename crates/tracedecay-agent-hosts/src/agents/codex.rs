@@ -88,24 +88,12 @@ impl AgentIntegration for CodexIntegration {
         &self,
         ctx: &InstallContext,
     ) -> Result<NonInteractiveInstallOutcome> {
+        // Staging is ready for Core apply to drive `codex plugin add`. Whether
+        // that binary resolves is activation's `HostCliUnavailable`, not a
+        // deferral: collapsing every resolution failure into
+        // `DeferredUserAction` made prepare's outcome a property of PATH and
+        // stopped the lifecycle before the host CLI could run.
         install_codex_plugin(&ctx.home, &ctx.tracedecay_bin)?;
-        // Core apply drives `codex plugin add` when the host CLI is present.
-        // When it is not, stop with the same backtick remediation preflight
-        // uses so operators (and lifecycle tests) can activate natively.
-        if plugin_registry::require_codex_plugin_cli().is_err() {
-            let marketplace_name = codex_exact_personal_marketplace_name(&ctx.home)
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| codex_cached_marketplace_name(&ctx.home));
-            return Ok(NonInteractiveInstallOutcome::DeferredUserAction(
-                DeferredUserAction {
-                    remediation: format!(
-                        "Codex activates plugins through its native cache. Run `codex plugin add tracedecay@{marketplace_name}` after TraceDecay stages the source package."
-                    ),
-                    staged_paths: Vec::new(),
-                },
-            ));
-        }
         Ok(NonInteractiveInstallOutcome::Ready)
     }
 
