@@ -1526,6 +1526,17 @@ impl ObservationStore for GlobalDbObservationStore {
                 Ok(CursorAdvanceOutcome::Committed)
             }
             RuntimeSubmitOutcomeV1::ExactReplay { .. } => Ok(CursorAdvanceOutcome::ExactDuplicate),
+            // The idempotency key covers the advanced coverage, not the whole
+            // command, so a re-scan of already-admitted history reuses the key
+            // with different bytes (a fresh `expected_cursor` or resume
+            // checkpoint) and the writer reports a conflict against the earlier
+            // committed receipt. When the durable cursor is already exactly
+            // `next_cursor`, that earlier commit is this advance: the coverage
+            // is applied and the replay is a duplicate. Only a conflict that
+            // left the cursor somewhere else is an unresolved collision.
+            RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } if existed_at_next => {
+                Ok(CursorAdvanceOutcome::ExactDuplicate)
+            }
             RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } => {
                 Err(ObservationStoreError::CursorAdvanceCollision)
             }

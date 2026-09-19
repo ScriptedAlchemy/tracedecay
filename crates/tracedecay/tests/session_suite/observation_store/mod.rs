@@ -1476,7 +1476,11 @@ async fn cursor_only_progress_persists_non_payload_receipt_and_retries_idempoten
 }
 
 #[tokio::test]
-async fn cursor_only_retry_rejects_same_cursor_with_different_reason() {
+/// A second owner replaying the same range with a different coverage reason
+/// finds the durable cursor already at its `next_cursor`: the coverage it
+/// wanted to record is applied, so the replay is a duplicate, not a
+/// collision that blocks ingest (#1842). The committed reason stays.
+async fn cursor_only_retry_with_same_cursor_and_different_reason_is_a_duplicate() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
     let store = runtime
@@ -1493,7 +1497,7 @@ async fn cursor_only_retry_rejects_same_cursor_with_different_reason() {
         .await
         .unwrap();
 
-    assert!(matches!(
+    assert_eq!(
         store
             .advance_source_cursor(cursor_advance(
                 None,
@@ -1501,9 +1505,10 @@ async fn cursor_only_retry_rejects_same_cursor_with_different_reason() {
                 10,
                 NonDurableFrameReason::OutOfScope,
             ))
-            .await,
-        Err(ObservationStoreError::CursorAdvanceCollision)
-    ));
+            .await
+            .unwrap(),
+        CursorAdvanceOutcome::ExactDuplicate
+    );
     assert_eq!(
         store.get_source_cursor(&source(), &scope()).await.unwrap(),
         Some(cursor(10))
