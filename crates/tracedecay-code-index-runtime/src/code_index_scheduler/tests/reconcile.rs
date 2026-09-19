@@ -2628,6 +2628,57 @@ async fn graph_read_during_reconcile_records_a_busy_follow_up() {
     registry.shutdown().await;
 }
 
+/// Strict readiness needs a ready graph and a finished text artifact. Awaiting
+/// the artifact before the first graph attempt leaves the graph pending for
+/// the whole build, which is the PR-dogfood timeout (still in bulk commit,
+/// graph pending, at the deadline). Graph activation has to move while the
+/// published text projection is held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_activation_runs_while_published_text_projection_is_held() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let canonical_root = fixture.path().canonicalize().expect("canonical fixture");
+    let (projection_started, release_projection) = registry
+        .pause_next_published_text_projection(canonical_root)
+        .await;
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount worktree");
+    tokio::time::timeout(Duration::from_secs(30), projection_started)
+        .await
+        .expect("publication did not reach text projection")
+        .expect("projection gate stays armed");
+
+    let graph_ready = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if matches!(
+                registry
+                    .code_graph_serving_readiness_for_test(fixture.path())
+                    .await,
+                Some(
+                    tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready
+                )
+            ) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    release_projection
+        .send(())
+        .expect("release publication projection");
+    graph_ready
+        .expect("graph serving becomes ready while the published text projection is still held");
+    registry.shutdown().await;
+}
+
 /// A publication can finish source capture long before its text artifact is
 /// ready. The serving swap must reverify after that projection, otherwise the
 /// exact active generation seats after its bounded proof expires and every

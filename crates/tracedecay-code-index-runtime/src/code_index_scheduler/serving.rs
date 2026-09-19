@@ -3292,15 +3292,24 @@ impl LatestCodeTextGenerationV1 {
             &sealed_identity,
             control,
         )?;
-        // The builder and source are gone, so its transient reservation no
-        // longer owns bytes. Release it before sampling the reader admission;
-        // the reader guard then carries the still-live unmodeled baseline.
-        drop(build_reservation);
-        let reader_reservation = store.reserve_resident_memory(
-            &self.metadata.manifest().generation_id,
-            "code-text-artifact-reader",
-            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
-        )?;
+        // Keep the build charge and shrink it to the reader budget. Dropping
+        // it and reserving again is a gap: a graph replay that overlapped this
+        // projection can be sitting on the process RSS watermark, and the new
+        // admission is then refused forever. The reader is a smaller charge
+        // of the same generation, so it stays inside the bytes already held.
+        let reader_budget = u64::try_from(CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1)
+            .map_err(|_| {
+                RetrievalPortError::Contract("text-artifact reader budget exceeds u64".to_owned())
+            })?;
+        let mut reader_reservation = build_reservation;
+        if reader_reservation.reserved_bytes() > reader_budget {
+            reader_reservation.shrink_to(reader_budget).map_err(|error| {
+                RetrievalPortError::Contract(format!(
+                    "text-artifact reader charge could not shrink inside its build reservation: reserved {} measured {}",
+                    error.reserved_bytes, error.measured_bytes
+                ))
+            })?;
+        }
         let final_path = code_text_artifact_path(store.store_root(), &descriptor)
             .map_err(text_artifact_unavailable)?;
         let reader = CodeLexicalArtifactReaderV1::open_content_addressed(

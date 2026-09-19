@@ -60,6 +60,30 @@ impl CodeIndexSchedulerRegistryV1 {
         }
     }
 
+    /// Graph-serving state of the mounted text owner, the same projection
+    /// status reads. `None` means the worktree is unmounted or has no text
+    /// owner yet.
+    #[cfg(test)]
+    pub async fn code_graph_serving_readiness_for_test(
+        &self,
+        project_root: &Path,
+    ) -> Option<tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1> {
+        let Ok(project_root) = project_root.canonicalize() else {
+            return None;
+        };
+        let text = {
+            let mounted = self.mounted.lock().await;
+            let Some(worktree) = mounted.get(&project_root) else {
+                return None;
+            };
+            Arc::clone(&worktree.text_generation)
+        };
+        text.read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|text| text.code_graph_serving_readiness())
+    }
+
     /// Test-only observation of an exact mounted worktree's active owner pass.
     #[cfg(test)]
     pub async fn reconcile_in_progress_for_test(&self, project_root: &Path) -> bool {
