@@ -693,15 +693,6 @@ impl DaemonEngine {
                         let publication = async {
                             let mut state = state;
                             loop {
-                                // A recorded refusal is the route's answer. Read it
-                                // before the cache probe: that probe is an await, and
-                                // an elapsed bound cancels it, which is how a
-                                // connection reported warming for `reset_required`.
-                                if let ProjectOpenTaskState::Failed(failure) =
-                                    state.borrow().clone()
-                                {
-                                    return Err(failure.to_error());
-                                }
                                 // The claim proves an open for this exact route is
                                 // in flight, so each iteration only needs to see
                                 // its publication land on the already-bound route

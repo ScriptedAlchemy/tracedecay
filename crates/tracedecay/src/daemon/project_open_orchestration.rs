@@ -21,9 +21,7 @@ where
     // resumed after it elapsed may still be inside `route_bound_project_server`
     // and would otherwise answer warming for a refusal already on the watch.
     // Callers repair that with `prefer_recorded_open_failure` against the
-    // claim's own watch channel instead of weakening the bound. The publication
-    // loop also reads `Failed` before that await, so a poll that sees the
-    // refusal returns it even when the deadline is also ready.
+    // claim's own watch channel instead of weakening the bound.
     hotpath::future!(
         tokio::time::timeout_at(deadline, publication),
         label = "daemon.project.open.publication_wait"
@@ -508,13 +506,6 @@ pub(super) async fn portable_project_server_for_request(
                 let publication = async {
                     let mut state = state;
                     loop {
-                        // A recorded refusal is the route's answer. Read it
-                        // before the cache probe: that probe is an await, and
-                        // an elapsed bound cancels it, which is how a
-                        // connection reported warming for `reset_required`.
-                        if let ProjectOpenTaskState::Failed(failure) = state.borrow().clone() {
-                            return Err(failure.to_error());
-                        }
                         if let Some(server) = portable_cached_project_server(
                             &store_administration,
                             &canonical_project_path,
