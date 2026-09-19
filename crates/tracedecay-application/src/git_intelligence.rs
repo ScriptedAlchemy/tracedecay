@@ -2954,14 +2954,14 @@ mod tests {
                 .filter(|(path, _)| path != ".git/index" && !path.starts_with(".git/logs/"))
                 .collect::<Vec<_>>()
         };
+        assert!(
+            !after.iter().any(|(path, _)| path.ends_with(".lock")),
+            "adapter left a lock file behind"
+        );
         assert_eq!(
             durable(before),
             durable(after),
             "read-only intelligence mutated repository state"
-        );
-        assert!(
-            !after.iter().any(|(path, _)| path.ends_with(".lock")),
-            "adapter left a lock file behind"
         );
     }
 }
