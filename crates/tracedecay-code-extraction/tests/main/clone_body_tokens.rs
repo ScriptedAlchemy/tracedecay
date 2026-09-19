@@ -320,3 +320,97 @@ fn clone_bodies_bind_to_method_and_stable_arrow_occurrences() {
         assert!(!body.body_span.is_empty());
     }
 }
+
+/// The sealed generation stores clone-body token streams as internally tagged
+/// objects, so the hand-written decoder has to reproduce the derived wire form
+/// byte for byte and refuse everything the derive refused.
+#[test]
+fn clone_token_wire_form_round_trips_in_any_member_order() {
+    let stream = tokens(
+        &RustExtractor,
+        "src/lib.rs",
+        "fn publish(input: &str) -> bool { validate(parse(input), \"read\") }",
+    );
+    let encoded = serde_json::to_string(&stream).expect("encode token stream");
+    assert!(
+        encoded.starts_with(r#"[{"kind":"structure_start","syntax_kind":"#),
+        "clone-body tokens must keep the internally tagged wire form: {encoded}"
+    );
+    assert!(
+        encoded.contains(r#"{"kind":"syntax","syntax_kind":"identifier","text":"validate"}"#),
+        "clone-body syntax tokens must keep tag-then-field member order: {encoded}"
+    );
+    assert_eq!(
+        serde_json::from_str::<Vec<ConservativeCloneTokenV1>>(&encoded).expect("decode"),
+        stream
+    );
+
+    // Member order is a serializer detail, never a decode requirement.
+    assert_eq!(
+        serde_json::from_str::<ConservativeCloneTokenV1>(
+            r#"{"text":"validate","syntax_kind":"identifier","kind":"syntax"}"#
+        )
+        .expect("decode reordered members"),
+        ConservativeCloneTokenV1::Syntax {
+            syntax_kind: "identifier".to_owned(),
+            text: "validate".to_owned(),
+        }
+    );
+    assert_eq!(
+        serde_json::from_str::<ConservativeCloneTokenV1>(
+            r#"{"syntax_kind":"block","kind":"structure_end"}"#
+        )
+        .expect("decode reordered structure members"),
+        ConservativeCloneTokenV1::StructureEnd {
+            syntax_kind: "block".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn clone_token_decode_refuses_malformed_wire_objects() {
+    for (wire, expected) in [
+        (
+            r#"{"kind":"syntax","syntax_kind":"identifier","text":"a","extra":1}"#,
+            "unknown field `extra`",
+        ),
+        (
+            r#"{"kind":"structure_start","syntax_kind":"block","text":"{"}"#,
+            "unknown field `text`",
+        ),
+        (
+            r#"{"kind":"syntax","syntax_kind":"identifier"}"#,
+            "missing field `text`",
+        ),
+        (r#"{"syntax_kind":"block"}"#, "missing field `kind`"),
+        (
+            r#"{"kind":"structure_start"}"#,
+            "missing field `syntax_kind`",
+        ),
+        (
+            r#"{"kind":"structure_middle","syntax_kind":"block"}"#,
+            "unknown variant `structure_middle`",
+        ),
+        (
+            r#"{"kind":"syntax","kind":"syntax","syntax_kind":"a","text":"b"}"#,
+            "duplicate field `kind`",
+        ),
+        (
+            r#"{"kind":"syntax","syntax_kind":"a","syntax_kind":"a","text":"b"}"#,
+            "duplicate field `syntax_kind`",
+        ),
+        (
+            r#"{"kind":"syntax","syntax_kind":"a","text":"b","text":"b"}"#,
+            "duplicate field `text`",
+        ),
+        (r#"["syntax","identifier","a"]"#, "invalid type"),
+    ] {
+        let error = serde_json::from_str::<ConservativeCloneTokenV1>(wire)
+            .expect_err("malformed clone token must be refused")
+            .to_string();
+        assert!(
+            error.contains(expected),
+            "decoding {wire} reported {error}, expected {expected}"
+        );
+    }
+}

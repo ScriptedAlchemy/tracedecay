@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
+use serde::de::{Error as _, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_domain::{NodeKind, SourceSpan};
 use tree_sitter::{Node as TreeSitterNode, Point, Tree, TreeCursor};
 
@@ -25,12 +27,161 @@ pub const MAX_AUTOMATIC_CLONE_BODY_BYTES_V1: u64 = 64 * 1024;
 /// streams under 1.5 MB, and is far past anything clone detection can act on.
 pub const MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1: u32 = 4096;
 
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Hash)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+/// Clone-body token streams are the largest repeated record in a sealed
+/// generation: a mid-size repository carries millions of these objects, and
+/// every generation publish, restore, and clone-census read decodes all of
+/// them.
+///
+/// `Serialize` stays derived so the wire form remains serde's internally
+/// tagged `{"kind":…,"syntax_kind":…,"text":…}` object, byte for byte.
+/// `Deserialize` is written by hand because serde's derive for an internally
+/// tagged enum buffers every object into `serde::__private::de::Content` — one
+/// heap map plus owned key/value pairs per token — before it can dispatch on
+/// the tag. The hand-written visitor reads the same object in one pass with no
+/// intermediate buffer, and keeps the derive's refusals: an unknown or
+/// duplicated member, a missing `kind`, an unknown tag, and a member that does
+/// not belong to the tagged variant are all still errors.
+#[derive(Clone, Debug, Serialize, Eq, PartialEq, Hash)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ConservativeCloneTokenV1 {
     StructureStart { syntax_kind: String },
     Syntax { syntax_kind: String, text: String },
     StructureEnd { syntax_kind: String },
+}
+
+const CLONE_TOKEN_MEMBERS_V1: &[&str] = &["kind", "syntax_kind", "text"];
+const CLONE_TOKEN_STRUCTURE_MEMBERS_V1: &[&str] = &["kind", "syntax_kind"];
+const CLONE_TOKEN_TAGS_V1: &[&str] = &["structure_start", "syntax", "structure_end"];
+
+#[derive(Clone, Copy)]
+enum CloneTokenMemberV1 {
+    Kind,
+    SyntaxKind,
+    Text,
+}
+
+#[derive(Clone, Copy)]
+enum CloneTokenTagV1 {
+    StructureStart,
+    Syntax,
+    StructureEnd,
+}
+
+impl<'de> Deserialize<'de> for CloneTokenMemberV1 {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct MemberVisitor;
+
+        impl Visitor<'_> for MemberVisitor {
+            type Value = CloneTokenMemberV1;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a clone-body token member")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                match value {
+                    "kind" => Ok(CloneTokenMemberV1::Kind),
+                    "syntax_kind" => Ok(CloneTokenMemberV1::SyntaxKind),
+                    "text" => Ok(CloneTokenMemberV1::Text),
+                    other => Err(E::unknown_field(other, CLONE_TOKEN_MEMBERS_V1)),
+                }
+            }
+        }
+
+        deserializer.deserialize_identifier(MemberVisitor)
+    }
+}
+
+impl<'de> Deserialize<'de> for CloneTokenTagV1 {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct TagVisitor;
+
+        impl Visitor<'_> for TagVisitor {
+            type Value = CloneTokenTagV1;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a clone-body token kind")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                match value {
+                    "structure_start" => Ok(CloneTokenTagV1::StructureStart),
+                    "syntax" => Ok(CloneTokenTagV1::Syntax),
+                    "structure_end" => Ok(CloneTokenTagV1::StructureEnd),
+                    other => Err(E::unknown_variant(other, CLONE_TOKEN_TAGS_V1)),
+                }
+            }
+        }
+
+        deserializer.deserialize_str(TagVisitor)
+    }
+}
+
+impl<'de> Deserialize<'de> for ConservativeCloneTokenV1 {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct TokenVisitor;
+
+        impl<'de> Visitor<'de> for TokenVisitor {
+            type Value = ConservativeCloneTokenV1;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a clone-body token object")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut tag = None;
+                let mut syntax_kind = None;
+                let mut text = None;
+                while let Some(member) = map.next_key::<CloneTokenMemberV1>()? {
+                    match member {
+                        CloneTokenMemberV1::Kind => {
+                            if tag.is_some() {
+                                return Err(A::Error::duplicate_field("kind"));
+                            }
+                            tag = Some(map.next_value::<CloneTokenTagV1>()?);
+                        }
+                        CloneTokenMemberV1::SyntaxKind => {
+                            if syntax_kind.is_some() {
+                                return Err(A::Error::duplicate_field("syntax_kind"));
+                            }
+                            syntax_kind = Some(map.next_value::<String>()?);
+                        }
+                        CloneTokenMemberV1::Text => {
+                            if text.is_some() {
+                                return Err(A::Error::duplicate_field("text"));
+                            }
+                            text = Some(map.next_value::<String>()?);
+                        }
+                    }
+                }
+                let tag = tag.ok_or_else(|| A::Error::missing_field("kind"))?;
+                let syntax_kind =
+                    syntax_kind.ok_or_else(|| A::Error::missing_field("syntax_kind"))?;
+                match tag {
+                    CloneTokenTagV1::Syntax => Ok(ConservativeCloneTokenV1::Syntax {
+                        syntax_kind,
+                        text: text.ok_or_else(|| A::Error::missing_field("text"))?,
+                    }),
+                    CloneTokenTagV1::StructureStart | CloneTokenTagV1::StructureEnd
+                        if text.is_some() =>
+                    {
+                        Err(A::Error::unknown_field(
+                            "text",
+                            CLONE_TOKEN_STRUCTURE_MEMBERS_V1,
+                        ))
+                    }
+                    CloneTokenTagV1::StructureStart => {
+                        Ok(ConservativeCloneTokenV1::StructureStart { syntax_kind })
+                    }
+                    CloneTokenTagV1::StructureEnd => {
+                        Ok(ConservativeCloneTokenV1::StructureEnd { syntax_kind })
+                    }
+                }
+            }
+        }
+
+        deserializer.deserialize_map(TokenVisitor)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash)]
