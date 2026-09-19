@@ -503,6 +503,15 @@ async fn run_foreground_unix(
     socket_path: PathBuf,
     remote_tls: Option<RemoteBrainTlsConfig>,
 ) -> Result<()> {
+    // Before any helper is forked. A later SIGKILL of this pid cannot run
+    // cleanup; the child has to die with us or it keeps the listen socket.
+    tracedecay_runtime_core::process_tree::arm_helper_parent_death().map_err(|error| {
+        TraceDecayError::Config {
+            message: format!(
+                "daemon could not arm helper children to die with this process: {error}"
+            ),
+        }
+    })?;
     let bootstrap_started = Instant::now();
     let profile_root = crate::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
         message: "could not determine TraceDecay user data directory".to_string(),

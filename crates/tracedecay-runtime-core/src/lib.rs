@@ -109,6 +109,8 @@ pub mod operation_task_owner;
 pub mod os_str_bytes;
 pub mod path_safety;
 pub mod path_scope;
+#[cfg(unix)]
+pub mod process_tree;
 mod profiled_lock;
 pub mod resident_memory;
 pub mod runtime_identity;
