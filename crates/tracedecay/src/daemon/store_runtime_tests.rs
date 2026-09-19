@@ -30,9 +30,9 @@ use tracedecay_session_memory::memory::{
 };
 use tracedecay_store::{
     CursorAdvanceOutcome, FactReadControl, FactWriteControl, ObservationCoverageReason,
-    ObservationCursorAdvance, ObservationStore, ObservationStoreError, ProjectId,
-    ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1,
-    RetainedGraphStoreLeaseV1, StoreShardIdV1,
+    ObservationCursorAdvance, ObservationStore, ProjectId, ProjectMemoryFactHistoryQueryV1,
+    ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1, RetainedGraphStoreLeaseV1,
+    StoreShardIdV1,
 };
 use tracedecay_store_runtime::{
     DaemonSessionRuntimeRegistryV1, RegisteredSchemaConvergenceStatus, process_runtime_generation,
@@ -1193,19 +1193,22 @@ async fn retained_runtime_ledger_replays_during_bounded_background_convergence()
             .expect("replay retained cursor while convergence is pending"),
         CursorAdvanceOutcome::ExactDuplicate
     );
-    let conflicting_advance = runtime_cursor_advance(
+    // The same range under a different coverage reason finds the retained
+    // cursor already at its `next_cursor`, so it is a duplicate of the
+    // applied coverage rather than a collision (#1842).
+    let rereasoned_advance = runtime_cursor_advance(
         &project_id,
         "retired",
         ObservationCoverageReason::BlankFrame,
     );
-    assert!(matches!(
+    assert_eq!(
         database
             .observation_store()
-            .advance_source_cursor(conflicting_advance)
+            .advance_source_cursor(rereasoned_advance)
             .await
-            .expect_err("classify retained cursor collision while convergence is pending"),
-        ObservationStoreError::CursorAdvanceCollision
-    ));
+            .expect("classify a re-reasoned retained cursor while convergence is pending"),
+        CursorAdvanceOutcome::ExactDuplicate
+    );
 
     let fresh_advance =
         runtime_cursor_advance(&project_id, "fresh", ObservationCoverageReason::OutOfScope);
