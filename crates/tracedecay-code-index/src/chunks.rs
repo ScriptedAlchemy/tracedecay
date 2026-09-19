@@ -2276,12 +2276,11 @@ fn resolve_file_references(
             .and_modify(|entry| *entry = None)
             .or_insert(Some(symbol));
     }
-    // Extractors emit a bare method-name duplicate alongside every dotted
-    // receiver call (`self.rows.push(row)` → `self.rows.push` + `push`) so an
-    // in-file method definition can still match. Index those duplicates by
-    // their call site: a duplicate that binds back to its own enclosing symbol
-    // is a receiver whose type is unknown (usually a container or another
-    // struct's method sharing the name), not evidence of recursion.
+    // A dotted call used to also emit its method's simple name
+    // (`self.rows.push(row)` → `self.rows.push` + `push`) so an in-file method
+    // could match. That duplicate binds the enclosing symbol when the names
+    // coincide, which is a receiver call, not recursion. Rust extraction no
+    // longer emits it; keep the skip so a duplicate cannot invent one.
     let dotted_duplicate_sites = unresolved
         .iter()
         .filter(|reference| reference.reference_name.contains('.'))
@@ -4366,6 +4365,91 @@ pub fn real_symbol() {}
             ["target", "target"]
         );
         assert_ne!(calls[0].evidence_span, calls[1].evidence_span);
+    }
+
+    #[test]
+    fn bare_receiver_method_call_does_not_invent_a_same_file_caller() {
+        let source = concat!(
+            "fn prepare(value: i32) {}\n",
+            "fn push(value: i32) {}\n",
+            "\n",
+            "struct Rows;\n",
+            "impl Rows {\n",
+            "    fn len(&self) -> usize { 0 }\n",
+            "    fn measure(&self) -> usize { self.len() }\n",
+            "}\n",
+            "trait Span {}\n",
+            "impl Span for Rows {\n",
+            "    fn wide(&self) -> usize { self.len() }\n",
+            "}\n",
+            "\n",
+            "fn caller(items: Vec<i32>, rows: Rows) {\n",
+            "    let foreign = make();\n",
+            "    foreign.prepare(1);\n",
+            "    items.push(1);\n",
+            "    prepare(1);\n",
+            "    push(1);\n",
+            "    rows.len();\n",
+            "}\n",
+            "fn make() -> Vec<i32> { Vec::new() }\n",
+        );
+        let file = validated_file("src/lib.rs", source.as_bytes());
+        let batch = batch_for(&file, ParseOutcomeV1::Complete);
+        let artifacts = chunker()
+            .index_file(&file, &batch, &rust_descriptor(), &NeverCancelled)
+            .expect("indexing succeeds");
+        let qualified = |occurrence: &SymbolOccurrenceId| {
+            artifacts
+                .symbols
+                .iter()
+                .find(|symbol| &symbol.occurrence == occurrence)
+                .map(|symbol| symbol.qualified_name.as_str())
+                .unwrap_or("<missing>")
+        };
+        let mut calls = artifacts
+            .edges
+            .iter()
+            .filter(|edge| edge.kind == RelationEdgeKindV1::Calls)
+            .map(|edge| {
+                (
+                    qualified(&edge.from_occurrence).to_owned(),
+                    qualified(&edge.to_occurrence).to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        calls.sort();
+
+        assert_eq!(
+            calls,
+            vec![
+                (
+                    "src/lib.rs::<Rows as Span>::wide".to_owned(),
+                    "src/lib.rs::Rows::len".to_owned(),
+                ),
+                (
+                    "src/lib.rs::Rows::measure".to_owned(),
+                    "src/lib.rs::Rows::len".to_owned(),
+                ),
+                (
+                    "src/lib.rs::caller".to_owned(),
+                    "src/lib.rs::Rows::len".to_owned(),
+                ),
+                (
+                    "src/lib.rs::caller".to_owned(),
+                    "src/lib.rs::make".to_owned(),
+                ),
+                (
+                    "src/lib.rs::caller".to_owned(),
+                    "src/lib.rs::prepare".to_owned(),
+                ),
+                (
+                    "src/lib.rs::caller".to_owned(),
+                    "src/lib.rs::push".to_owned()
+                ),
+            ],
+            "a bare receiver must not add a same-file caller; self and typed \
+             bindings still bind: {calls:?}"
+        );
     }
 
     #[test]

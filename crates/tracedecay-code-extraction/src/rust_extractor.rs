@@ -28,8 +28,8 @@ struct ShadowedCallNames {
 }
 
 /// Receiver bindings whose type the function body states outright: typed
-/// parameters, typed `let`s, and `let`s initialised by a struct literal
-/// (`T { .. }`, possibly behind `?`). A dotted
+/// parameters, typed `let`s, `let`s initialised by a struct literal
+/// (`T { .. }`, possibly behind `?`), and `self` in a method. A dotted
 /// call on such a binding also names the method by its type
 /// (`builder.build()` → `ignore::WalkBuilder::build`), which is the only form
 /// the resolver can bind across files. Method calls and constructor-like names
@@ -1579,24 +1579,11 @@ impl RustExtractor {
                                 column: child.start_position().column as u32,
                                 file_path: state.file_path.clone(),
                             });
-                            // For dot-calls (e.g. `instance.method()`), also emit
-                            // a ref with just the method name so the resolver can
-                            // match it against impl method definitions.
-                            if let Some(method_name) = callee_name.rsplit('.').next()
-                                && method_name != callee_name
-                            {
-                                state.unresolved_refs.push(UnresolvedRef {
-                                    from_node_id: fn_node_id.to_string(),
-                                    reference_name: method_name.to_string(),
-                                    reference_kind: EdgeKind::Calls,
-                                    line: child.start_position().row as u32,
-                                    column: child.start_position().column as u32,
-                                    file_path: state.file_path.clone(),
-                                });
-                            }
-                            // A dotted call on a binding with a stated type also
-                            // names the method through its type, the only form
-                            // that binds across files.
+                            // The simple name of a dotted call is not itself a call.
+                            // `items.push()` must not bind a same-file `fn push`.
+                            // Only a stated receiver type names the method
+                            // (`Rows::len`), which is also the form that binds
+                            // across files.
                             if let Some(typed_method) =
                                 Self::typed_receiver_method(state, callee, receivers)
                             {
@@ -1664,11 +1651,49 @@ impl RustExtractor {
         }
         let value = callee.child_by_field_name("value")?;
         let field = callee.child_by_field_name("field")?;
-        if value.kind() != "identifier" || field.kind() != "field_identifier" {
+        if field.kind() != "field_identifier" {
             return None;
         }
-        let type_path = receivers.type_of(state.node_text(value))?;
+        // `self` is its own token, not an identifier. Both name a binding.
+        let receiver_name = match value.kind() {
+            "identifier" | "self" => state.node_text(value),
+            _ => return None,
+        };
+        let type_path = receivers.type_of(receiver_name)?;
         Some(format!("{type_path}::{}", state.node_text(field)))
+    }
+
+    /// The type `self` names in the enclosing impl or trait.
+    ///
+    /// Trait impls store `<Type as Trait>` so the method keeps a UFCS name.
+    /// `self` still names `Type`, the path a call site writes and the alias
+    /// same-file resolution binds.
+    fn enclosing_receiver_type(state: &ExtractionState<'_>) -> Option<String> {
+        let (name, id) = state
+            .node_stack
+            .iter()
+            .rev()
+            .find(|(_, id)| id.starts_with("impl:") || id.starts_with("trait:"))?;
+        let type_name = if id.starts_with("impl:") {
+            match name
+                .strip_prefix('<')
+                .and_then(|inner| inner.split_once(" as "))
+            {
+                Some((type_name, _)) => type_name.trim(),
+                None => name.as_str(),
+            }
+        } else {
+            name.as_str()
+        };
+        if type_name.is_empty()
+            || type_name == "Self"
+            || type_name == "<unknown>"
+            || type_name == "<anonymous>"
+        {
+            None
+        } else {
+            Some(type_name.to_owned())
+        }
     }
 
     /// Records every binding the function introduces with the type it states,
@@ -1681,6 +1706,11 @@ impl RustExtractor {
         receivers: &mut ReceiverTypes,
     ) {
         match node.kind() {
+            "self_parameter" => {
+                if let Some(type_path) = Self::enclosing_receiver_type(state) {
+                    receivers.record("self".to_owned(), Some(type_path));
+                }
+            }
             "parameter" => {
                 if let Some(pattern) = node.child_by_field_name("pattern") {
                     let type_path = node
@@ -1737,15 +1767,15 @@ impl RustExtractor {
         }
     }
 
-    /// A bare identifier pattern takes `type_path`; every identifier inside any
-    /// other pattern is bound with an unknown type.
+    /// A bare identifier or `self` pattern takes `type_path`; every identifier
+    /// inside any other pattern is bound with an unknown type.
     fn record_receiver_pattern(
         state: &ExtractionState<'_>,
         pattern: TsNode<'_>,
         type_path: Option<String>,
         receivers: &mut ReceiverTypes,
     ) {
-        if pattern.kind() == "identifier" {
+        if pattern.kind() == "identifier" || pattern.kind() == "self" {
             receivers.record(state.node_text(pattern).to_owned(), type_path);
             return;
         }
@@ -1763,10 +1793,18 @@ impl RustExtractor {
     /// The nominal type path a type annotation names, seen through references,
     /// generic arguments, and `dyn`/`impl` trait objects; `None` for tuples,
     /// slices, function pointers, and anything else without one nominal head.
+    /// `Self` is the enclosing impl or trait type when one is on the stack.
     fn stated_type_path(state: &ExtractionState<'_>, ty: TsNode<'_>) -> Option<String> {
         match ty.kind() {
             "type_identifier" | "scoped_type_identifier" => {
-                Some(state.node_text(ty).to_owned()).filter(|path| path != "Self")
+                let path = state.node_text(ty);
+                if path == "Self" {
+                    // `Self` in an annotation is the enclosing impl or trait,
+                    // not a type the file declared under that name.
+                    Self::enclosing_receiver_type(state)
+                } else {
+                    Some(path.to_owned())
+                }
             }
             "reference_type" | "generic_type" => ty
                 .child_by_field_name("type")
