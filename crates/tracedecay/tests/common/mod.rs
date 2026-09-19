@@ -783,9 +783,27 @@ impl Drop for TestChildProcess {
 }
 
 /// PID-directed stop: survives `process_group(0)` / `setsid` detachment.
+///
+/// The child is the leader of its own group. Killing only that pid leaves
+/// helper children that still hold the listen socket, so the next spawn
+/// observes a connectable daemon after this process has already been reaped.
 fn terminate_and_reap(child: &mut Child) -> std::io::Result<ExitStatus> {
     if let Ok(Some(status)) = child.try_wait() {
         return Ok(status);
+    }
+
+    #[cfg(unix)]
+    {
+        let pid = child.id();
+        if pid != 0 {
+            // SAFETY: `pid` is this live child. Negating it targets the
+            // process group `process_group(0)` created with that pid as
+            // leader. ESRCH is ignored: setpgid may not have run yet, and the
+            // pid kill below still stops the leader.
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGKILL);
+            }
+        }
     }
 
     if let Err(kill_err) = child.kill() {

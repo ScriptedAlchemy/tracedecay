@@ -377,6 +377,62 @@ fn problem_envelope(payload: &Value, context: &str) -> Value {
     panic!("{context}: no typed problem envelope in the payload: {payload}")
 }
 
+/// True when the daemon has not published the project open yet.
+///
+/// The open wait on a connection is 500 ms. Past that, the surface answers
+/// `unavailable` / `after_delay` and leaves the open running. The CLI rides
+/// that refusal out; a raw HTTP or SDK call does not. A restart's first packet
+/// can therefore be warming even when the store's recorded terminal is
+/// `reset_required`.
+fn retryable_pre_admission_unavailable(payload: &Value) -> bool {
+    let problem = &payload["problem"];
+    problem["kind"] == "unavailable"
+        && problem["retry"] == "after_delay"
+        && problem["terminality"] == "pre_admission"
+}
+
+/// Polls until the open publishes a non-retryable problem, then returns it.
+///
+/// Bounded by the same 15 s a CLI tool call gives a cold open. A refusal that
+/// stays retryable past that bound is a real failure, not a slow open.
+fn await_settled_problem(context: &str, mut fetch: impl FnMut() -> Value) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let payload = fetch();
+        if !retryable_pre_admission_unavailable(&payload) {
+            return payload;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{context}: project open stayed retryable unavailable past the open grace: {payload}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn await_sdk_reset_problem(
+    context: &str,
+    client: &Client,
+    request: &<ApplicationStorageStatus as tracedecay_sdk::operations::TypedOperation>::Request,
+) -> (String, Value) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let error = client
+            .execute::<ApplicationStorageStatus>(request)
+            .expect_err("a refused store must not read as a healthy status");
+        let (kind, envelope) = sdk_problem(error, context);
+        let payload = problem_envelope(&envelope, context);
+        if !retryable_pre_admission_unavailable(&payload) {
+            return (kind, envelope);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{context}: project open stayed retryable unavailable past the open grace: {payload}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Arms the daemon's one-shot fact-commit barrier, runs `request` on its own
 /// thread, holds the committed effect there until the request's own deadline
 /// has certainly expired, then releases it and returns what `request` produced.
@@ -665,25 +721,23 @@ fn reset_required_survives_http_mcp_and_rust_sdk_across_restart() {
         "a typed HTTP terminal must not be reported as success: status {http_status}, body {http_body}"
     );
 
-    let mcp_response = mcp_tool_call(
-        &home_path,
-        &project_path,
-        "tracedecay_storage_status",
-        &storage_status_body,
-        None,
-    );
-    super::assert_reset_required(
-        &problem_envelope(&mcp_payload(&mcp_response), "MCP reset required"),
-        "MCP stdio host, first observation",
-    );
+    let mcp_problem = await_settled_problem("MCP stdio host, first observation", || {
+        let mcp_response = mcp_tool_call(
+            &home_path,
+            &project_path,
+            "tracedecay_storage_status",
+            &storage_status_body,
+            None,
+        );
+        problem_envelope(&mcp_payload(&mcp_response), "MCP reset required")
+    });
+    super::assert_reset_required(&mcp_problem, "MCP stdio host, first observation");
 
     let client = sdk_client(&mount, &identity);
     let request =
         serde_json::from_value(storage_status_body.clone()).expect("canonical storage status");
-    let sdk_error = client
-        .execute::<ApplicationStorageStatus>(&request)
-        .expect_err("a refused store must not read as a healthy status");
-    let (sdk_kind, sdk_envelope) = sdk_problem(sdk_error, "Rust SDK reset required");
+    let (sdk_kind, sdk_envelope) =
+        await_sdk_reset_problem("Rust SDK, first observation", &client, &request);
     assert_eq!(
         sdk_kind, "reset_required",
         "the Rust SDK must classify the terminal as reset required: {sdk_envelope}"
@@ -708,36 +762,37 @@ fn reset_required_survives_http_mcp_and_rust_sdk_across_restart() {
     );
     let mount = http_mount(&home_path);
 
-    let (_, http_body_after) = post_application(
-        &mount,
-        &identity,
-        STORAGE_STATUS_ROUTE,
-        &storage_status_body,
-        None,
-    );
-    super::assert_reset_required(
-        &problem_envelope(&http_body_after, "HTTP reset required after restart"),
-        "HTTP mount, after a physical restart",
-    );
+    let http_problem_after = await_settled_problem("HTTP mount, after a physical restart", || {
+        let (_, body) = post_application(
+            &mount,
+            &identity,
+            STORAGE_STATUS_ROUTE,
+            &storage_status_body,
+            None,
+        );
+        problem_envelope(&body, "HTTP reset required after restart")
+    });
+    super::assert_reset_required(&http_problem_after, "HTTP mount, after a physical restart");
 
-    let mcp_after = mcp_tool_call(
-        &home_path,
-        &project_path,
-        "tracedecay_storage_status",
-        &storage_status_body,
-        None,
-    );
+    let mcp_problem_after =
+        await_settled_problem("MCP stdio host, after a physical restart", || {
+            let mcp_after = mcp_tool_call(
+                &home_path,
+                &project_path,
+                "tracedecay_storage_status",
+                &storage_status_body,
+                None,
+            );
+            problem_envelope(&mcp_payload(&mcp_after), "MCP reset required after restart")
+        });
     super::assert_reset_required(
-        &problem_envelope(&mcp_payload(&mcp_after), "MCP reset required after restart"),
+        &mcp_problem_after,
         "MCP stdio host, after a physical restart",
     );
 
     let client = sdk_client(&mount, &identity);
-    let sdk_error_after = client
-        .execute::<ApplicationStorageStatus>(&request)
-        .expect_err("a refused store must not read as a healthy status after a restart");
     let (sdk_kind_after, sdk_envelope_after) =
-        sdk_problem(sdk_error_after, "Rust SDK reset required after restart");
+        await_sdk_reset_problem("Rust SDK reset required after restart", &client, &request);
     assert_eq!(
         sdk_kind_after, "reset_required",
         "the Rust SDK must keep classifying the terminal as reset required: {sdk_envelope_after}"
