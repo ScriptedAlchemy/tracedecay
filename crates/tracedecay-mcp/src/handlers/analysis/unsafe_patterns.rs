@@ -41,23 +41,28 @@ fn source_may_contain_unsafe_kind(source: &str, kind: &str) -> bool {
     }
 }
 
-fn line_matches_unsafe_kind(line: &str, kind: &str) -> bool {
+/// Byte offset of the risky construct within `line`, when the line has one.
+///
+/// The offset is what lets a match be attributed to the declaration that
+/// actually contains it: two declarations can share a line, so a line number
+/// alone cannot say which one a site belongs to.
+fn line_matches_unsafe_kind(line: &str, kind: &str) -> Option<usize> {
     let trimmed = line.trim_start();
     if trimmed.starts_with("//") || trimmed.starts_with("///") {
-        return false;
+        return None;
     }
     match kind {
         "unwrap" => contains_method_call(line, "unwrap", true),
         "expect" => contains_method_call(line, "expect", false),
-        "panic" => line.contains("panic!("),
-        "todo" => line.contains("todo!("),
-        "unimplemented" => line.contains("unimplemented!("),
+        "panic" => line.find("panic!("),
+        "todo" => line.find("todo!("),
+        "unimplemented" => line.find("unimplemented!("),
         "unsafe_block" => contains_unsafe_block_start(line),
-        _ => false,
+        _ => None,
     }
 }
 
-fn contains_method_call(line: &str, method: &str, empty_parens: bool) -> bool {
+fn contains_method_call(line: &str, method: &str, empty_parens: bool) -> Option<usize> {
     let needle = format!(".{method}");
     let bytes = line.as_bytes();
     let mut start = 0usize;
@@ -69,18 +74,18 @@ fn contains_method_call(line: &str, method: &str, empty_parens: bool) -> bool {
         if is_word_boundary && next == Some(b'(') {
             if empty_parens {
                 if line[after + 1..].trim_start().starts_with(')') {
-                    return true;
+                    return Some(abs);
                 }
             } else {
-                return true;
+                return Some(abs);
             }
         }
         start = abs + needle.len();
     }
-    false
+    None
 }
 
-fn contains_unsafe_block_start(line: &str) -> bool {
+fn contains_unsafe_block_start(line: &str) -> Option<usize> {
     let bytes = line.as_bytes();
     let mut start = 0usize;
     while let Some(pos) = line[start..].find("unsafe") {
@@ -97,12 +102,28 @@ fn contains_unsafe_block_start(line: &str) -> bool {
                 || rest.starts_with("impl ")
                 || rest.starts_with("trait ")
             {
-                return true;
+                return Some(abs);
             }
         }
         start = abs + "unsafe".len();
     }
-    false
+    None
+}
+
+/// Innermost declaration whose source range covers `match_byte`.
+///
+/// Byte containment, not line containment: an attribute such as `#[test]` and
+/// the two functions on `#[test] fn a() {…} fn b() {…}` all sit on one line,
+/// and only the byte range says which of them the site is inside. Selecting by
+/// line also had no stable order to break ties with, since symbols arrive in
+/// occurrence order and occurrence ids are per-project digests.
+fn enclosing_declaration(nodes: &[VerifiedAnalysisSymbol], match_byte: u64) -> Option<String> {
+    nodes
+        .iter()
+        .filter_map(|node| node.source_span.map(|span| (node, span)))
+        .filter(|(_, span)| span.start_byte <= match_byte && match_byte < span.end_byte)
+        .min_by_key(|(_, span)| span.end_byte.saturating_sub(span.start_byte))
+        .map(|(node, _)| node.metadata.qualified_name.clone())
 }
 
 fn path_looks_like_test(path: &str) -> bool {
@@ -216,7 +237,16 @@ pub async fn handle_unsafe_patterns(
                 // Masking can erase every raw hit (all of them in comments or
                 // string literals), so the file's nodes are fetched only once a
                 // real match survives.
-                for (idx, (line, masked_line)) in source.lines().zip(masked.lines()).enumerate() {
+                // Split inclusively so each line keeps its own byte offset;
+                // masking preserves byte layout, so the two sides stay aligned.
+                let mut line_start = 0usize;
+                for (idx, (line, masked_line)) in source
+                    .split_inclusive('\n')
+                    .zip(masked.split_inclusive('\n'))
+                    .enumerate()
+                {
+                    let line_offset = line_start;
+                    line_start += line.len();
                     let line_no = (idx as u32) + 1;
                     // A mixed test/production line is not wholly test scope,
                     // so keep its production risk visible.
@@ -225,16 +255,10 @@ pub async fn handle_unsafe_patterns(
                         continue;
                     }
                     for kind in &kinds {
-                        if line_matches_unsafe_kind(masked_line, kind) {
+                        if let Some(column) = line_matches_unsafe_kind(masked_line, kind) {
                             let nodes = symbols_by_file.get(file).map_or(&[][..], Vec::as_slice);
-                            let enclosing = nodes
-                                .iter()
-                                .filter(|n| {
-                                    n.metadata.start_line.saturating_add(1) <= line_no
-                                        && line_no <= n.end_line().saturating_add(1)
-                                })
-                                .min_by_key(|n| n.metadata.line_span)
-                                .map(|n| n.metadata.qualified_name.clone());
+                            let enclosing =
+                                enclosing_declaration(nodes, (line_offset + column) as u64);
                             *by_kind.entry(kind.clone()).or_insert(0) += 1;
                             matches.push(json!({
                                 "kind": kind,
@@ -314,7 +338,7 @@ mod unsafe_pattern_detection_tests {
 
         for line in lines {
             for kind in kinds {
-                if line_matches_unsafe_kind(line, kind) {
+                if line_matches_unsafe_kind(line, kind).is_some() {
                     assert!(
                         source_may_contain_unsafe_kind(line, kind),
                         "prefilter would drop a real {kind} site: {line:?}"
@@ -337,47 +361,46 @@ mod unsafe_pattern_detection_tests {
     fn detects_unsafe_block_inside_safe_fn() {
         // An `unsafe { }` block living inside an otherwise-safe function, the
         // exact shape the audit fixture plants.
-        assert!(line_matches_unsafe_kind(
-            "    unsafe { *ptr as usize }",
-            "unsafe_block"
-        ));
-        assert!(contains_unsafe_block_start("    unsafe { *ptr as usize }"));
+        assert!(line_matches_unsafe_kind("    unsafe { *ptr as usize }", "unsafe_block").is_some());
+        assert!(contains_unsafe_block_start("    unsafe { *ptr as usize }").is_some());
     }
 
     #[test]
     fn detects_unsafe_fn_impl_and_trait() {
-        assert!(line_matches_unsafe_kind(
-            "pub unsafe fn raw(&self) {",
-            "unsafe_block"
-        ));
-        assert!(line_matches_unsafe_kind(
-            "unsafe impl Send for Foo {}",
-            "unsafe_block"
-        ));
-        assert!(line_matches_unsafe_kind(
-            "unsafe trait Zeroable {}",
-            "unsafe_block"
-        ));
+        assert!(line_matches_unsafe_kind("pub unsafe fn raw(&self) {", "unsafe_block").is_some());
+        assert!(line_matches_unsafe_kind("unsafe impl Send for Foo {}", "unsafe_block").is_some());
+        assert!(line_matches_unsafe_kind("unsafe trait Zeroable {}", "unsafe_block").is_some());
     }
 
     #[test]
     fn ignores_safe_code_and_comments() {
         // Plain safe code has no unsafe markers.
-        assert!(!line_matches_unsafe_kind(
-            "let x = total as usize;",
-            "unsafe_block"
-        ));
+        assert!(line_matches_unsafe_kind("let x = total as usize;", "unsafe_block").is_none());
         // The word appears only in a comment/doc line: not a real unsafe site.
-        assert!(!line_matches_unsafe_kind(
-            "// this is not unsafe { } really",
-            "unsafe_block"
-        ));
-        assert!(!line_matches_unsafe_kind(
-            "/// drop the needless unsafe block",
-            "unsafe_block"
-        ));
+        assert!(
+            line_matches_unsafe_kind("// this is not unsafe { } really", "unsafe_block").is_none()
+        );
+        assert!(
+            line_matches_unsafe_kind("/// drop the needless unsafe block", "unsafe_block")
+                .is_none()
+        );
         // A substring of a longer identifier must not trip the word-boundary check.
-        assert!(!contains_unsafe_block_start("let unsafely = 1;"));
-        assert!(!contains_unsafe_block_start("let make_unsafe_thing = 2;"));
+        assert!(contains_unsafe_block_start("let unsafely = 1;").is_none());
+        assert!(contains_unsafe_block_start("let make_unsafe_thing = 2;").is_none());
+    }
+
+    /// The reported offset is what attributes a site to a declaration, so it
+    /// has to point at the construct itself, not at the start of the line.
+    #[test]
+    fn reports_where_on_the_line_the_site_is() {
+        let line = "#[test] fn a() { Some(5).unwrap(); } pub fn b() { panic!(); }";
+        assert_eq!(
+            line_matches_unsafe_kind(line, "unwrap"),
+            Some(line.find(".unwrap()").expect("unwrap call"))
+        );
+        assert_eq!(
+            line_matches_unsafe_kind(line, "panic"),
+            Some(line.find("panic!(").expect("panic call"))
+        );
     }
 }

@@ -43,7 +43,7 @@ use tracedecay_code_index::graph_projection::CodeGraphSemanticEdgeV1;
 use tracedecay_code_index::lineage::LineageSymbolRecordV1;
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
+use tracedecay_domain::{RelationEdgeKindV1, SourceSpan, SymbolOccurrenceId};
 use tracedecay_graph_query::VerifiedGraphQuery;
 
 fn path_is_rust(path: &str) -> bool {
@@ -63,6 +63,9 @@ const ANALYSIS_RELATION_BUDGET: usize = 2_000_000;
 struct VerifiedAnalysisSymbol {
     occurrence: SymbolOccurrenceId,
     path: String,
+    /// Byte range the declaration occupies in its file. Line numbers cannot
+    /// separate two declarations that share one line; this can.
+    source_span: Option<SourceSpan>,
     metadata: LineageSymbolRecordV1,
 }
 
@@ -89,6 +92,10 @@ fn verified_analysis_symbols(
     page.symbols
         .into_iter()
         .map(|symbol| {
+            let source_span = symbol
+                .binding
+                .as_ref()
+                .and_then(|binding| binding.source_span);
             let path = symbol
                 .binding
                 .and_then(|binding| binding.logical_path)
@@ -109,6 +116,7 @@ fn verified_analysis_symbols(
             Ok(VerifiedAnalysisSymbol {
                 occurrence: symbol.occurrence,
                 path,
+                source_span,
                 metadata,
             })
         })
