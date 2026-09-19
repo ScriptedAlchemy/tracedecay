@@ -1325,6 +1325,66 @@ fn ambiguous<T: Processor + Other>(processor: &T, input: u32) -> u32 {
 }
 
 #[test]
+fn self_receiver_names_carry_module_scope_and_the_outer_as_delimiter() {
+    let source = r#"
+mod inner {
+    pub struct Rows;
+    impl Rows {
+        fn len(&self) -> usize { 0 }
+        fn measure(&self) -> usize { self.len() }
+    }
+    trait Wide { fn wide(&self) -> usize; }
+    impl Wide for Rows {
+        fn wide(&self) -> usize { self.len() }
+    }
+}
+struct Foo;
+trait Assoc { type Item; }
+trait Local { fn span(&self) -> usize; }
+impl Local for <Foo as Assoc>::Item {
+    fn span(&self) -> usize { self.len() }
+}
+"#;
+    let result = RustExtractor.extract("src/lib.rs", source);
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+    let from = |qualified: &str| {
+        let function = result
+            .nodes
+            .iter()
+            .find(|node| {
+                matches!(node.kind, NodeKind::Function | NodeKind::Method)
+                    && node.qualified_name == qualified
+            })
+            .unwrap_or_else(|| panic!("{qualified} is extracted"));
+        result
+            .unresolved_refs
+            .iter()
+            .filter(|reference| {
+                reference.reference_kind == EdgeKind::Calls && reference.from_node_id == function.id
+            })
+            .map(|reference| reference.reference_name.as_str())
+            .collect::<Vec<_>>()
+    };
+
+    let measure = from("src/lib.rs::inner::Rows::measure");
+    assert!(
+        measure.contains(&"inner::Rows::len"),
+        "self inside `mod inner` names the module-scoped type: {measure:?}"
+    );
+    let wide = from("src/lib.rs::inner::<Rows as Wide>::wide");
+    assert!(
+        wide.contains(&"inner::Rows::len"),
+        "a trait impl in a module keeps the module path: {wide:?}"
+    );
+    let span = from("src/lib.rs::<<Foo as Assoc>::Item as Local>::span");
+    assert!(
+        span.contains(&"<Foo as Assoc>::Item::len"),
+        "a projected self type splits at the outer `as`: {span:?}"
+    );
+}
+
+#[test]
 fn wildcard_imports_retain_unresolved_dependencies_alongside_named_bindings() {
     let result = RustExtractor.extract(
         "src/lib.rs",
