@@ -1031,13 +1031,15 @@ impl CodeIndexSchedulerRegistryV1 {
                         started_micros,
                     );
                 }
-                // Source reconciliation is complete. Release the admission
-                // permit only across HeadOpening's scheduler-mutex wait: a
-                // holder of that mutex must be able to run, and an
-                // ignored-dependency owner still needs this permit before it
-                // can take the mutex. The publication's text projection
-                // re-acquires the permit before it renames the active pointer.
-                // Keep `reconcile_pass` through text seating; dropping it
+                // Source reconciliation is complete: release the background
+                // admission permit before HeadOpening / graph work so sibling
+                // stores can start. The permit is never re-acquired inside
+                // this pass: `_build_publication` is held for the rest of the
+                // iteration, and `run_ignored_dependency_admission` takes the
+                // admission *before* that same gate, so waiting on admission
+                // here would invert that order (see
+                // `background_worker_waits_for_global_admission_before_publication_gate`).
+                // Keep `reconcile_pass` through text seating, dropping it
                 // made `reconcile_in_progress` lie while this worker still
                 // owned graph try_lock, which deadlocked tests that hold the
                 // scheduler mutex and wait for that flag.
@@ -1114,49 +1116,12 @@ impl CodeIndexSchedulerRegistryV1 {
                         && !graph_activation_deferred
                         && let Some(text) = graph_text.clone()
                     {
-                        // Head opening released the permit so it could wait on
-                        // the scheduler mutex. Take it back for the pointer
-                        // rename. Drop the pass across that wait: a caller
-                        // holding the permit and waiting for the pass would
-                        // otherwise deadlock, and the pass is re-entered
-                        // before the rename so idle still means the pointer
-                        // write has finished.
-                        let resume_pass = reconcile_pass.is_some();
-                        drop(reconcile_pass.take());
-                        let Ok(_text_artifact_admission) = hotpath::future!(
-                            Arc::clone(&worker_background_reconcile_admission).acquire_owned(),
-                            label = "daemon.code_index.admission_wait"
-                        )
-                        .await
-                        else {
-                            tracing::info!(
-                                event = "code_index_worker_shutdown_observed",
-                                phase = "published_text_projection",
-                                "code-index worker observed shutdown and stopped its pass"
-                            );
-                            Self::join_retained_text_projection_on_worker_exit(
-                                &mut retained_text_projection,
-                            )
-                            .await;
-                            return;
-                        };
-                        if worker_shutting_down.load(Ordering::Acquire) {
-                            tracing::info!(
-                                event = "code_index_worker_shutdown_observed",
-                                phase = "published_text_projection",
-                                "code-index worker observed shutdown and stopped its pass"
-                            );
-                            Self::join_retained_text_projection_on_worker_exit(
-                                &mut retained_text_projection,
-                            )
-                            .await;
-                            return;
-                        }
-                        if resume_pass {
-                            reconcile_pass = Some(super::super::ReconcilePassGuard::enter(
-                                &worker_reconcile_in_progress,
-                            ));
-                        }
+                        // `reconcile_pass` is held across this projection, so
+                        // the pointer rename is inside the pass a reader
+                        // samples. Taking the admission permit back here
+                        // instead would deadlock against an
+                        // ignored-dependency owner that already holds it and
+                        // is waiting for `_build_publication`.
                         let projection = tokio::spawn(Self::drive_text_projection(
                             text,
                             Arc::clone(&worker_shutting_down),
