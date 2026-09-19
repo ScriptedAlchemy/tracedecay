@@ -387,7 +387,9 @@ async fn latest(
 ) -> LatestCompleteCodeIndexV1 {
     // Lightweight publication precedes complete-generation seating. Demand
     // that complete state before using its imports as admission evidence.
-    tokio::time::timeout(Duration::from_secs(5), async {
+    // The first cold scheduler start in this shard exceeded 5s, then the
+    // retry passed in under a second. Other seating waits use 20s.
+    tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let _ = registry.latest_complete_fresh(project_root).await;
             if registry

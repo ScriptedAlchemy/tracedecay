@@ -2972,23 +2972,19 @@ mod tests {
         );
         let before = durable(before);
         let after = durable(after);
-        let changed = before
-            .iter()
-            .filter_map(|(path, bytes)| {
-                after
-                    .iter()
-                    .find(|(candidate, _)| candidate == path)
-                    .and_then(|(_, next)| (next != bytes).then(|| format!("changed {path}")))
-            })
-            .chain(after.iter().filter_map(|(path, _)| {
-                (!before.iter().any(|(candidate, _)| candidate == path))
-                    .then(|| format!("added {path}"))
-            }))
-            .chain(before.iter().filter_map(|(path, _)| {
-                (!after.iter().any(|(candidate, _)| candidate == path))
-                    .then(|| format!("removed {path}"))
-            }))
-            .collect::<Vec<_>>();
+        let mut changed = Vec::new();
+        for (path, bytes) in &before {
+            match after.iter().find(|(candidate, _)| candidate == path) {
+                Some((_, next)) if next != bytes => changed.push(format!("changed {path}")),
+                None => changed.push(format!("removed {path}")),
+                Some(_) => {}
+            }
+        }
+        for (path, _) in &after {
+            if !before.iter().any(|(candidate, _)| candidate == path) {
+                changed.push(format!("added {path}"));
+            }
+        }
         assert!(
             changed.is_empty(),
             "read-only intelligence mutated repository state: {}",
