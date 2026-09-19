@@ -368,7 +368,9 @@ async fn coalesced_publication_failure_preserves_the_scheduler_error_family() {
     assert_publication_error(owner_error);
     assert_publication_error(follower_error);
     assert!(
-        pointer_path.is_dir(),
+        std::fs::symlink_metadata(&pointer_path)
+            .expect("faulted pointer remains")
+            .is_dir(),
         "publication must not replace a directory pointer it did not observe"
     );
 
