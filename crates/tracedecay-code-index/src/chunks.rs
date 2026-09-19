@@ -4273,6 +4273,65 @@ pub fn real_symbol() {}
         assert_eq!(identities(&reformatted), identities(&artifacts));
     }
 
+    /// The graph-rebuild refresh batch is one no-call function per file.
+    /// File-rooted `Contains` edges abstain because the file node is not a
+    /// symbol row, and primitive `u32` refs have no import or glob, so the
+    /// sealed relation census is empty. A same-file call still binds, so an
+    /// empty edge list is that fixture's shape rather than a dead emitter.
+    #[test]
+    fn no_call_refresh_probe_seals_zero_relation_edges() {
+        let index = |source: &str| {
+            let file = validated_file("src/refresh_batch/file_0000.rs", source.as_bytes());
+            let batch = batch_for(&file, ParseOutcomeV1::Complete);
+            chunker()
+                .index_file(&file, &batch, &rust_descriptor(), &NeverCancelled)
+                .expect("indexing succeeds")
+        };
+
+        let probe = "pub fn refresh_probe_0000_000(input: u32) -> u32 { input + 0 }\n";
+        let artifacts = index(probe);
+        assert_eq!(artifacts.symbols.len(), 1, "{:?}", artifacts.symbols);
+        assert!(
+            artifacts.edges.is_empty(),
+            "no-call probe must not seal relation edges: {:?}",
+            artifacts.edges
+        );
+        assert!(
+            artifacts.edge_abstentions.iter().all(|abstention| {
+                abstention.reason == CodeIndexEdgeAbstentionReasonV1::MissingSymbolEndpoint
+                    && abstention.legacy_kind == EdgeKind::Contains.as_str()
+                    && abstention.source_node_id.starts_with("file:")
+            }),
+            "file Contains must abstain, not vanish: {:?}",
+            artifacts.edge_abstentions
+        );
+        assert!(
+            !artifacts.edge_abstentions.is_empty(),
+            "the file node still emits a Contains edge that the census drops"
+        );
+        assert!(
+            artifacts
+                .unresolved_references
+                .iter()
+                .all(|reference| reference.reference_name == "u32"
+                    && matches!(
+                        reference.kind,
+                        RelationEdgeKindV1::TypeOf | RelationEdgeKindV1::Returns
+                    )),
+            "primitive type refs stay unresolved, not edges: {:?}",
+            artifacts.unresolved_references
+        );
+
+        let calling = "pub fn caller() -> u32 { refresh_probe_0000_000(1) }\n\
+                       pub fn refresh_probe_0000_000(input: u32) -> u32 { input + 0 }\n";
+        let calling = index(calling);
+        assert!(
+            calling.edges.iter().any(|edge| edge.kind == RelationEdgeKindV1::Calls),
+            "a same-file call must still seal, so the empty probe is not a dead path: {:?}",
+            calling.edges
+        );
+    }
+
     /// A body larger than the extractor's traversal budget reaches this path
     /// as an incomplete analysis: the lineage record carries the state and
     /// offers no exact counters, while ordinary bodies stay exact.
