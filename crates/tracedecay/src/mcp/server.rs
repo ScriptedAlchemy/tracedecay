@@ -1505,6 +1505,9 @@ fn application_surface_request_id(id: &Value, connection_scope: &str) -> Option<
 }
 
 #[cfg(test)]
+mod cancel_candidate_journey;
+
+#[cfg(test)]
 mod application_surface_request_id_tests {
     use serde_json::json;
 

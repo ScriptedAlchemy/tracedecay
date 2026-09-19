@@ -1555,10 +1555,15 @@ impl McpServer {
 
         // Transport cancellation is owned by the connection server, then the
         // same signal is mirrored into the already-selected target below.
+        // The registration's `Drop` removes the request from the cancellation
+        // table. Naming it `_registration` is not enough: this binding is never
+        // read, and the compiler ends its drop range at the `let`, so a cancel
+        // that arrives once the worker is inside a candidate batch finds an
+        // empty table. Hold it across the worker await.
         let PreparedDispatchControl {
             request_id: application_request_id,
             control,
-            registration: _registration,
+            registration: connection_cancellation,
         } = match self.prepare_dispatch_control(
             &id,
             &tool_name,
@@ -1639,10 +1644,15 @@ impl McpServer {
                 .dispatch_authority
                 .register_cancellation(request_id.clone(), control.cancellation());
         }
-        let _target_cancellation_registration = ApplicationCancellationRegistration::new(
+        let target_cancellation = ApplicationCancellationRegistration::new(
             dispatch_server.dispatch_authority.cancellations(),
             target_request_id,
         );
+        // `ManuallyDrop` so an earlier destructor of this binding cannot remove
+        // the row. The explicit drop below is the last use, after the worker
+        // returns, which is the whole time a transport cancel can still land.
+        let mut connection_cancellation = std::mem::ManuallyDrop::new(connection_cancellation);
+        let mut target_cancellation = std::mem::ManuallyDrop::new(target_cancellation);
         let worker_server = dispatch_server.dispatch_authority.server();
         let worker_tool_name = tool_name.clone();
         let worker_control = control.clone();
@@ -1676,6 +1686,12 @@ impl McpServer {
                 .run_retained(dispatch_server.dispatch_authority.registry(), worker)
                 .await
         };
+        // Safety: each guard is dropped exactly once, here, after the worker
+        // has settled, and neither is used again.
+        unsafe {
+            std::mem::ManuallyDrop::drop(&mut connection_cancellation);
+            std::mem::ManuallyDrop::drop(&mut target_cancellation);
+        }
         tracing::trace!(
             tool_name,
             settlement = ?dispatch_outcome.settlement(),
