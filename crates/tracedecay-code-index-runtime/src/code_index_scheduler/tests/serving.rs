@@ -853,6 +853,95 @@ fn clone_successor_keeps_lexical_owners_ready_and_cas_replaces_v14() {
     assert_eq!(v16_revision, 16);
 }
 
+/// Exact and lexical readiness is not the clone-successor copy.
+///
+/// The publication advance that installs those owners used to call
+/// `begin_clone_successor` before returning, and that call copies the whole
+/// prior lexical artifact. The freshness receipt awaits that advance, so
+/// status stayed non-current for the copy. The successor must still be
+/// reported as backfill, and the next advance is what writes its staging file.
+#[test]
+fn lexical_readiness_leaves_the_clone_successor_uncopied() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn alpha() { one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    while !latest.query_owners_are_ready() {
+        latest.advance_text_serving(1).expect("advance V14 build");
+    }
+    let tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Backfilling {
+        observation,
+    } = latest.clone_index_status(false, None)
+    else {
+        panic!(
+            "a generation without clone fingerprints must report backfill once lexical owners serve, got {:?}",
+            latest.clone_index_status(false, None)
+        );
+    };
+    assert_eq!(observation.coverage.completed_source_pages, 0);
+    assert!(
+        observation.coverage.total_source_pages > 0,
+        "the pending successor must name the sealed page count it has not visited"
+    );
+    // Status falls back to the published artifact's bytes when the successor
+    // has not created a staging file, so the bytes field cannot prove the
+    // copy stayed off this advance. The slot and the artifacts directory can.
+    assert!(
+        matches!(
+            &*latest.text_projection_build.lock_slot(),
+            super::super::CodeTextProjectionSlotV1::CloneSuccessorPending
+        ),
+        "owner readiness must leave the successor pending"
+    );
+    let staging_names = |root: &std::path::Path| {
+        std::fs::read_dir(code_text_artifacts_root(root))
+            .expect("artifacts root")
+            .map(|entry| entry.expect("artifact entry").file_name())
+            .filter(|name| name.to_string_lossy().ends_with(".staging"))
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        staging_names(store.path()).is_empty(),
+        "owner readiness copied the prior lexical artifact: {:?}",
+        staging_names(store.path())
+    );
+
+    latest
+        .advance_text_serving(1)
+        .expect("the retained successor advance copies the prior artifact");
+    assert!(latest.query_owners_are_ready());
+    assert!(
+        !matches!(
+            &*latest.text_projection_build.lock_slot(),
+            super::super::CodeTextProjectionSlotV1::CloneSuccessorPending
+        ),
+        "the next advance must take the pending successor"
+    );
+
+    while latest.text_projection_needs_work() {
+        latest
+            .advance_text_serving(16)
+            .expect("finish clone successor");
+    }
+    let revision: i64 = rusqlite::Connection::open(active_text_artifact_path(store.path()))
+        .expect("open finished artifact")
+        .query_row(
+            "SELECT format_revision FROM artifact_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read finished revision");
+    assert_eq!(revision, 16);
+}
+
 #[test]
 fn clone_status_distinguishes_unavailable_backfill_partial_ready_and_stale() {
     let fixture = GitFixture::new(&[(
