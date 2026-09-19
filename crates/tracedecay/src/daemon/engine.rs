@@ -680,15 +680,28 @@ impl DaemonEngine {
             // warm-up runs. The open task remains tracked and continues in the
             // background after this bounded wait expires.
             let mut retry_init = handshake.allow_init;
-            let publication_deadline = tokio::time::Instant::now() + PROJECT_OPEN_REQUEST_DEADLINE;
             loop {
                 let claim = Box::pin(self.begin_project_open(handshake.clone(), None)).await?;
+                // The bound starts here, after the open is claimed. Starting it
+                // at connection arrival let route enrollment spend it, and the
+                // request then answered warming for a refusal already on the watch.
+                let publication_deadline =
+                    project_open_publication_deadline(tokio::time::Instant::now());
                 let result = match claim {
                     ProjectOpenTaskClaim::InFlight(state) => {
                         let recorded = state.clone();
                         let publication = async {
                             let mut state = state;
                             loop {
+                                // A recorded refusal is the route's answer. Read it
+                                // before the cache probe: that probe is an await, and
+                                // an elapsed bound cancels it, which is how a
+                                // connection reported warming for `reset_required`.
+                                if let ProjectOpenTaskState::Failed(failure) =
+                                    state.borrow().clone()
+                                {
+                                    return Err(failure.to_error());
+                                }
                                 // The claim proves an open for this exact route is
                                 // in flight, so each iteration only needs to see
                                 // its publication land on the already-bound route
