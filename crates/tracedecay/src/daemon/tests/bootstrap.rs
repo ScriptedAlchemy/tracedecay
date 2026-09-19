@@ -3572,10 +3572,12 @@ async fn enrollment_delay_does_not_hide_a_quick_reset_required() {
         deadline,
         async {
             tokio::task::yield_now().await;
-            Err(tracedecay_domain::errors::TraceDecayError::reset_required(
-                "project store",
-                "database schema contains unexpected table",
-            ))
+            Err::<(), tracedecay_domain::errors::TraceDecayError>(
+                tracedecay_domain::errors::TraceDecayError::reset_required(
+                    "project store",
+                    "database schema contains unexpected table",
+                ),
+            )
         },
     )
     .await
