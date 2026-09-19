@@ -215,7 +215,9 @@ fn classify_daemon_protocol_identity(
     match identity {
         Ok((name, version))
             if name.as_deref() == Some("tracedecay")
-                && version.as_deref() == Some(expected_version) =>
+                && version.as_deref().is_some_and(|version| {
+                    tracedecay_daemon_protocol::versions_name_same_build(version, expected_version)
+                }) =>
         {
             DaemonProtocolState::Ready
         }
@@ -644,24 +646,52 @@ mod identity_classification_tests {
 
     const SHA: &str = "84598a0b9c841b914565f46b20bb6c765706e8e5";
 
+    /// The identity a `tracedecay` daemon reporting `version` answers with.
     fn identity(version: &str) -> (Option<String>, Option<String>) {
         (Some("tracedecay".to_owned()), Some(version.to_owned()))
     }
 
-    /// The GitHub release tag and the binary that tag ships are not the same
-    /// string. Readiness that is handed the tag classifies the live daemon as
-    /// a mismatch and the maintenance wait keeps opening a handshake.
+    /// `tracedecay update` installs a release and then waits for the daemon
+    /// that binary starts. The release path knows the version it installed as
+    /// the bare release, while the daemon names the commit it was built from,
+    /// so readiness used to refuse the very binary it had just installed.
     #[test]
-    fn a_release_tag_is_not_the_build_the_daemon_advertises() {
-        let build = format!("0.1.0-beta.47+{SHA}");
+    fn a_daemon_naming_its_commit_is_ready_against_its_bare_release() {
+        assert_eq!(
+            classify_daemon_protocol_identity(
+                Ok(identity(&format!("0.1.0-beta.47+{SHA}"))),
+                "0.1.0-beta.47",
+            ),
+            DaemonProtocolState::Ready
+        );
+    }
+
+    /// A genuinely stale daemon is still refused, whichever side names a
+    /// commit.
+    #[test]
+    fn a_different_build_is_still_an_identity_mismatch() {
+        let stale = format!("0.1.0-beta.46+{SHA}");
+        assert_eq!(
+            classify_daemon_protocol_identity(Ok(identity(&stale)), "0.1.0-beta.47"),
+            DaemonProtocolState::IdentityMismatch {
+                name: Some("tracedecay".to_owned()),
+                version: Some(stale),
+                expected_version: "0.1.0-beta.47".to_owned(),
+            }
+        );
+        let other_commit = format!("0.1.0-beta.47+{}", "b".repeat(40));
         assert!(matches!(
-            classify_daemon_protocol_identity(Ok(identity(&build)), "0.1.0-beta.47"),
+            classify_daemon_protocol_identity(
+                Ok(identity(&other_commit)),
+                &format!("0.1.0-beta.47+{SHA}"),
+            ),
             DaemonProtocolState::IdentityMismatch { .. }
         ));
     }
 
-    /// The probe stops when the expected identity is the string the daemon
-    /// answered with. That string is the installed binary's `--version`.
+    /// Once the release path reports the installed binary's own `--version`,
+    /// both sides name the same commit and readiness takes the exact-match
+    /// path rather than relying on build-metadata precedence.
     #[test]
     fn the_advertised_build_is_ready_against_itself() {
         let build = format!("0.1.0-beta.47+{SHA}");
