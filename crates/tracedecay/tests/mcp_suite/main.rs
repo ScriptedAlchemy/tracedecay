@@ -22,6 +22,7 @@ mod changelog_behavior_test;
 mod context_relevance_eval_test;
 mod fixture;
 mod git_correlation_test;
+mod health_read_behavior;
 mod mcp_cli_parity_test;
 mod mcp_cli_serve_test;
 mod mcp_dashboard_tool_test;
@@ -30,7 +31,9 @@ mod mcp_rendering_test;
 #[cfg(feature = "test-transport")]
 mod mcp_server_test;
 mod multi_mcp_coordination_test;
+mod read_behavior_test;
 mod serve_harness;
 mod serve_template_path_test;
+mod status_behavior_test;
 mod support;
 mod workflow_query_test;

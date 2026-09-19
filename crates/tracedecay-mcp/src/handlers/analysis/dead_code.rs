@@ -25,8 +25,9 @@ pub async fn handle_dead_code(
         .get("limit")
         .and_then(Value::as_u64)
         .map_or(100, |value| value.clamp(1, 1_000) as usize);
+    let path_prefix = effective_path(&args, scope_prefix);
     let dead = hotpath::future!(
-        graph.find_dead_code(&kinds, include_public, limit),
+        graph.find_dead_code(&kinds, include_public, path_prefix, limit),
         label = "mcp.analysis.dead_code.graph"
     )
     .await?;
@@ -58,9 +59,6 @@ pub async fn handle_dead_code(
                     detail: "a dead-code candidate has no extraction-attested symbol metadata"
                         .to_owned(),
                 })?;
-            if !tracedecay_runtime_core::path_scope::path_matches_scope(&file, scope_prefix) {
-                continue;
-            }
             files.push(file.clone());
             items.push(json!({
                 "id": symbol.occurrence.as_str(),

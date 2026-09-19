@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 #[cfg(feature = "test-transport")]
 use std::fs;
 #[cfg(feature = "test-transport")]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 #[cfg(feature = "test-transport")]
 use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_mcp::get_tool_definitions;
@@ -704,6 +704,174 @@ async fn storage_status_tool_summarizes_active_project_store_health() {
             .as_u64()
             .is_some_and(|bytes| bytes > 0),
         "production storage authority must report the retained database: {payload}"
+    );
+    fixture.harness.shutdown().await;
+}
+
+/// Page counts read from the admitted file itself, not from the tool.
+#[cfg(feature = "test-transport")]
+struct AdmittedStorePages {
+    page_size_bytes: u32,
+    page_count: u64,
+    freelist_pages: u64,
+}
+
+#[cfg(feature = "test-transport")]
+fn admitted_store_pages(path: &Path) -> AdmittedStorePages {
+    let connection =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap_or_else(|error| {
+                panic!("open admitted graph store {}: {error}", path.display())
+            });
+    let page_size: i64 = connection
+        .pragma_query_value(None, "page_size", |row| row.get(0))
+        .unwrap_or_else(|error| panic!("read page_size from {}: {error}", path.display()));
+    let page_count: i64 = connection
+        .pragma_query_value(None, "page_count", |row| row.get(0))
+        .unwrap_or_else(|error| panic!("read page_count from {}: {error}", path.display()));
+    let freelist_pages: i64 = connection
+        .pragma_query_value(None, "freelist_count", |row| row.get(0))
+        .unwrap_or_else(|error| panic!("read freelist_count from {}: {error}", path.display()));
+    AdmittedStorePages {
+        page_size_bytes: u32::try_from(page_size)
+            .unwrap_or_else(|_| panic!("page_size {page_size} does not fit u32")),
+        page_count: u64::try_from(page_count)
+            .unwrap_or_else(|_| panic!("page_count {page_count} does not fit u64")),
+        freelist_pages: u64::try_from(freelist_pages)
+            .unwrap_or_else(|_| panic!("freelist_count {freelist_pages} does not fit u64")),
+    }
+}
+
+#[cfg(feature = "test-transport")]
+fn storage_status_envelope(result: &Value) -> Value {
+    serde_json::from_str(extract_real_server_text(result))
+        .unwrap_or_else(|error| panic!("storage status JSON: {error}"))
+}
+
+#[cfg(feature = "test-transport")]
+fn assert_storage_status_matches_store(
+    envelope: &Value,
+    admitted_project_id: &str,
+    store_path: &str,
+    pages: &AdmittedStorePages,
+) {
+    let database_bytes = u64::from(pages.page_size_bytes).saturating_mul(pages.page_count);
+    assert_eq!(envelope["problem"], Value::Null);
+    assert_eq!(envelope["outcome"]["outcome"], json!("evidence"));
+    assert_eq!(
+        envelope["outcome"]["value"]["execution"]["termination"],
+        json!("completed")
+    );
+    assert_eq!(envelope["scope"]["project_id"], json!(admitted_project_id));
+    let payload = &envelope["outcome"]["value"]["payload"];
+    assert_eq!(payload["status"], json!("ok"));
+    assert_eq!(payload["read_only"], json!(false));
+    assert_eq!(payload["details"], json!([]));
+    assert_eq!(payload["project_id"], json!(admitted_project_id));
+    assert_eq!(payload["store_path"], json!(store_path));
+    assert_eq!(payload["page_size_bytes"], json!(pages.page_size_bytes));
+    assert_eq!(payload["page_count"], json!(pages.page_count));
+    assert_eq!(payload["freelist_pages"], json!(pages.freelist_pages));
+    assert_eq!(payload["database_bytes"], json!(database_bytes));
+    assert_eq!(
+        payload["history_coverage"],
+        json!("durable_project_store_history")
+    );
+    let history = payload["history"]
+        .as_array()
+        .unwrap_or_else(|| panic!("storage history must be an array: {payload}"));
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0]["database_bytes"], json!(database_bytes));
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn storage_status_reports_admitted_page_math_and_rejects_unknown_fields() {
+    let fixture = production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    let admitted_project_id = fixture
+        .harness
+        .project_id(&fixture.project_root)
+        .await
+        .expect("admitted project identity");
+    let store_path: PathBuf = server.cg().await.store_layout().graph_db_path.clone();
+    let store_path = fs::canonicalize(&store_path)
+        .unwrap_or_else(|error| panic!("canonicalize {}: {error}", store_path.display()));
+    let store_path_text = store_path.display().to_string();
+    let pages = admitted_store_pages(&store_path);
+
+    let omitted =
+        handle_real_server_tool_call(&server, "tracedecay_storage_status", json!({})).await;
+    let omitted = storage_status_envelope(&omitted);
+    assert_storage_status_matches_store(&omitted, &admitted_project_id, &store_path_text, &pages);
+    let stable_history = omitted["outcome"]["value"]["payload"]["history"].clone();
+
+    let detailed = handle_real_server_tool_call(
+        &server,
+        "tracedecay_storage_status",
+        json!({"include_details": true}),
+    )
+    .await;
+    let detailed = storage_status_envelope(&detailed);
+    assert_storage_status_matches_store(&detailed, &admitted_project_id, &store_path_text, &pages);
+    assert_eq!(
+        detailed["outcome"]["value"]["payload"]["history"], stable_history,
+        "an unchanged store must keep the first history sample"
+    );
+    assert_eq!(
+        detailed["outcome"]["value"]["payload"]["details"],
+        json!([])
+    );
+
+    let explicit = handle_real_server_tool_call(
+        &server,
+        "tracedecay_storage_status",
+        json!({"include_details": false}),
+    )
+    .await;
+    let explicit = storage_status_envelope(&explicit);
+    assert_eq!(
+        explicit["outcome"]["value"]["payload"]["history"], stable_history,
+        "include_details false must not append a history sample"
+    );
+    assert_eq!(
+        explicit["outcome"]["value"]["payload"]["status"],
+        json!("ok")
+    );
+    assert_eq!(
+        explicit["outcome"]["value"]["payload"]["details"],
+        json!([])
+    );
+
+    let rejected = handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_storage_status",
+        json!({"not_a_storage_field": true}),
+    )
+    .await;
+    assert_eq!(rejected["error"]["code"], json!(-32602));
+    assert_eq!(
+        rejected["error"]["data"]["tool"],
+        json!("tracedecay_storage_status")
+    );
+    assert_eq!(
+        rejected["error"]["data"]["reason_code"],
+        json!("application_surface_invalid_request")
+    );
+    assert_eq!(rejected["error"]["data"]["kind"], json!("invalid_request"));
+    assert_eq!(
+        rejected["error"]["data"]["code"],
+        json!("application_surface_invalid_request")
+    );
+    assert_eq!(rejected["error"]["data"]["retryable"], json!(false));
+    assert_eq!(
+        rejected["error"]["data"]["detail"],
+        json!(
+            "application surface request does not match its reviewed schema: unknown field `not_a_storage_field`, expected `include_details`"
+        )
     );
     fixture.harness.shutdown().await;
 }

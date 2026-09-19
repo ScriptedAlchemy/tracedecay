@@ -4231,6 +4231,17 @@ async fn dashboard_freshness_reports_pending_rebuild_liveness() {
         .expect("mount daemon-owned scheduler");
     wait_for_initial_generation(&registry, fixture.path()).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
+    // The mount seats exact/lexical before the clone successor is built, so
+    // `wait_for_dashboard_ready` returns with that backfill still pending, and
+    // the admission below only parks a *new* pass at its dequeue point. A
+    // backfill slice advances under the clone-successor slot lock, which
+    // `clone_index_status` takes with `try_lock`: a sample that lands inside
+    // one reports `Unavailable { "clone-index status is being updated" }`
+    // before the source-stale branch can answer `Stale` (CI run 35432037843).
+    // Drain the mount-era backfill and burn the wake permits it banks, so the
+    // held admission is the only scheduling this sample can observe.
+    drain_clone_backfill(&registry, fixture.path()).await;
+    settled_owner_with_idle_admission(&registry, fixture.path()).await;
 
     let admission = registry
         .background_reconcile_admission()
@@ -4256,10 +4267,14 @@ async fn dashboard_freshness_reports_pending_rebuild_liveness() {
         projected.rebuild_in_flight,
         "a pending scheduler wake must keep stale serving typed as rebuilding"
     );
-    assert!(matches!(
-        projected.clone_index,
-        Some(tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Stale { .. })
-    ));
+    assert!(
+        matches!(
+            projected.clone_index,
+            Some(tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Stale { .. })
+        ),
+        "a settled clone index under a stale source must read Stale: {:?}",
+        projected.clone_index
+    );
     drop(admission);
     registry.shutdown().await;
 }
