@@ -1775,7 +1775,11 @@ struct PendingAdmissionWindow<'window, State> {
 }
 
 enum CaptureWindowError {
-    ScalarFallback(HostAdmissionRecovery),
+    ScalarFallback(#[allow(dead_code)] HostAdmissionRecovery),
+    /// The window compare-and-swap lost, and the durable cursor does not cover
+    /// the last frame. Replay one frame at a time; do not treat that as a
+    /// store-issued batch fallback.
+    LostCursor,
     Ingest(TranscriptIngestError),
 }
 
@@ -2235,16 +2239,24 @@ impl ActiveAdmission<'_> {
                 // the peer that won the CAS is already past the window's last
                 // frame, every frame in it is durable behind the winner's
                 // cursor, so this is a no-op rather than a failed source pass.
-                if is_lost_cursor_cas(&outcome)
-                    && let Some(last) = checkpoints.last()
-                    && self
-                        .peer_already_covered(expected_cursor, last.end_offset)
-                        .await
-                {
-                    progress.frames_skipped = progress
-                        .frames_skipped
-                        .saturating_add(checkpoints.len() as u64);
-                    return Ok(());
+                // A cursor that only covers a prefix cannot be told apart from
+                // a miss at this layer; replay each frame so covered ones stay
+                // applied and an uncovered frame still fails the source.
+                if is_lost_cursor_cas(&outcome) && !self.cancellation.is_cancelled() {
+                    let fully_covered = match checkpoints.last() {
+                        Some(last) => {
+                            self.peer_already_covered(expected_cursor, last.end_offset)
+                                .await
+                        }
+                        None => false,
+                    };
+                    if fully_covered {
+                        progress.frames_skipped = progress
+                            .frames_skipped
+                            .saturating_add(checkpoints.len() as u64);
+                        return Ok(());
+                    }
+                    return Err(CaptureWindowError::LostCursor);
                 }
                 if is_admission_cancellation(&outcome, &self.cancellation) {
                     Err(CaptureWindowError::Ingest(
@@ -2464,7 +2476,7 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
             .await
         {
             Ok(()) => Ok(()),
-            Err(CaptureWindowError::ScalarFallback(_recovery)) => {
+            Err(CaptureWindowError::ScalarFallback(_) | CaptureWindowError::LostCursor) => {
                 for (checkpoint, range, bytes, prepared, hints) in backups {
                     if active.cancellation.is_cancelled() {
                         return Err(TranscriptIngestError::Cancelled {
