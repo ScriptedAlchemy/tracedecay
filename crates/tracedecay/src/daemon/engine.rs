@@ -682,9 +682,6 @@ impl DaemonEngine {
             let mut retry_init = handshake.allow_init;
             loop {
                 let claim = Box::pin(self.begin_project_open(handshake.clone(), None)).await?;
-                // The bound starts here, after the open is claimed. Starting it
-                // at connection arrival let route enrollment spend it, and the
-                // request then answered warming for a refusal already on the watch.
                 let publication_deadline =
                     project_open_publication_deadline(tokio::time::Instant::now());
                 let result = match claim {
