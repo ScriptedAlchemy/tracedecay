@@ -282,8 +282,13 @@ impl SessionRefreshProgressV1 {
         }
         let current = self.coverage;
         let candidate = next.coverage;
+        // The durable guard admits a successor only when it strictly advances
+        // the committed frontier. Accepting an equal frontier here let a
+        // producer submit a row the trigger then refused as a SQLite
+        // constraint abort, which the worker read as transient storage and
+        // resubmitted forever. Refuse it as typed state instead.
         if self.frontier.observed_through != next.frontier.observed_through
-            || next.frontier.committed_through < self.frontier.committed_through
+            || next.frontier.committed_through <= self.frontier.committed_through
             || next.committed_batches < self.committed_batches
             || next.committed_records < self.committed_records
             || candidate.visible < current.visible
