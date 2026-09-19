@@ -645,12 +645,25 @@ async fn session_projection_refresh(
 /// than a recovery. Those are terminal, and the caller durably fails the
 /// refresh instead of retrying it.
 fn is_retryable_storage(error: &SessionStoreError) -> bool {
-    let SessionStoreError::Storage { source, .. } = error else {
-        return false;
-    };
-    source
-        .downcast_ref::<EngineError>()
-        .is_none_or(|engine| !engine.is_deterministic_refusal())
+    matches!(error, SessionStoreError::Storage { .. }) && !is_deterministic_refusal(error)
+}
+
+/// True when the durable contract refused the exact submitted row or
+/// statement: a typed store refusal, or an engine failure that replays
+/// identically. Only such a refusal retires a running refresh. An
+/// interrupted pass (cancelled control, deadline, budget) and transient
+/// storage leave the operation for the next pass, which may hold a
+/// different control.
+fn is_deterministic_refusal(error: &SessionStoreError) -> bool {
+    match error {
+        SessionStoreError::Cancelled
+        | SessionStoreError::DeadlineExceeded
+        | SessionStoreError::BudgetExceeded { .. } => false,
+        SessionStoreError::Storage { source, .. } => source
+            .downcast_ref::<EngineError>()
+            .is_some_and(EngineError::is_deterministic_refusal),
+        _ => true,
+    }
 }
 
 pub async fn process_refresh_begin_requests(
@@ -872,7 +885,7 @@ pub async fn apply_refresh_effect(
                     report.retryable_errors += 1;
                     report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
                 }
-                Err(error) => {
+                Err(error) if is_deterministic_refusal(&error) => {
                     // A refused progress row is not work the next pass can
                     // finish: rediscovery hands the projector the same durable
                     // state and the same row comes back refused. Retire the
@@ -888,6 +901,13 @@ pub async fn apply_refresh_effect(
                         }
                         None => report.terminal_errors += 1,
                     }
+                }
+                Err(error) => {
+                    // Cancelled control, budget ceiling: this pass could not
+                    // persist, but the row itself was not refused, so the
+                    // operation stays `running` for the next pass.
+                    report.last_error = Some(format!("{error:?}"));
+                    report.terminal_errors += 1;
                 }
             }
         }
