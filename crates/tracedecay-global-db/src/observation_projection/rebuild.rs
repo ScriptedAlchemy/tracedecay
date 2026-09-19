@@ -2270,13 +2270,24 @@ async fn write_reconciled_sessions(
 /// A parallel SQL predicate used to report those conflicts as message
 /// `OutputCollision` values with `message_id = session:{id}`, which erased
 /// the field and sent session conflicts down the message-skip path.
+/// Paged by `(provider, session_id)` because the exact-SQL transport refuses a
+/// result set past `MAX_QUERY_ROWS` (10_000 rows) or 64 MiB, and a rebuild
+/// overlapping more history than that would fail activation instead of
+/// reconciling it. Both the staged primary key and `sessions` are unique on
+/// that pair, so one page's writes never move a later page's cursor.
 async fn reconcile_overlapping_rebuild_sessions(
     conn: &impl Executor,
     generation: &str,
 ) -> ProjectionStoreResult<()> {
-    let mut overlaps = conn
-        .query(
-            "SELECT staged.session_json,
+    let mut cursor: Option<(String, String)> = None;
+    loop {
+        let (after_provider, after_session) = match cursor.as_ref() {
+            Some((provider, session_id)) => (Some(provider.as_str()), Some(session_id.as_str())),
+            None => (None, None),
+        };
+        let mut overlaps = conn
+            .query(
+                "SELECT staged.session_json,
                     active.provider, active.session_id, active.project_key,
                     active.project_path, active.title, active.started_at,
                     active.ended_at, active.transcript_path, active.metadata_json,
@@ -2285,38 +2296,58 @@ async fn reconcile_overlapping_rebuild_sessions(
              FROM observation_projection_rebuild_sessions AS staged
              JOIN sessions AS active
                ON active.provider = staged.provider AND active.session_id = staged.session_id
-             WHERE staged.projector_version = ?1 AND staged.generation = ?2",
-            params![SESSION_MESSAGE_PROJECTOR_VERSION, generation],
-        )
-        .await
-        .map_err(|error| storage("read overlapping projection sessions", error))?;
-    let mut updates = Vec::new();
-    while let Some(row) = overlaps
-        .next()
-        .await
-        .map_err(|error| storage("read overlapping projection sessions", error))?
-    {
-        let staged_json: String = row
-            .get(0)
+             WHERE staged.projector_version = ?1 AND staged.generation = ?2
+               AND (?3 IS NULL
+                    OR staged.provider > ?3
+                    OR (staged.provider = ?3 AND staged.session_id > ?4))
+             ORDER BY staged.provider, staged.session_id
+             LIMIT ?5",
+                params![
+                    SESSION_MESSAGE_PROJECTOR_VERSION,
+                    generation,
+                    after_provider,
+                    after_session,
+                    REBUILD_PAGE_SIZE
+                ],
+            )
+            .await
             .map_err(|error| storage("read overlapping projection sessions", error))?;
-        let staged: SessionRecord = decode_json(&staged_json, "decode staged projection session")?;
-        let actual = decode_overlapping_session(&row)?;
-        let expected = canonicalize_session_project_paths(&staged);
-        let normalized_actual = canonicalize_session_project_paths(&actual);
-        let merged =
-            reconcile_session_rows_detailed(&normalized_actual, &expected).map_err(|conflict| {
-                ProjectionStoreError::SessionOutputCollision {
+        let mut updates = Vec::new();
+        let mut scanned = 0_i64;
+        let mut last = None;
+        while let Some(row) = overlaps
+            .next()
+            .await
+            .map_err(|error| storage("read overlapping projection sessions", error))?
+        {
+            let staged_json: String = row
+                .get(0)
+                .map_err(|error| storage("read overlapping projection sessions", error))?;
+            let staged: SessionRecord =
+                decode_json(&staged_json, "decode staged projection session")?;
+            let actual = decode_overlapping_session(&row)?;
+            scanned += 1;
+            last = Some((actual.provider.clone(), actual.session_id.clone()));
+            let expected = canonicalize_session_project_paths(&staged);
+            let normalized_actual = canonicalize_session_project_paths(&actual);
+            let merged = reconcile_session_rows_detailed(&normalized_actual, &expected).map_err(
+                |conflict| ProjectionStoreError::SessionOutputCollision {
                     provider: expected.provider.clone(),
                     session_id: expected.session_id.clone(),
                     field: conflict.field(),
-                }
-            })?;
-        if merged != actual {
-            updates.push(merged);
+                },
+            )?;
+            if merged != actual {
+                updates.push(merged);
+            }
         }
+        drop(overlaps);
+        write_reconciled_sessions(conn, &updates).await?;
+        if scanned < REBUILD_PAGE_SIZE {
+            return Ok(());
+        }
+        cursor = last;
     }
-    drop(overlaps);
-    write_reconciled_sessions(conn, &updates).await
 }
 
 async fn activate_rebuild_sessions(
@@ -2641,12 +2672,19 @@ async fn activate_rebuild_dispositions(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod activation_tests {
-    use super::{SESSION_MESSAGE_PROJECTOR_VERSION, activate_rebuild_sessions};
+    use super::{
+        REBUILD_PAGE_SIZE, SESSION_MESSAGE_PROJECTOR_VERSION, activate_rebuild_sessions,
+        reconcile_overlapping_rebuild_sessions,
+    };
     use crate::tests::harness::RegisteredGlobalDbHarness;
     use tracedecay_runtime_core::db::engine::{Executor, params};
     use tracedecay_store::{ProjectionStoreError, SessionRecord};
 
     const SESSION_ID: &str = "002bd803-dc62-46e2-b66a-a61cc282f0dc";
+    /// One past the exact-SQL transport's `MAX_QUERY_ROWS`
+    /// (`tracedecay-rusqlite-runtime/src/exact_sql/mod.rs`), which refuses a
+    /// result set rather than truncating it.
+    const OVERLAPS_PAST_TRANSPORT_ROW_CAP: i64 = 10_001;
 
     fn session(transcript_path: Option<&str>, title: Option<&str>) -> SessionRecord {
         SessionRecord {
@@ -2691,6 +2729,73 @@ mod activation_tests {
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn overlap_reconciliation_pages_past_the_transport_row_cap() {
+        const GENERATION: &str = "generation.session-overlap-paging";
+        let harness = RegisteredGlobalDbHarness::open("session-overlap-paging").await;
+        let mut staged_rows = Vec::with_capacity(OVERLAPS_PAST_TRANSPORT_ROW_CAP as usize);
+        for index in 0..OVERLAPS_PAST_TRANSPORT_ROW_CAP {
+            let session_id = format!("session.{index:05}");
+            let active = SessionRecord {
+                session_id: session_id.clone(),
+                ..session(None, None)
+            };
+            assert!(harness.registered.upsert_session(&active).await);
+            staged_rows.push(SessionRecord {
+                session_id,
+                title: Some(format!("composer {index:05}")),
+                ..session(None, None)
+            });
+        }
+        let transaction = harness.registered.begin_write_transaction().await.unwrap();
+        transaction
+            .execute(
+                "INSERT INTO observation_projection_rebuilds (
+                    projector_version, generation, frontier_sequence, state
+                 ) VALUES (?1, ?2, 0, 'ready')",
+                params![SESSION_MESSAGE_PROJECTOR_VERSION, GENERATION],
+            )
+            .await
+            .unwrap();
+        let staged_json = serde_json::to_string(&staged_rows).unwrap();
+        transaction
+            .execute(
+                "INSERT INTO observation_projection_rebuild_sessions (
+                    projector_version, generation, provider, session_id, session_json
+                 )
+                 SELECT ?1, ?2,
+                        json_extract(staged.value, '$.provider'),
+                        json_extract(staged.value, '$.session_id'),
+                        staged.value
+                 FROM json_each(?3) AS staged",
+                params![
+                    SESSION_MESSAGE_PROJECTOR_VERSION,
+                    GENERATION,
+                    staged_json.as_str()
+                ],
+            )
+            .await
+            .unwrap();
+
+        reconcile_overlapping_rebuild_sessions(&transaction, GENERATION)
+            .await
+            .expect("an overlap larger than one transport page must still reconcile");
+
+        let mut rows = transaction
+            .query(
+                "SELECT COUNT(*) FROM sessions
+                 WHERE provider = 'cursor' AND title LIKE 'composer %'",
+                (),
+            )
+            .await
+            .unwrap();
+        let reconciled = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+        assert_eq!(
+            reconciled, OVERLAPS_PAST_TRANSPORT_ROW_CAP,
+            "every overlapping session must be reconciled, not one page of {REBUILD_PAGE_SIZE}",
+        );
     }
 
     #[tokio::test]
