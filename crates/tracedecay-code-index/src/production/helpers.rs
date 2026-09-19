@@ -1246,7 +1246,15 @@ fn rust_export_resolves_to_target<T>(
 where
     T: AsRef<FileGenerationArtifactsV1>,
 {
-    if !visited.insert((scope_index, format!("{exported_name}{member}"))) {
+    // A hop is marked only when it recurses, so the miss path allocates
+    // nothing; a hop that did not recurse cannot be on the path back to
+    // itself.
+    if visited.iter().any(|(index, key)| {
+        *index == scope_index
+            && key.len() == exported_name.len() + member.len()
+            && key.starts_with(exported_name)
+            && key.ends_with(member)
+    }) {
         return false;
     }
     let root_path = &files[origin_index].as_ref().authority.logical_path;
@@ -1263,26 +1271,26 @@ where
     let Some(scope_module) = rust_file_module(relative_scope) else {
         return false;
     };
-    let scope_qualified_type = if scope_module.is_empty() {
-        exported_name.to_owned()
-    } else {
-        format!("{}::{exported_name}", scope_module.replace('/', "::"))
-    };
-    let qualified = format!("{scope_qualified_type}{member}");
     let target_path = &files[target.index].as_ref().authority.logical_path;
-    if (target.index == scope_index
-        && rust_crate_qualified_name_matches(
+    let direct = target.index == scope_index && {
+        let qualified = format!(
+            "{}{member}",
+            rust_scope_qualified_name(scope_module, exported_name)
+        );
+        rust_crate_qualified_name_matches(
             &qualified,
             root_path,
             target_path,
             &target.symbol.qualified_name,
-        ))
+        )
+    };
+    if direct
         || rust_inherent_method_owned_by_scope_type(
             files,
             rust,
             origin_index,
             scope_index,
-            &scope_qualified_type,
+            scope_module,
             exported_name,
             member,
             target,
@@ -1304,20 +1312,33 @@ where
                 ImportModuleKindV1::BareModule => {
                     rust_bare_import_matches(files, rust, access_index, binding, target, member)
                 }
-                ImportModuleKindV1::ProjectRelative => rust_project_import_resolves_to_target(
-                    files,
-                    rust,
-                    origin_index,
-                    access_index,
-                    scope_path,
-                    binding,
-                    target,
-                    member,
-                    visited,
-                ),
+                ImportModuleKindV1::ProjectRelative => {
+                    visited.insert((scope_index, format!("{exported_name}{member}")));
+                    rust_project_import_resolves_to_target(
+                        files,
+                        rust,
+                        origin_index,
+                        access_index,
+                        scope_path,
+                        binding,
+                        target,
+                        member,
+                        visited,
+                    )
+                }
             },
             _ => false,
         }
+    }
+}
+
+/// The crate-relative path of `exported_name` defined in the module file
+/// `scope_module` (`""` for the crate root).
+fn rust_scope_qualified_name(scope_module: &str, exported_name: &str) -> String {
+    if scope_module.is_empty() {
+        exported_name.to_owned()
+    } else {
+        format!("{}::{exported_name}", scope_module.replace('/', "::"))
     }
 }
 
@@ -1519,8 +1540,8 @@ fn file_qualified_name_matches(
         == Some(symbol_path)
 }
 
-/// A `Type::method` whose owning type is defined in `scope_index` (as
-/// `scope_qualified_type`, the type's crate-relative path) may live in any
+/// A `Type::method` whose owning type is defined in `scope_index` (the
+/// module file `scope_module`, `""` for the crate root) may live in any
 /// other file of the same crate, either an inherent `impl Type` or a unique
 /// `impl Trait for Type` whose UFCS name still answers the type-path call.
 /// Validate the type at scope, match the method by its file-relative
@@ -1535,7 +1556,7 @@ fn rust_inherent_method_owned_by_scope_type<T>(
     rust: &RustFileIndexV1,
     origin_index: usize,
     scope_index: usize,
-    scope_qualified_type: &str,
+    scope_module: &str,
     exported_name: &str,
     member: &str,
     target: RustSymbolTargetV1<'_>,
@@ -1566,10 +1587,11 @@ where
         return false;
     }
     let scope = files[scope_index].as_ref();
+    let scope_qualified_type = rust_scope_qualified_name(scope_module, exported_name);
     let Some(scope_type) = scope.artifacts.symbols.iter().find(|symbol| {
         relation_target_kind_is_compatible(RelationEdgeKindV1::TypeOf, &symbol.kind)
             && rust_crate_qualified_name_matches(
-                scope_qualified_type,
+                &scope_qualified_type,
                 root_path,
                 &scope.authority.logical_path,
                 &symbol.qualified_name,
