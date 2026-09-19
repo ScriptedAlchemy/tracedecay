@@ -210,10 +210,15 @@ impl StaticLanguageRegistry {
             // the owning type. Every language moved one revision when clone-body
             // eligibility gained its token bound and again when it gained the
             // pre-tokenization byte bound: one multi-megabyte literal is only
-            // a few tokens but still cannot fit a text-artifact page. Only
-            // re-extraction removes the poisoned record.
+            // a few tokens but still cannot fit a text-artifact page. Rust v11
+            // stopped emitting the bare method name of a dotted call, so an
+            // unrelated same-file callable sharing that name is no longer a
+            // caller, and types `self` through the enclosing impl or trait.
+            // Rust v12 resolves a receiver whose type is a type parameter with
+            // one trait bound to `Trait::method`, so that call now has a
+            // callee. Only re-extraction removes the poisoned record.
             let extractor_revision = if language == "rust" {
-                10
+                12
             } else if matches!(language.as_str(), "typescript" | "protobuf" | "sql") {
                 6
             } else {
@@ -418,7 +423,7 @@ mod tests {
         assert!(rust.stable_member_spans);
         assert!(rust.capabilities.extraction);
         assert_eq!(rust.root_markers, vec!["Cargo.toml".to_owned()]);
-        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v10");
+        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v12");
 
         assert_eq!(
             registry

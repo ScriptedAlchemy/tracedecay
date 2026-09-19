@@ -65,7 +65,8 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     let (cg, _env) = init_test_project(dir.path()).await;
     let full_text = format!("orchard dispatch {}", "external-payload-body ".repeat(220));
     let projection =
-        seed_temporal_lcm_session_message(&cg, "lcm-session", "lcm-message", full_text, 1).await;
+        seed_temporal_lcm_session_message(&cg, "lcm-session", "lcm-message", full_text.clone(), 1)
+            .await;
     let temporal_db = open_active_project_session_db(&cg).await;
     activate_test_temporal_generation(&temporal_db, "lcm-session", vec![projection]).await;
     let db = open_active_project_session_db(&cg).await;
@@ -286,10 +287,21 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         "{described_payload}"
     );
     assert_eq!(described_payload["description"]["raw_message_count"], 1);
+    let preview = described_payload["description"]["raw_messages"][0]["content_preview"]
+        .as_str()
+        .expect("describe preview");
     assert!(
-        described_payload["description"]["raw_messages"][0]
-            .get("content_preview")
-            .is_some()
+        preview.starts_with("orchard dispatch"),
+        "describe returned an empty preview: {preview:?}"
+    );
+    assert!(
+        preview.chars().count() < full_text.chars().count(),
+        "describe echoed the full payload body"
+    );
+    assert_eq!(
+        described_payload["description"]["raw_messages"][0]["content_range"]["total_chars"],
+        full_text.chars().count() as u64,
+        "describe must name the captured message length, not the preview stub"
     );
     assert!(
         described_payload["description"]["raw_messages"][0]
@@ -742,9 +754,12 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
         payload_payload["description"]["external_payload"]["payload_ref"],
         payload_ref
     );
-    assert_eq!(
-        payload_payload["description"]["external_payload"]["content_preview"],
-        ""
+    let payload_preview = payload_payload["description"]["external_payload"]["content_preview"]
+        .as_str()
+        .unwrap_or_else(|| panic!("payload describe preview missing: {payload_payload}"));
+    assert!(
+        payload_preview.contains(payload_ref.as_str()),
+        "payload describe must return the stored placeholder: {payload_preview:?}"
     );
     assert_eq!(payload_payload["grain"], "occurrence");
     assert_eq!(payload_payload["state"], "available");

@@ -23,8 +23,8 @@ pub async fn handle_hotspots(
         let mut incoming = HashMap::<SymbolOccurrenceId, u64>::new();
         let mut outgoing = HashMap::<SymbolOccurrenceId, u64>::new();
         for edge in edges {
-            *outgoing.entry(edge.edge.from_occurrence).or_default() += 1;
-            *incoming.entry(edge.edge.to_occurrence).or_default() += 1;
+            *outgoing.entry(edge.from_occurrence).or_default() += 1;
+            *incoming.entry(edge.to_occurrence).or_default() += 1;
         }
         symbols.sort_by(|left, right| {
             let left_total = incoming

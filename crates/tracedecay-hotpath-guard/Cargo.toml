@@ -1,0 +1,29 @@
+[package]
+name = "tracedecay-hotpath-guard"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+description = "Process-boundary Hotpath display limit for the shipped binary"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[lib]
+doctest = false
+
+[features]
+# Same activation as the shipped binary: the runtime crate stays crates.io
+# hotpath. `hotpath-mcp` is only so the live-query proof can start the server.
+hotpath = ["hotpath/hotpath"]
+hotpath-mcp = ["hotpath", "hotpath/hotpath-mcp"]
+
+[dependencies]
+hotpath.workspace = true
+
+[dev-dependencies]
+hotpath.workspace = true
+serde_json = "1"
+
+[[test]]
+name = "functions_limit_live"
+path = "tests/functions_limit_live.rs"
+required-features = ["hotpath", "hotpath-mcp"]

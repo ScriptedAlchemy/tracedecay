@@ -633,6 +633,34 @@ pub(super) async fn apply_session(
     }
 }
 
+/// Aligns a provenance-owned raw twin onto the projection's session before
+/// the content upsert.
+///
+/// The ingest upsert refuses a row whose `session_id` differs, so a drifted
+/// twin blocks the rewrite that uniquely owned current provenance authorizes.
+/// `(provider, message_id)` is that ownership key; `session_id` is a field of
+/// the twin, not a second owner. Callers reach this only after that ownership
+/// is already proven (an existing projected message, or released-rendering
+/// convergence). A first insert of an unowned identity must not adopt a
+/// foreign twin and does not call this.
+async fn adopt_owned_projection_raw_session(
+    conn: &impl Executor,
+    message: &SessionMessageRecord,
+) -> ProjectionStoreResult<()> {
+    conn.execute(
+        "UPDATE lcm_raw_messages SET session_id = ?3
+         WHERE provider = ?1 AND message_id = ?2 AND session_id <> ?3",
+        params![
+            message.provider.as_str(),
+            message.message_id.as_str(),
+            message.session_id.as_str(),
+        ],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| storage("adopt projection raw session", error))
+}
+
 /// Writes the projection-derived raw row through the canonical LCM raw
 /// authority so it carries the content-bound sanitization receipt that
 /// hydration requires; a receipt-less raw row is unreadable, not raw storage.
@@ -820,13 +848,14 @@ pub(in super::super) enum ConvergedRendering {
 /// deterministic rendering, keeping the historical `message_created` flag the
 /// releases wrote.
 ///
-/// Reached only from the authority audit, which has already proven the stored
-/// provenance row is the digest of the output row this store holds, the
-/// rendering a release wrote, rather than a row disagreeing with its own
-/// output. The message row and its LCM raw twin are pure derivations of the
-/// durable observation, so rewriting them loses nothing; the digest is
-/// re-stamped last so an interrupted transaction leaves the released pairing
-/// intact.
+/// Reached only from the authority audit, which has already admitted the row
+/// as a shipped rendering: provenance still carries the digest of the output
+/// this store holds, or it carries this binary's digest while the mutable row
+/// is still that shipped rendering. A row that matches neither is refused
+/// before this write. The message row and its LCM raw twin are pure
+/// derivations of the durable observation, so rewriting them loses nothing;
+/// the digest is re-stamped last so an interrupted transaction leaves the
+/// released pairing intact.
 ///
 /// When the LCM privacy sanitizer withholds this binary's rendering, that
 /// verdict *is* the current rendering: the output is retired to the disposition
@@ -844,6 +873,7 @@ pub(in super::super) async fn converge_released_output_rendering(
     let message = projection.message();
     supersede_projected_message(conn, message).await?;
     if message.provider != "hermes" {
+        adopt_owned_projection_raw_session(conn, message).await?;
         match upsert_projected_raw_message(conn, message).await {
             Ok(()) => {}
             Err(ProjectionStoreError::SanitizationRefused {
@@ -1022,6 +1052,13 @@ async fn apply_rows(
         }
     };
     if projected_message.provider != "hermes" && !preserve_protected_payload {
+        // Message-row presence is not projector ownership. An equal
+        // pre-existing row with no output state is retained without this
+        // projector ever having claimed the output, so its twin keeps the
+        // upsert's session guard and a disagreement stays a typed refusal.
+        if state.is_some_and(|state| state.projector_owned) {
+            adopt_owned_projection_raw_session(conn, projected_message).await?;
+        }
         upsert_projected_raw_message(conn, projected_message).await?;
     }
     Ok(transition == MessageTransition::Insert)

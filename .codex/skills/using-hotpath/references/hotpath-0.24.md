@@ -161,6 +161,8 @@ val_logs              {"debug_id": 3}
 
 Hotpath 0.24 detail calls accept IDs, not names, and have no per-call `limit`. Retention is controlled globally by `HOTPATH_LOGS_LIMIT`.
 
+Published hotpath 0.24 applies `HOTPATH_FUNCTIONS_LIMIT`, else `HOTPATH_LIMIT`, when the exit report is built. Live `functions_timing` and `functions_alloc` use the builder limit captured at guard start. The shipped `tracedecay` process copies that environment onto the builder before the server starts, so a limit set for the process is what those tools return. Setting the variable after the process is already running does not resize the worker.
+
 Recommended order:
 
 1. `profiler_status`.

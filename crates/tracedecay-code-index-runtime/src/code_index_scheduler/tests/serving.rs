@@ -853,6 +853,177 @@ fn clone_successor_keeps_lexical_owners_ready_and_cas_replaces_v14() {
     assert_eq!(v16_revision, 16);
 }
 
+/// Exact and lexical readiness is not the clone-successor copy.
+///
+/// The publication advance that installs those owners used to call
+/// `begin_clone_successor` before returning, and that call copies the whole
+/// prior lexical artifact. The freshness receipt awaits that advance, so
+/// status stayed non-current for the copy. The successor must still be
+/// reported as backfill, and the next advance is what writes its staging file.
+#[test]
+fn lexical_readiness_leaves_the_clone_successor_uncopied() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn alpha() { one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    while !latest.query_owners_are_ready() {
+        latest.advance_text_serving(1).expect("advance V14 build");
+    }
+    let tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Backfilling {
+        observation,
+    } = latest.clone_index_status(false, None)
+    else {
+        panic!(
+            "a generation without clone fingerprints must report backfill once lexical owners serve, got {:?}",
+            latest.clone_index_status(false, None)
+        );
+    };
+    assert_eq!(observation.coverage.completed_source_pages, 0);
+    assert!(
+        observation.coverage.total_source_pages > 0,
+        "the pending successor must name the sealed page count it has not visited"
+    );
+    // Status falls back to the published artifact's bytes when the successor
+    // has not created a staging file, so the bytes field cannot prove the
+    // copy stayed off this advance. The slot and the artifacts directory can.
+    assert!(
+        matches!(
+            &*latest.text_projection_build.lock_slot(),
+            super::super::CodeTextProjectionSlotV1::CloneSuccessorPending
+        ),
+        "owner readiness must leave the successor pending"
+    );
+    let staging_names = |root: &std::path::Path| {
+        std::fs::read_dir(code_text_artifacts_root(root))
+            .expect("artifacts root")
+            .map(|entry| entry.expect("artifact entry").file_name())
+            .filter(|name| name.to_string_lossy().ends_with(".staging"))
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        staging_names(store.path()).is_empty(),
+        "owner readiness copied the prior lexical artifact: {:?}",
+        staging_names(store.path())
+    );
+
+    latest
+        .advance_text_serving(1)
+        .expect("the retained successor advance copies the prior artifact");
+    assert!(latest.query_owners_are_ready());
+    assert!(
+        !matches!(
+            &*latest.text_projection_build.lock_slot(),
+            super::super::CodeTextProjectionSlotV1::CloneSuccessorPending
+        ),
+        "the next advance must take the pending successor"
+    );
+
+    while latest.text_projection_needs_work() {
+        latest
+            .advance_text_serving(16)
+            .expect("finish clone successor");
+    }
+    let revision: i64 = rusqlite::Connection::open(active_text_artifact_path(store.path()))
+        .expect("open finished artifact")
+        .query_row(
+            "SELECT format_revision FROM artifact_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read finished revision");
+    assert_eq!(revision, 16);
+}
+
+/// Only one wake at a time may own a head-open claim.
+///
+/// `open_published_text_artifact` used to park `CloneSuccessorPending`
+/// before `begin_clone_successor` copied the whole prior artifact, and
+/// `advance_artifact_text_serving` leaves its park loop on that state. A
+/// concurrent wake took a second `HeadOpening` on top of the first open,
+/// both drove the same staging database, and whichever open resolved second
+/// found the slot already reset and refused with `clone-successor retry
+/// requires an active head-open claim`. The clone lanes report that refusal
+/// as a non-retryable `search_failed`.
+#[test]
+fn concurrent_wakes_never_overlap_the_clone_successor_head_open() {
+    let sources = (0..24)
+        .map(|index| {
+            (
+                format!("src/module_{index}.rs"),
+                format!(
+                    "pub fn alpha_{index}() {{ one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }}\npub fn beta_{index}() {{ one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }}\n"
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    let files = sources
+        .iter()
+        .map(|(path, contents)| (path.as_str(), contents.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&files);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    while !latest.query_owners_are_ready() {
+        latest
+            .advance_text_serving(1)
+            .expect("advance lexical build");
+    }
+    assert!(
+        matches!(
+            &*latest.text_projection_build.lock_slot(),
+            super::super::CodeTextProjectionSlotV1::CloneSuccessorPending
+        ),
+        "the successor must still be owed when the wakes start"
+    );
+
+    let workers = (0..4)
+        .map(|_| {
+            let latest = latest.clone();
+            thread::spawn(move || {
+                let mut advances = 0_usize;
+                while latest.text_projection_needs_work() && advances < 400 {
+                    latest.advance_text_serving(1)?;
+                    advances += 1;
+                }
+                Ok(())
+            })
+        })
+        .collect::<Vec<_>>();
+    for worker in workers {
+        worker
+            .join()
+            .expect("wake thread joins")
+            .unwrap_or_else(|error: RetrievalPortError| {
+                panic!("a concurrent wake failed the text projection: {error}")
+            });
+    }
+
+    assert!(!latest.text_projection_needs_work());
+    let revision: i64 = rusqlite::Connection::open(active_text_artifact_path(store.path()))
+        .expect("open finished artifact")
+        .query_row(
+            "SELECT format_revision FROM artifact_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read finished revision");
+    assert_eq!(revision, 16, "the clone successor must have sealed");
+}
+
 #[test]
 fn clone_status_distinguishes_unavailable_backfill_partial_ready_and_stale() {
     let fixture = GitFixture::new(&[(
@@ -4148,6 +4319,30 @@ async fn root_graph_ready_does_not_depend_on_the_publication_decode_cache() {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .hold_active_decode();
 
+    // `waiter_count` counts every task parked on this store's active decode,
+    // not this call's. The owner's settle pass decodes the active generation
+    // inside graph prepare and drops its reconcile-pass guard before it gets
+    // there, so no admission or quiescence helper can fence it out of the
+    // hold, and against a bare `== 0` its park reads as a readiness park.
+    //
+    // Park the owner first and take its count as the floor instead. A park
+    // cannot end while the hold is up and the owner is blocked in the step it
+    // parked in, so every later rise is a readiness call joining the flight.
+    registry.request_complete_generation(fixture.path()).await;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let parked_owner = loop {
+        let parked = held_decode.waiter_count();
+        if parked > 0 {
+            break parked;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "the owner's settle pass never reached the held decode, so its park \
+             cannot be sequenced ahead of the readiness calls"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    };
+
     let ready = tokio::time::timeout(
         Duration::from_secs(30),
         registry.latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope),
@@ -4162,7 +4357,7 @@ async fn root_graph_ready_does_not_depend_on_the_publication_decode_cache() {
     );
     assert_eq!(
         held_decode.waiter_count(),
-        0,
+        parked_owner,
         "root graph readiness must not join the publication decode flight"
     );
 
@@ -4180,7 +4375,7 @@ async fn root_graph_ready_does_not_depend_on_the_publication_decode_cache() {
     );
     assert_eq!(
         held_decode.waiter_count(),
-        0,
+        parked_owner,
         "scope query readiness must not join the publication decode flight"
     );
 

@@ -495,7 +495,7 @@ struct RunningDashboard {
     addr: std::net::SocketAddr,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<Result<()>>,
-    completed: Arc<tokio::sync::Notify>,
+    completed: Arc<tokio::sync::Semaphore>,
 }
 
 impl RunningDashboard {
@@ -506,11 +506,20 @@ impl RunningDashboard {
     }
 }
 
-struct DashboardTaskCompletion(Arc<tokio::sync::Notify>);
+/// Closes [`RunningDashboard::completed`] when the serving task's body is
+/// dropped, whether it returned or was cancelled.
+///
+/// The signal is level triggered on purpose. A `Notify::notify_waiters` only
+/// wakes the waiters already registered, and the drop runs strictly before
+/// the runtime marks the `JoinHandle` finished, so a stop that registered in
+/// between observed neither the wake nor `is_finished` and then slept until
+/// its deadline. A closed semaphore is observable by every later waiter:
+/// `is_closed` reports it synchronously and `acquire` resolves at once.
+struct DashboardTaskCompletion(Arc<tokio::sync::Semaphore>);
 
 impl Drop for DashboardTaskCompletion {
     fn drop(&mut self) {
-        self.0.notify_waiters();
+        self.0.close();
     }
 }
 
@@ -532,7 +541,7 @@ async fn take_finished_dashboard_for(project_root: &Path) -> Option<RunningDashb
     let mut manager = get_manager().lock().await;
     if manager
         .get(project_root)
-        .is_some_and(|dashboard| dashboard.task.is_finished())
+        .is_some_and(|dashboard| dashboard.completed.is_closed())
     {
         manager.remove(project_root)
     } else {
@@ -584,19 +593,13 @@ pub(crate) async fn shutdown_dashboard_for_until(
             };
             Arc::clone(&dashboard.completed)
         };
-        let notified = completed.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        if let Some(dashboard) = take_finished_dashboard_for(project_root).await {
-            return join_dashboard(dashboard, exceeded_deadline).await;
-        }
         if exceeded_deadline {
-            notified.as_mut().await;
+            let _ = completed.acquire().await;
             continue;
         }
         tokio::select! {
             biased;
-            () = notified.as_mut() => {}
+            _ = completed.acquire() => {}
             () = tokio::time::sleep_until(deadline) => {
                 let mut manager = get_manager().lock().await;
                 if let Some(dashboard) = manager.get_mut(project_root) {
@@ -985,7 +988,7 @@ pub(super) async fn handle_dashboard(
             let url = format!("http://{addr}/");
 
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-            let completed = Arc::new(tokio::sync::Notify::new());
+            let completed = Arc::new(tokio::sync::Semaphore::new(0));
             let task_completion = DashboardTaskCompletion(Arc::clone(&completed));
             let task = tokio::spawn(async move {
                 let _completion = task_completion;

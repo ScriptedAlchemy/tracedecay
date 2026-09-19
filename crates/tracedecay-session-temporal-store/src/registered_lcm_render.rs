@@ -304,38 +304,62 @@ async fn raw_message_overviews(
     provider: &str,
     session_id: &str,
 ) -> Result<Vec<LcmRawMessageOverview>, LcmError> {
+    // The snippet is the bounded preview. `total_chars` is the message's own
+    // length: an external payload's recorded char count, otherwise the stored
+    // content. Using the snippet length here described a stub, which is how a
+    // session that expand can read came back empty.
+    let preview_cap = i64::try_from(tracedecay_lcm::MAX_DERIVED_SNIPPET_CHARS)
+        .map_err(|_| LcmError::Db("snippet preview cap does not fit i64".to_string()))?;
     let mut rows = query(
         snapshot,
-        "SELECT message_id, store_id, role, storage_kind, payload_ref,
-                LENGTH(snippet_text)
-         FROM lcm_raw_messages
-         WHERE provider = ?1 AND session_id = ?2
-         ORDER BY store_id
+        "SELECT raw.message_id, raw.store_id, raw.role, raw.storage_kind, raw.payload_ref,
+                CASE
+                    WHEN raw.snippet_text <> '' THEN raw.snippet_text
+                    ELSE substr(COALESCE(raw.content, ''), 1, ?3)
+                END,
+                COALESCE(
+                    (SELECT payload.char_count
+                       FROM lcm_external_payloads AS payload
+                      WHERE payload.payload_ref = raw.payload_ref),
+                    length(raw.content),
+                    length(raw.snippet_text),
+                    0
+                )
+         FROM lcm_raw_messages AS raw
+         WHERE raw.provider = ?1 AND raw.session_id = ?2
+         ORDER BY raw.store_id
          LIMIT 20",
-        params![provider, session_id],
+        params![provider, session_id, preview_cap],
     )
     .await?;
     let mut out = Vec::new();
     while let Some(row) = next_row(&mut rows).await? {
         let storage_kind_text: String = field!(&row, 3)?;
-        let total_chars = field!(&row, 5, i64)?.max(0) as u64;
+        let content_preview: String = field!(&row, 5)?;
+        let total_chars = field!(&row, 6, i64)?.max(0) as u64;
         out.push(LcmRawMessageOverview {
             message_id: field!(&row, 0)?,
             store_id: field!(&row, 1)?,
             role: field!(&row, 2)?,
             storage_kind: storage_kind(&storage_kind_text)?,
             payload_ref: field!(&row, 4)?,
-            content_preview: String::new(),
-            content_range: LcmContentRange {
-                offset: 0,
-                limit: 0,
-                returned_chars: 0,
-                total_chars,
-                truncated: total_chars > 0,
-            },
+            content_range: preview_range(&content_preview, total_chars),
+            content_preview,
         });
     }
     Ok(out)
+}
+
+fn preview_range(preview: &str, total_chars: u64) -> LcmContentRange {
+    let returned_chars = preview.chars().count() as u64;
+    let total_chars = total_chars.max(returned_chars);
+    LcmContentRange {
+        offset: 0,
+        limit: returned_chars,
+        returned_chars,
+        total_chars,
+        truncated: returned_chars < total_chars,
+    }
 }
 
 async fn summary_overviews(
@@ -346,7 +370,7 @@ async fn summary_overviews(
 ) -> Result<Vec<LcmSummaryNodeOverview>, LcmError> {
     let mut rows = query(
         snapshot,
-        "SELECT node_id, conversation_id, depth, created_at
+        "SELECT node_id, conversation_id, depth, summary_text, created_at
          FROM lcm_summary_nodes
          WHERE provider = ?1 AND session_id = ?2
          ORDER BY depth, created_at, node_id
@@ -357,14 +381,17 @@ async fn summary_overviews(
     let mut out = Vec::new();
     while let Some(row) = next_row(&mut rows).await? {
         let node_id: String = field!(&row, 0)?;
+        let summary_text: String = field!(&row, 3)?;
         let source_count = relation(relations, &node_id)?.sources.len();
         out.push(LcmSummaryNodeOverview {
             node_id,
             conversation_id: field!(&row, 1)?,
             depth: field!(&row, 2)?,
-            summary_preview: String::new(),
+            summary_preview: tracedecay_lcm::retrieval_content::derived_text_for_snippet(
+                &summary_text,
+            ),
             source_count,
-            created_at: field!(&row, 3)?,
+            created_at: field!(&row, 4)?,
         });
     }
     Ok(out)
@@ -489,6 +516,14 @@ async fn describe_external_payload(
     if payload.provider != provider || payload.session_id != session_id {
         return Err(LcmError::PayloadNotFound);
     }
+    let content_preview = external_payload_preview(
+        snapshot,
+        provider,
+        session_id,
+        &payload.message_id,
+        payload_ref,
+    )
+    .await?;
     Ok(LcmDescribeExternalPayload {
         payload_ref: payload.payload_ref,
         provider: payload.provider,
@@ -500,8 +535,33 @@ async fn describe_external_payload(
         char_count: payload.char_count,
         created_at: payload.created_at,
         metadata_json: payload.metadata_json,
-        content_preview: String::new(),
+        content_preview,
     })
+}
+
+async fn external_payload_preview(
+    snapshot: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: &str,
+    message_id: &str,
+    payload_ref: &str,
+) -> Result<String, LcmError> {
+    let mut rows = query(
+        snapshot,
+        "SELECT snippet_text
+         FROM lcm_raw_messages
+         WHERE provider = ?1
+           AND session_id = ?2
+           AND message_id = ?3
+           AND payload_ref = ?4
+         LIMIT 1",
+        params![provider, session_id, message_id, payload_ref],
+    )
+    .await?;
+    if let Some(row) = next_row(&mut rows).await? {
+        return field!(&row, 0);
+    }
+    Ok(format!("[externalized payload ref={payload_ref}]"))
 }
 
 /// Loads the raw row a directly requested `store_id` names, refusing when it is

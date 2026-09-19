@@ -38,8 +38,9 @@ fn baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples() {
     .expect("generate direct fixture outputs");
     let report = evaluate_generated_outputs(repo_root, workload, &generated)
         .expect("evaluate direct fixture outputs");
-    // Production retrieval changes must land with a re-pinned workload; the
-    // pin is what turns a silent ranking change into a visible one.
+    // A ranking change must move the receipt. A generation reseal must not:
+    // the receipt hashes ordered rows and lane coverage, not the sealed
+    // generation those rows were bound under.
     for profile in &report.profiles {
         let observed = generated
             .outputs
@@ -56,11 +57,12 @@ fn baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples() {
             .unwrap_or_else(|| "no generated output for this profile".to_owned());
         assert!(
             profile.fallback_matches_expected,
-            "{}:{} query fallback digest drifted from \
+            "{}:{} ranking receipt drifted from \
              `expected_query_fallback_digests.{}` in \
-             tests/fixtures/search_quality/query-lexical-graph-workload-v1.json \
-             ({observed}). Confirm the new query results are intended, then re-pin \
-             the packaged workload, packaged::WORKLOAD_SHA256, and the workload digest pins.",
+             crates/tracedecay-query/assets/runtime-root/tests/fixtures/search_quality/query-lexical-graph-workload-v1.json \
+             ({observed}). The receipt binds ordered ranking rows and lane coverage, \
+             not generation or extractor-revision identity. Re-pin only that receipt \
+             when the ranking itself changed; do not touch the workload identity pin.",
             profile.profile_id, profile.partition, profile.partition
         );
     }

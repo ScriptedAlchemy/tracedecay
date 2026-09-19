@@ -1710,6 +1710,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- *(admission)* `NotApplicable` is a terminal no-op in the shared replay-pass
+  decision. A closed status that leaves the spool unchanged now stops until
+  the next kick instead of entering the retryable backoff arm.
+
 - *(code-index)* the background worker consults the typed publication-authority
   park instead of a loop-local bool, so a park it has not yet observed still
   stops reconcile. Branch publication handles `NotApplicable` as a closed

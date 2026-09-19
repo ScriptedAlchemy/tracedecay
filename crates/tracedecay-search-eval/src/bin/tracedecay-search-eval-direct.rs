@@ -239,14 +239,15 @@ mod tests {
     }
 
     #[test]
-    fn default_validation_uses_the_byte_pinned_packaged_workload() {
+    fn default_validation_binds_the_packaged_workload_identity() {
         let summary = validate_requested_workload(std::path::Path::new("."), None)
             .expect("packaged workload validates");
 
         assert_eq!(summary.status, DirectEvaluationStatusV1::Pass);
         assert_eq!(
             summary.workload_digest,
-            "sha256:8657aa486a4c58e17c9969c7aa5d143a4d30e88dca7d26f13e61c7d3effab091"
+            tracedecay_query::search_quality::packaged::WORKLOAD_SHA256,
+            "validate must return the packaged workload identity, not a second pin"
         );
         assert_eq!(summary.profile_count, 1);
         assert_eq!(summary.query_count, 67);

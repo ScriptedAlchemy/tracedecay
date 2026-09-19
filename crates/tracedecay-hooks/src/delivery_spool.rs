@@ -17,7 +17,8 @@ use tracedecay_domain::{
     canonical_json_bytes, canonical_sha256, sha256_hex_suffix,
 };
 use tracedecay_private_fs::framed_log::{
-    DirectorySyncPolicy, atomic_write, read_bounded, sync_directory, validate_regular_or_missing,
+    DirectorySyncPolicy, atomic_write, is_owned_temporary_name, read_bounded,
+    remove_abandoned_temporaries, sync_directory, validate_regular_or_missing,
 };
 
 const MAX_PENDING_RECEIPTS: usize = 1_024;
@@ -187,6 +188,10 @@ impl HookDeliveryReceiptSpoolV1 {
             }
         }
         let spool = Self { root, _lock: lock };
+        // The lock is held now, so every staging temporary still in the root
+        // was abandoned by a killed publisher rather than owned by a live one.
+        remove_abandoned_temporaries(&spool.root, DIRECTORY_POLICY)
+            .map_err(|_| HookDeliverySpoolError::Io)?;
         spool.receipt_paths()?;
         Ok(spool)
     }
@@ -306,7 +311,7 @@ impl HookDeliveryReceiptSpoolV1 {
                 .file_name()
                 .into_string()
                 .map_err(|_| HookDeliverySpoolError::UnsafePath)?;
-            if name == LOCK_FILE {
+            if name == LOCK_FILE || is_owned_temporary_name(&name) {
                 continue;
             }
             if !valid_receipt_name(&name)

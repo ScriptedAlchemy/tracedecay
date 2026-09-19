@@ -83,6 +83,51 @@ async fn production_codex_message_search(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
 ) -> Value {
+    // A `partial` generation is the store saying "still converging", the same
+    // not-ready contract as `stale`: re-read it. Every other outcome answers
+    // now, so an empty `complete_zero` still fails the assertions below.
+    let payload = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let payload = production_codex_message_search_once(harness, project).await;
+            if payload["outcome"] != "partial"
+                || payload["results"]
+                    .as_array()
+                    .is_some_and(|results| !results.is_empty())
+            {
+                break payload;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("production Codex message search convergence deadline");
+    assert!(
+        payload["results"].as_array().is_some_and(|results| {
+            results.iter().any(|result| {
+                result["message"]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("cobalt orchard scheduler migration"))
+            })
+        }),
+        "production Codex message search was empty after completed ingest: {payload}"
+    );
+    assert!(
+        payload["results"].as_array().is_some_and(|results| {
+            results.iter().any(|result| {
+                result["message"]["text"].as_str()
+                    == Some("The cobalt orchard scheduler migration is ready for review")
+            })
+        }),
+        "production Codex message search did not hydrate the exact assistant message: {payload}"
+    );
+    payload
+}
+
+#[cfg(feature = "test-transport")]
+async fn production_codex_message_search_once(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+) -> Value {
     let response = harness
         .call_tool(
             project,
@@ -108,30 +153,10 @@ async fn production_codex_message_search(
     .expect("production message search JSON");
     // Retained tools respond with the full evidence envelope; the search
     // payload the assertions consume lives under `outcome.value.payload`.
-    let payload = envelope
+    envelope
         .pointer("/outcome/value/payload")
         .cloned()
-        .unwrap_or(envelope);
-    assert!(
-        payload["results"].as_array().is_some_and(|results| {
-            results.iter().any(|result| {
-                result["message"]["text"]
-                    .as_str()
-                    .is_some_and(|text| text.contains("cobalt orchard scheduler migration"))
-            })
-        }),
-        "production Codex message search was empty after completed ingest: {payload}"
-    );
-    assert!(
-        payload["results"].as_array().is_some_and(|results| {
-            results.iter().any(|result| {
-                result["message"]["text"].as_str()
-                    == Some("The cobalt orchard scheduler migration is ready for review")
-            })
-        }),
-        "production Codex message search did not hydrate the exact assistant message: {payload}"
-    );
-    payload
+        .unwrap_or(envelope)
 }
 
 #[cfg(feature = "test-transport")]
@@ -648,6 +673,39 @@ async fn production_codex_hook_ingest_survives_message_search_reopen() {
     assert_eq!(
         expanded["expansion"]["raw_message"]["message_id"], message_id,
         "{expanded}"
+    );
+    let described = call_production_tool(
+        &harness,
+        &project,
+        "tracedecay_lcm_describe",
+        json!({
+            "provider": "codex",
+            "session_id": session_id,
+            "target": {"kind": "session"},
+            "format": "json"
+        }),
+    )
+    .await;
+    let captured = "Find the cobalt orchard scheduler migration";
+    let overview = described["description"]["raw_messages"]
+        .as_array()
+        .and_then(|messages| {
+            messages
+                .iter()
+                .find(|message| message["message_id"] == message_id)
+        })
+        .unwrap_or_else(|| panic!("describe omitted the captured prompt: {described}"));
+    assert_eq!(
+        overview["content_range"]["total_chars"],
+        captured.chars().count() as u64,
+        "{overview}"
+    );
+    let preview = overview["content_preview"]
+        .as_str()
+        .unwrap_or_else(|| panic!("describe preview missing: {overview}"));
+    assert!(
+        preview.contains("cobalt orchard"),
+        "describe preview was empty: {preview:?}"
     );
 
     harness.shutdown().await;

@@ -2,9 +2,11 @@ use std::collections::{BTreeSet, HashMap};
 
 use futures_util::future::try_join_all;
 use tracedecay_domain::DurableObservationV1;
+use tracedecay_privacy::sanitize_lcm_payload_text;
 use tracedecay_store::{
     ObservationProjection, ProjectionSkipReason, ProjectionStoreError,
     SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageProjection, WorkflowFactProjection,
+    stored_message_is_shipped_release_rendering,
 };
 
 use crate::observation_projection::{ProjectionOutputAuthority, ProjectionRowsBatch};
@@ -816,32 +818,49 @@ async fn validate_message_projection_row(
     )? == StoredProvenanceRendering::Current
     {
         // Convergence supersedes an existing output row; it never inserts one.
-        // Both repair arms below therefore require the row to be there: a
-        // vanished output stays the hard failure #1775 and #1781 both promised,
-        // instead of a recorded repair that writes nothing. The batch also
-        // derives its session keys from the message rows it found, so a missing
-        // message is reported as a missing *session* row, which is why this
-        // guard has to cover the session arm too.
+        // A vanished message stays a hard failure. Session repair is only the
+        // uniquely owned current output whose session row is absent.
         let owner_message = owner_projection.message();
         let output_row_present = resolved
             .projection_rows
             .message(&owner_message.provider, &owner_message.message_id)
             .is_some();
         match verify_owner_output_rows(conn, resolved, &owner_projection).await {
-            Ok(()) => {}
+            Ok(()) => {
+                // Message equality is not the whole output. The raw twin is
+                // derived from the same observation and is not covered by the
+                // digest, so a matching message can still sit on a stale twin.
+                // Protected rows are not this arm: their stored message differs
+                // from the projection, and that compatibility already checked
+                // the twin.
+                if resolved
+                    .projection_rows
+                    .message(&owner_message.provider, &owner_message.message_id)
+                    .is_some_and(|stored| stored == owner_message)
+                    && owned_raw_twin_needs_rewrite(&owner_projection, &resolved.projection_rows)?
+                {
+                    resolved.released.record(&owner_projection);
+                }
+            }
             Err(ProjectionStoreError::OutputCollision {
                 provider,
                 message_id,
             }) if output_row_present
                 && provider == owner_projection.message().provider
-                && message_id == owner_projection.message().message_id =>
+                && message_id == owner_projection.message().message_id
+                && resolved
+                    .projection_rows
+                    .message(&provider, &message_id)
+                    .is_some_and(|stored| {
+                        stored_message_is_shipped_release_rendering(&authority.canonical, stored)
+                    }) =>
             {
-                // Ownership was validated above, the immutable observation
-                // re-derived this projection, and its provenance already
-                // carries the projection's current digest. The mutable output
-                // row is the only stale member, an interrupted/older write
-                // shape observed in ProfileSessions. Finish that write in the
-                // same convergence ledger used for released renderings.
+                // Provenance already carries this binary's digest, and the
+                // mutable row is still the rendering a shipped release wrote
+                // for this observation: the write that stamped the digest did
+                // not finish. Finish it on the released-rendering ledger. A
+                // body that matches neither rendering is tamper and falls
+                // through to the hard failure below.
                 resolved.released.record(&owner_projection);
             }
             Err(ProjectionStoreError::SessionOutputCollision {
@@ -877,17 +896,61 @@ async fn verify_owner_output_rows(
 ) -> std::result::Result<(), ProjectionStoreError> {
     let session = owner.session();
     let message = owner.message();
+    let session_row = crate::observation_projection::load_verified_session(
+        conn,
+        &resolved.projection_rows,
+        &session.provider,
+        &session.session_id,
+    )
+    .await?;
     crate::observation_projection::verify_projection_rows_from_records(
         conn,
         owner,
-        resolved
-            .projection_rows
-            .session(&session.provider, &session.session_id),
+        session_row.as_deref(),
         resolved
             .projection_rows
             .message(&message.provider, &message.message_id),
     )
     .await
+}
+
+/// Whether the LCM raw twin of a message that already matches this projection
+/// is not the twin a fresh projection write would store.
+///
+/// Hermes projections have no raw twin. A sanitizer quarantine is itself the
+/// current rendering, so the caller records the projection for the same
+/// converge path a fresh capture uses. A sanitizer fault stays a typed refusal.
+fn owned_raw_twin_needs_rewrite(
+    projection: &SessionMessageProjection,
+    rows: &ProjectionRowsBatch,
+) -> tracedecay_domain::errors::Result<bool> {
+    let message = projection.message();
+    if message.provider == "hermes" {
+        return Ok(false);
+    }
+    let expected = match sanitize_lcm_payload_text(&message.text) {
+        Ok(sanitized) => sanitized.sanitized_text().to_owned(),
+        Err(error) if error.is_quarantine_verdict() => return Ok(true),
+        Err(error) => {
+            return Err(authority_violation(format!(
+                "projection raw twin sanitizer failed: {error}"
+            )));
+        }
+    };
+    let Some(raw) = rows.raw_twin(&message.provider, &message.message_id) else {
+        return Ok(true);
+    };
+    // The derived columns are pure functions of the same sanitized body, so a
+    // twin whose content matches can still carry a hash that fails hydration
+    // with `PayloadIntegrityMismatch` or retrieval text the projector never
+    // wrote. Compare what a fresh write stores, not content alone.
+    Ok(raw.storage_kind != "inline"
+        || raw.session_id != message.session_id
+        || raw.content != expected
+        || raw.content_hash != tracedecay_lcm::retrieval_content::projected_content_hash(&expected)
+        || raw.snippet_text
+            != tracedecay_lcm::retrieval_content::derived_text_for_snippet(&expected)
+        || raw.index_text != tracedecay_lcm::retrieval_content::derived_text_for_index(&expected))
 }
 
 #[allow(clippy::too_many_arguments)]

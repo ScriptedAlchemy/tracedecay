@@ -1027,6 +1027,42 @@ fn prepare_stages_the_source_and_returns_ready_for_cli_activation() {
     );
 }
 
+/// `Ready` promises Core apply can drive `codex plugin add`, so an
+/// unresolvable plugin CLI must defer instead.
+///
+/// Answering `Ready` opens a component transaction that can only die in
+/// activation with `HostCliUnavailable`. Its rollback leaves a `RolledBack`
+/// journal pinning `config.toml` and the versioned cache as they were before
+/// the operator runs the remediation the failure prints, and the next
+/// lifecycle command's `recover_host` then refuses the drifted host with
+/// `StalePreview`.
+#[test]
+fn prepare_defers_when_no_plugin_cli_resolves() {
+    let home = tempfile::tempdir().unwrap();
+    // Resolution sees only this empty directory; the process `PATH` (which on
+    // a developer box usually does carry `codex`) is untouched.
+    let empty = tempfile::tempdir().unwrap();
+    let _host_programs =
+        tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(empty.path());
+
+    let outcome = CodexIntegration
+        .prepare_non_interactive_install(&install_ctx(home.path()))
+        .unwrap();
+    let NonInteractiveInstallOutcome::DeferredUserAction(deferred) = outcome else {
+        panic!("staging Codex without a resolvable plugin CLI must defer, got {outcome:?}");
+    };
+    assert!(
+        deferred
+            .remediation
+            .contains("`codex plugin add tracedecay@personal`"),
+        "the deferral must print the executable remediation: {}",
+        deferred.remediation
+    );
+    // The source is still staged: the operator's `codex plugin add` consumes it.
+    assert!(codex_plugin_manifest_path(home.path()).is_file());
+    assert!(codex_personal_marketplace_path(home.path()).is_file());
+}
+
 /// Activation must record hook trust even when Codex already reports the
 /// plugin natively active (no `codex plugin add` run): an already-current
 /// install can still carry missing or stale trust, and the canonical
