@@ -92,17 +92,6 @@ impl AgentIntegration for CodexIntegration {
         // Core apply drives `codex plugin add` when the host CLI is present.
         // When it is not, stop with the same backtick remediation preflight
         // uses so operators (and lifecycle tests) can activate natively.
-        //
-        // `Ready` here is a promise that Core apply can complete, so it must
-        // not be returned when no `codex` resolves. Returning it anyway opens
-        // a component transaction that can only die in activation with
-        // `HostCliUnavailable`; the rollback leaves a `RolledBack` journal
-        // whose registration backup pins `config.toml` and the versioned
-        // plugin cache as they were *before* the operator runs the printed
-        // `codex plugin add`. The next lifecycle command starts with
-        // `recover_host`, replays that stale rollback over the now-remediated
-        // host, and refuses with `StalePreview` -- making the remediation this
-        // very error prints impossible to follow.
         if plugin_registry::require_codex_plugin_cli().is_err() {
             let marketplace_name = codex_exact_personal_marketplace_name(&ctx.home)
                 .ok()

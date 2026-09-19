@@ -467,8 +467,7 @@ pub async fn call_tool_within(
 /// saturated open queue) and a retained project server retired mid-response
 /// during a composition upgrade. The daemon types every one of these
 /// `retryable: true`; a client that honours only the open subset reports the
-/// upgrade window as a hard failure, which is what the reset-recovery journey
-/// saw (`project_server_response_revoked` surfaced by `tracedecay tool`).
+/// upgrade window as a hard failure.
 fn is_project_open_retryable_error(error: &TraceDecayError) -> bool {
     error_is_project_open_retryable(error) || tool_call_transport_error_is_retryable(error)
 }
