@@ -4,10 +4,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::{
     CalibrationProfileId, CodeGenerationId, CodeSourceCursorBindingV1, ComponentRevision,
-    EphemeralSanitizedQueryViewV1, GitOidV1, PrincipalId, PublicRetrieverStatus, QueryMac,
-    QueryNormalizationRevision, RefId, RepositoryId, RetrievalCursorKeyId, RetrievalFailure,
-    RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome, SanitizerRevision,
-    ScoreDomainCalibrationV1, ScoreDomainId, TemporalModeV1,
+    EphemeralSanitizedQueryViewV1, FixedPointScore, GitOidV1, PrincipalId, PublicRetrieverStatus,
+    QueryMac, QueryNormalizationRevision, RefId, RepositoryId, RetrievalCursorKeyId,
+    RetrievalFailure, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
+    SanitizerRevision, ScoreDomainCalibrationV1, ScoreDomainId, TemporalModeV1,
 };
 
 use super::{batch, candidate, composition_lanes, id, no_caps, profile, request};
@@ -325,6 +325,45 @@ fn core_fallback_authority_ranks_task_session_without_changing_search_lanes() {
     authority
         .compose(&request, &query_view(), empty_foreground_lanes(), 8, None)
         .expect("search lanes stay the checked-in fallback set");
+}
+
+/// TaskSession raw scores are temporal ranking's encoded `tier * 1_000_000 +
+/// within_tier` values, not a `[0, 1_000_000]` feature. A calibration capped
+/// at one tier span saturates every ranked anchor to the same calibrated
+/// feature, flattening utility and handing the order to the source-validity
+/// tie-break.
+#[test]
+fn core_fallback_task_session_calibration_spans_the_temporal_score_range() {
+    let profile = authority()
+        .task_session_ranking_profile()
+        .expect("core fallback projects a TaskSession ranking profile");
+    let calibration = profile
+        .score_domain_calibrations
+        .get(&id::<ScoreDomainId>(
+            crate::retrieval::QUERY_TASK_SESSION_SCORE_DOMAIN_V1,
+        ))
+        .expect("projected TaskSession score domain calibration");
+
+    let corroborating = calibration
+        .calibrate(FixedPointScore(0))
+        .expect("corroborating occurrence exports zero");
+    let approximate = calibration
+        .calibrate(FixedPointScore(1_100_000))
+        .expect("approximate tier");
+    let exact_message = calibration
+        .calibrate(FixedPointScore(3_500_000))
+        .expect("exact-message tier");
+
+    assert_eq!(corroborating, 0);
+    assert!(
+        approximate < exact_message,
+        "distinct temporal tiers must not collapse onto one calibrated feature: \
+         {approximate} vs {exact_message}"
+    );
+    assert!(
+        exact_message < 1_000_000,
+        "the encoded ceiling must stay inside the calibration range: {exact_message}"
+    );
 }
 
 #[test]

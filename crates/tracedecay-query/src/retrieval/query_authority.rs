@@ -15,6 +15,7 @@ use tracedecay_domain::{
     RetrievalCursor, RetrievalCursorKeyId, RetrievalError, RetrievalRequest, RetrieverBatch,
     RetrieverKind, RetrieverOutcome, ScoreDomainCalibrationV1, ScoreDomainId,
 };
+use tracedecay_temporal_query::ranking::NORMALIZED_SCORE_CEILING_MICROS;
 
 use super::evidence_lanes::{TaskSessionCandidateSelectionV1, TaskSessionLaneEvidenceV1};
 use super::fusion::{
@@ -245,7 +246,9 @@ impl QueryAuthorityV1 {
     /// A federated profile already carries the accepted calibration. The core
     /// fallback profile does not, and must not: adding the lane there would
     /// change search cursor identity. The projection lives only on this read.
-    fn task_session_ranking_profile(&self) -> Result<FusionProfile, QueryAuthorityErrorV1> {
+    pub(super) fn task_session_ranking_profile(
+        &self,
+    ) -> Result<FusionProfile, QueryAuthorityErrorV1> {
         let mut profile = self.profile.clone();
         if profile
             .calibrations
@@ -283,8 +286,13 @@ impl QueryAuthorityV1 {
             ScoreDomainCalibrationV1 {
                 calibration_profile_id,
                 score_domain,
+                // TaskSession raw scores are temporal ranking's encoded
+                // tier+within-tier scores, not a [0, 1_000_000] feature. A
+                // narrower range would saturate every ranked anchor to the
+                // same calibrated feature and hand the order to the
+                // source-validity tie-break.
                 raw_min_micros: 0,
-                raw_max_micros: 1_000_000,
+                raw_max_micros: NORMALIZED_SCORE_CEILING_MICROS,
             },
         );
         Ok(profile)
