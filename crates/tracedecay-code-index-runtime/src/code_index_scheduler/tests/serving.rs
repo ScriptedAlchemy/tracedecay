@@ -912,6 +912,45 @@ fn clone_status_distinguishes_unavailable_backfill_partial_ready_and_stale() {
     ));
 }
 
+#[test]
+fn clone_status_reports_backfill_progress_while_a_slice_holds_the_slot() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn alpha() { one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    while !latest.query_owners_are_ready() {
+        latest.advance_text_serving(1).expect("advance V14 build");
+    }
+    let backfilling_while_held = |expected_completed: u64| {
+        let held_slot = latest.text.text_projection_build.lock_slot();
+        let status = latest.clone_index_status(false, None);
+        drop(held_slot);
+        let tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Backfilling {
+            observation,
+        } = status
+        else {
+            panic!("a held backfill slice must still report Backfilling, got {status:?}");
+        };
+        assert_eq!(observation.coverage.completed_source_pages, expected_completed);
+        observation.coverage.total_source_pages
+    };
+    let total = backfilling_while_held(0);
+    assert!(total > 0, "the sealed source must have pages to backfill");
+    latest
+        .advance_text_serving(1)
+        .expect("append one clone-successor batch");
+    assert!(latest.text_projection_needs_work());
+    backfilling_while_held(1);
+}
+
 // Holding the clone-successor slot across the await is the scenario, not an
 // oversight: the read under test must answer without joining the backfill that
 // owns the slot. The guard is released before shutdown.
@@ -945,14 +984,16 @@ async fn dashboard_freshness_does_not_join_a_clone_backfill_slice() {
     .await
     .expect("dashboard freshness must not wait for the clone backfill slice")
     .expect("mounted dashboard freshness");
-    assert!(matches!(
-        freshness.clone_index,
-        Some(
-            tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Unavailable {
-                reason
-            }
-        ) if reason == "clone-index status is being updated"
-    ));
+    assert!(
+        matches!(
+            freshness.clone_index,
+            Some(tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Backfilling {
+                ..
+            })
+        ),
+        "a held backfill slice must report Backfilling, got {:?}",
+        freshness.clone_index
+    );
 
     drop(held_slot);
     registry.shutdown().await;
