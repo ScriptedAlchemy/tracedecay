@@ -1487,14 +1487,13 @@ impl ObservationStore for GlobalDbObservationStore {
         )?;
         // One owner per frontier. A cursor that already reached `next` has
         // recorded the range; a second reason must not become a permanent
-        // collision that both ingest owners then warn on forever.
-        if actual_cursor
+        // collision that both ingest owners then warn on forever. The
+        // command still goes to the writer so the current authority epoch
+        // receipts the replay; only its outcome is reported as a duplicate.
+        let reached_frontier = actual_cursor
             .as_ref()
-            .is_some_and(|cursor| cursor.reached(advance.next_cursor()))
-        {
-            return Ok(CursorAdvanceOutcome::ExactDuplicate);
-        }
-        if actual_cursor.as_ref() != advance.expected_cursor() {
+            .is_some_and(|cursor| cursor.reached(advance.next_cursor()));
+        if !reached_frontier && actual_cursor.as_ref() != advance.expected_cursor() {
             return Err(ObservationStoreError::CursorConflict {
                 expected: Box::new(advance.expected_cursor().cloned()),
                 actual: Box::new(actual_cursor),
@@ -1524,6 +1523,12 @@ impl ObservationStore for GlobalDbObservationStore {
         )
         .await;
         match outcome? {
+            RuntimeSubmitOutcomeV1::Committed { .. }
+            | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
+                if reached_frontier =>
+            {
+                Ok(CursorAdvanceOutcome::ExactDuplicate)
+            }
             RuntimeSubmitOutcomeV1::Committed { .. }
             | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. } => {
                 Ok(CursorAdvanceOutcome::Committed)
