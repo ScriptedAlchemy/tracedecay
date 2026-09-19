@@ -1066,6 +1066,36 @@ impl SessionTemporalRefreshProjector for RecordingDeferredProjector {
 }
 
 #[tokio::test]
+async fn hook_ingest_join_runs_the_bound_refresh_worker() {
+    let temp = TempDir::new().unwrap();
+    let authority =
+        registered_test_database(&temp, "hook-ingest-wake", HostAdmissionScope::Profile).await;
+    let db = authority.database();
+    let registry = SessionTemporalRefreshSchedulerRegistry::default();
+    let wake = authority.ensure_profile(&registry).await;
+    let before = registry.profile_pass_count(db.db_path()).await;
+
+    let joined = tracedecay_mcp::server::join_required_live_transcript_refresh(
+        "tracedecay_hook_runtime",
+        &json!({"action": "ingest_transcript"}),
+        Some(&wake),
+        None,
+    )
+    .await
+    .expect("hook ingest must join the refresh worker that owns the written store");
+
+    assert_eq!(
+        joined,
+        tracedecay_mcp::server::LiveTranscriptRefreshJoin::PublicationJoined
+    );
+    assert!(
+        registry.profile_pass_count(db.db_path()).await > before,
+        "hook ingest must advance the refresh worker, not wait for an unrelated wake"
+    );
+    registry.shutdown().await;
+}
+
+#[tokio::test]
 async fn saturated_recovery_passes_visit_every_operation_before_idling() {
     let temp = TempDir::new().unwrap();
     let authority =
