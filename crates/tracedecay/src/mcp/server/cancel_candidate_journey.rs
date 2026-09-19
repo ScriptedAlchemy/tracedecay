@@ -124,7 +124,10 @@ impl CodeIndexMcpReadAdmissionV1 for PausingAdmission {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             loop {
-                if signal.as_ref().is_some_and(|live| live.is_cancelled()) {
+                if signal
+                    .as_ref()
+                    .is_some_and(tracedecay_contracts::CancellationSignal::is_cancelled)
+                {
                     break;
                 }
                 match resume.try_recv() {
@@ -259,7 +262,7 @@ async fn mount_candidate_corpus() -> MountedCorpus {
         .mount_worktree(project_id, &corpus, store)
         .await
         .expect("mount candidate corpus");
-    let latest = tokio::time::timeout(Duration::from_secs(180), async {
+    let latest = tokio::time::timeout(Duration::from_mins(3), async {
         loop {
             if let Some(latest) = registry.latest_complete_serving_for_scope(&scope).await
                 && latest.text_generation_handle().query_owners_are_ready()
@@ -358,7 +361,7 @@ async fn drive_cancel_journey(
                 connection_server
                     .run_connection(&mut wire)
                     .await
-                    .expect("legacy connection")
+                    .expect("legacy connection");
             });
             sender
                 .send(search_call(11, 8).to_string())
@@ -466,10 +469,10 @@ async fn drive_rmcp(
             )
             .await
             .expect("rmcp follow-up search");
-        let text = follow_up.content[0]
-            .as_text()
-            .map(|text| text.text.as_str())
-            .unwrap_or_else(|| panic!("rmcp follow-up text: {follow_up:?}"));
+        let text = follow_up.content[0].as_text().map_or_else(
+            || panic!("rmcp follow-up text: {follow_up:?}"),
+            |text| text.text.as_str(),
+        );
         let payload: Value = serde_json::from_str(text)
             .unwrap_or_else(|error| panic!("rmcp follow-up JSON ({error}): {text}"));
         assert_admitted_payload(&payload, "rmcp");
@@ -571,7 +574,7 @@ async fn wait_until_observed_signal_cancels(admission: &PausingAdmission, label:
 }
 
 async fn wait_for_batch_pause(admission: &PausingAdmission, label: &str) {
-    tokio::time::timeout(Duration::from_secs(120), admission.scan_paused.notified())
+    tokio::time::timeout(Duration::from_mins(2), admission.scan_paused.notified())
         .await
         .unwrap_or_else(|_| {
             panic!(
@@ -675,7 +678,7 @@ async fn read_channel_response(
     responses: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
     label: &str,
 ) -> Value {
-    let line = tokio::time::timeout(Duration::from_secs(60), responses.recv())
+    let line = tokio::time::timeout(Duration::from_mins(1), responses.recv())
         .await
         .unwrap_or_else(|_| panic!("{label}: response timed out"))
         .unwrap_or_else(|| panic!("{label}: connection closed"));
