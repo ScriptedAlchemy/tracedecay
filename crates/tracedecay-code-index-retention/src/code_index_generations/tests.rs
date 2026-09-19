@@ -1548,19 +1548,22 @@ fn idle_maintenance_preparation_stays_metadata_only() {
 }
 
 #[test]
-fn preparation_defers_when_the_scope_root_does_not_exist_yet() {
+fn preparation_plans_an_unpublished_store_when_the_scope_root_is_missing() {
     let parent = tempfile::TempDir::new().expect("parent");
     let missing = parent.path().join("not-created");
-    let error = prepare_next_code_generation_retention_cancellable(
-        &missing,
-        &BTreeSet::new(),
-        &|| false,
-        None,
-    )
-    .expect_err("an unpublished scope root has no census");
+    let sources = BTreeSet::from([CodeGenerationId::new("generation.waiter").expect("id")]);
+    let plan =
+        prepare_next_code_generation_retention_cancellable(&missing, &sources, &|| false, None)
+            .expect("a missing scope root is the publisher's create window, not a failure");
+    assert_eq!(plan.active_generation_id, None);
+    assert_eq!(plan.active_pointer, None);
     assert!(
-        matches!(error, CodeGenerationRetentionErrorV1::GenerationStoreBusy),
-        "a missing scope root is the publisher's create window, not a storage failure: {error:?}"
+        !plan.has_collectable_work(),
+        "a store that was never published has nothing to collect: {plan:?}"
+    );
+    assert_eq!(
+        plan.vector_readable_sources, sources,
+        "the caller's readable sources survive the unpublished plan"
     );
 }
 
