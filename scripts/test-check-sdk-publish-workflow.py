@@ -52,6 +52,14 @@ class SdkPublishWorkflowPolicyTests(unittest.TestCase):
         )
         self.assert_rejected(mutated)
 
+    def test_rejects_restoring_the_release_trigger(self) -> None:
+        mutated = self.workflow.replace(
+            "on:\n  workflow_dispatch:\n",
+            "on:\n  release:\n    types: [published]\n  workflow_dispatch:\n",
+            1,
+        )
+        self.assert_rejected(mutated)
+
     def test_rejects_sdk_dispatch_selector(self) -> None:
         mutated = self.workflow.replace(
             "  workflow_dispatch:\n    inputs:\n      release_tag:",

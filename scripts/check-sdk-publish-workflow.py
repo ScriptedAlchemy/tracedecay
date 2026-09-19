@@ -62,7 +62,7 @@ def assert_actions_pinned(name: str, job: dict[str, Any]) -> None:
             fail(f"'{name}' uses unpinned action {uses!r}")
 
 
-def assert_release_trigger(workflow: dict[str, Any]) -> None:
+def assert_master_dispatch_trigger(workflow: dict[str, Any]) -> None:
     triggers = workflow.get("on", workflow.get(True, {}))
     # A run whose ref is the release tag cannot restore the previous release's
     # Actions cache. release-please dispatches this workflow on master after
@@ -207,7 +207,7 @@ def main() -> None:
             )
 
     workflow = yaml.safe_load(text)
-    assert_release_trigger(workflow)
+    assert_master_dispatch_trigger(workflow)
 
     if workflow.get("permissions") != {"contents": "read"}:
         fail("top-level permissions must grant contents: read only")
