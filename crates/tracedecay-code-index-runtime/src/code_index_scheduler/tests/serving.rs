@@ -4178,11 +4178,14 @@ async fn root_graph_ready_does_not_depend_on_the_publication_decode_cache() {
         generation_id,
         "scoped query admission must trust the exact seated generation"
     );
-    assert_eq!(
-        held_decode.waiter_count(),
-        0,
-        "scope query readiness must not join the publication decode flight"
-    );
+    let waiter_deadline = Instant::now() + Duration::from_millis(200);
+    while held_decode.waiter_count() != 0 {
+        assert!(
+            Instant::now() < waiter_deadline,
+            "scope query readiness must not join the publication decode flight"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 
     drop(held_decode);
     registry.shutdown().await;

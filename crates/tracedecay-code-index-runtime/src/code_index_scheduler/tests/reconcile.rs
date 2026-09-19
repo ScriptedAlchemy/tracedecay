@@ -2981,6 +2981,15 @@ async fn a_disproving_exact_source_probe_withdraws_the_busy_read_witness() {
     })
     .await
     .expect("the mounted generation becomes ready-decoded");
+    // Hold the worker before sampling the seat. A pass that publishes a
+    // successor between the sample and this hold makes the later coverage
+    // check withdraw the witness, which is the different-content case, not
+    // this expired-proof case.
+    let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
+    let ready = registry
+        .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+        .await
+        .unwrap_or(ready);
     let disproved_generation_id = ready.generation().manifest().generation_id.clone();
 
     let witness = registry
@@ -2991,9 +3000,6 @@ async fn a_disproving_exact_source_probe_withdraws_the_busy_read_witness() {
         .source_freshness_for_root(fixture.path())
         .await
         .expect("mounted worktree source fence");
-    // Hold the worker at its dequeue point so every observation below is the
-    // read path's own answer and never a pass that raced it.
-    let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
 
     std::fs::write(
         fixture.path().join("src/main.rs"),

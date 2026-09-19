@@ -936,9 +936,12 @@ impl CodeIndexSchedulerRegistryV1 {
             .active_publication_covers(serving.generation())
             .ok()?
         {
-            // A read may decline a seat it cannot cover. Withdrawing the
-            // witness here fabricates a source disproof the retained pass has
-            // not made; only that pass may clear it.
+            // The active pointer names a different successor. The seat is stale
+            // and the busy-read witness must not keep serving it. An expired
+            // source proof returns above and does not reach this clear.
+            *serving_source_witness
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
             return None;
         }
         // Checkout-identity gate: the ready probe (or its recorded witness)
