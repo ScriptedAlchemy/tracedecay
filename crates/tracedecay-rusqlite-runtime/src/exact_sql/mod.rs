@@ -112,6 +112,32 @@ pub struct ExactSqlHandle {
     write_authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
 }
 
+/// Waits for the serialized writer actor's reply without stalling the async
+/// worker that issued the command.
+///
+/// Every synchronous storage port in this workspace (`WorkAttemptStoragePort`,
+/// `WorkflowRunStoragePort`, and their siblings) reaches the writer through
+/// these one-shot replies, and the daemon calls those ports from Tokio tasks.
+/// A plain `recv_blocking` therefore parks a whole worker for as long as the
+/// writer's command queue takes to reach this command. On a small runtime two
+/// concurrent waits starve every other task on it, including the HTTP reads
+/// whose admitted deadline then expires. `block_in_place` hands the worker's
+/// run queue to another thread for the wait; it panics outside a multi-thread
+/// runtime, so the flavor is checked first and everything else
+/// (current-thread runtimes, plain threads) keeps the previous inline
+/// behavior. The remaining `block_in_place` panic case is a `LocalSet` on a
+/// multi-thread runtime, which this workspace does not use.
+fn recv_writer_reply<T>(
+    response: async_channel::Receiver<T>,
+) -> Result<T, async_channel::RecvError> {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| response.recv_blocking())
+        }
+        _ => response.recv_blocking(),
+    }
+}
+
 impl ExactSqlHandle {
     pub fn attach<E: ReaderQueryExecutor>(
         writer: &PersistentWriter,
@@ -381,8 +407,7 @@ impl ExactSqlHandle {
     }
 
     pub fn checkpoint_wal_truncate(&self) -> Result<ExactSqlRows, ExactSqlError> {
-        self.enqueue_checkpoint_wal_truncate()?
-            .recv_blocking()
+        recv_writer_reply(self.enqueue_checkpoint_wal_truncate()?)
             .map_err(|_| ExactSqlError::WriterUnavailable)?
     }
 
@@ -478,8 +503,7 @@ impl ExactSqlHandle {
     }
 
     pub fn repair_incremental_auto_vacuum(&self) -> Result<(), ExactSqlError> {
-        self.enqueue_repair_incremental_auto_vacuum()?
-            .recv_blocking()
+        recv_writer_reply(self.enqueue_repair_incremental_auto_vacuum()?)
             .map_err(|_| ExactSqlError::WriterUnavailable)?
     }
 
@@ -636,9 +660,7 @@ impl ExactSqlHandle {
         policy: TransactionPolicy,
     ) -> Result<ExactSqlTransaction, ExactSqlError> {
         let (transaction, response) = self.enqueue_transaction(behavior, policy)?;
-        response
-            .recv_blocking()
-            .map_err(|_| ExactSqlError::WriterUnavailable)??;
+        recv_writer_reply(response).map_err(|_| ExactSqlError::WriterUnavailable)??;
         Ok(transaction)
     }
 
@@ -682,8 +704,7 @@ impl ExactSqlHandle {
 
     fn dispatch_writer(&self, request: SqlRequest) -> Result<SqlResult, ExactSqlError> {
         hotpath::measure_block!("rusqlite.exact_sql.dispatch", {
-            self.enqueue_writer_request(request)?
-                .recv_blocking()
+            recv_writer_reply(self.enqueue_writer_request(request)?)
                 .map_err(|_| ExactSqlError::WriterUnavailable)?
         })
     }
@@ -750,8 +771,7 @@ impl ExactSqlTransaction {
     }
     pub fn attach_database(&self, attachment: ExactSqlAttachment) -> Result<(), ExactSqlError> {
         let lease = Arc::clone(&self.lease);
-        self.enqueue_attach_database(attachment)?
-            .recv_blocking()
+        recv_writer_reply(self.enqueue_attach_database(attachment)?)
             .map_err(|_| transaction_terminal_error(&lease))?
     }
 
@@ -896,9 +916,7 @@ impl ExactSqlTransaction {
     }
     pub fn commit(self) -> Result<ExactSqlCommitReceipt, ExactSqlError> {
         let lease = Arc::clone(&self.lease);
-        self.enqueue_commit()?
-            .recv_blocking()
-            .map_err(|_| transaction_terminal_error(&lease))?
+        recv_writer_reply(self.enqueue_commit()?).map_err(|_| transaction_terminal_error(&lease))?
     }
 
     pub async fn commit_async(self) -> Result<ExactSqlCommitReceipt, ExactSqlError> {
@@ -940,8 +958,7 @@ impl ExactSqlTransaction {
 
     pub fn rollback(self) -> Result<ExactSqlRollbackReceipt, ExactSqlError> {
         match self.begin_rollback() {
-            RollbackDispatch::Awaiting { lease, response } => response
-                .recv_blocking()
+            RollbackDispatch::Awaiting { lease, response } => recv_writer_reply(response)
                 .unwrap_or_else(|_| settled_rollback_or_terminal_error(&lease)),
             RollbackDispatch::Settled(result) => result,
         }
@@ -994,8 +1011,7 @@ impl ExactSqlTransaction {
         request: SqlRequest,
         execution_policy: ExecutionPolicy,
     ) -> Result<SqlResult, ExactSqlError> {
-        self.enqueue_transaction_request(request, execution_policy)?
-            .recv_blocking()
+        recv_writer_reply(self.enqueue_transaction_request(request, execution_policy)?)
             .map_err(|_| transaction_terminal_error(&self.lease))?
     }
 
