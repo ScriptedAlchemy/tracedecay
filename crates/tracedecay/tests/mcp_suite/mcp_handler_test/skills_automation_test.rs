@@ -1,7 +1,7 @@
 #[cfg(feature = "test-transport")]
 use crate::fixture;
 use crate::support::*;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::fs;
 use tempfile::TempDir;
 #[cfg(feature = "test-transport")]
@@ -10,8 +10,8 @@ use tracedecay::mcp::McpServer;
 use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 #[cfg(feature = "test-transport")]
 use tracedecay_automation_runtime::automation::managed_skills::{
-    ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
-    create_managed_skill,
+    ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
+    ManagedSupportFile, create_managed_skill, set_managed_skill_state,
 };
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
@@ -392,4 +392,472 @@ pub(crate) fn managed_skill_test_draft(id: &str, title: &str) -> ManagedSkillDra
             run_id: Some("run_mcp_skill".to_string()),
         },
     }
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn skill_list_returns_filtered_skills_and_rejects_unknown_state() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
+    let (cg, _env) = init_test_project(&project).await;
+    let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
+    let profile = profile_root.display().to_string();
+    let runtime = open_active_project_scoped_runtime(&cg).await;
+    let server =
+        McpServer::new_with_host_admission_test_runtime_for_test(cg.into_inner(), None, runtime)
+            .await
+            .expect("registered test server");
+
+    let empty = server
+        .call_tool_for_test("tracedecay_skill_list", json!({"format": "json"}))
+        .await
+        .unwrap();
+    assert_eq!(empty.touched_files, Vec::<String>::new());
+    assert_eq!(
+        extract_json(&empty.value),
+        json!({
+            "status": "ok",
+            "profile_root": profile,
+            "count": 0,
+            "skills": []
+        })
+    );
+    let empty_markdown = server
+        .call_tool_for_test("tracedecay_skill_list", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(
+        extract_text(&empty_markdown.value),
+        format!(
+            "\
+## Managed Skills
+**status:** ok
+**count:** 0
+**profile_root:** {profile}
+
+### Skills
+_No managed skills._
+"
+        )
+    );
+
+    create_listed_skill(
+        &profile_root,
+        "alpha-active",
+        "Alpha Active",
+        "Lists the active skill.",
+        "Alpha body is the active skill text.",
+    )
+    .await;
+    create_listed_skill(
+        &profile_root,
+        "beta-disabled",
+        "Beta Disabled",
+        "Lists the disabled skill.",
+        "Beta body is the disabled skill text.",
+    )
+    .await;
+    create_listed_skill(
+        &profile_root,
+        "gamma-archived",
+        "Gamma Archived",
+        "Lists the archived skill.",
+        "Gamma body is the archived skill text.",
+    )
+    .await;
+    set_managed_skill_state(&profile_root, "beta-disabled", ManagedSkillState::Disabled)
+        .await
+        .unwrap();
+    set_managed_skill_state(&profile_root, "gamma-archived", ManagedSkillState::Archived)
+        .await
+        .unwrap();
+    let records_before = skill_records(&profile_root);
+
+    let unknown = server
+        .call_tool_for_test(
+            "tracedecay_skill_list",
+            json!({"state": "retired", "format": "json"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        unknown.to_string(),
+        "config error: unknown managed skill state: retired"
+    );
+    assert_eq!(skill_records(&profile_root), records_before);
+
+    let active = server
+        .call_tool_for_test(
+            "tracedecay_skill_list",
+            json!({"state": "active", "include_body": true, "format": "json"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(active.touched_files, Vec::<String>::new());
+    let active_payload = extract_json(&active.value);
+    assert_eq!(active_payload["status"], "ok");
+    assert_eq!(active_payload["count"], 1);
+    assert_eq!(active_payload["profile_root"], profile);
+    assert_eq!(
+        listed_skills_without_clocks(&active_payload),
+        vec![listed_skill(
+            "alpha-active",
+            "Alpha Active",
+            "Lists the active skill.",
+            "active",
+            Some("Alpha body is the active skill text."),
+            0,
+            &[],
+            json!({
+                "skill_id": "alpha-active",
+                "stale": true,
+                "recommendation": "archive_candidate",
+                "reason": "no view, use, or patch activity has been recorded"
+            }),
+            json!({
+                "skill_id": "alpha-active",
+                "improvement": false,
+                "recommendation": "none",
+                "reason": "no repeated correction or failed-use signal is present",
+                "priority": "none"
+            }),
+        )]
+    );
+    assert_eq!(
+        recommendation_evidence(&active_payload["skills"][0]["stale_recommendation"]),
+        vec![
+            "state=active".to_string(),
+            "pinned=false".to_string(),
+            "views=0".to_string(),
+            "uses=0".to_string(),
+            "patches=0".to_string(),
+            "last_activity_at=0".to_string(),
+            "created_by=skill-list-proof".to_string(),
+            "provenance_source=automation_run".to_string(),
+        ]
+    );
+
+    let disabled = server
+        .call_tool_for_test(
+            "tracedecay_skill_list",
+            json!({"state": "disabled", "format": "json"}),
+        )
+        .await
+        .unwrap();
+    let disabled_payload = extract_json(&disabled.value);
+    assert_eq!(disabled_payload["count"], 1);
+    assert_eq!(
+        listed_skills_without_clocks(&disabled_payload),
+        vec![listed_skill(
+            "beta-disabled",
+            "Beta Disabled",
+            "Lists the disabled skill.",
+            "disabled",
+            None,
+            1,
+            &["lifecycle"],
+            json!({
+                "skill_id": "beta-disabled",
+                "stale": false,
+                "recommendation": "keep",
+                "reason": "disabled skills are not auto-archive candidates"
+            }),
+            json!({
+                "skill_id": "beta-disabled",
+                "improvement": false,
+                "recommendation": "none",
+                "reason": "disabled or archived skills are not patch recommendation candidates",
+                "priority": "none"
+            }),
+        )]
+    );
+    assert_eq!(
+        recommendation_evidence(&disabled_payload["skills"][0]["stale_recommendation"]),
+        vec![
+            "state=disabled".to_string(),
+            "pinned=false".to_string(),
+            "views=0".to_string(),
+            "uses=0".to_string(),
+            "patches=1".to_string(),
+            "created_by=skill-list-proof".to_string(),
+            "provenance_source=automation_run".to_string(),
+        ]
+    );
+
+    let archived = server
+        .call_tool_for_test(
+            "tracedecay_skill_list",
+            json!({"state": "archived", "include_body": true, "format": "json"}),
+        )
+        .await
+        .unwrap();
+    let archived_payload = extract_json(&archived.value);
+    assert_eq!(archived_payload["count"], 1);
+    assert_eq!(
+        listed_skills_without_clocks(&archived_payload),
+        vec![listed_skill(
+            "gamma-archived",
+            "Gamma Archived",
+            "Lists the archived skill.",
+            "archived",
+            Some("Gamma body is the archived skill text."),
+            1,
+            &["lifecycle"],
+            json!({
+                "skill_id": "gamma-archived",
+                "stale": false,
+                "recommendation": "keep",
+                "reason": "skill is already archived"
+            }),
+            json!({
+                "skill_id": "gamma-archived",
+                "improvement": false,
+                "recommendation": "none",
+                "reason": "disabled or archived skills are not patch recommendation candidates",
+                "priority": "none"
+            }),
+        )]
+    );
+
+    let listed = server
+        .call_tool_for_test("tracedecay_skill_list", json!({"format": "json"}))
+        .await
+        .unwrap();
+    let listed_payload = extract_json(&listed.value);
+    assert_eq!(listed_payload["status"], "ok");
+    assert_eq!(listed_payload["count"], 3);
+    assert_eq!(listed_payload["profile_root"], profile);
+    assert_eq!(
+        listed_payload["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|skill| skill["metadata"]["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["alpha-active", "beta-disabled", "gamma-archived"]
+    );
+    assert_eq!(
+        listed_payload["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|skill| skill["metadata"]["state"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["active", "disabled", "archived"]
+    );
+
+    let markdown = server
+        .call_tool_for_test("tracedecay_skill_list", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(markdown.touched_files, Vec::<String>::new());
+    assert_eq!(
+        extract_text(&markdown.value),
+        format!(
+            "\
+## Managed Skills
+**status:** ok
+**count:** 3
+**profile_root:** {profile}
+
+### Skills
+- **alpha-active** - Alpha Active (active)
+  summary: Lists the active skill.
+  category: maintenance; targets: cursor, codex, claude, agents, opencode, kimi, kiro, hermes; support_files: 1
+- **beta-disabled** - Beta Disabled (disabled)
+  summary: Lists the disabled skill.
+  category: maintenance; targets: cursor, codex, claude, agents, opencode, kimi, kiro, hermes; support_files: 1
+- **gamma-archived** - Gamma Archived (archived)
+  summary: Lists the archived skill.
+  category: maintenance; targets: cursor, codex, claude, agents, opencode, kimi, kiro, hermes; support_files: 1
+"
+        )
+    );
+    let active_markdown = server
+        .call_tool_for_test("tracedecay_skill_list", json!({"state": "active"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        extract_text(&active_markdown.value),
+        format!(
+            "\
+## Managed Skills
+**status:** ok
+**count:** 1
+**profile_root:** {profile}
+
+### Skills
+- **alpha-active** - Alpha Active (active)
+  summary: Lists the active skill.
+  category: maintenance; targets: cursor, codex, claude, agents, opencode, kimi, kiro, hermes; support_files: 1
+"
+        )
+    );
+    assert_eq!(skill_records(&profile_root), records_before);
+
+    drop(server);
+}
+
+#[cfg(feature = "test-transport")]
+async fn create_listed_skill(
+    profile_root: &std::path::Path,
+    id: &str,
+    title: &str,
+    summary: &str,
+    body: &str,
+) {
+    create_managed_skill(
+        profile_root,
+        ManagedSkillDraft {
+            id: id.to_string(),
+            title: title.to_string(),
+            summary: summary.to_string(),
+            routing_description: summary.to_string(),
+            category: "maintenance".to_string(),
+            targets: tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(),
+            body_markdown: body.to_string(),
+            support_files: vec![
+                ManagedSupportFile::new(
+                    "references/checklist.md",
+                    b"inspect the listed skill\n".to_vec(),
+                )
+                .unwrap(),
+            ],
+            provenance: ManagedSkillProvenance {
+                source: ManagedSkillSource::AutomationRun,
+                actor: "skill-list-proof".to_string(),
+                run_id: Some("run-skill-list-proof".to_string()),
+            },
+        },
+    )
+    .await
+    .unwrap();
+}
+
+#[cfg(feature = "test-transport")]
+fn skill_records(profile_root: &std::path::Path) -> Vec<Vec<u8>> {
+    ["alpha-active", "beta-disabled", "gamma-archived"]
+        .into_iter()
+        .map(|id| {
+            fs::read(
+                profile_root
+                    .join("agent_managed")
+                    .join("skills")
+                    .join(id)
+                    .join("skill.json"),
+            )
+            .unwrap_or_else(|error| panic!("read {id} skill record: {error}"))
+        })
+        .collect()
+}
+
+#[cfg(feature = "test-transport")]
+fn listed_skills_without_clocks(payload: &Value) -> Vec<Value> {
+    payload["skills"]
+        .as_array()
+        .expect("skills array")
+        .iter()
+        .map(skill_list_item_without_clocks)
+        .collect()
+}
+
+#[cfg(feature = "test-transport")]
+fn skill_list_item_without_clocks(skill: &Value) -> Value {
+    let mut skill = skill.clone();
+    if let Some(metadata) = skill.get_mut("metadata").and_then(Value::as_object_mut) {
+        metadata.remove("checksum");
+        metadata.remove("created_at");
+        metadata.remove("updated_at");
+        metadata.remove("activated_at");
+    }
+    if let Some(usage) = skill
+        .get_mut("usage_summary")
+        .and_then(Value::as_object_mut)
+    {
+        usage.remove("activated_at");
+        usage.remove("last_activity_at");
+        usage.remove("last_patched_at");
+    }
+    for key in ["stale_recommendation", "improvement_recommendation"] {
+        if let Some(recommendation) = skill.get_mut(key).and_then(Value::as_object_mut) {
+            recommendation.remove("evidence");
+        }
+    }
+    skill
+}
+
+#[cfg(feature = "test-transport")]
+fn recommendation_evidence(recommendation: &Value) -> Vec<String> {
+    recommendation["evidence"]
+        .as_array()
+        .expect("recommendation evidence")
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|line| !line.starts_with("activated_at="))
+        .filter(|line| match line.strip_prefix("last_activity_at=") {
+            Some(activity) => activity == "0",
+            None => true,
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+#[cfg(feature = "test-transport")]
+fn listed_skill(
+    id: &str,
+    title: &str,
+    summary: &str,
+    state: &str,
+    body: Option<&str>,
+    patch_count: u64,
+    usage_targets: &[&str],
+    stale_recommendation: Value,
+    improvement_recommendation: Value,
+) -> Value {
+    let mut skill = json!({
+        "metadata": {
+            "id": id,
+            "title": title,
+            "summary": summary,
+            "routing_description": summary,
+            "category": "maintenance",
+            "targets": ["cursor", "codex", "claude", "agents", "opencode", "kimi", "kiro", "hermes"],
+            "state": state,
+            "pinned": false,
+            "provenance": {
+                "source": "automation_run",
+                "actor": "skill-list-proof",
+                "run_id": "run-skill-list-proof"
+            }
+        },
+        "support_file_count": 1,
+        "support_file_paths": ["references/checklist.md"],
+        "usage_summary": {
+            "schema_version": 2,
+            "skill_id": id,
+            "title": title,
+            "category": "maintenance",
+            "state": state,
+            "pinned": false,
+            "created_by": "skill-list-proof",
+            "provenance_source": "automation_run",
+            "targets": usage_targets,
+            "view_count": 0,
+            "use_count": 0,
+            "patch_count": patch_count,
+            "first_seen_at": 0,
+            "last_viewed_at": null,
+            "last_used_at": null,
+            "view_count_at_activation": 0,
+            "use_count_at_activation": 0
+        },
+        "stale_recommendation": stale_recommendation,
+        "improvement_recommendation": improvement_recommendation
+    });
+    if let Some(body) = body {
+        skill["body_markdown"] = json!(body);
+    }
+    skill
 }
