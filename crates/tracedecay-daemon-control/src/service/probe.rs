@@ -639,6 +639,40 @@ fn missing_loopback_authority() -> TraceDecayError {
 }
 
 #[cfg(test)]
+mod identity_classification_tests {
+    use super::{DaemonProtocolState, classify_daemon_protocol_identity};
+
+    const SHA: &str = "84598a0b9c841b914565f46b20bb6c765706e8e5";
+
+    fn identity(version: &str) -> (Option<String>, Option<String>) {
+        (Some("tracedecay".to_owned()), Some(version.to_owned()))
+    }
+
+    /// The GitHub release tag and the binary that tag ships are not the same
+    /// string. Readiness that is handed the tag classifies the live daemon as
+    /// a mismatch and the maintenance wait keeps opening a handshake.
+    #[test]
+    fn a_release_tag_is_not_the_build_the_daemon_advertises() {
+        let build = format!("0.1.0-beta.47+{SHA}");
+        assert!(matches!(
+            classify_daemon_protocol_identity(Ok(identity(&build)), "0.1.0-beta.47"),
+            DaemonProtocolState::IdentityMismatch { .. }
+        ));
+    }
+
+    /// The probe stops when the expected identity is the string the daemon
+    /// answered with. That string is the installed binary's `--version`.
+    #[test]
+    fn the_advertised_build_is_ready_against_itself() {
+        let build = format!("0.1.0-beta.47+{SHA}");
+        assert_eq!(
+            classify_daemon_protocol_identity(Ok(identity(&build)), &build),
+            DaemonProtocolState::Ready
+        );
+    }
+}
+
+#[cfg(test)]
 mod timeout_classification_tests {
     use std::io::{self, Cursor, Read, Write};
     use std::time::{Duration, Instant};

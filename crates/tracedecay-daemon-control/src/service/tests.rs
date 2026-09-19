@@ -367,6 +367,19 @@ fn strict_restoration_requires_readiness_only_for_running_state() {
         super::probe::DaemonSocketState::Connectable,
         &super::probe::DaemonProtocolState::Unresponsive("not TraceDecay".to_string()),
     ));
+    // A live daemon that answered initialize is still not restored while the
+    // expected identity is the release tag and the answer is the build. The
+    // maintenance wait keeps probing until this becomes Ready.
+    assert!(!super::restored_service_matches(
+        DaemonServiceState::RunningEnabled,
+        DaemonServiceState::RunningEnabled,
+        super::probe::DaemonSocketState::Connectable,
+        &super::probe::DaemonProtocolState::IdentityMismatch {
+            name: Some("tracedecay".to_owned()),
+            version: Some("0.1.0-beta.47+84598a0b9c841b914565f46b20bb6c765706e8e5".to_owned(),),
+            expected_version: "0.1.0-beta.47".to_owned(),
+        },
+    ));
 }
 
 #[cfg(unix)]

@@ -554,15 +554,15 @@ pub enum UpgradeOutcome {
         /// binary: `which_tracedecay()`'s current-exe-first order can point
         /// at the OLD binary (e.g. a stale Homebrew keg) after an upgrade.
         binary: Option<PathBuf>,
-        /// Version of the freshly installed binary: the release-manifest
-        /// version for GitHub-release installs, the linked binary's
-        /// self-reported version for package-manager installs. Daemon restore
+        /// Version of the freshly installed binary, read from its `--version`.
+        /// That string is the identity the daemon advertises
+        /// (`{release}+{commit}`), not the GitHub release tag. Daemon restore
         /// validates this version, the binary it actually restarts, instead
         /// of the one that was running before the upgrade. `None` only when
-        /// the manager's install could not be interrogated; restore
-        /// verification then validates the pre-upgrade version and, if a new
-        /// daemon really was installed, fails with a typed identity mismatch
-        /// rather than silently passing.
+        /// the install could not be interrogated; restore verification then
+        /// validates the pre-upgrade version and, if a new daemon really was
+        /// installed, fails with a typed identity mismatch rather than
+        /// silently passing.
         version: Option<String>,
     },
     /// Already on the latest version. The binary was not replaced.
@@ -794,11 +794,40 @@ fn run_versioned_upgrade(current: &str, is_beta: bool) -> Result<UpgradeOutcome>
     eprintln!("Upgrading v{current} → v{latest}...");
     let binary = install_upgrade_version(latest, is_beta)?;
     record_previous_version();
+    // The tag is what GitHub published. The daemon we just installed
+    // advertises `build_version()` (`{release}+{commit}`), and readiness
+    // refuses anything else by opening a handshake on every poll. Reporting
+    // the tag is what made `tracedecay update` probe that live daemon until
+    // the maintenance window expired. Two builds of one release differ only
+    // by commit, so the tag is not a stand-in.
+    let version = release_install_identity(binary.as_deref());
     eprintln!("\x1b[32m✔\x1b[0m Successfully upgraded to v{latest}!");
-    Ok(UpgradeOutcome::Installed {
-        binary,
-        version: Some(latest.to_owned()),
-    })
+    Ok(UpgradeOutcome::Installed { binary, version })
+}
+
+/// The identity the restarted daemon will advertise, read from the binary
+/// that was just installed.
+///
+/// A missing path or a `--version` that is not evidence is an unknown
+/// version, never the release tag. Inventing the tag is the probe storm.
+fn release_install_identity(binary: Option<&Path>) -> Option<String> {
+    let Some(path) = binary else {
+        eprintln!(
+            "  \x1b[33mwarning:\x1b[0m could not locate the installed binary; \
+             daemon restore will validate the pre-upgrade version"
+        );
+        return None;
+    };
+    match installed_binary_version(path) {
+        Ok(version) => Some(version),
+        Err(reason) => {
+            eprintln!(
+                "  \x1b[33mwarning:\x1b[0m could not read the installed binary's version \
+                 ({reason}); daemon restore will validate the pre-upgrade version"
+            );
+            None
+        }
+    }
 }
 
 /// Atomically replaces `target` with the contents of `source`: the bytes are
@@ -1287,6 +1316,27 @@ mod tests {
                     _
                 )))
             ));
+        }
+
+        #[test]
+        fn a_github_install_reports_the_binary_identity_not_the_release_tag() {
+            let dir = tempfile::tempdir().unwrap();
+            let build = "0.1.0-beta.47+84598a0b9c841b914565f46b20bb6c765706e8e5";
+            let binary = script(dir.path(), &format!("printf 'tracedecay {build}\\n'"));
+
+            assert_eq!(
+                super::super::release_install_identity(Some(&binary)).as_deref(),
+                Some(build)
+            );
+        }
+
+        #[test]
+        fn an_unreadable_install_is_unknown_rather_than_the_release_tag() {
+            let dir = tempfile::tempdir().unwrap();
+            let binary = script(dir.path(), "printf 'not a version\\n'");
+
+            assert_eq!(super::super::release_install_identity(Some(&binary)), None);
+            assert_eq!(super::super::release_install_identity(None), None);
         }
 
         #[test]
