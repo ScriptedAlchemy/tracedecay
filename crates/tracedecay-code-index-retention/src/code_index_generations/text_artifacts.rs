@@ -198,6 +198,15 @@ fn mutate_verified_text_artifact_under_lock(
             "publication pointer exceeds its durable byte bound".to_owned(),
         ));
     }
+    // Re-read immediately before the rename. A pointer that is no longer the
+    // one this mutation observed — including a truncated file — must not be
+    // replaced by the in-memory copy.
+    let current = read_active_pointer(store_root)?;
+    if &current != expected_pointer {
+        return Err(CodeGenerationRetentionErrorV1::Conflict(
+            "active generation pointer changed before text-artifact mutation".to_owned(),
+        ));
+    }
     atomic_write(
         &store_root.join(ACTIVE_POINTER_FILE),
         "code-generation-text-artifact-mutation",
