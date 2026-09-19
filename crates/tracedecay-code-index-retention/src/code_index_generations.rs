@@ -885,6 +885,9 @@ fn plan_code_generation_retention_with_verification_cancellable(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && active_pointer.is_none() => {
             None
         }
+        // A pointer is only durable once its generation directory is, so a
+        // live pointer over an absent directory is loss, not a publisher
+        // race, and must stay loud.
         Err(error) => return Err(storage(error)),
     };
     let mut generations = BTreeMap::new();
@@ -1218,7 +1221,7 @@ fn sweep_unreferenced_generation_segments(
                 continue;
             }
             let mut reader = CancellableGenerationManifestReaderV1 {
-                file: File::open(&path).map_err(storage)?,
+                file: File::open(&path).map_err(deferred_if_absent)?,
                 hasher: Sha256::new(),
                 is_cancelled,
                 cancelled: false,
@@ -1281,7 +1284,7 @@ fn sweep_unreferenced_generation_segments(
         if live_segments.contains(&format!("sha256:{digest}")) {
             continue;
         }
-        let metadata = path.symlink_metadata().map_err(storage)?;
+        let metadata = path.symlink_metadata().map_err(deferred_if_absent)?;
         if !metadata.file_type().is_file() {
             return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
                 "generation segment '{}' is not a regular file",
@@ -2051,6 +2054,19 @@ fn total_bytes(generations: &[CodeGenerationRetentionGenerationV1]) -> u64 {
 
 fn storage(error: impl std::fmt::Display) -> CodeGenerationRetentionErrorV1 {
     CodeGenerationRetentionErrorV1::Storage(error.to_string())
+}
+
+/// A path that is not there yet, or that a peer unlinked after this census
+/// listed it, is not a broken disk. The publisher creates the scope root and
+/// the sealed files under the store lock, then drops that lock; a census that
+/// does not hold the lock can observe the gap. The next tick sees a stable
+/// tree. Every other I/O failure stays a storage error.
+pub(super) fn deferred_if_absent(error: std::io::Error) -> CodeGenerationRetentionErrorV1 {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        CodeGenerationRetentionErrorV1::GenerationStoreBusy
+    } else {
+        storage(error)
+    }
 }
 
 #[cfg(test)]

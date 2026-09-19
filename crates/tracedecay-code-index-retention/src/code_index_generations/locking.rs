@@ -102,7 +102,7 @@ fn lock_file(
 }
 
 fn canonical_store_root(store_root: &Path) -> Result<PathBuf, CodeGenerationRetentionErrorV1> {
-    std::fs::canonicalize(store_root).map_err(storage)
+    std::fs::canonicalize(store_root).map_err(super::deferred_if_absent)
 }
 
 fn open_lock_file(path: &Path) -> Result<File, CodeGenerationRetentionErrorV1> {
@@ -112,5 +112,5 @@ fn open_lock_file(path: &Path) -> Result<File, CodeGenerationRetentionErrorV1> {
         .write(true)
         .truncate(false)
         .open(path)
-        .map_err(storage)
+        .map_err(super::deferred_if_absent)
 }
