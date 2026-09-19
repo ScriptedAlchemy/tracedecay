@@ -9,7 +9,7 @@ use tracedecay_store::{
 };
 use tracedecay_temporal_query::ports::ExecutionControl;
 
-use super::query::{PERSIST_OPERATION, storage, storage_message};
+use super::query::{PERSIST_OPERATION, storage};
 use super::refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
 use super::relations::SessionRelationError;
 use crate::handle::{SessionTemporalAccess, SessionTemporalRegisteredDb, SessionTemporalWriteTxn};
@@ -285,41 +285,15 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 ) {
                     Ok(copies) => copies,
                     Err(SessionRelationError::NotFound) => {
-                        let mut rows = snapshot
-                            .query(
-                                "SELECT COUNT(*)
-                             FROM session_occurrences
-                             WHERE session_id = ?1 AND generation = ?2",
-                                params![
-                                    recovery.session_id().as_str(),
-                                    i64::try_from(
-                                        recovery.frozen_watermarks().active_generation().value()
-                                    )
-                                    .map_err(|error| storage(MATERIALIZE_REFRESH, error))?,
-                                ],
-                            )
-                            .await
-                            .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
-                        let retained: i64 = rows
-                            .next()
-                            .await
-                            .map_err(|error| storage(MATERIALIZE_REFRESH, error))?
-                            .ok_or_else(|| {
-                                storage_message(
-                                    MATERIALIZE_REFRESH,
-                                    "active projection count returned no row",
-                                )
-                            })?
-                            .get(0)
-                            .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
-                        if retained == 0 {
-                            0
-                        } else {
-                            return Err(storage_message(
-                                MATERIALIZE_REFRESH,
-                                "active native relation projection is unavailable",
-                            ));
-                        }
+                        // No native graph was applied for this generation. Reconstruct
+                        // the copy count from the sealed rows instead of retrying the
+                        // absence as a busy source.
+                        crate::relation_projection::count_canonical_logical_copies(
+                            &snapshot,
+                            recovery.session_id(),
+                            recovery.frozen_watermarks().active_generation(),
+                        )
+                        .await?
                     }
                     Err(error) => return Err(storage(MATERIALIZE_REFRESH, error)),
                 }
