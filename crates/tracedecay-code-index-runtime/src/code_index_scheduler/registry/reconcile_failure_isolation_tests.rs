@@ -427,6 +427,11 @@ async fn a_capacity_refusal_that_never_clears_is_bounded() {
     let bound = 1 + MAX_CONSECUTIVE_CAPACITY_RETRIES_V1 as usize;
 
     fixture.wake_without_new_input().await;
+    // Sample the chain at its policy bound rather than after a quiet window:
+    // `settle_for` gives its deadline up silently, so on a loaded machine a
+    // retry still queued was sampled as the terminal count and the comparison
+    // below read its arrival as a re-arm.
+    wait_for_attempts(&fault, bound).await;
     fixture.settle_for(TERMINATION_QUIET_WINDOW).await;
     let settled = fault.attempts();
     // The decisive property: self-scheduling has *stopped*. An unbounded retry
