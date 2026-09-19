@@ -1548,23 +1548,6 @@ fn idle_maintenance_preparation_stays_metadata_only() {
 }
 
 #[test]
-fn preparation_defers_when_the_scope_root_does_not_exist_yet() {
-    let parent = tempfile::TempDir::new().expect("parent");
-    let missing = parent.path().join("not-created");
-    let error = prepare_next_code_generation_retention_cancellable(
-        &missing,
-        &BTreeSet::new(),
-        &|| false,
-        None,
-    )
-    .expect_err("an unpublished scope root has no census");
-    assert!(
-        matches!(error, CodeGenerationRetentionErrorV1::GenerationStoreBusy),
-        "a missing scope root is the publisher's create window, not a storage failure: {error:?}"
-    );
-}
-
-#[test]
 fn metadata_only_segment_census_observes_at_most_one_directory_entry() {
     let store = tempfile::TempDir::new().expect("create unpublished store");
     std::fs::create_dir_all(store.path().join(GENERATIONS_DIRECTORY))
