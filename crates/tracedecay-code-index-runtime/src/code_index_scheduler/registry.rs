@@ -2109,6 +2109,21 @@ impl CodeIndexSchedulerRegistryV1 {
         }
     }
 
+    /// Stamp a continuation while `reconcile_in_progress` still reports this pass.
+    ///
+    /// A seat waiter that sees the pass counter at zero treats the owner as
+    /// idle. Noting `BusyFollowUp` after that drop is the race: the waiter
+    /// samples an empty slot, then loses to the stamp and burns the failure
+    /// ceiling. The guard lives only for the note.
+    fn note_visible_worker_continuation(
+        passes: &Arc<AtomicUsize>,
+        pending_wake: &PendingWakeV1,
+        wake: &tokio::sync::Notify,
+    ) {
+        let _visible = super::ReconcilePassGuard::enter(passes);
+        Self::note_worker_continuation(pending_wake, wake);
+    }
+
     /// Claim the pending wake as one reconcile's arrival, at the instant the
     /// scheduler dequeues it.
     ///

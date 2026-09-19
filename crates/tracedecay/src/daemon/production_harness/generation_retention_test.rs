@@ -11,7 +11,8 @@ use super::journey_test_support::git;
 use super::*;
 use crate::daemon::maintenance::project_store_maintenance_lease;
 use tracedecay_code_index_retention::code_index_generations::{
-    MAX_CODE_GENERATION_RETENTION_BATCH_V1, prepare_next_code_generation_retention_cancellable,
+    CodeGenerationRetentionErrorV1, MAX_CODE_GENERATION_RETENTION_BATCH_V1,
+    prepare_next_code_generation_retention_cancellable,
 };
 use tracedecay_maintenance::tick::{MaintenanceContinuation, MaintenanceTickOutcome};
 
@@ -97,7 +98,13 @@ async fn mounted_code_generation_retention_continues_capped_segment_reclamation(
         .expect("project server")
         .cg()
         .await;
-    let canonical_root = graph.project_root().to_path_buf();
+    // The scheduler hashes the canonical project root. A non-canonical
+    // `project_root()` names a store that is never created, and
+    // `latest_generation_id` still answers because it canonicalizes itself.
+    let canonical_root = graph
+        .project_root()
+        .canonicalize()
+        .expect("canonical project root");
     let first_source = schedulers
         .latest_generation_id(&canonical_root)
         .await
@@ -114,13 +121,40 @@ async fn mounted_code_generation_retention_continues_capped_segment_reclamation(
             &canonical_root,
         );
     let graph_replay_pool_root = graph.db().database_path().with_extension("graph-replay");
-    let plan = prepare_next_code_generation_retention_cancellable(
-        &code_store_root,
-        &BTreeSet::new(),
-        &|| false,
-        Some(&graph_replay_pool_root),
-    )
-    .expect("code generation retention plan");
+    // Text seating moves `latest_generation_id` before the scoped store
+    // exists and before the superseded sealed file is collectable. Planning
+    // once at that instant is the race: canonicalize returns NotFound, and
+    // a wall-clock retry of the same snapshot hits the failure ceiling.
+    // Wake on the serving seat and re-read the store.
+    let mut serving_seats = schedulers.subscribe_serving_seats();
+    let plan = tokio::time::timeout(Duration::from_mins(2), async {
+        loop {
+            match prepare_next_code_generation_retention_cancellable(
+                &code_store_root,
+                &BTreeSet::new(),
+                &|| false,
+                Some(&graph_replay_pool_root),
+            ) {
+                Ok(plan)
+                    if plan
+                        .collectable_generations
+                        .iter()
+                        .any(|generation| generation.generation_id == first_source) =>
+                {
+                    return plan;
+                }
+                Ok(_) => {}
+                Err(CodeGenerationRetentionErrorV1::GenerationStoreBusy) => {}
+                Err(error) => panic!("code generation retention plan: {error}"),
+            }
+            serving_seats
+                .changed()
+                .await
+                .expect("the seating channel stays open while the registry lives");
+        }
+    })
+    .await
+    .expect("superseded source became collectable after the serving seat moved");
     let first_candidate = plan
         .collectable_generations
         .iter()
