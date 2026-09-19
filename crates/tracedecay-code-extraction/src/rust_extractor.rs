@@ -1663,25 +1663,22 @@ impl RustExtractor {
         Some(format!("{type_path}::{}", state.node_text(field)))
     }
 
-    /// The type `self` names in the enclosing impl or trait.
+    /// The type `self` names in the enclosing impl or trait, carrying the
+    /// enclosing module path.
     ///
     /// Trait impls store `<Type as Trait>` so the method keeps a UFCS name.
     /// `self` still names `Type`, the path a call site writes and the alias
-    /// same-file resolution binds.
+    /// same-file resolution binds. Same-file resolution keys a definition by
+    /// its file-relative qualified name, so an impl inside `mod inner` has to
+    /// name `inner::Type::method` or the call binds nothing.
     fn enclosing_receiver_type(state: &ExtractionState<'_>) -> Option<String> {
-        let (name, id) = state
+        let owner = state
             .node_stack
             .iter()
-            .rev()
-            .find(|(_, id)| id.starts_with("impl:") || id.starts_with("trait:"))?;
+            .rposition(|(_, id)| id.starts_with("impl:") || id.starts_with("trait:"))?;
+        let (name, id) = &state.node_stack[owner];
         let type_name = if id.starts_with("impl:") {
-            match name
-                .strip_prefix('<')
-                .and_then(|inner| inner.split_once(" as "))
-            {
-                Some((type_name, _)) => type_name.trim(),
-                None => name.as_str(),
-            }
+            Self::impl_owner_type_name(name)
         } else {
             name.as_str()
         };
@@ -1690,10 +1687,47 @@ impl RustExtractor {
             || type_name == "<unknown>"
             || type_name == "<anonymous>"
         {
-            None
-        } else {
-            Some(type_name.to_owned())
+            return None;
         }
+        // Frame 0 is the file root, which the qualified name drops.
+        let mut path = state
+            .node_stack
+            .get(1..owner)
+            .unwrap_or_default()
+            .iter()
+            .map(|(segment, _)| segment.as_str())
+            .collect::<Vec<_>>();
+        path.push(type_name);
+        Some(path.join("::"))
+    }
+
+    /// The self type inside a stored impl owner name.
+    ///
+    /// A trait impl stores `<Type as Trait>`, and `Type` can itself be a
+    /// projection (`<Foo as Assoc>::Item`), so the delimiter is the ` as ` at
+    /// depth zero inside the wrapper, not the first one in the string.
+    fn impl_owner_type_name(owner: &str) -> &str {
+        let Some(inner) = owner.strip_prefix('<') else {
+            return owner;
+        };
+        let mut depth = 0_i32;
+        for (index, character) in inner.char_indices() {
+            match character {
+                '<' => depth += 1,
+                '>' => {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                }
+                _ => {
+                    if depth == 0 && inner[index..].starts_with(" as ") {
+                        return inner[..index].trim();
+                    }
+                }
+            }
+        }
+        owner
     }
 
     /// Records every binding the function introduces with the type it states,
