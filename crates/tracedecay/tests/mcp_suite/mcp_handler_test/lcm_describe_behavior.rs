@@ -247,6 +247,9 @@ async fn describe_raw(server: &Arc<McpServer>, arguments: Value) -> Value {
 }
 
 fn session_document(node_id: &str, payload_ref: &str) -> Value {
+    let external_placeholder = format!(
+        "[Externalized LCM ingest payload: kind=tool_result; field=content; chars=320040; bytes=320040; ref={payload_ref}]"
+    );
     json!({
         "description": {
             "external_payload": null,
@@ -257,13 +260,13 @@ fn session_document(node_id: &str, payload_ref: &str) -> Value {
             "raw_message_count": 2,
             "raw_messages": [
                 {
-                    "content_preview": "",
+                    "content_preview": SOURCE_BODY,
                     "content_range": {
-                        "limit": 0,
+                        "limit": SOURCE_BODY.len(),
                         "offset": 0,
-                        "returned_chars": 0,
+                        "returned_chars": SOURCE_BODY.len(),
                         "total_chars": SOURCE_BODY.len(),
-                        "truncated": true
+                        "truncated": false
                     },
                     "message_id": SOURCE_ID,
                     "payload_ref": null,
@@ -272,12 +275,12 @@ fn session_document(node_id: &str, payload_ref: &str) -> Value {
                     "store_id": 1
                 },
                 {
-                    "content_preview": "",
+                    "content_preview": external_placeholder,
                     "content_range": {
-                        "limit": 0,
+                        "limit": external_placeholder.len(),
                         "offset": 0,
-                        "returned_chars": 0,
-                        "total_chars": 180,
+                        "returned_chars": external_placeholder.len(),
+                        "total_chars": 320_040,
                         "truncated": true
                     },
                     "message_id": TOOL_ID,
@@ -298,7 +301,7 @@ fn session_document(node_id: &str, payload_ref: &str) -> Value {
                     "depth": 0,
                     "node_id": node_id,
                     "source_count": 1,
-                    "summary_preview": ""
+                    "summary_preview": SUMMARY
                 }
             ],
             "target": "session"
@@ -402,7 +405,9 @@ fn external_payload_document(payload_ref: &str, content_hash: &str) -> Value {
                 "byte_count": 320_040,
                 "char_count": 320_040,
                 "content_hash": content_hash,
-                "content_preview": "",
+                "content_preview": format!(
+                    "[Externalized LCM ingest payload: kind=tool_result; field=content; chars=320040; bytes=320040; ref={payload_ref}]"
+                ),
                 "created_at": "<created_at>",
                 "kind": "tool_result",
                 "message_id": TOOL_ID,
