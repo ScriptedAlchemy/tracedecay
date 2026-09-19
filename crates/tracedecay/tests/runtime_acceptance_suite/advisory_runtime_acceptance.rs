@@ -1005,13 +1005,25 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
                     .expect("registered daemon ingest response text"),
             )
             .expect("registered daemon ingest payload");
-            if payload["completed"] != false {
+            // `completed: true` with `accepted_for_replay` means the catch-up
+            // sweep has not yet drained this admission. That is not a durable
+            // commit, so keep polling until a terminal that proves the
+            // transcript, or the deadline reports the last payload.
+            if matches!(
+                payload["status"].as_str(),
+                Some("committed" | "exact_duplicate")
+            ) {
                 break output;
             }
-            assert_eq!(
-                payload["admission"]["retryable"], true,
-                "incomplete ingest must carry a retryable admission: {response}"
-            );
+            if payload["completed"] != false && payload["status"] != "accepted_for_replay" {
+                break output;
+            }
+            if payload["completed"] == false {
+                assert_eq!(
+                    payload["admission"]["retryable"], true,
+                    "incomplete ingest must carry a retryable admission: {response}"
+                );
+            }
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             assert!(
