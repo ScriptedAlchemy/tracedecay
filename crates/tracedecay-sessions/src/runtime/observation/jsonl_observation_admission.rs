@@ -483,10 +483,18 @@ pub(in crate::runtime) fn install_test_shared_jsonl_preparation_authority() {
     use std::num::NonZeroUsize;
     use tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1;
 
+    // One process-wide budget serves the whole suite, so every test thread
+    // holding a `SHARED_JSONL_WORKER_RESERVATION_BYTES` page charges it at
+    // once. At 32 GiB a wide harness drove the derived preparation capacity
+    // down to two entries, which is the shared metadata cache's degraded mode,
+    // not the product's: a production process meters one ingest workload
+    // against the machine. Size the budget past what the harness's own
+    // parallelism can reserve so capacity stays CPU-bound, the way the
+    // composition root installs it.
     static MEMORY: OnceLock<Arc<ProcessResidentMemoryV1>> = OnceLock::new();
     let memory = Arc::clone(MEMORY.get_or_init(|| {
         Arc::new(ProcessResidentMemoryV1::new(
-            NonZeroU64::new(32 * 1024 * 1024 * 1024).unwrap(),
+            NonZeroU64::new(1024 * 1024 * 1024 * 1024).unwrap(),
         ))
     }));
     let background_cpu = Arc::new(ProcessBackgroundCpuV1::new(NonZeroUsize::new(48).unwrap()));

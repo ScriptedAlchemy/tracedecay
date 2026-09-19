@@ -1261,6 +1261,11 @@ async fn content_refusals_cover_past_so_the_stream_converges() {
 
 #[tokio::test]
 async fn codex_session_meta_prefix_is_decoded_once_across_consumers() {
+    // The shared metadata cache retains entries up to
+    // `shared_jsonl_preparation_capacity()`, so this test only observes the
+    // shared decode once the preparation authority is installed: without it the
+    // capacity is the degraded fallback of one entry.
+    super::install_test_shared_jsonl_preparation_authority();
     let (_temp, path, _) = rollout_fixture();
     let first = SeamSpyAdmission::default();
     let second = SeamSpyAdmission::default();
