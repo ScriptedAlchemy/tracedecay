@@ -47,6 +47,8 @@ test-helpers = ["tracedecay-temporal-query/test-helpers"]
 # CodeLexicalProjectionAdapterV1` and its builder). Production retrieval reads
 # the durable lexical artifact; only the search-quality evaluator and this
 # crate's own suites build projections directly from admitted chunks.
+# `tracedecay` must not depend on the evaluator unconditionally: that unifies
+# this feature into every root test target, including transport.
 search-eval = []
 # The grammar tier the shipped product indexes with, forwarded exactly as
 # `tracedecay-cli`'s `production` forwards `tracedecay/production`. Only the
