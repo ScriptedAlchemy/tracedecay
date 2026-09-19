@@ -43,7 +43,7 @@ use tracedecay_code_index::graph_projection::CodeGraphSemanticEdgeV1;
 use tracedecay_code_index::lineage::LineageSymbolRecordV1;
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
+use tracedecay_domain::{RelationEdgeKindV1, SourceSpan, SymbolOccurrenceId};
 use tracedecay_graph_query::VerifiedGraphQuery;
 
 fn path_is_rust(path: &str) -> bool {
@@ -63,6 +63,9 @@ const ANALYSIS_RELATION_BUDGET: usize = 2_000_000;
 struct VerifiedAnalysisSymbol {
     occurrence: SymbolOccurrenceId,
     path: String,
+    /// Byte range the declaration occupies in its file. Line numbers cannot
+    /// separate two declarations that share one line; this can.
+    source_span: Option<SourceSpan>,
     metadata: LineageSymbolRecordV1,
 }
 
@@ -72,6 +75,25 @@ impl VerifiedAnalysisSymbol {
             .start_line
             .saturating_add(self.metadata.line_span.saturating_sub(1))
     }
+}
+
+/// Innermost declaration whose source range covers `match_byte`.
+///
+/// Byte containment, not line containment: an attribute such as `#[test]` and
+/// the two functions on `#[test] fn a() {…} fn b() {…}` all sit on one line,
+/// and only the byte range says which of them the site is inside. Selecting by
+/// line also had no stable order to break ties with, since symbols arrive in
+/// occurrence order and occurrence ids are per-project digests.
+fn enclosing_declaration(
+    nodes: &[VerifiedAnalysisSymbol],
+    match_byte: u64,
+) -> Option<&VerifiedAnalysisSymbol> {
+    nodes
+        .iter()
+        .filter_map(|node| node.source_span.map(|span| (node, span)))
+        .filter(|(_, span)| span.start_byte <= match_byte && match_byte < span.end_byte)
+        .min_by_key(|(_, span)| span.end_byte.saturating_sub(span.start_byte))
+        .map(|(node, _)| node)
 }
 
 fn verified_analysis_symbols(
@@ -89,6 +111,10 @@ fn verified_analysis_symbols(
     page.symbols
         .into_iter()
         .map(|symbol| {
+            let source_span = symbol
+                .binding
+                .as_ref()
+                .and_then(|binding| binding.source_span);
             let path = symbol
                 .binding
                 .and_then(|binding| binding.logical_path)
@@ -109,6 +135,7 @@ fn verified_analysis_symbols(
             Ok(VerifiedAnalysisSymbol {
                 occurrence: symbol.occurrence,
                 path,
+                source_span,
                 metadata,
             })
         })
