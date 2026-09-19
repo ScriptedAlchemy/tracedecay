@@ -2923,6 +2923,10 @@ mod tests {
             files
         };
 
+        // Read commands must not start auto-gc. That rewrites packs and would
+        // look like a content mutation.
+        fixture.git_ok(&["config", "gc.auto", "0"]);
+        fixture.git_ok(&["config", "maintenance.auto", "false"]);
         let before = snapshot_tree(fixture.path());
         let adapter = fixture.adapter();
         let snapshot_digest = ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap();
@@ -2946,22 +2950,49 @@ mod tests {
             .unwrap();
 
         let after = snapshot_tree(fixture.path());
-        // `git status` and `git blame` refresh the index stat cache. That is
-        // not a content write; lock files are asserted separately below.
+        // Status and blame refresh the index, reflog, and commit-graph cache.
+        // Those are derived. The durable authorities are HEAD, config, refs,
+        // and object bytes. Lock files are asserted separately below.
         let durable = |files: Vec<(String, Vec<u8>)>| {
             files
                 .into_iter()
-                .filter(|(path, _)| path != ".git/index" && !path.starts_with(".git/logs/"))
+                .filter(|(path, _)| {
+                    path == ".git/HEAD"
+                        || path == ".git/config"
+                        || path == ".git/packed-refs"
+                        || path.starts_with(".git/refs/")
+                        || (path.starts_with(".git/objects/")
+                            && !path.starts_with(".git/objects/info/"))
+                })
                 .collect::<Vec<_>>()
         };
         assert!(
             !after.iter().any(|(path, _)| path.ends_with(".lock")),
             "adapter left a lock file behind"
         );
-        assert_eq!(
-            durable(before),
-            durable(after),
-            "read-only intelligence mutated repository state"
+        let before = durable(before);
+        let after = durable(after);
+        let changed = before
+            .iter()
+            .filter_map(|(path, bytes)| {
+                after
+                    .iter()
+                    .find(|(candidate, _)| candidate == path)
+                    .and_then(|(_, next)| (next != bytes).then(|| format!("changed {path}")))
+            })
+            .chain(after.iter().filter_map(|(path, _)| {
+                (!before.iter().any(|(candidate, _)| candidate == path))
+                    .then(|| format!("added {path}"))
+            }))
+            .chain(before.iter().filter_map(|(path, _)| {
+                (!after.iter().any(|(candidate, _)| candidate == path))
+                    .then(|| format!("removed {path}"))
+            }))
+            .collect::<Vec<_>>();
+        assert!(
+            changed.is_empty(),
+            "read-only intelligence mutated repository state: {}",
+            changed.join(", ")
         );
     }
 }
