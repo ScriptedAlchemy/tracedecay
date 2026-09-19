@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tracedecay_application::pr_tracking::{
@@ -153,6 +153,9 @@ async fn activate_and_track_manual_branch(
     let graph = Arc::clone(graph);
     let schedulers = schedulers.clone();
     let branch = branch.to_owned();
+    let published_data_root = data_root.clone();
+    let published_schedulers = schedulers.clone();
+    let published_registries = administration.session_runtime_registries();
 
     administration
         .admit_manual_branch_publication(|cancellation, admitted| async move {
@@ -215,6 +218,15 @@ async fn activate_and_track_manual_branch(
                 tracked
             }
             .await;
+            if matches!(&result, Ok(outcome) if *outcome != BranchAddOutcome::Deferred) {
+                mount_published_branch_query_authority(
+                    published_registries.as_ref(),
+                    &published_schedulers,
+                    &published_data_root,
+                    &branch,
+                )
+                .await;
+            }
             match &result {
                 Ok(outcome) => log_daemon_event(
                     "manual_branch_publication",
@@ -235,6 +247,101 @@ async fn activate_and_track_manual_branch(
             result
         })
         .await
+}
+
+/// Mounts the checked-in core query authority on the branch worktree this
+/// publication sealed, from the project's own durable cursor-key authority.
+///
+/// An explicitly published branch worktree is never a project-open route, so
+/// nothing else mounts its query authority: an exact branch read could only
+/// borrow one already mounted on a peer checkout of the same repository
+/// (`mount_query_authority_from_project_peer`), and that peer's own mount is
+/// deferred until it seats a text generation. A read taken right after this
+/// publication sealed its provenance therefore failed closed with a
+/// non-retryable `authority_unavailable` even though the branch generation was
+/// published and servable. Mounting here makes the generation this journey
+/// publishes queryable without depending on an unrelated worktree's
+/// activation order.
+///
+/// Runs inside the daemon-owned publication task, after the generation it
+/// serves is committed: the admitting `branch add` caller returns at admission
+/// and never waits for this, and the profile's session-registry lock is taken
+/// here rather than on that caller's path.
+///
+/// Best effort by design: the branch generation is already committed, so a
+/// missing session mount or cursor key must not retract it. The exact branch
+/// read falls back to borrowing a peer authority when this could not run.
+#[cfg(unix)]
+#[hotpath::measure(label = "daemon.branch_add.query_authority", future = true)]
+async fn mount_published_branch_query_authority(
+    registries: Option<&(super::branch_admin::SharedSessionRuntimeRegistries, PathBuf)>,
+    schedulers: &CodeIndexSchedulerRegistryV1,
+    data_root: &Path,
+    branch: &str,
+) {
+    let Some((registries, profile_root)) = registries else {
+        return;
+    };
+    let Some(source) =
+        tracedecay_runtime_core::branch_meta::load_branch_meta(data_root).and_then(|meta| {
+            meta.branches
+                .get(branch)
+                .and_then(|entry| entry.graph_source.clone())
+        })
+    else {
+        return;
+    };
+    let worktree_root = PathBuf::from(&source.worktree_root);
+    let Ok(project_id) = tracedecay_domain::ProjectId::new(source.project_id.clone()) else {
+        return;
+    };
+    let Ok(scope) =
+        tracedecay_code_index_runtime::resolved_scope_for_project(&worktree_root, &project_id)
+    else {
+        return;
+    };
+    let sessions = {
+        let registries = registries.lock().await;
+        registries
+            .get(profile_root)
+            .map(|entry| Arc::clone(&entry.registry))
+    };
+    let Some(sessions) = sessions.and_then(|registry| registry.get().cloned()) else {
+        return;
+    };
+    let Some(session_db) = sessions.mounted_project_sessions(&project_id).await else {
+        return;
+    };
+    let cursor_keys = match session_db.load_session_cursor_key_provider_result().await {
+        Ok(cursor_keys) => cursor_keys,
+        Err(error) => {
+            tracing::debug!(
+                event = "branch_query_authority_mount",
+                outcome = "unavailable",
+                branch = %branch,
+                reason = %error,
+                "durable query cursor key is unavailable for the published branch"
+            );
+            return;
+        }
+    };
+    if let Err(error) =
+        tracedecay_code_index_runtime::code_index_scheduler::query_runtime::mount_core_query_authority_on_project_open(
+            schedulers,
+            &worktree_root,
+            &scope,
+            &cursor_keys,
+        )
+        .await
+    {
+        tracing::debug!(
+            event = "branch_query_authority_mount",
+            outcome = "unavailable",
+            branch = %branch,
+            reason = %error,
+            "published branch query authority is unavailable; exact reads fall back to a peer"
+        );
+    }
 }
 
 #[cfg(unix)]

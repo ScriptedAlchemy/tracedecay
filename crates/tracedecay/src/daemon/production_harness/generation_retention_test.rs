@@ -125,7 +125,10 @@ async fn mounted_code_generation_retention_continues_capped_segment_reclamation(
     // exists and before the superseded sealed file is collectable. Planning
     // once at that instant is the race: canonicalize returns NotFound, and
     // a wall-clock retry of the same snapshot hits the failure ceiling.
-    // Wake on the serving seat and re-read the store.
+    // Wake on the serving seat and re-read the store. The planner also probes
+    // the generation-store lock and answers `GenerationStoreBusy` whenever a
+    // writer owns the store; that lock state publishes no seat, so the wait
+    // keeps the short maintenance-style tick as its floor.
     let mut serving_seats = schedulers.subscribe_serving_seats();
     let plan = tokio::time::timeout(Duration::from_mins(2), async {
         loop {
@@ -145,12 +148,13 @@ async fn mounted_code_generation_retention_continues_capped_segment_reclamation(
                 }
                 Ok(_) => {}
                 Err(CodeGenerationRetentionErrorV1::GenerationStoreBusy) => {}
-                Err(error) => panic!("code generation retention plan: {error}"),
+                Err(error) => panic!("code generation retention plan: {error:?}"),
             }
-            serving_seats
-                .changed()
-                .await
-                .expect("the seating channel stays open while the registry lives");
+            tokio::select! {
+                changed = serving_seats.changed() => changed
+                    .expect("the seating channel stays open while the registry lives"),
+                () = tokio::time::sleep(Duration::from_millis(25)) => {}
+            }
         }
     })
     .await

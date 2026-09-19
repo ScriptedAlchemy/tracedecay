@@ -22,7 +22,8 @@ const MAX_FINDING_COUNT: u64 = 1_000_000;
 const SQLITE_CORRUPT_VTAB: i32 = 267;
 const SESSION_TEMPORAL_HEALTH_CACHE_TTL: Duration = Duration::from_secs(2);
 const MAX_CACHED_SESSION_TEMPORAL_STORES: usize = 64;
-const MAX_SYNCHRONOUS_SESSION_TEMPORAL_HEALTH_BYTES: u64 = 64 * 1024 * 1024;
+const HEALTH_PROBE_PAGE_SIZE: i64 = 512;
+const HEALTH_PROBE_QUERY_LIMIT: i64 = HEALTH_PROBE_PAGE_SIZE + 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SessionTemporalStoreFileFingerprint {
@@ -118,77 +119,6 @@ fn session_temporal_store_fingerprint(
         })
     })
 }
-
-fn session_temporal_store_family_bytes(database_path: &Path) -> std::io::Result<u64> {
-    hotpath::measure_block!("session_temporal.doctor.stat", {
-        let database = std::fs::metadata(database_path)?.len();
-        let mut wal_path = database_path.as_os_str().to_os_string();
-        wal_path.push("-wal");
-        match std::fs::metadata(PathBuf::from(wal_path)) {
-            Ok(wal) => database.checked_add(wal.len()).ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "session temporal store size overflowed",
-                )
-            }),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(database),
-            Err(error) => Err(error),
-        }
-    })
-}
-
-fn permits_synchronous_session_temporal_health(database_path: &Path) -> bool {
-    session_temporal_store_family_bytes(database_path)
-        .is_ok_and(|bytes| bytes <= MAX_SYNCHRONOUS_SESSION_TEMPORAL_HEALTH_BYTES)
-}
-
-// Occurrence and summary FTS integrity share the same content/docsize
-// EXCEPT + probe-token shape; only the table names differ.
-macro_rules! fts_integrity_check_sql {
-    ($content:literal, $fts:literal, $docsize:literal) => {
-        concat!(
-            "SELECT
-    (SELECT COUNT(*) FROM (
-        SELECT rowid AS id FROM ",
-            $content,
-            "
-        EXCEPT SELECT id FROM ",
-            $docsize,
-            "
-        LIMIT 1000001
-    ))
-    + (SELECT COUNT(*) FROM (
-        SELECT id FROM ",
-            $docsize,
-            "
-        EXCEPT SELECT rowid AS id FROM ",
-            $content,
-            "
-        LIMIT 1000001
-    ))
-    + COALESCE((
-        SELECT 0 FROM ",
-            $fts,
-            "
-        WHERE ",
-            $fts,
-            " MATCH 'tracedecay_health_probe_token'
-        LIMIT 1
-    ), 0)"
-        )
-    };
-}
-
-const OCCURRENCE_FTS_CHECK_SQL: &str = fts_integrity_check_sql!(
-    "session_occurrences",
-    "session_occurrences_fts",
-    "session_occurrences_fts_docsize"
-);
-const SUMMARY_FTS_CHECK_SQL: &str = fts_integrity_check_sql!(
-    "session_summary_nodes",
-    "session_summary_nodes_fts",
-    "session_summary_nodes_fts_docsize"
-);
 
 const REQUIRED_BASE_TABLES: &[&str] = &[
     "lcm_summary_nodes",
@@ -305,226 +235,428 @@ const REQUIRED_TRIGGERS: &[(&str, &str)] = &[
     ),
 ];
 
+const INVALID_GENERATION_TAIL: &str = "WHERE candidate.generation <= 0
+    OR json_valid(candidate.frozen_watermarks_json) = 0
+    OR CASE WHEN json_valid(candidate.frozen_watermarks_json) = 1 THEN (
+         json_type(candidate.frozen_watermarks_json, '$.active_generation') IS NOT 'integer'
+         OR CAST(json_extract(
+             candidate.frozen_watermarks_json, '$.active_generation'
+         ) AS INTEGER) <= 0
+         OR CAST(json_extract(
+             candidate.frozen_watermarks_json, '$.active_generation'
+         ) AS INTEGER) > candidate.generation
+         OR json_type(candidate.frozen_watermarks_json, '$.source_frontier') IS NOT 'integer'
+         OR CAST(json_extract(
+             candidate.frozen_watermarks_json, '$.source_frontier'
+         ) AS INTEGER) < 0
+         OR json_type(candidate.frozen_watermarks_json, '$.projection_frontier') IS NOT 'integer'
+         OR CAST(json_extract(
+             candidate.frozen_watermarks_json, '$.projection_frontier'
+         ) AS INTEGER) < 0
+         OR json_type(candidate.frozen_watermarks_json, '$.summary_frontier') IS NOT 'integer'
+         OR CAST(json_extract(
+             candidate.frozen_watermarks_json, '$.summary_frontier'
+         ) AS INTEGER) < 0
+         OR NOT (
+              (candidate.state = 'building' AND candidate.ready_at IS NULL
+                   AND candidate.activated_at IS NULL AND candidate.completed_at IS NULL)
+           OR (candidate.state = 'ready' AND candidate.ready_at IS NOT NULL
+                   AND candidate.activated_at IS NULL AND candidate.completed_at IS NULL)
+           OR (candidate.state = 'active' AND candidate.ready_at IS NOT NULL
+                   AND candidate.activated_at IS NOT NULL AND candidate.completed_at IS NULL)
+           OR (candidate.state = 'superseded' AND candidate.ready_at IS NOT NULL
+                   AND candidate.activated_at IS NOT NULL
+                   AND candidate.completed_at IS NOT NULL)
+           OR (candidate.state IN ('failed', 'cancelled')
+                   AND candidate.completed_at IS NOT NULL)
+         )
+    ) ELSE 0 END";
+
+const MULTI_ACTIVE_GENERATION_TAIL: &str = "WHERE candidate.state = 'active'
+    AND NOT EXISTS (
+        SELECT 1
+        FROM session_temporal_generations AS earlier
+        WHERE earlier.session_id = candidate.session_id
+          AND earlier.state = 'active'
+          AND earlier.rowid < candidate.source_rowid
+    )
+    AND EXISTS (
+        SELECT 1
+        FROM session_temporal_generations AS later
+        WHERE later.session_id = candidate.session_id
+          AND later.state = 'active'
+          AND later.rowid > candidate.source_rowid
+    )";
+
+const CURSOR_KEY_ABSENT_TAIL: &str = "LEFT JOIN session_query_cursor_keys AS key
+    ON key.key_id = json_extract(candidate.frozen_watermarks_json, '$.cursor_key.key_id')
+   AND key.key_version = CAST(json_extract(
+          candidate.frozen_watermarks_json, '$.cursor_key.version'
+       ) AS INTEGER)
+   AND key.retired_at IS NULL
+  WHERE candidate.state = 'active'
+    AND (
+        json_type(candidate.frozen_watermarks_json, '$.cursor_key') IS NOT 'object'
+        OR key.key_id IS NULL
+    )";
+
+const STUCK_BINDING_TAIL: &str = "LEFT JOIN session_refresh_bindings AS binding
+    ON binding.session_id = candidate.session_id
+   AND binding.operation_id = candidate.operation_id
+  LEFT JOIN session_temporal_generations AS generation
+    ON generation.session_id = binding.session_id
+   AND generation.generation = binding.generation
+  WHERE candidate.state = 'running'
+    AND (
+        binding.operation_id IS NULL
+        OR generation.session_id IS NULL
+        OR generation.state <> 'building'
+    )";
+
+const STUCK_PROGRESS_SQL: &str = "WITH operation_source AS MATERIALIZED (
+        SELECT rowid AS source_rowid, session_id, operation_id, state, updated_at
+        FROM session_refresh_operations
+        ORDER BY rowid
+        LIMIT ?1
+    ),
+    operation_page AS MATERIALIZED (
+        SELECT * FROM operation_source ORDER BY source_rowid LIMIT ?2
+    ),
+    operation_progress AS MATERIALIZED (
+        SELECT operation.*,
+               (
+                   SELECT MAX(progress.recorded_at)
+                   FROM session_refresh_progress AS progress
+                   WHERE progress.session_id = operation.session_id
+                     AND progress.operation_id = operation.operation_id
+                     AND progress.progress_ordinal < ?2
+               ) AS latest_progress
+        FROM operation_page AS operation
+    )
+    SELECT
+      (SELECT COUNT(*)
+         FROM operation_progress AS operation
+         JOIN session_refresh_bindings AS binding
+           ON binding.session_id = operation.session_id
+          AND binding.operation_id = operation.operation_id
+         WHERE operation.state = 'running'
+           AND NOT EXISTS(
+               SELECT 1
+               FROM session_refresh_progress AS progress
+               WHERE progress.session_id = operation.session_id
+                 AND progress.operation_id = operation.operation_id
+                 AND progress.progress_ordinal >= ?2
+           )
+           AND (
+               (operation.latest_progress IS NULL
+                AND operation.updated_at
+                    < CAST(strftime('%s', 'now') AS INTEGER) * 1000000 - 900000000)
+               OR operation.latest_progress
+                    < CAST(strftime('%s', 'now') AS INTEGER) * 1000000 - 900000000
+           )),
+      EXISTS(SELECT 1 FROM operation_source LIMIT 1 OFFSET ?2)
+      OR EXISTS(
+          SELECT 1
+          FROM operation_page AS operation
+          WHERE EXISTS(
+              SELECT 1
+              FROM session_refresh_progress AS progress
+              WHERE progress.session_id = operation.session_id
+                AND progress.operation_id = operation.operation_id
+                AND progress.progress_ordinal >= ?2
+          )
+      )";
+
+const STUCK_RECEIPT_TAIL: &str = "LEFT JOIN session_refresh_receipts AS receipt
+    ON receipt.session_id = candidate.session_id
+   AND receipt.operation_id = candidate.operation_id
+  WHERE (candidate.state = 'running' AND receipt.operation_id IS NOT NULL)
+     OR (candidate.state <> 'running' AND receipt.operation_id IS NULL)
+     OR (receipt.operation_id IS NOT NULL
+         AND (
+             receipt.terminal_state <> candidate.state
+             OR receipt.terminal_at IS NOT candidate.terminal_at
+             OR receipt.failure_code IS NOT candidate.failure_code
+         ))";
+
+const COMPATIBILITY_DRIFT_TAIL: &str = "LEFT JOIN lcm_summary_nodes AS compatibility
+    ON compatibility.node_id = candidate.summary_id
+  WHERE compatibility.node_id IS NULL
+     OR candidate.publication_json IS NULL
+     OR json_extract(candidate.publication_json, '$.summary_hash') IS NULL
+     OR compatibility.session_id <> candidate.session_id
+     OR compatibility.summary_text <> candidate.summary_text
+     OR compatibility.summary_hash
+          <> json_extract(candidate.publication_json, '$.summary_hash')";
+
+macro_rules! row_health_check {
+    (
+        $kind:ident,
+        $tables:expr,
+        $source_table:literal,
+        $source_columns:literal,
+        $count:literal,
+        $tail:expr
+    ) => {
+        HealthCheck {
+            kind: SessionTemporalHealthFindingKind::$kind,
+            tables: $tables,
+            probe: HealthProbe::Rows {
+                source_table: $source_table,
+                source_columns: $source_columns,
+                count: $count,
+                tail: $tail,
+            },
+        }
+    };
+}
+
 const CHECKS: &[HealthCheck] = &[
+    row_health_check!(
+        OccurrenceFtsCorruption,
+        &["session_occurrences", "session_occurrences_fts_docsize"],
+        "session_occurrences",
+        "",
+        "COUNT(*)",
+        "LEFT JOIN session_occurrences_fts_docsize AS docsize
+           ON docsize.id = candidate.source_rowid
+         WHERE docsize.id IS NULL"
+    ),
+    row_health_check!(
+        OccurrenceFtsCorruption,
+        &["session_occurrences", "session_occurrences_fts_docsize"],
+        "session_occurrences_fts_docsize",
+        ", id",
+        "COUNT(*)",
+        "LEFT JOIN session_occurrences AS occurrence
+           ON occurrence.rowid = candidate.id
+         WHERE occurrence.rowid IS NULL"
+    ),
     HealthCheck {
         kind: SessionTemporalHealthFindingKind::OccurrenceFtsCorruption,
-        tables: &[
-            "session_occurrences",
-            "session_occurrences_fts",
-            "session_occurrences_fts_docsize",
-        ],
-        sql: OCCURRENCE_FTS_CHECK_SQL,
+        tables: &["session_occurrences_fts"],
+        probe: HealthProbe::Sql(
+            "SELECT COALESCE((
+                 SELECT 0 FROM session_occurrences_fts
+                 WHERE session_occurrences_fts MATCH 'tracedecay_health_probe_token'
+                 LIMIT 1
+             ), 0), (?1 - ?1) + (?2 - ?2)",
+        ),
     },
+    row_health_check!(
+        SummaryFtsCorruption,
+        &["session_summary_nodes", "session_summary_nodes_fts_docsize"],
+        "session_summary_nodes",
+        "",
+        "COUNT(*)",
+        "LEFT JOIN session_summary_nodes_fts_docsize AS docsize
+           ON docsize.id = candidate.source_rowid
+         WHERE docsize.id IS NULL"
+    ),
+    row_health_check!(
+        SummaryFtsCorruption,
+        &["session_summary_nodes", "session_summary_nodes_fts_docsize"],
+        "session_summary_nodes_fts_docsize",
+        ", id",
+        "COUNT(*)",
+        "LEFT JOIN session_summary_nodes AS summary
+           ON summary.rowid = candidate.id
+         WHERE summary.rowid IS NULL"
+    ),
     HealthCheck {
         kind: SessionTemporalHealthFindingKind::SummaryFtsCorruption,
-        tables: &[
-            "session_summary_nodes",
-            "session_summary_nodes_fts",
-            "session_summary_nodes_fts_docsize",
-        ],
-        sql: SUMMARY_FTS_CHECK_SQL,
+        tables: &["session_summary_nodes_fts"],
+        probe: HealthProbe::Sql(
+            "SELECT COALESCE((
+                 SELECT 0 FROM session_summary_nodes_fts
+                 WHERE session_summary_nodes_fts MATCH 'tracedecay_health_probe_token'
+                 LIMIT 1
+             ), 0), (?1 - ?1) + (?2 - ?2)",
+        ),
     },
-    HealthCheck {
-        kind: SessionTemporalHealthFindingKind::MissingAnchor,
-        tables: &[
-            "retrieval_anchors",
-            "session_assertions",
-            "session_occurrences",
-            "session_summary_nodes",
-        ],
-        sql: "SELECT
-            (SELECT COUNT(*) FROM session_summary_nodes AS node
-             LEFT JOIN retrieval_anchors AS anchor
-               ON anchor.anchor_id = node.summary_anchor_id
-             WHERE anchor.anchor_id IS NULL)
-            + (SELECT COUNT(*) FROM session_occurrences AS occurrence
-               LEFT JOIN retrieval_anchors AS anchor
-                 ON anchor.anchor_id = occurrence.retrieval_anchor_id
-               WHERE anchor.anchor_id IS NULL)
-            + (SELECT COUNT(*) FROM session_assertions AS assertion
-               LEFT JOIN retrieval_anchors AS subject
-                 ON subject.anchor_id = assertion.subject_anchor_id
-               LEFT JOIN retrieval_anchors AS object
-                 ON object.anchor_id = assertion.object_anchor_id
-               WHERE subject.anchor_id IS NULL OR object.anchor_id IS NULL)",
-    },
-    HealthCheck {
-        kind: SessionTemporalHealthFindingKind::MissingReceipt,
-        tables: &[
+    row_health_check!(
+        MissingAnchor,
+        &["retrieval_anchors", "session_summary_nodes"],
+        "session_summary_nodes",
+        ", summary_anchor_id",
+        "COUNT(*)",
+        "LEFT JOIN retrieval_anchors AS anchor
+           ON anchor.anchor_id = candidate.summary_anchor_id
+         WHERE anchor.anchor_id IS NULL"
+    ),
+    row_health_check!(
+        MissingAnchor,
+        &["retrieval_anchors", "session_occurrences"],
+        "session_occurrences",
+        ", retrieval_anchor_id",
+        "COUNT(*)",
+        "LEFT JOIN retrieval_anchors AS anchor
+           ON anchor.anchor_id = candidate.retrieval_anchor_id
+         WHERE anchor.anchor_id IS NULL"
+    ),
+    row_health_check!(
+        MissingAnchor,
+        &["retrieval_anchors", "session_assertions"],
+        "session_assertions",
+        ", subject_anchor_id, object_anchor_id",
+        "COUNT(*)",
+        "LEFT JOIN retrieval_anchors AS subject
+           ON subject.anchor_id = candidate.subject_anchor_id
+         LEFT JOIN retrieval_anchors AS object
+           ON object.anchor_id = candidate.object_anchor_id
+         WHERE subject.anchor_id IS NULL OR object.anchor_id IS NULL"
+    ),
+    row_health_check!(
+        MissingReceipt,
+        &[
             "sanitization_receipts",
-            "session_external_payload_manifests",
-            "session_refresh_batch_bindings",
-            "session_summary_nodes",
-            "session_temporal_observation_effects",
-            "session_temporal_projection_receipts",
+            "session_external_payload_manifests"
         ],
-        sql: "SELECT
-            (SELECT COUNT(*) FROM session_external_payload_manifests AS manifest
-             LEFT JOIN sanitization_receipts AS receipt
-               ON receipt.receipt_id = manifest.receipt_id
-             WHERE receipt.receipt_id IS NULL)
-            + (SELECT COUNT(*) FROM session_temporal_observation_effects AS effect
-               LEFT JOIN sanitization_receipts AS receipt
-                 ON receipt.receipt_id = effect.receipt_id
-               WHERE receipt.receipt_id IS NULL)
-            + (SELECT COUNT(*) FROM session_summary_nodes AS summary
-               LEFT JOIN sanitization_receipts AS receipt
-                 ON receipt.receipt_id = json_extract(summary.publication_json, '$.receipt_id')
-               WHERE summary.publication_json IS NULL OR receipt.receipt_id IS NULL)
-            + (SELECT COUNT(*) FROM session_refresh_batch_bindings AS binding
-               LEFT JOIN session_temporal_projection_receipts AS receipt
-                 ON receipt.session_id = binding.session_id
-                AND receipt.generation = binding.generation
-                AND receipt.batch_ordinal = binding.batch_ordinal
-               WHERE receipt.session_id IS NULL)",
-    },
-    HealthCheck {
-        kind: SessionTemporalHealthFindingKind::InvalidGeneration,
-        tables: &["session_temporal_generations"],
-        sql: "SELECT COUNT(*) FROM session_temporal_generations
-            WHERE generation <= 0
-               OR json_valid(frozen_watermarks_json) = 0
-               OR CASE WHEN json_valid(frozen_watermarks_json) = 1 THEN (
-                    json_type(frozen_watermarks_json, '$.active_generation') IS NOT 'integer'
-                    OR CAST(json_extract(
-                        frozen_watermarks_json, '$.active_generation'
-                    ) AS INTEGER) <= 0
-                    OR CAST(json_extract(
-                        frozen_watermarks_json, '$.active_generation'
-                    ) AS INTEGER) > generation
-                    OR json_type(
-                        frozen_watermarks_json, '$.source_frontier'
-                    ) IS NOT 'integer'
-                    OR CAST(json_extract(
-                        frozen_watermarks_json, '$.source_frontier'
-                    ) AS INTEGER) < 0
-                    OR json_type(
-                        frozen_watermarks_json, '$.projection_frontier'
-                    ) IS NOT 'integer'
-                    OR CAST(json_extract(
-                        frozen_watermarks_json, '$.projection_frontier'
-                    ) AS INTEGER) < 0
-                    OR json_type(
-                        frozen_watermarks_json, '$.summary_frontier'
-                    ) IS NOT 'integer'
-                    OR CAST(json_extract(
-                        frozen_watermarks_json, '$.summary_frontier'
-                    ) AS INTEGER) < 0
-                    OR NOT (
-                         (state = 'building' AND ready_at IS NULL
-                              AND activated_at IS NULL AND completed_at IS NULL)
-                      OR (state = 'ready' AND ready_at IS NOT NULL
-                              AND activated_at IS NULL AND completed_at IS NULL)
-                      OR (state = 'active' AND ready_at IS NOT NULL
-                              AND activated_at IS NOT NULL AND completed_at IS NULL)
-                      OR (state = 'superseded' AND ready_at IS NOT NULL
-                              AND activated_at IS NOT NULL AND completed_at IS NOT NULL)
-                      OR (state IN ('failed', 'cancelled') AND completed_at IS NOT NULL)
-                    )
-               ) ELSE 0 END",
-    },
-    HealthCheck {
-        kind: SessionTemporalHealthFindingKind::MultiActiveGeneration,
-        tables: &["session_temporal_generations"],
-        sql: "SELECT COUNT(*) FROM (
-                SELECT session_id
-                FROM session_temporal_generations
-                WHERE state = 'active'
-                GROUP BY session_id
-                HAVING COUNT(*) > 1
-            )",
-    },
-    HealthCheck {
-        kind: SessionTemporalHealthFindingKind::CursorChainAbsent,
-        tables: &["session_query_cursor_keys", "session_temporal_generations"],
-        sql: "SELECT
-            (SELECT COUNT(*) FROM session_query_cursor_keys AS key
-             WHERE key.key_version > 1
-               AND NOT EXISTS (
-                   SELECT 1 FROM session_query_cursor_keys AS predecessor
-                   WHERE predecessor.key_version = key.key_version - 1
-               ))
-            + (SELECT CASE
-                 WHEN EXISTS(
-                     SELECT 1 FROM session_temporal_generations
-                     WHERE state = 'active'
-                 ) AND (
-                     SELECT COUNT(*) FROM session_query_cursor_keys
-                     WHERE retired_at IS NULL
-                 ) <> 1
-                 THEN 1 ELSE 0 END)",
-    },
-    HealthCheck {
-        kind: SessionTemporalHealthFindingKind::CursorKeyAbsent,
-        tables: &["session_query_cursor_keys", "session_temporal_generations"],
-        sql: "SELECT COUNT(*)
-            FROM session_temporal_generations AS generation
-            LEFT JOIN session_query_cursor_keys AS key
-              ON key.key_id = json_extract(
-                    generation.frozen_watermarks_json, '$.cursor_key.key_id'
-                 )
-             AND key.key_version = CAST(json_extract(
-                    generation.frozen_watermarks_json, '$.cursor_key.version'
-                 ) AS INTEGER)
-             AND key.retired_at IS NULL
-            WHERE generation.state = 'active'
-              AND (
-                  json_type(generation.frozen_watermarks_json, '$.cursor_key') IS NOT 'object'
-                  OR key.key_id IS NULL
-              )",
-    },
-    HealthCheck {
-        kind: SessionTemporalHealthFindingKind::OwnershipDrift,
-        tables: &[
-            "session_refresh_batch_bindings",
-            "session_refresh_bindings",
-            "session_summary_availability",
-            "session_summary_nodes",
+        "session_external_payload_manifests",
+        ", receipt_id",
+        "COUNT(*)",
+        "LEFT JOIN sanitization_receipts AS receipt
+           ON receipt.receipt_id = candidate.receipt_id
+         WHERE receipt.receipt_id IS NULL"
+    ),
+    row_health_check!(
+        MissingReceipt,
+        &[
+            "sanitization_receipts",
+            "session_temporal_observation_effects"
         ],
-        sql: "SELECT
-            (SELECT COUNT(*)
-               FROM session_summary_availability AS availability
-               LEFT JOIN session_summary_nodes AS summary
-                 ON summary.summary_id = availability.summary_id
-               WHERE summary.summary_id IS NULL
-                  OR availability.session_id IS NOT summary.session_id)
-            + (SELECT COUNT(*)
-               FROM session_refresh_batch_bindings AS batch
-               LEFT JOIN session_refresh_bindings AS binding
-                 ON binding.session_id = batch.session_id
-                AND binding.operation_id = batch.operation_id
-               WHERE binding.operation_id IS NULL
-                  OR batch.generation IS NOT binding.generation)",
-    },
-    HealthCheck {
-        kind: SessionTemporalHealthFindingKind::StuckRefresh,
-        tables: &["session_refresh_operations"],
-        sql: "SELECT COUNT(*) FROM session_refresh_operations
-            WHERE state = 'running'
-              AND updated_at < CAST(strftime('%s', 'now') AS INTEGER) * 1000000 - 900000000",
-    },
-    HealthCheck {
-        kind: SessionTemporalHealthFindingKind::StuckBinding,
-        tables: &[
+        "session_temporal_observation_effects",
+        ", receipt_id",
+        "COUNT(*)",
+        "LEFT JOIN sanitization_receipts AS receipt
+           ON receipt.receipt_id = candidate.receipt_id
+         WHERE receipt.receipt_id IS NULL"
+    ),
+    row_health_check!(
+        MissingReceipt,
+        &["sanitization_receipts", "session_summary_nodes"],
+        "session_summary_nodes",
+        ", publication_json",
+        "COUNT(*)",
+        "LEFT JOIN sanitization_receipts AS receipt
+           ON receipt.receipt_id =
+              json_extract(candidate.publication_json, '$.receipt_id')
+         WHERE candidate.publication_json IS NULL OR receipt.receipt_id IS NULL"
+    ),
+    row_health_check!(
+        MissingReceipt,
+        &[
+            "session_refresh_batch_bindings",
+            "session_temporal_projection_receipts"
+        ],
+        "session_refresh_batch_bindings",
+        ", session_id, generation, batch_ordinal",
+        "COUNT(*)",
+        "LEFT JOIN session_temporal_projection_receipts AS receipt
+           ON receipt.session_id = candidate.session_id
+          AND receipt.generation = candidate.generation
+          AND receipt.batch_ordinal = candidate.batch_ordinal
+         WHERE receipt.session_id IS NULL"
+    ),
+    row_health_check!(
+        InvalidGeneration,
+        &["session_temporal_generations"],
+        "session_temporal_generations",
+        ", generation, state, frozen_watermarks_json, ready_at, activated_at, completed_at",
+        "COUNT(*)",
+        INVALID_GENERATION_TAIL
+    ),
+    row_health_check!(
+        MultiActiveGeneration,
+        &["session_temporal_generations"],
+        "session_temporal_generations",
+        ", session_id, state",
+        "COUNT(*)",
+        MULTI_ACTIVE_GENERATION_TAIL
+    ),
+    row_health_check!(
+        CursorChainAbsent,
+        &["session_query_cursor_keys"],
+        "session_query_cursor_keys",
+        ", key_version",
+        "COUNT(*)",
+        "WHERE candidate.key_version > 1
+           AND NOT EXISTS (
+               SELECT 1
+               FROM session_query_cursor_keys AS predecessor
+               WHERE predecessor.key_version = candidate.key_version - 1
+           )"
+    ),
+    row_health_check!(
+        CursorChainAbsent,
+        &["session_query_cursor_keys", "session_temporal_generations"],
+        "session_temporal_generations",
+        ", state",
+        "CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END",
+        "WHERE candidate.state = 'active'
+           AND (
+               SELECT COUNT(*)
+               FROM (
+                   SELECT 1
+                   FROM session_query_cursor_keys
+                   WHERE retired_at IS NULL
+                   LIMIT 2
+               )
+           ) <> 1"
+    ),
+    row_health_check!(
+        CursorKeyAbsent,
+        &["session_query_cursor_keys", "session_temporal_generations"],
+        "session_temporal_generations",
+        ", state, frozen_watermarks_json",
+        "COUNT(*)",
+        CURSOR_KEY_ABSENT_TAIL
+    ),
+    row_health_check!(
+        OwnershipDrift,
+        &["session_summary_availability", "session_summary_nodes"],
+        "session_summary_availability",
+        ", session_id, summary_id",
+        "COUNT(*)",
+        "LEFT JOIN session_summary_nodes AS summary
+           ON summary.summary_id = candidate.summary_id
+         WHERE summary.summary_id IS NULL
+            OR candidate.session_id IS NOT summary.session_id"
+    ),
+    row_health_check!(
+        OwnershipDrift,
+        &["session_refresh_batch_bindings", "session_refresh_bindings"],
+        "session_refresh_batch_bindings",
+        ", session_id, operation_id, generation",
+        "COUNT(*)",
+        "LEFT JOIN session_refresh_bindings AS binding
+           ON binding.session_id = candidate.session_id
+          AND binding.operation_id = candidate.operation_id
+         WHERE binding.operation_id IS NULL
+            OR candidate.generation IS NOT binding.generation"
+    ),
+    row_health_check!(
+        StuckRefresh,
+        &["session_refresh_operations"],
+        "session_refresh_operations",
+        ", state, updated_at",
+        "COUNT(*)",
+        "WHERE candidate.state = 'running'
+           AND candidate.updated_at
+               < CAST(strftime('%s', 'now') AS INTEGER) * 1000000 - 900000000"
+    ),
+    row_health_check!(
+        StuckBinding,
+        &[
             "session_refresh_bindings",
             "session_refresh_operations",
-            "session_temporal_generations",
+            "session_temporal_generations"
         ],
-        sql: "SELECT COUNT(*)
-            FROM session_refresh_operations AS operation
-            LEFT JOIN session_refresh_bindings AS binding
-              ON binding.session_id = operation.session_id
-             AND binding.operation_id = operation.operation_id
-            LEFT JOIN session_temporal_generations AS generation
-              ON generation.session_id = binding.session_id
-             AND generation.generation = binding.generation
-            WHERE operation.state = 'running'
-              AND (
-                  binding.operation_id IS NULL
-                  OR generation.session_id IS NULL
-                  OR generation.state <> 'building'
-              )",
-    },
+        "session_refresh_operations",
+        ", session_id, operation_id, state",
+        "COUNT(*)",
+        STUCK_BINDING_TAIL
+    ),
     HealthCheck {
         kind: SessionTemporalHealthFindingKind::StuckProgress,
         tables: &[
@@ -532,56 +664,24 @@ const CHECKS: &[HealthCheck] = &[
             "session_refresh_operations",
             "session_refresh_progress",
         ],
-        sql: "SELECT COUNT(*) FROM (
-                SELECT operation.session_id, operation.operation_id
-                FROM session_refresh_operations AS operation
-                JOIN session_refresh_bindings AS binding
-                  ON binding.session_id = operation.session_id
-                 AND binding.operation_id = operation.operation_id
-                LEFT JOIN session_refresh_progress AS progress
-                  ON progress.session_id = operation.session_id
-                 AND progress.operation_id = operation.operation_id
-                WHERE operation.state = 'running'
-                GROUP BY operation.session_id, operation.operation_id
-                HAVING (MAX(progress.recorded_at) IS NULL
-                        AND MAX(operation.updated_at)
-                            < CAST(strftime('%s', 'now') AS INTEGER) * 1000000 - 900000000)
-                    OR MAX(progress.recorded_at)
-                         < CAST(strftime('%s', 'now') AS INTEGER) * 1000000 - 900000000
-            )",
+        probe: HealthProbe::Sql(STUCK_PROGRESS_SQL),
     },
-    HealthCheck {
-        kind: SessionTemporalHealthFindingKind::StuckReceipt,
-        tables: &["session_refresh_operations", "session_refresh_receipts"],
-        sql: "SELECT COUNT(*)
-            FROM session_refresh_operations AS operation
-            LEFT JOIN session_refresh_receipts AS receipt
-              ON receipt.session_id = operation.session_id
-             AND receipt.operation_id = operation.operation_id
-            WHERE (operation.state = 'running' AND receipt.operation_id IS NOT NULL)
-               OR (operation.state <> 'running' AND receipt.operation_id IS NULL)
-               OR (receipt.operation_id IS NOT NULL
-                   AND (
-                       receipt.terminal_state <> operation.state
-                       OR receipt.terminal_at IS NOT operation.terminal_at
-                       OR receipt.failure_code IS NOT operation.failure_code
-                   ))",
-    },
-    HealthCheck {
-        kind: SessionTemporalHealthFindingKind::CompatibilityDrift,
-        tables: &["lcm_summary_nodes", "session_summary_nodes"],
-        sql: "SELECT COUNT(*)
-            FROM session_summary_nodes AS canonical
-            LEFT JOIN lcm_summary_nodes AS compatibility
-              ON compatibility.node_id = canonical.summary_id
-            WHERE compatibility.node_id IS NULL
-               OR canonical.publication_json IS NULL
-               OR json_extract(canonical.publication_json, '$.summary_hash') IS NULL
-               OR compatibility.session_id <> canonical.session_id
-               OR compatibility.summary_text <> canonical.summary_text
-               OR compatibility.summary_hash
-                    <> json_extract(canonical.publication_json, '$.summary_hash')",
-    },
+    row_health_check!(
+        StuckReceipt,
+        &["session_refresh_operations", "session_refresh_receipts"],
+        "session_refresh_operations",
+        ", session_id, operation_id, state, terminal_at, failure_code",
+        "COUNT(*)",
+        STUCK_RECEIPT_TAIL
+    ),
+    row_health_check!(
+        CompatibilityDrift,
+        &["lcm_summary_nodes", "session_summary_nodes"],
+        "session_summary_nodes",
+        ", summary_id, session_id, summary_text, publication_json",
+        "COUNT(*)",
+        COMPATIBILITY_DRIFT_TAIL
+    ),
 ];
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -640,9 +740,8 @@ impl SessionTemporalHealthFinding {
 pub struct SessionTemporalHealthReport {
     status: SessionTemporalHealthStatus,
     findings: Vec<SessionTemporalHealthFinding>,
-    /// Why diagnosis could not complete: a fixed machine reason for path-API
-    /// unavailability (for example `synchronous_diagnosis_size_budget_exceeded`)
-    /// or a `<probe>: <storage error>` detail naming the read that failed.
+    /// Why diagnosis could not complete: a fixed bounded-probe reason or a
+    /// `<probe>: <storage error>` detail naming the read that failed.
     /// Omitted when diagnosis ran to completion against an immutable snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
@@ -666,7 +765,17 @@ impl SessionTemporalHealthReport {
 struct HealthCheck {
     kind: SessionTemporalHealthFindingKind,
     tables: &'static [&'static str],
-    sql: &'static str,
+    probe: HealthProbe,
+}
+
+enum HealthProbe {
+    Rows {
+        source_table: &'static str,
+        source_columns: &'static str,
+        count: &'static str,
+        tail: &'static str,
+    },
+    Sql(&'static str),
 }
 
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
@@ -677,12 +786,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     #[hotpath::measure(future = true, label = "session_temporal.doctor.query")]
     pub async fn session_temporal_doctor_health(&self) -> SessionTemporalHealthReport {
         let database_path = self.db_path();
-        if !permits_synchronous_session_temporal_health(database_path) {
-            return unavailable_report_with_reason(
-                SessionTemporalHealthStatus::Unavailable,
-                Some("synchronous_diagnosis_size_budget_exceeded"),
-            );
-        }
         let cache = session_temporal_health_cache_cell(database_path);
         let mut cached = cache.lock().await;
         let before = session_temporal_store_fingerprint(database_path).ok();
@@ -753,6 +856,7 @@ async fn diagnose_snapshot(
 
     let mut status = SessionTemporalHealthStatus::Complete;
     let mut findings = Vec::new();
+    let mut partial_reasons = BTreeSet::new();
     let missing_tables = required_table_names()
         .filter(|table| !inventory.tables.contains(*table))
         .count() as u64;
@@ -835,33 +939,61 @@ async fn diagnose_snapshot(
             continue;
         }
         record_session_doctor_check();
-        match snapshot_count(conn, check.sql).await {
-            Ok(0) => {}
-            Ok(value) => merge_finding(&mut findings, check.kind, value),
-            Err(error) if is_fts_finding(check.kind) && is_fts_virtual_table_corruption(&error) => {
-                merge_finding(&mut findings, check.kind, 1);
-            }
-            Err(error) if is_engine_locked(&error) => {
-                return SessionTemporalHealthReport {
-                    status: SessionTemporalHealthStatus::Locked,
-                    findings,
-                    reason: None,
-                };
-            }
-            Err(error) => {
-                return unavailable_report_with_detail(
-                    SessionTemporalHealthStatus::Unavailable,
-                    check_probe_name(check.kind),
-                    &error,
-                );
-            }
+        if diagnose_health_check(
+            conn,
+            check,
+            &mut status,
+            &mut findings,
+            &mut partial_reasons,
+        )
+        .await
+        {
+            return SessionTemporalHealthReport {
+                status: SessionTemporalHealthStatus::Locked,
+                findings,
+                reason: None,
+            };
         }
     }
     findings.sort_by_key(SessionTemporalHealthFinding::kind);
     SessionTemporalHealthReport {
         status,
         findings,
-        reason: None,
+        reason: (!partial_reasons.is_empty())
+            .then(|| partial_reasons.into_iter().collect::<Vec<_>>().join("; ")),
+    }
+}
+
+async fn diagnose_health_check(
+    conn: &impl crate::handle::SessionTemporalQuery,
+    check: &HealthCheck,
+    status: &mut SessionTemporalHealthStatus,
+    findings: &mut Vec<SessionTemporalHealthFinding>,
+    partial_reasons: &mut BTreeSet<String>,
+) -> bool {
+    let probe_name = check_probe_name(check.kind);
+    match snapshot_count(conn, check).await {
+        Ok(outcome) => {
+            if outcome.count > 0 || !outcome.complete {
+                merge_finding(findings, check.kind, outcome.count);
+            }
+            if !outcome.complete {
+                *status = SessionTemporalHealthStatus::Partial;
+                partial_reasons.insert(format!("{probe_name}: bounded_row_probe_incomplete"));
+            }
+            false
+        }
+        Err(error) if is_fts_finding(check.kind) && is_fts_virtual_table_corruption(&error) => {
+            merge_finding(findings, check.kind, 1);
+            false
+        }
+        Err(error) if is_engine_locked(&error) => true,
+        Err(error) => {
+            *status = SessionTemporalHealthStatus::Partial;
+            merge_finding(findings, check.kind, 0);
+            partial_reasons.insert(format!("{probe_name}: {error}"));
+            false
+        }
     }
 }
 
@@ -959,19 +1091,54 @@ async fn snapshot_schema_version(
 #[hotpath::measure(future = true, label = "session_temporal.doctor.query.count")]
 async fn snapshot_count(
     conn: &impl crate::handle::SessionTemporalQuery,
-    sql: &str,
-) -> tracedecay_runtime_core::db::engine::Result<u64> {
-    let mut rows = conn.query(sql, ()).await?;
-    let value = rows
-        .next()
-        .await?
-        .map(|row| row.get::<Option<i64>>(0))
-        .transpose()?
-        .flatten();
-    Ok(value
-        .and_then(|value| u64::try_from(value).ok())
-        .unwrap_or(0)
-        .min(MAX_FINDING_COUNT))
+    check: &HealthCheck,
+) -> tracedecay_runtime_core::db::engine::Result<HealthProbeOutcome> {
+    let sql = match &check.probe {
+        HealthProbe::Rows {
+            source_table,
+            source_columns,
+            count,
+            tail,
+        } => format!(
+            "WITH source AS MATERIALIZED (
+                 SELECT rowid AS source_rowid{source_columns}
+                 FROM {source_table}
+                 ORDER BY rowid
+                 LIMIT ?1
+             ),
+             page AS MATERIALIZED (
+                 SELECT * FROM source ORDER BY source_rowid LIMIT ?2
+             )
+             SELECT {count},
+                    EXISTS(SELECT 1 FROM source LIMIT 1 OFFSET ?2)
+             FROM page AS candidate
+             {tail}"
+        ),
+        HealthProbe::Sql(sql) => (*sql).to_owned(),
+    };
+    let mut rows = conn
+        .query(&sql, [HEALTH_PROBE_QUERY_LIMIT, HEALTH_PROBE_PAGE_SIZE])
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(HealthProbeOutcome {
+            count: 0,
+            complete: true,
+        });
+    };
+    let value = row.get::<Option<i64>>(0)?;
+    let incomplete = row.get::<i64>(1)? != 0;
+    Ok(HealthProbeOutcome {
+        count: value
+            .and_then(|value| u64::try_from(value).ok())
+            .unwrap_or(0)
+            .min(MAX_FINDING_COUNT),
+        complete: !incomplete,
+    })
+}
+
+struct HealthProbeOutcome {
+    count: u64,
+    complete: bool,
 }
 
 fn finding(kind: SessionTemporalHealthFindingKind, count: u64) -> SessionTemporalHealthFinding {
@@ -1070,17 +1237,6 @@ fn unavailable_report_with_detail(
     }
 }
 
-fn unavailable_report_with_reason(
-    status: SessionTemporalHealthStatus,
-    reason: Option<&'static str>,
-) -> SessionTemporalHealthReport {
-    SessionTemporalHealthReport {
-        status,
-        findings: Vec::new(),
-        reason: reason.map(str::to_string),
-    }
-}
-
 #[inline(always)]
 fn record_session_doctor_cache_hit() {
     #[cfg(feature = "hotpath")]
@@ -1102,8 +1258,6 @@ fn record_session_doctor_check() {
 #[cfg(test)]
 mod cache_tests {
     use super::*;
-    use crate::handle::SessionTemporalAccess;
-    use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
 
     #[test]
     fn session_temporal_fingerprint_tracks_database_and_wal_changes() {
@@ -1121,20 +1275,114 @@ mod cache_tests {
         let expanded = session_temporal_store_fingerprint(&database).expect("expanded fingerprint");
         assert_ne!(with_wal, expanded);
     }
+}
 
-    #[test]
-    fn session_temporal_size_budget_includes_wal_bytes() {
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    use crate::handle::SessionTemporalExec;
+    use tracedecay_runtime_core::db::engine::TestConnection;
+
+    #[tokio::test]
+    async fn row_probe_reports_observed_findings_when_its_page_is_incomplete() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
-        let database = tmp.path().join("sessions.db");
-        std::fs::write(&database, b"database").expect("database");
-        assert!(permits_synchronous_session_temporal_health(&database));
+        let connection = TestConnection::open(&tmp.path().join("doctor-page.db"));
+        SessionTemporalExec::execute_batch(
+            &connection,
+            &format!(
+                "CREATE TABLE retrieval_anchors (anchor_id TEXT PRIMARY KEY);
+                 CREATE TABLE session_summary_nodes (summary_anchor_id TEXT NOT NULL);
+                 CREATE TABLE session_occurrences (retrieval_anchor_id TEXT NOT NULL);
+                 CREATE TABLE session_assertions (
+                     subject_anchor_id TEXT NOT NULL,
+                     object_anchor_id TEXT NOT NULL
+                 );
+                 WITH RECURSIVE sequence(value) AS (
+                     VALUES(0)
+                     UNION ALL
+                     SELECT value + 1 FROM sequence WHERE value < {}
+                 )
+                 INSERT INTO session_summary_nodes (summary_anchor_id)
+                 SELECT printf('missing-%d', value) FROM sequence;",
+                HEALTH_PROBE_PAGE_SIZE
+            ),
+        )
+        .await
+        .expect("seed oversized health probe");
+        let check = CHECKS
+            .iter()
+            .find(|check| check.kind == SessionTemporalHealthFindingKind::MissingAnchor)
+            .expect("missing-anchor check");
 
-        let wal = tmp.path().join("sessions.db-wal");
-        std::fs::File::create(wal)
-            .expect("wal")
-            .set_len(MAX_SYNCHRONOUS_SESSION_TEMPORAL_HEALTH_BYTES)
-            .expect("wal size");
-        assert!(!permits_synchronous_session_temporal_health(&database));
+        let mut status = SessionTemporalHealthStatus::Complete;
+        let mut findings = Vec::new();
+        let mut partial_reasons = BTreeSet::new();
+
+        assert!(
+            !diagnose_health_check(
+                &connection,
+                check,
+                &mut status,
+                &mut findings,
+                &mut partial_reasons,
+            )
+            .await
+        );
+        assert_eq!(status, SessionTemporalHealthStatus::Partial);
+        assert_eq!(
+            findings,
+            vec![finding(
+                SessionTemporalHealthFindingKind::MissingAnchor,
+                HEALTH_PROBE_PAGE_SIZE as u64,
+            )]
+        );
+        assert_eq!(
+            partial_reasons,
+            BTreeSet::from(["missing_anchor: bounded_row_probe_incomplete".to_owned()])
+        );
+    }
+}
+
+#[cfg(test)]
+mod registered_tests {
+    use super::*;
+    use crate::handle::{SessionTemporalAccess, SessionTemporalExec, SessionTemporalRegisteredDb};
+    use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
+
+    #[tokio::test]
+    async fn oversized_session_temporal_store_still_reports_schema_findings() {
+        const OLD_SYNCHRONOUS_HEALTH_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
+        let harness =
+            RegisteredGlobalDbHarness::open_without_relation_graph("doctor-oversized-store").await;
+        let writer = harness.registered.writer_connection().expect("writer");
+        SessionTemporalExec::execute(
+            &writer,
+            "DROP INDEX idx_session_occurrences_generation_order",
+            (),
+        )
+        .await
+        .expect("drop required index");
+
+        let database = SessionTemporalRegisteredDb::db_path(&harness.registered);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(database)
+            .expect("open session database")
+            .set_len(OLD_SYNCHRONOUS_HEALTH_BUDGET_BYTES + 4096)
+            .expect("grow session database past the former admission budget");
+
+        let report = SessionTemporalAccess::new(&harness.registered)
+            .session_temporal_doctor_health()
+            .await;
+
+        assert_eq!(report.status(), SessionTemporalHealthStatus::Partial);
+        assert_ne!(
+            report.reason(),
+            Some("synchronous_diagnosis_size_budget_exceeded")
+        );
+        assert!(report.findings().iter().any(|finding| {
+            finding.kind() == SessionTemporalHealthFindingKind::MigrationGap && finding.count() >= 1
+        }));
     }
 
     #[tokio::test]
