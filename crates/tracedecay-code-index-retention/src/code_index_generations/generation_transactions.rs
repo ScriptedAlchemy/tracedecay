@@ -2,14 +2,14 @@
 //!
 //! Quarantined generations are journaled, then hard-linked into the replay pool before the receipt is durable.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-#[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use sha2::{Digest, Sha256};
@@ -264,23 +264,30 @@ pub(super) fn acquire_graph_replay_pool_lock_checked(
     GraphReplayPoolLockV1::acquire_exclusive(pool_root, deadline, is_cancelled)
 }
 
+// Per-thread, not process-wide: an acquire runs on its caller's thread, and
+// the test harness runs the other acquire tests in parallel on their own
+// threads. Shared statics let any concurrent acquire land between a test's
+// reset and its read, which is what turned the exact `(1, 0)` proof into an
+// occasional `(5, 3)`.
 #[cfg(test)]
-static GRAPH_REPLAY_POOL_ACQUIRE_TRIES: AtomicUsize = AtomicUsize::new(0);
-#[cfg(test)]
-static GRAPH_REPLAY_POOL_ACQUIRE_WAITS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static GRAPH_REPLAY_POOL_ACQUIRE_TRIES: Cell<usize> = const { Cell::new(0) };
+    static GRAPH_REPLAY_POOL_ACQUIRE_WAITS: Cell<usize> = const { Cell::new(0) };
+}
 
 #[cfg(test)]
 pub(super) fn reset_graph_replay_pool_acquire_observation() {
-    GRAPH_REPLAY_POOL_ACQUIRE_TRIES.store(0, Ordering::SeqCst);
-    GRAPH_REPLAY_POOL_ACQUIRE_WAITS.store(0, Ordering::SeqCst);
+    GRAPH_REPLAY_POOL_ACQUIRE_TRIES.with(|tries| tries.set(0));
+    GRAPH_REPLAY_POOL_ACQUIRE_WAITS.with(|waits| waits.set(0));
 }
 
-/// `(non_blocking_tries, wait_for_exclusive_calls)` since the last reset.
+/// `(non_blocking_tries, wait_for_exclusive_calls)` on this thread since the
+/// last reset.
 #[cfg(test)]
 pub(super) fn graph_replay_pool_acquire_observation() -> (usize, usize) {
     (
-        GRAPH_REPLAY_POOL_ACQUIRE_TRIES.load(Ordering::SeqCst),
-        GRAPH_REPLAY_POOL_ACQUIRE_WAITS.load(Ordering::SeqCst),
+        GRAPH_REPLAY_POOL_ACQUIRE_TRIES.with(Cell::get),
+        GRAPH_REPLAY_POOL_ACQUIRE_WAITS.with(Cell::get),
     )
 }
 
@@ -307,7 +314,7 @@ impl GraphReplayPoolLockV1 {
             // the budget is gone. Windows lock-conflict is `Ok(None)` via
             // `is_lock_contended`, not Storage.
             #[cfg(test)]
-            GRAPH_REPLAY_POOL_ACQUIRE_TRIES.fetch_add(1, Ordering::SeqCst);
+            GRAPH_REPLAY_POOL_ACQUIRE_TRIES.with(|tries| tries.set(tries.get() + 1));
             match try_acquire_code_generation_store_lock(pool_root)? {
                 Some(guard) => {
                     crate::hotpath_observe::retention_replay_pool_acquired();
@@ -327,7 +334,7 @@ impl GraphReplayPoolLockV1 {
 
     fn wait_for_exclusive(deadline: Instant) {
         #[cfg(test)]
-        GRAPH_REPLAY_POOL_ACQUIRE_WAITS.fetch_add(1, Ordering::SeqCst);
+        GRAPH_REPLAY_POOL_ACQUIRE_WAITS.with(|waits| waits.set(waits.get() + 1));
         crate::hotpath_observe::retention_replay_pool_acquire_wait();
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
