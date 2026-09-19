@@ -697,9 +697,9 @@ impl DaemonSessionRetrievalService {
                     freshness: SessionDataFreshness::Stored { generation_lag },
                 }
             }
-            // Same refusal as the retrieval boundary: a converging generation
-            // has no published cohort yet, so an empty page is partial, not an
-            // authoritative zero the caller should treat as final.
+            // Hydration can surface the same Empty the freeze path returns.
+            // A Partial generation there is still converging, not an
+            // authoritative zero.
             SessionTemporalExecutionError::Empty {
                 freshness: freshness @ SessionDataFreshness::Partial { generation_lag },
             } => SessionRetrievalServiceOutcome::Partial {
