@@ -43,6 +43,7 @@ const PROJECTION_RETRY_MAX_MICROS: i64 = 300_000_000;
 static NEVER_CANCELLED: AtomicBool = AtomicBool::new(false);
 
 const SESSION_JSON_COLUMN: &str = "session_json";
+const MERGED_SESSION_JSON_COLUMN: &str = "merged.value";
 const MESSAGE_JSON_COLUMN: &str = "message_json";
 const STAGED_MESSAGE_JSON_COLUMN: &str = "staged.message_json";
 
@@ -2221,36 +2222,47 @@ fn decode_overlapping_session(row: &Row) -> ProjectionStoreResult<SessionRecord>
     })
 }
 
-async fn write_reconciled_session(
+/// Write every reconciled overlap in one set-based statement. Rebuild
+/// activation owns the database writer, so a per-row `UPDATE` loop would hold
+/// admission for as long as the history is large; the merge itself already ran
+/// in Rust, so each column is taken verbatim from the merged row.
+async fn write_reconciled_sessions(
     conn: &impl Executor,
-    merged: &SessionRecord,
+    merged: &[SessionRecord],
 ) -> ProjectionStoreResult<()> {
+    if merged.is_empty() {
+        return Ok(());
+    }
+    let rows = encode_json(&merged, "encode reconciled projection sessions")?;
+    let session_extracts =
+        json_extract_select_list(MERGED_SESSION_JSON_COLUMN, SESSION_JSON_FIELDS);
+    let assignments = SESSION_JSON_FIELDS
+        .iter()
+        .map(|field| format!("{field} = excluded.{field}"))
+        .collect::<Vec<_>>()
+        .join(",\n            ");
     conn.execute(
-        "UPDATE sessions
-         SET project_key = ?3, project_path = ?4, title = ?5, started_at = ?6,
-             ended_at = ?7, transcript_path = ?8, metadata_json = ?9,
-             parent_session_id = ?10, is_subagent = ?11, agent_id = ?12,
-             parent_tool_use_id = ?13
-         WHERE provider = ?1 AND session_id = ?2",
-        params![
-            merged.provider.as_str(),
-            merged.session_id.as_str(),
-            merged.project_key.as_str(),
-            merged.project_path.as_str(),
-            merged.title.as_deref(),
-            merged.started_at,
-            merged.ended_at,
-            merged.transcript_path.as_deref(),
-            merged.metadata_json.as_deref(),
-            merged.parent_session_id.as_deref(),
-            i64::from(merged.is_subagent),
-            merged.agent_id.as_deref(),
-            merged.parent_tool_use_id.as_deref(),
-        ],
+        &format!(
+            "INSERT INTO sessions (
+            provider, session_id, project_key, project_path, title, started_at, ended_at,
+            transcript_path, metadata_json, parent_session_id, is_subagent, agent_id,
+            parent_tool_use_id
+         )
+         SELECT {}, {},
+                {session_extracts}
+         FROM json_each(?1) AS merged
+         -- `WHERE true` disambiguates the upsert clause from a join constraint.
+         WHERE true
+         ON CONFLICT(provider, session_id) DO UPDATE SET
+            {assignments}",
+            json_extract_expr(MERGED_SESSION_JSON_COLUMN, "provider"),
+            json_extract_expr(MERGED_SESSION_JSON_COLUMN, "session_id"),
+        ),
+        params![rows.as_str()],
     )
     .await
     .map(|_| ())
-    .map_err(|error| storage("activate reconciled projection session", error))
+    .map_err(|error| storage("activate reconciled projection sessions", error))
 }
 
 /// Classify every staged session that already exists through
@@ -2304,10 +2316,7 @@ async fn reconcile_overlapping_rebuild_sessions(
         }
     }
     drop(overlaps);
-    for merged in &updates {
-        write_reconciled_session(conn, merged).await?;
-    }
-    Ok(())
+    write_reconciled_sessions(conn, &updates).await
 }
 
 async fn activate_rebuild_sessions(
@@ -2736,30 +2745,43 @@ mod activation_tests {
         let harness = RegisteredGlobalDbHarness::open("session-collision-merge").await;
         let active = session(None, None);
         assert!(harness.registered.upsert_session(&active).await);
+        let second_active = SessionRecord {
+            session_id: "session.second".to_owned(),
+            ..active.clone()
+        };
+        assert!(harness.registered.upsert_session(&second_active).await);
         let transaction = harness.registered.begin_write_transaction().await.unwrap();
         let staged = session(None, Some("Composer session"));
         stage(&transaction, "generation.session-merge", &staged).await;
+        // A second overlap keeps the set-based reconciled write honest: each
+        // merged row must land on its own session, not the first one twice.
+        let second_staged = SessionRecord {
+            title: Some("Second composer session".to_owned()),
+            ..second_active.clone()
+        };
         let fresh = SessionRecord {
             provider: "cursor".to_owned(),
             session_id: "session.fresh".to_owned(),
             title: Some("fresh session".to_owned()),
             ..active.clone()
         };
-        transaction
-            .execute(
-                "INSERT INTO observation_projection_rebuild_sessions (
+        for staged in [&second_staged, &fresh] {
+            transaction
+                .execute(
+                    "INSERT INTO observation_projection_rebuild_sessions (
                     projector_version, generation, provider, session_id, session_json
                  ) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    SESSION_MESSAGE_PROJECTOR_VERSION,
-                    "generation.session-merge",
-                    fresh.provider.as_str(),
-                    fresh.session_id.as_str(),
-                    serde_json::to_string(&fresh).unwrap().as_str(),
-                ],
-            )
-            .await
-            .unwrap();
+                    params![
+                        SESSION_MESSAGE_PROJECTOR_VERSION,
+                        "generation.session-merge",
+                        staged.provider.as_str(),
+                        staged.session_id.as_str(),
+                        serde_json::to_string(staged).unwrap().as_str(),
+                    ],
+                )
+                .await
+                .unwrap();
+        }
 
         activate_rebuild_sessions(&transaction, "generation.session-merge")
             .await
@@ -2780,6 +2802,22 @@ mod activation_tests {
             .get::<String>(0)
             .unwrap();
         assert_eq!(title, "Composer session");
+        drop(rows);
+        let mut rows = transaction
+            .query(
+                "SELECT title FROM sessions WHERE provider = 'cursor' AND session_id = 'session.second'",
+                (),
+            )
+            .await
+            .unwrap();
+        let second_title = rows
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap();
+        assert_eq!(second_title, "Second composer session");
         drop(rows);
         let mut rows = transaction
             .query(
