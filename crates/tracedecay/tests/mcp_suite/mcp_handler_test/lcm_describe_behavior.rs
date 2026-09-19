@@ -246,19 +246,10 @@ async fn describe_raw(server: &Arc<McpServer>, arguments: Value) -> Value {
     handle_real_server_tool_call_raw(server, "tracedecay_lcm_describe", arguments).await
 }
 
-fn externalized_tool_preview(payload_ref: &str) -> String {
-    let body = format!("{SECRET} {}", "payload ".repeat(40_000));
-    format!(
-        "[Externalized LCM ingest payload: kind=tool_result; field=content; chars={}; bytes={}; ref={payload_ref}]",
-        body.chars().count(),
-        body.len()
-    )
-}
-
 fn session_document(node_id: &str, payload_ref: &str) -> Value {
-    let tool_preview = externalized_tool_preview(payload_ref);
-    let tool_preview_chars = tool_preview.chars().count();
-    let source_chars = SOURCE_BODY.chars().count();
+    let external_placeholder = format!(
+        "[Externalized LCM ingest payload: kind=tool_result; field=content; chars=320040; bytes=320040; ref={payload_ref}]"
+    );
     json!({
         "description": {
             "external_payload": null,
@@ -271,10 +262,10 @@ fn session_document(node_id: &str, payload_ref: &str) -> Value {
                 {
                     "content_preview": SOURCE_BODY,
                     "content_range": {
-                        "limit": source_chars,
+                        "limit": SOURCE_BODY.len(),
                         "offset": 0,
-                        "returned_chars": source_chars,
-                        "total_chars": source_chars,
+                        "returned_chars": SOURCE_BODY.len(),
+                        "total_chars": SOURCE_BODY.len(),
                         "truncated": false
                     },
                     "message_id": SOURCE_ID,
@@ -284,11 +275,11 @@ fn session_document(node_id: &str, payload_ref: &str) -> Value {
                     "store_id": 1
                 },
                 {
-                    "content_preview": tool_preview,
+                    "content_preview": external_placeholder,
                     "content_range": {
-                        "limit": tool_preview_chars,
+                        "limit": external_placeholder.len(),
                         "offset": 0,
-                        "returned_chars": tool_preview_chars,
+                        "returned_chars": external_placeholder.len(),
                         "total_chars": 320_040,
                         "truncated": true
                     },
@@ -414,7 +405,9 @@ fn external_payload_document(payload_ref: &str, content_hash: &str) -> Value {
                 "byte_count": 320_040,
                 "char_count": 320_040,
                 "content_hash": content_hash,
-                "content_preview": externalized_tool_preview(payload_ref),
+                "content_preview": format!(
+                    "[Externalized LCM ingest payload: kind=tool_result; field=content; chars=320040; bytes=320040; ref={payload_ref}]"
+                ),
                 "created_at": "<created_at>",
                 "kind": "tool_result",
                 "message_id": TOOL_ID,
