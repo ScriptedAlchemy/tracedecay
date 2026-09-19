@@ -8173,6 +8173,139 @@ fn graph_off_stale_witness_reconciles_unchanged_source_without_full_decode() {
     );
 }
 
+/// The disk freshness witness names whichever generation last persisted it.
+/// A later seal of the same bytes used to return `None` the moment that id
+/// disagreed, and the graph-on caller then decoded and resealed. Under load
+/// that reseal outlived the admission window, the swap cleared the witness,
+/// and the newer generation never became current. Unchanged sealed bytes
+/// keep the generation and rewrite the witness onto it. Moved bytes still
+/// refuse, without publishing a substitute.
+#[test]
+fn predecessor_freshness_witness_keeps_the_sealed_generation() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let seeded = published(scheduler.reconcile_now().expect("seed retained generation"));
+    let metadata = scheduler
+        .servable_retained_text_generation()
+        .expect("publication store")
+        .expect("authenticated retained text generation")
+        .metadata()
+        .clone();
+    let generation_id = metadata.manifest().generation_id.clone();
+    let mut witness =
+        RestoreFreshnessWitnessV1::load(store.path()).expect("the seal persisted a proof");
+    assert_eq!(witness.generation_id, generation_id.as_str());
+    witness.generation_id = "generation.predecessor".to_owned();
+    witness.persist(store.path());
+    let index_path = fixture.path().join(".git/index");
+    let index_mtime = std::fs::metadata(&index_path)
+        .expect("git index metadata")
+        .modified()
+        .expect("git index mtime");
+    filetime::set_file_mtime(
+        &index_path,
+        filetime::FileTime::from_system_time(index_mtime + Duration::from_secs(2)),
+    )
+    .expect("advance only the git index mtime");
+
+    let decodes_before = scheduler.sealed_decode_count();
+    let outcome = scheduler
+        .reconcile_retained_text_generation_with(&metadata, false)
+        .expect("graph-on retained reconcile")
+        .expect("unchanged sealed bytes must not be dropped");
+    let CodeIndexReconcileOutcomeV1::Noop(evidence) = outcome else {
+        panic!("predecessor proof must not reseal the same snapshot: {outcome:?}");
+    };
+    assert_eq!(
+        evidence.snapshot_content_identity, seeded.snapshot_content_identity,
+        "the noop names the generation that was already sealed"
+    );
+    assert_eq!(
+        scheduler.sealed_decode_count(),
+        decodes_before,
+        "keeping the sealed generation must not decode it again"
+    );
+    assert_eq!(
+        RestoreFreshnessWitnessV1::load(store.path())
+            .expect("rebound proof")
+            .generation_id,
+        generation_id.as_str(),
+        "the disk proof must name the sealed generation, not the predecessor"
+    );
+    assert_eq!(
+        scheduler
+            .source_currency_witness_for(&generation_id, &metadata.snapshot().content_identity,)
+            .map(|witness| witness.generation_id),
+        Some(generation_id.clone()),
+        "the in-memory proof must admit the sealed generation"
+    );
+
+    fixture.edit(
+        "src/lib.rs",
+        "pub fn changed_after_predecessor_proof() -> u32 { 2 }\n",
+    );
+    let refused = scheduler
+        .reconcile_retained_text_generation_with(&metadata, false)
+        .expect("changed source is a typed refusal, not an error");
+    assert!(
+        refused.is_none(),
+        "moved bytes must not keep the sealed generation: {refused:?}"
+    );
+    assert_eq!(
+        scheduler
+            .publication
+            .read_publication_pointer()
+            .expect("read pointer")
+            .expect("active pointer")
+            .generation_id,
+        generation_id.as_str(),
+        "refusing the moved bytes must not publish a substitute generation"
+    );
+}
+
+/// Clone backfill and the seal itself outlive the 30s admission window. Expiry
+/// is a request to re-check the sealed digests, not a reason to drop the
+/// generation those digests already name. A byte change after expiry still drops it.
+#[test]
+fn expired_proof_keeps_the_sealed_generation_until_bytes_move() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let seeded = published(scheduler.reconcile_now().expect("seed retained generation"));
+    scheduler.expire_source_proof_for_test();
+    assert_eq!(
+        scheduler
+            .currency_witness_for_sealed_snapshot(
+                &seeded.generation_id,
+                &seeded.snapshot_content_identity,
+            )
+            .map(|witness| witness.generation_id),
+        Some(seeded.generation_id.clone()),
+        "an expired proof must keep the generation whose sealed bytes still match"
+    );
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 9 }\n");
+    scheduler.expire_source_proof_for_test();
+    assert!(
+        scheduler
+            .currency_witness_for_sealed_snapshot(
+                &seeded.generation_id,
+                &seeded.snapshot_content_identity,
+            )
+            .is_none(),
+        "an expired proof must drop the generation once its sealed bytes moved"
+    );
+}
+
 /// A query freshness probe against a restored owner that no pass has verified
 /// yet must report "not current", the restart's first pass is still the
 /// remedy, without minting an observed source change: no overflow hint and no
