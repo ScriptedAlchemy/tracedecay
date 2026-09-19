@@ -11,6 +11,10 @@ use tracedecay_temporal_query::ports::ExecutionControl;
 use super::super::query::{PERSIST_OPERATION, generation_i64, storage, storage_message};
 use super::super::rebuild::checkpoint_relation_rebuild_control;
 
+/// Keep one occurrence-ref read under the exact-SQL materialization ceiling
+/// (10_000 rows / 64 MiB). A terminal generation is larger than that ceiling.
+const OCCURRENCE_REF_PAGE_ROWS: i64 = 512;
+
 #[hotpath::measure(future = true, label = "session_temporal.projection.rebuild_derived")]
 pub(super) async fn rebuild_derived_evidence(
     conn: &impl crate::handle::SessionTemporalExec,
@@ -63,79 +67,138 @@ async fn load_occurrence_refs(
     generation: i64,
     control: &ExecutionControl,
 ) -> SessionStoreResult<Vec<DerivedEvidenceOccurrenceRefV1>> {
-    checkpoint_relation_rebuild_control(control)?;
-    let mut rows = conn
-        .query(
-            "SELECT occurrence.occurrence_id,
-                    occurrence.retrieval_anchor_id,
-                    occurrence.thread_id,
-                    occurrence.message_id,
-                    occurrence.knowledge_at,
-                    effect.observation_sequence,
-                    occurrence.projection_output_ordinal
-             FROM session_occurrences AS occurrence
-             JOIN session_temporal_observation_effects AS effect
-               ON effect.observation_id = occurrence.source_observation_id
-              AND effect.session_id = occurrence.session_id
-             WHERE occurrence.session_id = ?1 AND occurrence.generation = ?2
-             ORDER BY effect.observation_sequence ASC,
-                      occurrence.projection_output_ordinal ASC,
-                      occurrence.occurrence_id ASC",
-            params![session_id.as_str(), generation],
-        )
-        .await
-        .map_err(|error| storage(PERSIST_OPERATION, error))?;
     let mut occurrences = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage(PERSIST_OPERATION, error))?
-    {
+    let mut cursor: Option<(i64, i64, String)> = None;
+    loop {
         checkpoint_relation_rebuild_control(control)?;
-        let occurrence_id = row
-            .get::<String>(0)
-            .map_err(|error| storage(PERSIST_OPERATION, error))?;
-        let retrieval_anchor_id = row
-            .get::<String>(1)
-            .map_err(|error| storage(PERSIST_OPERATION, error))?;
-        let thread_id = row
-            .get::<Option<String>>(2)
-            .map_err(|error| storage(PERSIST_OPERATION, error))?;
-        let message_id = row
-            .get::<Option<String>>(3)
-            .map_err(|error| storage(PERSIST_OPERATION, error))?;
-        let knowledge_at = row
-            .get::<i64>(4)
-            .map_err(|error| storage(PERSIST_OPERATION, error))?;
-        let observation_sequence = row
-            .get::<i64>(5)
-            .map_err(|error| storage(PERSIST_OPERATION, error))?;
-        let projection_output_ordinal = row
-            .get::<i64>(6)
-            .map_err(|error| storage(PERSIST_OPERATION, error))?;
-        occurrences.push(DerivedEvidenceOccurrenceRefV1 {
-            occurrence_id: MessageOccurrenceIdV1::new(occurrence_id)
+        let mut rows = match &cursor {
+            None => conn
+                .query(
+                    "SELECT occurrence.occurrence_id,
+                            occurrence.retrieval_anchor_id,
+                            occurrence.thread_id,
+                            occurrence.message_id,
+                            occurrence.knowledge_at,
+                            effect.observation_sequence,
+                            occurrence.projection_output_ordinal
+                     FROM session_occurrences AS occurrence
+                     JOIN session_temporal_observation_effects AS effect
+                       ON effect.observation_id = occurrence.source_observation_id
+                      AND effect.session_id = occurrence.session_id
+                     WHERE occurrence.session_id = ?1 AND occurrence.generation = ?2
+                     ORDER BY effect.observation_sequence ASC,
+                              occurrence.projection_output_ordinal ASC,
+                              occurrence.occurrence_id ASC
+                     LIMIT ?3",
+                    params![session_id.as_str(), generation, OCCURRENCE_REF_PAGE_ROWS],
+                )
+                .await
                 .map_err(|error| storage(PERSIST_OPERATION, error))?,
-            retrieval_anchor_id: RetrievalAnchorId::new(retrieval_anchor_id)
-                .map_err(|error| storage_message(PERSIST_OPERATION, error.to_string()))?,
-            thread_id: thread_id
-                .map(|value| {
-                    ThreadId::new(value)
-                        .map_err(|error| storage_message(PERSIST_OPERATION, error.to_string()))
-                })
-                .transpose()?,
-            message_id: message_id
-                .map(|value| {
-                    MessageId::new(value)
-                        .map_err(|error| storage_message(PERSIST_OPERATION, error.to_string()))
-                })
-                .transpose()?,
-            knowledge_at: UtcMicros(knowledge_at),
-            observation_sequence: u64::try_from(observation_sequence)
+            Some((sequence, ordinal, occurrence_id)) => conn
+                .query(
+                    "SELECT occurrence.occurrence_id,
+                            occurrence.retrieval_anchor_id,
+                            occurrence.thread_id,
+                            occurrence.message_id,
+                            occurrence.knowledge_at,
+                            effect.observation_sequence,
+                            occurrence.projection_output_ordinal
+                     FROM session_occurrences AS occurrence
+                     JOIN session_temporal_observation_effects AS effect
+                       ON effect.observation_id = occurrence.source_observation_id
+                      AND effect.session_id = occurrence.session_id
+                     WHERE occurrence.session_id = ?1 AND occurrence.generation = ?2
+                       AND (
+                            effect.observation_sequence > ?3
+                            OR (
+                                effect.observation_sequence = ?3
+                                AND occurrence.projection_output_ordinal > ?4
+                            )
+                            OR (
+                                effect.observation_sequence = ?3
+                                AND occurrence.projection_output_ordinal = ?4
+                                AND occurrence.occurrence_id > ?5
+                            )
+                       )
+                     ORDER BY effect.observation_sequence ASC,
+                              occurrence.projection_output_ordinal ASC,
+                              occurrence.occurrence_id ASC
+                     LIMIT ?6",
+                    params![
+                        session_id.as_str(),
+                        generation,
+                        *sequence,
+                        *ordinal,
+                        occurrence_id.as_str(),
+                        OCCURRENCE_REF_PAGE_ROWS
+                    ],
+                )
+                .await
                 .map_err(|error| storage(PERSIST_OPERATION, error))?,
-            projection_output_ordinal: u32::try_from(projection_output_ordinal)
-                .map_err(|error| storage(PERSIST_OPERATION, error))?,
-        });
+        };
+        let mut page_rows = 0_i64;
+        let mut page_cursor = None;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| storage(PERSIST_OPERATION, error))?
+        {
+            checkpoint_relation_rebuild_control(control)?;
+            let occurrence_id = row
+                .get::<String>(0)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            let retrieval_anchor_id = row
+                .get::<String>(1)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            let thread_id = row
+                .get::<Option<String>>(2)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            let message_id = row
+                .get::<Option<String>>(3)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            let knowledge_at = row
+                .get::<i64>(4)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            let observation_sequence = row
+                .get::<i64>(5)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            let projection_output_ordinal = row
+                .get::<i64>(6)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            page_cursor = Some((
+                observation_sequence,
+                projection_output_ordinal,
+                occurrence_id.clone(),
+            ));
+            page_rows += 1;
+            occurrences.push(DerivedEvidenceOccurrenceRefV1 {
+                occurrence_id: MessageOccurrenceIdV1::new(occurrence_id)
+                    .map_err(|error| storage(PERSIST_OPERATION, error))?,
+                retrieval_anchor_id: RetrievalAnchorId::new(retrieval_anchor_id)
+                    .map_err(|error| storage_message(PERSIST_OPERATION, error.to_string()))?,
+                thread_id: thread_id
+                    .map(|value| {
+                        ThreadId::new(value)
+                            .map_err(|error| storage_message(PERSIST_OPERATION, error.to_string()))
+                    })
+                    .transpose()?,
+                message_id: message_id
+                    .map(|value| {
+                        MessageId::new(value)
+                            .map_err(|error| storage_message(PERSIST_OPERATION, error.to_string()))
+                    })
+                    .transpose()?,
+                knowledge_at: UtcMicros(knowledge_at),
+                observation_sequence: u64::try_from(observation_sequence)
+                    .map_err(|error| storage(PERSIST_OPERATION, error))?,
+                projection_output_ordinal: u32::try_from(projection_output_ordinal)
+                    .map_err(|error| storage(PERSIST_OPERATION, error))?,
+            });
+        }
+        if page_rows < OCCURRENCE_REF_PAGE_ROWS {
+            break;
+        }
+        cursor = page_cursor;
     }
     Ok(occurrences)
 }
@@ -259,4 +322,68 @@ async fn ensure_derived_anchor(
     .await
     .map_err(|error| storage(PERSIST_OPERATION, error))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracedecay_runtime_core::db::engine::Executor;
+
+    #[tokio::test]
+    async fn occurrence_refs_span_more_than_one_exact_sql_page() {
+        let dir = tempfile::TempDir::new().expect("occurrence dir");
+        let conn = tracedecay_runtime_core::db::engine::TestConnection::open(
+            &dir.path().join("occurrences.db"),
+        );
+        Executor::execute_batch(
+            &conn,
+            "CREATE TABLE session_occurrences (
+                session_id TEXT, generation INTEGER, occurrence_id TEXT,
+                retrieval_anchor_id TEXT, thread_id TEXT, message_id TEXT,
+                knowledge_at INTEGER, projection_output_ordinal INTEGER,
+                source_observation_id TEXT
+             );
+             CREATE TABLE session_temporal_observation_effects (
+                observation_id TEXT, session_id TEXT, observation_sequence INTEGER
+             );",
+        )
+        .await
+        .expect("schema");
+        let total = OCCURRENCE_REF_PAGE_ROWS + 3;
+        for index in 0..total {
+            let occurrence_id = format!("sha256:{index:064x}");
+            let observation_id = format!("obs-{index}");
+            Executor::execute(
+                &conn,
+                "INSERT INTO session_occurrences (
+                    session_id, generation, occurrence_id, retrieval_anchor_id,
+                    knowledge_at, projection_output_ordinal, source_observation_id
+                 ) VALUES ('page-session', 1, ?1, 'anchor.page', ?2, 0, ?3)",
+                params![occurrence_id, index, observation_id.clone()],
+            )
+            .await
+            .expect("occurrence");
+            Executor::execute(
+                &conn,
+                "INSERT INTO session_temporal_observation_effects (
+                    observation_id, session_id, observation_sequence
+                 ) VALUES (?1, 'page-session', ?2)",
+                params![observation_id, index],
+            )
+            .await
+            .expect("effect");
+        }
+
+        let session_id = SessionId::new("page-session").expect("session");
+        let refs = load_occurrence_refs(&conn, &session_id, 1, &ExecutionControl::default())
+            .await
+            .expect("paged refs");
+
+        assert_eq!(refs.len(), usize::try_from(total).expect("total"));
+        assert_eq!(refs[0].observation_sequence, 0);
+        assert_eq!(
+            refs.last().expect("last").observation_sequence,
+            u64::try_from(total - 1).expect("last sequence")
+        );
+    }
 }
