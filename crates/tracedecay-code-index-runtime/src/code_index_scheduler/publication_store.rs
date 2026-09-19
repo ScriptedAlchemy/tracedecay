@@ -1261,7 +1261,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                     mtime: metadata
                         .as_ref()
                         .and_then(|metadata| metadata.modified().ok()),
-                    size: metadata.map(|metadata| metadata.len()).unwrap_or(0),
+                    size: metadata.map_or(0, |metadata| metadata.len()),
                     digest: Self::state_digest(bytes),
                     pointer: pointer.clone(),
                 });
