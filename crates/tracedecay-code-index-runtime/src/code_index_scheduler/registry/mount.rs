@@ -1082,17 +1082,13 @@ impl CodeIndexSchedulerRegistryV1 {
                     Ok(Ok(CodeIndexReconcileOutcomeV1::Published(_)))
                 );
                 let mut graph_text = retained_text.clone();
-                // Text projection and graph activation both read the sealed
-                // generation. They run together: awaiting the whole artifact
-                // (bulk commit, then an undivided ngram index) before the
-                // first graph attempt is how strict readiness timed out still
-                // in `bulk_commit` with `graph=pending`. The text build keeps
-                // its reservation for the whole projection and shrinks that
-                // same charge into the reader, so graph holding RSS cannot
-                // open a gap where the reader admission is refused.
+                // The replacement owner's bounded projection must finish
+                // before a fresh graph publication starts. Both consume the
+                // same sealed generation and are corpus-sized: overlapping
+                // them lets graph replay hold the source while text opens it,
+                // then leaves text unable to reacquire its reservation after
+                // graph publication reaches the process RSS watermark.
                 let mut published_text_projection_outcome = None;
-                let mut published_text_projection = None;
-                let mut text_projection_in_flight = false;
                 if published_pass {
                     *worker_text_generation
                         .write()
@@ -1134,31 +1130,48 @@ impl CodeIndexSchedulerRegistryV1 {
                         }
                         Ok(Ok(Ok(None)) | Err(_)) | Err(_) => None,
                     };
-                    // Start the replacement text owner, but do not join it
-                    // before graph activation. Exact and lexical still have to
-                    // finish before the serving swap (the source proof is
-                    // renewed from the projection outcome below). Graph
-                    // activation reads the sealed generation directly and
-                    // shares that window instead of starting only after the
-                    // artifact is ready. Yielding back to the loop instead
-                    // would hand the next pass a checkout that has already
-                    // moved, and on a shared repository that pass publishes
-                    // again - which is exactly how a sealed generation stayed
-                    // unseated forever.
+                    // Finish the replacement text owner before optional
+                    // O(store) graph work below. Exact and lexical are the
+                    // required fresh-index product; graph activation is an
+                    // optional projection and must not consume the source or
+                    // resident-memory headroom needed to build them.
+                    // Yielding back to the loop instead would hand the next
+                    // pass a checkout that has already moved, and on a shared
+                    // repository that pass publishes again - which is exactly
+                    // how a sealed generation stayed unseated forever.
                     if graph_activation_enabled
                         && !graph_activation_deferred
                         && let Some(text) = graph_text.clone()
                     {
-                        published_text_projection =
-                            Some(tokio::spawn(Self::drive_text_projection(
-                                text,
-                                Arc::clone(&worker_shutting_down),
-                                Arc::clone(&worker_convergence_park),
-                                None,
-                                #[cfg(test)]
-                                worker_project_root.clone(),
-                            )));
-                        text_projection_in_flight = true;
+                        let projection = tokio::spawn(Self::drive_text_projection(
+                            text,
+                            Arc::clone(&worker_shutting_down),
+                            Arc::clone(&worker_convergence_park),
+                            None,
+                            #[cfg(test)]
+                            worker_project_root.clone(),
+                        ));
+                        published_text_projection_outcome = Some(match projection.await {
+                            Ok(outcome) => outcome,
+                            Err(error) => {
+                                if let Some(text) = graph_text.as_ref() {
+                                    text.mark_text_serving_failed();
+                                }
+                                park_convergence(
+                                    &worker_convergence_park,
+                                    format!("code text projection task failed abnormally: {error}"),
+                                    CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1,
+                                    None,
+                                    false,
+                                );
+                                tracing::warn!(
+                                    event = "code_index_text_projection_task_failed",
+                                    error = %error,
+                                    "published text projection task failed before graph seating"
+                                );
+                                PublishedTextProjectionOutcomeV1::Unfinished
+                            }
+                        });
                     } else if graph_text
                         .as_ref()
                         .is_none_or(LatestCodeTextGenerationV1::text_projection_needs_work)
@@ -1198,8 +1211,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     matches!(&source_result, Ok(Ok(_))),
                     published_pass,
                     if published_pass {
-                        text_projection_in_flight
-                            || exact_and_lexical_ready_for_graph(graph_text.as_ref())
+                        exact_and_lexical_ready_for_graph(graph_text.as_ref())
                     } else {
                         graph_text.is_some()
                     },
@@ -1457,14 +1469,12 @@ impl CodeIndexSchedulerRegistryV1 {
                 // verified graph head, which reads the durable graph store
                 // instead of replaying the sealed source. If recovery did not
                 // satisfy this pass, wait for text before the corpus-sized
-                // decode and replay below. A publication's text projection is
-                // already in flight and keeps its build reservation, so its
-                // graph replay shares that window instead of waiting for the
-                // artifact. A later retained pass still waits, or a failed
-                // fresh text pass would recreate the source contention.
+                // decode and replay below. Otherwise a failed fresh text pass
+                // becomes a retained pass on its next wake and recreates the
+                // same source and resident-memory contention we avoid above.
+                // Same named predicate as the published seat gate above.
                 if prepare_graph
                     && !graph_already_serves
-                    && !text_projection_in_flight
                     && !exact_and_lexical_ready_for_graph(graph_text.as_ref())
                 {
                     prepare_graph = false;
@@ -1718,34 +1728,9 @@ impl CodeIndexSchedulerRegistryV1 {
                         }
                     }
                 }
-                // Graph activation has had the projection window. Join the
-                // text owner before the source-proof renewal and the serving
-                // swap: those still need the projection's terminal outcome.
-                if let Some(projection) = published_text_projection.take() {
-                    published_text_projection_outcome = Some(match projection.await {
-                        Ok(outcome) => outcome,
-                        Err(error) => {
-                            if let Some(text) = graph_text.as_ref() {
-                                text.mark_text_serving_failed();
-                            }
-                            park_convergence(
-                                &worker_convergence_park,
-                                format!("code text projection task failed abnormally: {error}"),
-                                CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1,
-                                None,
-                                false,
-                            );
-                            tracing::warn!(
-                                event = "code_index_text_projection_task_failed",
-                                error = %error,
-                                "published text projection task failed before graph seating"
-                            );
-                            PublishedTextProjectionOutcomeV1::Unfinished
-                        }
-                    });
-                }
                 // Process the fresh text outcome at the existing source-proof
-                // and serving-swap boundary.
+                // and serving-swap boundary. Graph work above ran only when
+                // the outcome was ready.
                 if let Some(outcome) = published_text_projection_outcome.take() {
                     match outcome {
                         PublishedTextProjectionOutcomeV1::Finished => {
