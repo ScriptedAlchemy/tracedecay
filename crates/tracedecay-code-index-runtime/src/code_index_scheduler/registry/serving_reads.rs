@@ -301,7 +301,7 @@ impl CodeIndexSchedulerRegistryV1 {
             )
         };
         tokio::task::spawn_blocking(move || {
-            let progress = hotpath::measure_block!("daemon.code_index.dashboard.progress", {
+            let mut progress = hotpath::measure_block!("daemon.code_index.dashboard.progress", {
                 let progress = build_progress
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -330,6 +330,17 @@ impl CodeIndexSchedulerRegistryV1 {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
+            // The park is the authority on why this worktree cannot converge;
+            // the progress slot only describes the generation whose build
+            // published last. A text-artifact commit that lands after the park
+            // republishes a fresh snapshot and erases the reason the worker
+            // wrote there, so status reported a blocked index as `ready` with
+            // no reason. Project the park's reason instead of racing for it.
+            if let Some(reason) = parked.as_ref().and_then(|parked| parked.blocked_reason)
+                && let Some(progress) = progress.as_mut()
+            {
+                progress.blocked_reason = Some(reason);
+            }
             let generation_recovery = generation_recovery
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
