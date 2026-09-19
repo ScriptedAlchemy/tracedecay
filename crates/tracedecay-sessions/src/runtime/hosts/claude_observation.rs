@@ -936,6 +936,16 @@ async fn capture_frame_window<A: HostAdmission + ?Sized>(
                     stats,
                 )));
             }
+            // A batched advance collision does not say which frame is uncovered.
+            // Replay one frame at a time from the durable cursor: frames the
+            // cursor already covers stay applied, and only a real miss fails.
+            if outcome.reason_code == Some("observation_cursor_advance_collision")
+                && !context.cancellation.is_cancelled()
+            {
+                return Err(ClaudeWindowedCaptureFailure::ScalarReplay(std::mem::take(
+                    stats,
+                )));
+            }
             Err(ClaudeWindowedCaptureFailure::Error(
                 host_admission_error("claude", outcome).into(),
             ))
