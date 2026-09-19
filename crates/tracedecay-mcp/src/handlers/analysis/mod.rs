@@ -39,11 +39,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde_json::{Value, json};
-use tracedecay_code_index::graph_projection::CodeGraphSemanticEdgeV1;
 use tracedecay_code_index::lineage::LineageSymbolRecordV1;
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_domain::{RelationEdgeKindV1, SourceSpan, SymbolOccurrenceId};
+use tracedecay_domain::{
+    CanonicalRelationEdgeV1, RelationEdgeKindV1, SourceSpan, SymbolOccurrenceId,
+};
 use tracedecay_graph_query::VerifiedGraphQuery;
 
 fn path_is_rust(path: &str) -> bool {
@@ -153,7 +154,7 @@ fn verified_analysis_edges(
     graph: &VerifiedGraphQuery,
     symbols: &[VerifiedAnalysisSymbol],
     kinds: &[RelationEdgeKindV1],
-) -> Result<Vec<CodeGraphSemanticEdgeV1>> {
+) -> Result<Vec<CanonicalRelationEdgeV1>> {
     let occurrences = symbols
         .iter()
         .map(|symbol| symbol.occurrence.clone())

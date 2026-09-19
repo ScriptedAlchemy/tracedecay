@@ -1026,7 +1026,7 @@ async fn cursor_cas_lost_on_a_partially_covered_window_replays_the_tail() {
         })
     )
     .unwrap();
-    let len = u64::try_from(std::fs::metadata(&path).unwrap().len()).unwrap();
+    let len = std::fs::metadata(&path).unwrap().len();
     let spy = SeamSpyAdmission::default();
     spy.script_peer_covers_batch_prefix();
 
