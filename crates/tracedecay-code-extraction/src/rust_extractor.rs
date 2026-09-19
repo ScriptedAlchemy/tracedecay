@@ -61,6 +61,70 @@ impl ReceiverTypes {
     }
 }
 
+/// One type parameter's trait bounds, as a method owner.
+///
+/// `T: Processor` makes `value.process()` the callee `Processor::process`.
+/// Two bounds, or a bound the syntax does not name, stay unresolved so the
+/// call is not attached to both traits. This does not rename `self`: #1814
+/// still records that binding from the enclosing type.
+enum ParamBound {
+    Unbound,
+    Unique(String),
+    Ambiguous,
+}
+
+#[derive(Default)]
+struct TraitBounds {
+    parameters: BTreeMap<String, ParamBound>,
+}
+
+struct BoundClause {
+    paths: Vec<String>,
+    ambiguous: bool,
+}
+
+impl TraitBounds {
+    fn declare(&mut self, name: String) {
+        self.parameters.insert(name, ParamBound::Unbound);
+    }
+
+    fn knows(&self, name: &str) -> bool {
+        self.parameters.contains_key(name)
+    }
+
+    fn constrain(&mut self, name: &str, clause: BoundClause) {
+        if clause.paths.is_empty() && !clause.ambiguous {
+            return;
+        }
+        let Some(slot) = self.parameters.get_mut(name) else {
+            return;
+        };
+        if clause.ambiguous || clause.paths.len() != 1 {
+            *slot = ParamBound::Ambiguous;
+            return;
+        }
+        let Some(path) = clause.paths.into_iter().next() else {
+            *slot = ParamBound::Ambiguous;
+            return;
+        };
+        match slot {
+            ParamBound::Unbound => *slot = ParamBound::Unique(path),
+            ParamBound::Unique(existing) if existing == &path => {}
+            ParamBound::Unique(_) | ParamBound::Ambiguous => *slot = ParamBound::Ambiguous,
+        }
+    }
+
+    /// Replace a written type-parameter name with its unique trait. Any other
+    /// path, including the enclosing type recorded for `self`, is unchanged.
+    fn resolve(&self, path: String) -> Option<String> {
+        match self.parameters.get(path.as_str()) {
+            Some(ParamBound::Unique(bound)) => Some(bound.clone()),
+            Some(ParamBound::Ambiguous) => None,
+            Some(ParamBound::Unbound) | None => Some(path),
+        }
+    }
+}
+
 /// Internal state used during AST traversal.
 ///
 /// Borrows the caller's source for the lifetime of the walk: copying the
@@ -1739,6 +1803,17 @@ impl RustExtractor {
         function: TsNode<'_>,
         receivers: &mut ReceiverTypes,
     ) {
+        let bounds = Self::trait_bounds_for(state, function);
+        Self::collect_receiver_bindings(state, node, function, receivers, &bounds);
+    }
+
+    fn collect_receiver_bindings(
+        state: &ExtractionState<'_>,
+        node: TsNode<'_>,
+        function: TsNode<'_>,
+        receivers: &mut ReceiverTypes,
+        bounds: &TraitBounds,
+    ) {
         match node.kind() {
             "self_parameter" => {
                 if let Some(type_path) = Self::enclosing_receiver_type(state) {
@@ -1749,14 +1824,14 @@ impl RustExtractor {
                 if let Some(pattern) = node.child_by_field_name("pattern") {
                     let type_path = node
                         .child_by_field_name("type")
-                        .and_then(|ty| Self::stated_type_path(state, ty));
+                        .and_then(|ty| Self::receiver_type_path(state, ty, bounds));
                     Self::record_receiver_pattern(state, pattern, type_path, receivers);
                 }
             }
             "let_declaration" => {
                 if let Some(pattern) = node.child_by_field_name("pattern") {
                     let type_path = match node.child_by_field_name("type") {
-                        Some(ty) => Self::stated_type_path(state, ty),
+                        Some(ty) => Self::receiver_type_path(state, ty, bounds),
                         None => node
                             .child_by_field_name("value")
                             .and_then(|value| Self::stated_initializer_type_path(state, value)),
@@ -1793,7 +1868,7 @@ impl RustExtractor {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
-                Self::collect_receiver_types(state, cursor.node(), function, receivers);
+                Self::collect_receiver_bindings(state, cursor.node(), function, receivers, bounds);
                 if !cursor.goto_next_sibling() {
                     break;
                 }
@@ -1846,7 +1921,182 @@ impl RustExtractor {
             "dynamic_type" | "abstract_type" => ty
                 .child_by_field_name("trait")
                 .and_then(|inner| Self::stated_type_path(state, inner)),
+            "higher_ranked_trait_bound" => ty
+                .child_by_field_name("type")
+                .and_then(|inner| Self::stated_type_path(state, inner)),
+            // `impl Trait + 'a` still names that trait. Two nominals do not.
+            "bounded_type" => Self::unique_sum_type_path(state, ty),
             _ => None,
+        }
+    }
+
+    /// A parameter type, with a type parameter replaced by its unique trait
+    /// bound. `Self` is left as #1814 mapped it: the enclosing type, not the
+    /// trait the parameter happens to implement.
+    fn receiver_type_path(
+        state: &ExtractionState<'_>,
+        ty: TsNode<'_>,
+        bounds: &TraitBounds,
+    ) -> Option<String> {
+        if Self::annotation_is_self(state, ty) {
+            return Self::enclosing_receiver_type(state);
+        }
+        bounds.resolve(Self::stated_type_path(state, ty)?)
+    }
+
+    fn annotation_is_self(state: &ExtractionState<'_>, ty: TsNode<'_>) -> bool {
+        match ty.kind() {
+            "type_identifier" => state.node_text(ty) == "Self",
+            "reference_type" => ty
+                .child_by_field_name("type")
+                .is_some_and(|inner| Self::annotation_is_self(state, inner)),
+            _ => false,
+        }
+    }
+
+    fn unique_sum_type_path(state: &ExtractionState<'_>, ty: TsNode<'_>) -> Option<String> {
+        let mut found = None;
+        let mut cursor = ty.walk();
+        if !cursor.goto_first_child() {
+            return None;
+        }
+        loop {
+            let child = cursor.node();
+            if child.is_named() {
+                let path = match child.kind() {
+                    "lifetime" | "use_bounds" => None,
+                    "bounded_type" => Self::unique_sum_type_path(state, child),
+                    _ => Self::stated_type_path(state, child),
+                };
+                match path {
+                    None if matches!(child.kind(), "lifetime" | "use_bounds") => {}
+                    None => return None,
+                    Some(path) => {
+                        if found.replace(path).is_some() {
+                            return None;
+                        }
+                    }
+                }
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+        found
+    }
+
+    fn trait_bounds_for(state: &ExtractionState<'_>, function: TsNode<'_>) -> TraitBounds {
+        let mut ancestors = Vec::new();
+        let mut current = function.parent();
+        while let Some(node) = current {
+            if matches!(node.kind(), "function_item" | "function_signature_item") {
+                break;
+            }
+            if matches!(node.kind(), "impl_item" | "trait_item") {
+                ancestors.push(node);
+            }
+            current = node.parent();
+        }
+        ancestors.reverse();
+        let mut bounds = TraitBounds::default();
+        for item in ancestors {
+            Self::absorb_generic_bounds(state, item, &mut bounds);
+        }
+        Self::absorb_generic_bounds(state, function, &mut bounds);
+        bounds
+    }
+
+    fn absorb_generic_bounds(
+        state: &ExtractionState<'_>,
+        item: TsNode<'_>,
+        bounds: &mut TraitBounds,
+    ) {
+        if let Some(parameters) = item.child_by_field_name("type_parameters") {
+            let mut cursor = parameters.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    if child.kind() == "type_parameter"
+                        && let Some(name_node) = child.child_by_field_name("name")
+                    {
+                        let name = state.node_text(name_node).to_owned();
+                        bounds.declare(name.clone());
+                        if let Some(clause) = child.child_by_field_name("bounds") {
+                            bounds.constrain(&name, Self::trait_bound_clause(state, clause));
+                        }
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+        }
+        let Some(where_clause) = Self::child_of_kind(item, "where_clause") else {
+            return;
+        };
+        let mut cursor = where_clause.walk();
+        if !cursor.goto_first_child() {
+            return;
+        }
+        loop {
+            let child = cursor.node();
+            if child.kind() == "where_predicate"
+                && let Some(left) = child.child_by_field_name("left")
+                && left.kind() == "type_identifier"
+            {
+                let name = state.node_text(left);
+                if bounds.knows(name)
+                    && let Some(clause) = child.child_by_field_name("bounds")
+                {
+                    bounds.constrain(name, Self::trait_bound_clause(state, clause));
+                }
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+
+    fn trait_bound_clause(state: &ExtractionState<'_>, bounds: TsNode<'_>) -> BoundClause {
+        let mut clause = BoundClause {
+            paths: Vec::new(),
+            ambiguous: false,
+        };
+        let mut cursor = bounds.walk();
+        if !cursor.goto_first_child() {
+            return clause;
+        }
+        loop {
+            let child = cursor.node();
+            if child.is_named() {
+                match child.kind() {
+                    "lifetime" | "use_bounds" | "removed_trait_bound" => {}
+                    _ => match Self::stated_type_path(state, child) {
+                        Some(path) => clause.paths.push(path),
+                        None => clause.ambiguous = true,
+                    },
+                }
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+        clause
+    }
+
+    fn child_of_kind<'t>(node: TsNode<'t>, kind: &str) -> Option<TsNode<'t>> {
+        let mut cursor = node.walk();
+        if !cursor.goto_first_child() {
+            return None;
+        }
+        loop {
+            let child = cursor.node();
+            if child.kind() == kind {
+                return Some(child);
+            }
+            if !cursor.goto_next_sibling() {
+                return None;
+            }
         }
     }
 

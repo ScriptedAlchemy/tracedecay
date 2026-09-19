@@ -1548,23 +1548,6 @@ fn idle_maintenance_preparation_stays_metadata_only() {
 }
 
 #[test]
-fn preparation_defers_when_the_scope_root_does_not_exist_yet() {
-    let parent = tempfile::TempDir::new().expect("parent");
-    let missing = parent.path().join("not-created");
-    let error = prepare_next_code_generation_retention_cancellable(
-        &missing,
-        &BTreeSet::new(),
-        &|| false,
-        None,
-    )
-    .expect_err("an unpublished scope root has no census");
-    assert!(
-        matches!(error, CodeGenerationRetentionErrorV1::GenerationStoreBusy),
-        "a missing scope root is the publisher's create window, not a storage failure: {error:?}"
-    );
-}
-
-#[test]
 fn metadata_only_segment_census_observes_at_most_one_directory_entry() {
     let store = tempfile::TempDir::new().expect("create unpublished store");
     std::fs::create_dir_all(store.path().join(GENERATIONS_DIRECTORY))
@@ -3159,4 +3142,23 @@ fn vanished_listed_generation_open_defers_instead_of_storage_loss() {
         matches!(storage_error, CodeGenerationRetentionErrorV1::Storage(_)),
         "non-NotFound census I/O stays a storage failure: {storage_error:?}"
     );
+}
+
+#[test]
+fn missing_store_is_an_unpublished_plan_not_a_storage_failure() {
+    let missing = std::env::temp_dir().join(format!(
+        "tracedecay-missing-code-store-{}",
+        std::process::id()
+    ));
+    assert!(!missing.exists());
+    let plan = prepare_next_code_generation_retention_cancellable(
+        &missing,
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect("a store that has not been opened is unpublished");
+    assert_eq!(plan.active_generation_id, None);
+    assert!(plan.collectable_generations.is_empty());
+    assert!(!plan.has_collectable_work());
 }

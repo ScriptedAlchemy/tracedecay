@@ -880,12 +880,7 @@ fn project_open_refusal_response(
     if error_is_project_open_retryable(error) {
         return DaemonInvocationResponse::application_problem(
             request_id,
-            tracedecay_contracts::ApplicationProblem::unavailable(
-                tracedecay_contracts::SafeDiagnostic {
-                    code: tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE.to_owned(),
-                    message: "The project runtime for this operation is still mounting".to_owned(),
-                },
-            ),
+            tracedecay_contracts::ApplicationProblem::runtime_mounting(),
         );
     }
     DaemonInvocationResponse::problem(
