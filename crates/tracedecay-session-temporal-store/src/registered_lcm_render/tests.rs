@@ -393,3 +393,80 @@ async fn registered_metadata_rows_do_not_fabricate_full_raw_messages() {
         "expected a payload-integrity refusal, got: {error:?}"
     );
 }
+
+#[tokio::test]
+async fn session_describe_reports_the_message_not_an_empty_stub() {
+    let directory = tempdir().expect("temporary session store");
+    let runtime = seeded_render_fixture(directory.path()).await;
+    let content = "canonical raw message plus hidden tail";
+    runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered session database")
+        .writer_connection()
+        .expect("registered writer")
+        .execute_batch(&format!(
+            "UPDATE lcm_raw_messages
+                SET content = '{content}', snippet_text = 'canonical raw'
+              WHERE message_id = 'message-a';"
+        ))
+        .await
+        .expect("shorten the stored preview without shortening the message");
+    let snapshot = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered session database")
+        .read_snapshot()
+        .await
+        .expect("registered read snapshot");
+
+    let description = describe(
+        &snapshot,
+        LcmDescribeRequest {
+            provider: "codex".to_string(),
+            session_id: "session-a".to_string(),
+            target: LcmDescribeTarget::Session,
+        },
+        &canonical_fixture_relations(),
+    )
+    .await
+    .expect("session describe");
+
+    let overview = description
+        .raw_messages
+        .iter()
+        .find(|message| message.message_id == "message-a")
+        .expect("describe must list the captured message");
+    assert_eq!(overview.content_preview, "canonical raw");
+    assert!(!overview.content_preview.contains("hidden tail"));
+    assert_eq!(
+        overview.content_range.total_chars,
+        content.chars().count() as u64
+    );
+    assert!(overview.content_range.truncated);
+    let summary = description
+        .summary_nodes
+        .iter()
+        .find(|node| node.node_id == "summary-child")
+        .expect("describe must list the summary");
+    assert_eq!(summary.summary_preview, "canonical child summary");
+
+    let payload = describe(
+        &snapshot,
+        LcmDescribeRequest {
+            provider: "codex".to_string(),
+            session_id: "session-a".to_string(),
+            target: LcmDescribeTarget::ExternalPayload {
+                payload_ref: "payload-a".to_string(),
+            },
+        },
+        &[],
+    )
+    .await
+    .expect("external payload describe");
+    assert_eq!(
+        payload
+            .external_payload
+            .expect("payload metadata")
+            .content_preview,
+        "canonical external payload"
+    );
+}
