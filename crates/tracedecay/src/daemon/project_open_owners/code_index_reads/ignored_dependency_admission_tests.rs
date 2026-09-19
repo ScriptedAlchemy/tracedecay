@@ -386,8 +386,10 @@ async fn latest(
     project_root: &Path,
 ) -> LatestCompleteCodeIndexV1 {
     // Lightweight publication precedes complete-generation seating. Demand
-    // that complete state before using its imports as admission evidence.
-    tokio::time::timeout(Duration::from_secs(5), async {
+    // that complete state before using its imports as admission evidence. The
+    // seat is background work behind the scheduler mutex; under a loaded CI
+    // runner it has taken over 5 s, so the bound is generous.
+    tokio::time::timeout(Duration::from_secs(60), async {
         loop {
             let _ = registry.latest_complete_fresh(project_root).await;
             if registry

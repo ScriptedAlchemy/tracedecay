@@ -110,20 +110,39 @@ fn http_mount(home: &Path) -> HttpMount {
 /// this identity locally: its route accepts only the daemon's public ID.
 fn admitted_project_id(home: &Path, project: &Path) -> String {
     let project_arg = project.to_string_lossy().into_owned();
-    let output = tracedecay_command_with_home(home)
-        .current_dir(project)
-        .args([
-            "tool",
-            "--project",
-            project_arg.as_str(),
-            "storage_status",
-            "--args",
-            r#"{"include_details":false}"#,
-            "--json",
-        ])
-        .stdin(Stdio::null())
-        .output()
-        .expect("read daemon-admitted project identity");
+    let deadline = Instant::now() + AUTHORITY_TIMEOUT;
+    let output = loop {
+        let output = tracedecay_command_with_home(home)
+            .current_dir(project)
+            .args([
+                "tool",
+                "--project",
+                project_arg.as_str(),
+                "storage_status",
+                "--args",
+                r#"{"include_details":false}"#,
+                "--json",
+            ])
+            .stdin(Stdio::null())
+            .output()
+            .expect("read daemon-admitted project identity");
+        // Right after `init` the daemon can still be mounting the project's
+        // query authority; it says so with a pre-admission problem whose own
+        // retry directive is `after_delay`. Honour that directive, as a
+        // production client would, instead of treating it as a verdict.
+        let problem = serde_json::from_slice::<Value>(&output.stdout)
+            .ok()
+            .map(|envelope| envelope["problem"].clone())
+            .filter(|problem| problem["terminality"] == "pre_admission")
+            .filter(|problem| problem["retry"] == "after_delay");
+        match problem {
+            Some(problem) if !output.status.success() && Instant::now() < deadline => {
+                let millis = problem["retry_after_millis"].as_u64().unwrap_or(250);
+                std::thread::sleep(Duration::from_millis(millis));
+            }
+            _ => break output,
+        }
+    };
     assert!(
         output.status.success(),
         "storage_status failed while admitting the fixture project\nstdout:\n{}\nstderr:\n{}",
