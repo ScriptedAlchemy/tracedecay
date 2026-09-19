@@ -128,7 +128,7 @@ async fn call(server: &McpServer, tool: &str, mut args: Value) -> Value {
             .unwrap_or_else(|e| panic!("{tool} should succeed: {e}"));
         let envelope = extract_json(&result);
         if envelope.pointer("/problem/code").and_then(Value::as_str)
-            == Some("application.surface.unavailable")
+            == Some(tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE)
         {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             continue;

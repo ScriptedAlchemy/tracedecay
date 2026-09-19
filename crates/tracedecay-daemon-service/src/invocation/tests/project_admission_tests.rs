@@ -137,7 +137,7 @@ async fn admitted_storage_status_stays_retryable_while_owners_are_warming() {
         problem
             .diagnostic()
             .map(|diagnostic| diagnostic.code.as_str()),
-        Some("application.surface.unavailable")
+        Some(tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE)
     );
 }
 
@@ -227,7 +227,7 @@ async fn storage_status_admits_an_owner_registered_under_a_windows_verbatim_root
         problem
             .diagnostic()
             .map(|diagnostic| diagnostic.code.as_str()),
-        Some("application.surface.unavailable")
+        Some(tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE)
     );
 }
 
@@ -300,7 +300,10 @@ async fn retained_request_stays_retryable_while_owners_are_warming() {
     let diagnostic = problem
         .diagnostic()
         .expect("a mounting retained owner carries a diagnostic");
-    assert_eq!(diagnostic.code, "application.surface.unavailable");
+    assert_eq!(
+        diagnostic.code,
+        tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE
+    );
     assert!(
         !diagnostic
             .message

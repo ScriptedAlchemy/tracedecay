@@ -26,11 +26,6 @@ use super::{
     TraceDecayError, error_is_project_open_retryable, tool_call_transport_error_is_retryable,
 };
 
-/// Completed retryable problem results to observe before returning the typed
-/// state to an interactive caller. Transport-level project-open errors are not
-/// results and continue to use their explicit deadline.
-const MAX_COMPLETED_TOOL_RESULT_ATTEMPTS: usize = 3;
-
 /// Bounded grace a client keeps reading for *after* the caller's request
 /// deadline has elapsed.
 ///
@@ -502,32 +497,29 @@ fn daemon_tool_call_error(error: JsonRpcError) -> TraceDecayError {
     }
 }
 
-/// The delay a completed tool result directs before the same request is sent
-/// again, when its typed problem is a retryable pre-admission state.
+/// The delay before re-sending a completed tool result, when that result is
+/// the publication-window mounting refusal.
 ///
-/// A project-scoped owner that registers behind the core publication (the
-/// retained memory authority, the configuration runtime) answers a
-/// `RetryDirective::AfterDelay` unavailable while it is still mounting. The
-/// daemon renders that record under the tool result's `problem` member, so
-/// the one-shot client reads the directive from the same field every MCP
-/// client does. An admitted terminal (a partial effect, a permanent owner
-/// failure) never directs a delay and is the answer.
+/// A project-scoped owner that registers behind the core publication answers
+/// `application.runtime.mounting` while it is still mounting. The daemon
+/// renders that record under the tool result's `problem` member. An admitted
+/// terminal, and every other completed problem (a retained authority that is
+/// unavailable, a saturated owner, an observed diagnostic), is the answer:
+/// its `after_delay` directive is for the caller, not a transport loop.
 fn tool_result_retry_after_delay(result: &serde_json::Value) -> Option<Duration> {
     let record: tracedecay_contracts::ApplicationProblemRecord =
         serde_json::from_value(result.get("problem")?.clone()).ok()?;
-    record.pre_admission_retry_delay()
+    record.owner_mount_resend_delay()
 }
 
 /// How long to wait before re-sending the request whose outcome is `result`,
 /// or `None` when that outcome is the answer.
 ///
-/// Two states are ridden out: the daemon's project-open refusal (a JSON-RPC
-/// error carrying the warming hint or a saturated open queue) on the client's
-/// own cadence, and a completed result whose typed problem directs an
-/// after-delay retry, on the delay the directive names. Project-open errors
-/// may wait to `deadline`; completed results are also capped by
-/// [`MAX_COMPLETED_TOOL_RESULT_ATTEMPTS`] so a persistent authority result is
-/// returned instead of hidden behind a reconnect loop.
+/// Two states are ridden out to `deadline`: the daemon's project-open refusal
+/// (a JSON-RPC error carrying the warming hint or a saturated open queue) on
+/// the client's own cadence, and a completed mounting refusal on the delay
+/// that result names. Every other completed result is returned on the first
+/// observation.
 fn project_open_retry_wait(
     result: &Result<serde_json::Value>,
     deadline: Instant,
@@ -554,7 +546,6 @@ async fn call_tool_with_project_open_retry(
     tool_name: &str,
     arguments: serde_json::Value,
     deadline: Instant,
-    mut completed_result_attempts: usize,
 ) -> Result<serde_json::Value> {
     loop {
         let result = call_tool_within(
@@ -565,12 +556,6 @@ async fn call_tool_with_project_open_retry(
             deadline,
         )
         .await;
-        if result.is_ok() {
-            completed_result_attempts = completed_result_attempts.saturating_add(1);
-            if completed_result_attempts >= MAX_COMPLETED_TOOL_RESULT_ATTEMPTS {
-                return result;
-            }
-        }
         let Some(wait) = project_open_retry_wait(&result, deadline) else {
             return result;
         };
@@ -584,8 +569,9 @@ async fn call_tool_with_project_open_retry(
 /// accepting daemon. The request deadline travels on the wire; the local read
 /// waits that deadline plus the 30s response grace. A warming project, or an
 /// owner still mounting behind its core publication, still retries for at
-/// most the 15s open grace, never past this envelope. Callers that need a
-/// different budget use [`call_default_tool_within`] or
+/// most the 15s open grace, never past this envelope. A completed result that
+/// is not that mounting refusal is returned on the first observation.
+/// Callers that need a different budget use [`call_default_tool_within`] or
 /// [`call_default_tool_awaiting_project_open`].
 pub async fn call_default_tool(
     handshake: &DaemonHandshake,
@@ -613,7 +599,6 @@ pub async fn call_default_tool(
         tool_name,
         arguments,
         retry_deadline,
-        usize::from(result.is_ok()),
     )
     .await
 }
@@ -637,8 +622,8 @@ pub async fn call_default_tool_within(
 /// Bootstrap callers deliberately trigger the cold open they are waiting for,
 /// so a transport-level warming hint is progress rather than an answer:
 /// `tracedecay init` asks for a status it can only get after the open completes.
-/// Completed application problems are different: after three identical
-/// results, `tracedecay tool` returns that typed state for the caller to decide.
+/// A completed mounting refusal is the same kind of progress and is re-sent
+/// until `deadline`. Every other completed result is returned immediately.
 pub async fn call_default_tool_awaiting_project_open(
     handshake: &DaemonHandshake,
     tool_name: &str,
@@ -646,8 +631,7 @@ pub async fn call_default_tool_awaiting_project_open(
     deadline: Instant,
 ) -> Result<serde_json::Value> {
     let socket_path = default_available_socket_path()?;
-    call_tool_with_project_open_retry(&socket_path, handshake, tool_name, arguments, deadline, 0)
-        .await
+    call_tool_with_project_open_retry(&socket_path, handshake, tool_name, arguments, deadline).await
 }
 
 /// Extracts the single JSON payload from an MCP tool result while ignoring
