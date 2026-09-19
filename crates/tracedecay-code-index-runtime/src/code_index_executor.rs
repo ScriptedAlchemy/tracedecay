@@ -1506,13 +1506,13 @@ where
                 // state `Pending` reports above, so it keeps `Pending`'s
                 // retryable verdict; `Internal` told callers never to retry a
                 // window that resolves itself within one background pass.
-                Err(RetrievalPortError::Contract(_)) => {
-                    return unavailable(code_search::CodeIndexSearchUnavailableReasonV1::Internal);
-                }
-                Err(_) => {
+                Err(RetrievalPortError::AuthorityUnavailable(_)) => {
                     return unavailable(
                         code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnverified,
                     );
+                }
+                Err(_) => {
+                    return unavailable(code_search::CodeIndexSearchUnavailableReasonV1::Internal);
                 }
             }
             let owners = match generation.production_query_owners_with_budget(
@@ -1712,13 +1712,13 @@ where
                 // state `Pending` reports above, so it keeps `Pending`'s
                 // retryable verdict; `Internal` told callers never to retry a
                 // window that resolves itself within one background pass.
-                Err(RetrievalPortError::Contract(_)) => {
-                    return unavailable(code_search::CodeIndexSearchUnavailableReasonV1::Internal);
-                }
-                Err(_) => {
+                Err(RetrievalPortError::AuthorityUnavailable(_)) => {
                     return unavailable(
                         code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnverified,
                     );
+                }
+                Err(_) => {
+                    return unavailable(code_search::CodeIndexSearchUnavailableReasonV1::Internal);
                 }
             }
             let owners = match generation.production_query_owners_with_budget(
