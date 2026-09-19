@@ -121,15 +121,10 @@ async fn mounted_code_generation_retention_continues_capped_segment_reclamation(
             &canonical_root,
         );
     let graph_replay_pool_root = graph.db().database_path().with_extension("graph-replay");
-    // Text seating moves `latest_generation_id` before the scoped store
-    // exists and before the superseded sealed file is collectable. Planning
-    // once at that instant is the race: canonicalize returns NotFound, and
-    // a wall-clock retry of the same snapshot hits the failure ceiling.
-    // Wake on the serving seat and re-read the store. The planner also probes
-    // the generation-store lock and the graph replay pool, answering
-    // `GenerationStoreBusy` or `GraphReplayPoolBusy` whenever a writer owns
-    // one; neither lock state publishes a seat, so the wait keeps the short
-    // maintenance-style tick as its floor.
+    // Text seating moves `latest_generation_id` before the superseded sealed
+    // file is collectable, so the first plan the planner returns is not yet
+    // the answer. A lock holder publishes no seat, which is why the tick
+    // stays the floor of the wait.
     let mut serving_seats = schedulers.subscribe_serving_seats();
     let plan = tokio::time::timeout(Duration::from_mins(2), async {
         loop {

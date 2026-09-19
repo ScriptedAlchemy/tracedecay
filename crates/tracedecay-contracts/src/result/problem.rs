@@ -760,8 +760,7 @@ impl ApplicationProblem {
     }
 
     /// The refusal for an admitted project whose runtime has not finished
-    /// mounting. Every producer of that window builds it here, so one place
-    /// decides which code the one-shot client re-sends on.
+    /// mounting.
     pub fn runtime_mounting() -> Self {
         Self::unavailable(SafeDiagnostic {
             code: RUNTIME_MOUNTING_REASON_CODE.to_owned(),
