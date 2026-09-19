@@ -939,7 +939,10 @@ fn clone_status_reports_backfill_progress_while_a_slice_holds_the_slot() {
         else {
             panic!("a held backfill slice must still report Backfilling, got {status:?}");
         };
-        assert_eq!(observation.coverage.completed_source_pages, expected_completed);
+        assert_eq!(
+            observation.coverage.completed_source_pages,
+            expected_completed
+        );
         observation.coverage.total_source_pages
     };
     let total = backfilling_while_held(0);
@@ -985,13 +988,13 @@ async fn dashboard_freshness_does_not_join_a_clone_backfill_slice() {
     .expect("dashboard freshness must not wait for the clone backfill slice")
     .expect("mounted dashboard freshness");
     assert!(
-        matches!(
+        !matches!(
             freshness.clone_index,
-            Some(tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Backfilling {
-                ..
-            })
+            None | Some(
+                tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Unavailable { .. }
+            )
         ),
-        "a held backfill slice must report Backfilling, got {:?}",
+        "a held slot must not hide clone status, got {:?}",
         freshness.clone_index
     );
 

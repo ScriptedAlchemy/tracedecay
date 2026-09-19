@@ -673,11 +673,10 @@ async fn registry_feeds_publications_and_bounded_freshness_reads() {
 /// Poll a mounted worktree's dashboard clone-index status until it reports
 /// ready coverage.
 ///
-/// `clone_index_status` reads the clone-successor slot with `try_lock` so a
-/// freshness read never joins a running backfill. A single sample therefore
-/// reports `Unavailable { "clone-index status is being updated" }` whenever a
-/// freshly published generation's successor still holds the slot, which is a
-/// truthful transient, not the settled answer a caller is asking for.
+/// `clone_index_status` never joins a running backfill, so a single sample
+/// reports `Backfilling` while a freshly published generation's successor
+/// still holds the slot, which is a truthful transient, not the settled
+/// answer a caller is asking for.
 async fn wait_for_ready_clone_index(
     registry: &CodeIndexSchedulerRegistryV1,
     path: &Path,

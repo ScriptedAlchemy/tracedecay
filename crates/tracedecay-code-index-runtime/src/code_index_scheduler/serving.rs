@@ -815,6 +815,24 @@ pub(super) struct CodeTextCloneSuccessorBuildV1 {
     build_reservation: Option<ResidentMemoryReservationV1>,
 }
 
+impl CodeTextCloneSuccessorBuildV1 {
+    fn progress(&self) -> CloneSuccessorProgressV1 {
+        CloneSuccessorProgressV1 {
+            completed_source_pages: self
+                .builder
+                .as_ref()
+                .and_then(|builder| builder.next_cursor().ok().flatten())
+                .map_or(0, |cursor| cursor.next_page_ordinal()),
+            total_source_pages: self.prior.page_count(),
+            bytes_on_disk: self
+                .staging_path
+                .metadata()
+                .ok()
+                .map(|metadata| metadata.len()),
+        }
+    }
+}
+
 enum CloneSuccessorSourcePositionV1 {
     Appending,
     Revalidating(VerifiedSealedLexicalCursorV1),
@@ -834,6 +852,11 @@ enum CloneSuccessorSourcePositionV1 {
 pub(super) struct CodeTextProjectionStateV1 {
     slot: Mutex<CodeTextProjectionSlotV1>,
     ready: Condvar,
+    /// Clone-successor progress the slice owner publishes after each committed
+    /// batch. Status reads it when the slot is contended, so a backfill slice
+    /// (minutes of fsync-bound commits under the slot lock) never hides its
+    /// own progress behind that lock.
+    clone_progress: Mutex<Option<CloneSuccessorProgressV1>>,
 }
 
 pub(super) enum CodeTextProjectionSlotV1 {
@@ -856,7 +879,22 @@ impl CodeTextProjectionStateV1 {
         Self {
             slot: Mutex::new(CodeTextProjectionSlotV1::Idle),
             ready: Condvar::new(),
+            clone_progress: Mutex::new(None),
         }
+    }
+
+    fn publish_clone_progress(&self, progress: Option<CloneSuccessorProgressV1>) {
+        *self
+            .clone_progress
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = progress;
+    }
+
+    fn published_clone_progress(&self) -> Option<CloneSuccessorProgressV1> {
+        *self
+            .clone_progress
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     pub(super) fn lock_slot(&self) -> MutexGuard<'_, CodeTextProjectionSlotV1> {
@@ -902,6 +940,9 @@ impl<'a> TextHeadOpenClaimV1<'a> {
     fn install(&mut self, build: TextHeadOpenBuildV1) -> MutexGuard<'a, CodeTextProjectionSlotV1> {
         self.armed = false;
         let mut slot = self.state.lock_slot();
+        if let TextHeadOpenBuildV1::CloneSuccessor(build) = &build {
+            self.state.publish_clone_progress(Some(build.progress()));
+        }
         *slot = match build {
             TextHeadOpenBuildV1::Artifact(build) => CodeTextProjectionSlotV1::Building(build),
             TextHeadOpenBuildV1::CloneSuccessor(build) => {
@@ -1740,11 +1781,6 @@ impl LatestCodeTextGenerationV1 {
         let successor = match self.clone_successor_progress() {
             CloneSuccessorProgressReadV1::Idle => None,
             CloneSuccessorProgressReadV1::Backfilling(progress) => Some(progress),
-            CloneSuccessorProgressReadV1::Busy => {
-                return CodeCloneIndexStatusV1::Unavailable {
-                    reason: "clone-index status is being updated".to_owned(),
-                };
-            }
         };
         let artifact = match owners.clone_index_artifact() {
             Ok(artifact) => artifact,
@@ -1801,7 +1837,16 @@ impl LatestCodeTextGenerationV1 {
         let slot = match self.text_projection_build.slot.try_lock() {
             Ok(slot) => slot,
             Err(std::sync::TryLockError::WouldBlock) => {
-                return CloneSuccessorProgressReadV1::Busy;
+                // A successor build publishes its progress before it takes
+                // the slot for a slice; a contended slot without one is a
+                // wake that owns no successor, so the artifact answers.
+                return self
+                    .text_projection_build
+                    .published_clone_progress()
+                    .map_or(
+                        CloneSuccessorProgressReadV1::Idle,
+                        CloneSuccessorProgressReadV1::Backfilling,
+                    );
             }
             Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
         };
@@ -1821,20 +1866,7 @@ impl LatestCodeTextGenerationV1 {
                 })
             }
             CodeTextProjectionSlotV1::BuildingCloneSuccessor(build) => {
-                let completed_source_pages = build
-                    .builder
-                    .as_ref()
-                    .and_then(|builder| builder.next_cursor().ok().flatten())
-                    .map_or(0, |cursor| cursor.next_page_ordinal());
-                CloneSuccessorProgressReadV1::Backfilling(CloneSuccessorProgressV1 {
-                    completed_source_pages,
-                    total_source_pages: build.prior.page_count(),
-                    bytes_on_disk: build
-                        .staging_path
-                        .metadata()
-                        .ok()
-                        .map(|metadata| metadata.len()),
-                })
+                CloneSuccessorProgressReadV1::Backfilling(build.progress())
             }
             CodeTextProjectionSlotV1::Idle
             | CodeTextProjectionSlotV1::HeadOpening
@@ -1861,7 +1893,6 @@ struct CloneSuccessorProgressV1 {
 enum CloneSuccessorProgressReadV1 {
     Idle,
     Backfilling(CloneSuccessorProgressV1),
-    Busy,
 }
 
 fn clone_index_observation(
@@ -2991,6 +3022,7 @@ impl LatestCodeTextGenerationV1 {
             };
             if done {
                 *slot = CodeTextProjectionSlotV1::Idle;
+                self.text_projection_build.publish_clone_progress(None);
                 self.text_projection_build.ready.notify_all();
             }
             return Ok(done);
@@ -3384,6 +3416,8 @@ impl LatestCodeTextGenerationV1 {
                                 .to_owned(),
                         )
                     })?;
+                    self.text_projection_build
+                        .publish_clone_progress(Some(build.progress()));
                 }
                 VerifiedSealedLexicalPageBatchReadV1::Complete(receipt) => {
                     build.source_receipt = Some(receipt);
@@ -3551,6 +3585,8 @@ impl LatestCodeTextGenerationV1 {
         build.source_position = CloneSuccessorSourcePositionV1::Appending;
         build.source_receipt = None;
         build.builder = Some(builder);
+        self.text_projection_build
+            .publish_clone_progress(Some(build.progress()));
         Ok(())
     }
 
