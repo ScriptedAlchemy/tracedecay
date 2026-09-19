@@ -1271,7 +1271,10 @@ impl McpServer {
                         join_required_live_transcript_refresh(
                             &tool_name,
                             &analytics_arguments,
-                            selected_owner.is_some(),
+                            // This server executed the write. Its wakes are
+                            // the owners, including when a workspace route
+                            // selected it. Dropping them leaves the projection
+                            // dirty until an unrelated scheduler wake.
                             self.project_session_refresh_wake.as_deref(),
                             self.user_session_refresh_wake.as_deref(),
                         ),
