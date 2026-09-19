@@ -65,7 +65,8 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     let (cg, _env) = init_test_project(dir.path()).await;
     let full_text = format!("orchard dispatch {}", "external-payload-body ".repeat(220));
     let projection =
-        seed_temporal_lcm_session_message(&cg, "lcm-session", "lcm-message", full_text, 1).await;
+        seed_temporal_lcm_session_message(&cg, "lcm-session", "lcm-message", full_text.clone(), 1)
+            .await;
     let temporal_db = open_active_project_session_db(&cg).await;
     activate_test_temporal_generation(&temporal_db, "lcm-session", vec![projection]).await;
     let db = open_active_project_session_db(&cg).await;
