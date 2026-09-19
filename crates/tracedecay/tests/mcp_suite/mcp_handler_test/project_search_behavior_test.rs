@@ -499,14 +499,18 @@ async fn project_search_bounds_pages_and_does_not_expand_wildcards() {
         "No projects matching \"no-such-project-token\" found."
     );
 
+    // The search ORs whitespace-separated tokens, so a spaced `OR` would be a
+    // legitimate two-letter substring token that can match a random temp
+    // path (`.tmpXoRyz`). Keep the quote breakout, drop the whitespace, so
+    // the query is one token that no fixture field contains.
     let injected = search_json(
         server,
-        json!({"query": "search-alpha' OR '1'='1", "format": "json"}),
+        json!({"query": "search-alpha'OR'1'='1", "format": "json"}),
     )
     .await;
     assert_eq!(project_ids(&injected), Vec::<String>::new());
     assert_eq!(injected["status"], "ok");
-    assert_eq!(injected["query"], "search-alpha' OR '1'='1");
+    assert_eq!(injected["query"], "search-alpha'OR'1'='1");
 }
 
 #[tokio::test]
