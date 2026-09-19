@@ -662,6 +662,140 @@ mod tests {
         assert_eq!(stored_output(&snapshot, RECORD_ID).await, current);
     }
 
+    /// The digest covers the message, not its LCM raw twin. A twin can be
+    /// rewritten under a still-current message and provenance; reopen has to
+    /// restore the twin a fresh projection write stores.
+    #[tokio::test]
+    async fn current_provenance_repairs_a_stale_raw_twin() {
+        let directory = TempDir::new().unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .unwrap();
+        seed(&runtime, &observation()).await.unwrap();
+        let database = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        let snapshot = database.read_snapshot().await.unwrap();
+        let current = stored_output(&snapshot, RECORD_ID).await;
+        drop(snapshot);
+
+        let transaction = database
+            .runtime_database()
+            .begin_write_transaction("stale the raw twin under current provenance")
+            .await
+            .unwrap();
+        let updated = transaction
+            .execute(
+                "UPDATE lcm_raw_messages
+                 SET content = 'stale raw body', content_hash = 'stale',
+                     snippet_text = 'stale raw body', index_text = 'stale raw body'
+                 WHERE provider = 'codex' AND message_id = ?1",
+                tracedecay_runtime_core::params![RECORD_ID],
+            )
+            .await
+            .expect("stale the raw twin");
+        assert_eq!(updated, 1);
+        transaction.commit().await.unwrap();
+
+        let snapshot = database.read_snapshot().await.unwrap();
+        let stale = stored_output(&snapshot, RECORD_ID).await;
+        drop(snapshot);
+        assert_eq!(stale.digest, current.digest);
+        assert_eq!(stale.text, current.text);
+        assert_eq!(stale.raw_index_text, "stale raw body");
+
+        super::super::ensure_authority_invariants(database.runtime_database(), false, false)
+            .await
+            .expect("current provenance must repair its stale raw twin");
+
+        let snapshot = database.read_snapshot().await.unwrap();
+        assert_eq!(stored_output(&snapshot, RECORD_ID).await, current);
+    }
+
+    /// A drifted raw `session_id` is not a second owner of a provenance-bound
+    /// output. The ingest upsert refuses that row; convergence still has to
+    /// finish the rewrite or the stale message stays served.
+    #[tokio::test]
+    async fn current_provenance_adopts_a_raw_twin_on_a_stale_session() {
+        let directory = TempDir::new().unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .unwrap();
+        seed(&runtime, &observation()).await.unwrap();
+        let database = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        let snapshot = database.read_snapshot().await.unwrap();
+        let current = stored_output(&snapshot, RECORD_ID).await;
+        drop(snapshot);
+
+        let transaction = database
+            .runtime_database()
+            .begin_write_transaction("move the raw twin off its projection session")
+            .await
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO sessions (
+                    provider, session_id, project_key, project_path, title,
+                    started_at, ended_at, transcript_path, metadata_json,
+                    parent_session_id, is_subagent, agent_id, parent_tool_use_id
+                 )
+                 SELECT provider, 'stale-raw-session', project_key, project_path, title,
+                    started_at, ended_at, transcript_path, metadata_json,
+                    parent_session_id, is_subagent, agent_id, parent_tool_use_id
+                 FROM sessions WHERE provider = 'codex' AND session_id = ?1",
+                tracedecay_runtime_core::params![SESSION],
+            )
+            .await
+            .expect("create the session the drifted twin points at");
+        transaction
+            .execute(
+                "UPDATE session_messages SET text = 'stale message body'
+                 WHERE provider = 'codex' AND message_id = ?1",
+                tracedecay_runtime_core::params![RECORD_ID],
+            )
+            .await
+            .expect("stale the message row");
+        let updated = transaction
+            .execute(
+                "UPDATE lcm_raw_messages
+                 SET session_id = 'stale-raw-session', content = 'stale raw body',
+                     content_hash = 'stale', snippet_text = 'stale raw body',
+                     index_text = 'stale raw body'
+                 WHERE provider = 'codex' AND message_id = ?1",
+                tracedecay_runtime_core::params![RECORD_ID],
+            )
+            .await
+            .expect("move the raw twin");
+        assert_eq!(updated, 1);
+        transaction.commit().await.unwrap();
+
+        super::super::ensure_authority_invariants(database.runtime_database(), false, false)
+            .await
+            .expect("current provenance must adopt its drifted raw twin");
+
+        let snapshot = database.read_snapshot().await.unwrap();
+        assert_eq!(stored_output(&snapshot, RECORD_ID).await, current);
+        let mut rows = snapshot
+            .query(
+                "SELECT session_id FROM lcm_raw_messages
+                 WHERE provider = 'codex' AND message_id = ?1",
+                tracedecay_runtime_core::params![RECORD_ID],
+            )
+            .await
+            .expect("read repaired raw session");
+        assert_eq!(
+            rows.next()
+                .await
+                .expect("read repaired raw session")
+                .expect("raw twin row")
+                .get::<String>(0)
+                .unwrap(),
+            SESSION
+        );
+    }
+
     #[tokio::test]
     async fn current_provenance_restores_its_missing_session_row() {
         let directory = TempDir::new().unwrap();

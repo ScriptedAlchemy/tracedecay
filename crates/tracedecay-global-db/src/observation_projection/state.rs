@@ -789,9 +789,19 @@ pub(in super::super) struct ProjectionOutputAuthority {
     pub(in super::super) canonical: DurableObservationV1,
 }
 
+/// The LCM raw twin stored beside one projected message. Not part of the
+/// output digest; current provenance still authorizes it because the twin is
+/// derived from the same observation.
+pub(in super::super) struct ProjectionRawTwin {
+    pub(in super::super) session_id: String,
+    pub(in super::super) storage_kind: String,
+    pub(in super::super) content: String,
+}
+
 pub(in super::super) struct ProjectionRowsBatch {
     sessions: HashMap<(String, String), SessionRecord>,
     messages: HashMap<(String, String), SessionMessageRecord>,
+    raw_twins: HashMap<(String, String), ProjectionRawTwin>,
 }
 
 impl ProjectionRowsBatch {
@@ -812,6 +822,15 @@ impl ProjectionRowsBatch {
         self.messages
             .get(&(provider.to_owned(), message_id.to_owned()))
     }
+
+    pub(in super::super) fn raw_twin(
+        &self,
+        provider: &str,
+        message_id: &str,
+    ) -> Option<&ProjectionRawTwin> {
+        self.raw_twins
+            .get(&(provider.to_owned(), message_id.to_owned()))
+    }
 }
 
 pub(in super::super) async fn read_projection_rows_batch(
@@ -819,6 +838,7 @@ pub(in super::super) async fn read_projection_rows_batch(
     outputs: &BTreeSet<(String, String)>,
 ) -> ProjectionStoreResult<ProjectionRowsBatch> {
     let mut messages = HashMap::with_capacity(outputs.len());
+    let mut raw_twins = HashMap::with_capacity(outputs.len());
     let requested_keys = outputs.iter().collect::<Vec<_>>();
     for chunk in requested_keys.chunks(OUTPUT_AUTHORITY_BATCH_KEYS) {
         let requested = serde_json::to_string(
@@ -873,6 +893,45 @@ pub(in super::super) async fn read_projection_rows_batch(
             messages.insert(
                 (message.provider.clone(), message.message_id.clone()),
                 message,
+            );
+        }
+        drop(rows);
+        let mut rows = conn
+            .query(
+                "SELECT raw.provider, raw.message_id, raw.session_id, raw.storage_kind,
+                        COALESCE(raw.content, '')
+                 FROM json_each(?1) AS requested
+                 CROSS JOIN lcm_raw_messages AS raw
+                 WHERE raw.provider = json_extract(requested.value, '$.provider')
+                   AND raw.message_id = json_extract(requested.value, '$.message_id')",
+                params![requested.as_str()],
+            )
+            .await
+            .map_err(|error| storage("read projected raw twins", error))?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| storage("read projected raw twins", error))?
+        {
+            let provider = row
+                .get::<String>(0)
+                .map_err(|error| storage("decode projected raw twins", error))?;
+            let message_id = row
+                .get::<String>(1)
+                .map_err(|error| storage("decode projected raw twins", error))?;
+            raw_twins.insert(
+                (provider, message_id),
+                ProjectionRawTwin {
+                    session_id: row
+                        .get(2)
+                        .map_err(|error| storage("decode projected raw twins", error))?,
+                    storage_kind: row
+                        .get(3)
+                        .map_err(|error| storage("decode projected raw twins", error))?,
+                    content: row
+                        .get(4)
+                        .map_err(|error| storage("decode projected raw twins", error))?,
+                },
             );
         }
     }
@@ -945,7 +1004,11 @@ pub(in super::super) async fn read_projection_rows_batch(
         }
     }
 
-    Ok(ProjectionRowsBatch { sessions, messages })
+    Ok(ProjectionRowsBatch {
+        sessions,
+        messages,
+        raw_twins,
+    })
 }
 
 /// The batched ownership resolution behind [`read_output_authorities`].
@@ -1322,10 +1385,21 @@ pub(super) async fn protected_message_rows_compatible(
             == Some(expected_hash.as_str())
         && payload_ref.is_some_and(|payload_ref| actual.text.contains(payload_ref));
     if !external {
-        let raw =
-            tracedecay_lcm::schema::load_raw_message(conn, &actual.provider, &actual.message_id)
-                .await
-                .map_err(|error| storage("read protected projection output", error))?;
+        // A twin that fails its own receipt is not a protected rendering of
+        // this projection. Callers treat that as an ordinary output mismatch
+        // and, when current provenance uniquely owns the output, rewrite it.
+        // A database fault is still a fault.
+        let raw = match tracedecay_lcm::schema::load_raw_message(
+            conn,
+            &actual.provider,
+            &actual.message_id,
+        )
+        .await
+        {
+            Ok(raw) => raw,
+            Err(tracedecay_lcm::LcmError::PayloadIntegrityMismatch) => return Ok(false),
+            Err(error) => return Err(storage("read protected projection output", error)),
+        };
         let Some(raw) = raw else {
             return Ok(false);
         };

@@ -640,6 +640,34 @@ pub(super) async fn apply_session(
 /// A deterministic sanitization refusal keeps its typed class: mapping it to
 /// `Storage` would schedule an endless environmental retry for content that
 /// can never succeed, permanently poisoning the sequential projection queue.
+/// Aligns a provenance-owned raw twin onto the projection's session before
+/// the content upsert.
+///
+/// The ingest upsert refuses a row whose `session_id` differs, so a drifted
+/// twin blocks the rewrite that uniquely owned current provenance authorizes.
+/// `(provider, message_id)` is that ownership key; `session_id` is a field of
+/// the twin, not a second owner. Callers reach this only after that ownership
+/// is already proven (an existing projected message, or released-rendering
+/// convergence). A first insert of an unowned identity must not adopt a
+/// foreign twin and does not call this.
+async fn adopt_owned_projection_raw_session(
+    conn: &impl Executor,
+    message: &SessionMessageRecord,
+) -> ProjectionStoreResult<()> {
+    conn.execute(
+        "UPDATE lcm_raw_messages SET session_id = ?3
+         WHERE provider = ?1 AND message_id = ?2 AND session_id <> ?3",
+        params![
+            message.provider.as_str(),
+            message.message_id.as_str(),
+            message.session_id.as_str(),
+        ],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| storage("adopt projection raw session", error))
+}
+
 async fn upsert_projected_raw_message(
     conn: &impl Executor,
     message: &SessionMessageRecord,
@@ -844,6 +872,7 @@ pub(in super::super) async fn converge_released_output_rendering(
     let message = projection.message();
     supersede_projected_message(conn, message).await?;
     if message.provider != "hermes" {
+        adopt_owned_projection_raw_session(conn, message).await?;
         match upsert_projected_raw_message(conn, message).await {
             Ok(()) => {}
             Err(ProjectionStoreError::SanitizationRefused {
@@ -1022,6 +1051,9 @@ async fn apply_rows(
         }
     };
     if projected_message.provider != "hermes" && !preserve_protected_payload {
+        if existing.is_some() {
+            adopt_owned_projection_raw_session(conn, projected_message).await?;
+        }
         upsert_projected_raw_message(conn, projected_message).await?;
     }
     Ok(transition == MessageTransition::Insert)
