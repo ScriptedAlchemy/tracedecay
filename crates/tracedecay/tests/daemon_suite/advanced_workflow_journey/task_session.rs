@@ -308,8 +308,34 @@ pub(super) fn restart_and_wait_for_task_session(
         "a second physical restart must preserve the receipt exactly"
     );
     wait_for_code_generation(home, project);
-    let _ = task_session_lane_is_mounted(&restarted_client, scope);
+    wait_for_task_session_available(&restarted_client, scope);
     (restarted_daemon, restarted_client)
+}
+
+/// The core query authority mounts after the first sealed generation is
+/// seated, on a deferred owner. Poll the typed SDK until TaskSession evidence
+/// hydrates rather than asserting on the mount's timing.
+fn wait_for_task_session_available(client: &Client, scope: &TaskSessionEvidenceScope<'_>) {
+    let deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+        let (_, evidence, omissions) = retrieve(
+            client,
+            scope.selection,
+            scope.task_id,
+            scope.verified_version,
+            scope.identity,
+            TemporalModeV1::Current,
+        )
+        .unwrap_or_else(|error| panic!("typed SDK retrieval failed while waiting: {error}"));
+        if evidence.is_some() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the mounted query authority to serve TaskSession: {omissions:?}"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
 }
 
 fn wait_for_code_generation(home: &Path, project: &Path) {
@@ -429,8 +455,8 @@ pub(super) fn assert_available_over_sdk_mcp_and_dashboard(
 ) -> Option<WorkTaskSessionEvidenceV1> {
     if !task_session_lane_is_mounted(client, &scope) {
         eprintln!(
-            "skipping the mounted fan-out TaskSession evidence section; no evaluated federated \
-             query authority is mounted for this project"
+            "skipping the mounted fan-out TaskSession evidence section; the mounted query \
+             authority did not serve TaskSession for this project"
         );
         return None;
     }
@@ -702,21 +728,12 @@ pub(super) fn assert_available_over_sdk_mcp_and_dashboard(
     Some(current)
 }
 
-/// Whether this project's mounted query authority can serve the TaskSession
-/// retrieval lane at all.
+/// Whether this project's mounted query authority served TaskSession evidence.
 ///
-/// Before `8e7952f9` ("retire dense FastEmbed path for lexical/graph") this
-/// journey skipped unless the caller had installed the byte-pinned FastEmbed
-/// distribution package, because only the evaluated federated profile it
-/// activated could rank and hydrate TaskSession anchors. That commit deleted
-/// the accepted-profile federated authority and left project open mounting the
-/// checked-in core exact/lexical/graph policy, a `Fallback`-mode
-/// `QueryAuthorityV1`; `task_session_score_domain` serves only a `Federated`
-/// one. The production answer is therefore the typed `task_session`
-/// `Unavailable` omission, the same contract `work_route_exposure_conformance`
-/// pins in `assert_task_session_unavailable`. Keep the capability gate that
-/// commit dropped: assert the typed answer, and run the hydration section only
-/// when an authority that can serve the lane is mounted.
+/// The core fallback policy ranks the lane. Until that mount lands, or when
+/// the session store cannot hydrate, the only truthful answer is the typed
+/// `task_session` `Unavailable` omission. The hydration section runs only
+/// after a probe sees evidence.
 fn task_session_lane_is_mounted(client: &Client, scope: &TaskSessionEvidenceScope<'_>) -> bool {
     let (receipt, evidence, omissions) = retrieve(
         client,
@@ -782,7 +799,8 @@ fn retrieve_over_sdk_mcp_and_dashboard(
     )
     .expect("canonical MCP Work evidence payload");
     assert_eq!(
-        mcp, sdk,
+        normalized_cursors(&mcp),
+        normalized_cursors(&sdk),
         "typed SDK and real tracedecay serve must expose the same Work payload"
     );
     let (status, dashboard_envelope) = dashboard.retrieve_evidence(&request);
@@ -803,10 +821,52 @@ fn retrieve_over_sdk_mcp_and_dashboard(
     )
     .expect("canonical dashboard Work evidence payload");
     assert_eq!(
-        dashboard, sdk,
+        normalized_cursors(&dashboard),
+        normalized_cursors(&sdk),
         "dashboard, SDK, and MCP must preserve the same TaskSession page"
     );
     sdk
+}
+
+/// The same page read over three transports, with every continuation cursor
+/// replaced by a marker for its presence.
+///
+/// A retrieval cursor is authenticated with the issuing wall clock, not the
+/// snapshot time (`query_cursor_ttl_uses_wall_clock_instead_of_snapshot_time`),
+/// so three independent reads of one page necessarily mint three different
+/// cursor payloads. Everything the transports must actually agree on -
+/// evidence, sources, coverage, omissions, freshness, and whether each
+/// continuation exists at all - still compares byte for byte.
+fn normalized_cursors(payload: &WorkEvidenceRetrievalV1) -> WorkEvidenceRetrievalV1 {
+    let mut payload = payload.clone();
+    for source in &mut payload.sources {
+        if let WorkEvidenceSourceV1::TaskSession { evidence, .. } = source
+            && let Some(continuation) = evidence.continuation.as_mut()
+        {
+            normalize_task_session_cursors(continuation);
+        }
+    }
+    for continuation in &mut payload.continuations {
+        match continuation {
+            WorkEvidenceContinuationV1::Anchor { cursor, .. } => *cursor = cursor_marker(),
+            WorkEvidenceContinuationV1::TaskSession { continuation } => {
+                normalize_task_session_cursors(continuation);
+            }
+        }
+    }
+    payload
+}
+
+fn normalize_task_session_cursors(
+    continuation: &mut tracedecay_contracts::WorkTaskSessionContinuationV1,
+) {
+    continuation.temporal_cursor = continuation.temporal_cursor.take().map(|_| cursor_marker());
+    continuation.ranking_cursor = continuation.ranking_cursor.take().map(|_| cursor_marker());
+}
+
+fn cursor_marker() -> tracedecay_contracts::OpaqueCursor {
+    tracedecay_contracts::OpaqueCursor::new("cursor.normalized-for-transport-parity".to_owned())
+        .expect("normalized cursor marker")
 }
 
 fn serve_tool_call(home: &Path, project: &Path, tool_name: &str, arguments: Value) -> Value {

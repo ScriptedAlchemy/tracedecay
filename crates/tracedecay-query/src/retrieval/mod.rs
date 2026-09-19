@@ -63,6 +63,12 @@ pub const QUERY_LEXICAL_PROFILE_REVISION_V1: &str = "lexical-profile.daemon.v1";
 pub const QUERY_EXACT_SCORE_DOMAIN_V1: &str = "score.exact.daemon.v1";
 pub const QUERY_LEXICAL_SCORE_DOMAIN_V1: &str = "score.lexical.daemon.v1";
 pub const QUERY_GRAPH_SCORE_DOMAIN_V1: &str = "score.graph.daemon.v1";
+/// Score domain used when the mounted core fallback policy ranks TaskSession.
+///
+/// It is not part of the exact/lexical/graph fusion profile, so search cursor
+/// identity stays the checked-in fallback policy.
+pub const QUERY_TASK_SESSION_SCORE_DOMAIN_V1: &str = "score.task_session.daemon.v1";
+pub const QUERY_TASK_SESSION_CALIBRATION_V1: &str = "calibration.task_session.query-fallback";
 
 #[cfg(test)]
 mod tests;
