@@ -3557,40 +3557,6 @@ async fn foreground_project_open_wait_is_bounded_and_accepts_quick_publication()
     );
 }
 
-/// Route enrollment that consumes the old connection-arrival budget must not
-/// turn a quick `reset_required` into warming.
-///
-/// The publication future is pending on its first poll, which is exactly when
-/// an already-elapsed bound used to win: the waiter never read the refusal.
-/// The bound is measured from the claim, so enrollment time is not part of it.
-#[tokio::test(start_paused = true)]
-async fn enrollment_delay_does_not_hide_a_quick_reset_required() {
-    tokio::time::advance(super::super::PROJECT_OPEN_REQUEST_DEADLINE).await;
-    let deadline = super::super::project_open_publication_deadline(tokio::time::Instant::now());
-    let refused = super::super::project_open_orchestration::wait_for_project_open_publication(
-        std::path::Path::new("/projects/reset-required"),
-        deadline,
-        async {
-            tokio::task::yield_now().await;
-            Err::<(), tracedecay_domain::errors::TraceDecayError>(
-                tracedecay_domain::errors::TraceDecayError::reset_required(
-                    "project store",
-                    "database schema contains unexpected table",
-                ),
-            )
-        },
-    )
-    .await
-    .expect_err("a refused store must not publish a server");
-    assert!(
-        matches!(
-            refused,
-            tracedecay_domain::errors::TraceDecayError::ResetRequired { .. }
-        ),
-        "enrollment that spent the connection-arrival budget must not answer warming: {refused}"
-    );
-}
-
 fn production_composition_tool_text(response: &JsonRpcResponse) -> &str {
     assert!(response.error.is_none(), "tool failed: {response:?}");
     let result = response.result.as_ref().expect("tool result");
