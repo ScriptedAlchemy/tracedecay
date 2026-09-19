@@ -61,6 +61,7 @@ impl CodeLexicalCloneSuccessorV1 {
         memory_budget_bytes: usize,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
         let connection = open_builder_connection(staging_path, memory_budget_bytes)?;
+        ensure_clone_occurrence_indexes(&connection)?;
         let mutation_gate = register_builder_mutation_gate(&connection)?;
         let (prior_digest, format_revision): (String, i64) = connection
             .query_row(
@@ -431,6 +432,24 @@ fn reset_clone_tables(connection: &Connection) -> Result<(), CodeLexicalArtifact
         .map_err(sqlite_error)
 }
 
+/// Lookup indexes for resume verification, which reads postings by
+/// occurrence. Both postings tables are keyed from `class`/`language`, so
+/// without these every per-occurrence read is a full table scan; replaying N
+/// committed pages after a restart then costs N scans of every posting the
+/// repository has, and a daemon sat inside that replay for hours. A prior
+/// artifact copied from a build that predates the indexes gains them here,
+/// and nothing digests or enumerates the index schema.
+fn ensure_clone_occurrence_indexes(
+    connection: &Connection,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    connection
+        .execute_batch(
+            "CREATE INDEX IF NOT EXISTS clone_exact_postings_by_occurrence ON clone_exact_postings(symbol_occurrence_id);
+             CREATE INDEX IF NOT EXISTS clone_fingerprint_postings_by_occurrence ON clone_fingerprint_postings(symbol_occurrence_id);",
+        )
+        .map_err(sqlite_error)
+}
+
 fn append_clone_rows(
     transaction: &rusqlite::Transaction<'_>,
     page: &VerifiedSealedLexicalPageV1,
@@ -562,16 +581,12 @@ fn verify_copied_source_page(
 
 type CloneExactRowV1 = (i64, i64, String, String);
 
-/// Postings for one page's occurrences, read with one scan per table.
+/// Postings for one page's occurrences, read through the occurrence indexes
+/// `ensure_clone_occurrence_indexes` installs and bucketed by occurrence.
 ///
-/// `clone_exact_postings` and `clone_fingerprint_postings` are
-/// `WITHOUT ROWID` tables keyed from `class`/`language`, so a
-/// `WHERE symbol_occurrence_id = ?` lookup has no index to use and scans the
-/// whole table. Issuing one per body made resume verification quadratic in
-/// the postings a repository has: a daemon spent eleven hours inside
-/// `verify_clone_fingerprint_page_rows` on one mount without recording a
-/// single scheduler pass. Scanning once per page and bucketing by occurrence
-/// keeps the comparisons byte-identical while paying the scan once.
+/// The postings tables are keyed from `class`/`language`; before those
+/// indexes existed a per-occurrence read scanned the whole table, and a
+/// daemon spent eleven hours replaying committed pages after a restart.
 struct ClonePagePostingsV1 {
     exact: HashMap<String, Vec<CloneExactRowV1>>,
     fingerprints: HashMap<String, Vec<CloneFingerprintRowV1>>,
@@ -586,49 +601,47 @@ impl ClonePagePostingsV1 {
         let mut exact: HashMap<String, Vec<CloneExactRowV1>> = HashMap::new();
         let mut statement = connection
             .prepare(
-                "SELECT symbol_occurrence_id, class, normalization_revision, digest, payload_digest FROM clone_exact_postings",
+                "SELECT class, normalization_revision, digest, payload_digest FROM clone_exact_postings WHERE symbol_occurrence_id = ?1",
             )
             .map_err(sqlite_error)?;
-        let mut rows = statement.query([]).map_err(sqlite_error)?;
-        while let Some(row) = rows.next().map_err(sqlite_error)? {
-            let occurrence: String = row.get(0).map_err(sqlite_error)?;
-            if !occurrences.contains(occurrence.as_str()) {
-                continue;
+        for occurrence in occurrences {
+            checkpoint(control)?;
+            let mut rows = statement.query([occurrence]).map_err(sqlite_error)?;
+            while let Some(row) = rows.next().map_err(sqlite_error)? {
+                exact.entry((*occurrence).to_owned()).or_default().push((
+                    row.get(0).map_err(sqlite_error)?,
+                    row.get(1).map_err(sqlite_error)?,
+                    row.get(2).map_err(sqlite_error)?,
+                    row.get(3).map_err(sqlite_error)?,
+                ));
             }
-            exact.entry(occurrence).or_default().push((
-                row.get(1).map_err(sqlite_error)?,
-                row.get(2).map_err(sqlite_error)?,
-                row.get(3).map_err(sqlite_error)?,
-                row.get(4).map_err(sqlite_error)?,
-            ));
         }
-        drop(rows);
         drop(statement);
-        checkpoint(control)?;
 
         let mut fingerprints: HashMap<String, Vec<CloneFingerprintRowV1>> = HashMap::new();
         let mut statement = connection
             .prepare(
-                "SELECT symbol_occurrence_id, language, class, normalization_revision, fingerprint, token_position, payload_digest, body_digest FROM clone_fingerprint_postings",
+                "SELECT language, class, normalization_revision, fingerprint, token_position, payload_digest, body_digest FROM clone_fingerprint_postings WHERE symbol_occurrence_id = ?1",
             )
             .map_err(sqlite_error)?;
-        let mut rows = statement.query([]).map_err(sqlite_error)?;
-        while let Some(row) = rows.next().map_err(sqlite_error)? {
-            let occurrence: String = row.get(0).map_err(sqlite_error)?;
-            if !occurrences.contains(occurrence.as_str()) {
-                continue;
+        for occurrence in occurrences {
+            checkpoint(control)?;
+            let mut rows = statement.query([occurrence]).map_err(sqlite_error)?;
+            while let Some(row) = rows.next().map_err(sqlite_error)? {
+                fingerprints
+                    .entry((*occurrence).to_owned())
+                    .or_default()
+                    .push((
+                        row.get(0).map_err(sqlite_error)?,
+                        row.get(1).map_err(sqlite_error)?,
+                        row.get(2).map_err(sqlite_error)?,
+                        row.get(3).map_err(sqlite_error)?,
+                        row.get(4).map_err(sqlite_error)?,
+                        row.get(5).map_err(sqlite_error)?,
+                        row.get(6).map_err(sqlite_error)?,
+                    ));
             }
-            fingerprints.entry(occurrence).or_default().push((
-                row.get(1).map_err(sqlite_error)?,
-                row.get(2).map_err(sqlite_error)?,
-                row.get(3).map_err(sqlite_error)?,
-                row.get(4).map_err(sqlite_error)?,
-                row.get(5).map_err(sqlite_error)?,
-                row.get(6).map_err(sqlite_error)?,
-                row.get(7).map_err(sqlite_error)?,
-            ));
         }
-        drop(rows);
         drop(statement);
         checkpoint(control)?;
 
