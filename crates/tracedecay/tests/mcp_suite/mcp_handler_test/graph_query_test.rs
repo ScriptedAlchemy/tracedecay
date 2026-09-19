@@ -105,9 +105,7 @@ pub struct PlainValue;
 }
 
 fn clone_family_lane_still_publishing(error: &str) -> bool {
-    error.contains("search_failed")
-        || error.contains("generation_unverified")
-        || error.contains("code_index_unavailable")
+    error.contains("generation_unverified")
 }
 
 async fn shutdown_graph_fixture(fixture: GraphQueryFixture) {
