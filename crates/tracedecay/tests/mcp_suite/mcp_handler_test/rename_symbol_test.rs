@@ -512,3 +512,412 @@ async fn test_rename_symbol_publication_failure_preserves_preimage() {
         "published caller must be rolled back to its preimage"
     );
 }
+
+/// Source of `src/pricing.rs` in [`rename_fixture`], byte for byte.
+const PRICING_SOURCE: &str = r#"//! pricing
+pub struct LineItem {
+    pub unit_price: u64,
+    pub quantity: u32,
+}
+
+/// Grand total in cents.
+pub fn compute_grand_total(items: &[LineItem]) -> u64 {
+    let mut total = 0u64;
+    for item in items {
+        total += item.unit_price * item.quantity as u64;
+    }
+    total
+}
+
+pub fn tally(items: &[LineItem]) -> u64 {
+    compute_grand_total(items)
+}
+"#;
+
+/// `PRICING_SOURCE` after `compute_grand_total` becomes `calculate_total_cents`.
+const RENAMED_PRICING_SOURCE: &str = r#"//! pricing
+pub struct LineItem {
+    pub unit_price: u64,
+    pub quantity: u32,
+}
+
+/// Grand total in cents.
+pub fn calculate_total_cents(items: &[LineItem]) -> u64 {
+    let mut total = 0u64;
+    for item in items {
+        total += item.unit_price * item.quantity as u64;
+    }
+    total
+}
+
+pub fn tally(items: &[LineItem]) -> u64 {
+    calculate_total_cents(items)
+}
+"#;
+
+/// Source of `src/nested/orders.rs` in [`rename_fixture`], byte for byte.
+const ORDERS_SOURCE: &str = r#"//! orders
+use crate::pricing::LineItem;
+
+pub fn quantity(items: &[LineItem]) -> usize {
+    items.len()
+}
+"#;
+
+/// Exact dry-run diff for renaming `compute_grand_total` in `src/pricing.rs`.
+///
+/// The preview renderer prefixes a context line with one space and a removed
+/// or added line with `-` or `+`, so a blank source line is a single marker
+/// character. The hunk has no trailing newline.
+const RENAME_PREVIEW_DIFF: &str = concat!(
+    "--- src/pricing.rs\n",
+    "@@ -5,14 +5,14 @@\n",
+    " }\n",
+    " \n",
+    " /// Grand total in cents.\n",
+    "-pub fn compute_grand_total(items: &[LineItem]) -> u64 {\n",
+    "-    let mut total = 0u64;\n",
+    "-    for item in items {\n",
+    "-        total += item.unit_price * item.quantity as u64;\n",
+    "-    }\n",
+    "-    total\n",
+    "-}\n",
+    "-\n",
+    "-pub fn tally(items: &[LineItem]) -> u64 {\n",
+    "-    compute_grand_total(items)\n",
+    "+pub fn calculate_total_cents(items: &[LineItem]) -> u64 {\n",
+    "+    let mut total = 0u64;\n",
+    "+    for item in items {\n",
+    "+        total += item.unit_price * item.quantity as u64;\n",
+    "+    }\n",
+    "+    total\n",
+    "+}\n",
+    "+\n",
+    "+pub fn tally(items: &[LineItem]) -> u64 {\n",
+    "+    calculate_total_cents(items)\n",
+    " }",
+);
+
+const RENAMED_SITES: &str = r#"[
+  {
+    "disposition": "changed",
+    "end_byte": 137,
+    "expected_bytes": "compute_grand_total",
+    "file": "src/pricing.rs",
+    "kind": "declaration",
+    "line": 8,
+    "reason": "exact graph-bound occurrence",
+    "replacement_bytes": "calculate_total_cents",
+    "start_byte": 118
+  },
+  {
+    "disposition": "changed",
+    "end_byte": 358,
+    "expected_bytes": "compute_grand_total",
+    "file": "src/pricing.rs",
+    "kind": "resolved_call",
+    "line": 17,
+    "reason": "exact graph-bound occurrence",
+    "replacement_bytes": "calculate_total_cents",
+    "start_byte": 339
+  }
+]"#;
+
+/// Drop digests, receipts, and occurrence ids. What remains is the rename a
+/// caller can check without knowing the fixture's git commit or graph generation.
+/// Hazard order is not part of that contract when several hazards share a
+/// message and no site id, so hazards are compared sorted by kind.
+fn observable_rename(payload: &Value) -> Value {
+    let mut payload = payload.clone();
+    let Some(object) = payload.as_object_mut() else {
+        return payload;
+    };
+    if let Some(sites) = object.get_mut("sites").and_then(Value::as_array_mut) {
+        for site in sites {
+            if let Some(site) = site.as_object_mut() {
+                site.remove("site_id");
+                site.remove("source_node_id");
+            }
+        }
+    }
+    if let Some(hazards) = object.get_mut("hazards").and_then(Value::as_array_mut) {
+        for hazard in hazards.iter_mut() {
+            if let Some(hazard) = hazard.as_object_mut() {
+                hazard.remove("site_id");
+            }
+        }
+        hazards.sort_by(|left, right| {
+            left["kind"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(right["kind"].as_str().unwrap_or(""))
+                .then(
+                    left["message"]
+                        .as_str()
+                        .unwrap_or("")
+                        .cmp(right["message"].as_str().unwrap_or("")),
+                )
+        });
+    }
+    for key in [
+        "preview_id",
+        "preview_digest",
+        "plan_digest",
+        "graph_revision",
+        "repository_revision",
+        "expected_state",
+        "predicted_state",
+        "verification",
+        "effect",
+    ] {
+        object.remove(key);
+    }
+    payload
+}
+
+fn assert_pricing_fixture_bytes(project: &Path) {
+    assert_eq!(
+        fs::read_to_string(project.join("src/pricing.rs")).unwrap(),
+        PRICING_SOURCE
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("src/nested/orders.rs")).unwrap(),
+        ORDERS_SOURCE
+    );
+}
+
+#[tokio::test]
+async fn test_rename_symbol_literal_dry_run_plan() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
+    rename_fixture(project).await;
+    assert_pricing_fixture_bytes(project);
+    let (cg, _env) = init_test_project(project).await;
+
+    let node = preview_node(&cg, "compute_grand_total").await;
+    assert_eq!(node["name"], "compute_grand_total");
+    assert_eq!(node["kind"], "function");
+    assert_eq!(node["file"], "src/pricing.rs");
+    assert_eq!(
+        node["qualified_name"],
+        "src/pricing.rs::compute_grand_total"
+    );
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_rename_symbol",
+        rename_args(&node, "calculate_total_cents"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = rename_payload(&result);
+    let sites: Value = serde_json::from_str(RENAMED_SITES).unwrap();
+    assert_eq!(
+        observable_rename(&payload),
+        json!({
+            "success": true,
+            "dry_run": true,
+            "message": "dry run. Nothing written; preview only (rename previewed)",
+            "symbol": "src/pricing.rs::compute_grand_total",
+            "old_name": "compute_grand_total",
+            "new_name": "calculate_total_cents",
+            "files": [{"file": "src/pricing.rs", "replaced_count": 2}],
+            "reference_count": 1,
+            "sites": sites,
+            "dispositions": {"changed": 2, "unchanged": 0, "skipped": 0, "blocked": 0},
+            "impact": {
+                "callers": ["src/pricing.rs::tally"],
+                "reexports": [],
+                "affected_files": ["src/pricing.rs"],
+                "affected_tests": []
+            },
+            "diff": RENAME_PREVIEW_DIFF,
+            "replayed": false
+        })
+    );
+    assert_pricing_fixture_bytes(project);
+}
+
+#[tokio::test]
+async fn test_rename_symbol_literal_applied_source() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
+    rename_fixture(project).await;
+    assert_pricing_fixture_bytes(project);
+    let (cg, _env) = init_test_project(project).await;
+
+    let node = preview_node(&cg, "compute_grand_total").await;
+    let preview = preview_rename(&cg, &node, "calculate_total_cents").await;
+    let args = accepted_apply_args(
+        &node,
+        "calculate_total_cents",
+        &preview,
+        "rename.literal-applied-source",
+    );
+    let result = handle_tool_call(&cg, "tracedecay_rename_symbol", args.clone(), None, None)
+        .await
+        .unwrap();
+    let payload = rename_payload(&result);
+
+    assert_eq!(payload["success"], true);
+    assert_eq!(payload["message"], "rename applied");
+    assert_eq!(payload["replayed"], false);
+    assert_eq!(payload.get("dry_run"), None);
+    assert_eq!(payload["old_name"], "compute_grand_total");
+    assert_eq!(payload["new_name"], "calculate_total_cents");
+    assert_eq!(
+        payload["files"],
+        json!([{"file": "src/pricing.rs", "replaced_count": 2}])
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("src/pricing.rs")).unwrap(),
+        RENAMED_PRICING_SOURCE
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("src/nested/orders.rs")).unwrap(),
+        ORDERS_SOURCE
+    );
+
+    let replay = handle_tool_call(&cg, "tracedecay_rename_symbol", args, None, None)
+        .await
+        .unwrap();
+    let replayed = rename_payload(&replay);
+    assert_eq!(
+        json!({
+            "success": replayed["success"],
+            "replayed": replayed["replayed"],
+            "durable_metadata_only": replayed["durable_metadata_only"],
+            "message": replayed["message"],
+            "files": replayed["files"],
+            "change_count": replayed["change_count"],
+            "finding_count": replayed["finding_count"],
+            "operation": replayed["operation"],
+        }),
+        json!({
+            "success": true,
+            "replayed": true,
+            "durable_metadata_only": true,
+            "message": "source edit completed; detailed edit output was not retained",
+            "files": ["src/pricing.rs"],
+            "change_count": 2,
+            "finding_count": 0,
+            "operation": "operation.application.rename_symbol",
+        })
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("src/pricing.rs")).unwrap(),
+        RENAMED_PRICING_SOURCE
+    );
+}
+
+#[tokio::test]
+async fn test_rename_symbol_literal_denials() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
+    rename_fixture(project).await;
+    assert_pricing_fixture_bytes(project);
+    let (cg, _env) = init_test_project(project).await;
+    let node = preview_node(&cg, "compute_grand_total").await;
+
+    let invalid = handle_tool_call(
+        &cg,
+        "tracedecay_rename_symbol",
+        rename_args(&node, "not an identifier"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let invalid = rename_payload(&invalid);
+    assert_eq!(
+        observable_rename(&invalid),
+        json!({
+            "success": false,
+            "dry_run": true,
+            "message": "rename requires valid old and new identifiers",
+            "symbol": "src/pricing.rs::compute_grand_total",
+            "old_name": "compute_grand_total",
+            "new_name": "not an identifier",
+            "reference_count": 0,
+            "dispositions": {"changed": 0, "unchanged": 0, "skipped": 0, "blocked": 0},
+            "hazards": [{
+                "kind": "invalid_identifier",
+                "blocking": true,
+                "message": "rename requires valid old and new identifiers"
+            }],
+            "impact": {
+                "callers": [],
+                "reexports": [],
+                "affected_files": [],
+                "affected_tests": []
+            },
+            "replayed": false
+        })
+    );
+
+    let same = handle_tool_call(
+        &cg,
+        "tracedecay_rename_symbol",
+        rename_args(&node, "compute_grand_total"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let same = rename_payload(&same);
+    assert_eq!(same["success"], false);
+    assert_eq!(
+        same["message"],
+        "new name is identical to the bound old name"
+    );
+    assert_eq!(
+        observable_rename(&same)["hazards"],
+        json!([{
+            "kind": "invalid_identifier",
+            "blocking": true,
+            "message": "new name is identical to the bound old name"
+        }])
+    );
+
+    let collision = handle_tool_call(
+        &cg,
+        "tracedecay_rename_symbol",
+        rename_args(&node, "tally"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let collision = rename_payload(&collision);
+    assert_eq!(
+        collision["message"],
+        "rename blocked by stale, ambiguous, unsupported, or colliding evidence"
+    );
+    assert_eq!(
+        observable_rename(&collision)["hazards"],
+        json!([
+            {
+                "kind": "changed_resolution",
+                "blocking": true,
+                "message": "`tally` already occurs in src/pricing.rs; collision, shadowing, or changed resolution is possible"
+            },
+            {
+                "kind": "namespace_collision",
+                "blocking": true,
+                "message": "`tally` already occurs in src/pricing.rs; collision, shadowing, or changed resolution is possible"
+            },
+            {
+                "kind": "shadowing",
+                "blocking": true,
+                "message": "`tally` already occurs in src/pricing.rs; collision, shadowing, or changed resolution is possible"
+            }
+        ])
+    );
+    assert_eq!(collision["success"], false);
+    assert_pricing_fixture_bytes(project);
+}
