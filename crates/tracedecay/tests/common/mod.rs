@@ -657,6 +657,9 @@ pub fn http_agent_with_timeout(timeout: Duration) -> ureq::Agent {
 /// panic while the child is still running, `Drop` force-stops and reaps it.
 pub struct TestChildProcess {
     child: Child,
+    /// Whether this child has been waited on. A reaped pid belongs to the
+    /// kernel again, so it must never be used to address a process group.
+    reaped: bool,
     /// Path of a Unix socket this child published. Released after the process
     /// group is reaped so a descendant that still holds the listen descriptor
     /// cannot keep the path accepting.
@@ -671,6 +674,7 @@ impl TestChildProcess {
     pub fn new(child: Child) -> Self {
         Self {
             child,
+            reaped: false,
             #[cfg(unix)]
             release_socket: None,
         }
@@ -712,7 +716,9 @@ impl TestChildProcess {
     }
 
     pub fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
-        self.child.try_wait()
+        let status = self.child.try_wait()?;
+        self.reaped |= status.is_some();
+        Ok(status)
     }
 
     pub fn wait_for_exit(&mut self, timeout: Duration) -> std::io::Result<Option<ExitStatus>> {
@@ -792,10 +798,11 @@ impl TestChildProcess {
     /// the child's process group is signaled first, then the published socket
     /// path is unlinked.
     pub fn kill_and_wait(&mut self) -> std::io::Result<ExitStatus> {
-        let status = terminate_and_reap(&mut self.child)?;
+        let status = terminate_and_reap(&mut self.child, !self.reaped);
+        self.reaped = true;
         #[cfg(unix)]
         self.release_recorded_socket();
-        Ok(status)
+        status
     }
 
     fn drain_stderr(&mut self) {
@@ -819,7 +826,8 @@ impl TestChildProcess {
 
 impl Drop for TestChildProcess {
     fn drop(&mut self) {
-        let _ = terminate_and_reap(&mut self.child);
+        let _ = terminate_and_reap(&mut self.child, !self.reaped);
+        self.reaped = true;
         #[cfg(unix)]
         self.release_recorded_socket();
     }
@@ -832,12 +840,20 @@ impl Drop for TestChildProcess {
 /// inherited, including a listen socket, so the path stays connectable after
 /// `wait` returns. Signaling the group first closes those descriptors; the
 /// leader kill still covers a child whose `setpgid` has not run yet.
-fn terminate_and_reap(child: &mut Child) -> std::io::Result<ExitStatus> {
+///
+/// `signal_group` must be false once this child has been waited on: a reaped
+/// pid is the kernel's to reissue, so negating it could address a process
+/// group this harness never created.
+fn terminate_and_reap(child: &mut Child, signal_group: bool) -> std::io::Result<ExitStatus> {
     // Signal the group before reaping. A leader that has already exited still
-    // names the group; returning on `try_wait` first would leave descendants
-    // holding the listen socket.
+    // names the group while it is an unreaped zombie; returning on `try_wait`
+    // first would leave descendants holding the listen socket.
     #[cfg(unix)]
-    signal_child_process_group(child.id());
+    if signal_group {
+        signal_child_process_group(child.id());
+    }
+    #[cfg(not(unix))]
+    let _ = signal_group;
 
     if let Ok(Some(status)) = child.try_wait() {
         return Ok(status);
