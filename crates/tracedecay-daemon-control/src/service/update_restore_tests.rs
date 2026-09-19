@@ -133,3 +133,49 @@ fn restore_readiness_rejects_a_stale_daemon_after_an_upgrade() {
     );
     server.join().expect("join stale daemon");
 }
+
+/// Protocol identity is the string the daemon advertises, build metadata
+/// included. A bare release tag is not that identity: `tracedecay update`
+/// refused the daemon it had just installed when expected_version was
+/// `0.1.0-beta.47` and the process answered `0.1.0-beta.47+<sha>`.
+#[cfg(unix)]
+#[test]
+fn restore_readiness_accepts_the_advertised_build_and_rejects_its_release_tag() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let profile = TempDir::new().expect("profile temp dir");
+    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, profile.path());
+
+    const BUILD: &str = "0.1.0-beta.47+84598a0b9c841b914565f46b20bb6c765706e8e5";
+    const RELEASE: &str = "0.1.0-beta.47";
+
+    let ready_socket = profile.path().join("ready.sock");
+    let ready_listener = UnixListener::bind(&ready_socket).expect("bind ready daemon socket");
+    let ready_server = serve_initialize_identity(ready_listener, "tracedecay", BUILD);
+    assert_eq!(
+        super::probe::daemon_protocol_state_with_timeout(
+            &ready_socket,
+            BUILD,
+            std::time::Duration::from_secs(5),
+        ),
+        super::probe::DaemonProtocolState::Ready,
+    );
+    ready_server.join().expect("join ready daemon");
+
+    let mismatch_socket = profile.path().join("mismatch.sock");
+    let mismatch_listener =
+        UnixListener::bind(&mismatch_socket).expect("bind mismatched daemon socket");
+    let mismatch_server = serve_initialize_identity(mismatch_listener, "tracedecay", BUILD);
+    assert_eq!(
+        super::probe::daemon_protocol_state_with_timeout(
+            &mismatch_socket,
+            RELEASE,
+            std::time::Duration::from_secs(5),
+        ),
+        super::probe::DaemonProtocolState::IdentityMismatch {
+            name: Some("tracedecay".to_string()),
+            version: Some(BUILD.to_string()),
+            expected_version: RELEASE.to_string(),
+        }
+    );
+    mismatch_server.join().expect("join mismatched daemon");
+}

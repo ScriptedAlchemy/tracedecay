@@ -554,15 +554,15 @@ pub enum UpgradeOutcome {
         /// binary: `which_tracedecay()`'s current-exe-first order can point
         /// at the OLD binary (e.g. a stale Homebrew keg) after an upgrade.
         binary: Option<PathBuf>,
-        /// Version of the freshly installed binary: the release-manifest
-        /// version for GitHub-release installs, the linked binary's
-        /// self-reported version for package-manager installs. Daemon restore
-        /// validates this version, the binary it actually restarts, instead
-        /// of the one that was running before the upgrade. `None` only when
-        /// the manager's install could not be interrogated; restore
-        /// verification then validates the pre-upgrade version and, if a new
-        /// daemon really was installed, fails with a typed identity mismatch
-        /// rather than silently passing.
+        /// Protocol identity of the freshly installed binary, the string
+        /// `tracedecay --version` prints and the daemon advertises as
+        /// `build_version()`. That is `{release}+{sha}[.dirty]`, not the
+        /// GitHub release tag. Daemon restore compares it to the answering
+        /// process with exact equality. `None` when the binary could not be
+        /// read: restore then keeps the pre-upgrade identity and fails with
+        /// a typed mismatch if a different daemon starts, instead of
+        /// substituting the bare release tag and refusing the binary that
+        /// was just installed.
         version: Option<String>,
     },
     /// Already on the latest version. The binary was not replaced.
@@ -796,8 +796,12 @@ fn run_versioned_upgrade(current: &str, is_beta: bool) -> Result<UpgradeOutcome>
     record_previous_version();
     eprintln!("\x1b[32m✔\x1b[0m Successfully upgraded to v{latest}!");
     Ok(UpgradeOutcome::Installed {
+        // The release tag is the bare semver the operator downloaded. The
+        // daemon advertises `{release}+{sha}`, and readiness compares those
+        // strings exactly, so the window must expect the binary's own
+        // identity rather than `latest`.
+        version: installed_protocol_identity(binary.as_deref()),
         binary,
-        version: Some(latest.to_owned()),
     })
 }
 
@@ -947,6 +951,35 @@ impl fmt::Display for VersionProbeError {
 /// the upgrade. Every exit path leaves the child killed and reaped.
 fn installed_binary_version(path: &Path) -> std::result::Result<String, VersionProbeError> {
     installed_binary_version_within(path, VERSION_PROBE_DEADLINE)
+}
+
+/// Protocol identity of a binary this process just published.
+///
+/// Readiness and the handshake compare this value to the daemon's
+/// `build_version()` with exact string equality. A GitHub release tag is
+/// only the release (`0.1.0-beta.47`); the binary the tag installs names
+/// itself `0.1.0-beta.47+<sha>`. Reporting the tag made `tracedecay update`
+/// refuse the daemon it had just started. An unreadable binary is `None`,
+/// never the tag: inventing a less specific identity is what produced the
+/// mismatch.
+fn installed_protocol_identity(binary: Option<&Path>) -> Option<String> {
+    match binary.map(installed_binary_version) {
+        Some(Ok(version)) => Some(version),
+        Some(Err(reason)) => {
+            eprintln!(
+                "  \x1b[33mwarning:\x1b[0m could not read the installed binary's protocol identity \
+                 ({reason}); daemon restore will not substitute the release tag"
+            );
+            None
+        }
+        None => {
+            eprintln!(
+                "  \x1b[33mwarning:\x1b[0m installed binary path is unknown; daemon restore will \
+                 not substitute the release tag"
+            );
+            None
+        }
+    }
 }
 
 fn installed_binary_version_within(
@@ -1235,6 +1268,7 @@ mod tests {
 
         use super::super::{
             VersionProbeError, installed_binary_version, installed_binary_version_within,
+            installed_protocol_identity,
         };
 
         fn script(dir: &Path, body: &str) -> PathBuf {
@@ -1250,6 +1284,36 @@ mod tests {
             let binary = script(dir.path(), "printf 'tracedecay 1.2.3+abcdef\\n'");
 
             assert_eq!(installed_binary_version(&binary).unwrap(), "1.2.3+abcdef");
+        }
+
+        /// The `tracedecay update` failure: the release tag is `0.1.0-beta.47`
+        /// and the binary that tag installs names itself with `+<sha>`.
+        /// Readiness compares those strings exactly, so the maintenance
+        /// window must be handed the binary's identity.
+        #[test]
+        fn a_direct_install_reports_the_binary_identity_not_the_release_tag() {
+            let dir = tempfile::tempdir().unwrap();
+            let build = "0.1.0-beta.47+84598a0b9c841b914565f46b20bb6c765706e8e5";
+            let binary = script(dir.path(), &format!("printf 'tracedecay {build}\\n'"));
+
+            assert_eq!(
+                installed_protocol_identity(Some(&binary)).as_deref(),
+                Some(build)
+            );
+
+            let bare = script(dir.path(), "printf 'tracedecay 0.1.0-beta.47\\n'");
+            assert_eq!(
+                installed_protocol_identity(Some(&bare)).as_deref(),
+                Some("0.1.0-beta.47")
+            );
+
+            let missing = dir.path().join("absent");
+            assert_eq!(
+                installed_protocol_identity(Some(&missing)),
+                None,
+                "an unreadable binary must not fall back to the release tag"
+            );
+            assert_eq!(installed_protocol_identity(None), None);
         }
 
         #[test]
