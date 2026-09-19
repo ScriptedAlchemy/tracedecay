@@ -172,10 +172,9 @@ async fn hold_idle_background_admission(
     loop {
         if registry.memory_stats().await.reconciling_worktrees == 0
             && let Ok(permit) = admission.clone().try_acquire_owned()
+            && registry.memory_stats().await.reconciling_worktrees == 0
         {
-            if registry.memory_stats().await.reconciling_worktrees == 0 {
-                return permit;
-            }
+            return permit;
         }
         assert!(
             std::time::Instant::now() <= deadline,
