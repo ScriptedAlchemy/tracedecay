@@ -359,6 +359,11 @@ impl<'a> GraphQueryManager<'a> {
             .iter()
             .map(|symbol| symbol.occurrence.clone())
             .collect::<Vec<_>>();
+        // Adjacency refuses an empty seed list. A logical path this generation
+        // never published has no symbols, so it has no file neighbors.
+        if seeds.is_empty() {
+            return Ok(Vec::new());
+        }
         let edges = hotpath::measure_block!("usecases.graph.file_neighbors.edges", {
             if incoming {
                 self.reader.callers(

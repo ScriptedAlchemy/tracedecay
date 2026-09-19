@@ -922,23 +922,15 @@ async fn test_files_json_format_with_grouped_layout() {
 }
 
 #[tokio::test]
-async fn test_affected() {
+async fn test_affected_rejects_a_call_without_files() {
     let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_affected",
-        json!({"files": ["src/utils.rs"]}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
+    let error = call_production_tool(&cg, "tracedecay_affected", json!({}), None, None)
+        .await
+        .expect_err("files is required");
     assert!(
-        text.contains("affected_tests"),
-        "should have affected_tests key"
+        error.to_string().contains("missing required parameter: files"),
+        "{error}"
     );
-    assert!(text.contains("count"), "should have count key");
 }
 
 #[cfg(feature = "test-transport")]
@@ -1069,6 +1061,88 @@ async fn affected_central_daemon_fixture_preserves_set_and_ranks_near_tests_over
         payload["ranking_metadata"]["strategy"],
         "dependency_distance_then_path"
     );
+
+    let depth_limited = harness
+        .call_tool(
+            &project,
+            "tracedecay_affected",
+            json!({"files": ["src/daemon.rs"], "depth": 1, "format": "json"}),
+        )
+        .await
+        .expect("production invocation succeeds")
+        .result
+        .expect("depth-limited affected call returns a result");
+    let depth_payload: Value = serde_json::from_str(
+        depth_limited["content"][0]["text"]
+            .as_str()
+            .expect("depth-limited affected text"),
+    )
+    .expect("depth-limited affected JSON");
+    assert_eq!(
+        depth_payload["affected_tests"],
+        json!(["tests/daemon_direct_test.rs"]),
+        "depth 1 keeps the direct test and drops near and transitive tests: {depth_payload}"
+    );
+    assert_eq!(depth_payload["count"], 1);
+    assert_eq!(
+        depth_payload["recommended_tests"],
+        json!(["tests/daemon_direct_test.rs"])
+    );
+
+    let filtered = harness
+        .call_tool(
+            &project,
+            "tracedecay_affected",
+            json!({
+                "files": ["src/daemon.rs"],
+                "depth": 5,
+                "filter": "tests/daemon_*.rs",
+                "format": "json"
+            }),
+        )
+        .await
+        .expect("production invocation succeeds")
+        .result
+        .expect("filtered affected call returns a result");
+    let filtered_payload: Value = serde_json::from_str(
+        filtered["content"][0]["text"]
+            .as_str()
+            .expect("filtered affected text"),
+    )
+    .expect("filtered affected JSON");
+    assert_eq!(
+        filtered_payload["affected_tests"],
+        json!(["tests/daemon_direct_test.rs"]),
+        "a custom glob drops test files that do not match: {filtered_payload}"
+    );
+
+    let unknown = harness
+        .call_tool(
+            &project,
+            "tracedecay_affected",
+            json!({"files": ["src/missing.rs"], "format": "json"}),
+        )
+        .await
+        .expect("production invocation succeeds");
+    let unknown_result = unknown.result.unwrap_or_else(|| {
+        panic!(
+            "unknown-file affected call returned an error: {:?}",
+            unknown.error
+        )
+    });
+    let unknown_payload: Value = serde_json::from_str(
+        unknown_result["content"][0]["text"]
+            .as_str()
+            .expect("unknown-file affected text"),
+    )
+    .expect("unknown-file affected JSON");
+    assert_eq!(
+        unknown_payload["affected_tests"],
+        json!([]),
+        "a path with no dependents is an empty set, not an error: {unknown_payload}"
+    );
+    assert_eq!(unknown_payload["count"], 0);
+    assert_eq!(unknown_payload["recommended_tests"], json!([]));
 }
 
 #[cfg(feature = "test-transport")]
