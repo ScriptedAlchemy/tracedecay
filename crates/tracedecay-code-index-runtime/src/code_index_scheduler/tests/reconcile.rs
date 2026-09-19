@@ -24,18 +24,18 @@ use tracedecay_runtime_core::resident_memory::{
 
 use super::{
     ALPHA_LIB_V1, GitFixture, RETAINED_REVISION_0, SERVING_SEAT_FAILURE_CEILING,
-    advance_pointer_to_unseated_successor, application_context, committed_capture_corpus_files,
-    core_search_request, drain_clone_backfill, git, git_stdout, hold_settled_background_admission,
+    advance_pointer_to_unseated_successor, application_context, clear_pending_wake_until_quiet,
+    committed_capture_corpus_files, core_search_request, drain_clone_backfill, git, git_stdout,
     mounted_core_query_worktree, mounted_core_query_worktree_with_one_permit, published,
     query_authority, query_meta, quiesced_background_reconcile_admission,
     replace_scheduler_chunker_revision, replace_scheduler_policy_revision,
     rewrite_active_rust_extractor_revision, rewrite_preserving_stat, scheduler,
-    scheduler_with_policy, served_lexical_texts, test_project_id, wait_for_dashboard_ready,
-    wait_for_event_to_ready, wait_for_generation_change, wait_for_initial_generation,
-    wait_for_live_complete_generation, wait_for_live_complete_generation_by_polling,
-    wait_for_queryable_text_generation, wait_for_queryable_text_generation_change,
-    wait_for_queryable_text_generation_id, wait_for_quiescent_owner_pass, wait_for_settled_owner,
-    wait_until_serving_seat, write,
+    scheduler_with_policy, served_lexical_texts, settled_owner_with_idle_admission,
+    test_project_id, wait_for_dashboard_ready, wait_for_event_to_ready, wait_for_generation_change,
+    wait_for_initial_generation, wait_for_live_complete_generation,
+    wait_for_live_complete_generation_by_polling, wait_for_queryable_text_generation,
+    wait_for_queryable_text_generation_change, wait_for_queryable_text_generation_id,
+    wait_for_quiescent_owner_pass, wait_for_settled_owner, wait_until_serving_seat, write,
 };
 use crate::{
     code_index::{
@@ -2156,7 +2156,10 @@ async fn unchanged_git_watcher_probe_does_not_enqueue_authoritative_capture() {
         .acquire_owned()
         .await
         .expect("hold background reconcile admission");
-    registry.clear_pending_wake_for_scope(&scope).await;
+    // The settle above cannot see a pass tail that has dropped its guard and
+    // not yet stamped its `BusyFollowUp` follow-up, so prove the slot stays
+    // empty before asserting that nothing queued a capture pass.
+    clear_pending_wake_until_quiet(&registry, &scope).await;
     assert_eq!(
         scheduler
             .lock()
@@ -2869,7 +2872,11 @@ async fn ignored_dependency_waits_for_global_admission_before_publication_gate()
     let store = TempDir::new().expect("store root");
     let (registry, _) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
     let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    // Draining leaves the busy follow-up wake armed, and every pass it starts
+    // owns the single global admission permit this test needs idle. Settle
+    // that chain and burn the banked permit behind it before sampling.
     drain_clone_backfill(&registry, fixture.path()).await;
+    settled_owner_with_idle_admission(&registry, fixture.path()).await;
     let generation = latest.generation();
     let verified_import = generation
         .imports()
@@ -2900,37 +2907,13 @@ async fn ignored_dependency_waits_for_global_admission_before_publication_gate()
         )
     };
     let global_admission = registry.background_reconcile_admission();
-    // `drain_clone_backfill` drops the permit it held, and the worker may
-    // already be inside the pass that follows. That pass owns the only
-    // permit, so the assertion below is a race unless setup waits for the
-    // worker to release it — and drops this gate if the worker is blocked on
-    // it — before the request under test is admitted.
     registry.clear_pending_wake_for_scope(&scope).await;
-    let idle_deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
-    let publication = loop {
-        while global_admission.available_permits() == 0
-            || registry
-                .reconcile_in_progress_for_test(fixture.path())
-                .await
-        {
-            assert!(
-                Instant::now() <= idle_deadline,
-                "background worker must release global admission before the publication gate is held"
-            );
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-        registry.clear_pending_wake_for_scope(&scope).await;
-        let publication = publication_gate.lock().await;
-        let available = global_admission.available_permits();
-        if available == 1 {
-            break publication;
-        }
-        drop(publication);
-        assert!(
-            Instant::now() <= idle_deadline,
-            "test setup requires an idle global admission"
-        );
-    };
+    let publication = publication_gate.lock().await;
+    assert_eq!(
+        global_admission.available_permits(),
+        1,
+        "test setup requires an idle global admission"
+    );
 
     let request_registry = registry.clone();
     let project_root = fixture.path().to_path_buf();
@@ -3695,7 +3678,10 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
         .collect::<Vec<_>>();
     let fixture = GitFixture::new(&borrowed);
     let store = TempDir::new().expect("store root");
-    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    // One background permit, so holding it is what parks the owner: the
+    // default bound is the host core count and a single held permit would
+    // leave the other passes free to run under the sample below.
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
     registry
         .mount_worktree(
             test_project_id(),
@@ -3706,22 +3692,40 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
         .expect("mount daemon-owned scheduler");
     wait_for_initial_generation(&registry, fixture.path()).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
-    // Clone backfill posts its own wakes after the seat. Drain them before
-    // the progress sample so a successor pass cannot look like this test's
-    // unrelated scheduler-mutex holder.
+    // `refresh_in_flight` is the pass counter *or* the pending-wake slot, and
+    // `wait_for_dashboard_ready` only joins the running pass. The seat no
+    // longer waits for the clone successor, so the mount leaves backfill work
+    // behind, and the wakes that drain it leave a banked permit whose no-op
+    // pass projects Verifying instead of Fresh. Settle the whole mount-era
+    // chain, then hold the admission so no further pass can start under the
+    // sample below.
     drain_clone_backfill(&registry, fixture.path()).await;
+    settled_owner_with_idle_admission(&registry, fixture.path()).await;
+    let _quiet_owner = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     let canonical_root = fixture
         .path()
         .canonicalize()
         .expect("canonical fixture root");
-    let (scheduler, progress_slot) = {
+    let (scheduler, progress_slot, scope) = {
         let mounted = registry.mounted.lock().await;
         let worktree = mounted.get(&canonical_root).expect("mounted worktree");
         (
             Arc::clone(&worktree.scheduler),
             Arc::clone(&worktree.build_progress),
+            tracedecay_contracts::ResolvedScope::new(
+                test_project_id(),
+                worktree.repository_id.clone(),
+                worktree.worktree_id.clone(),
+                None,
+            )
+            .expect("resolved scope"),
         )
     };
+    // `refresh_in_flight` also reads the pending-wake slot, and the settled
+    // owner's pass tail can still stamp `BusyFollowUp` into it after every
+    // settle check above (CI run 35412193695). With the admission held that
+    // tail is finite: empty the slot until it stays empty.
+    clear_pending_wake_until_quiet(&registry, &scope).await;
     let expected = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Some(progress) = progress_slot.read().expect("progress slot").snapshot() {
@@ -3732,10 +3736,6 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
     })
     .await
     .expect("background text build publishes progress");
-    // Text seating keeps `reconcile_in_progress` after it releases the
-    // scheduler mutex. Sampling in that window reports Verifying for a real
-    // pass, which is not this test's unrelated holder.
-    let _admission = hold_settled_background_admission(&registry, fixture.path()).await;
 
     let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -5236,11 +5236,13 @@ async fn concurrent_query_admissions_claim_one_pending_wake_before_worker_coales
     // about simultaneous query admissions, so finish that independent
     // production journey before establishing the empty-slot precondition.
     drain_clone_backfill(&registry, fixture.path()).await;
-    let admission = registry
-        .background_reconcile_admission()
-        .acquire_owned()
-        .await
-        .expect("background reconcile admission");
+    // Take the shared admission first, through the helper that also waits out
+    // an in-flight pass: from here no new pass can start, so the quiet window
+    // established below stays quiet. A raw `acquire_owned` returns the instant
+    // a running pass releases the admission mid-body, and that pass's tail then
+    // stamps `BusyFollowUp` over the empty slot this test set up, which makes
+    // every claim below decline.
+    let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     let scheduler = {
         let mounted = registry.mounted.lock().await;
         Arc::clone(
@@ -5250,8 +5252,11 @@ async fn concurrent_query_admissions_claim_one_pending_wake_before_worker_coales
                 .scheduler,
         )
     };
+    // The tail of the pass the admission was taken from also publishes text
+    // owners, so empty the wake slot and prove it stays empty before clearing
+    // the generations this test needs absent.
+    clear_pending_wake_until_quiet(&registry, &scope).await;
     registry.clear_serving_generation_for_scope(&scope).await;
-    registry.clear_pending_wake_for_scope(&scope).await;
     let held = scheduler
         .lock()
         .expect("hold the scheduler as a rebuild would");
@@ -5476,7 +5481,10 @@ async fn foreign_wake_keeps_pending_arrival_when_query_claim_is_released() {
     let store = TempDir::new().expect("store root");
     let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
     let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
-    registry.clear_pending_wake_for_scope(&scope).await;
+    // A `BusyFollowUp` stamp from the finishing pass's tail would make the
+    // request below decline before it ever reaches the claim gate, and
+    // `wait_for_query_claim` would then hang instead of failing.
+    clear_pending_wake_until_quiet(&registry, &scope).await;
     registry.install_query_claim_gate(&scope);
 
     let request = {
@@ -5526,7 +5534,9 @@ async fn foreign_wake_arriving_during_query_claim_drop_is_retained() {
     // reaches the claim gate under test; settle the backfill first.
     drain_clone_backfill(&registry, fixture.path()).await;
     let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
-    registry.clear_pending_wake_for_scope(&scope).await;
+    // Same hang: a tail's `BusyFollowUp` stamp declines the request before the
+    // claim gate this test waits on.
+    clear_pending_wake_until_quiet(&registry, &scope).await;
     registry.install_query_claim_gate(&scope);
     registry.install_pending_wake_drop_gate(&scope).await;
 
@@ -6954,7 +6964,9 @@ async fn text_freshness_query_during_owner_work_is_current_when_source_is_unchan
         .acquire_owned()
         .await
         .expect("hold background reconcile admission");
-    registry.clear_pending_wake_for_scope(&scope).await;
+    // A pass tail that stamps `BusyFollowUp` after this clear would fail the
+    // "no wake" assertion below, so prove the empty slot holds.
+    clear_pending_wake_until_quiet(&registry, &scope).await;
     // Stand in for a worker pass re-observing an unchanged tree: in-progress,
     // scheduler mutex free, nothing moved on disk or in git.
     let owner_pass = registry
@@ -9142,7 +9154,8 @@ async fn graph_off_remount_preserves_an_unhinted_source_reconcile() {
         .acquire_owned()
         .await
         .expect("hold worker after remount dequeue");
-    registry.clear_pending_wake_for_scope(&scope).await;
+    // Same tail: its stamp would look like the unhinted edit's own wake below.
+    clear_pending_wake_until_quiet(&registry, &scope).await;
     fixture.edit("src/lib.rs", "pub fn beta() -> usize { 2 }\n");
     git(fixture.path(), &["commit", "-qam", "unhinted remount edit"]);
 

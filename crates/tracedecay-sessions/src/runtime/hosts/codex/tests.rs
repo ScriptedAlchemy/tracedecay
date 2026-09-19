@@ -799,20 +799,32 @@ mod goal_event_tests {
         );
     }
 
+    /// A pass yields on the source the capture window left mid-file, not on
+    /// every source it finishes.
+    ///
+    /// `MAX_CAPTURE_WINDOW` is the cooperative bound that owns a resumable
+    /// cursor: it stops inside one rollout and the next pass resumes at that
+    /// byte offset. Yielding once per *finished* rollout has no such cursor, so
+    /// the discovery frontier can never commit and every later pass re-reads
+    /// every rollout it already exhausted, which is quadratic in the rollouts a
+    /// project has. The profile-scope loop has always been bounded this way.
     #[tokio::test]
-    async fn project_provider_yields_between_dated_rollouts_and_converges_without_loss() {
+    async fn project_provider_yields_on_a_deferred_rollout_and_converges_without_loss() {
         crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().canonicalize().unwrap();
         let project = home.join("project");
         std::fs::create_dir_all(&project).unwrap();
+        // The newest rollout alone exceeds one capture window, so pass 0 must
+        // stop inside it; the two behind it fit in the pass that finishes it.
+        let deferring_messages =
+            crate::runtime::jsonl_observation_admission::MAX_CAPTURE_WINDOW + 44;
         let rollouts = [
-            (("2026", "09", "03"), "session-newest"),
-            (("2026", "09", "02"), "session-middle"),
-            (("2026", "09", "01"), "session-oldest"),
+            (("2026", "09", "03"), "session-newest", deferring_messages),
+            (("2026", "09", "02"), "session-middle", 3),
+            (("2026", "09", "01"), "session-oldest", 3),
         ];
-        let messages_per_rollout = 3;
-        for (date, session_id) in rollouts {
+        for (date, session_id, messages_per_rollout) in rollouts {
             let directory = home
                 .join(".codex/sessions")
                 .join(date.0)
@@ -826,7 +838,7 @@ mod goal_event_tests {
             })];
             lines.extend((0..messages_per_rollout).map(|ordinal| {
                 json!({
-                    "timestamp": format!("{}-{}-{}T12:00:0{}.000Z", date.0, date.1, date.2, ordinal + 1),
+                    "timestamp": format!("{}-{}-{}T12:00:01.{:03}Z", date.0, date.1, date.2, ordinal),
                     "type": "event_msg",
                     "payload": {
                         "type": "user_message",
@@ -852,7 +864,22 @@ mod goal_event_tests {
         };
         let admission = MemoryHostAdmission::default();
         let cancellation = ObservationCancellation::default();
-        let failure_ceiling = rollouts.len().saturating_add(1);
+        // Pass 0 stops inside the newest rollout at the capture window; pass 1
+        // resumes it from the stored byte offset and, still inside its byte
+        // budget, finishes the two rollouts behind it.
+        let expected_passes: [(&[&str], usize); 2] = [
+            (
+                &["session-newest"],
+                crate::runtime::jsonl_observation_admission::MAX_CAPTURE_WINDOW,
+            ),
+            (
+                &["session-newest", "session-middle", "session-oldest"],
+                (deferring_messages + 1)
+                    - crate::runtime::jsonl_observation_admission::MAX_CAPTURE_WINDOW
+                    + 8,
+            ),
+        ];
+        let failure_ceiling = expected_passes.len().saturating_add(1);
         let mut completed_after = None;
 
         for pass_index in 0..failure_ceiling {
@@ -877,20 +904,30 @@ mod goal_event_tests {
             let after = admission.observations();
             let admitted_this_pass = &after[before..];
             assert!(
-                pass_index < rollouts.len(),
+                pass_index < expected_passes.len(),
                 "coverage did not complete within the fixture-derived ceiling"
             );
-            let expected_session = rollouts[pass_index].1;
+            let (expected_sessions, expected_admitted) = expected_passes[pass_index];
             assert_eq!(
                 admitted_this_pass.len(),
-                messages_per_rollout + 1,
-                "pass {pass_index} must finish exactly {expected_session}"
+                expected_admitted,
+                "pass {pass_index} must admit one capture window of {expected_sessions:?}"
             );
-            assert!(admitted_this_pass.iter().all(|stored| {
-                let envelope: CanonicalObservationEnvelopeV1 =
-                    serde_json::from_value(stored.observation().payload().clone()).unwrap();
-                envelope.relations().session_id().as_str() == expected_session
-            }));
+            assert_eq!(
+                admitted_this_pass
+                    .iter()
+                    .map(|stored| {
+                        let envelope: CanonicalObservationEnvelopeV1 =
+                            serde_json::from_value(stored.observation().payload().clone()).unwrap();
+                        envelope.relations().session_id().as_str().to_owned()
+                    })
+                    .collect::<BTreeSet<_>>(),
+                expected_sessions
+                    .iter()
+                    .map(|session_id| (*session_id).to_owned())
+                    .collect::<BTreeSet<_>>(),
+                "pass {pass_index} admitted the wrong rollouts"
+            );
 
             let coverage = read_host_provider_coverage(&admission, &scope, "codex")
                 .await
@@ -902,11 +939,14 @@ mod goal_event_tests {
             assert_eq!(coverage, Some(HostProviderCoverage::Partial));
         }
 
-        assert_eq!(completed_after, Some(rollouts.len()));
+        assert_eq!(completed_after, Some(expected_passes.len()));
         let observations = admission.observations();
         assert_eq!(
             observations.len(),
-            rollouts.len() * (messages_per_rollout + 1)
+            rollouts
+                .iter()
+                .map(|(_, _, messages)| messages + 1)
+                .sum::<usize>()
         );
         let envelopes = observations
             .iter()
@@ -925,10 +965,10 @@ mod goal_event_tests {
             admitted_sessions.iter().cloned().collect::<BTreeSet<_>>(),
             rollouts
                 .iter()
-                .map(|(_, session_id)| (*session_id).to_owned())
+                .map(|(_, session_id, _)| (*session_id).to_owned())
                 .collect::<BTreeSet<_>>()
         );
-        for (_, session_id) in rollouts {
+        for (_, session_id, messages_per_rollout) in rollouts {
             assert_eq!(
                 admitted_sessions
                     .iter()

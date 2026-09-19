@@ -3108,7 +3108,7 @@ fn symbol_facts(symbols: &Value) -> Value {
             }
         })
         .collect::<Vec<_>>();
-    facts.sort_by(|left, right| left.to_string().cmp(&right.to_string()));
+    facts.sort_by_key(ToString::to_string);
     Value::Array(facts)
 }
 

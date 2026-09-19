@@ -178,6 +178,46 @@ fn cursor_admission_record_id(
     Ok((identity.into_primary(), retry_eligible))
 }
 
+/// What one Cursor ingest pass did to the sources it scanned, independently of
+/// what its own projection drain happened to catch.
+///
+/// The projection queue is shared per scope and consumed on projection, so the
+/// project catch-up sweep in [`crate::runtime::ingest::project_provider`] can
+/// drain the rows this pass just admitted before this pass drains them itself.
+/// Projection-output counts alone therefore cannot answer whether the pass's
+/// transcript is durable, and both of the states below report zero outputs:
+///
+/// - `observations_committed > 0`: this pass persisted new observations. They
+///   are durable at admission; which drainer materializes them is not the
+///   host's question.
+/// - `fully_replayed()`: every scanned source resumed at its stored cursor
+///   with nothing new to persist, so its observations were already durable.
+#[derive(Debug, Default, Clone, Copy)]
+struct CursorSourceAdmissionTally {
+    scanned: u64,
+    replayed: u64,
+    observations_committed: u64,
+}
+
+impl CursorSourceAdmissionTally {
+    fn record(&mut self, progress: &JsonlObservationAdmissionProgress) {
+        self.scanned = self.scanned.saturating_add(1);
+        self.observations_committed = self
+            .observations_committed
+            .saturating_add(progress.frames_persisted);
+        if progress.resumed && progress.frames_persisted == 0 {
+            self.replayed = self.replayed.saturating_add(1);
+        }
+    }
+
+    /// True only when at least one source was scanned and every one of them
+    /// was a pure replay. One source with new frames makes the pass a commit,
+    /// not a duplicate.
+    const fn fully_replayed(self) -> bool {
+        self.scanned > 0 && self.scanned == self.replayed
+    }
+}
+
 // Cursor JSONL admission chokepoint: the whole per-file admission future is
 // boxed here so the per-file sweep loop no longer pins each call, keeping the
 // debug poll frame bounded through the deep ingest recursion chain.
@@ -575,6 +615,7 @@ pub async fn try_ingest_cursor_transcript_event_capped_with_admission(
         "sessions.hosts.cursor.discover_blocking",
         run_blocking_transcript_section(|| source.transcript_paths(&project_root))
     );
+    let mut admitted = CursorSourceAdmissionTally::default();
     for path in paths {
         let context = cursor_observation_context(&source.event, &path, false);
         let progress = admit_cursor_jsonl_observations(
@@ -587,6 +628,7 @@ pub async fn try_ingest_cursor_transcript_event_capped_with_admission(
             &ObservationCancellation::default(),
         )
         .await?;
+        admitted.record(&progress);
         budget.record_progress(progress.bytes_consumed, progress.source_deferred);
     }
     let mut stats = drain_cursor_observation_projections(
@@ -597,6 +639,10 @@ pub async fn try_ingest_cursor_transcript_event_capped_with_admission(
     .await?;
     stats.bytes_consumed = budget.consumed();
     stats.source_deferred |= budget.deferred();
+    stats.observations_committed = admitted.observations_committed;
+    stats.exact_duplicate |= stats.messages_upserted == 0
+        && stats.observations_committed == 0
+        && admitted.fully_replayed();
     Ok(stats)
 }
 
@@ -719,6 +765,7 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_admission(
         "sessions.hosts.cursor.discover_blocking",
         run_blocking_transcript_section(|| source.transcript_paths(&placeholder))
     );
+    let mut admitted = CursorSourceAdmissionTally::default();
     for path in paths {
         let context = cursor_observation_context(&source.event, &path, true);
         let progress = admit_cursor_jsonl_observations(
@@ -731,6 +778,7 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_admission(
             &ObservationCancellation::default(),
         )
         .await?;
+        admitted.record(&progress);
         budget.record_progress(progress.bytes_consumed, progress.source_deferred);
     }
     let mut stats = drain_cursor_observation_projections(
@@ -741,6 +789,10 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_admission(
     .await?;
     stats.bytes_consumed = budget.consumed();
     stats.source_deferred |= budget.deferred();
+    stats.observations_committed = admitted.observations_committed;
+    stats.exact_duplicate |= stats.messages_upserted == 0
+        && stats.observations_committed == 0
+        && admitted.fully_replayed();
     Ok(stats)
 }
 
@@ -820,6 +872,7 @@ async fn admit_cursor_sweep_observations_with_session_ids(
         "sessions.hosts.cursor.discover_blocking",
         run_blocking_transcript_section(|| source.transcript_paths(project_root))
     );
+    let mut admitted = CursorSourceAdmissionTally::default();
     for path in paths {
         if cancellation.is_cancelled() {
             return Err(TranscriptIngestError::Cancelled { provider: "cursor" });
@@ -847,18 +900,20 @@ async fn admit_cursor_sweep_observations_with_session_ids(
             cancellation,
         )
         .await?;
+        admitted.record(&progress);
         budget.record_progress(progress.bytes_consumed, progress.source_deferred);
     }
     if cancellation.is_cancelled() {
         return Err(TranscriptIngestError::Cancelled { provider: "cursor" });
     }
-    let outcome = projection::drain_cursor_observation_projections_with_sessions(
+    let mut outcome = projection::drain_cursor_observation_projections_with_sessions(
         admission,
         &scope,
         cancellation,
     )
     .await
     .map(|stats| stats.into_sweep_outcome(budget.consumed(), budget.deferred()))?;
+    outcome.stats.observations_committed = admitted.observations_committed;
     persist_host_provider_coverage(
         admission,
         &scope,

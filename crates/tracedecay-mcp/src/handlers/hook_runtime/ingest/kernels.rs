@@ -121,6 +121,14 @@ pub(super) struct TranscriptCaptureOutcome {
     pub(super) snapshot: Option<SnapshotCaptureOutcome>,
     pub(super) claude_observation: Option<ClaudeObservationIngestStats>,
     pub(super) source_deferred: bool,
+    /// Observations the route durably admitted, whoever later projects them.
+    /// `messages_upserted` counts only the projections this pass drained
+    /// itself, which a peer drainer can legitimately take first.
+    pub(super) observations_committed: u64,
+    /// The route committed nothing because its observations were already
+    /// durable. Kept apart from `messages_upserted == 0`, which cannot tell an
+    /// already-committed replay from a pass that captured nothing.
+    pub(super) exact_duplicate: bool,
     /// Set by routes that commit through the LCM authority instead of a source
     /// scan; rendered as `authority_outcome` and `committed_state`.
     pub(super) lcm_receipt: Option<LcmAuthorityResponse>,
@@ -405,7 +413,7 @@ async fn capture_codex_project(
     let scope = ObservationScopeV1::Project {
         project_id: project_id.clone(),
     };
-    let source_deferred = admit_codex_project_rollouts(
+    let admitted = admit_codex_project_rollouts(
         ctx.facade,
         &source,
         cg.project_root(),
@@ -418,7 +426,9 @@ async fn capture_codex_project(
         drain_host_observation_projections(ctx.facade, &scope, ctx.cancellation).await?;
     Ok(TranscriptCaptureOutcome {
         messages_upserted,
-        source_deferred,
+        source_deferred: admitted.deferred,
+        observations_committed: admitted.observations_committed,
+        exact_duplicate: admitted.exact_duplicate,
         ..TranscriptCaptureOutcome::default()
     })
 }
@@ -445,6 +455,8 @@ fn cursor_capture_outcome(
     TranscriptCaptureOutcome {
         messages_upserted: stats.messages_upserted,
         source_deferred: stats.source_deferred,
+        observations_committed: stats.observations_committed,
+        exact_duplicate: stats.exact_duplicate,
         ..TranscriptCaptureOutcome::default()
     }
 }
