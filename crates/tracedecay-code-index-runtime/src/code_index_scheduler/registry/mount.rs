@@ -48,6 +48,12 @@ use super::{
 /// dogfood deadline expired still inside text projection, graph never seated.
 /// A process-wide runtime keeps indexing scheduled as soon as the wake is
 /// posted. The future is already boxed, so the stack only has to poll it.
+///
+/// Tests do not use this. The suite mounts many registries in one process;
+/// a few shared threads then hold a waiter behind every other mount until
+/// the per-test deadline. Each test already has a runtime that is not the
+/// daemon's serving runtime.
+#[cfg(not(test))]
 fn code_index_worker_runtime() -> Result<&'static tokio::runtime::Runtime, CodeIndexSchedulerErrorV1>
 {
     static RUNTIME: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
@@ -2365,6 +2371,12 @@ impl CodeIndexSchedulerRegistryV1 {
                 let _ = result;
             }
         });
+        #[cfg(test)]
+        let task = tokio::spawn(hotpath::future!(
+            worker_loop,
+            label = "daemon.code_index.scheduler_worker"
+        ));
+        #[cfg(not(test))]
         let task = code_index_worker_runtime()?.spawn(hotpath::future!(
             worker_loop,
             label = "daemon.code_index.scheduler_worker"
