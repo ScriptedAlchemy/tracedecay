@@ -79,6 +79,7 @@ mod memory_status_test;
 mod move_symbol_behavior_test;
 #[cfg(feature = "test-transport")]
 mod move_symbol_test;
+mod outline_behavior_test;
 #[cfg(feature = "test-transport")]
 mod multi_str_replace_behavior_test;
 mod mutate_graph_test;
