@@ -754,9 +754,12 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
         payload_payload["description"]["external_payload"]["payload_ref"],
         payload_ref
     );
-    assert_eq!(
-        payload_payload["description"]["external_payload"]["content_preview"],
-        ""
+    let payload_preview = payload_payload["description"]["external_payload"]["content_preview"]
+        .as_str()
+        .unwrap_or_else(|| panic!("payload describe preview missing: {payload_payload}"));
+    assert!(
+        payload_preview.contains(payload_ref.as_str()),
+        "payload describe must return the stored placeholder: {payload_preview:?}"
     );
     assert_eq!(payload_payload["grain"], "occurrence");
     assert_eq!(payload_payload["state"], "available");
