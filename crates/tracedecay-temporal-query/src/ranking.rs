@@ -103,6 +103,15 @@ pub type RankedResult = Result<Vec<RankedCandidate>, RankingError>;
 
 const TIER_SPAN: u64 = 1_000_000;
 
+/// Exclusive upper bound of [`RankedCandidate::normalized_score_micros`].
+///
+/// `encode_score` packs the rank tier into the high decade, so a ranked
+/// temporal score is `tier * TIER_SPAN + within_tier` over tiers `1..=3`, and
+/// only a corroborating occurrence exports zero. A consumer that calibrates
+/// this score domain must span the whole range; a calibration capped at
+/// `TIER_SPAN` saturates every ranked anchor to the same calibrated feature.
+pub const NORMALIZED_SCORE_CEILING_MICROS: u64 = 4 * TIER_SPAN;
+
 /// Partition key for raw-score normalization. Absent sources stay singleton
 /// partitions without colliding with a concrete `source` string value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -769,11 +778,9 @@ mod tests {
         assert!((TIER_SPAN..(2 * TIER_SPAN)).contains(&score("approx")));
         assert!(((2 * TIER_SPAN)..(3 * TIER_SPAN)).contains(&score("phrase")));
         assert!(((3 * TIER_SPAN)..(4 * TIER_SPAN)).contains(&score("message")));
-        assert!(
-            ranked
-                .iter()
-                .all(|candidate| { candidate.normalized_score_micros < 4 * TIER_SPAN })
-        );
+        assert!(ranked.iter().all(|candidate| {
+            candidate.normalized_score_micros < NORMALIZED_SCORE_CEILING_MICROS
+        }));
     }
 
     #[test]
