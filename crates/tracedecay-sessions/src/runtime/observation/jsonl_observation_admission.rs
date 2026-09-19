@@ -2852,7 +2852,7 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
 /// unbound authorities, retryable races, says nothing about the record and
 /// must surface as a typed block instead of writing coverage over a commit
 /// that never landed (or one that already landed and advanced the cursor).
-fn is_deterministic_content_refusal(outcome: &HostAdmissionOutcome) -> bool {
+pub(in crate::runtime) fn is_deterministic_content_refusal(outcome: &HostAdmissionOutcome) -> bool {
     matches!(
         outcome.recovery,
         Some(HostAdmissionRecovery::DeterministicContentRefusal)

@@ -15,6 +15,7 @@ use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursor
 
 use crate::admission::{HostAdmission, HostAdmissionOutcome};
 use crate::observation::{CaptureObservationOutcome, ObservationCancellation};
+use crate::runtime::jsonl_observation_admission::is_deterministic_content_refusal;
 use crate::runtime::shared::TranscriptIngestStats;
 use tracedecay_runtime_core::db::{SqliteFileIdentityOperation, sqlite_generation_identity};
 
@@ -89,8 +90,29 @@ async fn advance_coverage(
         .map_err(host_admission_error)
 }
 
+/// The admission's own verdict, verbatim.
+///
+/// The status alone names a family ("degraded"), not a cause: every
+/// deterministic refusal, cursor mismatch and contract violation collapsed
+/// into one indistinguishable sentence, so a sweep that skipped the same
+/// `state.db` every five seconds forever gave an operator nothing to act on.
+/// Carry the reason code, retryability and storage cause the outcome already
+/// holds.
 fn host_admission_error(outcome: HostAdmissionOutcome) -> String {
-    crate::runtime::snapshot_observation::host_admission_status_message("Hermes", outcome.status)
+    let mut message = crate::runtime::snapshot_observation::host_admission_status_message(
+        "Hermes",
+        outcome.status,
+    );
+    if let Some(reason) = outcome.reason_code {
+        message.push_str(&format!(
+            " (reason_code={reason}, retryable={})",
+            outcome.retryable
+        ));
+    }
+    if let Some(cause) = outcome.storage_cause {
+        message.push_str(&format!(": {cause}"));
+    }
+    message
 }
 
 pub(super) async fn drain_hermes_projections_with_admission(
@@ -221,11 +243,44 @@ pub(super) async fn admit_rows_with_admission_and_cancellation(
                 .await?;
             }
             HermesAdmissionAction::Capture(request) => {
-                match facade
-                    .capture_observation(*request)
-                    .await
-                    .map_err(host_admission_error)?
-                {
+                let captured = match facade.capture_observation(*request).await {
+                    Ok(captured) => captured,
+                    // A deterministic content refusal re-fails identically on
+                    // every pass. Without a durable skip the source's cursor
+                    // never clears the offending row, so the whole `state.db`
+                    // is abandoned every sweep, forever, with one WARN each
+                    // time. Cover past it with a typed reason exactly as the
+                    // shared JSONL path does so the stream converges.
+                    Err(outcome) if is_deterministic_content_refusal(&outcome) => {
+                        tracing::warn!(
+                            provider = PROVIDER,
+                            row = row.id,
+                            reason = outcome.reason_code.unwrap_or("host_admission_refused"),
+                            "admission refused a Hermes row; covering past it"
+                        );
+                        advance_coverage(
+                            facade,
+                            source,
+                            range,
+                            expected_cursor,
+                            scope.clone(),
+                            generation,
+                            if outcome.reason_code == Some("observation_identity_collision") {
+                                ObservationCoverageReason::ObservationIdentityCollision
+                            } else {
+                                ObservationCoverageReason::AdmissionRefused
+                            },
+                            None,
+                            file_identity,
+                            resume_fingerprint,
+                            cancellation,
+                        )
+                        .await?;
+                        continue;
+                    }
+                    Err(outcome) => return Err(host_admission_error(outcome)),
+                };
+                match captured {
                     CaptureObservationOutcome::Persisted { outcome, .. }
                     | CaptureObservationOutcome::AcceptedForReplay { outcome, .. } => {
                         if matches!(*outcome, ObservationPersistOutcome::Committed(_)) {
