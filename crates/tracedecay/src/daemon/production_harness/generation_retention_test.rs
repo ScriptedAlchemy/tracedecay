@@ -11,7 +11,8 @@ use super::journey_test_support::git;
 use super::*;
 use crate::daemon::maintenance::project_store_maintenance_lease;
 use tracedecay_code_index_retention::code_index_generations::{
-    MAX_CODE_GENERATION_RETENTION_BATCH_V1, prepare_next_code_generation_retention_cancellable,
+    CodeGenerationRetentionErrorV1, MAX_CODE_GENERATION_RETENTION_BATCH_V1,
+    prepare_next_code_generation_retention_cancellable,
 };
 use tracedecay_maintenance::tick::{MaintenanceContinuation, MaintenanceTickOutcome};
 
@@ -114,13 +115,38 @@ async fn mounted_code_generation_retention_continues_capped_segment_reclamation(
             &canonical_root,
         );
     let graph_replay_pool_root = graph.db().database_path().with_extension("graph-replay");
-    let plan = prepare_next_code_generation_retention_cancellable(
-        &code_store_root,
-        &BTreeSet::new(),
-        &|| false,
-        Some(&graph_replay_pool_root),
-    )
-    .expect("code generation retention plan");
+    // The serving id moves when the swap installs the generation. The sealed
+    // files and the replay pool are still being published and retired beside
+    // that swap, so one census can miss the scope root or a file it just
+    // listed. Those reads are `GenerationStoreBusy`, not a failed journey.
+    let plan = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            match prepare_next_code_generation_retention_cancellable(
+                &code_store_root,
+                &BTreeSet::new(),
+                &|| false,
+                Some(&graph_replay_pool_root),
+            ) {
+                Ok(plan)
+                    if plan
+                        .collectable_generations
+                        .iter()
+                        .any(|generation| generation.generation_id == first_source) =>
+                {
+                    return plan;
+                }
+                Ok(_)
+                | Err(
+                    CodeGenerationRetentionErrorV1::GenerationStoreBusy
+                    | CodeGenerationRetentionErrorV1::GraphReplayPoolBusy,
+                ) => {}
+                Err(error) => panic!("code generation retention plan: {error:?}"),
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("superseded source became collectable");
     let first_candidate = plan
         .collectable_generations
         .iter()

@@ -885,7 +885,7 @@ fn plan_code_generation_retention_with_verification_cancellable(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && active_pointer.is_none() => {
             None
         }
-        Err(error) => return Err(storage(error)),
+        Err(error) => return Err(deferred_if_absent(error)),
     };
     let mut generations = BTreeMap::new();
     let mut active_state_digest = None;
@@ -1218,7 +1218,7 @@ fn sweep_unreferenced_generation_segments(
                 continue;
             }
             let mut reader = CancellableGenerationManifestReaderV1 {
-                file: File::open(&path).map_err(storage)?,
+                file: File::open(&path).map_err(deferred_if_absent)?,
                 hasher: Sha256::new(),
                 is_cancelled,
                 cancelled: false,
@@ -1281,7 +1281,7 @@ fn sweep_unreferenced_generation_segments(
         if live_segments.contains(&format!("sha256:{digest}")) {
             continue;
         }
-        let metadata = path.symlink_metadata().map_err(storage)?;
+        let metadata = path.symlink_metadata().map_err(deferred_if_absent)?;
         if !metadata.file_type().is_file() {
             return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
                 "generation segment '{}' is not a regular file",
@@ -1745,7 +1745,7 @@ fn read_active_pointer(
     store_root: &Path,
 ) -> Result<DurablePublicationPointerV1, CodeGenerationRetentionErrorV1> {
     let path = store_root.join(ACTIVE_POINTER_FILE);
-    let bytes = std::fs::read(&path).map_err(storage)?;
+    let bytes = std::fs::read(&path).map_err(deferred_if_absent)?;
     serde_json::from_slice(&bytes).map_err(|error| {
         CodeGenerationRetentionErrorV1::UnsafeState(format!(
             "active pointer '{}' is corrupt: {error}",
@@ -2031,6 +2031,19 @@ fn total_bytes(generations: &[CodeGenerationRetentionGenerationV1]) -> u64 {
 
 fn storage(error: impl std::fmt::Display) -> CodeGenerationRetentionErrorV1 {
     CodeGenerationRetentionErrorV1::Storage(error.to_string())
+}
+
+/// A path that is not there yet, or that a peer unlinked after this census
+/// listed it, is not a broken disk. The publisher creates the scope root and
+/// the sealed files under the store lock, then drops that lock; a census that
+/// does not hold the lock can observe the gap. The next tick sees a stable
+/// tree. Every other I/O failure stays a storage error.
+pub(super) fn deferred_if_absent(error: std::io::Error) -> CodeGenerationRetentionErrorV1 {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        CodeGenerationRetentionErrorV1::GenerationStoreBusy
+    } else {
+        storage(error)
+    }
 }
 
 #[cfg(test)]

@@ -1502,6 +1502,41 @@ fn idle_maintenance_preparation_stays_metadata_only() {
 }
 
 #[test]
+fn preparation_defers_when_the_scope_root_does_not_exist_yet() {
+    let parent = tempfile::TempDir::new().expect("parent");
+    let missing = parent.path().join("not-created");
+    let error = prepare_next_code_generation_retention_cancellable(
+        &missing,
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect_err("an unpublished scope root has no census");
+    assert!(
+        matches!(error, CodeGenerationRetentionErrorV1::GenerationStoreBusy),
+        "a missing scope root is the publisher's create window, not a storage failure: {error:?}"
+    );
+}
+
+#[test]
+fn preparation_defers_when_the_pointer_exists_without_its_generation_directory() {
+    let (store, _generations) = fixture_store(1);
+    std::fs::remove_dir_all(store.path().join(GENERATIONS_DIRECTORY))
+        .expect("remove generation directory under a live pointer");
+    let error = prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect_err("the generation directory is not durable yet");
+    assert!(
+        matches!(error, CodeGenerationRetentionErrorV1::GenerationStoreBusy),
+        "a pointer without its generation directory is a torn publish, not a storage failure: {error:?}"
+    );
+}
+
+#[test]
 fn metadata_only_segment_census_observes_at_most_one_directory_entry() {
     let store = tempfile::TempDir::new().expect("create unpublished store");
     std::fs::create_dir_all(store.path().join(GENERATIONS_DIRECTORY))
