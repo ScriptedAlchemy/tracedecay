@@ -63,6 +63,9 @@ struct SeamSpyAdmission {
     /// cursor CAS as lost, the way a live hook ingest wins the race a sweep
     /// was still trying to write.
     peer_wins_next_cursor_cas: AtomicBool,
+    /// Commit only the first batched frame, then report the window CAS lost.
+    /// The durable cursor then covers a prefix, not the window's last frame.
+    peer_covers_batch_prefix: AtomicBool,
 }
 
 #[tokio::test]
@@ -659,6 +662,10 @@ impl SeamSpyAdmission {
         self.peer_wins_next_cursor_cas.store(true, Ordering::SeqCst);
     }
 
+    fn script_peer_covers_batch_prefix(&self) {
+        self.peer_covers_batch_prefix.store(true, Ordering::SeqCst);
+    }
+
     fn peer_won_cursor_cas(&self) -> bool {
         self.peer_wins_next_cursor_cas.swap(false, Ordering::SeqCst)
     }
@@ -723,6 +730,14 @@ impl HostAdmission for SeamSpyAdmission {
             );
             if self.peer_won_cursor_cas() {
                 let _ = self.inner.capture_observations(requests).await;
+                return Err(HostAdmissionOutcome::retained_backpressured(
+                    "cursor_conflict",
+                ));
+            }
+            if self.peer_covers_batch_prefix.swap(false, Ordering::SeqCst) {
+                if let Some(first) = requests.into_iter().next() {
+                    let _ = self.inner.capture_observation(first).await;
+                }
                 return Err(HostAdmissionOutcome::retained_backpressured(
                     "cursor_conflict",
                 ));
@@ -982,6 +997,54 @@ async fn cursor_cas_lost_without_peer_coverage_stays_a_typed_block() {
         }
     ));
     assert!(stored_cursor(&spy).await.is_none());
+}
+
+/// A window CAS that the peer only partly won used to fail the source. The
+/// prefix is already durable; the tail has to be replayed one frame at a time.
+#[tokio::test]
+async fn cursor_cas_lost_on_a_partially_covered_window_replays_the_tail() {
+    super::install_test_shared_jsonl_preparation_authority();
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("workspace");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let path = temp.path().join("rollout.jsonl");
+    write_rollout(&path, &cwd);
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    writeln!(
+        file,
+        "{}",
+        json!({
+            "timestamp": "2026-01-01T00:00:02.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "user_message",
+                "message": "tail that the peer did not cover"
+            }
+        })
+    )
+    .unwrap();
+    let len = u64::try_from(std::fs::metadata(&path).unwrap().len()).unwrap();
+    let spy = SeamSpyAdmission::default();
+    spy.script_peer_covers_batch_prefix();
+
+    let stats =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect("a prefix-covered window must replay its uncovered tail");
+
+    assert_eq!(
+        stored_cursor(&spy).await.map(|cursor| cursor.position()),
+        Some(len),
+        "the replay must adopt the prefix and commit through the tail"
+    );
+    assert!(
+        spy.inner.observations().len() >= 2,
+        "the covered prefix and the uncovered tail must both stay durable, got {} observations and stats {stats:?}",
+        spy.inner.observations().len()
+    );
 }
 
 #[tokio::test]
