@@ -25,6 +25,7 @@ use super::wake::{
     SessionTemporalRefreshWakeState, TerminalAttemptGuard,
 };
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_runtime_core::db::engine::Error as EngineError;
 use tracedecay_session_temporal_store::{
     SessionRefreshRecoveryV1, SessionRefreshRestartStateV1, SessionTemporalStore,
 };
@@ -634,12 +635,22 @@ async fn session_projection_refresh(
     run_session_temporal_refresh_pass(database, state, projector, policy).await
 }
 
-fn classify_store_error(error: &SessionStoreError) -> SessionTemporalRefreshRetryClass {
-    if error.is_storage() {
-        SessionTemporalRefreshRetryClass::Storage
-    } else {
-        SessionTemporalRefreshRetryClass::Projector
-    }
+/// True when replaying this store failure unchanged could still succeed.
+///
+/// `is_storage` only says the failure came from the storage adapter; it does
+/// not say the failure is transient. A schema-contract trigger refusing the
+/// submitted row, or an exact-SQL ceiling refusing the submitted statement, is
+/// deterministic: the worker resubmits the identical request every pass, so
+/// treating it as retryable is an unbounded spin at the backoff cap rather
+/// than a recovery. Those are terminal, and the caller durably fails the
+/// refresh instead of retrying it.
+fn is_retryable_storage(error: &SessionStoreError) -> bool {
+    let SessionStoreError::Storage { source, .. } = error else {
+        return false;
+    };
+    source
+        .downcast_ref::<EngineError>()
+        .is_none_or(|engine| !engine.is_deterministic_refusal())
 }
 
 pub async fn process_refresh_begin_requests(
@@ -667,7 +678,7 @@ pub async fn process_refresh_begin_requests(
                     tracedecay_store::SessionRefreshDispositionV1::Joined => report.joined += 1,
                 }
             }
-            Err(error) if error.is_storage() => {
+            Err(error) if is_retryable_storage(&error) => {
                 report.last_error = Some(format!("{error:?}"));
                 report.retryable_errors += 1;
                 report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
@@ -709,7 +720,7 @@ pub async fn begin_admitted_session_refreshes(
     {
         Ok(page) => page,
         Err(error) => {
-            if classify_store_error(&error) == SessionTemporalRefreshRetryClass::Storage {
+            if is_retryable_storage(&error) {
                 report.last_error = Some(format!("{error:?}"));
                 report.retryable_errors += 1;
                 report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
@@ -767,7 +778,7 @@ async fn complete_ready_refresh(
         Ok(_) => {
             report.completed += 1;
         }
-        Err(error) if error.is_storage() => {
+        Err(error) if is_retryable_storage(&error) => {
             report.last_error = Some(format!("{error:?}"));
             report.retryable_errors += 1;
             report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
@@ -796,6 +807,48 @@ fn record_projector_error(
     }
 }
 
+/// Typed failure recorded when the durable contract refuses the projected
+/// progress row. It is not a projector fault: the row was well formed for the
+/// state the projector read, and the durable state disagrees.
+const REFRESH_PROGRESS_REFUSED: &str = "refresh_progress_refused";
+
+/// Builds the durable failure request that retires one running refresh.
+fn durable_failure_request(
+    recovery: &SessionRefreshRecoveryV1,
+    failure_code: String,
+) -> Option<SessionRefreshFailureRequestV1> {
+    let (frontier, coverage) = match recovery.progress() {
+        Some(progress) => (progress.frontier(), *progress.coverage()),
+        None => (
+            SessionRefreshFrontierV1::new(
+                recovery.target_frontier().observed_through(),
+                recovery.source_frontier(),
+            )
+            .ok()?,
+            zero_refresh_coverage(),
+        ),
+    };
+    let request = SessionRefreshFailureRequestV1::new(
+        recovery.operation_id().clone(),
+        recovery.session_id().clone(),
+        frontier,
+        coverage,
+        failure_code,
+    )
+    .ok()?;
+    Some(
+        match recovery
+            .progress()
+            .and_then(SessionRefreshProgressV1::source_coverage)
+            .cloned()
+            .or_else(|| recovery.source_coverage(frontier.committed_through()).ok())
+        {
+            Some(source_coverage) => request.with_source_coverage(source_coverage),
+            None => request,
+        },
+    )
+}
+
 pub async fn apply_refresh_effect(
     store: &SessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
     state: &SessionTemporalRefreshWakeState,
@@ -814,40 +867,63 @@ pub async fn apply_refresh_effect(
                 .await
             {
                 Ok(_) => report.projected_batches += 1,
-                Err(error) if error.is_storage() => {
+                Err(error) if is_retryable_storage(&error) => {
                     report.last_error = Some(format!("{error:?}"));
                     report.retryable_errors += 1;
                     report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
                 }
                 Err(error) => {
+                    // A refused progress row is not work the next pass can
+                    // finish: rediscovery hands the projector the same durable
+                    // state and the same row comes back refused. Retire the
+                    // operation so it leaves `running` and a fresh refresh can
+                    // be admitted, instead of resubmitting it forever.
                     report.last_error = Some(format!("{error:?}"));
-                    report.terminal_errors += 1;
+                    match durable_failure_request(
+                        recovery,
+                        durable_projector_failure_code(REFRESH_PROGRESS_REFUSED),
+                    ) {
+                        Some(request) => {
+                            apply_fail_effect(store, state, recovery, request, report).await;
+                        }
+                        None => report.terminal_errors += 1,
+                    }
                 }
             }
         }
         SessionTemporalRefreshEffect::Fail(request) => {
-            if !state.claim_terminal_attempt(recovery) {
-                return;
-            }
-            let mut attempt = TerminalAttemptGuard::new(state, recovery);
-            match store.fail_session_refresh(request).await {
-                Ok(_) => {
-                    report.failed += 1;
-                    state.record_terminal_discovery_failure(recovery);
-                }
-                Err(error) if error.is_storage() => {
-                    report.last_error = Some(format!("{error:?}"));
-                    report.retryable_errors += 1;
-                    report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
-                }
-                Err(error) => {
-                    attempt.retain();
-                    report.last_error = Some(format!("{error:?}"));
-                    report.terminal_errors += 1;
-                }
-            }
+            apply_fail_effect(store, state, recovery, request, report).await;
         }
         SessionTemporalRefreshEffect::Deferred => report.deferred += 1,
+    }
+}
+
+async fn apply_fail_effect(
+    store: &SessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
+    state: &SessionTemporalRefreshWakeState,
+    recovery: &SessionRefreshRecoveryV1,
+    request: SessionRefreshFailureRequestV1,
+    report: &mut SessionTemporalRefreshPassReport,
+) {
+    if !state.claim_terminal_attempt(recovery) {
+        return;
+    }
+    let mut attempt = TerminalAttemptGuard::new(state, recovery);
+    match store.fail_session_refresh(request).await {
+        Ok(_) => {
+            report.failed += 1;
+            state.record_terminal_discovery_failure(recovery);
+        }
+        Err(error) if is_retryable_storage(&error) => {
+            report.last_error = Some(format!("{error:?}"));
+            report.retryable_errors += 1;
+            report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
+        }
+        Err(error) => {
+            attempt.retain();
+            report.last_error = Some(format!("{error:?}"));
+            report.terminal_errors += 1;
+        }
     }
 }
 
@@ -894,35 +970,7 @@ async fn project_running_refresh(
         Err(error) => {
             let failure_code = durable_projector_failure_code(&error.code);
             report.last_error = Some(failure_code.clone());
-            let (frontier, coverage) = if let Some(progress) = recovery.progress() {
-                (progress.frontier(), *progress.coverage())
-            } else {
-                let Ok(frontier) = SessionRefreshFrontierV1::new(
-                    recovery.target_frontier().observed_through(),
-                    recovery.source_frontier(),
-                ) else {
-                    report.terminal_errors += 1;
-                    return;
-                };
-                (frontier, zero_refresh_coverage())
-            };
-            let request = if let Ok(request) = SessionRefreshFailureRequestV1::new(
-                recovery.operation_id().clone(),
-                recovery.session_id().clone(),
-                frontier,
-                coverage,
-                failure_code,
-            ) {
-                match recovery
-                    .progress()
-                    .and_then(SessionRefreshProgressV1::source_coverage)
-                    .cloned()
-                    .or_else(|| recovery.source_coverage(frontier.committed_through()).ok())
-                {
-                    Some(source_coverage) => request.with_source_coverage(source_coverage),
-                    None => request,
-                }
-            } else {
+            let Some(request) = durable_failure_request(recovery, failure_code) else {
                 report.terminal_errors += 1;
                 return;
             };
@@ -960,7 +1008,7 @@ async fn running_refreshes(
         Ok(recoveries) => Some(recoveries),
         Err(error) => {
             report.last_error = Some(format!("{error:?}"));
-            if classify_store_error(&error) == SessionTemporalRefreshRetryClass::Storage {
+            if is_retryable_storage(&error) {
                 report.retryable_errors += 1;
                 report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
             } else {
@@ -1120,6 +1168,36 @@ mod tests {
     use tracedecay_runtime_core::db::engine::params;
     use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
     use tracedecay_store::ParseOffset;
+
+    #[test]
+    fn deterministic_storage_refusals_are_not_retryable() {
+        // The schema-contract trigger that refused eleven hours of identical
+        // progress rows in #1794: transport-level `Storage`, but replaying it
+        // can never succeed.
+        let refused = SessionStoreError::storage(
+            "persist session refresh progress",
+            EngineError::Sqlite {
+                operation: "execute",
+                code: Some(19),
+                extended_code: Some(1811),
+                message: "invalid session refresh progress".to_owned(),
+            },
+        );
+        assert!(!is_retryable_storage(&refused));
+
+        // Contention is the transient case the retry loop exists for.
+        assert!(is_retryable_storage(&SessionStoreError::storage(
+            "persist session refresh progress",
+            EngineError::Busy,
+        )));
+
+        // Typed contract failures were already terminal and stay terminal.
+        assert!(!is_retryable_storage(
+            &SessionStoreError::InvalidStateTransition {
+                context: "refresh progress successor",
+            }
+        ));
+    }
 
     #[test]
     fn dropping_worker_instrumentation_clears_pending_state_once() {
