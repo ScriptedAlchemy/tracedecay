@@ -814,12 +814,17 @@ pub fn prepare_next_code_generation_retention_cancellable(
     if observe_cancel(is_cancelled) {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
-    // The serving seat can name a generation before the scoped store directory
-    // exists: cold open creates it inside the worker, and a waiter that only
-    // saw `latest_generation_id` plans against a path canonicalize then
+    // The serving seat can name a generation before the scoped store
+    // directory exists. Cold open creates it inside the worker, so a waiter
+    // that only saw `latest_generation_id` plans against a path canonicalize
     // reports as `Storage(NotFound)`. That is an unpublished store, the same
-    // typed state as a directory with no pointer, not a storage failure the
-    // failure ceiling then retries.
+    // typed state as a directory with no pointer. It is not
+    // `GenerationStoreBusy` either. An absent root has no publisher to wait
+    // for and stays absent until the project is first indexed, while the only
+    // production caller turns that deferral into a failed maintenance tick on
+    // the short retry delay, so a never-indexed project would report degraded
+    // on every tick forever. The enumerate-then-open sites below keep the
+    // deferral, where `read_dir` already proved the name existed.
     match std::fs::metadata(store_root) {
         Ok(metadata) if metadata.is_dir() => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

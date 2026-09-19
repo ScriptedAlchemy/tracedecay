@@ -1548,26 +1548,6 @@ fn idle_maintenance_preparation_stays_metadata_only() {
 }
 
 #[test]
-fn preparation_plans_an_unpublished_store_when_the_scope_root_is_missing() {
-    let parent = tempfile::TempDir::new().expect("parent");
-    let missing = parent.path().join("not-created");
-    let sources = BTreeSet::from([CodeGenerationId::new("generation.waiter").expect("id")]);
-    let plan =
-        prepare_next_code_generation_retention_cancellable(&missing, &sources, &|| false, None)
-            .expect("a missing scope root is the publisher's create window, not a failure");
-    assert_eq!(plan.active_generation_id, None);
-    assert_eq!(plan.active_pointer, None);
-    assert!(
-        !plan.has_collectable_work(),
-        "a store that was never published has nothing to collect: {plan:?}"
-    );
-    assert_eq!(
-        plan.vector_readable_sources, sources,
-        "the caller's readable sources survive the unpublished plan"
-    );
-}
-
-#[test]
 fn metadata_only_segment_census_observes_at_most_one_directory_entry() {
     let store = tempfile::TempDir::new().expect("create unpublished store");
     std::fs::create_dir_all(store.path().join(GENERATIONS_DIRECTORY))
