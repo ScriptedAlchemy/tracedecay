@@ -30,9 +30,9 @@ use tracedecay_session_memory::memory::{
 };
 use tracedecay_store::{
     CursorAdvanceOutcome, FactReadControl, FactWriteControl, ObservationCoverageReason,
-    ObservationCursorAdvance, ObservationStore, ProjectId,
-    ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1,
-    RetainedGraphStoreLeaseV1, StoreShardIdV1,
+    ObservationCursorAdvance, ObservationStore, ProjectId, ProjectMemoryFactHistoryQueryV1,
+    ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1, RetainedGraphStoreLeaseV1,
+    StoreShardIdV1,
 };
 use tracedecay_store_runtime::{
     DaemonSessionRuntimeRegistryV1, RegisteredSchemaConvergenceStatus, process_runtime_generation,
