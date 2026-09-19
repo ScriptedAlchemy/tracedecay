@@ -534,15 +534,19 @@ async fn production_codex_hook_ingest_survives_message_search_reopen() {
     )
     .expect("production Codex hook ingest JSON");
     assert_eq!(ingest["completed"], true, "{ingest}");
-    // The composition's background Codex catch-up may admit the rollout
-    // before the hook pass reaches it, in which case the hook truthfully
-    // reports zero new bytes. Either path must leave the rollout durable and
-    // searchable, which the retrieval assertions below verify directly.
+    // The composition's background Codex catch-up may admit the rollout before
+    // the hook pass reaches it, in which case the hook persists no new frames
+    // and reports the rollout as an exact duplicate. Both terminals prove the
+    // transcript is durable; `accepted_for_replay` proves neither a commit nor
+    // a duplicate and must not be reported for a rollout that is on disk and
+    // admitted. Either path must also leave the rollout searchable, which the
+    // retrieval assertions below verify directly.
     assert!(
-        ingest["admission"]["status"]
-            .as_str()
-            .is_some_and(|status| status != "unavailable" && status != "unknown"),
-        "real Codex hook ingest was refused: {ingest}"
+        matches!(
+            ingest["admission"]["status"].as_str(),
+            Some("committed" | "exact_duplicate")
+        ),
+        "real Codex hook ingest proved neither a commit nor a duplicate: {ingest}"
     );
 
     let initial = production_codex_message_search(&harness, &project).await;
