@@ -531,40 +531,37 @@ fn assert_window_side(label: &str, returned: &[String], in_window: bool, payload
     }
 }
 
-/// The complement of the 12-hour window, once temporal convergence can serve
-/// it.
+/// One window read, retried until the projection can serve that window.
 ///
-/// A `stale` outcome is the projection reporting it has not caught up to those
-/// generations yet; reading absence out of it would let the window assertions
-/// pass on lag instead of on a window decision.
-async fn wait_for_pre_window_search(
+/// Retrieval is never blocked on convergence, which is the admission this
+/// journey asserts: a window the projection has not caught up to is answered
+/// with typed staleness instead of waiting for it. So any single read here can
+/// land in a lag window that background ingest opened after an earlier read of
+/// the same window was served, and reading absence out of that would let the
+/// window assertions pass on lag instead of on a window decision. Every window
+/// read retries under the same convergence budget the discovery wait uses.
+///
+/// The returned elapsed time is the served call alone, so the product search
+/// budget still measures one answer and not the wait in front of it.
+async fn converged_window_read(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
-    origin: i64,
-    since: i64,
-) -> Value {
+    label: &str,
+    tool: &str,
+    arguments: Value,
+) -> (Duration, Value) {
     let deadline = Instant::now() + CONVERGENCE_WAIT;
     loop {
-        let payload = answered(
-            harness,
-            project,
-            "tracedecay_message_search",
-            json!({
-                "query": DIRECT_USER_QUERY,
-                "message_type": "direct_user",
-                "since": origin,
-                "until": since - 1,
-                "limit": SESSION_REPLAYS,
-                "format": "json",
-            }),
-        )
-        .await;
-        if payload["outcome"] != json!("stale") {
-            return payload;
+        let (elapsed, response) = timed_call(harness, project, tool, arguments.clone()).await;
+        let payload = retained_payload(&resolved(harness, project, tool, response).await);
+        // `lcm_grep` names typed staleness on `status`, `message_search` on
+        // `outcome`; a served page carries "stale" on neither.
+        if payload["status"] != json!("stale") && payload["outcome"] != json!("stale") {
+            return (elapsed, payload);
         }
         assert!(
             Instant::now() < deadline,
-            "the pre-window search never left typed staleness: {payload}"
+            "{label} never left typed staleness: {payload}"
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
@@ -765,9 +762,10 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
         "known TraceDecay worktree must return its correlated session: {sessions_for}"
     );
 
-    let (search_elapsed, search) = timed_call(
+    let (search_elapsed, search_payload) = converged_window_read(
         &harness,
         &project,
+        "direct-user 12-hour message_search",
         "tracedecay_message_search",
         json!({
             "query": DIRECT_USER_QUERY,
@@ -783,8 +781,6 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
         search_elapsed,
         SEARCH_BUDGET,
     );
-    let search_payload =
-        retained_payload(&resolved(&harness, &project, "tracedecay_message_search", search).await);
     assert_ne!(
         search_payload["status"],
         json!("error"),
@@ -807,7 +803,21 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
     // The exclusion above must be a window decision, not an empty corpus: the
     // complementary query over the same span returns exactly the replays the
     // 12-hour window drops, every one of them.
-    let excluded_search = wait_for_pre_window_search(&harness, &project, origin, since).await;
+    let (_, excluded_search) = converged_window_read(
+        &harness,
+        &project,
+        "pre-window direct-user search",
+        "tracedecay_message_search",
+        json!({
+            "query": DIRECT_USER_QUERY,
+            "message_type": "direct_user",
+            "since": origin,
+            "until": since - 1,
+            "limit": SESSION_REPLAYS,
+            "format": "json",
+        }),
+    )
+    .await;
     let excluded_sessions = message_hit_session_ids(&excluded_search);
     assert_window_side(
         "pre-window direct-user search",
@@ -823,9 +833,10 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
         );
     }
 
-    let (grep_elapsed, grep) = timed_call(
+    let (grep_elapsed, grep_payload) = converged_window_read(
         &harness,
         &project,
+        "direct-user 12-hour lcm_grep",
         "tracedecay_lcm_grep",
         json!({
             "query": DIRECT_USER_QUERY,
@@ -837,8 +848,6 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
     )
     .await;
     assert_under_budget("direct-user 12-hour lcm_grep", grep_elapsed, SEARCH_BUDGET);
-    let grep_payload =
-        retained_payload(&resolved(&harness, &project, "tracedecay_lcm_grep", grep).await);
     for hit in grep_hits(&grep_payload) {
         let snippet = hit["snippet"].as_str().unwrap_or_default();
         assert!(
