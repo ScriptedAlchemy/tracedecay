@@ -553,6 +553,11 @@ async fn a_family_read_that_loses_the_permit_race_waits_for_the_permit() {
     let store = TempDir::new().expect("store root");
     let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
     let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    // A family read serves clone postings, and the seat precedes the
+    // clone-fingerprint backfill. Leaving that backfill in flight made the
+    // reads below report the warming generation rather than the permit
+    // handover this test is about.
+    drain_clone_backfill(&registry, fixture.path()).await;
     let source = crate::code_index_branch_diff::generation_symbols(
         latest.generation(),
         Some("src/first.rs"),
