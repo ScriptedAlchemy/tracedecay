@@ -10510,3 +10510,66 @@ fn serving_swap_seats_a_generation_whose_publication_moved_while_it_activated() 
         "neither refusing arm writes the serving slot"
     );
 }
+
+/// Unchanged source bytes are not a reason to keep a generation the checkout
+/// has committed past. An empty (or docs-only) commit moves HEAD without
+/// touching one indexed byte, and `finish_retained_reconcile` rebuilds on
+/// exactly that `source_revision` drift because branch-scoped reads resolve
+/// generations by the commit they sealed. Accepting the sealed snapshot here
+/// would pin the stale attribution for as long as the bytes hold still.
+#[test]
+fn a_moved_commit_refuses_the_sealed_generation_despite_identical_bytes() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("seed retained generation"));
+    let metadata = scheduler
+        .servable_retained_text_generation()
+        .expect("publication store")
+        .expect("authenticated retained text generation")
+        .metadata()
+        .clone();
+    let sealed_revision = metadata
+        .snapshot()
+        .source_revision
+        .clone()
+        .expect("a clean seed seals its commit");
+    git(
+        fixture.path(),
+        &["commit", "-qm", "docs only", "--allow-empty"],
+    );
+    let moved_head =
+        CommitId::new(git_stdout(fixture.path(), &["rev-parse", "HEAD"])).expect("moved HEAD");
+    assert_ne!(sealed_revision, moved_head, "the fixture must move HEAD");
+
+    let refused = scheduler
+        .reconcile_retained_text_generation_with(&metadata, false)
+        .expect("graph-on retained reconcile");
+    assert!(
+        refused.is_none(),
+        "a moved commit must not keep the generation sealed at {sealed_revision:?}: {refused:?}"
+    );
+
+    // The refusal is what hands the pass to the authoritative capture, and
+    // that capture is what re-attributes the generation to the new commit.
+    published(
+        scheduler
+            .reconcile_now()
+            .expect("rebuild at the moved commit"),
+    );
+    assert_eq!(
+        scheduler
+            .servable_retained_text_generation()
+            .expect("publication store")
+            .expect("authenticated retained text generation")
+            .metadata()
+            .snapshot()
+            .source_revision,
+        Some(moved_head),
+        "the rebuilt generation must name the commit the checkout is on"
+    );
+}

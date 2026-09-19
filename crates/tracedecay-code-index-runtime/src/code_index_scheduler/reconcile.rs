@@ -1874,12 +1874,30 @@ impl CodeIndexWorktreeSchedulerV1 {
                 witness.git_metadata_signature == sampled_metadata.stable_signature()
                     && witness.stat_signature == sampled_sweep.signature
             });
+        // Identical source bytes do not make a moved commit or branch the same
+        // generation. `finish_retained_reconcile` rebuilds on exactly this
+        // drift, and branch-scoped reads resolve generations by their sealed
+        // `source_revision`, so accepting here would leave the retained
+        // generation attributed to a commit the checkout has left for as long
+        // as the bytes hold still. `self.identity` was re-resolved above, so
+        // this costs no extra walk. A snapshot sealed without a revision
+        // (a dirty capture) has no commit attribution to invalidate.
+        let sealed_attribution_is_current = metadata.snapshot().reference.as_ref()
+            == self.identity.head_ref()
+            && metadata
+                .snapshot()
+                .source_revision
+                .as_ref()
+                .is_none_or(|sealed| self.identity.head_commit() == Some(sealed));
         // Graph-on refuses to decode the sealed generation just because the
         // predecessor witness, or a git-index mtime this seal itself moved,
         // does not name this generation. The sealed digests are the proof.
         // Graph-off still captures so a metadata-only drift is verified
         // without a full decode when the quiet witness is absent.
-        if sealed_bytes_match && (quiet_witness || !rebuild_changed_source_without_decode) {
+        if sealed_bytes_match
+            && sealed_attribution_is_current
+            && (quiet_witness || !rebuild_changed_source_without_decode)
+        {
             return Ok(Some(self.accept_unchanged_sealed_snapshot(
                 metadata,
                 sampled_metadata,
