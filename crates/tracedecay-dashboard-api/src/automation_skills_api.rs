@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::util::{JsonError, http_detail, internal_error};
+use super::util::{JsonError, internal_error, json_error};
 use super::{
     DashboardManagedSkillCommandOutcomeV1, DashboardManagedSkillCommandV1, DashboardState,
     automation_authority_error_response, exact_automation_authority,
@@ -86,7 +86,7 @@ pub async fn view(State(state): State<DashboardState>, Path(id): Path<String>) -
     let skill = load_managed_skill(profile_root, &id)
         .await
         .map_err(|err| not_found_or_internal(&err))?;
-    skill_payload(profile_root, skill).await
+    skill_payload_with_deployment(profile_root, skill, None).await
 }
 
 #[hotpath::measure(label = "dashboard_api.skills.create", future = true)]
@@ -164,10 +164,6 @@ async fn execute_skill_command(
     skill_payload_with_deployment(authority.profile_root(), skill, Some(deployment)).await
 }
 
-async fn skill_payload(profile_root: &std::path::Path, skill: ManagedSkill) -> ApiResult {
-    skill_payload_with_deployment(profile_root, skill, None).await
-}
-
 async fn skill_payload_with_deployment(
     profile_root: &std::path::Path,
     skill: ManagedSkill,
@@ -215,10 +211,6 @@ fn profile_root(state: &DashboardState) -> std::result::Result<&std::path::Path,
     Ok(automation_authority(state)?.profile_root())
 }
 
-fn bad_request(err: &impl ToString) -> JsonError {
-    (StatusCode::BAD_REQUEST, Json(http_detail(&err.to_string())))
-}
-
 fn bad_request_or_internal(err: &impl ToString) -> JsonError {
     client_error_or_internal(err, false, true)
 }
@@ -234,20 +226,16 @@ fn client_error_or_internal(
 ) -> JsonError {
     let message = err.to_string();
     if allow_not_found && is_not_found(&message) {
-        not_found(&message)
+        json_error(StatusCode::NOT_FOUND, message)
     } else if allow_bad_request && is_bad_request(&message) {
-        bad_request(&message)
+        json_error(StatusCode::BAD_REQUEST, message)
     } else {
-        internal_error(&message)
+        internal_error(message)
     }
 }
 
 fn is_not_found(message: &str) -> bool {
     message.contains("No such file") || message.contains("not found")
-}
-
-fn not_found(message: &str) -> JsonError {
-    (StatusCode::NOT_FOUND, Json(http_detail(message)))
 }
 
 fn is_bad_request(message: &str) -> bool {

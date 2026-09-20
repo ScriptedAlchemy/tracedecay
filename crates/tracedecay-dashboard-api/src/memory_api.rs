@@ -31,7 +31,7 @@ mod overview_contract;
 
 use control::{
     fact_read_control, read_error_envelope, request_deadline_elapsed, request_terminal_state,
-    terminal_read_code,
+    terminal_read_code, terminal_read_response,
 };
 pub(super) use overview_contract::MemoryOverviewPayloadV1;
 use overview_contract::{
@@ -719,15 +719,7 @@ pub async fn fact_trust_history(
             let result =
                 fact_trust_history_payload(&state, fact_id, &fact_read_control(&control)).await;
             if let Some(state) = request_terminal_state(&control) {
-                let (code, detail) = terminal_read_code(state);
-                return (
-                    if state == DashboardDomainStateV1::TimedOut {
-                        StatusCode::GATEWAY_TIMEOUT
-                    } else {
-                        StatusCode::REQUEST_TIMEOUT
-                    },
-                    Json(json!({"detail": detail, "code": code})),
-                );
+                return terminal_read_response(state);
             }
             match result {
                 Ok(Some(payload)) => (StatusCode::OK, Json(payload)),
