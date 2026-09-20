@@ -11,6 +11,11 @@ use std::future::Future;
 
 use tracedecay_runtime_core::db::engine::{self, Transaction};
 
+pub(crate) use tracedecay_runtime_core::db::{
+    decode_stored_json as decode_json, encode_stored_json as encode_json,
+    optional_text_column as row_optional_text, text_column as row_text,
+};
+
 use crate::RegisteredGlobalDbWriteTransaction;
 
 /// Write transaction that can commit or roll back through the engine.

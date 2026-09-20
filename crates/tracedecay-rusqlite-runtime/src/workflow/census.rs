@@ -22,8 +22,9 @@ fn decode_census(
     payload: &str,
     stored_digest: &str,
 ) -> Result<WorkflowFanOutCensusV1, WorkflowFanOutCensusError> {
-    let census = tracedecay_domain::decode_with_canonical_digest(payload, stored_digest)
-        .map_err(|_| WorkflowFanOutCensusError::InvalidHistory)?;
+    let census: WorkflowFanOutCensusV1 =
+        tracedecay_domain::decode_with_canonical_digest(payload, stored_digest)
+            .map_err(|_| WorkflowFanOutCensusError::InvalidHistory)?;
     census
         .validate()
         .map_err(|_| WorkflowFanOutCensusError::InvalidHistory)?;

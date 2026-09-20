@@ -96,8 +96,9 @@ impl WorkflowSqliteAuthority {
         let Some(ExactSqlValue::Text(stored_digest)) = row.values.get(1) else {
             return Err(WorkflowSqliteAuthorityBuildError::ResetRequired);
         };
-        let definition = tracedecay_domain::decode_with_canonical_digest(payload, stored_digest)
-            .map_err(|_| WorkflowSqliteAuthorityBuildError::ResetRequired)?;
+        let definition: WorkflowDefinition =
+            tracedecay_domain::decode_with_canonical_digest(payload, stored_digest)
+                .map_err(|_| WorkflowSqliteAuthorityBuildError::ResetRequired)?;
         if definition.definition_id() != definition_id
             || definition.definition_version() != definition_version
         {
