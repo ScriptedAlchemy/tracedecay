@@ -86,7 +86,7 @@ pub async fn view(State(state): State<DashboardState>, Path(id): Path<String>) -
     let skill = load_managed_skill(profile_root, &id)
         .await
         .map_err(|err| not_found_or_internal(&err))?;
-    skill_payload(profile_root, skill).await
+    skill_payload_with_deployment(profile_root, skill, None).await
 }
 
 #[hotpath::measure(label = "dashboard_api.skills.create", future = true)]
@@ -162,10 +162,6 @@ async fn execute_skill_command(
         .await
         .map_err(automation_authority_error_response)?;
     skill_payload_with_deployment(authority.profile_root(), skill, Some(deployment)).await
-}
-
-async fn skill_payload(profile_root: &std::path::Path, skill: ManagedSkill) -> ApiResult {
-    skill_payload_with_deployment(profile_root, skill, None).await
 }
 
 async fn skill_payload_with_deployment(
