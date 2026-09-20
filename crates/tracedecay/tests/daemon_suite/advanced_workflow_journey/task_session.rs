@@ -536,12 +536,28 @@ pub(super) fn assert_available_over_sdk_mcp_and_dashboard(
             first_hydrated.rank, first_ranked.final_ordinal,
             "{temporal:?} page one hydration rank must equal its ranked ordinal"
         );
-        assert!(
-            first_ranked
-                .contributions
-                .iter()
-                .any(|contribution| contribution.retriever == RetrieverKind::TaskSession),
-            "{temporal:?} page one must retain canonical TaskSession provenance: {first_ranked:?}"
+        // The ranking policy that produced this order is the consumer's only
+        // way to tell the checked-in core fallback apart from an evaluated
+        // federated profile, so the exact policy identity is pinned rather
+        // than just the lane. These are `QUERY_TASK_SESSION_SCORE_DOMAIN_V1`
+        // and `QUERY_TASK_SESSION_CALIBRATION_V1`; a mount that ranked this
+        // anchor under a search lane's calibration would read as that lane.
+        let provenance = first_ranked
+            .contributions
+            .iter()
+            .find(|contribution| contribution.retriever == RetrieverKind::TaskSession)
+            .unwrap_or_else(|| {
+                panic!("{temporal:?} page one dropped canonical TaskSession provenance: {first_ranked:?}")
+            });
+        assert_eq!(
+            provenance.score_domain.as_str(),
+            "score.task_session.daemon.v1",
+            "{temporal:?} page one must name the policy that ranked it: {first_ranked:?}"
+        );
+        assert_eq!(
+            provenance.calibration_profile.as_str(),
+            "calibration.task_session.query-fallback",
+            "{temporal:?} page one must name the calibration that scored it: {first_ranked:?}"
         );
         assert_eq!(first_evidence.source.provider().as_str(), "claude");
         assert_eq!(

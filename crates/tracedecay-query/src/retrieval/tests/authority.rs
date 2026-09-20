@@ -366,6 +366,49 @@ fn core_fallback_task_session_calibration_spans_the_temporal_score_range() {
     );
 }
 
+/// A ranked TaskSession anchor names the policy that ordered it, and under the
+/// core authority that policy is the checked-in fallback, not a search lane.
+///
+/// This is the consumer's only signal that the order came from the fallback:
+/// `WorkTaskSessionRankContributionV1` publishes the score domain and
+/// calibration profile per anchor, and a projection that reused a search
+/// lane's identity would report the fallback ranking as that lane's.
+#[test]
+fn core_fallback_task_session_ranking_names_its_own_policy() {
+    let profile = authority()
+        .task_session_ranking_profile()
+        .expect("core fallback projects a TaskSession ranking profile");
+    let score_domain = id::<ScoreDomainId>(crate::retrieval::QUERY_TASK_SESSION_SCORE_DOMAIN_V1);
+    let calibration =
+        id::<CalibrationProfileId>(crate::retrieval::QUERY_TASK_SESSION_CALIBRATION_V1);
+
+    assert_eq!(
+        profile.calibrations.get(&RetrieverKind::TaskSession),
+        Some(&calibration),
+        "the ranked contribution must name the fallback calibration profile"
+    );
+    assert_eq!(
+        profile
+            .score_domain_calibrations
+            .get(&score_domain)
+            .map(|domain| &domain.calibration_profile_id),
+        Some(&calibration),
+        "the fallback score domain must resolve to the fallback calibration"
+    );
+    for search_lane in [
+        crate::retrieval::QUERY_EXACT_SCORE_DOMAIN_V1,
+        crate::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1,
+        crate::retrieval::QUERY_GRAPH_SCORE_DOMAIN_V1,
+    ] {
+        assert!(
+            !profile
+                .score_domain_calibrations
+                .contains_key(&id::<ScoreDomainId>(search_lane)),
+            "a TaskSession ranking must not be reported under the {search_lane} search lane"
+        );
+    }
+}
+
 #[test]
 fn federated_authority_rejects_missing_or_duplicate_lanes() {
     let authority = federated_authority();
