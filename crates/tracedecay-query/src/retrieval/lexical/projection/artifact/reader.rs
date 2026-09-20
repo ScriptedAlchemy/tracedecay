@@ -2188,10 +2188,9 @@ impl<'a> ArtifactQueryV1<'a> {
                 retain_bounded(
                     &mut ranked,
                     cap,
-                    RankedLexicalEntryV1 {
+                    Keyed {
                         key: (Reverse(ranking), row.id.as_str().to_owned(), document),
-                        score,
-                        row,
+                        value: (score, row),
                     },
                 );
                 Ok(())
@@ -2205,10 +2204,9 @@ impl<'a> ArtifactQueryV1<'a> {
             if ordinal.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
                 retrieval_checkpoint(control)?;
             }
-            let RankedLexicalEntryV1 {
-                key: (_, _, _),
-                score,
-                row,
+            let Keyed {
+                value: (score, row),
+                ..
             } = entry;
             let mut candidate = lexical_lane_candidate(
                 &row,
@@ -2285,15 +2283,13 @@ impl<'a> ArtifactQueryV1<'a> {
             retain_bounded(
                 &mut ranked,
                 cap,
-                RankedExactEntryV1 {
+                Keyed {
                     key: (
                         Reverse(matched_literals.len()),
                         row.id.as_str().to_owned(),
                         document,
                     ),
-                    admitted_ordinal,
-                    matched_literals,
-                    matched_kinds,
+                    value: (admitted_ordinal, matched_literals, matched_kinds),
                 },
             );
             Ok(())
@@ -2307,11 +2303,9 @@ impl<'a> ArtifactQueryV1<'a> {
             if ordinal.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
                 retrieval_checkpoint(request.control)?;
             }
-            let RankedExactEntryV1 {
+            let Keyed {
                 key: (_, _, document),
-                admitted_ordinal,
-                matched_literals,
-                matched_kinds,
+                value: (admitted_ordinal, matched_literals, matched_kinds),
             } = entry;
             let proof = proofs.admitted_proof(admitted_ordinal)?;
             let matched_literals = matched_literals
@@ -2909,61 +2903,29 @@ impl LexicalStatsCacheV1 {
     }
 }
 
-/// One admitted exact candidate retained during bounded selection: the
-/// canonical ranking key plus ordinals into the request literals, the
-/// admitting literal and every matched literal. Winner materialization
-/// resolves the proof from the per-request cache and clones the literals
-/// only then. Ordering is by key alone.
-struct RankedExactEntryV1 {
-    key: (Reverse<usize>, String, u32),
-    admitted_ordinal: usize,
-    matched_literals: Vec<usize>,
-    matched_kinds: Vec<ExactTechnicalTermKindV1>,
+/// Heap entry ordered by `key` alone. Payload is excluded from equality so a
+/// worst-first `BinaryHeap` ranks capped winners without comparing row
+/// material.
+struct Keyed<K, V> {
+    key: K,
+    value: V,
 }
 
-/// One lexical winner retained during bounded selection. Carrying its decoded
-/// row and score avoids both winner rehydration and score recomputation.
-struct RankedLexicalEntryV1 {
-    key: (Reverse<u64>, String, u32),
-    score: LexicalRowScoreV1,
-    row: ArtifactRowV1,
-}
-
-impl PartialEq for RankedLexicalEntryV1 {
+impl<K: PartialEq, V> PartialEq for Keyed<K, V> {
     fn eq(&self, other: &Self) -> bool {
         self.key == other.key
     }
 }
 
-impl Eq for RankedLexicalEntryV1 {}
+impl<K: Eq, V> Eq for Keyed<K, V> {}
 
-impl PartialOrd for RankedLexicalEntryV1 {
+impl<K: Ord, V> PartialOrd for Keyed<K, V> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for RankedLexicalEntryV1 {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.key.cmp(&other.key)
-    }
-}
-
-impl PartialEq for RankedExactEntryV1 {
-    fn eq(&self, other: &Self) -> bool {
-        self.key == other.key
-    }
-}
-
-impl Eq for RankedExactEntryV1 {}
-
-impl PartialOrd for RankedExactEntryV1 {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for RankedExactEntryV1 {
+impl<K: Ord, V> Ord for Keyed<K, V> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.key.cmp(&other.key)
     }
