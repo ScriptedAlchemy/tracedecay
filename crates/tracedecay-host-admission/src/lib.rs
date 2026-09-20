@@ -553,12 +553,15 @@ impl<'a> HostAdmissionFacade<'a> {
             )
             .await
             .map_err(|error| classify_error(&error))?;
-        project_captured_outcome(
+        let mut projected = project_captured_outcomes(
             database,
             self.authorities.repository_provenance.as_ref(),
-            outcome,
+            vec![outcome],
         )
-        .await
+        .await?;
+        projected.pop().ok_or_else(|| {
+            HostAdmissionOutcome::retained_unavailable("external_source_commit_failed")
+        })
     }
 
     /// Sanitize then persist a bounded window through one store-owned batch.
@@ -982,38 +985,6 @@ fn classify_external_source_error(
         }
         _ => HostAdmissionOutcome::retained_unavailable("external_source_commit_failed"),
     }
-}
-
-async fn project_captured_outcome(
-    database: &RegisteredGlobalDb,
-    repository_provenance: Option<&RepositoryProvenanceAdmissionContext>,
-    outcome: CaptureObservationOutcome,
-) -> Result<CaptureObservationOutcome, HostAdmissionOutcome> {
-    let CaptureObservationOutcome::Persisted {
-        outcome: persisted, ..
-    } = &outcome
-    else {
-        return Ok(outcome);
-    };
-    let projection =
-        tracedecay_session_memory::external_source_store::RuntimeExternalSourceStore::new(
-            database.runtime_client(),
-        )
-        .capture_host_observation(persisted.receipt())
-        .await
-        .map_err(classify_external_source_error)?;
-    publish_canonical_git_evidence(
-        database,
-        repository_provenance,
-        std::slice::from_ref(&outcome),
-    )
-    .await?;
-    let outcome = if let tracedecay_session_memory::external_source_store::RuntimeSourceCaptureOutcomeV1::ProjectionPending(receipt) = projection {
-        accepted_for_external_source_replay(outcome, receipt)?
-    } else {
-        outcome
-    };
-    Ok(outcome)
 }
 
 async fn project_captured_outcomes(
