@@ -68,8 +68,7 @@ fn assert_list_success(result: &Value, envelope: &Value, payload: &Value) {
         "{envelope}"
     );
     assert_eq!(
-        &envelope["value"]["outcome"]["value"]["payload"],
-        payload,
+        &envelope["value"]["outcome"]["value"]["payload"], payload,
         "{envelope}"
     );
 }
