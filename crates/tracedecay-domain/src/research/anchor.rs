@@ -936,6 +936,17 @@ impl RetrievalAnchorRecordV2 {
         &self.owner
     }
 
+    /// JSON stored in `retrieval_anchors.owner_json`. Callers compare or insert
+    /// this text; they do not re-serialize the owner column themselves.
+    pub fn owner_column_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self.owner())
+    }
+
+    /// Whether a stored `owner_json` cell is this record's owner column.
+    pub fn owner_column_matches(&self, stored: &str) -> bool {
+        self.owner_column_json().ok().as_deref() == Some(stored)
+    }
+
     pub fn aliases(&self) -> &[NativeAliasV2] {
         &self.aliases
     }
