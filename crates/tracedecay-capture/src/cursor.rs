@@ -12,8 +12,8 @@ use tracedecay_store::cursor_dispatch::{cursor_model_string, is_subagent_dispatc
 
 use crate::git_facts::append_diff_and_pull_request_facts;
 use crate::{
-    ObservationRecordParseErrorV1, parse::canonical_message_role,
-    parse::canonical_u64_i64 as canonical_u64, parse::sha256_hex, parse_cursor_human_timestamp,
+    ObservationRecordParseErrorV1, parse::canonical_u64_i64 as canonical_u64, parse::sha256_hex,
+    parse_cursor_human_timestamp,
 };
 
 pub fn normalize_cursor_observation(
@@ -137,7 +137,9 @@ fn normalize_cursor_record(
     if let Some(content) = content {
         if let Some(message_content) = canonical_cursor_message_content(content) {
             facts.push(CanonicalObservationFactV1::Message {
-                role: canonical_message_role(native.get("role").and_then(Value::as_str)),
+                role: crate::content::canonical_message_role(
+                    native.get("role").and_then(Value::as_str),
+                ),
                 content: message_content,
                 model: cursor_record_message_model(native, message.unwrap_or(native)).or_else(
                     || {

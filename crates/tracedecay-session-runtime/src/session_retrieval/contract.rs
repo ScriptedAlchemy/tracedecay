@@ -526,3 +526,41 @@ pub enum SessionRetrievalServiceOutcome {
     TimedOut,
     Cancelled,
 }
+
+#[cfg(test)]
+mod temporal_filter_wire_tests {
+    use serde_json::json;
+
+    use super::{
+        SessionMessageType, SessionSearchScope, temporal_message_type, temporal_session_scope,
+    };
+
+    #[test]
+    fn temporal_scope_keeps_the_session_wire_label() {
+        for scope in [
+            SessionSearchScope::All,
+            SessionSearchScope::ParentsOnly,
+            SessionSearchScope::SubagentsOnly,
+        ] {
+            assert_eq!(
+                serde_json::to_value(temporal_session_scope(scope)).expect("scope serializes"),
+                json!(scope.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn temporal_message_type_keeps_the_session_wire_label() {
+        for message_type in [
+            SessionMessageType::All,
+            SessionMessageType::DirectUser,
+            SessionMessageType::ToolResult,
+        ] {
+            assert_eq!(
+                serde_json::to_value(temporal_message_type(message_type))
+                    .expect("message type serializes"),
+                json!(message_type.as_str())
+            );
+        }
+    }
+}

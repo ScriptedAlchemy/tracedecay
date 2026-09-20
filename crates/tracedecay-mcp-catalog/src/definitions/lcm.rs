@@ -1,6 +1,9 @@
 //! LCM session-store and session health-baseline tool definitions.
 
 use serde_json::json;
+use tracedecay_contracts::retained_surfaces::{
+    LcmRoleV1, MessageRelationshipScopeV1, MessageTypeFilterV1,
+};
 
 use super::{def, string_property};
 use crate::ToolDefinition;
@@ -139,12 +142,12 @@ pub(super) fn def_lcm_grep() -> ToolDefinition {
                 },
                 "relationship_scope": {
                     "type": "string",
-                    "enum": ["all", "parents_only", "subagents_only"],
+                    "enum": MessageRelationshipScopeV1::WIRE,
                     "description": "Optional parent/subagent relationship filter across sessions. Default: all."
                 },
                 "message_type": {
                     "type": "string",
-                    "enum": ["all", "direct_user", "tool_result"],
+                    "enum": MessageTypeFilterV1::WIRE,
                     "description": "Semantic raw-message filter. direct_user excludes provider-mislabeled tool results; tool_result recognizes role, kind, and tool-event metadata. Default: all."
                 },
                 "session_id": {
@@ -168,7 +171,7 @@ pub(super) fn def_lcm_grep() -> ToolDefinition {
                 },
                 "role": {
                     "type": "string",
-                    "enum": ["system", "user", "assistant", "tool", "unknown"],
+                    "enum": LcmRoleV1::WIRE,
                     "description": "Optional raw-message role filter. When supplied, summary results are omitted."
                 },
                 "start_time": {

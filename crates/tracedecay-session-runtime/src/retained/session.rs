@@ -3,11 +3,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tracedecay_contracts::retained_surfaces::{
-    GitScopeV1, MessageSearchHitV1, MessageSearchRequestV1, MessageSearchResultV1,
-    RetainedOutcomeStatusV1, RetainedSurfaceOperation, RetainedSurfaceResultV1, SessionMessageV1,
-    SessionRecordV1, SessionRefreshRequestV1, SessionRefreshScopeV1, SessionsForRequestV1,
-    TemporalCoverageOmissionV1, TemporalExplanationV1, TemporalFreshnessV1, TemporalMetadataV1,
-    TemporalOmissionV1, TemporalPopulationCountV1, WorkflowsRequestV1,
+    GitScopeV1, HydrationStateResultV1, MessageSearchHitV1, MessageSearchRequestV1,
+    MessageSearchResultV1, RetainedOutcomeStatusV1, RetainedSurfaceOperation,
+    RetainedSurfaceResultV1, SessionMessageV1, SessionRecordV1, SessionRefreshRequestV1,
+    SessionRefreshScopeV1, SessionsForRequestV1, TemporalCoverageOmissionV1, TemporalExplanationV1,
+    TemporalFreshnessV1, TemporalMetadataV1, TemporalOmissionV1, TemporalPopulationCountV1,
+    WorkflowsRequestV1,
 };
 use tracedecay_contracts::{
     ApplicationOutcome, RequestAdmission, RetainedSessionExecutionPortV1, RetainedSessionRequestV1,
@@ -1034,7 +1035,7 @@ fn temporal(
             .map(|omission| TemporalOmissionV1 {
                 rank: omission.rank,
                 anchor: omission.anchor.as_str().to_owned(),
-                reason: hydration(omission.reason),
+                reason: HydrationStateResultV1::from(omission.reason),
             })
             .collect(),
         coverage_omissions: value
@@ -1075,7 +1076,7 @@ fn coverage_omission(omission: SessionRetrievalCoverageOmissionView) -> Temporal
     }
 }
 
-pub(super) use super::wire::{coverage, hydration, source_coverage, temporal_watermarks};
+pub(super) use super::wire::{coverage, source_coverage, temporal_watermarks};
 
 #[cfg(test)]
 mod refusal_tests {

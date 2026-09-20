@@ -4,7 +4,7 @@ use std::sync::Arc;
 use thiserror::Error;
 pub use tracedecay_domain::MAX_OBSERVATION_RECORD_BYTES;
 use tracedecay_domain::{
-    CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, MAX_OBSERVATION_STRUCTURE_DEPTH,
+    CanonicalObservationEnvelopeV1, MAX_OBSERVATION_STRUCTURE_DEPTH,
     MAX_OBSERVATION_STRUCTURE_VALUES, ObservationOrderingDomainV1, ObservationSourceRangeV1,
     ProviderId,
 };
@@ -365,16 +365,6 @@ fn record_digest(record: &[u8]) -> [u8; 32] {
     // sample, corpus-scale throughput is the quantity being compared.
     hotpath::gauge!("capture.parse.record_bytes").inc(record.len());
     hotpath::measure_block!("capture.parse.record_digest", Sha256::digest(record).into())
-}
-
-pub(crate) fn canonical_message_role(role: Option<&str>) -> CanonicalMessageRoleV1 {
-    match role {
-        Some("user") => CanonicalMessageRoleV1::User,
-        Some("assistant") => CanonicalMessageRoleV1::Assistant,
-        Some("system" | "developer") => CanonicalMessageRoleV1::System,
-        Some("tool") => CanonicalMessageRoleV1::Tool,
-        _ => CanonicalMessageRoleV1::Unknown,
-    }
 }
 
 pub(crate) fn canonical_u64_i64(value: Option<&Value>) -> Option<u64> {

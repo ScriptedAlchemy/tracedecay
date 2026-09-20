@@ -14,8 +14,8 @@ use tracedecay_domain::{
 };
 
 use crate::{
-    ObservationRecordParseErrorV1, parse::canonical_message_role,
-    parse::canonical_u64_i64 as canonical_u64, parse::sha256_hex, parse_rfc3339_timestamp,
+    ObservationRecordParseErrorV1, parse::canonical_u64_i64 as canonical_u64, parse::sha256_hex,
+    parse_rfc3339_timestamp,
 };
 
 const PROVIDER: &str = "codex";
@@ -744,7 +744,7 @@ fn append_codex_response_item_facts(
                     return;
                 }
                 facts.push(CanonicalObservationFactV1::Message {
-                    role: canonical_message_role(role),
+                    role: crate::content::canonical_message_role(role),
                     content,
                     model: payload
                         .get("model")

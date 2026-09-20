@@ -2,7 +2,7 @@
 
 use tracedecay_contracts::RetainedSurfaceExecutionErrorV1;
 use tracedecay_contracts::retained_surfaces::{
-    CompactLineageEdgeV1, LcmContentRangeV1, LcmDescribeExternalPayloadV1,
+    CompactLineageEdgeV1, HydrationStateResultV1, LcmContentRangeV1, LcmDescribeExternalPayloadV1,
     LcmDescribeSourceOverviewV1, LcmDescribeSummaryNodeV1, LcmDescriptionV1,
     LcmExpandQueryBudgetV1, LcmExpandQueryContextBlockV1, LcmExpandQueryMatchV1,
     LcmExpandQueryPaginationV1, LcmExpandQueryResultV1, LcmExpandQuerySynthesisPromptV1,
@@ -27,7 +27,6 @@ use tracedecay_temporal_query::context::OrderedTextContextAssembler;
 
 use crate::session_retrieval::SessionTemporalMetadataView;
 
-pub(super) use super::super::wire::hydration;
 use super::super::wire::{coverage, source_coverage, temporal_watermarks};
 
 #[hotpath::measure(label = "daemon.retained.lcm.hydrate_temporal")]
@@ -60,7 +59,7 @@ pub(super) fn temporal_fields(value: SessionTemporalMetadataView) -> LcmTemporal
             .map(|item| TemporalOmissionV1 {
                 rank: item.rank,
                 anchor: item.anchor.as_str().to_owned(),
-                reason: hydration(item.reason),
+                reason: HydrationStateResultV1::from(item.reason),
             })
             .collect(),
         next_cursor: value.cursor,
@@ -255,7 +254,7 @@ pub(super) fn expansion(value: LcmExpandResponse) -> LcmExpansionV1 {
             .into_iter()
             .map(|source| LcmExpandedSourceV1 {
                 source_ref: source_ref(source.source_ref),
-                state: hydration(source.state),
+                state: HydrationStateResultV1::from(source.state),
                 content: source.content,
                 content_range: source.content_range.map(content_range),
                 content_truncated: source.content_truncated,
@@ -347,7 +346,7 @@ pub(super) fn expand_query_result(
                     kind: page.kind,
                     node_id: page.node_id,
                     source_ref: page.source_ref.map(source_ref),
-                    state: page.state.map(hydration),
+                    state: page.state.map(HydrationStateResultV1::from),
                     next_content_offset: page.next_content_offset,
                     has_more: page.has_more,
                 })

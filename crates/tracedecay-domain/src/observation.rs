@@ -1636,6 +1636,69 @@ pub enum CanonicalReasoningVisibilityV1 {
     NotApplicable,
 }
 
+impl CanonicalMessageRoleV1 {
+    /// Exact canonical role label. Host aliases (`developer`, `model`,
+    /// `_system_prompt`) stay at the host boundary so a foreign alias cannot
+    /// become a role for every provider.
+    pub fn from_known_label(value: &str) -> Option<Self> {
+        match value {
+            "user" => Some(Self::User),
+            "assistant" => Some(Self::Assistant),
+            "system" => Some(Self::System),
+            "tool" => Some(Self::Tool),
+            _ => None,
+        }
+    }
+
+    /// `from_known_label`, with every other label recorded as [`Self::Unknown`]
+    /// instead of refused.
+    pub fn from_wire_label(value: &str) -> Self {
+        match Self::from_known_label(value) {
+            Some(role) => role,
+            None => Self::Unknown,
+        }
+    }
+}
+
+#[cfg(test)]
+mod canonical_message_role_label_tests {
+    use super::CanonicalMessageRoleV1;
+
+    #[test]
+    fn known_labels_parse_and_foreign_aliases_stay_unknown() {
+        assert_eq!(
+            CanonicalMessageRoleV1::from_known_label("user"),
+            Some(CanonicalMessageRoleV1::User)
+        );
+        assert_eq!(
+            CanonicalMessageRoleV1::from_known_label("assistant"),
+            Some(CanonicalMessageRoleV1::Assistant)
+        );
+        assert_eq!(
+            CanonicalMessageRoleV1::from_known_label("system"),
+            Some(CanonicalMessageRoleV1::System)
+        );
+        assert_eq!(
+            CanonicalMessageRoleV1::from_known_label("tool"),
+            Some(CanonicalMessageRoleV1::Tool)
+        );
+        assert_eq!(CanonicalMessageRoleV1::from_known_label("unknown"), None);
+        assert_eq!(CanonicalMessageRoleV1::from_known_label("developer"), None);
+        assert_eq!(
+            CanonicalMessageRoleV1::from_wire_label("user"),
+            CanonicalMessageRoleV1::User
+        );
+        assert_eq!(
+            CanonicalMessageRoleV1::from_wire_label("developer"),
+            CanonicalMessageRoleV1::Unknown
+        );
+        assert_eq!(
+            CanonicalMessageRoleV1::from_wire_label(""),
+            CanonicalMessageRoleV1::Unknown
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CanonicalGitEvidenceKindV1 {

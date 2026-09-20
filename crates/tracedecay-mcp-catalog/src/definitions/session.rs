@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use tracedecay_contracts::retained_surfaces::{MessageRelationshipScopeV1, MessageTypeFilterV1};
 
 use super::{def, def_rw, project_selector_object, string_property};
 use crate::ToolDefinition;
@@ -85,13 +86,13 @@ pub(super) fn def_message_search() -> ToolDefinition {
                     "type": "string",
                     "default": "all",
                     "description": "Relationship scope for search results (default: all).",
-                    "enum": ["all", "parents_only", "subagents_only"]
+                    "enum": MessageRelationshipScopeV1::WIRE,
                 },
                 "message_type": {
                     "type": "string",
                     "default": "all",
                     "description": "Semantic message filter. direct_user excludes provider-mislabeled tool results; tool_result includes role-, kind-, and metadata-identified tool output. Default: all.",
-                    "enum": ["all", "direct_user", "tool_result"]
+                    "enum": MessageTypeFilterV1::WIRE,
                 },
                 "limit": {
                     "type": "integer",

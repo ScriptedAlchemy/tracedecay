@@ -1,32 +1,19 @@
 //! One retained projection of domain coverage and hydration onto wire results.
 
 use tracedecay_contracts::retained_surfaces::{
-    ClosedUtcIntervalV1, HydrationStateResultV1, SessionCoverageIntervalV1, SessionCoverageModeV1,
-    SessionCoverageReasonV1, SessionCoverageRequestV1, SessionCoverageStateV1,
+    ClosedUtcIntervalV1, SessionCoverageIntervalV1, SessionCoverageModeV1, SessionCoverageReasonV1,
+    SessionCoverageRequestV1, SessionCoverageStateV1,
     SessionSourceCoverageV1 as WireSourceCoverageV1, TemporalCoverageV1, TemporalWatermarksV1,
     ValidCoverageIntervalV1,
 };
 use tracedecay_domain::{
-    ClosedUtcIntervalV1 as DomainClosedUtcIntervalV1, HydrationStateV1,
-    SessionSourceCoverageIntervalV1, SessionSourceCoverageReasonV1, SessionSourceCoverageStateV1,
-    SessionSourceCoverageV1, TemporalCoverageCountsV1, TemporalModeV1,
+    ClosedUtcIntervalV1 as DomainClosedUtcIntervalV1, SessionSourceCoverageIntervalV1,
+    SessionSourceCoverageReasonV1, SessionSourceCoverageStateV1, SessionSourceCoverageV1,
+    TemporalCoverageCountsV1, TemporalModeV1,
     ValidCoverageIntervalV1 as DomainValidCoverageIntervalV1,
 };
 
 use crate::session_retrieval::SessionTemporalWatermarksView;
-
-pub(super) const fn hydration(value: HydrationStateV1) -> HydrationStateResultV1 {
-    match value {
-        HydrationStateV1::Available => HydrationStateResultV1::Available,
-        HydrationStateV1::RetainedButUnavailable => HydrationStateResultV1::RetainedButUnavailable,
-        HydrationStateV1::Redacted => HydrationStateResultV1::Redacted,
-        HydrationStateV1::Deleted => HydrationStateResultV1::Deleted,
-        HydrationStateV1::RetentionExpired => HydrationStateResultV1::RetentionExpired,
-        HydrationStateV1::Unauthorized => HydrationStateResultV1::Unauthorized,
-        HydrationStateV1::Locked => HydrationStateResultV1::Locked,
-        HydrationStateV1::UnverifiableLegacy => HydrationStateResultV1::UnverifiableLegacy,
-    }
-}
 
 pub(super) const fn coverage(value: TemporalCoverageCountsV1) -> TemporalCoverageV1 {
     TemporalCoverageV1 {
