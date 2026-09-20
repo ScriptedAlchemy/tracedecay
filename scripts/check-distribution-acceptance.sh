@@ -873,6 +873,12 @@ fn main() {
 }
 RS
 
+# A fresh manifest resolves from scratch, and offline resolution refuses a
+# version that has since been yanked even when the workspace lockfile pins
+# it (bisync 0.3.0 under gix-protocol). Seed the consumer with that
+# lockfile, as the extracted packages are, so it resolves what the product
+# resolves.
+cp -- "$staged/Cargo.lock" "$consumer/Cargo.lock"
 echo "distribution acceptance: calling packaged catalog and host bundles"
 CARGO_NET_OFFLINE=true cargo run \
   --manifest-path "$consumer/Cargo.toml" \
@@ -898,6 +904,7 @@ fn main() {
     let _ = McpServer::has_project_session_retrieval_service_for_test;
 }
 RS
+cp -- "$staged/Cargo.lock" "$test_api_probe/Cargo.lock"
 echo "distribution acceptance: proving production package omits test APIs"
 test_api_stderr="$work/test-api-probe.stderr"
 if CARGO_NET_OFFLINE=true cargo check \
