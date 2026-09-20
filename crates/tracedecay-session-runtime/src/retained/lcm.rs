@@ -1002,11 +1002,7 @@ pub(super) fn relationship_scope(value: Option<MessageRelationshipScopeV1>) -> S
 }
 
 pub(super) fn message_type(value: Option<MessageTypeFilterV1>) -> SessionMessageType {
-    match value.unwrap_or(MessageTypeFilterV1::All) {
-        MessageTypeFilterV1::All => SessionMessageType::All,
-        MessageTypeFilterV1::DirectUser => SessionMessageType::DirectUser,
-        MessageTypeFilterV1::ToolResult => SessionMessageType::ToolResult,
-    }
+    SessionMessageType::from(value.unwrap_or(MessageTypeFilterV1::All))
 }
 
 pub(super) fn time_filter(

@@ -69,6 +69,16 @@ impl SessionRetrievalCommand {
     }
 }
 
+pub(crate) const fn temporal_message_type(
+    message_type: SessionMessageType,
+) -> TemporalMessageTypeFilterV1 {
+    match message_type {
+        SessionMessageType::All => TemporalMessageTypeFilterV1::All,
+        SessionMessageType::DirectUser => TemporalMessageTypeFilterV1::DirectUser,
+        SessionMessageType::ToolResult => TemporalMessageTypeFilterV1::ToolResult,
+    }
+}
+
 pub(crate) const fn temporal_session_scope(
     scope: SessionSearchScope,
 ) -> TemporalSessionScopeFilterV1 {
@@ -92,11 +102,7 @@ fn temporal_candidate_filter(
         source: filters.source.clone(),
         include_summaries: filters.include_summaries,
         session_scope: temporal_session_scope(filters.scope),
-        message_type: match filters.message_type {
-            SessionMessageType::All => TemporalMessageTypeFilterV1::All,
-            SessionMessageType::DirectUser => TemporalMessageTypeFilterV1::DirectUser,
-            SessionMessageType::ToolResult => TemporalMessageTypeFilterV1::ToolResult,
-        },
+        message_type: temporal_message_type(filters.message_type),
         roles,
         start_time: filters.time_range.start_time,
         end_time: filters.time_range.end_time,
@@ -522,10 +528,12 @@ pub enum SessionRetrievalServiceOutcome {
 }
 
 #[cfg(test)]
-mod temporal_scope_wire_tests {
+mod temporal_filter_wire_tests {
     use serde_json::json;
 
-    use super::{SessionSearchScope, temporal_session_scope};
+    use super::{
+        SessionMessageType, SessionSearchScope, temporal_message_type, temporal_session_scope,
+    };
 
     #[test]
     fn temporal_scope_keeps_the_session_wire_label() {
@@ -537,6 +545,21 @@ mod temporal_scope_wire_tests {
             assert_eq!(
                 serde_json::to_value(temporal_session_scope(scope)).expect("scope serializes"),
                 json!(scope.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn temporal_message_type_keeps_the_session_wire_label() {
+        for message_type in [
+            SessionMessageType::All,
+            SessionMessageType::DirectUser,
+            SessionMessageType::ToolResult,
+        ] {
+            assert_eq!(
+                serde_json::to_value(temporal_message_type(message_type))
+                    .expect("message type serializes"),
+                json!(message_type.as_str())
             );
         }
     }

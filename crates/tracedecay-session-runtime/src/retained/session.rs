@@ -37,7 +37,7 @@ use tracedecay_sessions::runtime::{
 };
 use tracedecay_temporal_query::context::ContextBudget;
 use tracedecay_temporal_query::ports::{
-    TemporalCandidateFilterV1, TemporalCandidatePopulationCount, TemporalMessageTypeFilterV1,
+    TemporalCandidateFilterV1, TemporalCandidatePopulationCount,
 };
 use tracedecay_temporal_query::ranking::DiversityLimits;
 
@@ -507,11 +507,8 @@ impl MessageSearchInput {
         if !include_subagents && scope == SessionSearchScope::All {
             scope = SessionSearchScope::ParentsOnly;
         }
-        let message_type = match request.message_type.unwrap_or(MessageTypeFilterV1::All) {
-            MessageTypeFilterV1::All => SessionMessageType::All,
-            MessageTypeFilterV1::DirectUser => SessionMessageType::DirectUser,
-            MessageTypeFilterV1::ToolResult => SessionMessageType::ToolResult,
-        };
+        let message_type =
+            SessionMessageType::from(request.message_type.unwrap_or(MessageTypeFilterV1::All));
         let workflow_run = optional_string(request.workflow_run.as_deref())?;
         let workflow_agent = optional_string(request.workflow_agent.as_deref())?;
         if workflow_agent.is_some() && workflow_run.is_none() {
@@ -561,11 +558,7 @@ impl MessageSearchInput {
             source: None,
             include_summaries: false,
             session_scope: crate::session_retrieval::temporal_session_scope(self.scope),
-            message_type: match self.message_type {
-                SessionMessageType::All => TemporalMessageTypeFilterV1::All,
-                SessionMessageType::DirectUser => TemporalMessageTypeFilterV1::DirectUser,
-                SessionMessageType::ToolResult => TemporalMessageTypeFilterV1::ToolResult,
-            },
+            message_type: crate::session_retrieval::temporal_message_type(self.message_type),
             roles: Vec::new(),
             start_time: self.since,
             end_time: self.until,

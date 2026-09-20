@@ -1,7 +1,9 @@
 //! LCM session-store and session health-baseline tool definitions.
 
 use serde_json::json;
-use tracedecay_contracts::retained_surfaces::{LcmRoleV1, MessageRelationshipScopeV1};
+use tracedecay_contracts::retained_surfaces::{
+    LcmRoleV1, MessageRelationshipScopeV1, MessageTypeFilterV1,
+};
 
 use super::{def, git_scope};
 use crate::ToolDefinition;
@@ -145,7 +147,7 @@ pub(super) fn def_lcm_grep() -> ToolDefinition {
                 },
                 "message_type": {
                     "type": "string",
-                    "enum": ["all", "direct_user", "tool_result"],
+                    "enum": MessageTypeFilterV1::WIRE,
                     "description": "Semantic raw-message filter. direct_user excludes provider-mislabeled tool results; tool_result recognizes role, kind, and tool-event metadata. Default: all."
                 },
                 "session_id": {

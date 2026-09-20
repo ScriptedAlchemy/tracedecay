@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracedecay_contracts::retained_surfaces::MessageRelationshipScopeV1;
+use tracedecay_contracts::retained_surfaces::{MessageRelationshipScopeV1, MessageTypeFilterV1};
 
 pub mod compression;
 pub mod compression_decision;
@@ -189,23 +189,32 @@ pub enum SessionMessageType {
     ToolResult,
 }
 
-impl SessionMessageType {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim() {
-            "all" => Some(Self::All),
-            "direct_user" => Some(Self::DirectUser),
-            "tool_result" => Some(Self::ToolResult),
-            _ => None,
+impl From<MessageTypeFilterV1> for SessionMessageType {
+    fn from(value: MessageTypeFilterV1) -> Self {
+        match value {
+            MessageTypeFilterV1::All => Self::All,
+            MessageTypeFilterV1::DirectUser => Self::DirectUser,
+            MessageTypeFilterV1::ToolResult => Self::ToolResult,
         }
+    }
+}
+
+impl SessionMessageType {
+    const fn filter(self) -> MessageTypeFilterV1 {
+        match self {
+            Self::All => MessageTypeFilterV1::All,
+            Self::DirectUser => MessageTypeFilterV1::DirectUser,
+            Self::ToolResult => MessageTypeFilterV1::ToolResult,
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        MessageTypeFilterV1::parse(value.trim()).map(Self::from)
     }
 
     #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::DirectUser => "direct_user",
-            Self::ToolResult => "tool_result",
-        }
+        self.filter().as_str()
     }
 }
 
@@ -345,5 +354,40 @@ mod relationship_scope_map_tests {
             );
         }
         assert_eq!(SessionSearchScope::parse("all_sessions"), None);
+    }
+}
+
+#[cfg(test)]
+mod message_type_map_tests {
+    use tracedecay_contracts::retained_surfaces::MessageTypeFilterV1;
+
+    use super::SessionMessageType;
+
+    #[test]
+    fn session_message_type_uses_the_contract_wire_label() {
+        let types = [
+            (SessionMessageType::All, MessageTypeFilterV1::All),
+            (
+                SessionMessageType::DirectUser,
+                MessageTypeFilterV1::DirectUser,
+            ),
+            (
+                SessionMessageType::ToolResult,
+                MessageTypeFilterV1::ToolResult,
+            ),
+        ];
+        for (message_type, contract) in types {
+            assert_eq!(message_type.as_str(), contract.as_str());
+            assert_eq!(SessionMessageType::from(contract), message_type);
+            assert_eq!(
+                SessionMessageType::parse(message_type.as_str()),
+                Some(message_type)
+            );
+            assert_eq!(
+                SessionMessageType::parse(&format!(" {} ", message_type.as_str())),
+                Some(message_type)
+            );
+        }
+        assert_eq!(SessionMessageType::parse("user"), None);
     }
 }
