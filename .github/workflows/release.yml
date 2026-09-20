@@ -176,21 +176,6 @@ jobs:
           digest="$(python3 scripts/check-dashboard-bundle.py dashboard/app-dist --print-digest)"
           echo "TRACEDECAY_DASHBOARD_BUNDLE_SHA256=${digest}" >> "$GITHUB_ENV"
 
-      - name: Validate portable distribution harnesses
-        run: |
-          python3 scripts/test-check-packaged-lsp-bridge.py
-          python3 scripts/test-build-mcpb.py
-          python3 scripts/test-resolve-installed-binary.py
-          python3 scripts/test-check-packaged-mcp-stdio.py
-          python3 scripts/test-check-distribution-feature-wiring.py
-          python3 scripts/test-resolve-release-source-profile.py
-          python3 scripts/test-package-release-archive.py
-          python3 scripts/test-plan-release-recovery.py
-          python3 scripts/test-check-release-artifacts.py
-          bash scripts/test-check-distribution-clean-source.sh
-          bash scripts/test-check-distribution-snapshot.sh
-          bash scripts/test-check-distribution-reuse.sh
-
       # rust-toolchain.toml is the only compiler this job may install.
       # Installing floating stable as well fragments rust-cache's environment
       # key whenever stable moves (measured on Release Beta 35271070760).

@@ -191,6 +191,23 @@ jobs:
           python3 scripts/test-rust-cache-lineage.py
           python3 scripts/check-rust-cache-lineage.py
 
+      # Packager unit tests. They do not need a release binary, so they run
+      # once here instead of once per release matrix target.
+      - name: Test release packagers
+        run: |
+          python3 scripts/test-check-packaged-lsp-bridge.py
+          python3 scripts/test-build-mcpb.py
+          python3 scripts/test-resolve-installed-binary.py
+          python3 scripts/test-check-packaged-mcp-stdio.py
+          python3 scripts/test-check-distribution-feature-wiring.py
+          python3 scripts/test-resolve-release-source-profile.py
+          python3 scripts/test-package-release-archive.py
+          python3 scripts/test-plan-release-recovery.py
+          python3 scripts/test-check-release-artifacts.py
+          bash scripts/test-check-distribution-clean-source.sh
+          bash scripts/test-check-distribution-snapshot.sh
+          bash scripts/test-check-distribution-reuse.sh
+
       # Release guards: drift, safety, installer, PR integrity, bundle check.
       # Pull requests only; the release PR itself is exempt because it is
       # the one change allowed to move the version authorities.
