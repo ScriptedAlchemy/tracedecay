@@ -20,27 +20,24 @@ STABLE_ASSET="tracedecay-${STABLE_TAG}-x86_64-linux.tar.gz"
 # Newer prerelease that Release Please published before assets uploaded.
 INCOMPLETE_TAG=v9.8.8-beta.1
 
-cat >"$tmpdir/archive/tracedecay" <<'SH'
+stage_release_archive() {
+  local version=$1
+  local asset=$2
+  local sums=$3
+  cat >"$tmpdir/archive/tracedecay" <<SH
 #!/usr/bin/env bash
-printf 'tracedecay 9.8.7-beta.1\n'
+printf 'tracedecay ${version}\n'
 SH
-chmod +x "$tmpdir/archive/tracedecay"
-tar -czf "$tmpdir/${BETA_ASSET}" -C "$tmpdir/archive" tracedecay
-(
-  cd "$tmpdir"
-  sha256sum "$BETA_ASSET" >SHA256SUMS
-)
+  chmod +x "$tmpdir/archive/tracedecay"
+  tar -czf "$tmpdir/${asset}" -C "$tmpdir/archive" tracedecay
+  (
+    cd "$tmpdir"
+    sha256sum "$asset" >"$sums"
+  )
+}
 
-cat >"$tmpdir/archive/tracedecay" <<'SH'
-#!/usr/bin/env bash
-printf 'tracedecay 9.8.7\n'
-SH
-chmod +x "$tmpdir/archive/tracedecay"
-tar -czf "$tmpdir/${STABLE_ASSET}" -C "$tmpdir/archive" tracedecay
-(
-  cd "$tmpdir"
-  sha256sum "$STABLE_ASSET" >STABLE_SHA256SUMS
-)
+stage_release_archive "9.8.7-beta.1" "$BETA_ASSET" SHA256SUMS
+stage_release_archive "9.8.7" "$STABLE_ASSET" STABLE_SHA256SUMS
 
 # Incomplete first, complete beta second: default latest must skip the empty
 # prerelease and install the beta that already lists archive + SHA256SUMS.
@@ -153,7 +150,7 @@ run_installer() {
   TRACEDECAY_INSTALL_DIR="$tmpdir/install" \
   TEST_RELEASES_JSON="$tmpdir/releases.json" \
   TEST_ARCHIVE="$tmpdir/${BETA_ASSET}" \
-  TEST_CHECKSUMS="$tmpdir/SHA256SUMS" \
+  TEST_CHECKSUMS="${INSTALLER_CHECKSUMS:-$tmpdir/SHA256SUMS}" \
   TEST_STABLE_ARCHIVE="$tmpdir/${STABLE_ASSET}" \
   TEST_STABLE_CHECKSUMS="$tmpdir/STABLE_SHA256SUMS" \
     "$@"
@@ -174,14 +171,7 @@ expect_installer_failure() {
   local checksums=$1
   local expected_message=$2
   local output="$tmpdir/installer-failure.log"
-  if PATH="$tmpdir/bin:$PATH" \
-    TRACEDECAY_INSTALL_DIR="$tmpdir/install" \
-    TEST_RELEASES_JSON="$tmpdir/releases.json" \
-    TEST_ARCHIVE="$tmpdir/${BETA_ASSET}" \
-    TEST_CHECKSUMS="$checksums" \
-    TEST_STABLE_ARCHIVE="$tmpdir/${STABLE_ASSET}" \
-    TEST_STABLE_CHECKSUMS="$tmpdir/STABLE_SHA256SUMS" \
-      "$INSTALLER" >"$output" 2>&1
+  if INSTALLER_CHECKSUMS="$checksums" run_installer "$INSTALLER" >"$output" 2>&1
   then
     echo "installer unexpectedly accepted invalid release inputs" >&2
     exit 1
