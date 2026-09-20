@@ -548,10 +548,7 @@ pub(crate) fn parse_unix_secs(ts: &str) -> u64 {
 }
 
 pub(crate) fn now_unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    crate::tracedecay::unix_secs()
 }
 
 #[cfg(test)]

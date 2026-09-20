@@ -1411,16 +1411,8 @@ fn code_diagnostic(
         // resolved later via `DiagnosticBroker::resolve_enclosing_nodes`,
         // which has access to the indexed nodes for the file.
         enclosing_node: None,
-        updated_at: now_unix(),
+        updated_at: tracedecay_runtime_core::tracedecay::saturating_unix_secs(),
     }
-}
-
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| {
-            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
-        })
 }
 
 fn code_to_string(value: NumberOrString) -> String {
