@@ -15,6 +15,7 @@ use crate::{
         AnnotationEmitterState, emit_annotation_usage, scan_children_for_annotation_kinds,
     },
     complexity::{JAVA_COMPLEXITY, count_complexity},
+    traversal::has_direct_child_kind,
 };
 
 /// Extracts code graph nodes and edges from Java source files using tree-sitter.
@@ -58,8 +59,7 @@ impl<'s> ExtractionState<'s> {
     ///
     /// The file root is pushed onto `node_stack` as the first frame when
     /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment. Prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
+    /// path as the leading segment.
     fn qualified_prefix(&self) -> String {
         self.node_stack
             .iter()
@@ -683,7 +683,7 @@ impl JavaExtractor {
         //   2. It is in an interface and has no body (no `block` child).
         let has_abstract_modifier = Self::has_modifier(node, state, "abstract");
         let has_body =
-            node.child_by_field_name("body").is_some() || Self::has_child_of_kind(node, "block");
+            node.child_by_field_name("body").is_some() || has_direct_child_kind(node, "block");
         let is_abstract = has_abstract_modifier || (state.inside_interface && !has_body);
 
         let kind = if is_abstract {
@@ -975,21 +975,6 @@ impl JavaExtractor {
                 if child.kind() == "modifiers" {
                     let text = state.node_text(child);
                     return text.split_whitespace().any(|w| w == modifier);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        false
-    }
-
-    fn has_child_of_kind(node: TsNode<'_>, kind: &str) -> bool {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                if cursor.node().kind() == kind {
-                    return true;
                 }
                 if !cursor.goto_next_sibling() {
                     break;

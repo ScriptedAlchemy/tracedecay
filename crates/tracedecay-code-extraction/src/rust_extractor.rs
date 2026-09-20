@@ -14,6 +14,7 @@ use crate::extraction_artifact::{
     ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportNamespaceV1, ImportReexportScopeV1,
     import_module_kind,
 };
+use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
     ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, SourceSpan,
     UnresolvedRef, Visibility, generate_node_id,
@@ -165,8 +166,7 @@ impl<'s> ExtractionState<'s> {
     ///
     /// The file root is pushed onto `node_stack` as the first frame when
     /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment. Prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
+    /// path as the leading segment.
     fn qualified_prefix(&self) -> String {
         self.node_stack
             .iter()
@@ -2031,7 +2031,7 @@ impl RustExtractor {
                 }
             }
         }
-        let Some(where_clause) = Self::child_of_kind(item, "where_clause") else {
+        let Some(where_clause) = find_direct_child_by_kind(item, "where_clause") else {
             return;
         };
         let mut cursor = where_clause.walk();
@@ -2082,22 +2082,6 @@ impl RustExtractor {
             }
         }
         clause
-    }
-
-    fn child_of_kind<'t>(node: TsNode<'t>, kind: &str) -> Option<TsNode<'t>> {
-        let mut cursor = node.walk();
-        if !cursor.goto_first_child() {
-            return None;
-        }
-        loop {
-            let child = cursor.node();
-            if child.kind() == kind {
-                return Some(child);
-            }
-            if !cursor.goto_next_sibling() {
-                return None;
-            }
-        }
     }
 
     /// The type a `let` initialiser states in syntax: a `T { .. }` literal,
