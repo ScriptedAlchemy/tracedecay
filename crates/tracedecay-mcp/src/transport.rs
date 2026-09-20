@@ -113,14 +113,13 @@ impl<T: McpTransport + Send> McpTransport for ReplayTransport<T> {
 /// The frame accumulator lives in the reader, not in the `read_line` future, so
 /// a read dropped by a lost `tokio::select!` race resumes rather than truncating
 /// the frame. See [`tracedecay_framing::BoundedLineReader`].
-#[cfg(feature = "hotpath")]
-type ProfiledStdin = hotpath::io::InstrumentedIo<tokio::io::Stdin>;
-#[cfg(not(feature = "hotpath"))]
-type ProfiledStdin = tokio::io::Stdin;
-#[cfg(feature = "hotpath")]
-type ProfiledStdout = hotpath::io::InstrumentedIo<tokio::io::Stdout>;
-#[cfg(not(feature = "hotpath"))]
-type ProfiledStdout = tokio::io::Stdout;
+/// `hotpath::io!` returns its argument untouched without the profiling backend
+/// and an `InstrumentedIo` wrapper with it, and that backend is selected on the
+/// hotpath dependency, not on this crate's feature. Erasing the half behind a
+/// trait object keeps one shape for both, so no feature combination can put the
+/// stored type and the macro's result out of step.
+type ProfiledStdin = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
+type ProfiledStdout = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
 
 type StdinLineReader = tracedecay_framing::BoundedLineReader<tokio::io::BufReader<ProfiledStdin>>;
 
@@ -134,9 +133,12 @@ impl Default for StdioTransport {
     fn default() -> Self {
         Self {
             reader: tracedecay_framing::BoundedLineReader::new(tokio::io::BufReader::new(
-                hotpath::io!(tokio::io::stdin(), label = "mcp.server.stdin"),
+                Box::new(hotpath::io!(tokio::io::stdin(), label = "mcp.server.stdin")),
             )),
-            writer: hotpath::io!(tokio::io::stdout(), label = "mcp.server.stdout"),
+            writer: Box::new(hotpath::io!(
+                tokio::io::stdout(),
+                label = "mcp.server.stdout"
+            )),
         }
     }
 }
