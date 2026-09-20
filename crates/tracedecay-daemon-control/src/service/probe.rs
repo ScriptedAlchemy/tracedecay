@@ -92,6 +92,28 @@ pub fn daemon_reachable() -> bool {
     })
 }
 
+/// Whether the default socket has a listener, whether or not it named itself
+/// inside the reachability probe timeout.
+///
+/// [`daemon_reachable`] answers "a daemon proved its identity in one second".
+/// A cold daemon on a CPU-constrained host answers initialize later than that,
+/// and a caller that owns its own deadline must not read that miss as "no
+/// daemon is running": the socket is connectable only because a process is
+/// accepting on it.
+pub fn daemon_socket_connectable() -> bool {
+    default_socket_path().is_ok_and(|path| {
+        matches!(
+            daemon_readiness_probe(
+                &path,
+                env!("CARGO_PKG_VERSION"),
+                DAEMON_REACHABILITY_PROBE_TIMEOUT,
+            )
+            .0,
+            DaemonSocketState::Connectable
+        )
+    })
+}
+
 /// Probe `socket_path` once and return both the socket observation and the
 /// initialize proof. Callers must not connect again to classify liveness.
 pub(super) fn observe_daemon_process(
