@@ -142,7 +142,7 @@ pub fn source_walk(project_root: &Path, path_glob: Option<&str>) -> Result<Walk,
 /// the first hit).
 #[must_use]
 pub fn forward_slash_relative(relative: &Path) -> Arc<str> {
-    relative.to_string_lossy().replace('\\', "/").into()
+    tracedecay_domain::forward_slash_path(relative).into()
 }
 
 fn build_overrides(

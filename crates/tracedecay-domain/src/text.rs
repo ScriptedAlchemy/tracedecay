@@ -6,6 +6,26 @@
 //! stays empty. Callers that trim, mark truncation, or refuse a mid-character
 //! budget still do that themselves.
 
+/// Replace `\` with `/`.
+///
+/// Trailing separators stay. `\` becomes `/`, `foo\` becomes `foo/`, and
+/// `foo/` is unchanged. An empty string stays empty. This does not trim,
+/// lowercase a drive letter, or strip a `\\?\` prefix.
+#[must_use]
+pub fn forward_slash_text(text: &str) -> String {
+    text.replace('\\', "/")
+}
+
+/// [`forward_slash_text`] of a path's lossy display form.
+///
+/// A trailing separator on the path is kept. A non-UTF-8 component is the
+/// usual `U+FFFD` replacement, the same spelling `to_string_lossy` already
+/// produced at the deleted call sites.
+#[must_use]
+pub fn forward_slash_path(path: &std::path::Path) -> String {
+    forward_slash_text(&path.to_string_lossy())
+}
+
 /// Join Unicode whitespace-separated pieces with a single ASCII space.
 ///
 /// Leading, trailing, and repeated whitespace disappear. An empty or
@@ -29,7 +49,21 @@ pub fn utf8_prefix_at_or_before(text: &str, max_bytes: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{collapse_whitespace, utf8_prefix_at_or_before};
+    use super::{collapse_whitespace, forward_slash_text, utf8_prefix_at_or_before};
+
+    #[test]
+    fn forward_slashes_keep_trailing_separators_and_an_empty_string() {
+        assert_eq!(forward_slash_text(""), "");
+        assert_eq!(forward_slash_text(r"\"), "/");
+        assert_eq!(forward_slash_text(r"foo\"), "foo/");
+        assert_eq!(forward_slash_text("foo/"), "foo/");
+        assert_eq!(forward_slash_text(r"C:\repo\\"), "C:/repo//");
+        assert_eq!(forward_slash_text(r"\\?\C:\repo"), "//?/C:/repo");
+        assert_eq!(
+            super::forward_slash_path(std::path::Path::new(r"foo\bar\")),
+            "foo/bar/"
+        );
+    }
 
     #[test]
     fn collapse_whitespace_keeps_non_space_and_drops_only_whitespace() {

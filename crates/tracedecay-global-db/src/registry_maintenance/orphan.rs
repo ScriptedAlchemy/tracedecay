@@ -165,8 +165,8 @@ fn inspect_registry_orphan_manifest_inner(
             project_id,
             store_kind: "code_project".to_string(),
             storage_mode: "profile_sharded".to_string(),
-            store_relpath: path_string(&store_relpath),
-            manifest_relpath: Some(path_string(&manifest_relpath)),
+            store_relpath: tracedecay_domain::forward_slash_path(&store_relpath),
+            manifest_relpath: Some(tracedecay_domain::forward_slash_path(&manifest_relpath)),
             last_verified_at: Some(verified_at),
             last_write_at: None,
         },
@@ -392,7 +392,7 @@ fn reconstruct_graph_scopes(
             project_id: project_id.to_string(),
             store_id: store_id.to_string(),
             branch_name: branch_name.clone(),
-            db_relpath: path_string(&profile_db_relpath),
+            db_relpath: tracedecay_domain::forward_slash_path(&profile_db_relpath),
             parent_scope_id: entry
                 .parent
                 .as_ref()
@@ -427,7 +427,7 @@ fn push_artifact_if_present(
     artifacts.push(StoreArtifactUpsert {
         store_id: store_id.to_string(),
         artifact_kind: artifact_kind.to_string(),
-        relpath: path_string(&relpath),
+        relpath: tracedecay_domain::forward_slash_path(&relpath),
         size_bytes: i64::try_from(meta.len()).ok(),
         schema_version,
         updated_at: Some(updated_at),
@@ -446,8 +446,4 @@ fn is_safe_relpath(path: &Path) -> bool {
         && path
             .components()
             .all(|component| matches!(component, Component::Normal(_)))
-}
-
-fn path_string(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
 }
