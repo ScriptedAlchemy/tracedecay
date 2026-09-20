@@ -751,6 +751,7 @@ TRACEDECAY_TEST_BIN="$packaged_cli_bin" \
   -p tracedecay \
   --test mcp_suite \
   --features tracedecay/test-transport \
+  --no-fail-fast \
   --no-tests=fail
 
 install_root="$work/install"
