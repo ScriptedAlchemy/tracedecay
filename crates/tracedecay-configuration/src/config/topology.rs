@@ -10,7 +10,7 @@ use thiserror::Error;
 use tracedecay_domain::DomainError;
 use tracedecay_domain::configuration::{
     ConfigurationSnapshotV1, ConfigurationValueV1, SettingKey, WORK_TOPOLOGY_POLICY_SETTING_KEY,
-    WorkTopologyPolicyV1, safe_work_topology_policy_v1,
+    WorkTopologyPolicyV1,
 };
 
 #[derive(Debug, Error)]
@@ -38,12 +38,6 @@ pub fn resolved_work_topology_policy(
         Some(_) => Err(TopologyConfigurationError::WrongTopologyValue),
         None => Err(TopologyConfigurationError::MissingTopologyPolicy),
     }
-}
-
-/// Exposes the exact safe policy used by the typed registry before any
-/// operator publishes a protected replacement.
-pub fn safe_default_work_topology_policy() -> WorkTopologyPolicyV1 {
-    safe_work_topology_policy_v1()
 }
 
 #[cfg(test)]

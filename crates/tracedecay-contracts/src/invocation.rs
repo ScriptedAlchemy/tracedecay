@@ -254,19 +254,6 @@ impl ApplicationRequest {
     pub const fn is_cancellation(&self) -> bool {
         matches!(self, Self::OperationCancel { .. })
     }
-
-    pub fn feedback_observation_parts(&self) -> Option<(&ManifestDigest, UtcMicros, &Value)> {
-        match self {
-            Self::FeedbackObservation {
-                configuration_digest,
-                observed_at,
-                event,
-            } => Some((configuration_digest, *observed_at, event)),
-            Self::Surface { .. } | Self::OperationEvents { .. } | Self::OperationCancel { .. } => {
-                None
-            }
-        }
-    }
 }
 
 /// One complete transport-neutral invocation.
