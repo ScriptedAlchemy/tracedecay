@@ -9,13 +9,12 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 
+use crate::common::fixture::git_capture as git;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
-use tracedecay::test_support::git::GIT_FIXTURE_CONFIG;
 
 const COMMITTED_SOURCE: &str = "pub fn committed_anchor() -> usize { 1 }\n";
 const DIRTY_SOURCE: &str = "\
@@ -193,24 +192,6 @@ fn visible_hits(payload: &Value) -> Value {
             })
             .collect(),
     )
-}
-
-fn git(project: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .args(GIT_FIXTURE_CONFIG)
-        .args(args)
-        .current_dir(project)
-        .output()
-        .unwrap_or_else(|error| panic!("git {args:?} failed to spawn: {error}"));
-    assert!(
-        output.status.success(),
-        "git {args:?} failed\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout)
-        .expect("git stdout is UTF-8")
-        .trim()
-        .to_owned()
 }
 
 async fn wait_until_worktree_search_serves_dirty_anchor(

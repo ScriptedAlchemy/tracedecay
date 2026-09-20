@@ -6,14 +6,14 @@
 
 #![cfg(feature = "test-transport")]
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
+
+use crate::common::fixture::{git_capture as git_stdout, git_run as git};
 
 use serde_json::{Value, json};
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 
-use crate::common;
 use crate::fixture;
 use crate::support::{TestTempDir, test_temp_dir};
 
@@ -24,36 +24,6 @@ struct StatusProject {
     project_root: PathBuf,
     head: String,
     _isolation: TestTempDir,
-}
-
-fn git(project: &Path, args: &[&str]) {
-    let status = Command::new(common::git_program())
-        .args(args)
-        .current_dir(project)
-        .status()
-        .expect("git");
-    assert!(
-        status.success(),
-        "git {args:?} failed in {}",
-        project.display()
-    );
-}
-
-fn git_stdout(project: &Path, args: &[&str]) -> String {
-    let output = Command::new(common::git_program())
-        .args(args)
-        .current_dir(project)
-        .output()
-        .expect("git");
-    assert!(
-        output.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout)
-        .expect("git stdout")
-        .trim()
-        .to_owned()
 }
 
 async fn open_status_project() -> StatusProject {

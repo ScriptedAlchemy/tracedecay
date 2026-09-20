@@ -153,7 +153,7 @@ async fn open_sources(
         fs::create_dir_all(path.parent().expect("source file has a parent")).unwrap();
         fs::write(&path, contents).unwrap();
     }
-    let (fixture, _) = init_test_project(&project_root).await;
+    let fixture = init_test_project(&project_root).await;
     (dir, project_root, fixture)
 }
 

@@ -34,7 +34,7 @@ async fn open_file(
     let file = project.join(relative);
     fs::create_dir_all(file.parent().expect("fixture file has a parent")).unwrap();
     fs::write(&file, bytes).unwrap();
-    let (fixture, ()) = init_production_source_edit_project(&project).await;
+    let fixture = init_production_source_edit_project(&project).await;
     (fixture, dir, file)
 }
 

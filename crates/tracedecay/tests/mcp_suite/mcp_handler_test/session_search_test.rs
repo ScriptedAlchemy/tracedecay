@@ -508,32 +508,7 @@ async fn production_codex_hook_ingest_survives_message_search_reopen() {
     let project = isolation.join("project");
     std::fs::create_dir_all(&project).expect("production composition project");
     fixture::write_indexed_fixture_sources(&project);
-    let init = Command::new(common::git_program())
-        .args(["init", "-q"])
-        .current_dir(&project)
-        .status()
-        .expect("git init");
-    assert!(init.success(), "git init must succeed");
-    let add = Command::new(common::git_program())
-        .args(["add", "."])
-        .current_dir(&project)
-        .status()
-        .expect("git add");
-    assert!(add.success(), "git add must succeed");
-    let commit = Command::new(common::git_program())
-        .args([
-            "-c",
-            "user.name=TraceDecay Test",
-            "-c",
-            "user.email=tracedecay@example.invalid",
-            "commit",
-            "-qm",
-            "production Codex transcript fixture",
-        ])
-        .current_dir(&project)
-        .status()
-        .expect("git commit");
-    assert!(commit.success(), "git commit must succeed");
+    commit_worktree(&project, "production Codex transcript fixture");
     write_production_codex_rollout(&home, &project);
 
     let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(

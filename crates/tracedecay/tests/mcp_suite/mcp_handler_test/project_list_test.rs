@@ -6,7 +6,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde_json::{Value, json};
 use tracedecay::mcp::McpServer;
@@ -581,11 +580,6 @@ fn directory(path: &Path) -> PathBuf {
 
 fn git_repository(path: &Path) -> PathBuf {
     let root = directory(path);
-    let status = Command::new(crate::common::git_program())
-        .args(["init", "--quiet"])
-        .current_dir(&root)
-        .status()
-        .expect("git init");
-    assert!(status.success(), "git init failed in {}", root.display());
+    crate::common::fixture::git_run(&root, &["init", "--quiet"]);
     root
 }

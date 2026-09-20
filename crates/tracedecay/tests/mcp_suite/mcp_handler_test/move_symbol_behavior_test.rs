@@ -169,7 +169,7 @@ async fn dry_run_then_apply_moves_compute_grand_total() {
     let project_root = dir.path().join("project");
     let project = project_root.as_path();
     write_pricing_crate(project);
-    let (fixture, ()) = init_production_source_edit_project(project).await;
+    let fixture = init_production_source_edit_project(project).await;
     let server = fixture
         .harness
         .server(project)
@@ -294,7 +294,7 @@ async fn move_symbol_refuses_unsafe_or_stale_requests() {
     let project_root = dir.path().join("project");
     let project = project_root.as_path();
     write_pricing_crate(project);
-    let (fixture, ()) = init_production_source_edit_project(project).await;
+    let fixture = init_production_source_edit_project(project).await;
     let server = fixture
         .harness
         .server(project)
