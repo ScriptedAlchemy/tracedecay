@@ -3,16 +3,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tracedecay_contracts::retained_surfaces::{
-    ClosedUtcIntervalV1, GitScopeV1, HydrationStateResultV1, MessageRelationshipScopeV1,
-    MessageSearchHitV1, MessageSearchRequestV1, MessageSearchResultV1, MessageTypeFilterV1,
-    RetainedOutcomeStatusV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
-    SessionCoverageIntervalV1, SessionCoverageModeV1, SessionCoverageReasonV1,
-    SessionCoverageRequestV1, SessionCoverageStateV1, SessionMessageV1, SessionRecordV1,
-    SessionRefreshRequestV1, SessionRefreshScopeV1,
-    SessionSourceCoverageV1 as WireSourceCoverageV1, SessionsForRequestV1,
-    TemporalCoverageOmissionV1, TemporalCoverageV1, TemporalExplanationV1, TemporalFreshnessV1,
-    TemporalMetadataV1, TemporalOmissionV1, TemporalPopulationCountV1, TemporalWatermarksV1,
-    ValidCoverageIntervalV1, WorkflowsRequestV1,
+    GitScopeV1, MessageRelationshipScopeV1, MessageSearchHitV1, MessageSearchRequestV1,
+    MessageSearchResultV1, MessageTypeFilterV1, RetainedOutcomeStatusV1, RetainedSurfaceOperation,
+    RetainedSurfaceResultV1, SessionMessageV1, SessionRecordV1, SessionRefreshRequestV1,
+    SessionRefreshScopeV1, SessionsForRequestV1, TemporalCoverageOmissionV1, TemporalExplanationV1,
+    TemporalFreshnessV1, TemporalMetadataV1, TemporalOmissionV1, TemporalPopulationCountV1,
+    WorkflowsRequestV1,
 };
 use tracedecay_contracts::{
     ApplicationOutcome, RequestAdmission, RetainedSessionExecutionPortV1, RetainedSessionRequestV1,
@@ -20,10 +16,8 @@ use tracedecay_contracts::{
     RetainedSurfaceExecutionFutureV1, now_micros,
 };
 use tracedecay_domain::{
-    HydrationStateV1, ManifestDigest, ProjectId, RetrievalGrainV1, SessionId,
-    SessionSourceCoverageIntervalV1, SessionSourceCoverageReasonV1, SessionSourceCoverageStateV1,
-    SessionSourceCoverageV1, TemporalCoverageCountsV1, TemporalModeV1, UserProfileId,
-    ValidCoverageIntervalV1 as DomainValidCoverageIntervalV1, canonical_sha256,
+    ManifestDigest, ProjectId, RetrievalGrainV1, SessionId, TemporalModeV1, UserProfileId,
+    canonical_sha256,
 };
 use tracedecay_session_memory::context::{ResolvedSessionIdentity, SessionRootId, SessionStoreId};
 use tracedecay_session_memory::session::{
@@ -1036,13 +1030,7 @@ fn temporal(
             .into_iter()
             .map(|anchor| anchor.as_str().to_owned())
             .collect(),
-        watermarks: TemporalWatermarksV1 {
-            generation: value.watermarks.generation,
-            source: value.watermarks.source,
-            projection: value.watermarks.projection,
-            index: value.watermarks.index,
-            summary: value.watermarks.summary,
-        },
+        watermarks: temporal_watermarks(value.watermarks),
         coverage: coverage(value.coverage),
         source_coverage: value
             .source_coverage
@@ -1104,119 +1092,7 @@ fn coverage_omission(omission: SessionRetrievalCoverageOmissionView) -> Temporal
     }
 }
 
-const fn coverage(value: TemporalCoverageCountsV1) -> TemporalCoverageV1 {
-    TemporalCoverageV1 {
-        visible: value.visible,
-        hidden: value.hidden,
-        unknown: value.unknown,
-        redacted: value.redacted,
-    }
-}
-
-pub(super) fn source_coverage(value: SessionSourceCoverageV1) -> WireSourceCoverageV1 {
-    WireSourceCoverageV1 {
-        source_id: value.source_id().as_str().to_owned(),
-        observed_frontier: value.observed_frontier().value(),
-        committed_frontier: value.committed_frontier().value(),
-        target_watermark: value.target_watermark().value(),
-        request: SessionCoverageRequestV1 {
-            mode: coverage_mode(value.request().mode()),
-        },
-        covered_intervals: value
-            .covered_intervals()
-            .iter()
-            .cloned()
-            .map(coverage_interval)
-            .collect(),
-        missing_intervals: value
-            .missing_intervals()
-            .iter()
-            .cloned()
-            .map(coverage_interval)
-            .collect(),
-        state: coverage_state(value.state()),
-        reason: coverage_reason(value.reason()),
-    }
-}
-
-fn coverage_interval(value: SessionSourceCoverageIntervalV1) -> SessionCoverageIntervalV1 {
-    SessionCoverageIntervalV1 {
-        knowledge: ClosedUtcIntervalV1 {
-            from_inclusive: value.knowledge.from_inclusive().map(|value| value.0),
-            through_inclusive: value.knowledge.through_inclusive().map(|value| value.0),
-        },
-        valid: match value.valid {
-            DomainValidCoverageIntervalV1::Known(interval) => {
-                ValidCoverageIntervalV1::Known(ClosedUtcIntervalV1 {
-                    from_inclusive: interval.from_inclusive().map(|value| value.0),
-                    through_inclusive: interval.through_inclusive().map(|value| value.0),
-                })
-            }
-            DomainValidCoverageIntervalV1::Unknown => ValidCoverageIntervalV1::Unknown,
-        },
-    }
-}
-
-const fn coverage_mode(value: TemporalModeV1) -> SessionCoverageModeV1 {
-    match value {
-        TemporalModeV1::Current => SessionCoverageModeV1::Current,
-        TemporalModeV1::AsOf { cutoff } => SessionCoverageModeV1::AsOf { cutoff: cutoff.0 },
-        TemporalModeV1::Evolution => SessionCoverageModeV1::Evolution,
-        TemporalModeV1::Forensic => SessionCoverageModeV1::Forensic,
-    }
-}
-
-const fn coverage_state(value: SessionSourceCoverageStateV1) -> SessionCoverageStateV1 {
-    match value {
-        SessionSourceCoverageStateV1::Fresh => SessionCoverageStateV1::Fresh,
-        SessionSourceCoverageStateV1::Stale => SessionCoverageStateV1::Stale,
-        SessionSourceCoverageStateV1::Partial => SessionCoverageStateV1::Partial,
-        SessionSourceCoverageStateV1::Locked => SessionCoverageStateV1::Locked,
-        SessionSourceCoverageStateV1::Redacted => SessionCoverageStateV1::Redacted,
-        SessionSourceCoverageStateV1::RetentionWithheld => {
-            SessionCoverageStateV1::RetentionWithheld
-        }
-        SessionSourceCoverageStateV1::Unavailable => SessionCoverageStateV1::Unavailable,
-    }
-}
-
-fn coverage_reason(value: &SessionSourceCoverageReasonV1) -> SessionCoverageReasonV1 {
-    match value {
-        SessionSourceCoverageReasonV1::CaughtUp => SessionCoverageReasonV1::CaughtUp,
-        SessionSourceCoverageReasonV1::ProjectionBehindSource { lag } => {
-            SessionCoverageReasonV1::ProjectionBehindSource { lag: *lag }
-        }
-        SessionSourceCoverageReasonV1::SourceBehindTarget { lag } => {
-            SessionCoverageReasonV1::SourceBehindTarget { lag: *lag }
-        }
-        SessionSourceCoverageReasonV1::ProjectionAndSourceBehind {
-            projection_lag,
-            source_lag,
-        } => SessionCoverageReasonV1::ProjectionAndSourceBehind {
-            projection_lag: *projection_lag,
-            source_lag: *source_lag,
-        },
-        SessionSourceCoverageReasonV1::Locked => SessionCoverageReasonV1::Locked,
-        SessionSourceCoverageReasonV1::Redacted => SessionCoverageReasonV1::Redacted,
-        SessionSourceCoverageReasonV1::RetentionWithheld => {
-            SessionCoverageReasonV1::RetentionWithheld
-        }
-        SessionSourceCoverageReasonV1::Unavailable => SessionCoverageReasonV1::Unavailable,
-    }
-}
-
-const fn hydration(value: HydrationStateV1) -> HydrationStateResultV1 {
-    match value {
-        HydrationStateV1::Available => HydrationStateResultV1::Available,
-        HydrationStateV1::RetainedButUnavailable => HydrationStateResultV1::RetainedButUnavailable,
-        HydrationStateV1::Redacted => HydrationStateResultV1::Redacted,
-        HydrationStateV1::Deleted => HydrationStateResultV1::Deleted,
-        HydrationStateV1::RetentionExpired => HydrationStateResultV1::RetentionExpired,
-        HydrationStateV1::Unauthorized => HydrationStateResultV1::Unauthorized,
-        HydrationStateV1::Locked => HydrationStateResultV1::Locked,
-        HydrationStateV1::UnverifiableLegacy => HydrationStateResultV1::UnverifiableLegacy,
-    }
-}
+pub(super) use super::wire::{coverage, hydration, source_coverage, temporal_watermarks};
 
 #[cfg(test)]
 mod refusal_tests {

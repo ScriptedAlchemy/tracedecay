@@ -2,23 +2,17 @@
 
 use tracedecay_contracts::RetainedSurfaceExecutionErrorV1;
 use tracedecay_contracts::retained_surfaces::{
-    ClosedUtcIntervalV1, CompactLineageEdgeV1, HydrationStateResultV1, LcmContentRangeV1,
-    LcmDescribeExternalPayloadV1, LcmDescribeSourceOverviewV1, LcmDescribeSummaryNodeV1,
-    LcmDescriptionV1, LcmExpandQueryBudgetV1, LcmExpandQueryContextBlockV1, LcmExpandQueryMatchV1,
+    CompactLineageEdgeV1, LcmContentRangeV1, LcmDescribeExternalPayloadV1,
+    LcmDescribeSourceOverviewV1, LcmDescribeSummaryNodeV1, LcmDescriptionV1,
+    LcmExpandQueryBudgetV1, LcmExpandQueryContextBlockV1, LcmExpandQueryMatchV1,
     LcmExpandQueryPaginationV1, LcmExpandQueryResultV1, LcmExpandQuerySynthesisPromptV1,
     LcmExpandedSourceV1, LcmExpansionV1, LcmGrepHitV1, LcmMessageV1, LcmRawMessageMetadataV1,
     LcmRawMessageOverviewV1, LcmRawMessageV1, LcmRetrievalOutcomeV1, LcmSourcePaginationV1,
     LcmSourceRefV1, LcmStorageKindV1, LcmSummaryNodeOverviewV1, LcmSummaryNodeV1,
-    LcmTemporalFieldsV1, RetainedOutcomeStatusV1, SessionCoverageIntervalV1, SessionCoverageModeV1,
-    SessionCoverageReasonV1, SessionCoverageRequestV1, SessionCoverageStateV1,
-    SessionSourceCoverageV1 as RetainedSourceCoverageV1, TemporalExplanationV1,
-    TemporalFreshnessV1, TemporalOmissionV1, TemporalWatermarksV1, ValidCoverageIntervalV1,
+    LcmTemporalFieldsV1, RetainedOutcomeStatusV1, TemporalExplanationV1, TemporalFreshnessV1,
+    TemporalOmissionV1,
 };
-use tracedecay_domain::{
-    CompactContextLineageEdgeV1, HydrationStateV1, SessionSourceCoverageIntervalV1,
-    SessionSourceCoverageReasonV1, SessionSourceCoverageStateV1, SessionSourceCoverageV1,
-    TemporalModeV1, ValidCoverageIntervalV1 as DomainValidCoverageIntervalV1,
-};
+use tracedecay_domain::CompactContextLineageEdgeV1;
 use tracedecay_lcm::contracts::{
     LcmContentRange, LcmDataFreshness, LcmDescribeResponse, LcmExpandResponse, LcmRawMessage,
     LcmRawMessageMetadata, LcmRetrievalOutcome, LcmSourceRef, LcmStorageKind, LcmSummaryNode,
@@ -33,6 +27,9 @@ use tracedecay_temporal_query::context::OrderedTextContextAssembler;
 
 use crate::session_retrieval::SessionTemporalMetadataView;
 
+pub(super) use super::super::wire::hydration;
+use super::super::wire::{coverage, source_coverage, temporal_watermarks};
+
 #[hotpath::measure(label = "daemon.retained.lcm.hydrate_temporal")]
 pub(super) fn temporal_fields(value: SessionTemporalMetadataView) -> LcmTemporalFieldsV1 {
     LcmTemporalFieldsV1 {
@@ -41,20 +38,9 @@ pub(super) fn temporal_fields(value: SessionTemporalMetadataView) -> LcmTemporal
             .into_iter()
             .map(|anchor| anchor.as_str().to_owned())
             .collect(),
-        watermarks: TemporalWatermarksV1 {
-            generation: value.watermarks.generation,
-            source: value.watermarks.source,
-            projection: value.watermarks.projection,
-            index: value.watermarks.index,
-            summary: value.watermarks.summary,
-        },
+        watermarks: temporal_watermarks(value.watermarks),
         authorized_root: value.authorized_root,
-        coverage: tracedecay_contracts::retained_surfaces::TemporalCoverageV1 {
-            visible: value.coverage.visible,
-            hidden: value.coverage.hidden,
-            unknown: value.coverage.unknown,
-            redacted: value.coverage.redacted,
-        },
+        coverage: coverage(value.coverage),
         source_coverage: value
             .source_coverage
             .into_iter()
@@ -78,99 +64,6 @@ pub(super) fn temporal_fields(value: SessionTemporalMetadataView) -> LcmTemporal
             })
             .collect(),
         next_cursor: value.cursor,
-    }
-}
-
-fn source_coverage(value: SessionSourceCoverageV1) -> RetainedSourceCoverageV1 {
-    RetainedSourceCoverageV1 {
-        source_id: value.source_id().as_str().to_owned(),
-        observed_frontier: value.observed_frontier().value(),
-        committed_frontier: value.committed_frontier().value(),
-        target_watermark: value.target_watermark().value(),
-        request: SessionCoverageRequestV1 {
-            mode: coverage_mode(value.request().mode()),
-        },
-        covered_intervals: value
-            .covered_intervals()
-            .iter()
-            .cloned()
-            .map(coverage_interval)
-            .collect(),
-        missing_intervals: value
-            .missing_intervals()
-            .iter()
-            .cloned()
-            .map(coverage_interval)
-            .collect(),
-        state: coverage_state(value.state()),
-        reason: coverage_reason(value.reason()),
-    }
-}
-
-fn coverage_interval(value: SessionSourceCoverageIntervalV1) -> SessionCoverageIntervalV1 {
-    SessionCoverageIntervalV1 {
-        knowledge: closed_interval(value.knowledge),
-        valid: match value.valid {
-            DomainValidCoverageIntervalV1::Known(interval) => {
-                ValidCoverageIntervalV1::Known(closed_interval(interval))
-            }
-            DomainValidCoverageIntervalV1::Unknown => ValidCoverageIntervalV1::Unknown,
-        },
-    }
-}
-
-fn closed_interval(value: tracedecay_domain::ClosedUtcIntervalV1) -> ClosedUtcIntervalV1 {
-    ClosedUtcIntervalV1 {
-        from_inclusive: value.from_inclusive().map(|value| value.0),
-        through_inclusive: value.through_inclusive().map(|value| value.0),
-    }
-}
-
-const fn coverage_mode(value: TemporalModeV1) -> SessionCoverageModeV1 {
-    match value {
-        TemporalModeV1::Current => SessionCoverageModeV1::Current,
-        TemporalModeV1::AsOf { cutoff } => SessionCoverageModeV1::AsOf { cutoff: cutoff.0 },
-        TemporalModeV1::Evolution => SessionCoverageModeV1::Evolution,
-        TemporalModeV1::Forensic => SessionCoverageModeV1::Forensic,
-    }
-}
-
-const fn coverage_state(value: SessionSourceCoverageStateV1) -> SessionCoverageStateV1 {
-    match value {
-        SessionSourceCoverageStateV1::Fresh => SessionCoverageStateV1::Fresh,
-        SessionSourceCoverageStateV1::Stale => SessionCoverageStateV1::Stale,
-        SessionSourceCoverageStateV1::Partial => SessionCoverageStateV1::Partial,
-        SessionSourceCoverageStateV1::Locked => SessionCoverageStateV1::Locked,
-        SessionSourceCoverageStateV1::Redacted => SessionCoverageStateV1::Redacted,
-        SessionSourceCoverageStateV1::RetentionWithheld => {
-            SessionCoverageStateV1::RetentionWithheld
-        }
-        SessionSourceCoverageStateV1::Unavailable => SessionCoverageStateV1::Unavailable,
-    }
-}
-
-fn coverage_reason(value: &SessionSourceCoverageReasonV1) -> SessionCoverageReasonV1 {
-    match value {
-        SessionSourceCoverageReasonV1::CaughtUp => SessionCoverageReasonV1::CaughtUp,
-        SessionSourceCoverageReasonV1::ProjectionBehindSource { lag } => {
-            SessionCoverageReasonV1::ProjectionBehindSource { lag: *lag }
-        }
-        SessionSourceCoverageReasonV1::SourceBehindTarget { lag } => {
-            SessionCoverageReasonV1::SourceBehindTarget { lag: *lag }
-        }
-        SessionSourceCoverageReasonV1::ProjectionAndSourceBehind {
-            projection_lag,
-            source_lag,
-        } => SessionCoverageReasonV1::ProjectionAndSourceBehind {
-            projection_lag: *projection_lag,
-            source_lag: *source_lag,
-        },
-        SessionSourceCoverageReasonV1::Locked => SessionCoverageReasonV1::Locked,
-        SessionSourceCoverageReasonV1::Redacted => SessionCoverageReasonV1::Redacted,
-        SessionSourceCoverageReasonV1::RetentionWithheld => {
-            SessionCoverageReasonV1::RetentionWithheld
-        }
-        SessionSourceCoverageReasonV1::Unavailable => SessionCoverageReasonV1::Unavailable,
     }
 }
 
@@ -593,19 +486,6 @@ fn rebuild_synthesis_user_prompt(result: &mut LcmExpandQueryResultV1) {
     };
     let prompt = result.prompt.as_deref().unwrap_or_default();
     synthesis.user = format!("QUESTION:\n{prompt}\n\nEXPANDED CONTEXT:\n{context}");
-}
-
-pub(super) const fn hydration(value: HydrationStateV1) -> HydrationStateResultV1 {
-    match value {
-        HydrationStateV1::Available => HydrationStateResultV1::Available,
-        HydrationStateV1::RetainedButUnavailable => HydrationStateResultV1::RetainedButUnavailable,
-        HydrationStateV1::Redacted => HydrationStateResultV1::Redacted,
-        HydrationStateV1::Deleted => HydrationStateResultV1::Deleted,
-        HydrationStateV1::RetentionExpired => HydrationStateResultV1::RetentionExpired,
-        HydrationStateV1::Unauthorized => HydrationStateResultV1::Unauthorized,
-        HydrationStateV1::Locked => HydrationStateResultV1::Locked,
-        HydrationStateV1::UnverifiableLegacy => HydrationStateResultV1::UnverifiableLegacy,
-    }
 }
 
 const fn storage_kind(value: LcmStorageKind) -> LcmStorageKindV1 {
