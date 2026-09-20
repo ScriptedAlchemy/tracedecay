@@ -323,14 +323,10 @@ pub(super) async fn execute_callable_code(
 fn invalid_callable_code_request(wire_request_id: String) -> DaemonInvocationResponse {
     application_problem(
         wire_request_id,
-        ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
-                code: "callable_code.invalid_query".to_owned(),
-                message: "The callable code query is invalid".to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: Vec::new(),
-        },
+        ApplicationProblem::invalid_request_without_action(SafeDiagnostic {
+            code: "callable_code.invalid_query".to_owned(),
+            message: "The callable code query is invalid".to_owned(),
+        }),
     )
 }
 
@@ -360,15 +356,12 @@ pub fn callable_code_request_context(
             RetryDirective::Never,
         ));
     }
-    let request_id =
-        RequestId::new(wire_request_id).map_err(|_| ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
-                code: "callable_code.invalid_request_id".to_owned(),
-                message: "The callable code request identifier is invalid".to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: Vec::new(),
-        })?;
+    let request_id = RequestId::new(wire_request_id).map_err(|_| {
+        ApplicationProblem::invalid_request_without_action(SafeDiagnostic {
+            code: "callable_code.invalid_request_id".to_owned(),
+            message: "The callable code request identifier is invalid".to_owned(),
+        })
+    })?;
     // Correlation IDs stay on the RequestContext. The route authority is a
     // function of the access and the operation, so the same authorized call
     // resolves the same grant from any surface and across durable retries.

@@ -47,14 +47,12 @@ impl DaemonAdvisoryCycleInvocationPort for MountedAdvisoryCycle {
         _request: DaemonAdvisoryCycleInvocationRequest,
     ) -> DaemonAdvisoryCycleInvocationFuture<'_> {
         Box::pin(async {
-            Err(ApplicationProblem::InvalidRequest {
-                diagnostic: SafeDiagnostic {
+            Err(ApplicationProblem::invalid_request_without_action(
+                SafeDiagnostic {
                     code: "feedback.test-mounted-advisory-owner".to_owned(),
                     message: "The mounted advisory owner received the request".to_owned(),
                 },
-                retry: RetryDirective::Never,
-                legal_actions: Vec::new(),
-            })
+            ))
         })
     }
 
@@ -63,14 +61,12 @@ impl DaemonAdvisoryCycleInvocationPort for MountedAdvisoryCycle {
         _request: DaemonFeedbackProximityInvocationRequest,
     ) -> DaemonFeedbackProximityInvocationFuture<'_> {
         Box::pin(async {
-            Err(ApplicationProblem::InvalidRequest {
-                diagnostic: SafeDiagnostic {
+            Err(ApplicationProblem::invalid_request_without_action(
+                SafeDiagnostic {
                     code: "feedback.test-mounted-proximity-owner".to_owned(),
                     message: "The mounted proximity owner received the request".to_owned(),
                 },
-                retry: RetryDirective::Never,
-                legal_actions: Vec::new(),
-            })
+            ))
         })
     }
 }

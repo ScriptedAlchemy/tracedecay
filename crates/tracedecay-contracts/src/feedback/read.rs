@@ -24,7 +24,7 @@ use crate::error::ApplicationContractError;
 use crate::handlers::ApplicationOperation;
 use crate::result::{
     ApplicationEnvelope, ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult,
-    AuthorityReceipt, EvidencePacket, LegalAction, OpaqueCursor, OperationReceipt,
+    AuthorityReceipt, EvidencePacket, OpaqueCursor, OperationReceipt,
     OperationTermination, PageCursor, RetrievalEvidence, RetryDirective, SafeDiagnostic,
 };
 use crate::retrieval::{
@@ -605,14 +605,10 @@ fn invalid_request<T>(
     problem_envelope(
         context,
         operation,
-        ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic::new(
-                "application.feedback.invalid-request",
-                "The feedback read request is invalid.",
-            )?,
-            retry: RetryDirective::Never,
-            legal_actions: Vec::<LegalAction>::new(),
-        },
+        ApplicationProblem::invalid_request_without_action(SafeDiagnostic::new(
+            "application.feedback.invalid-request",
+            "The feedback read request is invalid.",
+        )?),
     )
 }
 

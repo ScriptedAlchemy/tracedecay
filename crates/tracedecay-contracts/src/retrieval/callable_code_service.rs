@@ -543,13 +543,11 @@ fn invalid_code_query_outcome_problem() -> ApplicationProblem {
 }
 
 fn invalid_code_query_problem() -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic::new(
+    ApplicationProblem::invalid_request_without_action(
+        SafeDiagnostic::new(
             "application.code-query.invalid-request",
             "The callable code-intelligence request is invalid.",
         )
         .expect("static safe diagnostic is valid"),
-        retry: RetryDirective::Never,
-        legal_actions: Vec::new(),
-    }
+    )
 }

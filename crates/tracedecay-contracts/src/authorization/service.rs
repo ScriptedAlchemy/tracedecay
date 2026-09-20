@@ -101,15 +101,13 @@ where
 
         let policy = self.policy_reference(&decision)?;
         AuthorityReceipt::from_context(context, policy, observed_at).map_err(|_| {
-            ApplicationProblem::InvalidRequest {
-                diagnostic: SafeDiagnostic::new(
+            ApplicationProblem::invalid_request_without_action(
+                SafeDiagnostic::new(
                     "application.authorization.invalid-context",
                     "The request context is invalid.",
                 )
                 .expect("static safe diagnostic is valid"),
-                retry: RetryDirective::Never,
-                legal_actions: Vec::new(),
-            }
+            )
         })
     }
 
@@ -207,14 +205,14 @@ where
                 .ok_or_else(|| self.non_disclosure.proof_problem())?;
         let policy = self.policy_reference(&decision)?;
         let receipt = AuthorityReceipt::from_context(request.context, policy, request.observed_at)
-            .map_err(|_| ApplicationProblem::InvalidRequest {
-                diagnostic: SafeDiagnostic::new(
-                    "application.authorization.invalid-context",
-                    "The request context is invalid.",
+            .map_err(|_| {
+                ApplicationProblem::invalid_request_without_action(
+                    SafeDiagnostic::new(
+                        "application.authorization.invalid-context",
+                        "The request context is invalid.",
+                    )
+                    .expect("static safe diagnostic is valid"),
                 )
-                .expect("static safe diagnostic is valid"),
-                retry: RetryDirective::Never,
-                legal_actions: Vec::new(),
             })?;
 
         Ok(AuthorizationAdmission {

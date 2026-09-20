@@ -27,6 +27,26 @@ fn invalid_request_offers_correction_and_never_retries() {
 }
 
 #[test]
+fn invalid_request_without_action_offers_no_recovery() {
+    let diagnostic = SafeDiagnostic {
+        code: "application.invalid-request.closed".to_owned(),
+        message: "The request is invalid.".to_owned(),
+    };
+    let problem = ApplicationProblem::invalid_request_without_action(diagnostic.clone());
+
+    assert_eq!(
+        problem,
+        ApplicationProblem::InvalidRequest {
+            diagnostic,
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        }
+    );
+    assert_eq!(problem.safe_message(), "The request is invalid.");
+    assert!(problem.legal_actions().is_empty());
+}
+
+#[test]
 fn reset_required_is_a_distinct_non_retryable_terminal() {
     let problem = ApplicationProblem::reset_required(
         SafeDiagnostic::new("store.reset_required", "The store must be reset.")

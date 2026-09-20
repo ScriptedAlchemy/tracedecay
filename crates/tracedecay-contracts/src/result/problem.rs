@@ -697,6 +697,18 @@ impl ApplicationProblem {
         }
     }
 
+    /// Invalid request that offers no recovery action. Never retries.
+    ///
+    /// Empty legal actions are part of the refusal: adapters must not invent
+    /// `CorrectRequest` for these problems.
+    pub fn invalid_request_without_action(diagnostic: SafeDiagnostic) -> Self {
+        Self::InvalidRequest {
+            diagnostic,
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        }
+    }
+
     pub fn cancelled_before_admission() -> Self {
         Self::Cancelled {
             stage: CancellationStage::BeforeAdmission,

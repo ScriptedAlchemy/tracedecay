@@ -1752,14 +1752,12 @@ fn primitive_failure<T>(
     failure: tracedecay_contracts::retrieval::PrimitiveFailure,
 ) -> Result<ApplicationResult<T>, ApplicationContractError> {
     let application_problem = match failure.kind {
-        PrimitiveFailureKind::InvalidRequest => ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
+        PrimitiveFailureKind::InvalidRequest => {
+            ApplicationProblem::invalid_request_without_action(SafeDiagnostic {
                 code: failure.code,
                 message: failure.message,
-            },
-            retry: RetryDirective::Never,
-            legal_actions: Vec::new(),
-        },
+            })
+        }
         PrimitiveFailureKind::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
@@ -1791,14 +1789,10 @@ fn grep_problem<T>(
         GrepAnalysisProblemV1::InvalidRequest(message) => problem(
             context,
             operation,
-            ApplicationProblem::InvalidRequest {
-                diagnostic: SafeDiagnostic {
-                    code: "application.retrieval.invalid-request".to_owned(),
-                    message,
-                },
-                retry: RetryDirective::Never,
-                legal_actions: Vec::new(),
-            },
+            ApplicationProblem::invalid_request_without_action(SafeDiagnostic {
+                code: "application.retrieval.invalid-request".to_owned(),
+                message,
+            }),
         ),
         GrepAnalysisProblemV1::AuthorityFailed(_) => unavailable(context, operation),
     }
@@ -1824,14 +1818,10 @@ fn invalid_request<T>(
     problem(
         context,
         operation,
-        ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
-                code: "application.retrieval.invalid-request".to_owned(),
-                message: "The primitive request is invalid.".to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: Vec::new(),
-        },
+        ApplicationProblem::invalid_request_without_action(SafeDiagnostic {
+            code: "application.retrieval.invalid-request".to_owned(),
+            message: "The primitive request is invalid.".to_owned(),
+        }),
     )
 }
 

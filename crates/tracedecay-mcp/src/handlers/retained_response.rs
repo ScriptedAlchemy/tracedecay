@@ -100,14 +100,10 @@ pub fn validated_retained_response(
 fn invocation_problem(problem: DaemonInvocationProblem) -> Result<ApplicationProblem> {
     Ok(match problem {
         DaemonInvocationProblem::InvalidRequest | DaemonInvocationProblem::UnsupportedRevision => {
-            ApplicationProblem::InvalidRequest {
-                diagnostic: retained_safe_diagnostic(
-                    "application.surface.invalid_request",
-                    "The daemon rejected the retained application request",
-                )?,
-                retry: RetryDirective::Never,
-                legal_actions: Vec::new(),
-            }
+            ApplicationProblem::invalid_request_without_action(retained_safe_diagnostic(
+                "application.surface.invalid_request",
+                "The daemon rejected the retained application request",
+            )?)
         }
         DaemonInvocationProblem::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)

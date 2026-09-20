@@ -54,14 +54,10 @@ pub(super) fn application_contract_error_response(error: ApplicationContractErro
 }
 
 fn invalid_surface_request_problem(message: String) -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: "application.surface.invalid_request".to_owned(),
-            message,
-        },
-        retry: RetryDirective::Never,
-        legal_actions: Vec::new(),
-    }
+    ApplicationProblem::invalid_request_without_action(SafeDiagnostic {
+        code: "application.surface.invalid_request".to_owned(),
+        message,
+    })
 }
 
 pub(super) fn http_adapter_problem(
@@ -154,14 +150,10 @@ pub(super) fn invocation_problem(
     Ok(match problem {
         tracedecay_daemon_protocol::DaemonInvocationProblem::InvalidRequest
         | tracedecay_daemon_protocol::DaemonInvocationProblem::UnsupportedRevision => {
-            ApplicationProblem::InvalidRequest {
-                diagnostic: SafeDiagnostic::new(
-                    "application.surface.invalid_request",
-                    "The daemon rejected the application request",
-                )?,
-                retry: RetryDirective::Never,
-                legal_actions: Vec::new(),
-            }
+            ApplicationProblem::invalid_request_without_action(SafeDiagnostic::new(
+                "application.surface.invalid_request",
+                "The daemon rejected the application request",
+            )?)
         }
         tracedecay_daemon_protocol::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
@@ -201,14 +193,10 @@ pub(super) fn invocation_contract_problem(
             ApplicationProblem::timed_out_before_admission()
         }
         tracedecay_contracts::InvocationError::InvalidRequest => {
-            ApplicationProblem::InvalidRequest {
-                diagnostic: SafeDiagnostic::new(
-                    "application.surface.invalid_request",
-                    "The daemon rejected the application request",
-                )?,
-                retry: RetryDirective::Never,
-                legal_actions: Vec::new(),
-            }
+            ApplicationProblem::invalid_request_without_action(SafeDiagnostic::new(
+                "application.surface.invalid_request",
+                "The daemon rejected the application request",
+            )?)
         }
         tracedecay_contracts::InvocationError::Conflict => ApplicationProblem::Conflict {
             diagnostic: SafeDiagnostic::new(

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
-use tracedecay_contracts::{ApplicationProblem, Deadline, RetryDirective, SafeDiagnostic};
+use tracedecay_contracts::{ApplicationProblem, Deadline, SafeDiagnostic};
 use tracedecay_domain::UtcMicros;
 use tracedecay_lsp::analyzer::broker::{DiagnosticBroker, MountedLspProvider};
 use tracedecay_session_memory::context::MonotonicDeadline;
@@ -51,13 +51,11 @@ pub(super) fn advisory_monotonic_deadline_from_remaining(
     observed_at
         .checked_add(remaining)
         .map(MonotonicDeadline::at)
-        .ok_or_else(|| ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
+        .ok_or_else(|| {
+            ApplicationProblem::invalid_request_without_action(SafeDiagnostic {
                 code: "feedback.advisory-cycle.deadline".to_owned(),
                 message: "The advisory feedback cycle deadline is outside the supported horizon"
                     .to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: Vec::new(),
+            })
         })
 }

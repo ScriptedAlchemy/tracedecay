@@ -416,11 +416,7 @@ pub(crate) fn invalid_request_problem(
     let diagnostic = SafeDiagnostic::new(code, message)?;
     adapter_problem(
         request_id,
-        ApplicationProblem::InvalidRequest {
-            diagnostic,
-            retry: RetryDirective::Never,
-            legal_actions: Vec::new(),
-        },
+        ApplicationProblem::invalid_request_without_action(diagnostic),
     )
 }
 
