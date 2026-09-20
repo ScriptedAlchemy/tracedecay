@@ -6,6 +6,8 @@
 
 use std::sync::Arc;
 
+use super::registered_http::invoke_registered_http;
+use super::require_public_catalog_route;
 use axum::response::Response;
 use tracedecay_api::{WorkHttpRequest, WorkOperation};
 use tracedecay_contracts::{
@@ -26,16 +28,13 @@ use tracedecay_contracts::{
     WorkProposalComparisonV1, WorkRunControlReadingV1, WorkRunControlRequestV1,
     WorkSynthesisAttemptV1, WorkTopologyViewRequestV1,
 };
+use tracedecay_daemon_protocol::ApplicationSurfaceAdapterError;
+use tracedecay_daemon_protocol::DaemonInvocationExecutor;
+use tracedecay_daemon_protocol::{WorkApplicationInvocationV1, WorkApplicationOutcomeV1};
 use tracedecay_domain::{
     WorkAttemptV1, WorkDuplicateAdjudicationCommandV1, WorkPlacementPreflightV1, WorkPlacementV1,
     WorkRunControlV1,
 };
-use tracedecay_tool_catalog::RouteExposureV1;
-
-use super::registered_http::invoke_registered_http;
-use tracedecay_daemon_protocol::ApplicationSurfaceAdapterError;
-use tracedecay_daemon_protocol::DaemonInvocationExecutor;
-use tracedecay_daemon_protocol::{WorkApplicationInvocationV1, WorkApplicationOutcomeV1};
 
 pub(super) fn router_with_executor(
     executor: Arc<dyn DaemonInvocationExecutor>,
@@ -63,18 +62,7 @@ pub(crate) fn validate_catalog_bindings() -> Result<(), ApplicationSurfaceAdapte
     for operation in WorkOperation::ALL {
         let operation_id = tracedecay_tool_catalog::OperationId::new(operation.operation_id())
             .map_err(ApplicationSurfaceAdapterError::Identifier)?;
-        let Some(binding) = registry
-            .get(&operation_id)
-            .and_then(|availability| availability.binding())
-        else {
-            return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
-        };
-        let RouteExposureV1::Public { route_path, .. } = binding.exposure() else {
-            return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
-        };
-        if route_path != operation.application_route_path() {
-            return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
-        }
+        require_public_catalog_route(registry, &operation_id, operation.application_route_path())?;
     }
     Ok(())
 }
