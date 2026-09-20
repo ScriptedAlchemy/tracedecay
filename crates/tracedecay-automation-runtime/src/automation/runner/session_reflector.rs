@@ -615,42 +615,12 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
-    dashboard_root: PathBuf,
-    sessions_db: RegisteredGlobalDbLeaseV1,
-    retrieval: &dyn AutomationSessionRetrieval,
-    memory: &MemoryApplication<A>,
-    config: &AutomationConfig,
-    run_control: &AutomationRunControl,
-    authority: &tracedecay_policy::CurationApplyAuthorityV1,
-    backend: &dyn AgentTaskBackend,
-    options: SessionReflectorAutomationOptions,
-    prebuilt_evidence: Option<SessionReflectorEvidenceBundle>,
-) -> AutomationRunResult<SessionReflectorAutomationRun> {
-    run_session_reflector_for_store_with_publication(
-        dashboard_root,
-        sessions_db,
-        retrieval,
-        memory,
-        config,
-        run_control,
-        authority,
-        backend,
-        options,
-        prebuilt_evidence,
-        AutomationRunLedgerPublication::Immediate,
-        None,
-    )
-    .await
-}
-
-// The single funnel every reflector entry point (project, user, retained
+// The single funnel every reflector entry point (project and retained
 // settlement) flows through: one static run-lifetime span in the futures lane
 // so suspension and cancellation of long runs stay visible.
 #[hotpath::measure(future = true, label = "automation.run.session_reflector")]
 #[allow(clippy::too_many_arguments)]
-async fn run_session_reflector_for_store_with_publication<A: ProjectMemoryFactStore>(
+pub(super) async fn run_session_reflector_for_store_with_publication<A: ProjectMemoryFactStore>(
     dashboard_root: PathBuf,
     sessions_db: RegisteredGlobalDbLeaseV1,
     retrieval: &dyn AutomationSessionRetrieval,

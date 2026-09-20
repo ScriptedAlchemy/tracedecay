@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -26,7 +25,7 @@ use super::skill_writer::{
     activation_policy as skill_writer_activation_policy, validate_and_apply_skill_proposals,
     validate_skill_proposals,
 };
-use crate::ports::project_runtime::{AutomationProjectContext, ProfileRuntime};
+use crate::ports::project_runtime::AutomationProjectContext;
 use crate::ports::session_store::AutomationSessionStore;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
@@ -40,10 +39,6 @@ mod evidence;
 mod retrieval;
 mod session_reflector;
 mod skill_writer;
-mod user_evidence_preflight;
-#[cfg(test)]
-mod user_scope_tests;
-
 use curation::{combined_review_output, evaluate_skill_curation};
 use evidence::{
     SessionReflectorEvidenceBundle, SessionReflectorEvidenceOutcome, SkillWriterEvidenceBundle,
@@ -59,11 +54,15 @@ use skill_writer::{
     ProposedSkillOutput, SkillWriterFinalization, build_skill_writer_prompt,
     finalize_skill_writer_success,
 };
-pub(crate) use skill_writer::run_user_skill_writer_with_backend_and_retrieval;
 
 pub use super::lifecycle::{
     AutomationRunSettlementGuard, RetainedAutomationRun, RetainedAutomationSettlementDisposition,
     ReusedSchedulerSkip,
+};
+pub use super::memory_curator::{
+    CURATION_DEFAULT_FACT_REVIEW_LIMIT, CURATION_DEFAULT_MIN_CONFIDENCE,
+    MemoryCuratorAutomationOptions, MemoryCuratorAutomationRun, run_memory_curator_with_backend,
+    run_memory_curator_with_backend_for_retained_settlement,
 };
 pub use evidence::{AutomationTemporalEvidence, AutomationTemporalEvidenceItem};
 pub use retrieval::registered_project_automation_retrieval;
@@ -81,14 +80,6 @@ pub use skill_writer::{
     SkillWriterAutomationOptions, SkillWriterAutomationRun, run_skill_writer_with_backend,
     run_skill_writer_with_backend_and_retrieval,
     run_skill_writer_with_backend_and_retrieval_for_retained_settlement,
-};
-pub(crate) use user_evidence_preflight::run_user_session_reflector_with_backend_and_retrieval;
-
-pub(crate) use super::memory_curator::run_user_memory_curator_with_backend;
-pub use super::memory_curator::{
-    CURATION_DEFAULT_FACT_REVIEW_LIMIT, CURATION_DEFAULT_MIN_CONFIDENCE,
-    MemoryCuratorAutomationOptions, MemoryCuratorAutomationRun, run_memory_curator_with_backend,
-    run_memory_curator_with_backend_for_retained_settlement,
 };
 
 const USER_AUTOMATION_DIR: &str = "user-automation";
@@ -116,22 +107,6 @@ fn project_curation_authority(
         actor_id,
         project_id: Some(context.project_id.clone()),
         profile_id: context.profile_id.clone(),
-        configuration_revision_id: configuration_revision_id.clone(),
-    })
-}
-
-fn profile_curation_authority(
-    runtime: &dyn ProfileRuntime,
-    actor: &'static str,
-    configuration_revision_id: &ConfigurationRevisionId,
-) -> Result<CurationApplyAuthorityV1> {
-    let actor_id = ActorId::new(actor).map_err(|error| TraceDecayError::Config {
-        message: format!("invalid curation actor identity: {error}"),
-    })?;
-    Ok(CurationApplyAuthorityV1 {
-        actor_id,
-        project_id: None,
-        profile_id: runtime.profile_id().clone(),
         configuration_revision_id: configuration_revision_id.clone(),
     })
 }

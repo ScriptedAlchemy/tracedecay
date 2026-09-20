@@ -560,4 +560,3 @@ fn quarantined_fact_with_validation(
         "validation": validation,
     }))
 }
-

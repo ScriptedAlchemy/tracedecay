@@ -1,10 +1,10 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    CanonicalGitEvidenceKindV1, CanonicalObservationEnvelopeV1,
-    CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
-    CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1, CanonicalWorkflowEvidenceKindV1,
-    ObservationId, ObservationOrderingDomainV1, ObservationPositionalOccurrenceV1, ProviderId,
+    CanonicalGitEvidenceKindV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
+    CanonicalObservationFactV1, CanonicalObservationRelationsV1, CanonicalReasoningVisibilityV1,
+    CanonicalUnknownStateV1, CanonicalWorkflowEvidenceKindV1, ObservationId,
+    ObservationOrderingDomainV1, ObservationPositionalOccurrenceV1, ProviderId,
     ProviderUsageCounterSemanticsV1, ProviderUsageCountersV1, ProviderUsageModelV1,
     ProviderUsageScopeV1, SessionId,
 };

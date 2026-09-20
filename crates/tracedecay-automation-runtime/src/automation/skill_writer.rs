@@ -936,7 +936,6 @@ fn rejected_skill(proposal: &Value, reason: &str) -> Value {
     })
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

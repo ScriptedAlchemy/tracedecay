@@ -16,13 +16,13 @@ use super::job_error;
 use super::job_webhook;
 use super::lifecycle::{
     AutomationRunLedgerPublication, AutomationRunSettlementGuard, RetainedAutomationRun,
-    generated_run_id,
+    generated_run_id, publish_ledger_record,
 };
 use super::managed_skills::{ManagedSkillState, load_managed_skill};
 use super::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunLedgerTaskSummary, AutomationRunStatus,
-    AutomationTrigger, append_or_reuse_scheduler_diagnostic, append_run_record,
-    latest_record_by_canonical_completion, load_run_ledger_task_summary,
+    AutomationTrigger, append_or_reuse_scheduler_diagnostic, latest_record_by_canonical_completion,
+    load_run_ledger_task_summary,
 };
 use super::scheduler::{
     AutomationSchedule, AutomationTaskLock, cron_is_due, elapsed_secs, parse_schedule,
@@ -923,12 +923,7 @@ impl JobRunContext<'_> {
     }
 
     async fn publish_terminal(&self, record: &AutomationRunLedgerRecord) -> Result<()> {
-        match self.ledger_publication {
-            AutomationRunLedgerPublication::Immediate => {
-                append_run_record(self.dashboard_root, record).await
-            }
-            AutomationRunLedgerPublication::DeferredUntilApplicationSettlement => Ok(()),
-        }
+        publish_ledger_record(self.ledger_publication, self.dashboard_root, record).await
     }
 }
 
