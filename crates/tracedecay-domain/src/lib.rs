@@ -67,8 +67,8 @@ pub use code_intelligence::{
     is_cli_flag_token, is_commit_hash, is_commit_identifier_token, is_compiler_error_code_token,
     is_configuration_key_token, is_identifier_token, is_path_shape, is_path_token,
     is_qualified_name_token, is_runtime_error_code_token, is_technical_token_char,
-    is_tool_name_token, projection_batch_publication_digest, repository_path_matches_scope,
-    split_subtokens, technical_tokens, validate_code_logical_path,
+    is_tool_name_token, path_matches_scope, projection_batch_publication_digest,
+    repository_path_matches_scope, split_subtokens, technical_tokens, validate_code_logical_path,
 };
 pub use configuration::{
     ACCESS_RULES_SETTING_KEY, ANALYZER_SETTINGS_SETTING_KEY, AUTOMATION_SETTINGS_SETTING_KEY,

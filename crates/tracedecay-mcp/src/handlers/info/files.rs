@@ -25,12 +25,7 @@ pub async fn handle_files(
     .await?;
 
     if let Some(dir) = effective_path(&args, scope_prefix) {
-        let prefix = if dir.ends_with('/') {
-            dir.to_string()
-        } else {
-            format!("{dir}/")
-        };
-        files.retain(|f| f.path.starts_with(&prefix) || f.path == dir);
+        files.retain(|f| tracedecay_domain::path_matches_scope(&f.path, Some(dir)));
     }
 
     if let Some(pat) = args.get("pattern").and_then(|v| v.as_str()) {

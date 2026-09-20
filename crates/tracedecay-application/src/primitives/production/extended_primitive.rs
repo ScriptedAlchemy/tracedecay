@@ -43,11 +43,6 @@ pub(super) fn public_module_symbols(
     nodes: Vec<CodeGraphSymbolSummaryV1>,
     path: &str,
 ) -> Result<Vec<SymbolPrimitiveRecord>, ()> {
-    let prefix = if path.ends_with('/') {
-        path.to_owned()
-    } else {
-        format!("{path}/")
-    };
     let mut pub_nodes: Vec<CodeGraphSymbolSummaryV1> = nodes
         .into_iter()
         .filter(|node| {
@@ -61,7 +56,8 @@ pub(super) fn public_module_symbols(
             else {
                 return false;
             };
-            metadata.visibility == "public" && (file_path == path || file_path.starts_with(&prefix))
+            metadata.visibility == "public"
+                && tracedecay_domain::path_matches_scope(file_path, Some(path))
         })
         .collect();
     pub_nodes.sort_by(|left, right| {
