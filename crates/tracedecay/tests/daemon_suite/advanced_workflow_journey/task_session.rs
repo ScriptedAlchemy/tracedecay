@@ -604,10 +604,14 @@ pub(super) fn assert_available_over_sdk_mcp_and_dashboard(
             second_hydrated.anchor_id, first_hydrated.anchor_id,
             "{temporal:?} continuation repeated a hydrated TaskSession anchor"
         );
+        // The lane pages at the temporal layer, so each page composes and
+        // ranks only the candidates that page returned. A cross-page ordinal
+        // would also break `QueryFallbackSubpayload::validate`, which requires
+        // every payload's ordinals to be its own `0..n`.
         assert_eq!(
-            second_ranked.final_ordinal,
-            first_ranked.final_ordinal + 1,
-            "{temporal:?} continuation must advance by exactly one ranked TaskSession anchor"
+            (first_ranked.final_ordinal, second_ranked.final_ordinal),
+            (0, 0),
+            "{temporal:?} every ranked TaskSession page must number its own ordinals from zero"
         );
         let actual_contents = BTreeSet::from([
             first_hydrated
