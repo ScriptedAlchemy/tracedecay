@@ -27,6 +27,7 @@ mod configuration_unset_test;
 mod constructors_behavior_test;
 mod context_behavior_test;
 mod context_test;
+mod coupling_test;
 mod dependency_depth_test;
 mod dependency_hint_test;
 mod derives_test;
