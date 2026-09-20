@@ -90,24 +90,10 @@ impl DaemonHookEvent {
         self
     }
 
-    pub fn cursor_after_file_edit(rel_paths: Vec<String>) -> Self {
-        Self::new(HookAgent::Cursor, "afterFileEdit", rel_paths, None, None)
-    }
-
     pub fn cursor_after_shell_execution(cwd: PathBuf) -> Self {
         Self::new(
             HookAgent::Cursor,
             "afterShellExecution",
-            Vec::new(),
-            None,
-            Some(cwd),
-        )
-    }
-
-    pub fn cursor_workspace_open(cwd: PathBuf) -> Self {
-        Self::new(
-            HookAgent::Cursor,
-            "workspaceOpen",
             Vec::new(),
             None,
             Some(cwd),
@@ -129,9 +115,5 @@ impl DaemonHookEvent {
     /// native daemon state, not shell parsing, owns Git reconciliation.
     pub fn post_tool_use_shell(agent: HookAgent, cwd: PathBuf) -> Self {
         Self::new(agent, "postToolUseShell", Vec::new(), None, Some(cwd))
-    }
-
-    pub fn kiro_post_tool_use(rel_paths: Vec<String>, cwd: Option<PathBuf>) -> Self {
-        Self::new(HookAgent::Kiro, "postToolUse", rel_paths, None, cwd)
     }
 }
