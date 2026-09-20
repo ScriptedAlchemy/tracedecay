@@ -107,6 +107,10 @@ pub(super) async fn invoke_production_tool(
     invoke_exact_tool(&fixture.server, tool_name, arguments).await
 }
 
+pub(super) fn fact_store_server(fixture: &FactStoreMcpFixture) -> &tracedecay::mcp::McpServer {
+    &fixture.server
+}
+
 pub(super) async fn close_test_graph(fixture: FactStoreMcpFixture) {
     fixture.production.harness.shutdown().await;
 }
