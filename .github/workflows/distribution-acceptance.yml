@@ -96,6 +96,16 @@ jobs:
           mold-version: 2.41.0
           make-default: true
 
+      # The acceptance script runs the packaged suites through nextest, and
+      # the MCP suite's structural-rewrite proof shells out to ast-grep.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Install ast-grep
+        uses: ./.github/actions/install-ast-grep
+        with:
+          version: "0.44.0"
+
       - name: Build release binary for packaging
         run: cargo build --package tracedecay-cli --bin tracedecay --release --target ${{ env.TARGET }} --no-default-features --features production --locked
 

@@ -363,6 +363,12 @@ tar -C "$repo" \
   --exclude='./node_modules' \
   -cf - . | tar -xf - -C "$staged"
 resolve_clean_source_head "$repo" "$source_git_sha" >/dev/null
+# The asset staging below rewrites package-local directories inside `$staged`
+# (its `crates/tracedecay/tests/fixtures` becomes the root fixtures), so the
+# integration suites that read package-local fixtures run from this untouched
+# copy of the same snapshot.
+source_snapshot="$work/source"
+cp -a -- "$staged" "$source_snapshot"
 
 staged_product="$staged/crates/tracedecay"
 [[ -f "$staged_product/Cargo.toml" ]] ||
@@ -384,10 +390,16 @@ declare -a staged_root_assets=(
   "tests/fixtures"
   "scripts/run-session-temporal-benchmark.sh"
 )
+# A package directory may already carry its own entry at the destination path,
+# as `crates/tracedecay/tests/fixtures` does. `cp -a` merges a directory into
+# an existing directory of the same name, which would leave the package-local
+# asset a superset of the root one. Clear the destination so the staged asset
+# is exactly the root snapshot the assertion below demands.
 for asset in "${staged_root_assets[@]}"; do
   [[ -e "$staged/$asset" ]] ||
     die "product package asset is missing from the staged source tree: $asset"
   mkdir -p -- "$staged_product/$(dirname -- "$asset")"
+  rm -rf -- "$staged_product/$asset"
   cp -a -- "$staged/$asset" "$staged_product/$(dirname -- "$asset")/"
 done
 
@@ -404,6 +416,7 @@ for asset in "${staged_cli_assets[@]}"; do
   [[ -e "$staged/$asset" ]] ||
     die "CLI package asset is missing from the staged source tree: $asset"
   mkdir -p -- "$staged_cli_crate/$(dirname -- "$asset")"
+  rm -rf -- "$staged_cli_crate/$asset"
   cp -a -- "$staged/$asset" "$staged_cli_crate/$(dirname -- "$asset")/"
 done
 
@@ -724,15 +737,22 @@ CARGO_NET_OFFLINE=true cargo nextest run \
   --config "$patch_config" \
   --no-tests=fail
 
+# `cargo package` publishes no integration tests (the root crate's `include`
+# whitelist carries only fixtures), and `mcp_suite` requires the
+# `test-transport` feature the production graph excludes, so the extracted
+# package cannot run this suite. Run it from the untouched source snapshot
+# under the `root-transport` CI lens instead, with the packaged CLI as the
+# binary the suite spawns.
 echo "distribution acceptance: checking packaged MCP tool behavior"
 TRACEDECAY_TEST_BIN="$packaged_cli_bin" \
   CARGO_NET_OFFLINE=true cargo nextest run \
-  --manifest-path "$root_package/Cargo.toml" \
+  --manifest-path "$source_snapshot/Cargo.toml" \
   --release \
-  --no-default-features \
-  --features production \
+  -p tracedecay \
   --test mcp_suite \
-  --config "$patch_config" \
+  --features tracedecay/test-transport \
+  --no-fail-fast \
+  --retries 2 \
   --no-tests=fail
 
 install_root="$work/install"
@@ -786,7 +806,10 @@ print(
     + " }"
 )
 PY
-cat >"$consumer/src/main.rs" <<'RS'
+# The host bundle generators sign each bundle with the commit that produced
+# it; the packaged product's source head is that commit.
+printf 'const GENERATOR_COMMIT: &str = "%s";\n' "$source_git_sha" >"$consumer/src/main.rs"
+cat >>"$consumer/src/main.rs" <<'RS'
 use std::collections::BTreeSet;
 
 use tracedecay_contracts::catalog_composition::build_application_catalog_snapshot;
@@ -838,11 +861,11 @@ fn main() {
     );
     for host in RECEIPT_BACKED_HOST_KINDS {
         let components = default_components(host);
-        let component_set = verified_embedded_default_host_component_set(host, 0)
+        let component_set = verified_embedded_default_host_component_set(host, 0, GENERATOR_COMMIT)
             .expect("default packaged host component set must verify");
         assert_eq!(component_set.component_set.components.len(), components.len());
         for component in components {
-            let bundle = verified_embedded_host_bundle(host, component, 0)
+            let bundle = verified_embedded_host_bundle(host, component, 0, GENERATOR_COMMIT)
                 .expect("packaged host bundle must be callable");
             bundle
                 .manifest
@@ -854,6 +877,12 @@ fn main() {
 }
 RS
 
+# A fresh manifest resolves from scratch, and offline resolution refuses a
+# version that has since been yanked even when the workspace lockfile pins
+# it (bisync 0.3.0 under gix-protocol). Seed the consumer with that
+# lockfile, as the extracted packages are, so it resolves what the product
+# resolves.
+cp -- "$staged/Cargo.lock" "$consumer/Cargo.lock"
 echo "distribution acceptance: calling packaged catalog and host bundles"
 CARGO_NET_OFFLINE=true cargo run \
   --manifest-path "$consumer/Cargo.toml" \
@@ -879,6 +908,7 @@ fn main() {
     let _ = McpServer::has_project_session_retrieval_service_for_test;
 }
 RS
+cp -- "$staged/Cargo.lock" "$test_api_probe/Cargo.lock"
 echo "distribution acceptance: proving production package omits test APIs"
 test_api_stderr="$work/test-api-probe.stderr"
 if CARGO_NET_OFFLINE=true cargo check \
@@ -887,9 +917,15 @@ if CARGO_NET_OFFLINE=true cargo check \
   2>"$test_api_stderr"; then
   die "production package exposed test-transport APIs"
 fi
-grep -Eq "no function or associated item named .*has_project_session_retrieval_service_for_test" \
-  "$test_api_stderr" ||
+# rustc words this refusal differently across releases ("no function or
+# associated item named" before 1.97, "no associated function or constant
+# named" from 1.97), so match the error code and the probed name.
+grep -Eq "error\[E0599\].*has_project_session_retrieval_service_for_test" \
+  "$test_api_stderr" || {
+  echo "distribution acceptance: test API probe stderr follows" >&2
+  tail -n 60 -- "$test_api_stderr" >&2
   die "test API probe failed for an unexpected reason"
+}
 
 binary=$(python3 "$repo/scripts/resolve-installed-binary.py" \
   "$install_root" \
