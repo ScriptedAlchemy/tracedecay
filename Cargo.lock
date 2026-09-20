@@ -5961,7 +5961,6 @@ dependencies = [
  "tracedecay-global-db",
  "tracedecay-graph-db",
  "tracedecay-graph-query",
- "tracedecay-hooks",
  "tracedecay-lsp",
  "tracedecay-privacy",
  "tracedecay-runtime-core",

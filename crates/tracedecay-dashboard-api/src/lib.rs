@@ -145,7 +145,6 @@ pub mod feedback_api;
 mod graph_api;
 mod graph_service;
 mod graph_structure_api;
-pub mod hooks;
 mod lcm_api;
 mod remote_status_api;
 pub use lcm_api::{
