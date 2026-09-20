@@ -300,31 +300,31 @@ impl Client {
                 || schema_id != Some(Operation::RESULT_SCHEMA_ID)
                 || schema_revision != Some(u64::from(Operation::RESULT_SCHEMA_REVISION))
             {
-                return Err(ClientError::Protocol {
-                    status: Some(response.status()),
-                    message: format!(
+                return Err(protocol(
+                    response.status(),
+                    format!(
                         "daemon returned mismatched contracts for {}",
                         Operation::OPERATION_ID
                     ),
-                });
+                ));
             }
-            let outcome =
-                response
-                    .envelope()
-                    .get("outcome")
-                    .ok_or_else(|| ClientError::Protocol {
-                        status: Some(response.status()),
-                        message: format!("daemon omitted the {} outcome", Operation::OPERATION_ID),
-                    })?;
+            let outcome = response.envelope().get("outcome").ok_or_else(|| {
+                protocol(
+                    response.status(),
+                    format!("daemon omitted the {} outcome", Operation::OPERATION_ID),
+                )
+            })?;
             let outcome_kind = outcome
                 .get("outcome")
                 .and_then(Value::as_str)
-                .ok_or_else(|| ClientError::Protocol {
-                    status: Some(response.status()),
-                    message: format!(
-                        "daemon omitted the {} outcome kind",
-                        Operation::OPERATION_ID
-                    ),
+                .ok_or_else(|| {
+                    protocol(
+                        response.status(),
+                        format!(
+                            "daemon omitted the {} outcome kind",
+                            Operation::OPERATION_ID
+                        ),
+                    )
                 })?;
             let lifecycle_shape_is_legal = matches!(
                 (Operation::RECEIPT, Operation::RECONCILIATION, outcome_kind),
@@ -339,100 +339,107 @@ impl Client {
                 )
             );
             if !lifecycle_shape_is_legal {
-                return Err(ClientError::Protocol {
-                    status: Some(response.status()),
-                    message: format!(
+                return Err(protocol(
+                    response.status(),
+                    format!(
                         "daemon returned outcome {outcome_kind} outside the {} receipt contract",
                         Operation::OPERATION_ID
                     ),
-                });
+                ));
             }
             let execution = outcome
                 .get("value")
                 .and_then(|value| value.get("execution"))
-                .ok_or_else(|| ClientError::Protocol {
-                    status: Some(response.status()),
-                    message: format!(
-                        "daemon omitted the {} execution receipt",
-                        Operation::OPERATION_ID
-                    ),
+                .ok_or_else(|| {
+                    protocol(
+                        response.status(),
+                        format!(
+                            "daemon omitted the {} execution receipt",
+                            Operation::OPERATION_ID
+                        ),
+                    )
                 })?;
             let termination = execution
                 .get("termination")
                 .and_then(Value::as_str)
-                .ok_or_else(|| ClientError::Protocol {
-                    status: Some(response.status()),
-                    message: format!(
-                        "daemon omitted the {} terminal state",
-                        Operation::OPERATION_ID
-                    ),
+                .ok_or_else(|| {
+                    protocol(
+                        response.status(),
+                        format!(
+                            "daemon omitted the {} terminal state",
+                            Operation::OPERATION_ID
+                        ),
+                    )
                 })?;
             if !Operation::TERMINAL_STATES
                 .iter()
                 .copied()
                 .any(|state| terminal_state_name(state) == termination)
             {
-                return Err(ClientError::Protocol {
-                    status: Some(response.status()),
-                    message: format!(
+                return Err(protocol(
+                    response.status(),
+                    format!(
                         "daemon returned terminal state {termination} outside the {} contract",
                         Operation::OPERATION_ID
                     ),
-                });
+                ));
             }
             if let Some(cancellation) = execution.get("cancellation")
                 && !cancellation.is_null()
             {
                 if !Operation::CANCELLABLE {
-                    return Err(ClientError::Protocol {
-                        status: Some(response.status()),
-                        message: format!(
+                    return Err(protocol(
+                        response.status(),
+                        format!(
                             "daemon returned cancellation evidence for non-cancellable {}",
                             Operation::OPERATION_ID
                         ),
-                    });
+                    ));
                 }
                 let stage = cancellation
                     .get("stage")
                     .and_then(Value::as_str)
-                    .ok_or_else(|| ClientError::Protocol {
-                        status: Some(response.status()),
-                        message: format!(
-                            "daemon returned malformed cancellation evidence for {}",
-                            Operation::OPERATION_ID
-                        ),
+                    .ok_or_else(|| {
+                        protocol(
+                            response.status(),
+                            format!(
+                                "daemon returned malformed cancellation evidence for {}",
+                                Operation::OPERATION_ID
+                            ),
+                        )
                     })?;
                 if !Operation::CANCELLATION_POINTS
                     .iter()
                     .copied()
                     .any(|point| cancellation_point_name(point) == stage)
                 {
-                    return Err(ClientError::Protocol {
-                        status: Some(response.status()),
-                        message: format!(
+                    return Err(protocol(
+                        response.status(),
+                        format!(
                             "daemon returned cancellation stage {stage} outside the {} contract",
                             Operation::OPERATION_ID
                         ),
-                    });
+                    ));
                 }
             }
-            let payload = response
-                .payload()
-                .cloned()
-                .ok_or_else(|| ClientError::Protocol {
-                    status: Some(response.status()),
-                    message: format!(
+            let payload = response.payload().cloned().ok_or_else(|| {
+                protocol(
+                    response.status(),
+                    format!(
                         "daemon omitted the {} result payload",
                         Operation::OPERATION_ID
                     ),
-                })?;
+                )
+            })?;
             let request_id = response
                 .envelope()
                 .get("request_id")
                 .and_then(Value::as_str)
-                .ok_or_else(|| ClientError::Protocol {
-                    status: Some(response.status()),
-                    message: "daemon omitted the application request ID".into(),
+                .ok_or_else(|| {
+                    protocol(
+                        response.status(),
+                        "daemon omitted the application request ID",
+                    )
                 })?
                 .to_owned();
             if !crate::semantic::response_matches(
@@ -442,22 +449,23 @@ impl Client {
                 &request,
                 &payload,
             ) {
-                return Err(ClientError::Protocol {
-                    status: Some(response.status()),
-                    message: format!(
+                return Err(protocol(
+                    response.status(),
+                    format!(
                         "daemon returned a semantically invalid {} result",
                         Operation::OPERATION_ID
                     ),
-                });
+                ));
             }
-            let result =
-                serde_json::from_value(payload).map_err(|error| ClientError::Protocol {
-                    status: Some(response.status()),
-                    message: format!(
+            let result = serde_json::from_value(payload).map_err(|error| {
+                protocol(
+                    response.status(),
+                    format!(
                         "daemon returned a malformed {} result: {error}",
                         Operation::OPERATION_ID
                     ),
-                })?;
+                )
+            })?;
             Ok(TypedResponse {
                 request_id,
                 result,
@@ -521,9 +529,11 @@ impl Client {
                 return Err(ClientError::Authentication(status.as_u16()));
             }
             let body: Value = crate::observe::body_decode(|| {
-                response.json().map_err(|error| ClientError::Protocol {
-                    status: Some(status.as_u16()),
-                    message: format!("daemon returned malformed cancellation JSON: {error}"),
+                response.json().map_err(|error| {
+                    protocol(
+                        status.as_u16(),
+                        format!("daemon returned malformed cancellation JSON: {error}"),
+                    )
                 })
             })?;
             if body.get("kind").and_then(Value::as_str) == Some("problem") {
@@ -533,11 +543,12 @@ impl Client {
                     "cancellation problem envelope has no value",
                 ));
             }
-            let value: OperationCancellation =
-                serde_json::from_value(body).map_err(|error| ClientError::Protocol {
-                    status: Some(status.as_u16()),
-                    message: format!("daemon returned malformed cancellation JSON: {error}"),
-                })?;
+            let value: OperationCancellation = serde_json::from_value(body).map_err(|error| {
+                protocol(
+                    status.as_u16(),
+                    format!("daemon returned malformed cancellation JSON: {error}"),
+                )
+            })?;
             let valid_status = matches!(
                 (status, value.status),
                 (StatusCode::ACCEPTED, CancellationStatus::Requested)
@@ -545,10 +556,10 @@ impl Client {
                     | (StatusCode::OK, CancellationStatus::AlreadyTerminal)
             );
             if !valid_status {
-                return Err(ClientError::Protocol {
-                    status: Some(status.as_u16()),
-                    message: "daemon returned a non-canonical cancellation response".into(),
-                });
+                return Err(protocol(
+                    status.as_u16(),
+                    "daemon returned a non-canonical cancellation response",
+                ));
             }
             Ok(value)
         })())
@@ -612,24 +623,23 @@ impl Client {
             return Err(ClientError::Authentication(status.as_u16()));
         }
         if media_type(response.headers()) != Some("application/json") {
-            return Err(ClientError::Protocol {
-                status: Some(status.as_u16()),
-                message: "daemon response is not application/json".into(),
-            });
+            return Err(protocol(
+                status.as_u16(),
+                "daemon response is not application/json",
+            ));
         }
-        let body: Value = response.json().map_err(|error| ClientError::Protocol {
-            status: Some(status.as_u16()),
-            message: format!("daemon returned malformed application JSON: {error}"),
+        let body: Value = response.json().map_err(|error| {
+            protocol(
+                status.as_u16(),
+                format!("daemon returned malformed application JSON: {error}"),
+            )
         })?;
         match body.get("kind").and_then(Value::as_str) {
             Some("success") if status.is_success() => {
                 let value = body
                     .get("value")
                     .cloned()
-                    .ok_or_else(|| ClientError::Protocol {
-                        status: Some(status.as_u16()),
-                        message: "success envelope has no value".into(),
-                    })?;
+                    .ok_or_else(|| protocol(status.as_u16(), "success envelope has no value"))?;
                 ApplicationResponse::new(value, status.as_u16())
             }
             Some("problem") if !status.is_success() => {
@@ -640,10 +650,10 @@ impl Client {
                 if expected_request_id
                     .is_some_and(|expected| response_request_id != Some(expected.as_str()))
                 {
-                    return Err(ClientError::Protocol {
-                        status: Some(status.as_u16()),
-                        message: "daemon returned a different application request ID".into(),
-                    });
+                    return Err(protocol(
+                        status.as_u16(),
+                        "daemon returned a different application request ID",
+                    ));
                 }
                 Err(problem_error(
                     &body,
@@ -651,10 +661,10 @@ impl Client {
                     "problem envelope has no value",
                 ))
             }
-            _ => Err(ClientError::Protocol {
-                status: Some(status.as_u16()),
-                message: "daemon returned an inconsistent HTTP envelope".into(),
-            }),
+            _ => Err(protocol(
+                status.as_u16(),
+                "daemon returned an inconsistent HTTP envelope",
+            )),
         }
     }
 }
@@ -784,10 +794,7 @@ fn media_type(headers: &HeaderMap) -> Option<&str> {
 /// carries no value, because only the caller knows which surface it read.
 fn problem_error(body: &Value, status: u16, missing_value: &'static str) -> ClientError {
     let Some(envelope) = body.get("value").cloned() else {
-        return ClientError::Protocol {
-            status: Some(status),
-            message: missing_value.into(),
-        };
+        return protocol(status, missing_value);
     };
     match ProblemError::new(status, envelope) {
         Ok(problem) => ClientError::Problem(Box::new(problem)),
@@ -1084,9 +1091,11 @@ impl OperationStream {
         let media_type = media_type(response.headers());
         if !status.is_success() && media_type == Some("application/json") {
             let body: Value = crate::observe::body_decode(|| {
-                response.json().map_err(|error| ClientError::Protocol {
-                    status: Some(status.as_u16()),
-                    message: format!("daemon returned malformed stream problem JSON: {error}"),
+                response.json().map_err(|error| {
+                    protocol(
+                        status.as_u16(),
+                        format!("daemon returned malformed stream problem JSON: {error}"),
+                    )
                 })
             })?;
             if body.get("kind").and_then(Value::as_str) == Some("problem") {
@@ -1096,16 +1105,16 @@ impl OperationStream {
                     "stream problem envelope has no value",
                 ));
             }
-            return Err(ClientError::Protocol {
-                status: Some(status.as_u16()),
-                message: "daemon returned an unknown stream problem envelope".into(),
-            });
+            return Err(protocol(
+                status.as_u16(),
+                "daemon returned an unknown stream problem envelope",
+            ));
         }
         if !status.is_success() || media_type != Some("text/event-stream") {
-            return Err(ClientError::Protocol {
-                status: Some(status.as_u16()),
-                message: "daemon did not open a canonical event stream".into(),
-            });
+            return Err(protocol(
+                status.as_u16(),
+                "daemon did not open a canonical event stream",
+            ));
         }
         self.reader = Some(BufReader::new(response));
         Ok(())

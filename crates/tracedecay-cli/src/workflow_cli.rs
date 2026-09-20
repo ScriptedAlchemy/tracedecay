@@ -51,6 +51,7 @@ fn workflow_catalog(operation: WorkflowOperation) -> Result<(ResultContractRef, 
     ))
 }
 
+#[cfg(test)]
 fn workflow_cli_deadline(operation: WorkflowOperation, observed_at: UtcMicros) -> Result<Deadline> {
     let (_, maximum_millis) = workflow_catalog(operation)?;
     deadline_from_maximum_millis(maximum_millis, observed_at)
