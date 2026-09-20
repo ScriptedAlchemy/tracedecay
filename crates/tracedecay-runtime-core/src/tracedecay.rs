@@ -19,12 +19,17 @@ fn wall_clock_since_epoch() -> Duration {
         .unwrap_or_default()
 }
 
+/// Unix seconds since the epoch. A pre-epoch clock is `0`.
+pub fn unix_secs() -> u64 {
+    wall_clock_since_epoch().as_secs()
+}
+
 /// Returns the current UNIX timestamp in seconds.
 ///
 /// Overflow keeps the historical wrapping `as i64` cast. Callers that must
 /// saturate use [`saturating_unix_secs`].
 pub fn current_timestamp() -> i64 {
-    wall_clock_since_epoch().as_secs() as i64
+    unix_secs() as i64
 }
 
 /// Unix seconds as `i64`. A pre-epoch clock is `0`; overflow is `i64::MAX`.

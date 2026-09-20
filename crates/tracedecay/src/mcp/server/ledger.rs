@@ -313,10 +313,7 @@ impl McpServer {
     /// never await configuration or cloud I/O and shutdown still drains it.
     #[hotpath::measure(label = "mcp.ledger.flush_worldwide")]
     pub(crate) fn maybe_flush_worldwide(self: &Arc<Self>) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        let now = crate::project::current_timestamp();
         let last = self.last_flush_at.load(Ordering::Relaxed);
         if now - last < 30 {
             return;
@@ -593,10 +590,7 @@ fn persist_worldwide_delta(delta: u64, upload_enabled: bool) -> bool {
         && tracedecay_dashboard_api::cloud::flush_pending(config.pending_upload).is_some()
     {
         config.pending_upload = 0;
-        config.last_upload_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        config.last_upload_at = crate::project::current_timestamp();
     }
     match config.save() {
         Ok(()) => true,
