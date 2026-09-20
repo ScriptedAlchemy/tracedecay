@@ -389,9 +389,24 @@ impl GraphGenerationManifest {
                 MAX_VERIFIED_GENERATION_RELATIONS,
             ));
         }
-        let dependencies = checked_sorted_dependencies(dependencies, check)?;
-        let entities = checked_sorted_entities(entities, check)?;
-        let relations = checked_sorted_relations(relations, check)?;
+        let dependencies = checked_sorted_by(
+            dependencies,
+            check,
+            Ord::cmp,
+            "a graph generation repeats a dependency",
+        )?;
+        let entities = checked_sorted_by(
+            entities,
+            check,
+            |left, right| left.identity.cmp(&right.identity),
+            "a graph generation repeats an entity identity",
+        )?;
+        let relations = checked_sorted_by(
+            relations,
+            check,
+            |left, right| left.identity.cmp(&right.identity),
+            "a graph generation repeats a relation identity",
+        )?;
         let manifest = Self {
             projection,
             generation,
@@ -777,58 +792,22 @@ impl GraphGenerationManifest {
     }
 }
 
-fn checked_sorted_dependencies(
-    mut dependencies: Vec<GraphGenerationDependency>,
+fn checked_sorted_by<T>(
+    mut items: Vec<T>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<Vec<GraphGenerationDependency>, GraphDbError> {
+    mut order: impl FnMut(&T, &T) -> std::cmp::Ordering,
+    duplicate: &'static str,
+) -> Result<Vec<T>, GraphDbError> {
     check()?;
-    dependencies.sort_unstable();
-    for pair in dependencies.windows(2) {
+    items.sort_unstable_by(&mut order);
+    for pair in items.windows(2) {
         check()?;
-        if pair[0] == pair[1] {
-            return Err(GraphDbError::invalid(
-                "a graph generation repeats a dependency",
-            ));
+        if order(&pair[0], &pair[1]).is_eq() {
+            return Err(GraphDbError::invalid(duplicate));
         }
     }
     check()?;
-    Ok(dependencies)
-}
-
-fn checked_sorted_entities(
-    mut entities: Vec<GraphEntity>,
-    check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<Vec<GraphEntity>, GraphDbError> {
-    check()?;
-    entities.sort_unstable_by(|left, right| left.identity.cmp(&right.identity));
-    for pair in entities.windows(2) {
-        check()?;
-        if pair[0].identity == pair[1].identity {
-            return Err(GraphDbError::invalid(
-                "a graph generation repeats an entity identity",
-            ));
-        }
-    }
-    check()?;
-    Ok(entities)
-}
-
-fn checked_sorted_relations(
-    mut relations: Vec<GraphGenerationRelation>,
-    check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<Vec<GraphGenerationRelation>, GraphDbError> {
-    check()?;
-    relations.sort_unstable_by(|left, right| left.identity.cmp(&right.identity));
-    for pair in relations.windows(2) {
-        check()?;
-        if pair[0].identity == pair[1].identity {
-            return Err(GraphDbError::invalid(
-                "a graph generation repeats a relation identity",
-            ));
-        }
-    }
-    check()?;
-    Ok(relations)
+    Ok(items)
 }
 
 /// The dependency-closure digest, shared by the full manifest and its
@@ -2041,7 +2020,7 @@ mod checked_vec_writer_tests {
     use super::{
         CheckedVecWriter, GraphDbError, GraphGenerationManifest, ManifestDigestChunk,
         ManifestDigestChunkEncoding, ManifestDigestPipelineConfig, ManifestDigestPipelineMetrics,
-        canonical_buffer_allocation_growths, checked_canonical_bytes, checked_sorted_entities,
+        canonical_buffer_allocation_growths, checked_canonical_bytes, checked_sorted_by,
         encode_manifest_digest_chunk, frame_length_headers, recovered_generation_digest,
         recovered_generation_digest_with_config, reset_canonical_buffer_allocation_growths,
     };
@@ -2263,7 +2242,13 @@ mod checked_vec_writer_tests {
         entities.shrink_to_fit();
         let allocation = entities.as_ptr();
 
-        let sorted = checked_sorted_entities(entities, &|| Ok(())).unwrap();
+        let sorted = checked_sorted_by(
+            entities,
+            &|| Ok(()),
+            |left, right| left.identity.cmp(&right.identity),
+            "a graph generation repeats an entity identity",
+        )
+        .unwrap();
 
         assert_eq!(
             sorted.as_ptr(),
