@@ -13,10 +13,6 @@ use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_mcp::transport::{ChannelTransport, McpTransport};
 use tracedecay_runtime_core::storage::resolve_response_handle_root;
 
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
-
 /// Creates a temporary Rust project and returns a direct protocol server.
 ///
 /// Graph journeys use [`crate::support::production_composition_fixture`]

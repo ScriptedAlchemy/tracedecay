@@ -153,10 +153,6 @@ async fn test_context_appends_index_coverage_hint_for_skipped_generated_dirs() {
     fixture.harness.shutdown().await;
 }
 
-// ---------------------------------------------------------------------------
-// 2. tracedecay_context
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn context_includes_matching_memory_facts() {
     let fixture = setup_production_project().await;

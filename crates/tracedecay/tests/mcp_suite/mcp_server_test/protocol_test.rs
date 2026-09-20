@@ -13,10 +13,6 @@ use tracedecay_mcp::response_handles::{
 };
 use tracedecay_runtime_core::storage::resolve_response_handle_root;
 
-// ---------------------------------------------------------------------------
-// 1. test_initialize
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_initialize() {
     let (server, _dir) = setup_server().await;
@@ -48,10 +44,6 @@ async fn initialize_roots_route_registered_reader_tools_without_explicit_selecto
 async fn initialize_root_route_rejects_caller_project_path_spoof() {
     assert_legacy_selectors_cannot_spoof_initialize_root().await;
 }
-
-// ---------------------------------------------------------------------------
-// 2. notifications
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_any_notification_without_id_produces_no_response() {
@@ -123,10 +115,6 @@ async fn test_tools_call_explicit_null_id_is_still_a_request() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 5. test_tools_list
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_tools_list() {
     let (server, _dir) = setup_server().await;
@@ -155,10 +143,6 @@ async fn test_tools_list() {
         "should have tracedecay_context"
     );
 }
-
-// ---------------------------------------------------------------------------
-// 6. test_tools_call_search
-// ---------------------------------------------------------------------------
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
@@ -282,10 +266,6 @@ async fn test_tools_call_plain_text_failure_sets_is_error() {
         "expected rendered changelog git failure, got: {text}"
     );
 }
-
-// ---------------------------------------------------------------------------
-// 6b. test_tools_call_timings_flag
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_tools_call_timings_enabled_by_default() {
@@ -628,10 +608,6 @@ async fn cancellable_tool_call_fails_connection_on_peer_write_failure() {
     fixture.harness.shutdown().await;
 }
 
-// ---------------------------------------------------------------------------
-// 7. test_tools_call_status
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_tools_call_status() {
     let (server, _dir) = setup_server().await;
@@ -672,10 +648,6 @@ async fn test_tools_call_status() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 8. test_tools_call_missing_params
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_tools_call_missing_params() {
     let (server, _dir) = setup_server().await;
@@ -709,10 +681,6 @@ async fn test_tools_call_missing_params() {
         "error message should mention missing params"
     );
 }
-
-// ---------------------------------------------------------------------------
-// 9. test_tools_call_missing_name
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_tools_call_missing_name() {
@@ -884,10 +852,6 @@ async fn test_tracedecay_retrieve_handle_read_failure_returns_actionable_interna
     );
 }
 
-// ---------------------------------------------------------------------------
-// 10. test_unknown_method
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_unknown_method() {
     let (server, _dir) = setup_server().await;
@@ -906,10 +870,6 @@ async fn test_unknown_method() {
         "should be MethodNotFound error"
     );
 }
-
-// ---------------------------------------------------------------------------
-// 11. test_malformed_json
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_malformed_json() {
@@ -953,10 +913,6 @@ async fn test_malformed_json() {
         "ping after malformed JSON should succeed"
     );
 }
-
-// ---------------------------------------------------------------------------
-// 11b. test_foreign_protocol_version_is_rejected_before_dispatch
-// ---------------------------------------------------------------------------
 
 /// The envelope rule is enforced once at the transport boundary: a frame
 /// whose `jsonrpc` is not exactly `"2.0"` is answered with `InvalidRequest`
@@ -1011,10 +967,6 @@ async fn test_foreign_protocol_version_is_rejected_before_dispatch() {
         "{stats}"
     );
 }
-
-// ---------------------------------------------------------------------------
-// 12. test_blank_lines_skipped
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_blank_lines_skipped() {
@@ -1306,10 +1258,6 @@ async fn test_server_stats_after_run() {
     assert_eq!(stats["ratios"]["tool_calls_per_jsonrpc_message"], 0.25);
 }
 
-// ---------------------------------------------------------------------------
-// 16. test_error_tracking
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_error_tracking() {
     let (server, _dir) = setup_server().await;
@@ -1365,10 +1313,6 @@ async fn test_error_tracking() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 17. test_initialize_has_resources_capability
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_initialize_has_resources_capability() {
     let (server, _dir) = setup_server().await;
@@ -1384,10 +1328,6 @@ async fn test_initialize_has_resources_capability() {
         "initialize should advertise resources capability"
     );
 }
-
-// ---------------------------------------------------------------------------
-// 19. test_resources_list
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_resources_list() {
@@ -1441,10 +1381,6 @@ async fn test_resources_list() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// 20. test_resources_read_status
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_resources_read_status() {
     let (server, _dir) = setup_server().await;
@@ -1486,10 +1422,6 @@ async fn test_resources_read_status() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 21. test_resources_read_files
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_resources_read_files() {
     let (server, _dir) = setup_server().await;
@@ -1528,10 +1460,6 @@ async fn test_resources_read_files() {
         "status: unavailable\nreason: verified_generation_file_inventory_not_admitted"
     );
 }
-
-// ---------------------------------------------------------------------------
-// 22. test_resources_read_overview
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_resources_read_overview() {
@@ -1578,10 +1506,6 @@ async fn test_resources_read_overview() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 23. test_resources_read_unknown_uri
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_resources_read_unknown_uri() {
     let (server, _dir) = setup_server().await;
@@ -1612,10 +1536,6 @@ async fn test_resources_read_unknown_uri() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 24. test_resources_read_missing_uri
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_resources_read_missing_uri() {
     let (server, _dir) = setup_server().await;
@@ -1639,10 +1559,6 @@ async fn test_resources_read_missing_uri() {
         "should be InvalidParams error"
     );
 }
-
-// ---------------------------------------------------------------------------
-// Regression: logging/setLevel must be handled (not return MethodNotFound)
-// ---------------------------------------------------------------------------
 
 /// The MCP client sends `logging/setLevel` immediately after initialisation
 /// whenever the server advertises the `logging` capability. Before the fix the
@@ -1757,10 +1673,6 @@ async fn test_run_returns_transport_read_errors() {
         "unexpected error: {err}"
     );
 }
-
-// ---------------------------------------------------------------------------
-// search_call_writes_savings_ledger_row
-// ---------------------------------------------------------------------------
 
 // Repeated serve-mode LCM calls must keep working while the project session
 // DB schema is ensured at most once per process: after the first write-path
