@@ -77,18 +77,36 @@ pub(crate) fn acceptance_reader_budget(fixture: &ReaderRuntimeFixture) -> Reader
     budget
 }
 
+fn project_scope_binding(
+    brain_id: &str,
+    profile_id: &str,
+    scope_kind: &str,
+    project_id: &str,
+    incarnation: u64,
+    authority_epoch: u64,
+) -> StoreRuntimeBindingV1 {
+    serde_json::from_value(json!({
+        "shard_id": {
+            "brain_id": brain_id,
+            "profile_id": profile_id,
+            "scope": { "kind": scope_kind, "project_id": project_id }
+        },
+        "incarnation": incarnation,
+        "authority_epoch": authority_epoch
+    }))
+    .expect("construct runtime binding")
+}
+
 pub(crate) fn reader_runtime_fixture() -> ReaderRuntimeFixture {
     ReaderRuntimeFixture {
-        binding: serde_json::from_value(json!({
-            "shard_id": {
-                "brain_id": "brain.runtime-reader",
-                "profile_id": "profile.runtime-reader",
-                "scope": { "kind": "project", "project_id": "project.runtime-reader" }
-            },
-            "incarnation": 1,
-            "authority_epoch": 7
-        }))
-        .expect("construct reader runtime binding"),
+        binding: project_scope_binding(
+            "brain.runtime-reader",
+            "profile.runtime-reader",
+            "project",
+            "project.runtime-reader",
+            1,
+            7,
+        ),
         reader_budget: ReaderBudgetFixture {
             min_per_hot_shard: 2,
             max_per_hot_shard: 2,
@@ -100,40 +118,34 @@ pub(crate) fn reader_runtime_fixture() -> ReaderRuntimeFixture {
 }
 
 pub(crate) fn maintenance_binding() -> StoreRuntimeBindingV1 {
-    serde_json::from_value(json!({
-        "shard_id": {
-            "brain_id": "brain.runtime-maintenance",
-            "profile_id": "profile.runtime-maintenance",
-            "scope": { "kind": "project", "project_id": "project.runtime-maintenance" }
-        },
-        "incarnation": 3,
-        "authority_epoch": 11
-    }))
-    .expect("construct maintenance runtime binding")
+    project_scope_binding(
+        "brain.runtime-maintenance",
+        "profile.runtime-maintenance",
+        "project",
+        "project.runtime-maintenance",
+        3,
+        11,
+    )
 }
 
 pub(crate) fn writer_runtime_fixture() -> WriterRuntimeFixture {
     WriterRuntimeFixture {
-        origin_binding: serde_json::from_value(json!({
-            "shard_id": {
-                "brain_id": "brain.runtime-writer",
-                "profile_id": "profile.runtime-writer",
-                "scope": { "kind": "project", "project_id": "project.runtime-writer-origin" }
-            },
-            "incarnation": 5,
-            "authority_epoch": 13
-        }))
-        .expect("construct writer origin binding"),
-        target_binding: serde_json::from_value(json!({
-            "shard_id": {
-                "brain_id": "brain.runtime-writer",
-                "profile_id": "profile.runtime-writer",
-                "scope": { "kind": "project_sessions", "project_id": "project.runtime-writer-origin" }
-            },
-            "incarnation": 6,
-            "authority_epoch": 17
-        }))
-        .expect("construct writer target binding"),
+        origin_binding: project_scope_binding(
+            "brain.runtime-writer",
+            "profile.runtime-writer",
+            "project",
+            "project.runtime-writer-origin",
+            5,
+            13,
+        ),
+        target_binding: project_scope_binding(
+            "brain.runtime-writer",
+            "profile.runtime-writer",
+            "project_sessions",
+            "project.runtime-writer-origin",
+            6,
+            17,
+        ),
         effect_id: "effect.runtime.writer",
         ordering_key: "project.runtime-writer.serialized",
         commit_sequences: [1, 2],
