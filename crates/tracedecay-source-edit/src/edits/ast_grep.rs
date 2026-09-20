@@ -24,11 +24,7 @@ pub(crate) async fn ast_grep_rewrite(
     rewrite: &str,
     dry_run: bool,
 ) -> Result<AstGrepResult> {
-    let rel_path = super::primitives::resolve_path(project_root, path).ok_or_else(|| {
-        TraceDecayError::Config {
-            message: "path is not within the project".to_string(),
-        }
-    })?;
+    let rel_path = super::primitives::require_project_path(project_root, path)?;
     let file = SourceEditFileAuthority::open(project_root, Path::new(&rel_path))?;
     let (source, source_identity) = file.read_to_string(path)?;
 
@@ -38,49 +34,45 @@ pub(crate) async fn ast_grep_rewrite(
     );
 
     if check_output.is_err() {
-        if can_use_literal_rewrite_fallback(pattern) {
-            if !source.contains(pattern) {
-                return Ok(AstGrepResult {
-                    success: false,
-                    file_path: rel_path.clone(),
-                    pattern: pattern.to_string(),
-                    rewrite: rewrite.to_string(),
-                    dry_run,
-                    diff: None,
-                    message: "pattern not found (built-in literal fallback)".to_string(),
-                });
-            }
-            let modified = source.replace(pattern, rewrite);
-            let diff = super::primitives::commit_or_preview_edit(
-                &rel_path,
-                &file,
-                &source_identity,
-                &source,
-                &modified,
+        if !can_use_literal_rewrite_fallback(pattern) {
+            return Ok(refused_ast_grep(
+                rel_path,
+                pattern,
+                rewrite,
                 dry_run,
-            )
-            .await?;
-            return Ok(AstGrepResult {
-                success: true,
-                file_path: rel_path,
-                pattern: pattern.to_string(),
-                rewrite: rewrite.to_string(),
-                dry_run,
-                diff,
-                message: edit_success_message(
-                    dry_run,
-                    "literal rewrite completed using built-in fallback",
-                ),
-            });
+                "ast-grep is not installed and this pattern needs SGPattern matching. Simple literal rewrites are handled by the built-in fallback.",
+            ));
         }
+        if !source.contains(pattern) {
+            return Ok(refused_ast_grep(
+                rel_path,
+                pattern,
+                rewrite,
+                dry_run,
+                "pattern not found (built-in literal fallback)",
+            ));
+        }
+        let modified = source.replace(pattern, rewrite);
+        let diff = super::primitives::commit_or_preview_edit(
+            &rel_path,
+            &file,
+            &source_identity,
+            &source,
+            &modified,
+            dry_run,
+        )
+        .await?;
         return Ok(AstGrepResult {
-            success: false,
-            file_path: rel_path.clone(),
+            success: true,
+            file_path: rel_path,
             pattern: pattern.to_string(),
             rewrite: rewrite.to_string(),
             dry_run,
-            diff: None,
-            message: "ast-grep is not installed and this pattern needs SGPattern matching. Simple literal rewrites are handled by the built-in fallback.".to_string(),
+            diff,
+            message: edit_success_message(
+                dry_run,
+                "literal rewrite completed using built-in fallback",
+            ),
         });
     }
 
@@ -136,15 +128,9 @@ pub(crate) async fn ast_grep_rewrite(
                  File: {rel_path}, pattern: {pattern:?}"
             )
         };
-        return Ok(AstGrepResult {
-            success: false,
-            file_path: rel_path.clone(),
-            pattern: pattern.to_string(),
-            rewrite: rewrite.to_string(),
-            dry_run,
-            diff: None,
-            message,
-        });
+        return Ok(refused_ast_grep(
+            rel_path, pattern, rewrite, dry_run, message,
+        ));
     }
 
     let modified = reconstruct_ast_grep_rewrite(&source, &output.stdout)?;
@@ -236,6 +222,24 @@ fn can_use_literal_rewrite_fallback(pattern: &str) -> bool {
         && !pattern.contains('$')
         && !pattern.contains('\n')
         && !pattern.contains('\r')
+}
+
+fn refused_ast_grep(
+    file_path: String,
+    pattern: &str,
+    rewrite: &str,
+    dry_run: bool,
+    message: impl Into<String>,
+) -> AstGrepResult {
+    AstGrepResult {
+        success: false,
+        file_path,
+        pattern: pattern.to_string(),
+        rewrite: rewrite.to_string(),
+        dry_run,
+        diff: None,
+        message: message.into(),
+    }
 }
 
 #[cfg(test)]

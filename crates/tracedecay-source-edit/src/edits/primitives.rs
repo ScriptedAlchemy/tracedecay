@@ -44,19 +44,33 @@ pub(crate) fn splice_lines<S: AsRef<str>>(
     joined
 }
 
+fn refused_multi_edit(file_path: String, dry_run: bool, message: String) -> MultiEditResult {
+    MultiEditResult {
+        success: false,
+        file_path,
+        applied_count: 0,
+        dry_run,
+        diff: None,
+        message,
+    }
+}
+
 /// Resolves a path to a relative path string.
 /// If the path is already relative, validates that it stays in the project.
 /// If absolute, strips the `project_root` prefix.
-pub(super) fn resolve_path(project_root: &Path, path: &str) -> Option<String> {
+pub(super) fn require_project_path(project_root: &Path, path: &str) -> Result<String> {
     let path = Path::new(path);
     let relative = if path.is_absolute() {
-        path.strip_prefix(project_root).ok()?
+        path.strip_prefix(project_root).ok()
     } else {
-        path
+        Some(path)
     };
-    normalize_source_edit_relative_path(relative)
-        .ok()
+    relative
+        .and_then(|relative| normalize_source_edit_relative_path(relative).ok())
         .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "path is not within the project".to_string(),
+        })
 }
 
 /// Write-or-preview gate shared by every edit primitive. On a real run this
@@ -105,9 +119,7 @@ pub(crate) async fn str_replace(
     new_str: &str,
     dry_run: bool,
 ) -> Result<EditResult> {
-    let rel_path = resolve_path(project_root, path).ok_or_else(|| TraceDecayError::Config {
-        message: "path is not within the project".to_string(),
-    })?;
+    let rel_path = require_project_path(project_root, path)?;
 
     let file = SourceEditFileAuthority::open(project_root, Path::new(&rel_path))?;
     let (source, source_identity) = file.read_to_string(path)?;
@@ -177,9 +189,7 @@ pub(crate) async fn multi_str_replace(
     replacements: &[(&str, &str)],
     dry_run: bool,
 ) -> Result<MultiEditResult> {
-    let rel_path = resolve_path(project_root, path).ok_or_else(|| TraceDecayError::Config {
-        message: "path is not within the project".to_string(),
-    })?;
+    let rel_path = require_project_path(project_root, path)?;
 
     let file = SourceEditFileAuthority::open(project_root, Path::new(&rel_path))?;
     let (source, source_identity) = file.read_to_string(path)?;
@@ -194,17 +204,14 @@ pub(crate) async fn multi_str_replace(
     for (old, new) in replacements {
         let mut hits = source.match_indices(old);
         let Some((start, matched)) = hits.next() else {
-            return Ok(MultiEditResult {
-                success: false,
-                file_path: rel_path.clone(),
-                applied_count: 0,
+            return Ok(refused_multi_edit(
+                rel_path,
                 dry_run,
-                diff: None,
-                message: format!(
+                format!(
                     "replacement '{}' matches 0 times, must match exactly once",
                     tracedecay_runtime_core::text::utf8_prefix_at_or_before(old, 20)
                 ),
-            });
+            ));
         };
         if hits.next().is_some() {
             // Two matches already consumed from `hits`; the remainder it
@@ -212,18 +219,14 @@ pub(crate) async fn multi_str_replace(
             // that count plus the two already seen, no need for a
             // redundant full-string `source.matches(old).count()` pass.
             let count = 2 + hits.count();
-            return Ok(MultiEditResult {
-                success: false,
-                file_path: rel_path.clone(),
-                applied_count: 0,
+            return Ok(refused_multi_edit(
+                rel_path,
                 dry_run,
-                diff: None,
-                message: format!(
-                    "replacement '{}' matches {} times, must match exactly once",
+                format!(
+                    "replacement '{}' matches {count} times, must match exactly once",
                     tracedecay_runtime_core::text::utf8_prefix_at_or_before(old, 20),
-                    count
                 ),
-            });
+            ));
         }
         spans.push((start, start + matched.len(), old, new));
     }
@@ -236,18 +239,15 @@ pub(crate) async fn multi_str_replace(
         let (_, prev_end, prev_old, _) = window[0];
         let (next_start, _, next_old, _) = window[1];
         if next_start < prev_end {
-            return Ok(MultiEditResult {
-                success: false,
-                file_path: rel_path.clone(),
-                applied_count: 0,
+            return Ok(refused_multi_edit(
+                rel_path,
                 dry_run,
-                diff: None,
-                message: format!(
+                format!(
                     "replacements '{}' and '{}' target overlapping ranges; apply them separately",
                     tracedecay_runtime_core::text::utf8_prefix_at_or_before(prev_old, 20),
                     tracedecay_runtime_core::text::utf8_prefix_at_or_before(next_old, 20)
                 ),
-            });
+            ));
         }
     }
 
@@ -294,9 +294,7 @@ pub(crate) async fn insert_at(
     before: bool,
     dry_run: bool,
 ) -> Result<InsertResult> {
-    let rel_path = resolve_path(project_root, path).ok_or_else(|| TraceDecayError::Config {
-        message: "path is not within the project".to_string(),
-    })?;
+    let rel_path = require_project_path(project_root, path)?;
 
     let file = SourceEditFileAuthority::open(project_root, Path::new(&rel_path))?;
     let (source, source_identity) = file.read_to_string(path)?;
