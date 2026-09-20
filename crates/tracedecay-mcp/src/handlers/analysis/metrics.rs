@@ -79,9 +79,9 @@ pub async fn handle_rank(
         let mut counts = HashMap::<SymbolOccurrenceId, u64>::new();
         for edge in edges {
             let occurrence = if incoming {
-                edge.edge.to_occurrence
+                edge.to_occurrence
             } else {
-                edge.edge.from_occurrence
+                edge.from_occurrence
             };
             *counts.entry(occurrence).or_default() += 1;
         }
@@ -241,8 +241,8 @@ pub async fn handle_coupling(
         let mut coupled = HashMap::<String, HashSet<String>>::new();
         for edge in edges {
             let (Some(source), Some(target)) = (
-                paths.get(&edge.edge.from_occurrence),
-                paths.get(&edge.edge.to_occurrence),
+                paths.get(&edge.from_occurrence),
+                paths.get(&edge.to_occurrence),
             ) else {
                 return Err(verified_analysis_unavailable(
                     "coupling",
@@ -316,12 +316,12 @@ pub async fn handle_inheritance_depth(
         let mut parents = HashMap::<SymbolOccurrenceId, Vec<SymbolOccurrenceId>>::new();
         let mut hierarchy_symbols = HashSet::new();
         for edge in edges {
-            hierarchy_symbols.insert(edge.edge.from_occurrence.clone());
-            hierarchy_symbols.insert(edge.edge.to_occurrence.clone());
+            hierarchy_symbols.insert(edge.from_occurrence.clone());
+            hierarchy_symbols.insert(edge.to_occurrence.clone());
             parents
-                .entry(edge.edge.from_occurrence)
+                .entry(edge.from_occurrence)
                 .or_default()
-                .push(edge.edge.to_occurrence);
+                .push(edge.to_occurrence);
         }
         symbols.retain(|symbol| hierarchy_symbols.contains(&symbol.occurrence));
         let mut memo = HashMap::<SymbolOccurrenceId, u64>::new();

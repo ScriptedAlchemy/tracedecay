@@ -62,10 +62,15 @@ fn refresh_unavailable(tool_name: &str) -> TraceDecayError {
     }
 }
 
+/// Joins the refresh owner of the store this call wrote.
+///
+/// `project_wake` and `user_wake` are the execution server's owners. A
+/// selected project is that server, so its wake is the project owner, not a
+/// reason to ignore it. A missing owner is unavailable. There is no fallback
+/// onto the other scope or onto some other project's scheduler.
 pub async fn join_required_live_transcript_refresh(
     tool_name: &str,
     arguments: &Value,
-    selected_project_owner: bool,
     project_wake: Option<&dyn SessionRefreshWorkerPort>,
     user_wake: Option<&dyn SessionRefreshWorkerPort>,
 ) -> Result<LiveTranscriptRefreshJoin> {
@@ -73,9 +78,8 @@ pub async fn join_required_live_transcript_refresh(
         return Ok(LiveTranscriptRefreshJoin::NotRequired);
     };
     let wake = match scope {
-        LiveTranscriptRefreshScope::Project if !selected_project_owner => project_wake,
+        LiveTranscriptRefreshScope::Project => project_wake,
         LiveTranscriptRefreshScope::User => user_wake,
-        LiveTranscriptRefreshScope::Project => None,
     }
     .ok_or_else(|| refresh_unavailable(tool_name))?;
     if wake
@@ -90,16 +94,73 @@ pub async fn join_required_live_transcript_refresh(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
     use serde_json::json;
+    use tracedecay_contracts::{SessionTemporalRefreshWakeFuture, SessionTemporalRefreshWakePort};
+    use tracedecay_sessions::serving::{
+        SessionProjectionServingState, SessionProjectionServingStatus,
+        SessionProjectionServingStatusPort,
+    };
+
+    use super::LiveTranscriptRefreshJoin;
 
     use tracedecay_contracts::UnavailableSessionTemporalRefreshWake;
+
+    /// Refresh owner whose publication is the state after `wake_and_wait`.
+    struct PublishingRefresh {
+        published: AtomicBool,
+    }
+
+    impl PublishingRefresh {
+        fn idle() -> Self {
+            Self {
+                published: AtomicBool::new(false),
+            }
+        }
+
+        fn published(&self) -> bool {
+            self.published.load(Ordering::Acquire)
+        }
+    }
+
+    impl SessionTemporalRefreshWakePort for PublishingRefresh {
+        fn wake(&self) -> bool {
+            self.published.store(true, Ordering::Release);
+            true
+        }
+
+        fn is_unavailable(&self) -> bool {
+            false
+        }
+
+        fn wake_and_wait_until_idle(
+            &self,
+            _timeout: Duration,
+        ) -> SessionTemporalRefreshWakeFuture<'_> {
+            let published = self.wake();
+            Box::pin(async move { published })
+        }
+    }
+
+    impl SessionProjectionServingStatusPort for PublishingRefresh {
+        fn serving_status(&self) -> SessionProjectionServingStatus {
+            SessionProjectionServingStatus {
+                state: SessionProjectionServingState::Current,
+                last_progress_at_unix_micros: None,
+                backlog: 0,
+                blocker: None,
+                retry_class: None,
+            }
+        }
+    }
 
     #[tokio::test]
     async fn completed_hook_ingest_fails_when_its_refresh_owner_is_unavailable() {
         let error = super::join_required_live_transcript_refresh(
             "tracedecay_hook_runtime",
             &json!({"action": "ingest_transcript"}),
-            false,
             Some(&UnavailableSessionTemporalRefreshWake),
             None,
         )
@@ -121,11 +182,11 @@ mod tests {
 
     #[tokio::test]
     async fn user_scope_never_falls_back_to_the_project_refresh_owner() {
+        let project = PublishingRefresh::idle();
         let error = super::join_required_live_transcript_refresh(
             "tracedecay_hook_runtime",
             &json!({"action": "ingest_transcript", "user_scope": true}),
-            false,
-            Some(&UnavailableSessionTemporalRefreshWake),
+            Some(&project),
             None,
         )
         .await
@@ -135,24 +196,55 @@ mod tests {
             error.hook_runtime_context().map(|context| context.0),
             Some("temporal_refresh_unavailable")
         );
+        assert!(
+            !project.published(),
+            "user ingest must not publish through the project refresh owner"
+        );
     }
 
     #[tokio::test]
-    async fn selected_project_never_uses_the_active_projects_refresh_owner() {
-        let active_project_wake = UnavailableSessionTemporalRefreshWake;
+    async fn project_ingest_does_not_publish_through_the_user_refresh_owner() {
+        let user = PublishingRefresh::idle();
         let error = super::join_required_live_transcript_refresh(
             "tracedecay_hook_runtime",
             &json!({"action": "ingest_transcript"}),
-            true,
-            Some(&active_project_wake),
             None,
+            Some(&user),
         )
         .await
-        .expect_err("selected project must require its own refresh owner");
+        .expect_err("project ingest must require the project refresh owner");
 
         assert_eq!(
             error.hook_runtime_context().map(|context| context.0),
             Some("temporal_refresh_unavailable")
+        );
+        assert!(
+            !user.published(),
+            "project ingest must not publish through the user refresh owner"
+        );
+    }
+
+    #[tokio::test]
+    async fn hook_ingest_joins_the_project_refresh_owner() {
+        let project = PublishingRefresh::idle();
+        let user = PublishingRefresh::idle();
+        let joined = super::join_required_live_transcript_refresh(
+            "tracedecay_hook_runtime",
+            &json!({"action": "ingest_transcript"}),
+            Some(&project),
+            Some(&user),
+        )
+        .await
+        .expect("project hook ingest must join its refresh owner");
+
+        assert_eq!(joined, LiveTranscriptRefreshJoin::PublicationJoined);
+        assert!(
+            project.published(),
+            "hook ingest must publish through the project refresh owner"
+        );
+        assert!(
+            !user.published(),
+            "project hook ingest must not also publish through the user owner"
         );
     }
 }

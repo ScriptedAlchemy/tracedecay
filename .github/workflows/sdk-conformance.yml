@@ -1,8 +1,8 @@
 name: SDK conformance
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [master]
     paths:
       - ".github/workflows/**"
       - ".github/release-targets.json"
@@ -23,8 +23,7 @@ on:
       - "scripts/plan-release-recovery.py"
       - "scripts/test-plan-release-recovery.py"
       - "tests/release_safety_test.sh"
-  push:
-    branches: [master]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -35,7 +34,6 @@ concurrency:
 
 jobs:
   publish-workflow-policy:
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -70,7 +68,6 @@ jobs:
           .github/workflows/release-please.yml
           .github/workflows/release-pr-integrity.yml
   packages:
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -91,7 +88,6 @@ jobs:
         working-directory: sdks/typescript
 
   production-router:
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

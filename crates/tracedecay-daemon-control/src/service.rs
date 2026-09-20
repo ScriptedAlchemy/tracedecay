@@ -26,7 +26,7 @@ mod tests;
 #[allow(clippy::expect_used)]
 mod update_restore_tests;
 
-pub use probe::{DaemonProcessProofV1, daemon_reachable};
+pub use probe::{DaemonProcessProofV1, daemon_reachable, daemon_socket_connectable};
 pub use unit_file::installed_service_socket_path;
 
 use probe::{
@@ -522,7 +522,6 @@ impl DaemonServiceSpec {
              [Service]\n\
              Type=simple\n\
              Environment=\"PATH={}\"\n\
-             Environment=\"MALLOC_ARENA_MAX=2\"\n\
              ExecStart={} daemon run --socket {}{}\n\
              # Restart=always (not on-failure): come back after OOM SIGKILL,\n\
              # crash, or a clean-but-unexpected exit. A looping daemon is\n\

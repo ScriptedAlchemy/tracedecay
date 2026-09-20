@@ -841,6 +841,10 @@ impl ProfileHostAdmissionReplayWorker {
                         // Non-retryable failure: stop until the next explicit kick.
                         break;
                     }
+                    ReplayPassDecision::TerminalNoop => {
+                        consecutive_retryable = 0;
+                        break;
+                    }
                     ReplayPassDecision::Requeue => {
                         consecutive_retryable = 0;
                     }
@@ -1388,6 +1392,43 @@ mod tests {
         .await
         .expect("pending no-progress replay must back off instead of spinning");
         assert!(registry.pass_count(&db_path).await <= 3);
+        registry.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn not_applicable_pending_record_does_not_back_off() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+        let (runtime, _) =
+            tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&db_path).unwrap();
+        let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
+        broker.admit("test:pending", b"pending").await.unwrap();
+        let registry = ProfileHostAdmissionReplayRegistry::default();
+        let pass_override = Arc::new(|| {
+            Box::pin(async { HostAdmissionOutcome::not_applicable("code_index_not_applicable") })
+                as std::pin::Pin<Box<dyn std::future::Future<Output = HostAdmissionOutcome> + Send>>
+        });
+
+        registry
+            .ensure_with_pass_override(&db_path, &profile_root, &broker, pass_override)
+            .await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while registry.pass_count(&db_path).await == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("profile replay must attempt the not-applicable record");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let passes = registry.pass_count(&db_path).await;
+        assert!(passes >= 1);
+        assert_eq!(registry.backoff_count(&db_path).await, 0);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        assert_eq!(registry.pass_count(&db_path).await, passes);
+        assert_eq!(registry.backoff_count(&db_path).await, 0);
         registry.shutdown().await;
     }
 

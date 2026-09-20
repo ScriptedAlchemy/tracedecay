@@ -77,6 +77,18 @@ const MAX_CACHED_PROJECT_SERVERS: usize = 8;
 const MAX_TRACKED_PROJECT_OPEN_TASKS: usize = MAX_CACHED_PROJECT_SERVERS;
 const MAX_CACHED_PROJECT_OPEN_FAILURES: usize = 64;
 const PROJECT_OPEN_REQUEST_DEADLINE: Duration = Duration::from_millis(500);
+
+/// Instant a foreground request stops waiting for an open it has already claimed.
+///
+/// Measured from the claim, not from connection arrival. Route enrollment and
+/// git discovery have their own bounds. Charging them to this deadline made a
+/// restart's first request answer warming for a store whose open had already
+/// recorded `reset_required`: the connection spent the budget before it joined
+/// the watch, so the publication wait returned immediately and never read the
+/// refusal.
+fn project_open_publication_deadline(claimed_at: tokio::time::Instant) -> tokio::time::Instant {
+    claimed_at + PROJECT_OPEN_REQUEST_DEADLINE
+}
 /// One budget for every blocking repository probe a route resolution runs.
 ///
 /// Route resolution reads the repository's topology, enrollment marker, and

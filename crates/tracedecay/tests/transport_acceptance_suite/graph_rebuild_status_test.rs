@@ -25,6 +25,14 @@ use tracedecay_mcp::JsonRpcResponse;
 
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(90);
 
+/// Pause between status polls while the daemon reconciles.
+///
+/// Yielding instead spun the awaiting task against the very worker it waits
+/// for: the loop issued roughly 290 `tracedecay_status` calls a second, and on
+/// a four-core runner that is a whole core spent recomputing freshness rather
+/// than sealing the generation under it.
+const POLL_INTERVAL: Duration = Duration::from_millis(25);
+
 fn git(project: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(["-c", "core.hooksPath=.git/no-hooks"])
@@ -87,12 +95,52 @@ async fn tool(
     name: &str,
     arguments: Value,
 ) -> Value {
-    tool_payload(
+    let payload = tool_payload(
         &harness
             .call_tool(project, name, arguments)
             .await
             .unwrap_or_else(|error| panic!("{name} failed: {error}")),
-    )
+    );
+    let Some(handle) = payload["truncated"]
+        .as_bool()
+        .unwrap_or(false)
+        .then(|| payload["handle"].as_str())
+        .flatten()
+    else {
+        return payload;
+    };
+    // A response over the budget answers with a preview plus a retrieve
+    // handle, not with the payload. A generation-scale search page crosses
+    // that budget on its cursor and candidate provenance alone, so shrinking
+    // the page cannot keep it under; reassemble the stored response exactly as
+    // an agent does before reading the top-level fields.
+    let mut content = String::new();
+    let mut offset = 0_u64;
+    loop {
+        let page = tool_payload(
+            &harness
+                .call_tool(
+                    project,
+                    "tracedecay_retrieve",
+                    json!({ "handle": handle, "offset": offset, "format": "json" }),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("tracedecay_retrieve failed: {error}")),
+        );
+        content.push_str(
+            page["content"]
+                .as_str()
+                .unwrap_or_else(|| panic!("retrieved page without content: {page}")),
+        );
+        if page["has_more"] != Value::Bool(true) {
+            break;
+        }
+        offset = page["next_offset"]
+            .as_u64()
+            .expect("retrieved page next_offset");
+    }
+    serde_json::from_str(&content)
+        .unwrap_or_else(|error| panic!("{name} retrieved invalid JSON: {error}; text={content}"))
 }
 
 async fn status(harness: &ProductionProjectCompositionHarnessV1, project: &Path) -> Value {
@@ -116,9 +164,10 @@ async fn search(
     project: &Path,
     query: &str,
 ) -> Value {
-    // Keep the page tiny: a generation-scale refresh batch otherwise returns
-    // multi-dozen-KiB candidate bodies that MCP truncates into a handle, and
-    // the wait helpers never see top-level `results` / `code_generation`.
+    // Keep the page tiny so the common answer fits the response budget; a
+    // page that still crosses it is reassembled through its retrieve handle in
+    // `tool`, so the wait helpers always see top-level `results` and
+    // `code_generation`.
     tool(
         harness,
         project,
@@ -168,7 +217,7 @@ async fn wait_for_current_generation(
                     return current_generation;
                 }
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(POLL_INTERVAL).await;
         }
     })
     .await
@@ -219,19 +268,34 @@ async fn wait_for_background_refresh(
                 }
                 return;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(POLL_INTERVAL).await;
         }
     })
     .await
     .unwrap_or_else(|_| panic!("reopen omitted background-refresh status: {last_status}"));
 }
 
+/// Files in the batch whose arrival the background refresh has to work through.
+///
+/// The batch only has to keep one refresh observable across a few status polls.
+/// At 768 files it instead indexed 98,304 symbols into 455 million lexical
+/// units and 645 MB on disk, which on a four-core runner takes ~61s to commit:
+/// no `RECEIPT_TIMEOUT` can rescue that, the journey simply cannot finish. 96
+/// files of 16 symbols still take seconds, so `partial_refresh_in_progress` is
+/// sampled many times over at [`POLL_INTERVAL`]; the 128 symbols a file used to
+/// carry bought no extra samples and cost eight times the commit.
+///
+/// The batch is also retired in the offline commit before the first reopen, so
+/// its weight is paid by the refresh it exists for and not again by two reopens
+/// bounded by a publish gate this journey cannot raise.
+const REFRESH_BATCH_FILES: u32 = 96;
+
 fn install_background_batch(isolation_root: &Path, project: &Path) {
     let staging = isolation_root.join("refresh-batch-staging");
     fs::create_dir_all(&staging).expect("background batch staging directory");
-    for file_index in 0..768_u32 {
+    for file_index in 0..REFRESH_BATCH_FILES {
         let mut source = String::new();
-        for symbol_index in 0..128_u32 {
+        for symbol_index in 0..16_u32 {
             writeln!(
                 source,
                 "pub fn refresh_probe_{file_index:04}_{symbol_index:03}(input: u32) -> u32 {{ input + {symbol_index} }}"
@@ -299,12 +363,25 @@ async fn background_refresh_and_reopen_report_only_servable_generations_inner() 
     );
     harness.shutdown().await;
 
+    // The batch has done its only job: one background refresh stayed
+    // observable across many status polls. Leaving it installed makes every
+    // later reopen re-index the whole batch inside
+    // `ProductionProjectCompositionHarnessV1::open`'s fixed 20s publish gate, a
+    // budget this journey neither controls nor asserts on: on a contended
+    // four-core runner that reopen exhausts the gate and the open fails before
+    // any reopen assertion runs. Retiring the batch in the same offline commit
+    // keeps both reopen assertions exact -- a source change the closed daemon
+    // never saw, then a quiet checkout -- at the cost they actually need.
+    fs::remove_dir_all(project.join("src/refresh_batch")).expect("retire the background batch");
     fs::write(
         project.join("src/after_reopen.rs"),
         "pub fn after_reopen() -> &'static str { \"current\" }\n",
     )
     .expect("post-shutdown source");
-    commit_all(&project, "change source while daemon is closed");
+    commit_all(
+        &project,
+        "retire the batch and change source while daemon is closed",
+    );
     let reopened_revision = head(&project);
 
     let reopened = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])

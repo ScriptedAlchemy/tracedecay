@@ -303,7 +303,13 @@ fn enrolled_remote_client_rejects_an_untrusted_private_authority_and_isolates_en
         .json(&json!({"grant": grant, "admission": admission}))
         .send()
         .unwrap();
-    assert_eq!(provisioned.status(), reqwest::StatusCode::NO_CONTENT);
+    let provision_status = provisioned.status();
+    let provision_body = provisioned.text().unwrap_or_default();
+    assert_eq!(
+        provision_status,
+        reqwest::StatusCode::NO_CONTENT,
+        "{provision_body}"
+    );
 
     let request = enrollment_request(&grant);
     let untrusted_authority = EnrolledRemoteClient::new_with_root_certificate(

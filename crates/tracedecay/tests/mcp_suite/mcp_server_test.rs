@@ -7,9 +7,18 @@
 //! helpers live in `mcp_server_test/support.rs`.
 
 mod analytics_test;
+mod automation_run_artifact_view_test;
+mod automation_run_view_test;
+mod branch_list_test;
 mod hooks_branch_test;
+mod multi_root_scope_set_read_test;
 mod protocol_test;
+mod retrieve_behavior_test;
 pub(crate) mod support;
+mod unused_imports_test;
+mod workflow_create;
+mod workflow_delete_test;
+mod workflow_update_test;
 
 // Backwards-compatible path for `crate::mcp_server_test::…` consumers.
 pub(crate) use support::run_client_connection_with_messages;

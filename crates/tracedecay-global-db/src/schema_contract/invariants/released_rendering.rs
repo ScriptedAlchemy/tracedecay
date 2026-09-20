@@ -33,7 +33,10 @@
 //! that owns the transaction. A row disagreeing on identity, anchor, receipt,
 //! output provider or message id, or carrying a digest that matches neither
 //! this binary's output nor its own output row is not a rendering difference,
-//! and stays refused, named.
+//! and stays refused, named. A current digest over a mutable row that is still
+//! that shipped rendering is the same admission: the write that stamped the
+//! digest did not finish. A row that matches neither rendering is tamper and
+//! stays refused.
 //!
 //! Convergence has two outcomes because rendering does. Some released
 //! renderings are content the current LCM privacy sanitizer withholds, a
@@ -79,7 +82,7 @@ pub(super) struct ReleasedRenderingLedger {
 }
 
 impl ReleasedRenderingLedger {
-    fn record(&self, projection: &SessionMessageProjection) {
+    pub(super) fn record(&self, projection: &SessionMessageProjection) {
         let mut outputs = self
             .outputs
             .lock()
@@ -599,6 +602,313 @@ mod tests {
             converged,
             "a second open must be a no-op"
         );
+    }
+
+    /// A beta-era interrupted convergence could stamp the current digest while
+    /// leaving the previous mutable message rendering behind. The immutable
+    /// observation plus the uniquely owned current provenance authorize the
+    /// current row, so reopening must finish that projection write rather than
+    /// degrade ProfileSessions forever.
+    #[tokio::test]
+    async fn current_provenance_repairs_its_stale_output_row() {
+        let directory = TempDir::new().unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .unwrap();
+        seed(&runtime, &observation()).await.unwrap();
+        let database = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+
+        let snapshot = database.read_snapshot().await.unwrap();
+        let current = stored_output(&snapshot, RECORD_ID).await;
+        drop(snapshot);
+
+        let transaction = database
+            .runtime_database()
+            .begin_write_transaction("seed current provenance over a stale output")
+            .await
+            .unwrap();
+        downgrade_to_released(
+            &transaction,
+            released()["released_output_digest"].as_str().unwrap(),
+        )
+        .await;
+        transaction
+            .execute(
+                "UPDATE observation_projection_provenance SET output_digest = ?2
+                 WHERE projector_version = ?1 AND observation_id = ?3",
+                tracedecay_runtime_core::params![
+                    SESSION_MESSAGE_PROJECTOR_VERSION,
+                    current.digest.as_str(),
+                    canonical_observation_id()
+                ],
+            )
+            .await
+            .expect("stamp current provenance digest only");
+        transaction.commit().await.unwrap();
+
+        let snapshot = database.read_snapshot().await.unwrap();
+        let interrupted = stored_output(&snapshot, RECORD_ID).await;
+        drop(snapshot);
+        assert_eq!(interrupted.digest, current.digest);
+        assert_ne!(
+            interrupted, current,
+            "the fixture must carry current provenance over a stale output row"
+        );
+
+        super::super::ensure_authority_invariants(database.runtime_database(), true, false)
+            .await
+            .expect("current provenance must repair its stale mutable output row");
+
+        let snapshot = database.read_snapshot().await.unwrap();
+        assert_eq!(stored_output(&snapshot, RECORD_ID).await, current);
+    }
+
+    /// The digest covers the message, not its LCM raw twin. A twin can be
+    /// rewritten under a still-current message and provenance; reopen has to
+    /// restore the twin a fresh projection write stores.
+    #[tokio::test]
+    async fn current_provenance_repairs_a_stale_raw_twin() {
+        let directory = TempDir::new().unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .unwrap();
+        seed(&runtime, &observation()).await.unwrap();
+        let database = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        let snapshot = database.read_snapshot().await.unwrap();
+        let current = stored_output(&snapshot, RECORD_ID).await;
+        drop(snapshot);
+
+        let transaction = database
+            .runtime_database()
+            .begin_write_transaction("stale the raw twin under current provenance")
+            .await
+            .unwrap();
+        let updated = transaction
+            .execute(
+                "UPDATE lcm_raw_messages
+                 SET content = 'stale raw body', content_hash = 'stale',
+                     snippet_text = 'stale raw body', index_text = 'stale raw body'
+                 WHERE provider = 'codex' AND message_id = ?1",
+                tracedecay_runtime_core::params![RECORD_ID],
+            )
+            .await
+            .expect("stale the raw twin");
+        assert_eq!(updated, 1);
+        transaction.commit().await.unwrap();
+
+        let snapshot = database.read_snapshot().await.unwrap();
+        let stale = stored_output(&snapshot, RECORD_ID).await;
+        drop(snapshot);
+        assert_eq!(stale.digest, current.digest);
+        assert_eq!(stale.text, current.text);
+        assert_eq!(stale.raw_index_text, "stale raw body");
+
+        super::super::ensure_authority_invariants(database.runtime_database(), false, false)
+            .await
+            .expect("current provenance must repair its stale raw twin");
+
+        let snapshot = database.read_snapshot().await.unwrap();
+        assert_eq!(stored_output(&snapshot, RECORD_ID).await, current);
+    }
+
+    /// A twin whose content survived but whose derived columns did not still
+    /// fails hydration with `PayloadIntegrityMismatch`. Content equality alone
+    /// is not the twin a fresh projection write stores.
+    #[tokio::test]
+    async fn current_provenance_repairs_a_raw_twin_with_a_stale_hash() {
+        let directory = TempDir::new().unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .unwrap();
+        seed(&runtime, &observation()).await.unwrap();
+        let database = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        let snapshot = database.read_snapshot().await.unwrap();
+        let current = stored_output(&snapshot, RECORD_ID).await;
+        drop(snapshot);
+
+        let transaction = database
+            .runtime_database()
+            .begin_write_transaction("stale the raw twin derivations")
+            .await
+            .unwrap();
+        let updated = transaction
+            .execute(
+                "UPDATE lcm_raw_messages
+                 SET content_hash = 'stale', index_text = 'stale index'
+                 WHERE provider = 'codex' AND message_id = ?1",
+                tracedecay_runtime_core::params![RECORD_ID],
+            )
+            .await
+            .expect("stale the derived columns");
+        assert_eq!(updated, 1);
+        transaction.commit().await.unwrap();
+
+        super::super::ensure_authority_invariants(database.runtime_database(), false, false)
+            .await
+            .expect("current provenance must repair a twin with stale derivations");
+
+        let snapshot = database.read_snapshot().await.unwrap();
+        assert_eq!(stored_output(&snapshot, RECORD_ID).await, current);
+        let mut rows = snapshot
+            .query(
+                "SELECT content_hash, content FROM lcm_raw_messages
+                 WHERE provider = 'codex' AND message_id = ?1",
+                tracedecay_runtime_core::params![RECORD_ID],
+            )
+            .await
+            .expect("read the repaired twin");
+        let row = rows
+            .next()
+            .await
+            .expect("read the repaired twin")
+            .expect("raw twin row");
+        assert_eq!(
+            row.get::<String>(0).unwrap(),
+            tracedecay_lcm::retrieval_content::projected_content_hash(
+                &row.get::<String>(1).unwrap()
+            ),
+            "the repaired twin must carry the hash its content hydrates against"
+        );
+    }
+
+    /// The repair above is the shipped rendering, not any disagreement under
+    /// current provenance. A body neither this binary nor a release wrote is
+    /// tamper: the audit refuses it and does not rewrite the row.
+    #[tokio::test]
+    async fn current_provenance_refuses_a_tampered_output_row() {
+        let directory = TempDir::new().unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .unwrap();
+        seed(&runtime, &observation()).await.unwrap();
+        let database = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+
+        let transaction = database
+            .runtime_database()
+            .begin_write_transaction("tamper the projected message body")
+            .await
+            .unwrap();
+        let updated = transaction
+            .execute(
+                "UPDATE session_messages SET text = 'tampered projection body'
+                 WHERE provider = 'codex' AND message_id = ?1",
+                tracedecay_runtime_core::params![RECORD_ID],
+            )
+            .await
+            .expect("tamper projected message");
+        assert_eq!(updated, 1);
+        transaction
+            .execute("DELETE FROM authority_audit_checkpoints", ())
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        let error =
+            super::super::ensure_authority_invariants(database.runtime_database(), true, false)
+                .await
+                .expect_err(
+                    "a tampered projected message under current provenance must stay refused",
+                );
+        let message = error.to_string();
+        assert!(
+            message.contains("projection output rows disagree with deterministic output"),
+            "{message}"
+        );
+
+        let snapshot = database.read_snapshot().await.unwrap();
+        assert_eq!(
+            stored_output(&snapshot, RECORD_ID).await.text,
+            "tampered projection body",
+            "refusal must not rewrite the tampered row"
+        );
+    }
+
+    #[tokio::test]
+    async fn current_provenance_restores_its_missing_session_row() {
+        let directory = TempDir::new().unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .unwrap();
+        seed(&runtime, &observation()).await.unwrap();
+        let database = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        let snapshot = database.read_snapshot().await.unwrap();
+        let current = stored_output(&snapshot, RECORD_ID).await;
+        drop(snapshot);
+
+        let transaction = database
+            .runtime_database()
+            .begin_write_transaction("move the projected session row to a stale identity")
+            .await
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO sessions (
+                    provider, session_id, project_key, project_path, title,
+                    started_at, ended_at, transcript_path, metadata_json,
+                    parent_session_id, is_subagent, agent_id, parent_tool_use_id
+                 )
+                 SELECT provider, ?2, project_key, project_path, title,
+                    started_at, ended_at, transcript_path, metadata_json,
+                    parent_session_id, is_subagent, agent_id, parent_tool_use_id
+                 FROM sessions WHERE provider = 'codex' AND session_id = ?1",
+                tracedecay_runtime_core::params![SESSION, "stale-session-identity"],
+            )
+            .await
+            .expect("create stale session identity");
+        transaction
+            .execute(
+                "UPDATE session_messages SET session_id = ?2
+                 WHERE provider = 'codex' AND session_id = ?1",
+                tracedecay_runtime_core::params![SESSION, "stale-session-identity"],
+            )
+            .await
+            .expect("move projected message to stale session identity");
+        let removed = transaction
+            .execute(
+                "DELETE FROM sessions WHERE provider = 'codex' AND session_id = ?1",
+                tracedecay_runtime_core::params![SESSION],
+            )
+            .await
+            .expect("remove expected projected session");
+        assert_eq!(removed, 1);
+        transaction.commit().await.unwrap();
+        let snapshot = database.read_snapshot().await.unwrap();
+        let mut rows = snapshot
+            .query(
+                "SELECT COUNT(*) FROM sessions WHERE provider = 'codex' AND session_id = ?1",
+                tracedecay_runtime_core::params![SESSION],
+            )
+            .await
+            .expect("count missing session");
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            0
+        );
+        drop(rows);
+        drop(snapshot);
+
+        super::super::ensure_authority_invariants(database.runtime_database(), true, false)
+            .await
+            .expect("current provenance must restore its missing session row");
+
+        let restored = database
+            .get_session("codex", SESSION)
+            .await
+            .expect("session restored from immutable projection");
+        assert_eq!(restored.provider, "codex");
+        assert_eq!(restored.session_id, SESSION);
+        let snapshot = database.read_snapshot().await.unwrap();
+        assert_eq!(stored_output(&snapshot, RECORD_ID).await, current);
     }
 
     /// One observation's projection authority: whether it still owns a served

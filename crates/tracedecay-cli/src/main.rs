@@ -18,11 +18,12 @@ static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocato
 // Opt-in allocator features (see Cargo.toml). Exactly one global allocator
 // may exist per binary, so overlapping selections resolve by fixed precedence
 // rather than a compile error: hotpath-alloc's counting allocator wins in
-// measurement builds, then jemalloc, then mimalloc. The default build keeps
-// the system allocator (glibc malloc on Linux), whose retained-arena behavior
-// the daemon compensates for with `malloc_trim` at maintenance boundaries and
-// `MALLOC_ARENA_MAX=2` in the installed service unit; neither compensation is
-// load-bearing under jemalloc or mimalloc.
+// measurement builds, then jemalloc, then mimalloc. `production` selects
+// mimalloc (see Cargo.toml for the measurements); only a build that opts out
+// of it keeps the system allocator, and the installed service unit must not
+// cap glibc's arenas either way: `MALLOC_ARENA_MAX=2` once did, to bound
+// retained memory, and put 60% of a 20-worker daemon's CPU into two arena
+// locks while RSS still reached 15 GB.
 #[cfg(all(feature = "alloc-jemalloc", not(feature = "hotpath-alloc")))]
 #[global_allocator]
 static JEMALLOC_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -522,9 +523,14 @@ fn hotpath_guard() -> hotpath::HotpathGuard {
     // CPU sampling remains available only by explicit operator request:
     // `HOTPATH_REPORT` (e.g. `functions-cpu`) takes precedence over this
     // default exclusion.
-    hotpath::HotpathGuardBuilder::new("tracedecay")
-        .sections_exclude(vec![hotpath::Section::FunctionsCpu])
-        .build()
+    // Hotpath 0.24 reads HOTPATH_FUNCTIONS_LIMIT only when the exit report is
+    // built. Live functions_timing and functions_alloc use the builder limit
+    // captured when this guard starts, so the same env is applied here.
+    tracedecay_hotpath_guard::with_functions_display_limit(
+        hotpath::HotpathGuardBuilder::new("tracedecay")
+            .sections_exclude(vec![hotpath::Section::FunctionsCpu]),
+    )
+    .build()
 }
 
 #[cfg(feature = "hotpath")]

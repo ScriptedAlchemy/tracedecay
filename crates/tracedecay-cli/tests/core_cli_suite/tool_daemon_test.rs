@@ -15,7 +15,8 @@ use crate::common::{
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_contracts::{
-    ApplicationProblem, ApplicationProblemEnvelope, RequestId, ResultContractRef, SafeDiagnostic,
+    ApplicationProblem, ApplicationProblemEnvelope, RUNTIME_MOUNTING_REASON_CODE, RequestId,
+    ResultContractRef, SafeDiagnostic,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_hooks::{HookEventV2, HookHostV1, HookSpoolConfigV1, HookSpoolV1};
@@ -1937,10 +1938,9 @@ fn spawn_scripted_result_sequence_daemon(
     }
 }
 
-/// The MCP tool result the daemon renders for a project route whose retained
-/// owner is still mounting behind the core publication: `isError` with the
-/// typed pre-admission problem and its after-delay retry directive.
-fn mounting_owner_tool_result(retry_after_millis: u64) -> Value {
+/// The MCP tool result the daemon renders for a completed pre-admission
+/// problem whose retry directive is `after_delay`.
+fn retry_directed_tool_result(code: &str, message: &str, retry_after_millis: u64) -> Value {
     let envelope = ApplicationProblemEnvelope::new(
         ResultContractRef::new(
             SchemaId::new("schema.retained.fact_store_add.result").expect("schema id"),
@@ -1948,15 +1948,9 @@ fn mounting_owner_tool_result(retry_after_millis: u64) -> Value {
         )
         .expect("result contract"),
         RequestId::new("request.cli.tool.mounting-owner").expect("request id"),
-        ApplicationProblem::unavailable(
-            SafeDiagnostic::new(
-                "application.surface.unavailable",
-                "The project runtime for this operation is still mounting",
-            )
-            .expect("diagnostic"),
-        ),
+        ApplicationProblem::unavailable(SafeDiagnostic::new(code, message).expect("diagnostic")),
     )
-    .expect("mounting owner envelope")
+    .expect("retry-directed envelope")
     .with_retry_after_millis(Some(retry_after_millis))
     .expect("retry delay");
     json!({
@@ -1967,6 +1961,16 @@ fn mounting_owner_tool_result(retry_after_millis: u64) -> Value {
         "isError": true,
         "problem": serde_json::to_value(envelope.problem.as_ref()).expect("problem record"),
     })
+}
+
+/// The MCP tool result for a project route whose retained owner is still
+/// mounting behind the core publication.
+fn mounting_owner_tool_result(retry_after_millis: u64) -> Value {
+    retry_directed_tool_result(
+        RUNTIME_MOUNTING_REASON_CODE,
+        "The project runtime for this operation is still mounting",
+        retry_after_millis,
+    )
 }
 
 fn fact_store_add_args() -> String {
@@ -2024,6 +2028,8 @@ fn tool_waits_through_an_after_delay_unavailable_within_its_deadline() {
         vec![
             mounting_owner_tool_result(RETRY_AFTER_MILLIS),
             mounting_owner_tool_result(RETRY_AFTER_MILLIS),
+            mounting_owner_tool_result(RETRY_AFTER_MILLIS),
+            mounting_owner_tool_result(RETRY_AFTER_MILLIS),
             json!({
                 "content": [{
                     "type": "text",
@@ -2051,25 +2057,24 @@ fn tool_waits_through_an_after_delay_unavailable_within_its_deadline() {
         "stdout must carry the mounted owner's answer, got:\n{stdout}"
     );
     assert!(
-        !stdout.contains("application.surface.unavailable"),
+        !stdout.contains(RUNTIME_MOUNTING_REASON_CODE),
         "a ridden-out mounting state must not reach the caller, got:\n{stdout}"
     );
     let attempts = std::iter::from_fn(|| daemon.requests.try_recv().ok()).count();
     assert_eq!(
-        attempts, 3,
-        "the CLI must re-send the same request until the owner answers"
+        attempts, 5,
+        "the CLI must re-send the same mounting request until the owner answers"
     );
     assert!(
-        elapsed >= Duration::from_millis(2 * RETRY_AFTER_MILLIS),
+        elapsed >= Duration::from_millis(4 * RETRY_AFTER_MILLIS),
         "each retry must wait the delay the directive names, took {elapsed:?}"
     );
 }
 
-/// The retry directive is honoured only inside the caller's budget: once the
-/// deadline cannot hold another delay, the daemon's typed state is the answer
-/// and the process fails typed instead of retrying past its budget.
+/// A completed authority unavailable is the daemon's answer. Its `after_delay`
+/// directive is for the caller; the CLI must not reconnect on it.
 #[test]
-fn tool_fails_typed_when_an_after_delay_unavailable_outlives_its_deadline() {
+fn tool_returns_a_completed_authority_result_without_resending() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let socket_dir = TempDir::new().unwrap();
@@ -2081,18 +2086,22 @@ fn tool_fails_typed_when_an_after_delay_unavailable_outlives_its_deadline() {
     let daemon = spawn_scripted_result_sequence_daemon(
         socket_path.clone(),
         "tracedecay_fact_store_add",
-        vec![mounting_owner_tool_result(250)],
+        vec![retry_directed_tool_result(
+            "application.retained.authority-unavailable",
+            "The retained operation authority is unavailable: history is not available",
+            250,
+        )],
     );
     let started = Instant::now();
     let output = run_command_with_timeout(
-        fact_store_add_command(&home_path, &project_path, &socket_path, "1500"),
+        fact_store_add_command(&home_path, &project_path, &socket_path, "10000"),
         CLI_CHILD_KILL_TIMEOUT,
     );
     let elapsed = started.elapsed();
 
     assert!(
         !output.status.success(),
-        "an owner that never mounts within the deadline must fail\nstdout:\n{}\nstderr:\n{}",
+        "a completed authority unavailable must fail typed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -2102,8 +2111,8 @@ fn tool_fails_typed_when_an_after_delay_unavailable_outlives_its_deadline() {
     });
     assert_eq!(printed["isError"], true);
     assert_eq!(
-        printed["problem"]["code"], "application.surface.unavailable",
-        "the daemon's typed state must be surfaced once the deadline is exhausted"
+        printed["problem"]["code"], "application.retained.authority-unavailable",
+        "the daemon's completed answer must be surfaced, got:\n{stdout}"
     );
     assert_eq!(printed["problem"]["retry"], "after_delay");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2112,13 +2121,13 @@ fn tool_fails_typed_when_an_after_delay_unavailable_outlives_its_deadline() {
         "the process must fail typed, got:\n{stderr}"
     );
     let attempts = std::iter::from_fn(|| daemon.requests.try_recv().ok()).count();
-    assert!(
-        attempts >= 2,
-        "the CLI must retry within its deadline before surfacing the state, made {attempts} attempt(s)"
+    assert_eq!(
+        attempts, 1,
+        "a completed authority result must not be resent"
     );
     assert!(
-        elapsed >= Duration::from_millis(1000) && elapsed < Duration::from_secs(10),
-        "retries must stop at the deadline, not before or long after it, took {elapsed:?}"
+        elapsed < Duration::from_secs(5),
+        "the CLI must return the completed answer well before the 10s deadline, took {elapsed:?}"
     );
 }
 

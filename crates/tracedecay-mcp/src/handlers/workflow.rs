@@ -1028,8 +1028,8 @@ fn test_annotations_in_file<'a>(
                 MAX_ANNOTATION_RELATIONS,
             )?
             .into_iter()
-            .filter(|edge| markers.contains(&edge.edge.from_occurrence))
-            .map(|edge| edge.edge.to_occurrence.as_str().to_owned())
+            .filter(|edge| markers.contains(&edge.from_occurrence))
+            .map(|edge| edge.to_occurrence.as_str().to_owned())
             .collect();
         cache.insert(path.to_owned(), annotated);
     }

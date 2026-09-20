@@ -8,11 +8,6 @@
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, Write};
-
-#[cfg(feature = "hotpath")]
-type ProfiledFile = hotpath::io::InstrumentedIo<File>;
-#[cfg(not(feature = "hotpath"))]
-type ProfiledFile = File;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -111,7 +106,7 @@ pub struct FixedGitIndexRunner {
 /// exact lock file over the real index.
 pub struct NativeIndexLock {
     path: PathBuf,
-    file: ProfiledFile,
+    file: File,
     published: bool,
 }
 
@@ -235,7 +230,6 @@ impl FixedGitIndexRunner {
                     NativeGitIndexError::Io(error.to_string())
                 }
             })?;
-        let file = hotpath::io!(file, label = "usecases.git_index_tx.lock.file");
         Ok(NativeIndexLock {
             path,
             file,
@@ -538,12 +532,15 @@ impl FixedGitIndexRunner {
             bytes
         };
         hotpath::measure_block!("usecases.git_index_tx.index.write", {
-            lock.file
-                .set_permissions(candidate_permissions)
-                .and_then(|()| lock.file.rewind())
-                .and_then(|()| lock.file.set_len(0))
-                .and_then(|()| lock.file.write_all(&candidate_bytes))
-                .and_then(|()| lock.file.sync_all())
+            // `io!` is the identity without the backend, leaving a plain
+            // `&mut File` that needs no mutable binding of its own.
+            #[allow(unused_mut)]
+            let mut file = hotpath::io!(&mut lock.file, label = "usecases.git_index_tx.lock.file");
+            file.set_permissions(candidate_permissions)
+                .and_then(|()| file.rewind())
+                .and_then(|()| file.set_len(0))
+                .and_then(|()| file.write_all(&candidate_bytes))
+                .and_then(|()| file.sync_all())
                 .map_err(|error| NativeGitIndexError::Io(error.to_string()))
         })?;
         // rename either publishes atomically or reports failure without

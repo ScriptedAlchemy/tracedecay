@@ -23,7 +23,7 @@ use super::unavailable_error;
 use super::{
     BrokerStream, DaemonAuthPreface, DaemonClientDeadline, DaemonHandshake, JsonRpcError,
     JsonRpcRequest, JsonRpcResponse, PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, Result,
-    TraceDecayError, error_is_project_open_retryable,
+    TraceDecayError, error_is_project_open_retryable, tool_call_transport_error_is_retryable,
 };
 
 /// Bounded grace a client keeps reading for *after* the caller's request
@@ -462,8 +462,14 @@ pub async fn call_tool_within(
     .await
 }
 
+/// Transport errors the one-shot client rides out on its own cadence: a
+/// project open that has not finished (warming, deferred discovery, a
+/// saturated open queue) and a retained project server retired mid-response
+/// during a composition upgrade. The daemon types every one of these
+/// `retryable: true`; a client that honours only the open subset reports the
+/// upgrade window as a hard failure.
 fn is_project_open_retryable_error(error: &TraceDecayError) -> bool {
-    error_is_project_open_retryable(error)
+    error_is_project_open_retryable(error) || tool_call_transport_error_is_retryable(error)
 }
 
 /// Reconstruct a typed daemon tool refusal from the JSON-RPC error frame.
@@ -490,32 +496,29 @@ fn daemon_tool_call_error(error: JsonRpcError) -> TraceDecayError {
     }
 }
 
-/// The delay a completed tool result directs before the same request is sent
-/// again, when its typed problem is a retryable pre-admission state.
+/// The delay before re-sending a completed tool result, when that result is
+/// the publication-window mounting refusal.
 ///
-/// A project-scoped owner that registers behind the core publication (the
-/// retained memory authority, the configuration runtime) answers a
-/// `RetryDirective::AfterDelay` unavailable while it is still mounting. The
-/// daemon renders that record under the tool result's `problem` member, so
-/// the one-shot client reads the directive from the same field every MCP
-/// client does. An admitted terminal (a partial effect, a permanent owner
-/// failure) never directs a delay and is the answer.
+/// A project-scoped owner that registers behind the core publication answers
+/// `application.runtime.mounting` while it is still mounting. The daemon
+/// renders that record under the tool result's `problem` member. An admitted
+/// terminal, and every other completed problem (a retained authority that is
+/// unavailable, a saturated owner, an observed diagnostic), is the answer:
+/// its `after_delay` directive is for the caller, not a transport loop.
 fn tool_result_retry_after_delay(result: &serde_json::Value) -> Option<Duration> {
     let record: tracedecay_contracts::ApplicationProblemRecord =
         serde_json::from_value(result.get("problem")?.clone()).ok()?;
-    record.pre_admission_retry_delay()
+    record.owner_mount_resend_delay()
 }
 
 /// How long to wait before re-sending the request whose outcome is `result`,
 /// or `None` when that outcome is the answer.
 ///
-/// Two states are ridden out: the daemon's project-open refusal (a JSON-RPC
-/// error carrying the warming hint or a saturated open queue) on the client's
-/// own cadence, and a completed result whose typed problem directs an
-/// after-delay retry, on the delay the directive names. Neither is retried
-/// past `deadline`: when the budget cannot hold the wait, the daemon's own
-/// typed state, a warming project, a still-mounting authority, is the
-/// truthful answer, not the client's deadline bookkeeping.
+/// Two states are ridden out to `deadline`: the daemon's project-open refusal
+/// (a JSON-RPC error carrying the warming hint or a saturated open queue) on
+/// the client's own cadence, and a completed mounting refusal on the delay
+/// that result names. Every other completed result is returned on the first
+/// observation.
 fn project_open_retry_wait(
     result: &Result<serde_json::Value>,
     deadline: Instant,
@@ -565,8 +568,9 @@ async fn call_tool_with_project_open_retry(
 /// accepting daemon. The request deadline travels on the wire; the local read
 /// waits that deadline plus the 30s response grace. A warming project, or an
 /// owner still mounting behind its core publication, still retries for at
-/// most the 15s open grace, never past this envelope. Callers that need a
-/// different budget use [`call_default_tool_within`] or
+/// most the 15s open grace, never past this envelope. A completed result that
+/// is not that mounting refusal is returned on the first observation.
+/// Callers that need a different budget use [`call_default_tool_within`] or
 /// [`call_default_tool_awaiting_project_open`].
 pub async fn call_default_tool(
     handshake: &DaemonHandshake,
@@ -615,13 +619,10 @@ pub async fn call_default_tool_within(
 /// mount behind its core publication, until `deadline`.
 ///
 /// Bootstrap callers deliberately trigger the cold open they are waiting for,
-/// so the warming hint is progress rather than an answer: `tracedecay init`
-/// asks for a status it can only get after the open completes, and
-/// `tracedecay tool` wants the retained owner's answer, not its still-mounting
-/// state. That is the opposite of [`call_default_tool_within`], whose callers
-/// want the typed warming state returned to them, and wider than
-/// [`call_default_tool`], whose grace is sized for an already-open project
-/// rather than a first index.
+/// so a transport-level warming hint is progress rather than an answer:
+/// `tracedecay init` asks for a status it can only get after the open completes.
+/// A completed mounting refusal is the same kind of progress and is re-sent
+/// until `deadline`. Every other completed result is returned immediately.
 pub async fn call_default_tool_awaiting_project_open(
     handshake: &DaemonHandshake,
     tool_name: &str,
@@ -714,6 +715,18 @@ mod tests {
             ))
         );
         assert!(tool_call_transport_error_is_retryable(&revoked));
+        assert!(
+            super::is_project_open_retryable_error(&revoked),
+            "the one-shot client rides out a mid-response retirement like a warming open"
+        );
+        assert!(
+            super::project_open_retry_wait(
+                &Err(revoked),
+                tokio::time::Instant::now() + std::time::Duration::from_secs(5)
+            )
+            .is_some(),
+            "a revoked response is re-sent, not returned"
+        );
     }
 
     #[test]

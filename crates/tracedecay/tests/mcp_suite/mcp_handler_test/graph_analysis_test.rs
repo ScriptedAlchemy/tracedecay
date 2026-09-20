@@ -1,6 +1,10 @@
 #![cfg(feature = "test-transport")]
 
+mod diff_context_behavior;
+mod gini;
 mod graph_readiness;
+mod hotspots;
+mod recursion_behavior;
 
 use crate::common::fixture::git_run;
 use crate::support::*;
@@ -9,6 +13,7 @@ use serde_json::{Value, json};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::project::TraceDecay;
 use tracedecay_domain::errors::{Result as TraceDecayResult, TraceDecayError};
@@ -1125,17 +1130,305 @@ async fn commit_context_clean_worktree_returns_json() {
     .await
     .unwrap();
 
-    let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
-    assert_eq!(output["summary"].as_str(), Some("No changes detected."));
-    assert_eq!(output["changed_files"].as_array().map(Vec::len), Some(0));
+    let output = commit_context_json(&result.value);
+    assert_eq!(result.value.get("isError"), None);
     assert_eq!(
-        output["symbols_by_role"]
-            .as_object()
-            .map(serde_json::Map::len),
-        Some(0)
+        output,
+        json!({
+            "changed_files": [],
+            "symbols_by_role": {},
+            "suggested_category": null,
+            "recent_commits": ["init"],
+            "summary": "No changes detected.",
+        })
     );
-    assert!(output["recent_commits"].as_array().is_some());
+}
+
+/// Staged source and test files are what an agent sees when drafting a
+/// commit: file roles, the symbols in those files, and the category that
+/// follows from those roles.
+#[tokio::test]
+async fn commit_context_staged_source_and_test_reports_symbols() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
+    seed_commit(
+        project,
+        &[
+            ("Cargo.toml", BILLING_MANIFEST),
+            ("src/lib.rs", "pub fn baseline() -> i64 { 0 }\n"),
+            ("tests/invoice_test.rs", "fn baseline_check() {}\n"),
+        ],
+        "seed context",
+    );
+    write_project_file(
+        project,
+        "src/lib.rs",
+        "pub fn billed_total() -> i64 {\n    1\n}\n",
+    );
+    write_project_file(
+        project,
+        "tests/invoice_test.rs",
+        "fn covers_billed_total() {}\n",
+    );
+    git_run(project, &["add", "src/lib.rs", "tests/invoice_test.rs"]);
+
+    let (host, _env) = init_test_project(project).await;
+    let result = handle_tool_call(
+        &host,
+        "tracedecay_commit_context",
+        json!({"format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    close_test_graph(host).await;
+
+    assert_eq!(result.value.get("isError"), None);
+    assert_eq!(
+        commit_context_json(&result.value),
+        json!({
+            "changed_files": [
+                {"file": "src/lib.rs", "role": "source", "symbols": 1},
+                {"file": "tests/invoice_test.rs", "role": "test", "symbols": 1}
+            ],
+            "symbols_by_role": {
+                "source": [{
+                    "name": "billed_total",
+                    "kind": "function",
+                    "file": "src/lib.rs",
+                    "line": 0
+                }],
+                "test": [{
+                    "name": "covers_billed_total",
+                    "kind": "function",
+                    "file": "tests/invoice_test.rs",
+                    "line": 0
+                }]
+            },
+            "suggested_category": "feature/fix (source + tests)",
+            "recent_commits": ["seed context"],
+            "summary": "2 file(s) changed, 2 symbol(s) affected",
+        })
+    );
+}
+
+/// Config and docs changes are not source work. Config files collapse to one
+/// summary entry instead of one symbol per key.
+#[tokio::test]
+async fn commit_context_config_and_docs_report_chore() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
+    seed_commit(
+        project,
+        &[
+            ("Cargo.toml", BILLING_MANIFEST),
+            ("src/lib.rs", "pub fn untouched() {}\n"),
+            ("billing.cfg", "timeout=1\n"),
+            ("notes.txt", "committed note\n"),
+        ],
+        "seed context",
+    );
+    write_project_file(project, "billing.cfg", "timeout=9\n");
+    write_project_file(project, "notes.txt", "Ship the invoice total.\n");
+    git_run(project, &["add", "billing.cfg", "notes.txt"]);
+
+    let (host, _env) = init_test_project(project).await;
+    let result = handle_tool_call(
+        &host,
+        "tracedecay_commit_context",
+        json!({"format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    close_test_graph(host).await;
+
+    assert_eq!(result.value.get("isError"), None);
+    assert_eq!(
+        commit_context_json(&result.value),
+        json!({
+            "changed_files": [
+                {"file": "billing.cfg", "role": "config", "symbols": 0},
+                {"file": "notes.txt", "role": "docs", "symbols": 0}
+            ],
+            "symbols_by_role": {
+                "config": [{
+                    "file": "billing.cfg",
+                    "kind": "config_summary",
+                    "config_keys": 0
+                }]
+            },
+            "suggested_category": "chore/docs/config",
+            "recent_commits": ["seed context"],
+            "summary": "2 file(s) changed, 1 symbol(s) affected",
+        })
+    );
+}
+
+/// `staged_only` is the difference between "what will this commit contain"
+/// and "what is dirty". An unstaged docs edit must appear only when the
+/// caller asks for every uncommitted change.
+#[tokio::test]
+async fn commit_context_staged_only_excludes_unstaged_file() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
+    seed_commit(
+        project,
+        &[
+            ("Cargo.toml", BILLING_MANIFEST),
+            ("src/lib.rs", "pub fn baseline() -> i64 { 0 }\n"),
+            ("notes.txt", "committed note\n"),
+        ],
+        "seed context",
+    );
+    // gix compares the working-tree mtime, in whole seconds, with the index
+    // stat. A write in the same second as `git commit` is invisible, so the
+    // unstaged edit has to land in a later second.
+    std::thread::sleep(Duration::from_secs(2));
+    write_project_file(project, "notes.txt", "unstaged note\n");
+    write_project_file(
+        project,
+        "src/lib.rs",
+        "pub fn staged_total() -> i64 {\n    1\n}\n",
+    );
+    git_run(project, &["add", "src/lib.rs"]);
+
+    let (host, _env) = init_test_project(project).await;
+    let staged = handle_tool_call(
+        &host,
+        "tracedecay_commit_context",
+        json!({"format": "json", "staged_only": true}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let everything = handle_tool_call(
+        &host,
+        "tracedecay_commit_context",
+        json!({"format": "json", "staged_only": false}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    close_test_graph(host).await;
+
+    assert_eq!(staged.value.get("isError"), None);
+    assert_eq!(
+        commit_context_json(&staged.value),
+        json!({
+            "changed_files": [
+                {"file": "src/lib.rs", "role": "source", "symbols": 1}
+            ],
+            "symbols_by_role": {
+                "source": [{
+                    "name": "staged_total",
+                    "kind": "function",
+                    "file": "src/lib.rs",
+                    "line": 0
+                }]
+            },
+            "suggested_category": "feature/fix/refactor",
+            "recent_commits": ["seed context"],
+            "summary": "1 file(s) changed, 1 symbol(s) affected",
+        })
+    );
+    assert_eq!(everything.value.get("isError"), None);
+    assert_eq!(
+        commit_context_json(&everything.value),
+        json!({
+            "changed_files": [
+                {"file": "notes.txt", "role": "docs", "symbols": 0},
+                {"file": "src/lib.rs", "role": "source", "symbols": 1}
+            ],
+            "symbols_by_role": {
+                "source": [{
+                    "name": "staged_total",
+                    "kind": "function",
+                    "file": "src/lib.rs",
+                    "line": 0
+                }]
+            },
+            "suggested_category": "feature/fix/refactor",
+            "recent_commits": ["seed context"],
+            "summary": "2 file(s) changed, 1 symbol(s) affected",
+        })
+    );
+}
+
+/// A repository whose HEAD does not name a commit cannot describe a commit.
+/// The tool reports that as a git status failure, not an empty success.
+#[tokio::test]
+async fn commit_context_unborn_head_is_git_status_error() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
+    seed_commit(
+        project,
+        &[("src/lib.rs", "pub fn baseline() {}\n")],
+        "seed context",
+    );
+    let (host, _env) = init_test_project(project).await;
+    git_run(project, &["symbolic-ref", "HEAD", "refs/heads/unborn"]);
+
+    let result = handle_tool_call(
+        &host,
+        "tracedecay_commit_context",
+        json!({"format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    close_test_graph(host).await;
+
+    assert_eq!(result.value.get("isError"), Some(&json!(true)));
+    assert_eq!(
+        commit_context_json(&result.value),
+        json!({
+            "error": {
+                "kind": "git",
+                "operation": "status",
+                "message": "cannot peel HEAD to commit: Branch 'refs/heads/unborn' does not have any commits",
+            }
+        })
+    );
+}
+
+const BILLING_MANIFEST: &str =
+    "[package]\nname = \"billing\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+
+fn seed_commit(project: &Path, files: &[(&str, &str)], message: &str) {
+    fs::create_dir_all(project).unwrap();
+    for (path, body) in files {
+        write_project_file(project, path, body);
+    }
+    git_run(project, &["init"]);
+    git_run(project, &["add", "."]);
+    git_run(project, &["commit", "-m", message]);
+}
+
+fn write_project_file(project: &Path, path: &str, body: &str) {
+    let full = project.join(path);
+    if let Some(parent) = full.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(full, body).unwrap();
+}
+
+fn commit_context_json(value: &Value) -> Value {
+    serde_json::from_str(extract_text(value)).unwrap_or_else(|error| {
+        panic!(
+            "tracedecay_commit_context did not return JSON: {error}\n{}",
+            extract_text(value)
+        )
+    })
 }
 
 #[tokio::test]
@@ -1198,31 +1491,6 @@ async fn test_changelog_with_real_git() {
     );
 }
 
-#[tokio::test]
-async fn test_gini() {
-    let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_gini",
-        json!({ "metric": "lines" }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
-    assert!(
-        parsed.get("gini").is_some(),
-        "gini field should exist, got: {}",
-        text
-    );
-    assert!(
-        parsed.get("interpretation").is_some(),
-        "interpretation field should exist"
-    );
-}
-
 /// `details=true` must surface raw counts + interpretation per dimension,
 /// so callers don't have to compose six separate tools to reproduce the
 /// breakdown.
@@ -1271,61 +1539,274 @@ async fn test_health_detailed_includes_raw_signals() {
     assert!(dims["redundancy"].get("dead_count").is_some());
 }
 
-#[tokio::test]
-async fn test_dsm_stats() {
-    let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_dsm",
-        json!({ "shape": "stats" }),
-        None,
-        None,
+/// Five Rust files. The calls a reader can see are `src/ui.rs` calling
+/// `panel::draw` in `src/ui/panel.rs` and `crate::core::store::load` in
+/// `src/core/store.rs`. `mod` declarations are not themselves calls.
+fn write_dsm_coupling_sources(project: &Path) {
+    fs::create_dir_all(project.join("src/ui")).unwrap();
+    fs::create_dir_all(project.join("src/core")).unwrap();
+    fs::write(project.join("src/lib.rs"), "mod ui;\nmod core;\n").unwrap();
+    fs::write(
+        project.join("src/ui.rs"),
+        "mod panel;\nuse crate::core::store::load;\n\n\
+         pub fn render() -> i32 {\n    panel::draw() + load()\n}\n",
     )
-    .await
     .unwrap();
-    let text = extract_text(&result.value);
-    assert!(text.starts_with("## Design Structure Matrix"));
-    assert!(
-        text.contains("**files:**"),
-        "files field should exist, got: {}",
-        text
-    );
-    assert!(
-        text.contains("**density:**"),
-        "density field should exist, got: {}",
-        text
-    );
-    assert!(
-        text.contains("### Top Clusters"),
-        "default DSM markdown should include top clusters, got: {}",
-        text
-    );
+    fs::write(
+        project.join("src/ui/panel.rs"),
+        "pub fn draw() -> i32 { 1 }\n",
+    )
+    .unwrap();
+    fs::write(project.join("src/core.rs"), "pub mod store;\n").unwrap();
+    fs::write(
+        project.join("src/core/store.rs"),
+        "pub fn load() -> i32 { 4 }\n",
+    )
+    .unwrap();
+}
+
+async fn call_dsm(host: &ProductionCompositionFixture, args: Value) -> String {
+    let result = handle_tool_call(host, "tracedecay_dsm", args, None, None)
+        .await
+        .unwrap_or_else(|error| panic!("tracedecay_dsm failed over production MCP: {error}"));
+    extract_text(&result.value).to_owned()
+}
+
+fn parse_dsm_json(text: &str) -> Value {
+    serde_json::from_str(text)
+        .unwrap_or_else(|error| panic!("tracedecay_dsm did not return JSON: {error}\n{text}"))
+}
+
+fn coupling_stats() -> Value {
+    json!({
+        "files": 5,
+        "edges": 2,
+        "density": 0.1,
+        "clusters": 3,
+        "largest_cluster": 3
+    })
+}
+
+fn coupling_clusters() -> Value {
+    json!([
+        {
+            "directory": "src",
+            "file_count": 3,
+            "internal_edges": 0,
+            "outgoing_edges": 2,
+            "incoming_edges": 0,
+            "boundary_edges": 2
+        },
+        {
+            "directory": "src/core",
+            "file_count": 1,
+            "internal_edges": 0,
+            "outgoing_edges": 0,
+            "incoming_edges": 1,
+            "boundary_edges": 1
+        },
+        {
+            "directory": "src/ui",
+            "file_count": 1,
+            "internal_edges": 0,
+            "outgoing_edges": 0,
+            "incoming_edges": 1,
+            "boundary_edges": 1
+        }
+    ])
+}
+
+/// Dependency pairs in the matrix, independent of the tie order among files
+/// that share an edge count. The matrix sort is stable over a `HashMap`, so
+/// tied rows are not a stable literal.
+fn matrix_edges(matrix: &Value) -> Vec<(String, String)> {
+    let files = matrix["files"]
+        .as_array()
+        .expect("matrix.files")
+        .iter()
+        .map(|file| file.as_str().expect("matrix file name").to_owned())
+        .collect::<Vec<_>>();
+    let rows = matrix["matrix"].as_array().expect("matrix.matrix");
+    assert_eq!(rows.len(), files.len(), "matrix is not square: {matrix}");
+    let mut edges = Vec::new();
+    for (row_index, row) in rows.iter().enumerate() {
+        let cells = row.as_array().expect("matrix row");
+        assert_eq!(cells.len(), files.len(), "matrix row {row_index}: {matrix}");
+        for (column_index, cell) in cells.iter().enumerate() {
+            let present = cell
+                .as_u64()
+                .unwrap_or_else(|| panic!("matrix cell is not 0 or 1: {cell} in {matrix}"));
+            if row_index == column_index {
+                assert_eq!(
+                    present, 0,
+                    "DSM matrix has a self-edge at {}",
+                    files[row_index]
+                );
+            }
+            match present {
+                0 => {}
+                1 => edges.push((files[row_index].clone(), files[column_index].clone())),
+                other => panic!("matrix cell {other} is not 0 or 1 in {matrix}"),
+            }
+        }
+    }
+    edges.sort();
+    edges
 }
 
 #[tokio::test]
-async fn test_dsm_json_returns_stats_shape() {
-    let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_dsm",
-        json!({ "format": "json" }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
-    assert!(
-        parsed["stats"].get("files").is_some(),
-        "files field should exist, got: {}",
-        text
+async fn test_dsm_reports_authored_file_dependencies() {
+    let host = production_composition_fixture_with_sources(write_dsm_coupling_sources).await;
+    wait_for_current_graph(&host).await;
+
+    let stats_markdown = call_dsm(&host, json!({})).await;
+    // Density is a JSON number. The markdown renderer reads it with
+    // `field_str`, which only accepts strings, so the default line is
+    // `**density:** ` with an empty value. The JSON assertion below is the
+    // one that checks the rounded number.
+    assert_eq!(
+        stats_markdown,
+        "\
+## Design Structure Matrix
+**shape:** stats
+**files:** 5
+**edges:** 2
+**density:** 
+**clusters:** 3
+**largest_cluster:** 3
+
+### Top Clusters
+- src: 3 files; 0 internal; 2 boundary (2 out, 0 in)
+- src/core: 1 files; 0 internal; 1 boundary (0 out, 1 in)
+- src/ui: 1 files; 0 internal; 1 boundary (0 out, 1 in)
+"
     );
-    assert!(
-        parsed["stats"].get("density").is_some(),
-        "density field should exist"
+
+    let stats = parse_dsm_json(&call_dsm(&host, json!({ "format": "json" })).await);
+    assert_eq!(
+        stats,
+        json!({
+            "shape": "stats",
+            "stats": coupling_stats(),
+            "clusters": coupling_clusters(),
+        })
     );
-    assert_eq!(parsed["shape"], "stats");
+
+    let named_stats =
+        parse_dsm_json(&call_dsm(&host, json!({ "format": "json", "shape": "stats" })).await);
+    assert_eq!(
+        named_stats,
+        json!({
+            "shape": "stats",
+            "stats": coupling_stats(),
+            "clusters": coupling_clusters(),
+        })
+    );
+
+    let clusters =
+        parse_dsm_json(&call_dsm(&host, json!({ "format": "json", "shape": "clusters" })).await);
+    assert_eq!(
+        clusters,
+        json!({
+            "shape": "clusters",
+            "stats": coupling_stats(),
+            "clusters": coupling_clusters(),
+        })
+    );
+
+    // An unrecognized shape is the stats report, not an empty success.
+    let unknown =
+        parse_dsm_json(&call_dsm(&host, json!({ "format": "json", "shape": "layers" })).await);
+    assert_eq!(
+        unknown,
+        json!({
+            "shape": "stats",
+            "stats": coupling_stats(),
+            "clusters": coupling_clusters(),
+        })
+    );
+
+    let matrix =
+        parse_dsm_json(&call_dsm(&host, json!({ "format": "json", "shape": "matrix" })).await);
+    assert_eq!(matrix["shape"], "matrix");
+    assert_eq!(matrix["stats"], coupling_stats());
+    assert_eq!(matrix["clusters"], coupling_clusters());
+    let mut files = matrix["matrix"]["files"]
+        .as_array()
+        .expect("matrix files")
+        .iter()
+        .map(|file| file.as_str().expect("short name").to_owned())
+        .collect::<Vec<_>>();
+    files.sort();
+    assert_eq!(
+        files,
+        ["core.rs", "lib.rs", "panel.rs", "store.rs", "ui.rs"]
+    );
+    assert_eq!(matrix["matrix"]["note"], "Top 5 files by edge count shown");
+    assert_eq!(
+        matrix_edges(&matrix["matrix"]),
+        vec![
+            ("ui.rs".to_owned(), "panel.rs".to_owned()),
+            ("ui.rs".to_owned(), "store.rs".to_owned()),
+        ]
+    );
+
+    let top_file = parse_dsm_json(
+        &call_dsm(
+            &host,
+            json!({ "format": "json", "shape": "matrix", "max_files": 1 }),
+        )
+        .await,
+    );
+    assert_eq!(
+        top_file["matrix"],
+        json!({
+            "files": ["ui.rs"],
+            "matrix": [[0]],
+            "note": "Top 1 files by edge count shown"
+        })
+    );
+
+    let ui_only =
+        parse_dsm_json(&call_dsm(&host, json!({ "format": "json", "path": "src/ui" })).await);
+    assert_eq!(
+        ui_only,
+        json!({
+            "shape": "stats",
+            "stats": {
+                "files": 1,
+                "edges": 0,
+                "density": 0.0,
+                "clusters": 1,
+                "largest_cluster": 1
+            },
+            "clusters": [{
+                "directory": "src/ui",
+                "file_count": 1,
+                "internal_edges": 0,
+                "outgoing_edges": 0,
+                "incoming_edges": 0,
+                "boundary_edges": 0
+            }]
+        })
+    );
+
+    let missing = call_dsm(&host, json!({ "path": "src/missing" })).await;
+    assert_eq!(
+        missing,
+        "\
+## Design Structure Matrix
+**shape:** stats
+**files:** 0
+**edges:** 0
+**density:** 
+**clusters:** 0
+**largest_cluster:** 0
+
+### Top Clusters
+_No dependency clusters found._
+"
+    );
 }
 
 #[tokio::test]
@@ -1739,36 +2220,29 @@ async fn recursion_keeps_direct_recursion() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
         project.join("src/lib.rs"),
-        r#"
-pub fn recurse(n: u32) -> u32 {
-    if n == 0 { 0 } else { recurse(n - 1) }
-}
-
-pub fn nonrecursive() -> u32 { 42 }
-"#,
+        "pub fn recurse(n: u32) -> u32 {\n    if n == 0 { 0 } else { recurse(n - 1) }\n}\n\npub fn nonrecursive() -> u32 { 42 }\n",
     )
     .unwrap();
     let (cg, _env) = init_test_project(project).await;
     let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
         .await
         .unwrap();
-    let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
-    let cycles = output["cycles"].as_array().unwrap();
-    let has_recurse = cycles.iter().any(|cycle| {
-        cycle["chain"].as_array().is_some_and(|chain| {
-            chain
-                .iter()
-                .filter_map(|n| n["name"].as_str())
-                .filter(|name| *name == "recurse")
-                .count()
-                >= 2
-        })
-    });
-    assert!(
-        has_recurse,
-        "direct self-recursive function should be reported; got {cycles:?}"
+    let output = extract_json(&result.value);
+    assert_eq!(
+        recursion_behavior::public_recursion_report(&output),
+        json!({
+            "cycle_count": 1,
+            "cycles": [{
+                "length": 1,
+                "chain": [
+                    {"name": "recurse", "kind": "function", "file": "src/lib.rs", "line": 1},
+                    {"name": "recurse", "kind": "function", "file": "src/lib.rs", "line": 1}
+                ]
+            }]
+        }),
+        "direct recursion must be the only cycle, and `nonrecursive` must stay out: {output}"
     );
+    recursion_behavior::assert_reported_cycles_close(&output);
 }
 
 #[tokio::test]
@@ -1780,35 +2254,29 @@ async fn recursion_filters_self_edge_artifacts() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
         project.join("src/lib.rs"),
-        r#"
-pub struct Triplet {
-    rows: Vec<usize>,
-}
-
-impl Triplet {
-    pub fn push(&mut self, row: usize) {
-        self.rows.push(row);
-    }
-}
-"#,
+        "pub fn recurse(n: u32) -> u32 {\n    if n == 0 { 0 } else { recurse(n - 1) }\n}\n\npub struct Triplet {\n    rows: Vec<usize>,\n}\n\nimpl Triplet {\n    pub fn push(&mut self, row: usize) {\n        self.rows.push(row);\n    }\n}\n",
     )
     .unwrap();
     let (cg, _env) = init_test_project(project).await;
     let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
         .await
         .unwrap();
-    let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
-    let cycles = output["cycles"].as_array().unwrap();
-    let mentions_push = cycles.iter().any(|cycle| {
-        cycle["chain"]
-            .as_array()
-            .is_some_and(|chain| chain.iter().any(|n| n["name"].as_str() == Some("push")))
-    });
-    assert!(
-        !mentions_push,
-        "`self.rows.push(...)` should not be reported as recursive; got {cycles:?}"
+    let output = extract_json(&result.value);
+    assert_eq!(
+        recursion_behavior::public_recursion_report(&output),
+        json!({
+            "cycle_count": 1,
+            "cycles": [{
+                "length": 1,
+                "chain": [
+                    {"name": "recurse", "kind": "function", "file": "src/lib.rs", "line": 1},
+                    {"name": "recurse", "kind": "function", "file": "src/lib.rs", "line": 1}
+                ]
+            }]
+        }),
+        "`self.rows.push` must not become a cycle while `recurse` is reported: {output}"
     );
+    recursion_behavior::assert_reported_cycles_close(&output);
 }
 
 #[tokio::test]
@@ -1831,24 +2299,24 @@ pub fn c() { a(); }
     let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
         .await
         .unwrap();
-    let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
-    let cycles = output["cycles"].as_array().unwrap();
-    let chain = cycles
-        .iter()
-        .find_map(|cycle| {
-            let chain = cycle["chain"].as_array()?;
-            let names: Vec<&str> = chain.iter().filter_map(|n| n["name"].as_str()).collect();
-            (names.len() == 4).then_some(names)
-        })
-        .expect("expected a three-node cycle path");
-    let valid_edges = [("a", "b"), ("b", "c"), ("c", "a")];
-    for pair in chain.windows(2) {
-        assert!(
-            valid_edges.contains(&(pair[0], pair[1])),
-            "chain must follow real call edges; got {chain:?}"
-        );
-    }
+    let output = extract_json(&result.value);
+    assert_eq!(
+        recursion_behavior::public_recursion_report(&output),
+        json!({
+            "cycle_count": 1,
+            "cycles": [{
+                "length": 3,
+                "chain": [
+                    {"name": "a", "kind": "function", "file": "src/lib.rs", "line": 2},
+                    {"name": "b", "kind": "function", "file": "src/lib.rs", "line": 3},
+                    {"name": "c", "kind": "function", "file": "src/lib.rs", "line": 4},
+                    {"name": "a", "kind": "function", "file": "src/lib.rs", "line": 2}
+                ]
+            }]
+        }),
+        "the only cycle is a -> b -> c -> a: {output}"
+    );
+    recursion_behavior::assert_reported_cycles_close(&output);
 }
 
 /// `tracedecay_changelog`'s response must not list directories under
@@ -1956,72 +2424,6 @@ pub fn caller() { called(); }
     assert!(
         symbols.contains(&"never_called_anywhere"),
         "with include_public, the pub unreferenced fn should appear; got {symbols:?}"
-    );
-}
-
-/// `build_file_adjacency` must count only `uses` and `calls` for file-level
-/// dependency depth. `implements` and `extends` edges are heavily
-/// resolver-fuzzy-bound to nonsense targets in unrelated files.
-#[tokio::test]
-async fn dependency_depth_excludes_implements_and_extends() {
-    let dir = test_temp_dir();
-    let project_root = dir.path().join("project");
-    fs::create_dir_all(&project_root).unwrap();
-    let project = project_root.as_path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    // file_a derives Debug, extractor emits derives_macro and the
-    // resolver historically pollutes implements edges across files.
-    fs::write(
-        project.join("src/lib.rs"),
-        r#"
-mod a;
-mod b;
-"#,
-    )
-    .unwrap();
-    fs::write(
-        project.join("src/a.rs"),
-        r#"
-#[derive(Debug, Clone)]
-pub struct A;
-"#,
-    )
-    .unwrap();
-    fs::write(
-        project.join("src/b.rs"),
-        r#"
-pub trait T {}
-"#,
-    )
-    .unwrap();
-    let (cg, _env) = init_test_project(project).await;
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_dependency_depth",
-        json!({"limit": 100}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-    let chains = output["chains"]
-        .as_array()
-        .expect("dependency-depth response should contain chains");
-    assert!(
-        chains.iter().all(|entry| {
-            let chain = entry["chain"]
-                .as_array()
-                .expect("dependency-depth chain should be an array");
-            !chain.windows(2).any(|pair| {
-                matches!(
-                    (pair[0].as_str(), pair[1].as_str()),
-                    (Some("src/a.rs"), Some("src/b.rs")) | (Some("src/b.rs"), Some("src/a.rs"))
-                )
-            })
-        }),
-        "derive/trait metadata must not create a dependency between leaf files: {output}"
     );
 }
 
@@ -3039,6 +3441,345 @@ async fn pr_context_collapses_cargo_toml_keys() {
     );
 }
 
+/// Author and committer identity are fixed so the commit objects, and therefore
+/// the oids `tracedecay_pr_context` returns, are literals rather than values
+/// read back out of the repository under test.
+fn git_with_pinned_dates(dir: &Path, args: &[&str], date: Option<&str>) {
+    let mut command = std::process::Command::new(
+        tracedecay_runtime_core::git::try_git_program().expect("git executable"),
+    );
+    command
+        .args([
+            "-c",
+            "core.hooksPath=.git/no-hooks",
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "user.name=TraceDecay Test",
+            "-c",
+            "user.email=tracedecay-test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .current_dir(dir);
+    if let Some(date) = date {
+        command
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date);
+    }
+    let output = command
+        .output()
+        .unwrap_or_else(|error| panic!("git {args:?} should spawn: {error}"));
+    assert!(
+        output.status.success(),
+        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+async fn pr_context_json(host: &impl AnalysisToolHost, arguments: Value) -> Value {
+    let result = handle_tool_call(host, "tracedecay_pr_context", arguments, None, None)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("tracedecay_pr_context should return a tool result: {error}")
+        });
+    serde_json::from_str(extract_text(&result.value)).expect("PR context JSON")
+}
+
+fn symbol_facts(symbols: &Value) -> Value {
+    let mut facts = symbols
+        .as_array()
+        .unwrap_or_else(|| panic!("symbol list must be an array, got {symbols}"))
+        .iter()
+        .map(|symbol| {
+            if symbol.get("kind").and_then(Value::as_str) == Some("config_summary") {
+                json!({
+                    "config_keys": symbol["config_keys"],
+                    "file": symbol["file"],
+                    "kind": "config_summary",
+                })
+            } else {
+                json!({
+                    "file": symbol["file"],
+                    "kind": symbol["kind"],
+                    "line": symbol["line"],
+                    "name": symbol["name"],
+                })
+            }
+        })
+        .collect::<Vec<_>>();
+    facts.sort_by_key(ToString::to_string);
+    Value::Array(facts)
+}
+
+fn pr_context_view(output: &Value) -> Value {
+    json!({
+        "affected_tests": output["affected_tests"],
+        "analysis_complete": output["analysis_coverage"]["complete"],
+        "base": output["base"],
+        "base_oid": output["base_oid"],
+        "changes": output["changes"],
+        "commits": output["commits"],
+        "coverage_status": output["symbol_changes_coverage"]["status"],
+        "error": output["error"],
+        "files_changed": output["files_changed"],
+        "head": output["head"],
+        "head_oid": output["head_oid"],
+        "impacted_modules": output["impacted_modules"],
+        "merge_base": output["merge_base"],
+        "message": output["message"],
+        "next_cursor": output["next_cursor"],
+        "status": output["status"],
+        "symbols_added": symbol_facts(&output["added"]),
+        "symbols_modified": symbol_facts(&output["modified"]),
+        "symbols_removed": symbol_facts(&output["removed"]),
+        "symbols_added_count": output["symbols_added"],
+        "symbols_modified_count": output["symbols_modified"],
+        "symbols_removed_count": output["symbols_removed"],
+        "symbol_page_complete": output["symbol_page"]["complete"],
+        "symbol_page_has_more": output["symbol_page"]["has_more"],
+        "symbol_page_limit": output["symbol_page"]["limit"],
+        "symbol_page_selection": output["symbol_page"]["selection"],
+        "test_files_changed": output["test_files_changed"],
+    })
+}
+
+/// `tracedecay_pr_context` is the pull-request summary a caller asks for.
+/// These literals are the tool result for one pinned history: `master` at
+/// `bece36f8dada44933bc1bfa4c42faaccf77dcaab` and `feature` at
+/// `bd4bc112c3374fbe23cb4ae2185cbf7945cb0e82`.
+#[tokio::test]
+async fn pr_context_reports_the_pinned_feature_summary() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    let project = project_root.as_path();
+    git_with_pinned_dates(project, &["init", "-b", "master"], None);
+    fs::write(
+        project.join("src/announce.rs"),
+        "pub fn announce() -> &'static str {\n    greet()\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        "mod announce;\n\npub fn greet() -> &'static str {\n    \"hi\"\n}\n",
+    )
+    .unwrap();
+    git_with_pinned_dates(project, &["add", "."], None);
+    git_with_pinned_dates(
+        project,
+        &["commit", "-m", "base"],
+        Some("2020-01-02T03:04:05Z"),
+    );
+    git_with_pinned_dates(project, &["switch", "-c", "feature"], None);
+    fs::write(
+        project.join("src/lib.rs"),
+        "mod announce;\n\npub fn greet() -> &'static str {\n    \"hello\"\n}\n",
+    )
+    .unwrap();
+    fs::create_dir_all(project.join("tests")).unwrap();
+    fs::write(
+        project.join("tests/greet.rs"),
+        "#[test]\nfn greet_says_hello() {}\n",
+    )
+    .unwrap();
+    git_with_pinned_dates(project, &["add", "."], None);
+    git_with_pinned_dates(
+        project,
+        &["commit", "-m", "say hello"],
+        Some("2020-01-03T03:04:05Z"),
+    );
+
+    let (host, _env) = init_test_project(project).await;
+    let feature = pr_context_json(
+        &host,
+        json!({"format": "json", "base_ref": "master", "head_ref": "feature"}),
+    )
+    .await;
+    assert_eq!(
+        feature["graph_generation"], feature["symbol_changes_coverage"]["head_generation"],
+        "the served graph must be the compared head generation: {feature}"
+    );
+    let mut feature_summary = json!({
+        "affected_tests": [],
+        "analysis_complete": true,
+        "base": "master",
+        "base_oid": "bece36f8dada44933bc1bfa4c42faaccf77dcaab",
+        "changes": [
+            {"path": "src/lib.rs", "status": "modified"},
+            {"path": "tests/greet.rs", "status": "added"}
+        ],
+        "commits": [{"hash": "bd4bc112c3374fbe23cb4ae2185cbf7945cb0e82", "subject": "say hello"}],
+        "coverage_status": "complete",
+        "error": null,
+        "files_changed": 2,
+        "head": "feature",
+        "head_oid": "bd4bc112c3374fbe23cb4ae2185cbf7945cb0e82",
+        "impacted_modules": [],
+        "merge_base": "bece36f8dada44933bc1bfa4c42faaccf77dcaab",
+        "message": null,
+        "next_cursor": null,
+        "status": "complete",
+        "symbols_added": [
+            {"file": "tests/greet.rs", "kind": "annotation_usage", "line": 0, "name": "test"},
+            {"file": "tests/greet.rs", "kind": "function", "line": 1, "name": "greet_says_hello"}
+        ],
+        "symbols_modified": [
+            {"file": "src/lib.rs", "kind": "function", "line": 2, "name": "greet"}
+        ],
+        "symbols_removed": [],
+        "symbols_added_count": 2,
+        "symbols_modified_count": 1,
+        "symbols_removed_count": 0,
+        "symbol_page_complete": true,
+        "symbol_page_has_more": false,
+        "symbol_page_limit": 200,
+        "symbol_page_selection": "stable_prefix",
+        "test_files_changed": ["tests/greet.rs"],
+    });
+    for key in ["symbols_added", "symbols_modified", "symbols_removed"] {
+        feature_summary[key] = symbol_facts(&feature_summary[key]);
+    }
+    assert_eq!(
+        pr_context_view(&feature),
+        feature_summary,
+        "feature summary: {feature}"
+    );
+
+    let default_base =
+        pr_context_json(&host, json!({"format": "json", "head_ref": "feature"})).await;
+    assert_eq!(
+        pr_context_view(&default_base),
+        feature_summary,
+        "omitting base_ref must select the repository default branch master: {default_base}"
+    );
+
+    let same_ref = pr_context_json(
+        &host,
+        json!({"format": "json", "base_ref": "feature", "head_ref": "feature"}),
+    )
+    .await;
+    assert_eq!(
+        pr_context_view(&same_ref),
+        json!({
+            "affected_tests": [],
+            "analysis_complete": true,
+            "base": "feature",
+            "base_oid": "bd4bc112c3374fbe23cb4ae2185cbf7945cb0e82",
+            "changes": [],
+            "commits": [],
+            "coverage_status": "complete",
+            "error": null,
+            "files_changed": 0,
+            "head": "feature",
+            "head_oid": "bd4bc112c3374fbe23cb4ae2185cbf7945cb0e82",
+            "impacted_modules": [],
+            "merge_base": "bd4bc112c3374fbe23cb4ae2185cbf7945cb0e82",
+            "message": null,
+            "next_cursor": null,
+            "status": "complete",
+            "symbols_added": [],
+            "symbols_modified": [],
+            "symbols_removed": [],
+            "symbols_added_count": 0,
+            "symbols_modified_count": 0,
+            "symbols_removed_count": 0,
+            "symbol_page_complete": true,
+            "symbol_page_has_more": false,
+            "symbol_page_limit": 200,
+            "symbol_page_selection": "stable_prefix",
+            "test_files_changed": [],
+        }),
+        "identical refs must report an empty summary, not an error: {same_ref}"
+    );
+
+    let cursor = handle_tool_call(
+        &host,
+        "tracedecay_pr_context",
+        json!({"format": "json", "base_ref": "master", "head_ref": "feature", "cursor": 1}),
+        None,
+        None,
+    )
+    .await
+    .expect_err("a numeric cursor is not a continuation token");
+    assert_eq!(
+        cursor.to_string(),
+        "config error: tracedecay_pr_context failed over production MCP: tool execution failed: config error: PR context cursor must be a string"
+    );
+
+    close_test_graph(host).await;
+}
+
+/// A short branch name whose local tip and `origin` tip have diverged is not
+/// a comparison. The tool must say so, naming both explicit refs, instead of
+/// silently picking one side.
+#[tokio::test]
+async fn pr_context_names_both_refs_when_a_branch_has_diverged() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(&project_root).unwrap();
+    let project = project_root.as_path();
+    git_with_pinned_dates(project, &["init", "-b", "main"], None);
+    fs::write(project.join("base.txt"), "base\n").unwrap();
+    git_with_pinned_dates(project, &["add", "."], None);
+    git_with_pinned_dates(project, &["commit", "-m", "base"], None);
+    git_with_pinned_dates(
+        project,
+        &["update-ref", "refs/remotes/origin/main", "HEAD"],
+        None,
+    );
+    fs::write(project.join("local.txt"), "local\n").unwrap();
+    git_with_pinned_dates(project, &["add", "."], None);
+    git_with_pinned_dates(project, &["commit", "-m", "local advance"], None);
+    git_with_pinned_dates(
+        project,
+        &["switch", "--detach", "refs/remotes/origin/main"],
+        None,
+    );
+    fs::write(project.join("remote.txt"), "remote\n").unwrap();
+    git_with_pinned_dates(project, &["add", "."], None);
+    git_with_pinned_dates(project, &["commit", "-m", "remote advance"], None);
+    git_with_pinned_dates(
+        project,
+        &["update-ref", "refs/remotes/origin/main", "HEAD"],
+        None,
+    );
+    git_with_pinned_dates(project, &["switch", "main"], None);
+
+    // The refusal is decided by the git comparison, before graph enrichment.
+    // Waiting for a code-graph publication never completes for this text-only
+    // history, and a caller does not wait for one before asking.
+    let isolation_root = project
+        .parent()
+        .expect("graph-analysis project must have an isolation parent");
+    let harness =
+        ProductionProjectCompositionHarnessV1::open(isolation_root, [project.to_path_buf()])
+            .await
+            .expect("production graph-analysis composition");
+    let host = MountedProductionProject {
+        harness,
+        project_root: project.to_path_buf(),
+    };
+    let output = pr_context_json(
+        &host,
+        json!({"format": "json", "base_ref": "main", "head_ref": "HEAD"}),
+    )
+    .await;
+    assert_eq!(
+        output,
+        json!({
+            "error": {
+                "kind": "git",
+                "operation": "diff",
+                "message": "branch 'main' has diverged local and origin tips; pass 'refs/heads/main' or 'origin/main' explicitly"
+            }
+        })
+    );
+    close_test_graph(host).await;
+}
+
 /// `tracedecay_dead_code` must not treat non-reference edges like
 /// `annotates` or `derives_macro` as "this function is alive" evidence. A
 /// private helper with no callers but an `#[inline]` (or any other
@@ -3306,4 +4047,293 @@ async fn field_sites_ignores_field_text_in_real_rust_literals() {
         "string literal was reported as a field site: {output}"
     );
     assert_eq!(output["write_sites"][0]["line"], 256, "payload: {output}");
+}
+
+fn field_site(line: u64, enclosing: &str, snippet: &str) -> Value {
+    json!({
+        "file": "src/lib.rs",
+        "line": line,
+        "enclosing": enclosing,
+        "snippet": snippet,
+    })
+}
+
+const FIELD_BEHAVIOR_SOURCE: &str = r#"pub struct Counter {
+    pub n: u32,
+}
+
+pub struct Gauge {
+    pub n: u32,
+}
+
+impl Counter {
+    pub fn read(&self, gauge: &Gauge) -> u32 {
+        let kept = self.n;
+        let other = gauge.n;
+        kept + other
+    }
+}
+
+pub fn bump(counter: &mut Counter, gauge: &mut Gauge) -> u32 {
+    let same = counter.n == 0;
+    counter.n = 1;
+    gauge.n += 2;
+    let borrowed = &mut counter.n;
+    let shifted = counter.n << 1;
+    counter.n <<= 1;
+    let shown = "counter.n = 9";
+    // counter.n = 8;
+    let _ = (same, borrowed, shifted, shown);
+    counter.n
+}
+
+pub fn arrow(counter: &Counter) -> u32 {
+    take!(counter.n => 1);
+    counter.n
+}
+"#;
+
+const FIELD_QUALIFIED_SOURCE: &str = r#"pub struct Counter {
+    pub n: u32,
+}
+
+pub struct Gauge {
+    pub n: u32,
+}
+
+impl Counter {
+    pub fn read(&self, gauge: &Gauge) -> u32 {
+        let kept = self.n;
+        let other = gauge.n;
+        kept + other
+    }
+}
+
+pub fn bump(counter: &mut Counter, gauge: &mut Gauge) -> u32 {
+    let same = counter.n == 0;
+    counter.n = 1;
+    gauge.n += 2;
+    let borrowed = &mut counter.n;
+    let shifted = counter.n << 1;
+    counter.n <<= 1;
+    counter.n
+}
+"#;
+
+async fn call_field_sites(host: &impl AnalysisToolHost, arguments: Value) -> Value {
+    let result = handle_tool_call(host, "tracedecay_field_sites", arguments, None, None)
+        .await
+        .expect("production MCP field-sites call");
+    extract_json(&result.value)
+}
+
+#[tokio::test]
+async fn field_sites_behavior_reports_literal_read_and_write_sites() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(project_root.join("src/lib.rs"), FIELD_BEHAVIOR_SOURCE).unwrap();
+    let (host, _env) = init_test_project(&project_root).await;
+
+    let read_method = "src/lib.rs::Counter::read";
+    let bump = "src/lib.rs::bump";
+    let arrow = "src/lib.rs::arrow";
+    let reads = json!([
+        field_site(11, read_method, "let kept = self.n;"),
+        field_site(12, read_method, "let other = gauge.n;"),
+        field_site(18, bump, "let same = counter.n == 0;"),
+        field_site(22, bump, "let shifted = counter.n << 1;"),
+        field_site(27, bump, "counter.n"),
+        field_site(31, arrow, "take!(counter.n => 1);"),
+        field_site(32, arrow, "counter.n"),
+    ]);
+    let writes = json!([
+        field_site(19, bump, "counter.n = 1;"),
+        field_site(20, bump, "gauge.n += 2;"),
+        field_site(21, bump, "let borrowed = &mut counter.n;"),
+        field_site(23, bump, "counter.n <<= 1;"),
+    ]);
+
+    let bare = call_field_sites(&host, json!({"field": "n", "limit": 20, "format": "json"})).await;
+    assert_eq!(
+        bare,
+        json!({
+            "field": "n",
+            "qualifier": null,
+            "qualifier_applied": false,
+            "write_count": 4,
+            "read_count": 7,
+            "write_sites": writes,
+            "read_sites": reads,
+        }),
+        "bare field must partition assignment, compound assignment, mut borrow, and shift-assign as writes, and comparison, shift, and fat-arrow uses as reads"
+    );
+
+    let writes_only = call_field_sites(
+        &host,
+        json!({"field": "n", "writes_only": true, "format": "json"}),
+    )
+    .await;
+    assert_eq!(
+        writes_only,
+        json!({
+            "field": "n",
+            "qualifier": null,
+            "qualifier_applied": false,
+            "write_count": 4,
+            "write_sites": writes,
+        }),
+        "writes_only must omit the read list rather than return it empty"
+    );
+
+    // The scan stops only after both kinds have reached `limit`, so reads that
+    // precede the first write stay in the result.
+    let limited =
+        call_field_sites(&host, json!({"field": "n", "limit": 1, "format": "json"})).await;
+    assert_eq!(
+        limited,
+        json!({
+            "field": "n",
+            "qualifier": null,
+            "qualifier_applied": false,
+            "write_count": 1,
+            "read_count": 3,
+            "write_sites": [
+                field_site(19, bump, "counter.n = 1;"),
+            ],
+            "read_sites": [
+                field_site(11, read_method, "let kept = self.n;"),
+                field_site(12, read_method, "let other = gauge.n;"),
+                field_site(18, bump, "let same = counter.n == 0;"),
+            ],
+        }),
+    );
+
+    let missing_field = expect_tool_error(
+        handle_tool_call(
+            &host,
+            "tracedecay_field_sites",
+            json!({"format": "json"}),
+            None,
+            None,
+        )
+        .await,
+    );
+    assert_eq!(
+        missing_field,
+        "config error: tracedecay_field_sites failed over production MCP: tool execution failed: config error: tracedecay_field_sites requires a 'field' argument"
+    );
+
+    // `take!` is parseable Rust, but its body is a token tree, so the qualifier
+    // path cannot bind `counter.n` to `Counter`. The first unbound site stops
+    // the qualified census.
+    let unbound_macro = expect_tool_error(
+        handle_tool_call(
+            &host,
+            "tracedecay_field_sites",
+            json!({"field": "Counter::n", "format": "json"}),
+            None,
+            None,
+        )
+        .await,
+    );
+    assert_eq!(
+        unbound_macro,
+        "config error: tracedecay_field_sites failed over production MCP: tool project route failed: reason_code=verified-field-qualifier-unavailable retryable=false: the indexed graph cannot bind field receiver '<unresolved>' at src/lib.rs:31 to exactly one qualified owner"
+    );
+    close_test_graph(host).await;
+
+    let qualified_dir = test_temp_dir();
+    let qualified_root = qualified_dir.path().join("project");
+    fs::create_dir_all(qualified_root.join("src")).unwrap();
+    fs::write(qualified_root.join("src/lib.rs"), FIELD_QUALIFIED_SOURCE).unwrap();
+    let (qualified_host, _qualified_env) = init_test_project(&qualified_root).await;
+    let qualified = call_field_sites(
+        &qualified_host,
+        json!({"field": "Counter::n", "format": "json"}),
+    )
+    .await;
+    assert_eq!(
+        qualified,
+        json!({
+            "field": "Counter::n",
+            "qualifier": "Counter",
+            "qualifier_applied": true,
+            "write_count": 3,
+            "read_count": 4,
+            "write_sites": [
+                field_site(19, bump, "counter.n = 1;"),
+                field_site(21, bump, "let borrowed = &mut counter.n;"),
+                field_site(23, bump, "counter.n <<= 1;"),
+            ],
+            "read_sites": [
+                field_site(11, read_method, "let kept = self.n;"),
+                field_site(18, bump, "let same = counter.n == 0;"),
+                field_site(22, bump, "let shifted = counter.n << 1;"),
+                field_site(24, bump, "counter.n"),
+            ],
+        }),
+        "Counter::n must drop Gauge sites"
+    );
+
+    let missing = call_field_sites(
+        &qualified_host,
+        json!({"field": "Missing::n", "format": "json"}),
+    )
+    .await;
+    assert_eq!(
+        missing,
+        json!({
+            "field": "Missing::n",
+            "qualifier": "Missing",
+            "qualifier_applied": true,
+            "write_count": 0,
+            "read_count": 0,
+            "write_sites": [],
+            "read_sites": [],
+        }),
+        "an unknown qualifier is an empty census, not every same-named field"
+    );
+    close_test_graph(qualified_host).await;
+}
+
+#[tokio::test]
+async fn field_sites_behavior_refuses_unbound_qualified_receiver() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("src/lib.rs"),
+        r#"pub struct Counter {
+    pub n: u32,
+}
+pub struct Gauge {
+    pub n: u32,
+}
+
+pub fn closure_then_sibling(counter: &Counter) -> u32 {
+    let read_gauge = |counter: Gauge| counter.n;
+    read_gauge(Gauge { n: 3 }) + counter.n
+}
+"#,
+    )
+    .unwrap();
+    let (host, _env) = init_test_project(&project_root).await;
+
+    let error = expect_tool_error(
+        handle_tool_call(
+            &host,
+            "tracedecay_field_sites",
+            json!({"field": "Counter::n", "format": "json"}),
+            None,
+            None,
+        )
+        .await,
+    );
+    assert_eq!(
+        error,
+        "config error: tracedecay_field_sites failed over production MCP: tool project route failed: reason_code=verified-field-qualifier-unavailable retryable=false: the indexed graph cannot bind field receiver '<unresolved>' at src/lib.rs:9 to exactly one qualified owner"
+    );
+
+    close_test_graph(host).await;
 }

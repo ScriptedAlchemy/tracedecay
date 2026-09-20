@@ -985,7 +985,7 @@ mod tests {
         let error = source_edit_refusal(DaemonInvocationOutcome::ApplicationProblem {
             problem: ApplicationProblem::unavailable(
                 SafeDiagnostic::new(
-                    "application.surface.unavailable",
+                    tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE,
                     "The project runtime for this operation is still mounting",
                 )
                 .unwrap(),
@@ -995,7 +995,10 @@ mod tests {
         let (reason_code, retryable, _) = error
             .project_route_context()
             .expect("warming must stay a typed project-route error");
-        assert_eq!(reason_code, "application.surface.unavailable");
+        assert_eq!(
+            reason_code,
+            tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE
+        );
         assert!(retryable);
     }
 

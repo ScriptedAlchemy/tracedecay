@@ -361,10 +361,10 @@ impl CodeIndexCloneBodyV1 {
                 .fold(std::mem::size_of_val(tokens), |bytes, token| match token {
                     ConservativeCloneTokenV1::StructureStart { syntax_kind }
                     | ConservativeCloneTokenV1::StructureEnd { syntax_kind } => {
-                        bytes.saturating_add(syntax_kind.capacity())
+                        bytes.saturating_add(syntax_kind.len())
                     }
                     ConservativeCloneTokenV1::Syntax { syntax_kind, text } => bytes
-                        .saturating_add(syntax_kind.capacity())
+                        .saturating_add(syntax_kind.len())
                         .saturating_add(text.capacity()),
                 })
         }
@@ -1180,7 +1180,7 @@ mod fingerprint_tests {
     fn tokens(prefix: &str, count: usize) -> Vec<ConservativeCloneTokenV1> {
         (0..count)
             .map(|ordinal| ConservativeCloneTokenV1::Syntax {
-                syntax_kind: "identifier".to_owned(),
+                syntax_kind: std::borrow::Cow::Borrowed("identifier"),
                 text: format!("{prefix}{ordinal}"),
             })
             .collect()
@@ -1250,7 +1250,7 @@ mod fingerprint_tests {
         let left = tokens("left", CLONE_FINGERPRINT_K_V1);
         let mut right = left.clone();
         right[3] = ConservativeCloneTokenV1::Syntax {
-            syntax_kind: "identifier".to_owned(),
+            syntax_kind: std::borrow::Cow::Borrowed("identifier"),
             text: "different".to_owned(),
         };
 
@@ -1306,7 +1306,7 @@ mod fingerprint_tests {
         let mut colliding = payload;
         let mut tokens = colliding.conservative_tokens.to_vec();
         tokens[0] = ConservativeCloneTokenV1::Syntax {
-            syntax_kind: "identifier".to_owned(),
+            syntax_kind: std::borrow::Cow::Borrowed("identifier"),
             text: "colliding-but-different".to_owned(),
         };
         colliding.conservative_tokens = tokens.into();
@@ -1323,7 +1323,7 @@ mod fingerprint_tests {
         right.extend(tokens("added-branch", 2));
         right.extend(left[10..20].iter().cloned());
         right.push(ConservativeCloneTokenV1::Syntax {
-            syntax_kind: "string".to_owned(),
+            syntax_kind: std::borrow::Cow::Borrowed("string"),
             text: "\"changed\"".to_owned(),
         });
         right.extend(left[21..].iter().cloned());
@@ -1362,7 +1362,7 @@ mod fingerprint_tests {
         assert_eq!(
             alignment.differences[1].right_tokens,
             vec![ConservativeCloneTokenV1::Syntax {
-                syntax_kind: "string".to_owned(),
+                syntax_kind: std::borrow::Cow::Borrowed("string"),
                 text: "\"changed\"".to_owned(),
             }]
         );

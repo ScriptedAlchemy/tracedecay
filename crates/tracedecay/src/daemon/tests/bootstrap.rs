@@ -2249,10 +2249,9 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
     let _database_scope =
         enter_test_daemon_database_scope(&profile_root, "registered missing-db init retry");
     let engine = test_daemon_engine_for_profile(&profile_root);
-    // Each request arms its publication bound on its first poll, before route
-    // enrollment resolves. Opening and migrating the profile database on that
-    // path would spend the whole bound before either request subscribes to the
-    // open below, so the runtime is warmed the way daemon bootstrap warms it.
+    // Profile open sits before the publication bound (the bound starts when
+    // the open is claimed). Warm it so the 150 ms join window below is spent
+    // on the controlled open, not on the first profile migration.
     prewarm_test_profile_runtime(&engine.store_administration).await;
     let ordinary_handshake = DaemonHandshake {
         project_path: Some(project.clone()),
@@ -2264,13 +2263,10 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
         allow_init: true,
         ..ordinary_handshake.clone()
     };
-    // The bound also covers everything a request does *before* it can join an
-    // open, route enrollment, git discovery, the registered layout, so a
-    // first-touch request can spend the whole bound before it ever subscribes
-    // to the open below and would then mint its own. One ordinary request
-    // ahead of the fixture resolves that path for this exact route, and its
-    // refusal is the same missing-index failure the joined waiter classifies
-    // later.
+    // One ordinary request ahead of the fixture resolves this exact route,
+    // and its refusal is the same missing-index failure the joined waiter
+    // classifies later. The publication bound no longer includes that
+    // enrollment, so the request can subscribe before the bound is spent.
     // It is retried the way a client retries the warming hint, so the route is
     // left with no open of its own before the fixture takes it over.
     let warmup_give_up = tokio::time::Instant::now() + std::time::Duration::from_secs(30);

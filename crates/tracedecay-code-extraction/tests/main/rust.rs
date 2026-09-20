@@ -1131,10 +1131,256 @@ fn use_foo() {
         ref_names.contains(&"Foo::new"),
         "expected Foo::new call, got: {ref_names:?}"
     );
-    // f.bar() should also produce "bar" (method-name hint).
     assert!(
-        ref_names.contains(&"bar"),
-        "expected 'bar' method-name ref from f.bar(), got: {ref_names:?}"
+        ref_names.contains(&"f.bar"),
+        "the receiver-dotted form remains: {ref_names:?}"
+    );
+    // `Foo::new()` does not state that `f` is Foo, and `bar` is the method of
+    // an impl in this file. Emitting the simple name would invent that caller.
+    assert!(
+        !ref_names.contains(&"bar"),
+        "untyped f.bar() must not emit a bare method name: {ref_names:?}"
+    );
+    assert!(
+        !ref_names.contains(&"Foo::bar"),
+        "constructor-like Foo::new() must not fabricate a Foo receiver: {ref_names:?}"
+    );
+}
+
+#[test]
+fn bare_receiver_calls_name_self_without_the_method_simple_name() {
+    let source = r#"
+fn prepare(value: i32) {}
+fn push(value: i32) {}
+
+struct Rows;
+impl Rows {
+    fn len(&self) -> usize { 0 }
+    fn measure(&self) -> usize { self.len() }
+    fn via_explicit(self: &Self) -> usize { self.len() }
+}
+trait Span {}
+impl Span for Rows {
+    fn wide(&self) -> usize { self.len() }
+}
+
+fn caller(items: Vec<i32>, rows: Rows) {
+    let foreign = make();
+    foreign.prepare(1);
+    items.push(1);
+    prepare(1);
+    push(1);
+    rows.len();
+}
+fn make() -> Vec<i32> { Vec::new() }
+"#;
+    let result = RustExtractor.extract("src/lib.rs", source);
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+    let from = |name: &str| {
+        let function = result
+            .nodes
+            .iter()
+            .find(|node| {
+                matches!(node.kind, NodeKind::Function | NodeKind::Method) && node.name == name
+            })
+            .unwrap_or_else(|| panic!("{name} is extracted"));
+        result
+            .unresolved_refs
+            .iter()
+            .filter(|reference| {
+                reference.reference_kind == EdgeKind::Calls && reference.from_node_id == function.id
+            })
+            .map(|reference| reference.reference_name.as_str())
+            .collect::<Vec<_>>()
+    };
+
+    let measure = from("measure");
+    assert!(
+        measure.contains(&"self.len") && measure.contains(&"Rows::len"),
+        "{measure:?}"
+    );
+    assert!(
+        !measure.contains(&"len"),
+        "self.len() must not emit the bare method name: {measure:?}"
+    );
+
+    let via_explicit = from("via_explicit");
+    assert!(
+        via_explicit.contains(&"Rows::len"),
+        "self: &Self still names the enclosing type: {via_explicit:?}"
+    );
+
+    let wide = from("wide");
+    assert!(
+        wide.contains(&"Rows::len"),
+        "self inside `impl Span for Rows` names Rows, not Span: {wide:?}"
+    );
+    assert!(!wide.contains(&"Span::len"), "{wide:?}");
+
+    let caller = from("caller");
+    assert!(caller.contains(&"prepare"), "{caller:?}");
+    assert!(caller.contains(&"push"), "{caller:?}");
+    assert!(caller.contains(&"Rows::len"), "{caller:?}");
+    assert!(caller.contains(&"Vec::push"), "{caller:?}");
+    assert!(caller.contains(&"foreign.prepare"), "{caller:?}");
+    assert!(caller.contains(&"items.push"), "{caller:?}");
+    assert_eq!(
+        caller.iter().filter(|name| **name == "prepare").count(),
+        1,
+        "foreign.prepare() invented a second prepare call: {caller:?}"
+    );
+    assert_eq!(
+        caller.iter().filter(|name| **name == "push").count(),
+        1,
+        "items.push() invented a second push call: {caller:?}"
+    );
+}
+
+#[test]
+fn trait_bound_calls_name_the_trait_without_a_bare_method() {
+    let source = r#"
+trait Processor {
+    fn process(&self, input: u32) -> u32;
+    fn via_self(&self, input: u32) -> u32 {
+        self.process(input)
+    }
+}
+trait Other {
+    fn process(&self, input: u32) -> u32;
+}
+struct Doubler;
+impl Doubler {
+    fn kick(&self, input: u32) -> u32 {
+        self.process(input)
+    }
+}
+impl Processor for Doubler {
+    fn process(&self, input: u32) -> u32 {
+        input * 2
+    }
+}
+fn via_dyn(processor: &dyn Processor, input: u32) -> u32 {
+    processor.process(input)
+}
+fn via_impl(processor: impl Processor + 'static, input: u32) -> u32 {
+    processor.process(input)
+}
+fn via_bound<T: Processor>(processor: &T, input: u32) -> u32 {
+    processor.process(input)
+}
+fn via_where<T>(processor: &T, input: u32) -> u32
+where
+    T: Processor,
+{
+    processor.process(input)
+}
+fn ambiguous<T: Processor + Other>(processor: &T, input: u32) -> u32 {
+    processor.process(input)
+}
+"#;
+    let result = RustExtractor.extract("src/lib.rs", source);
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    let from = |name: &str| {
+        let function = result
+            .nodes
+            .iter()
+            .find(|node| {
+                matches!(node.kind, NodeKind::Function | NodeKind::Method) && node.name == name
+            })
+            .unwrap_or_else(|| panic!("{name} is extracted"));
+        result
+            .unresolved_refs
+            .iter()
+            .filter(|reference| {
+                reference.reference_kind == EdgeKind::Calls && reference.from_node_id == function.id
+            })
+            .map(|reference| reference.reference_name.as_str())
+            .collect::<Vec<_>>()
+    };
+
+    for owner in ["via_self", "via_dyn", "via_impl", "via_bound", "via_where"] {
+        let names = from(owner);
+        assert!(
+            names.contains(&"Processor::process"),
+            "{owner} must name the trait callee: {names:?}"
+        );
+        assert!(
+            !names.contains(&"process"),
+            "{owner} must not reintroduce the bare method name: {names:?}"
+        );
+    }
+    let kick = from("kick");
+    assert!(
+        kick.contains(&"Doubler::process") && !kick.contains(&"Processor::process"),
+        "self in an inherent impl stays the type, not the trait: {kick:?}"
+    );
+    assert!(!kick.contains(&"process"), "{kick:?}");
+    let ambiguous = from("ambiguous");
+    assert!(
+        !ambiguous.iter().any(|name| name.contains("::process")),
+        "two trait bounds must not pick a callee: {ambiguous:?}"
+    );
+    assert!(!ambiguous.contains(&"process"), "{ambiguous:?}");
+}
+
+#[test]
+fn self_receiver_names_carry_module_scope_and_the_outer_as_delimiter() {
+    let source = r#"
+mod inner {
+    pub struct Rows;
+    impl Rows {
+        fn len(&self) -> usize { 0 }
+        fn measure(&self) -> usize { self.len() }
+    }
+    trait Wide { fn wide(&self) -> usize; }
+    impl Wide for Rows {
+        fn wide(&self) -> usize { self.len() }
+    }
+}
+struct Foo;
+trait Assoc { type Item; }
+trait Local { fn span(&self) -> usize; }
+impl Local for <Foo as Assoc>::Item {
+    fn span(&self) -> usize { self.len() }
+}
+"#;
+    let result = RustExtractor.extract("src/lib.rs", source);
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+    let from = |qualified: &str| {
+        let function = result
+            .nodes
+            .iter()
+            .find(|node| {
+                matches!(node.kind, NodeKind::Function | NodeKind::Method)
+                    && node.qualified_name == qualified
+            })
+            .unwrap_or_else(|| panic!("{qualified} is extracted"));
+        result
+            .unresolved_refs
+            .iter()
+            .filter(|reference| {
+                reference.reference_kind == EdgeKind::Calls && reference.from_node_id == function.id
+            })
+            .map(|reference| reference.reference_name.as_str())
+            .collect::<Vec<_>>()
+    };
+
+    let measure = from("src/lib.rs::inner::Rows::measure");
+    assert!(
+        measure.contains(&"inner::Rows::len"),
+        "self inside `mod inner` names the module-scoped type: {measure:?}"
+    );
+    let wide = from("src/lib.rs::inner::<Rows as Wide>::wide");
+    assert!(
+        wide.contains(&"inner::Rows::len"),
+        "a trait impl in a module keeps the module path: {wide:?}"
+    );
+    let span = from("src/lib.rs::<<Foo as Assoc>::Item as Local>::span");
+    assert!(
+        span.contains(&"<Foo as Assoc>::Item::len"),
+        "a projected self type splits at the outer `as`: {span:?}"
     );
 }
 

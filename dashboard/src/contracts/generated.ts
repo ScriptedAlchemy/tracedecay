@@ -690,6 +690,7 @@ export const CodeCloneIndexCoverageV1Schema = z.object({
   eligible_source_bodies: z.number().int().safe().min(0).nullable(),
   exact_postings: z.number().int().safe().min(0).nullable(),
   excluded_incomplete_tokenization_bodies: z.number().int().safe().min(0).nullable(),
+  excluded_too_large_bodies: z.number().int().safe().min(0).nullable(),
   excluded_too_small_bodies: z.number().int().safe().min(0).nullable(),
   hot_posting_rows_skipped: z.number().int().safe().min(0).nullable(),
   hot_postings_skipped: z.number().int().safe().min(0).nullable(),
@@ -5154,6 +5155,10 @@ export const SimilarCoverageV1Schema = z.discriminatedUnion("status", [z.object(
   status: z.literal("complete"),
 }).strict(), z.object({
   status: z.literal("excluded_incomplete_tokenization"),
+}).strict(), z.object({
+  maximum_bytes: z.number().int().safe().min(0),
+  maximum_tokens: z.number().int().min(0),
+  status: z.literal("excluded_too_large"),
 }).strict(), z.object({
   minimum_tokens: z.number().int().min(0),
   status: z.literal("excluded_too_small"),

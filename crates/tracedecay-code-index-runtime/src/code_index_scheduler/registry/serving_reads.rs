@@ -277,6 +277,7 @@ impl CodeIndexSchedulerRegistryV1 {
             generation_recovery,
             build_progress,
             hints,
+            pending_wake,
             source_freshness,
             graph_activation_enabled,
         ) = {
@@ -294,12 +295,13 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.generation_recovery),
                 Arc::clone(&worktree.build_progress),
                 Arc::clone(&worktree.hints),
+                Arc::clone(&worktree.pending_wake),
                 worktree.source_freshness.clone(),
                 worktree.graph_activation.policy().is_enabled(),
             )
         };
         tokio::task::spawn_blocking(move || {
-            let progress = hotpath::measure_block!("daemon.code_index.dashboard.progress", {
+            let mut progress = hotpath::measure_block!("daemon.code_index.dashboard.progress", {
                 let progress = build_progress
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -316,17 +318,29 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 progress
             });
-            // `Verifying` / `Refreshing` name an executing source proof or
-            // rebuild pass. A bare pending wake is only a scheduled follow-up;
-            // counting it here flipped Fresh→Verifying between consecutive
-            // status reads after a settled seat (registry publication feeds).
-            // The pass guard (`reconcile_in_progress`) is the durable signal.
-            let refresh_in_flight = reconcile_in_progress.load(Ordering::Acquire) != 0;
+            let refresh_in_flight = reconcile_in_progress.load(Ordering::Acquire) != 0
+                || pending_wake
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .micros
+                    != 0;
             let source_change_pending = source_freshness.source_change_pending();
             let parked = convergence_park
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
+            // The park is the authority on why this worktree cannot converge;
+            // the progress slot only describes the generation whose build
+            // published last. A text-artifact commit that lands after the park
+            // republishes a fresh snapshot and erases the reason the worker
+            // wrote there, so status reported a blocked index as `ready` with
+            // no reason. Project the park's reason instead of racing for it.
+            if let Some(reason) = parked.as_ref().and_then(|parked| parked.blocked_reason)
+                && let Some(progress) = progress.as_mut()
+            {
+                progress.blocked_reason = Some(reason);
+            }
             let generation_recovery = generation_recovery
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -561,18 +575,16 @@ impl CodeIndexSchedulerRegistryV1 {
                         .read()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .clone();
-                    // A still-current proof needs no follow-up. If it expired
-                    // after this pass began, leave one coalesced wake so the
-                    // worker re-observes source after releasing its ownership.
-                    if serving.is_some()
-                        && !source_freshness.ready_without_stat(&freshness_root, &shutting_down)
-                    {
-                        Self::note_wake_if_idle(
-                            &pending_wake,
-                            &wake,
-                            CodeIndexCadenceTriggerV1::BusyFollowUp,
-                        );
-                    }
+                    // The holder of the scheduler is already the source
+                    // observation. A follow-up posted from this read is taken
+                    // by that pass, the slot goes empty, and the next poll
+                    // finds the lock still held with the proof not yet
+                    // renewed and posts another. Dashboard freshness reads
+                    // that slot as `refresh_in_flight` and stays `Verifying`
+                    // for the whole chain. The pass renews the proof before
+                    // it releases the lock; a proof that is still expired
+                    // afterwards is requested by the next read that acquires
+                    // the scheduler.
                     return serving;
                 }
             };

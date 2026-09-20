@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -12,13 +13,42 @@ mod rename;
 pub const CONSERVATIVE_CLONE_NORMALIZATION_REVISION_V1: u16 = 1;
 pub const RENAME_CLONE_NORMALIZATION_REVISION_V1: u16 = 1;
 pub const MIN_AUTOMATIC_CLONE_BODY_TOKENS_V1: u32 = 30;
+/// Source-byte guard checked before tokenization. Token count cannot bound one
+/// giant literal token, while the text artifact still serializes its bytes.
+pub const MAX_AUTOMATIC_CLONE_BODY_BYTES_V1: u64 = 64 * 1024;
+/// Bodies with more non-trivia tokens than this are not clone candidates and
+/// keep no token stream. A clone body is persisted as one serialized record
+/// inside a 4 MiB text-artifact page; a 14k-token function (a generated
+/// argument extractor, a fixture-heavy test) serializes its conservative and
+/// rename streams to ~4.8 MB together, and a single such record parked a whole
+/// project's text projection on a deterministic contract violation with no
+/// way to converge. 4096 tokens is roughly a thousand lines, keeps both
+/// streams under 1.5 MB, and is far past anything clone detection can act on.
+pub const MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1: u32 = 4096;
+
+/// A clone-token syntax kind.
+///
+/// Every kind an extractor emits is a grammar-owned `&'static str`, drawn from
+/// a vocabulary of a few hundred names, while one repository pass emits tens of
+/// millions of tokens. Owning the name per token made the grammar table's
+/// static strings the largest single allocation source of the pre-progress
+/// extraction window; borrowing it keeps the wire shape and pays nothing.
+/// Deserialized pages still own their names.
+pub type CloneSyntaxKindV1 = Cow<'static, str>;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Hash)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ConservativeCloneTokenV1 {
-    StructureStart { syntax_kind: String },
-    Syntax { syntax_kind: String, text: String },
-    StructureEnd { syntax_kind: String },
+    StructureStart {
+        syntax_kind: CloneSyntaxKindV1,
+    },
+    Syntax {
+        syntax_kind: CloneSyntaxKindV1,
+        text: String,
+    },
+    StructureEnd {
+        syntax_kind: CloneSyntaxKindV1,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -26,7 +56,13 @@ pub enum ConservativeCloneTokenV1 {
 pub enum CloneBodyEligibilityV1 {
     Eligible,
     ExcludedIncompleteTokenization,
-    ExcludedTooSmall { minimum_tokens: u32 },
+    ExcludedTooSmall {
+        minimum_tokens: u32,
+    },
+    ExcludedTooLarge {
+        maximum_tokens: u32,
+        maximum_bytes: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -40,6 +76,7 @@ pub enum CloneBodyTokenizationStatusV1 {
 #[serde(rename_all = "snake_case")]
 pub enum CloneBodyTokenizationIssueV1 {
     BodyBoundaryUnavailable,
+    BodyExceedsSizeBound,
     InvalidSourceRange,
     ParseError,
 }
@@ -166,8 +203,37 @@ fn extract_clone_body(
     language: &str,
     logical_path: &str,
 ) -> ExtractedCloneBodyV1 {
-    let conservative = conservative_fields(syntax, source, language);
-    let rename = rename_fields(syntax, source, language);
+    let body_bytes = syntax
+        .body
+        .end_byte()
+        .saturating_sub(syntax.body.start_byte()) as u64;
+    let conservative = if body_bytes > MAX_AUTOMATIC_CLONE_BODY_BYTES_V1 {
+        ConservativeFields {
+            tokens: Arc::from([]),
+            issues: vec![CloneBodyTokenizationIssueV1::BodyExceedsSizeBound],
+            token_count: 0,
+            status: CloneBodyTokenizationStatusV1::Partial,
+            eligibility: oversized_clone_body(),
+        }
+    } else {
+        conservative_fields(syntax, source, language)
+    };
+    // An oversized body keeps its count and its typed exclusion but no
+    // stream: the streams are what would not fit a page, and rename
+    // normalization has nothing to normalize for.
+    let rename = if matches!(
+        conservative.eligibility,
+        CloneBodyEligibilityV1::ExcludedTooLarge { .. }
+    ) {
+        RenameFields {
+            revision: None,
+            status: CloneBodyRenameStatusV1::Partial,
+            issues: Vec::new(),
+            tokens: None,
+        }
+    } else {
+        rename_fields(syntax, source, language)
+    };
     ExtractedCloneBodyV1 {
         logical_path: logical_path.to_owned(),
         language: language.to_owned(),
@@ -235,15 +301,29 @@ fn conservative_fields(
         CloneBodyEligibilityV1::ExcludedTooSmall {
             minimum_tokens: MIN_AUTOMATIC_CLONE_BODY_TOKENS_V1,
         }
+    } else if emitter.token_count > MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1 {
+        oversized_clone_body()
     } else {
         CloneBodyEligibilityV1::Eligible
     };
+    let tokens = if matches!(eligibility, CloneBodyEligibilityV1::ExcludedTooLarge { .. }) {
+        Arc::from([])
+    } else {
+        emitter.tokens.into()
+    };
     ConservativeFields {
-        tokens: emitter.tokens.into(),
+        tokens,
         issues: emitter.issues,
         token_count: emitter.token_count,
         status: tokenization_status,
         eligibility,
+    }
+}
+
+const fn oversized_clone_body() -> CloneBodyEligibilityV1 {
+    CloneBodyEligibilityV1::ExcludedTooLarge {
+        maximum_tokens: MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1,
+        maximum_bytes: MAX_AUTOMATIC_CLONE_BODY_BYTES_V1,
     }
 }
 
@@ -308,7 +388,7 @@ impl<'a> TokenEmitter<'a> {
 
         if node.is_named() {
             self.tokens.push(ConservativeCloneTokenV1::StructureStart {
-                syntax_kind: node.kind().to_owned(),
+                syntax_kind: Cow::Borrowed(node.kind()),
             });
         }
         let mut cursor = node.walk();
@@ -322,7 +402,7 @@ impl<'a> TokenEmitter<'a> {
         }
         if node.is_named() {
             self.tokens.push(ConservativeCloneTokenV1::StructureEnd {
-                syntax_kind: node.kind().to_owned(),
+                syntax_kind: Cow::Borrowed(node.kind()),
             });
         }
     }
@@ -340,7 +420,7 @@ impl<'a> TokenEmitter<'a> {
             return;
         }
         self.tokens.push(ConservativeCloneTokenV1::Syntax {
-            syntax_kind: node.kind().to_owned(),
+            syntax_kind: Cow::Borrowed(node.kind()),
             text: self
                 .replacements
                 .and_then(|replacements| replacements.get(&(node.start_byte(), node.end_byte())))

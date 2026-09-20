@@ -147,7 +147,17 @@ async fn configure_attempt_provider(production: &ProductionCompositionFixture) {
 
 /// A fresh provider attempt has no session association yet. The public Work
 /// reads must still project it from the authority that committed the attempt.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+///
+/// The journey deliberately leaves the second attempt in flight and then reads
+/// it, so the runtime has to carry the reader and the attempt worker at once.
+/// The Work read handlers are synchronous: `load_effect_dispatch` occupies its
+/// worker thread while it waits for the exact-SQL transaction slot the in-flight
+/// attempt holds. With two worker threads the reader and the attempt worker
+/// deadlock until the 30s transaction-idle reclaim frees the slot, which is
+/// within milliseconds of this operation's own 30s deadline, so the journey
+/// passed or failed by a race rather than by its contract. Provision the
+/// threads the journey's own concurrency needs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn work_attempt_consumers_read_the_public_start_attempt_effect() {
     let production = production_composition_fixture().await;
     let project_root = production.project_root.clone();
@@ -390,7 +400,6 @@ async fn work_attempt_consumers_read_the_public_start_attempt_effect() {
         second_started["identity"]["attempt_id"], "attempt.mcp-attempt-read.second",
         "{second_started}"
     );
-
     let attempts = call(
         &server,
         "tracedecay_work_list_attempts",
@@ -581,4 +590,487 @@ async fn work_attempt_consumers_read_the_public_start_attempt_effect() {
     )
     .await;
     assert_eq!(resumed["state"], "running", "{resumed}");
+}
+
+const GENERATE_ROUTE_ID: &str = "route.work.mcp-attempt-codex.v1";
+const GENERATE_PROVIDER_ID: &str = "provider.work.codex-cli";
+
+async fn create_ready_task(
+    server: &tracedecay::mcp::McpServer,
+    selection: &Value,
+    occurred_at: i64,
+    task_id: &str,
+) -> Value {
+    let prepared = call(
+        server,
+        "tracedecay_work_prepare_graph_mutation",
+        json!({
+            "selection": selection,
+            "change": {
+                "change": "create_task",
+                "initiative": {
+                    "id": format!("initiative.{task_id}"),
+                    "title": "Generate proposal initiative",
+                    "created_at": occurred_at
+                },
+                "plan": {
+                    "id": format!("plan.{task_id}"),
+                    "initiative_id": format!("initiative.{task_id}"),
+                    "title": "Generate proposal plan",
+                    "created_at": occurred_at
+                },
+                "milestone": {
+                    "id": format!("milestone.{task_id}"),
+                    "plan_id": format!("plan.{task_id}"),
+                    "title": "Generate proposal milestone",
+                    "created_at": occurred_at
+                },
+                "item": {
+                    "input": {
+                        "task_id": task_id,
+                        "hierarchy": {
+                            "initiative_id": format!("initiative.{task_id}"),
+                            "plan_id": format!("plan.{task_id}"),
+                            "milestone_id": format!("milestone.{task_id}")
+                        },
+                        "title": "Generate one proposal",
+                        "dependencies": [],
+                        "informational_relations": [],
+                        "causal_candidates": [],
+                        "acceptance_criteria": [],
+                        "effort": 1,
+                        "scheduled_at": null,
+                        "deadline": null,
+                        "created_at": occurred_at,
+                        "updated_at": occurred_at
+                    },
+                    "accepted_proposal": null,
+                    "accepted_route": null,
+                    "execution_admitted_at": null,
+                    "accepted_attempts": [],
+                    "accepted_criteria": {},
+                    "accepted_at": null,
+                    "archived_at": null,
+                    "evidence_links": [],
+                    "handoffs": []
+                }
+            },
+            "evidence": []
+        }),
+    )
+    .await;
+    let created = call(
+        server,
+        "tracedecay_work_create",
+        prepared["request"].clone(),
+    )
+    .await;
+    assert_eq!(created["replayed"], false, "{created}");
+    assert_eq!(
+        created["verified_graph_version"]["graph_version"], 1,
+        "{created}"
+    );
+    assert_eq!(
+        created["verified_graph_version"]["event_sequence"], 1,
+        "{created}"
+    );
+    created
+}
+
+fn proposal_arguments(
+    selection: &Value,
+    task_id: &str,
+    proposal_id: &str,
+    occurred_at: i64,
+) -> Value {
+    json!({
+        "selection": selection,
+        "task_id": task_id,
+        "proposal_id": proposal_id,
+        "occurred_at": occurred_at
+    })
+}
+
+fn work_tool_text(result: &Value) -> Value {
+    serde_json::from_str(extract_real_server_text(result))
+        .unwrap_or_else(|error| panic!("Work tool text is not JSON ({error}): {result}"))
+}
+
+/// Drop the digest that covers per-call admission (deadline and cancellation).
+///
+/// Two calls with the same arguments are not byte-identical, because that
+/// digest is minted again on every `tools/call`. The route, reasons, sizing,
+/// and graph version are.
+fn without_admission_digest(mut value: Value) -> Value {
+    if let Some(object) = value.pointer_mut("/decision") {
+        object
+            .as_object_mut()
+            .expect("decision object")
+            .remove("input_digest");
+    }
+    if let Some(object) = value.pointer_mut("/proposal") {
+        object
+            .as_object_mut()
+            .expect("proposal object")
+            .remove("evidence_digest");
+    }
+    if let Some(object) = value.pointer_mut("/calibration/provenance") {
+        object
+            .as_object_mut()
+            .expect("provenance object")
+            .remove("input_digest");
+    }
+    value
+}
+
+/// The payload a host reads after a successful `tools/call`.
+///
+/// `isError` is absent on success; a problem rides in the text as
+/// `kind: problem`, not as a sibling of the MCP result.
+async fn generate_proposal_success(server: &tracedecay::mcp::McpServer, arguments: Value) -> Value {
+    let result =
+        handle_real_server_tool_call(server, "tracedecay_work_generate_proposal", arguments).await;
+    assert_ne!(result["isError"], json!(true), "{result}");
+    let envelope = work_tool_text(&result);
+    assert_eq!(envelope["kind"], "success", "{envelope}");
+    envelope
+        .pointer("/value/outcome/value/payload")
+        .cloned()
+        .unwrap_or_else(|| panic!("success envelope has no payload: {envelope}"))
+}
+
+/// `tracedecay_work_generate_proposal` is a read. A ready task with one
+/// configured route is allowed onto that route, without inventing a size or
+/// moving the graph. A task the graph does not contain is a typed refusal,
+/// not an empty proposal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn generate_proposal_allows_a_ready_task_on_the_configured_route_and_refuses_a_missing_task()
+{
+    let production = production_composition_fixture().await;
+    let project_root = production.project_root.clone();
+    let isolation_root = project_root
+        .parent()
+        .expect("production fixture isolation root")
+        .to_path_buf();
+    configure_attempt_provider(&production).await;
+    production.harness.shutdown().await;
+    let harness = tracedecay::daemon::ProductionProjectCompositionHarnessV1::open(
+        &isolation_root,
+        [project_root.clone()],
+    )
+    .await
+    .expect("reopen production composition with Work provider");
+    let server = harness
+        .server(&project_root)
+        .expect("production MCP server");
+    let selection = json!({ "selection": "profile_owned_no_git" });
+    let occurred_at = now_micros();
+    let created = create_ready_task(&server, &selection, occurred_at, "task.mcp-generate").await;
+    // The committed version is stamped when the mutation lands. A read whose
+    // observation instant is earlier than that stamp sees no graph, so every
+    // task — including the one just created — is not_found.
+    let observed_at = now_micros();
+
+    let refused = handle_real_server_tool_call(
+        &server,
+        "tracedecay_work_generate_proposal",
+        proposal_arguments(
+            &selection,
+            "task.mcp-generate.absent",
+            "proposal.mcp-generate.absent",
+            observed_at,
+        ),
+    )
+    .await;
+    assert_eq!(refused["isError"], true, "{refused}");
+    let refused_text = work_tool_text(&refused);
+    assert_eq!(refused_text["kind"], "problem", "{refused_text}");
+    assert!(
+        refused_text["value"].get("binding_id").is_none(),
+        "a concealed refusal must not reveal the binding: {refused_text}"
+    );
+    assert!(
+        refused_text.pointer("/value/outcome").is_none(),
+        "a missing task must not return a proposal: {refused_text}"
+    );
+    let mut problem = refused_text["value"]["problem"].clone();
+    let problem_fields = problem.as_object_mut().expect("refusal problem object");
+    let request_id = problem_fields
+        .remove("request_id")
+        .expect("refusal request id");
+    let trace_id = problem_fields.remove("trace_id").expect("refusal trace id");
+    assert_eq!(
+        problem,
+        json!({
+            "revision": 1,
+            "kind": "not_found_or_not_authorized",
+            "code": "not_found_or_not_authorized",
+            "message": "The requested resource was not found or is not authorized",
+            "diagnostic": null,
+            "committed_receipt": null,
+            "owning_layer": "application",
+            "terminality": "pre_admission",
+            "retryable": false,
+            "retry": "never",
+            "retry_scope": null,
+            "retry_after_millis": null,
+            "cancellation_stage": null,
+            "unavailable_classification": null,
+            "execution_failure_classification": null,
+            "details": [],
+            "legal_actions": [],
+            "coverage": null
+        }),
+        "{refused_text}"
+    );
+    let request_id = request_id.as_str().expect("refusal request id");
+    assert!(!request_id.is_empty(), "{refused_text}");
+    assert_eq!(trace_id, json!(request_id), "{refused_text}");
+    assert_eq!(
+        refused_text["value"]["request_id"],
+        json!(request_id),
+        "{refused_text}"
+    );
+
+    let generated = generate_proposal_success(
+        &server,
+        proposal_arguments(
+            &selection,
+            "task.mcp-generate",
+            "proposal.mcp-generate.ready",
+            observed_at,
+        ),
+    )
+    .await;
+    assert_eq!(
+        generated["verified_graph_version"], created["verified_graph_version"],
+        "generating a proposal must not advance the graph: {generated}"
+    );
+    let mut proposal = generated["proposal"].clone();
+    let proposal_evidence_digest = proposal
+        .as_object_mut()
+        .expect("proposal object")
+        .remove("evidence_digest");
+    let proposal_configuration_digest = proposal
+        .as_object_mut()
+        .expect("proposal object")
+        .remove("configuration_digest");
+    assert_eq!(
+        proposal,
+        json!({
+            "proposal_id": "proposal.mcp-generate.ready",
+            "task_id": "task.mcp-generate",
+            "based_on_version": 1,
+            "shape": {
+                "score_kind": "ordinal",
+                "complexity": 0,
+                "ambiguity": 0,
+                "blast_radius": 0,
+                "integration_overhead": 0
+            },
+            "sizing": {
+                "score_kind": "ordinal",
+                "low": 1,
+                "likely": 1,
+                "high": 1,
+                "coverage": "declared_work_item_effort"
+            },
+            "children": [],
+            "route": {
+                "decision": "selected",
+                "recommended": {
+                    "provider_id": GENERATE_PROVIDER_ID,
+                    "route_id": GENERATE_ROUTE_ID
+                },
+                "alternatives": [],
+                "exclusions": [],
+                "fallback": GENERATE_ROUTE_ID
+            },
+            "explanation": "policy disposition Allow; reasons [FrontierIncomparable, Ready, RouteEvidenceSparse, InsufficientCalibrationSupport, DeterministicBaselineSelected]"
+        }),
+        "{generated}"
+    );
+    assert_eq!(
+        proposal_evidence_digest.as_ref(),
+        Some(&generated["decision"]["input_digest"]),
+        "{generated}"
+    );
+    assert_eq!(
+        proposal_configuration_digest.as_ref(),
+        Some(&generated["decision"]["configuration_digest"]),
+        "{generated}"
+    );
+    let evidence_digest = generated["decision"]["input_digest"]
+        .as_str()
+        .expect("decision input digest");
+    assert_eq!(evidence_digest.len(), "sha256:".len() + 64, "{generated}");
+    assert!(evidence_digest.starts_with("sha256:"), "{generated}");
+    assert_eq!(
+        generated["decision"]["evaluator_id"], "work_proposal.v1",
+        "{generated}"
+    );
+    assert_eq!(
+        generated["decision"]["evaluator_revision"], 3,
+        "{generated}"
+    );
+    assert_eq!(
+        generated["decision"]["task_id"], "task.mcp-generate",
+        "{generated}"
+    );
+    assert_eq!(generated["decision"]["based_on_version"], 1, "{generated}");
+    assert_eq!(generated["decision"]["disposition"], "allow", "{generated}");
+    assert_eq!(
+        generated["decision"]["recommended_action"], "proceed_to_acceptance",
+        "{generated}"
+    );
+    assert_eq!(
+        generated["decision"]["deterministic_fallback"], true,
+        "{generated}"
+    );
+    assert_eq!(
+        generated["decision"]["ordered_reason_codes"],
+        json!([
+            "frontier_incomparable",
+            "ready",
+            "route_evidence_sparse",
+            "insufficient_calibration_support",
+            "deterministic_baseline_selected"
+        ]),
+        "{generated}"
+    );
+    assert_eq!(
+        generated["decision"]["frontier_comparison"], "incomparable",
+        "{generated}"
+    );
+    assert_eq!(
+        generated["decision"]["live_git_evidence"],
+        Value::Null,
+        "{generated}"
+    );
+    assert_eq!(
+        generated["decision"]["local_evidence"]["watermark"], observed_at,
+        "{generated}"
+    );
+    assert_eq!(generated["decision"].get("sizing"), None, "{generated}");
+    assert_eq!(
+        generated["decision"].get("decomposition"),
+        None,
+        "{generated}"
+    );
+    assert_eq!(
+        generated["decision"]["shape"],
+        json!({
+            "kind": "unclassified",
+            "band": "lowest"
+        }),
+        "{generated}"
+    );
+    assert_eq!(
+        generated["decision"]["route_plan"],
+        json!({
+            "ranked": [{
+                "rank": 1,
+                "route_id": GENERATE_ROUTE_ID,
+                "correctness": "high",
+                "sensitive_data_fitness": "high",
+                "latency": "moderate",
+                "cost": "moderate",
+                "autonomy": "high",
+                "evidence_quality": "high"
+            }],
+            "exclusions": [],
+            "deterministic_baseline": GENERATE_ROUTE_ID,
+            "coverage": "lowest",
+            "uncertainty": "highest",
+            "human_override_applied": false
+        }),
+        "{generated}"
+    );
+    let mut calibration = generated["calibration"].clone();
+    let provenance = calibration
+        .as_object_mut()
+        .expect("calibration object")
+        .remove("provenance");
+    assert_eq!(
+        calibration,
+        json!({
+            "cohort_route": GENERATE_ROUTE_ID,
+            "raw_outcomes": [],
+            "eligible_route_count": 1,
+            "routes_with_outcomes": 0,
+            "comparable_outcomes": 0,
+            "incomparable_outcomes": 0,
+            "uncertainty": "sparse"
+        }),
+        "{generated}"
+    );
+    let provenance = provenance.expect("calibration provenance");
+    assert_eq!(
+        provenance["evaluator_id"], "work_proposal.v1",
+        "{generated}"
+    );
+    assert_eq!(provenance["evaluator_revision"], 3, "{generated}");
+    assert_eq!(provenance["evaluated_at"], observed_at, "{generated}");
+    assert_eq!(
+        provenance["input_digest"], generated["decision"]["input_digest"],
+        "{generated}"
+    );
+    assert_eq!(
+        provenance["configuration_digest"], generated["decision"]["configuration_digest"],
+        "{generated}"
+    );
+    assert_eq!(
+        provenance["configuration_revision"], generated["decision"]["configuration_revision"],
+        "{generated}"
+    );
+    assert_eq!(
+        provenance["local_evidence"], generated["decision"]["local_evidence"],
+        "{generated}"
+    );
+
+    let replayed = generate_proposal_success(
+        &server,
+        proposal_arguments(
+            &selection,
+            "task.mcp-generate",
+            "proposal.mcp-generate.ready",
+            observed_at,
+        ),
+    )
+    .await;
+    assert_eq!(
+        replayed["proposal"]["evidence_digest"], replayed["decision"]["input_digest"],
+        "{replayed}"
+    );
+    assert_eq!(
+        without_admission_digest(replayed),
+        without_admission_digest(generated.clone()),
+        "the same arguments must select the same route"
+    );
+
+    let other = generate_proposal_success(
+        &server,
+        proposal_arguments(
+            &selection,
+            "task.mcp-generate",
+            "proposal.mcp-generate.other",
+            observed_at,
+        ),
+    )
+    .await;
+    assert_eq!(
+        other["proposal"]["evidence_digest"], other["decision"]["input_digest"],
+        "{other}"
+    );
+    assert_eq!(
+        other["proposal"]["proposal_id"], "proposal.mcp-generate.other",
+        "{other}"
+    );
+    let mut other_stable = without_admission_digest(other);
+    let generated_stable = without_admission_digest(generated);
+    other_stable["proposal"]["proposal_id"] = generated_stable["proposal"]["proposal_id"].clone();
+    assert_eq!(
+        other_stable, generated_stable,
+        "the caller-chosen proposal id does not change the route"
+    );
 }

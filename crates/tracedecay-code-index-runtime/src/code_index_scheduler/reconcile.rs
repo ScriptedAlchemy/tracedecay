@@ -398,6 +398,14 @@ impl CodeIndexSchedulerErrorV1 {
             }
             Self::SnapshotMemoryCapacityUnavailable => true,
             Self::GraphProjection(CodeGraphProjectionError::BudgetExhausted { .. }) => true,
+            // The code-generation store lock is bounded shared capacity: a
+            // concurrent publication in the same store root already holds it,
+            // and it releases on its own without waking this worktree. Every
+            // other `Unavailable` detail names a fault in this store, so only
+            // this one refusal is retried.
+            Self::Production(CodeIndexProductionErrorV1::Publication(
+                CodeIndexPublicationStoreErrorV1::Unavailable(detail),
+            )) => detail == super::publication_store::CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1,
             _ => false,
         }
     }
@@ -599,6 +607,37 @@ impl SourceFreshnessFenceV1 {
                     .describes_snapshot(snapshot_content_identity)
             })
             && self.snapshot_is_recently_verified(&state, project_root, shutting_down)
+    }
+
+    /// Whether the last completed proof was sealed from exactly this snapshot.
+    ///
+    /// Clock age is not part of the answer. A seal or clone backfill can
+    /// outlive the admission window without the snapshot changing identity.
+    pub(super) fn proof_describes_snapshot(
+        &self,
+        snapshot_content_identity: &ContentDigest,
+    ) -> bool {
+        let state = self.snapshot();
+        state.verified_against_source
+            && state.source_witness.as_ref().is_some_and(|witness| {
+                witness
+                    .content_manifest
+                    .describes_snapshot(snapshot_content_identity)
+            })
+    }
+
+    /// Refresh the admission clock and the git-metadata sample after the
+    /// sealed digests still matched. The content witness and reconciled
+    /// epoch stay put: this is the same proof, not a new generation.
+    fn rebind_admission_clock(&self, git_metadata: identity::GitMetadataFingerprintV1) {
+        let micros = now_micros().0;
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.git_metadata = git_metadata;
+        state.last_reconciled_at = Instant::now();
+        state.verified_against_source = true;
+        state.freshness_unknown = false;
+        self.last_reconciled_at_micros
+            .store(micros, Ordering::Release);
     }
 }
 
@@ -1520,34 +1559,32 @@ impl CodeIndexWorktreeSchedulerV1 {
         };
         // Equal metadata is not currency. A quiet Noop is only honest when
         // this pass decoded the generation and re-derived every sealed digest.
-        // A dirty remount (hints, config drift, or a moved frontier) must still
-        // seat from the durable pointer without joining the publication decode
-        // barrier, activation may already own that flight.
-        let frontier_sweep = self.retained_frontier_stat_sweep(&pointer);
+        // Otherwise return None so the caller runs the content proof now;
+        // a later wake is not a substitute, because this empty-slot seat is
+        // the first branch and would keep swallowing the pass.
         let content_matches = decoded.as_ref().is_some_and(|generation| {
-            frontier_sweep.as_ref().is_some_and(|sweep| {
-                sweep.content_matches(
-                    &self.project_root,
-                    &SourceContentManifestV1::for_snapshot(generation.snapshot()),
-                    &self.shutting_down,
-                )
-            })
+            self.retained_frontier_stat_sweep(&pointer)
+                .is_some_and(|sweep| {
+                    sweep.content_matches(
+                        &self.project_root,
+                        &SourceContentManifestV1::for_snapshot(generation.snapshot()),
+                        &self.shutting_down,
+                    )
+                })
         });
+        if !retained_empty_seat_settles_source(decoded.is_some(), content_matches) {
+            return Ok(None);
+        }
+        let Some(generation) = decoded else {
+            return Ok(None);
+        };
         let dirty = {
             let hints = self
                 .hints
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             hints.overflow || !hints.paths.is_empty()
-        } || configuration_changed
-            || frontier_sweep.is_none()
-            || (decoded.is_some() && !content_matches);
-        if !dirty && !retained_empty_seat_settles_source(decoded.is_some(), content_matches) {
-            // Quiet + undecoded (or unproven) must not settle: a later wake is
-            // not a substitute, because this empty-slot seat is the first
-            // branch and would keep swallowing the content-proof pass.
-            return Ok(None);
-        }
+        } || configuration_changed;
         if dirty {
             self.request_background_reconcile();
         }
@@ -1555,13 +1592,8 @@ impl CodeIndexWorktreeSchedulerV1 {
         // `load_active_shared` here parked remount on the publication
         // barrier while activation owned it, so the seated event never
         // published and the dirty successor extract never started.
-        let snapshot_content_identity = if let Some(generation) = decoded {
-            self.adopt_ignored_source_roster(&generation);
-            generation.snapshot().content_identity.clone()
-        } else {
-            ContentDigest::new(pointer.snapshot_content_identity.clone())
-                .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?
-        };
+        self.adopt_ignored_source_roster(&generation);
+        let snapshot_content_identity = generation.snapshot().content_identity.clone();
         self.latest_content_identity = Some(snapshot_content_identity.clone());
         Ok(Some(CodeIndexReconcileOutcomeV1::Noop(
             CodeIndexNoopEvidenceV1 {
@@ -1590,13 +1622,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.worktree_stat_sweep()
             .ok()
             .filter(|sweep| witness.stat_signature == sweep.signature)
-    }
-
-    #[cfg(test)]
-    pub fn seat_retained_generation_on_empty_serving_for_test(
-        &mut self,
-    ) -> Result<Option<CodeIndexReconcileOutcomeV1>, CodeIndexSchedulerErrorV1> {
-        self.seat_retained_generation_on_empty_serving()
     }
 
     /// Verify an unchanged retained text generation without decoding the full
@@ -1743,6 +1768,45 @@ impl CodeIndexWorktreeSchedulerV1 {
         Ok(Some(outcome))
     }
 
+    /// Record that `metadata` is the generation the live worktree still seals.
+    ///
+    /// The in-memory fence takes this snapshot. The disk witness, when one
+    /// exists, is rewritten to this generation id so the next open does not
+    /// treat the predecessor's proof as a reason to drop it and reseal.
+    fn accept_unchanged_sealed_snapshot(
+        &mut self,
+        metadata: &VerifiedSealedTextGenerationMetadataV1,
+        git_metadata: identity::GitMetadataFingerprintV1,
+        stat_signature: String,
+        source_manifest: SourceContentManifestV1,
+        prior_witness: Option<&RestoreFreshnessWitnessV1>,
+    ) -> CodeIndexReconcileOutcomeV1 {
+        let snapshot_content_identity = metadata.snapshot().content_identity.clone();
+        self.latest_content_identity = Some(snapshot_content_identity.clone());
+        self.mark_reconciled_retained_generation_state(
+            git_metadata.clone(),
+            Some(ReconciledSourceWitnessV1 {
+                stat_signature: stat_signature.clone(),
+                content_manifest: source_manifest,
+            }),
+        );
+        if let Some(prior) = prior_witness {
+            RestoreFreshnessWitnessV1 {
+                generation_id: metadata.manifest().generation_id.as_str().to_owned(),
+                git_metadata_signature: git_metadata.stable_signature(),
+                stat_signature,
+                repository_parse_identity_digest: prior.repository_parse_identity_digest.clone(),
+                ignored_source_admissions_digest: prior.ignored_source_admissions_digest.clone(),
+                ignored_source_paths: Vec::new(),
+            }
+            .persist(&self.store_root);
+        }
+        CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
+            snapshot_content_identity,
+            overflow_reconciled: false,
+        })
+    }
+
     pub(super) fn reconcile_retained_text_generation_with(
         &mut self,
         metadata: &VerifiedSealedTextGenerationMetadataV1,
@@ -1764,10 +1828,14 @@ impl CodeIndexWorktreeSchedulerV1 {
             .observe_retained_text_compatibility(metadata)
             .is_reusable();
         let witness = RestoreFreshnessWitnessV1::load(&self.store_root);
-        if witness.as_ref().is_some_and(|witness| {
-            witness.generation_id != metadata.manifest().generation_id.as_str()
-                || !witness.ignored_source_paths.is_empty()
-        }) || !self.ignored_source_admissions.is_empty()
+        // A predecessor freshness witness is not a reason to drop this
+        // generation. It names the proof that sealed an earlier snapshot.
+        // Ignored-source rosters still require the complete capture: their
+        // digest is not the ordinary file manifest this path compares.
+        if witness
+            .as_ref()
+            .is_some_and(|witness| !witness.ignored_source_paths.is_empty())
+            || !self.ignored_source_admissions.is_empty()
         {
             return Ok(None);
         }
@@ -1794,37 +1862,54 @@ impl CodeIndexWorktreeSchedulerV1 {
         // generation's sealed file digests; its matching stat signature is
         // the negative cache that lets a moved tree skip the byte comparison.
         let source_manifest = SourceContentManifestV1::for_snapshot(metadata.snapshot());
-        if retained_is_reusable
+        let sealed_bytes_match = retained_is_reusable
             && !has_hints
-            && let Some(witness) = witness.as_ref()
-            && witness.git_metadata_signature == sampled_metadata.stable_signature()
-            && witness.stat_signature == sampled_sweep.signature
             && sampled_sweep.content_matches(
                 &self.project_root,
                 &source_manifest,
                 &self.shutting_down,
-            )
-        {
-            let snapshot_content_identity = metadata.snapshot().content_identity.clone();
-            self.latest_content_identity = Some(snapshot_content_identity.clone());
-            self.mark_reconciled_retained_generation_state(
-                sampled_metadata,
-                Some(ReconciledSourceWitnessV1 {
-                    stat_signature: sampled_sweep.signature,
-                    content_manifest: source_manifest,
-                }),
             );
-            return Ok(Some(CodeIndexReconcileOutcomeV1::Noop(
-                CodeIndexNoopEvidenceV1 {
-                    snapshot_content_identity,
-                    overflow_reconciled: false,
-                },
+        let quiet_witness = sealed_bytes_match
+            && witness.as_ref().is_some_and(|witness| {
+                witness.git_metadata_signature == sampled_metadata.stable_signature()
+                    && witness.stat_signature == sampled_sweep.signature
+            });
+        // Identical source bytes do not make a moved commit or branch the same
+        // generation. `finish_retained_reconcile` rebuilds on exactly this
+        // drift, and branch-scoped reads resolve generations by their sealed
+        // `source_revision`, so accepting here would leave the retained
+        // generation attributed to a commit the checkout has left for as long
+        // as the bytes hold still. `self.identity` was re-resolved above, so
+        // this costs no extra walk. A snapshot sealed without a revision
+        // (a dirty capture) has no commit attribution to invalidate.
+        let sealed_attribution_is_current = metadata.snapshot().reference.as_ref()
+            == self.identity.head_ref()
+            && metadata
+                .snapshot()
+                .source_revision
+                .as_ref()
+                .is_none_or(|sealed| self.identity.head_commit() == Some(sealed));
+        // Graph-on refuses to decode the sealed generation just because the
+        // predecessor witness, or a git-index mtime this seal itself moved,
+        // does not name this generation. The sealed digests are the proof.
+        // Graph-off still captures so a metadata-only drift is verified
+        // without a full decode when the quiet witness is absent.
+        if sealed_bytes_match
+            && sealed_attribution_is_current
+            && (quiet_witness || !rebuild_changed_source_without_decode)
+        {
+            return Ok(Some(self.accept_unchanged_sealed_snapshot(
+                metadata,
+                sampled_metadata,
+                sampled_sweep.signature,
+                source_manifest,
+                witness.as_ref(),
             )));
         }
 
-        // A compatible generation whose witness did not prove a quiet tree
-        // falls through to the full graph-on reconcile. An incompatible
-        // lightweight owner rebuilds here without decoding the retained graph.
+        // A compatible generation whose bytes moved falls through to the full
+        // graph-on reconcile. An incompatible lightweight owner rebuilds here
+        // without decoding the retained graph.
         if retained_is_reusable && !rebuild_changed_source_without_decode {
             return Ok(None);
         }
@@ -2819,6 +2904,50 @@ impl CodeIndexWorktreeSchedulerV1 {
             .source_currency_witness_for(generation_id, snapshot_content_identity)
     }
 
+    /// Bind a sealed snapshot to the source proof, renewing an expired clock
+    /// when the sealed digests still match.
+    ///
+    /// The admission window is 30s. This does not move the clone-successor
+    /// copy off the publication advance. It only stops an expired clock, or a
+    /// predecessor disk witness, from clearing the generation those digests
+    /// already name. A hook epoch or a digest mismatch still refuses.
+    pub(super) fn currency_witness_for_sealed_snapshot(
+        &self,
+        generation_id: &CodeGenerationId,
+        snapshot_content_identity: &ContentDigest,
+    ) -> Option<ServingSourceWitnessV1> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return None;
+        }
+        if self.freshness_fence.serves_recently_verified_source(
+            snapshot_content_identity,
+            &self.project_root,
+            &self.shutting_down,
+        ) {
+            return self
+                .freshness_fence
+                .source_currency_witness_for(generation_id, snapshot_content_identity);
+        }
+        if !self
+            .freshness_fence
+            .proof_describes_snapshot(snapshot_content_identity)
+            || self.freshness_fence.source_change_pending()
+        {
+            return None;
+        }
+        let freshness = self.freshness_fence.snapshot();
+        if !self.source_witness_matches_worktree(&freshness) {
+            return None;
+        }
+        // Sample after the walk. `gix::open` inside the digest comparison can
+        // move index metadata; storing the post-walk sample is what keeps the
+        // next probe from calling that side effect a new generation.
+        let git_metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
+        self.freshness_fence.rebind_admission_clock(git_metadata);
+        self.freshness_fence
+            .source_currency_witness_for(generation_id, snapshot_content_identity)
+    }
+
     /// A cheap stat-level (path, mtime, size) signature of the present source
     /// candidates. It opens gix and runs stat-based status (no byte reads, no
     /// content hashing). A changed signature skips straight to reconcile; an
@@ -3256,6 +3385,19 @@ impl CodeIndexWorktreeSchedulerV1 {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn sealed_decode_count(&self) -> u64 {
         self.publication.sealed_decode_count()
+    }
+
+    /// Age the admission clock past its own threshold without touching source.
+    #[cfg(test)]
+    pub(super) fn expire_source_proof_for_test(&self) {
+        let mut state = self
+            .freshness_fence
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        state.last_reconciled_at = Instant::now()
+            .checked_sub(state.staleness_threshold + Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
@@ -3794,9 +3936,8 @@ fn changed_paths_between_trees(
 /// A quiet empty-slot seat may end the pass only when the generation was
 /// decoded and its sealed file digests still match the bytes on disk.
 ///
-/// Equal stat metadata with no decoded generation is not currency. Dirty
-/// remount seating bypasses this gate and may emit a Noop from the durable
-/// pointer without joining the publication decode barrier.
+/// Equal stat metadata with no decoded generation is not currency. Callers
+/// that treat `false` as a settled Noop will skip the content proof.
 pub(crate) fn retained_empty_seat_settles_source(
     generation_decoded: bool,
     content_matches: bool,

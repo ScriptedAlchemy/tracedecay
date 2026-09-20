@@ -534,8 +534,8 @@ fn test_annotation_evidence(
         .map_err(|_| ())?;
     let evidence = edges
         .into_iter()
-        .filter(|edge| markers.contains(&edge.edge.from_occurrence))
-        .map(|edge| edge.edge.to_occurrence)
+        .filter(|edge| markers.contains(&edge.from_occurrence))
+        .map(|edge| edge.to_occurrence)
         .collect::<std::collections::HashSet<_>>();
     if let Ok(mut guard) = cache.lock() {
         *guard = Some((generation, evidence.clone()));

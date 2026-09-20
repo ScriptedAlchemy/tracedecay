@@ -779,6 +779,8 @@ mod cursor_tests {
                 messages_upserted: 3,
                 bytes_consumed: 4,
                 source_deferred: true,
+                observations_committed: 0,
+                exact_duplicate: false,
             },
             session_ids: BTreeSet::from(["shared-session".to_string()]),
         };

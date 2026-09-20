@@ -1,13 +1,19 @@
-use tracedecay_domain::canonical_text::sha256_hex;
-
 use super::candidate_output::{
-    CandidateWorkloadV1, validate_need_provenance_against_embedded_corpus,
+    CandidateWorkloadV1, compute_workload_digest, validate_need_provenance_against_embedded_corpus,
     validate_workload_for_tuning,
 };
 use super::evaluate::SearchEvalError;
 
 const WORKLOAD_PATH: &str = "tests/fixtures/search_quality/query-lexical-graph-workload-v1.json";
-const WORKLOAD_SHA256: &str = "20322067510f57f5fa75f68674b18290a65d0535af7da363b6b6f29384042ca4";
+/// Canonical identity of the packaged workload inputs.
+///
+/// This is [`compute_workload_digest`]: schema, queries, corpus, profile, and
+/// execution contract. It deliberately excludes `expected_query_fallback_digests`.
+/// Those receipts observe ranking; folding them into this pin made every
+/// receipt edit, including a generation-only reseal, rewrite the workload
+/// identity as well.
+pub const WORKLOAD_SHA256: &str =
+    "sha256:883b1dc8673f0bdf09f54fd4e4bc598e7df01607933a6bf4053f31003b111d31";
 
 const FILES: &[(&str, &[u8])] = &[
     (
@@ -110,15 +116,17 @@ pub fn packaged_evaluator_files() -> &'static [(&'static str, &'static [u8])] {
 
 #[hotpath::measure(label = "search_eval.packaged.load_workload")]
 pub fn load_workload() -> Result<CandidateWorkloadV1, SearchEvalError> {
-    let observed_workload_digest = sha256_hex(FILES[0].1);
+    let workload = serde_json::from_slice::<CandidateWorkloadV1>(FILES[0].1).map_err(|error| {
+        SearchEvalError::Contract(format!("parse packaged evaluator workload: {error}"))
+    })?;
+    let observed_workload_digest = compute_workload_digest(&workload).map_err(|error| {
+        SearchEvalError::Contract(format!("hash packaged evaluator workload: {error}"))
+    })?;
     if observed_workload_digest != WORKLOAD_SHA256 {
         return Err(SearchEvalError::Contract(format!(
             "packaged evaluator workload digest mismatch: expected {WORKLOAD_SHA256}, observed {observed_workload_digest}"
         )));
     }
-    let workload = serde_json::from_slice::<CandidateWorkloadV1>(FILES[0].1).map_err(|error| {
-        SearchEvalError::Contract(format!("parse packaged evaluator workload: {error}"))
-    })?;
     validate_workload_for_tuning(&workload)?;
     validate_need_provenance_against_embedded_corpus(&workload, FILES)?;
     Ok(workload)

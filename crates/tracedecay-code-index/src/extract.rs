@@ -775,11 +775,16 @@ mod tests {
 
         // extractor.rust.v8 records restricted `pub` re-export scope as a
         // typed value and no longer fabricates receiver types for method
-        // initializers. Pin the resulting current artifact identity.
-        assert_eq!(descriptor.extractor_revision.as_str(), "extractor.rust.v8");
+        // initializers; v9 adds the clone-body token bound and v10 the byte
+        // bound; v11 drops the bare method name of a dotted call and types
+        // `self` from the enclosing impl or trait; v12 binds a receiver typed
+        // by a type parameter with one trait bound to `Trait::method`. The
+        // revision is part of the batch identity, so the pinned digest moves
+        // with it.
+        assert_eq!(descriptor.extractor_revision.as_str(), "extractor.rust.v12");
         assert_eq!(
             extraction.batch().rows_digest.as_str(),
-            "sha256:da811677a89babc024b19ae5b99dad72fb2f3ccc88a3d53f97f22488cc88219d"
+            "sha256:4e483806dfce308dfc97ec460c65f674b28f2dc8bad0e57c28a3b1519c8e495c"
         );
     }
 

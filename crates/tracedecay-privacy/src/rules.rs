@@ -654,10 +654,10 @@ fn compile_regex(
 ///   so it is *both* a different match and vastly larger to compile: three
 ///   upstream rules that repeat `\w` over a wide bound
 ///   (`pypi-...[\w-]{50,1000}`) blow past the compiler's 10 MB program limit.
-///   Expanding `\w` to its RE2 meaning fixes the semantics and the size at once
-///  , every rule in the catalogue then compiles under the default limit, with
-///   no memory headroom bought and no rule dropped.
-////// * **`\b` / `\B`.** RE2's word boundary is ASCII. Rust's is Unicode-aware,
+///   Expanding `\w` to its RE2 meaning fixes the semantics and the size at
+///   once: every rule in the catalogue then compiles under the default limit,
+///   with no memory headroom bought and no rule dropped.
+/// * **`\b` / `\B`.** RE2's word boundary is ASCII. Rust's is Unicode-aware,
 ///   and a Unicode boundary is the one construct the lazy DFA gives up on the
 ///   moment the haystack holds a non-ASCII byte: every file with an em-dash or
 ///   an emoji in a comment was then scanned by the PikeVM, the slowest engine,
@@ -1397,9 +1397,14 @@ mod tests {
             assert_eq!(re2_compatible_regex(untouched), untouched);
         }
 
-        // Word boundaries take RE2's ASCII meaning; inside a class `\b` is a
-        // backspace and is left alone.
-        assert_eq!(re2_compatible_regex(r"\bplain\B"), r"(?-u:\b)plain(?-u:\B)");
+        // Word boundaries take RE2's ASCII meaning: a non-ASCII letter is not a
+        // word character, so `key` sits on a boundary after `é`. Rust's own
+        // Unicode `\b` disagrees, and is also what forces the PikeVM on any
+        // non-ASCII haystack. Inside a class `\b` is a backspace and is left alone.
+        let ascii_boundary = Regex::new(&re2_compatible_regex(r"\bkey\b")).unwrap();
+        assert!(ascii_boundary.is_match("ékey="));
+        assert!(!Regex::new(r"\bkey\b").unwrap().is_match("ékey="));
+        assert!(!ascii_boundary.is_match("mykey="));
         assert_eq!(re2_compatible_regex(r"[\b]"), r"[\b]");
 
         assert_eq!(

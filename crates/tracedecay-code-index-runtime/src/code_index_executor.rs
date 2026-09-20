@@ -1501,6 +1501,16 @@ where
                         code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnverified,
                     );
                 }
+                // A contended or already-retired staging artifact leaves this
+                // generation's clone projection unfinished. That is the same
+                // state `Pending` reports above, so it keeps `Pending`'s
+                // retryable verdict; `Internal` told callers never to retry a
+                // window that resolves itself within one background pass.
+                Err(RetrievalPortError::AuthorityUnavailable(_)) => {
+                    return unavailable(
+                        code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnverified,
+                    );
+                }
                 Err(_) => {
                     return unavailable(code_search::CodeIndexSearchUnavailableReasonV1::Internal);
                 }
@@ -1693,6 +1703,16 @@ where
             match generation.finish_clone_similarity_warmup_for_request(control.as_ref()) {
                 Ok(code_index_scheduler::CloneSimilarityWarmupForRequestV1::Ready) => {}
                 Ok(code_index_scheduler::CloneSimilarityWarmupForRequestV1::Pending) => {
+                    return unavailable(
+                        code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnverified,
+                    );
+                }
+                // A contended or already-retired staging artifact leaves this
+                // generation's clone projection unfinished. That is the same
+                // state `Pending` reports above, so it keeps `Pending`'s
+                // retryable verdict; `Internal` told callers never to retry a
+                // window that resolves itself within one background pass.
+                Err(RetrievalPortError::AuthorityUnavailable(_)) => {
                     return unavailable(
                         code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnverified,
                     );

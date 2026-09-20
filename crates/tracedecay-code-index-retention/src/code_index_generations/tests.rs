@@ -997,6 +997,52 @@ fn text_artifact_retention_collects_staging_database_sidecars_with_their_owner()
     );
 }
 
+/// The inventory scans the artifact root without the generation-store lock, so
+/// the text-artifact builder can retire a `.staging` family between the
+/// directory listing and the stat. A vanished entry is already reclaimed and
+/// must leave the plan intact rather than failing it with a storage error.
+#[test]
+fn text_artifact_inventory_skips_an_entry_reclaimed_during_the_scan() {
+    let store = tempfile::TempDir::new().expect("artifact store");
+    let artifacts_root = code_text_artifacts_root(store.path());
+    std::fs::create_dir_all(&artifacts_root).expect("create artifact root");
+    let staging_family = ["a", "b", "c"]
+        .into_iter()
+        .map(|seed| {
+            let path = artifacts_root.join(format!(".text-artifact-{}.staging", seed.repeat(64)));
+            std::fs::write(&path, b"staging").expect("write staging evidence");
+            path
+        })
+        .collect::<Vec<_>>();
+
+    // The scan probes cancellation once on entry and once per directory entry,
+    // before it takes that entry. Retiring from the third probe on leaves the
+    // listing already taken and one entry already inspected, so every further
+    // name the scan holds names a file that is gone from disk.
+    let probes = std::sync::atomic::AtomicUsize::new(0);
+    let retire_during_the_scan = || {
+        if probes.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 2 {
+            for path in &staging_family {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        false
+    };
+
+    let inventory = plan_collectable_text_artifacts_cancellable(
+        store.path(),
+        None,
+        GenerationDigestVerificationV1::Full,
+        &retire_during_the_scan,
+    )
+    .expect("an entry reclaimed mid-scan leaves the store plannable");
+    assert!(
+        inventory.candidates.len() < staging_family.len(),
+        "an entry that vanished before its stat is reclaimed, not planned: {:?}",
+        inventory.candidates
+    );
+}
+
 #[test]
 fn applied_retention_refuses_a_busy_generation_store_and_retries() {
     let (store, _) = fixture_store(2);
@@ -3071,4 +3117,48 @@ fn recovery_completes_a_committed_rewrite_that_never_reached_the_pointer() {
     );
     plan_code_generation_retention(fixture.store.path(), &BTreeSet::new())
         .expect("a recovered store must stay plannable");
+}
+
+/// The census opens every name `read_dir` just returned. Publication can
+/// unlink that name first. `NotFound` is the same deferral as a held writer,
+/// not a storage failure. Any other open failure stays storage.
+#[test]
+fn vanished_listed_generation_open_defers_instead_of_storage_loss() {
+    let root = tempfile::tempdir().expect("census root");
+    let missing = root.path().join(format!("generation-{:064x}.json", 1));
+    let error = super::generation_scan::read_generation_format_revision(&missing, &|| false)
+        .expect_err("a vanished listed generation defers the census");
+    assert!(
+        matches!(error, CodeGenerationRetentionErrorV1::GenerationStoreBusy),
+        "a missing listed generation is a publisher race, not a storage failure: {error:?}"
+    );
+
+    let directory = root.path().join("not-a-generation-file");
+    std::fs::create_dir(&directory).expect("directory where a file was listed");
+    let storage_error =
+        super::generation_scan::read_generation_format_revision(&directory, &|| false)
+            .expect_err("a directory is not a vanished file");
+    assert!(
+        matches!(storage_error, CodeGenerationRetentionErrorV1::Storage(_)),
+        "non-NotFound census I/O stays a storage failure: {storage_error:?}"
+    );
+}
+
+#[test]
+fn missing_store_is_an_unpublished_plan_not_a_storage_failure() {
+    let missing = std::env::temp_dir().join(format!(
+        "tracedecay-missing-code-store-{}",
+        std::process::id()
+    ));
+    assert!(!missing.exists());
+    let plan = prepare_next_code_generation_retention_cancellable(
+        &missing,
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect("a store that has not been opened is unpublished");
+    assert_eq!(plan.active_generation_id, None);
+    assert!(plan.collectable_generations.is_empty());
+    assert!(!plan.has_collectable_work());
 }

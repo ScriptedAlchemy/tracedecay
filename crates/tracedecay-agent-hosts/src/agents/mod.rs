@@ -827,48 +827,75 @@ pub(crate) fn skill_contents_have_tracedecay_marker(contents: &str) -> bool {
     })
 }
 
-/// Choose which detected agents `tracedecay install` should configure.
+/// Choose which detected agents `tracedecay install` should configure, or
+/// `None` when this machine has no supported agent yet.
 ///
 /// The install verb is already the authorization. Detected agents that are not
 /// yet installed are selected and already-installed agents are kept. This never
 /// reads stdin and never uninstalls: removal is a separate destructive command.
 ///
-/// Returns `(to_install, to_uninstall)`. `to_uninstall` is always empty.
-pub fn select_detected_integrations(
-    home: &Path,
-    installed: &[String],
-) -> Result<(Vec<String>, Vec<String>)> {
+/// Finding nothing to configure used to be an error, so the first thing a user
+/// ran on a fresh machine exited 1 and read as a broken install. It is an
+/// ordinary outcome of a setup command; the caller reports
+/// [`no_detected_integrations_notice`] and succeeds.
+pub fn select_detected_integrations(home: &Path, installed: &[String]) -> Option<Vec<String>> {
     let detected: Vec<Box<dyn AgentIntegration>> = all_integrations()
         .into_iter()
         .filter(|ag| ag.is_detected(home))
         .collect();
 
     if detected.is_empty() {
-        return Err(TraceDecayError::Config {
-            message: "No supported agents detected on this system".to_string(),
-        });
+        return None;
     }
 
-    let to_install = detected
-        .iter()
-        .map(|agent| agent.id().to_string())
-        .filter(|id| !installed.contains(id))
-        .collect();
-    Ok((to_install, Vec::new()))
+    Some(
+        detected
+            .iter()
+            .map(|agent| agent.id().to_string())
+            .filter(|id| !installed.contains(id))
+            .collect(),
+    )
+}
+
+/// What to tell a user whose machine has no supported agent installed yet.
+///
+/// Built from [`all_integrations`] so the list cannot drift from the set
+/// `tracedecay install` actually detects, and it names the directory that was
+/// searched: an unexpected `HOME` is the other reason this comes up empty.
+pub fn no_detected_integrations_notice(home: &Path) -> String {
+    let integrations = all_integrations();
+    let mut names: Vec<&str> = integrations.iter().map(|agent| agent.name()).collect();
+    names.sort_unstable();
+    format!(
+        "No supported agents detected under {}.\n\
+         TraceDecay configures {}.\n\
+         Install one of them, then run `tracedecay install` again.",
+        home.display(),
+        names.join(", ")
+    )
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod select_detected_integrations_tests {
-    use super::select_detected_integrations;
+    use super::{no_detected_integrations_notice, select_detected_integrations};
 
     #[test]
-    fn empty_home_is_an_error_not_a_prompt() {
+    fn empty_home_selects_nothing_instead_of_failing() {
         let home = tempfile::tempdir().unwrap();
-        let error = select_detected_integrations(home.path(), &[]).expect_err("no detected agents");
+        assert!(select_detected_integrations(home.path(), &[]).is_none());
+    }
+
+    #[test]
+    fn the_empty_home_notice_names_the_agents_and_the_retry() {
+        let home = tempfile::tempdir().unwrap();
+        let notice = no_detected_integrations_notice(home.path());
+        assert!(notice.contains("Claude Code"), "{notice}");
+        assert!(notice.contains("Cursor"), "{notice}");
+        assert!(notice.contains("tracedecay install"), "{notice}");
         assert!(
-            error.to_string().contains("No supported agents detected"),
-            "{error}"
+            notice.contains(&home.path().display().to_string()),
+            "{notice}"
         );
     }
 
@@ -878,10 +905,9 @@ mod select_detected_integrations_tests {
         std::fs::create_dir(home.path().join(".cursor")).unwrap();
         std::fs::create_dir(home.path().join(".claude")).unwrap();
 
-        let (to_install, to_uninstall) =
+        let to_install =
             select_detected_integrations(home.path(), &["cursor".to_string()]).unwrap();
 
-        assert!(to_uninstall.is_empty(), "install must not uninstall");
         assert!(!to_install.iter().any(|id| id == "cursor"));
         assert!(to_install.iter().any(|id| id == "claude"));
     }
