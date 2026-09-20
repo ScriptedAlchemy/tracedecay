@@ -4,15 +4,13 @@ use std::path::Path;
 use rusqlite::params;
 
 use crate::runtime::host_scan::HostScanBudget;
-use crate::runtime::source::{TranscriptIngestError, TranscriptIngestResult};
+use crate::runtime::source::TranscriptIngestResult;
 
 use super::opencode::{
     MAX_ID_BYTES, MAX_MESSAGES_PER_PAGE, OpenCodeMessageRef, OpenCodePageCursor,
-    OpenCodeReferencePage, OpenCodeScanSource, install_progress_handler, open_scan_connection,
-    sql_text,
+    OpenCodeReferencePage, OpenCodeScanSource, install_progress_handler, invalid_frame,
+    open_scan_connection, scan_error, sql_text,
 };
-
-const PROVIDER: &str = "opencode";
 
 pub(super) fn scan_part_reference_page(
     source: &OpenCodeScanSource,
@@ -176,20 +174,4 @@ pub(super) fn scan_part_reference_page(
         },
         budget,
     ))
-}
-
-fn scan_error(
-    operation: &'static str,
-    path: &Path,
-    error: impl std::error::Error + Send + Sync + 'static,
-) -> TranscriptIngestError {
-    TranscriptIngestError::ScanIo {
-        operation,
-        path: path.to_path_buf(),
-        source: std::io::Error::other(error),
-    }
-}
-
-const fn invalid_frame() -> TranscriptIngestError {
-    TranscriptIngestError::InvalidFrameState { provider: PROVIDER }
 }

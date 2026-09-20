@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use tracedecay_domain::ObservationSourceGenerationV1;
 use tracedecay_runtime_core::sqlite_read_snapshot::SnapshotDatabase;
 
+use super::opencode::scan_error;
 use crate::runtime::host_scan::HostScanBudget;
 use crate::runtime::source::{TranscriptIngestError, TranscriptIngestResult};
 
@@ -187,16 +188,4 @@ pub(super) fn snapshot_scratch_root() -> Option<PathBuf> {
     tracedecay_runtime_core::storage::default_profile_root()
         .ok()
         .map(|root| root.join("scratch/sqlite-read/opencode"))
-}
-
-fn scan_error(
-    operation: &'static str,
-    path: &Path,
-    error: impl std::error::Error + Send + Sync + 'static,
-) -> TranscriptIngestError {
-    TranscriptIngestError::ScanIo {
-        operation,
-        path: path.to_path_buf(),
-        source: std::io::Error::other(error),
-    }
 }
