@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tracedecay_rusqlite_runtime::exact_sql::ExactSqlReadSnapshot;
 
-use super::{IntoParams, Result, Rows, Value, connection::statement};
+use super::{IntoParams, Result, Rows, connection::statement};
 
 pub struct ReadSnapshot {
     /// One snapshot holds one pooled reader worker for its whole lifetime, and
@@ -33,15 +33,7 @@ impl ReadSnapshot {
         })
         .await
         .map_err(join_error)??;
-        Ok(Rows::from_parts(
-            rows.columns,
-            rows.rows
-                .into_iter()
-                .map(|row| {
-                    super::Row::from_values(row.values.into_iter().map(Value::from).collect())
-                })
-                .collect(),
-        ))
+        Ok(Rows::from_exact(rows))
     }
 }
 
