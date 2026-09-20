@@ -59,17 +59,28 @@ async fn search_returns_the_named_symbol_and_rejects_a_missing_query() {
 
     warm_code_index_search(&server, "ledger_post_entry").await;
 
-    let hit = handle_real_server_tool_call(
-        &server,
-        "tracedecay_search",
-        json!({
-            "query": "ledger_post_entry",
-            "prefer_symbol": true,
-            "format": "json",
-        }),
-    )
-    .await;
-    let hit: Value = serde_json::from_str(extract_real_server_text(&hit)).expect("search JSON");
+    // The warm-up proves the generation is current and every lane complete.
+    // The seat can still have a continuation pass in flight after that, and
+    // a search taken while it runs reports `verifying`. The literal payload
+    // below is the settled one, so take the first search that reports it.
+    let mut hit = Value::Null;
+    for _ in 0..40 {
+        let response = handle_real_server_tool_call(
+            &server,
+            "tracedecay_search",
+            json!({
+                "query": "ledger_post_entry",
+                "prefer_symbol": true,
+                "format": "json",
+            }),
+        )
+        .await;
+        hit = serde_json::from_str(extract_real_server_text(&response)).expect("search JSON");
+        if hit["freshness"] == json!({ "state": "fresh" }) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
     assert_eq!(hit["freshness"], json!({ "state": "fresh" }), "{hit}");
     assert_eq!(
         hit["coverage"],
