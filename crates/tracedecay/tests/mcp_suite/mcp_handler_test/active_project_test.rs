@@ -15,7 +15,7 @@ use tracedecay_runtime_core::storage::pin_fixture_repository_identity;
 
 use crate::support::{
     TestTempDir, extract_real_server_text, handle_real_server_tool_call,
-    handle_real_server_tool_call_raw, test_temp_dir,
+    handle_real_server_tool_call_raw, test_temp_dir, wait_for_code_index_generation,
 };
 
 const PROJECT_ID: &str = "proj_active_proof";
@@ -37,6 +37,11 @@ async fn active_project_reports_the_opened_checkout() {
         .harness
         .server(&opened.project_root)
         .expect("mounted production server");
+    // `serving_branch` names the branch of the seated, current code index.
+    // Open returns before the first generation seats, so the payload read
+    // straight after open is a truthful `null` and not the exact answer this
+    // test pins. Wait for the seat first.
+    wait_for_code_index_generation(&server, "active_project_marker").await;
 
     let payload = call_json(&server, json!({"format": "json"})).await;
     assert_identity(&opened, &payload);
