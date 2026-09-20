@@ -18,12 +18,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_tool_catalog::OperationId;
 
 use crate::ToolResult;
-use crate::handlers::support::unknown_tool_error;
-use crate::text_tool_result;
-
-fn json_result(value: &Value) -> ToolResult {
-    text_tool_result(&value.to_string(), Vec::new())
-}
+use crate::handlers::support::{json_result, unknown_tool_error};
 
 #[hotpath::measure(future = true, label = "mcp.workflow.total")]
 pub async fn handle_workflow<Invoke, InvokeFuture>(

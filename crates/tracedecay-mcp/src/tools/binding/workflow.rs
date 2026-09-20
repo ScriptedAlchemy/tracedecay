@@ -33,6 +33,17 @@ pub(super) fn workflow_executable_binding_for_tool(
         .and_then(|availability| availability.binding()))
 }
 
+fn invalid_workflow_binding(
+    reason: &'static str,
+) -> super::super::dispatch::McpDispatchMetadataError {
+    super::super::dispatch::McpDispatchMetadataError::CatalogValidation(
+        tracedecay_tool_catalog::CatalogValidationError::InvalidValue {
+            field: "MCP Workflow executable binding",
+            reason,
+        },
+    )
+}
+
 /// Project every canonical Workflow executable into a dispatch entry.
 ///
 /// Resolves the registry once and looks each operation up in it, rather than
@@ -42,38 +53,25 @@ pub(super) fn dispatch_catalog_bindings()
 -> Result<Vec<DispatchCatalogBinding>, super::super::dispatch::McpDispatchMetadataError> {
     let registry = tracedecay_contracts::workflow_executable_binding_registry()
         .map_err(super::super::dispatch::McpDispatchMetadataError::CatalogValidation)?;
-    tracedecay_api::WorkflowOperation::ALL
-        .into_iter()
-        .map(|operation| {
-            let name = format!("tracedecay_workflow_{}", operation.operation_key());
-            let operation_id =
-                tracedecay_tool_catalog::OperationId::new(operation.operation_id_str().to_owned())
-                    .map_err(|_| {
-                        invalid_workflow_binding("must name one canonical Workflow operation")
-                    })?;
-            let binding = registry
-                .get(&operation_id)
-                .and_then(|availability| availability.binding())
-                .ok_or_else(|| {
-                    invalid_workflow_binding("canonical Workflow operation is not executable")
-                })?;
-            Ok(DispatchCatalogBinding {
-                name,
-                group: Some(McpToolDispatchGroup::Workflow),
-                executable_binding: Some(binding),
-            })
-        })
-        .collect()
-}
-
-fn invalid_workflow_binding(
-    reason: &'static str,
-) -> super::super::dispatch::McpDispatchMetadataError {
-    super::super::dispatch::McpDispatchMetadataError::CatalogValidation(
-        tracedecay_tool_catalog::CatalogValidationError::InvalidValue {
-            field: "MCP Workflow executable binding",
-            reason,
-        },
+    super::project_family_dispatch(
+        McpToolDispatchGroup::Workflow,
+        registry,
+        tracedecay_api::WorkflowOperation::ALL
+            .into_iter()
+            .map(|operation| {
+                (
+                    format!("tracedecay_workflow_{}", operation.operation_key()),
+                    operation.operation_id_str().to_owned(),
+                )
+            }),
+        (
+            "MCP Workflow executable binding",
+            "must name one canonical Workflow operation",
+        ),
+        (
+            "MCP Workflow executable binding",
+            "canonical Workflow operation is not executable",
+        ),
     )
 }
 

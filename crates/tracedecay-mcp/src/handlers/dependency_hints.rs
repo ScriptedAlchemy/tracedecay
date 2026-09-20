@@ -11,6 +11,7 @@ use tracedecay_contracts::retrieval::{
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::VerifiedGraphQuery;
 
+use crate::handlers::graph::user_line;
 use crate::tool_context::McpToolContext;
 use crate::tools::render::{self, Md};
 
@@ -226,8 +227,4 @@ pub fn append_external_import_hint_md(md: &mut Md, value: &Value) {
             ));
         }
     }
-}
-
-fn user_line(line: u32) -> u32 {
-    line.saturating_add(1)
 }

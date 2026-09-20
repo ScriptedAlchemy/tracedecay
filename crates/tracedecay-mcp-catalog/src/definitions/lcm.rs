@@ -2,7 +2,7 @@
 
 use serde_json::json;
 
-use super::{def, git_scope};
+use super::{def, string_property};
 use crate::ToolDefinition;
 
 pub(super) fn def_lcm_status() -> ToolDefinition {
@@ -220,9 +220,9 @@ pub(super) fn def_lcm_grep() -> ToolDefinition {
                     "minimum": 0,
                     "description": "Required cutoff in UTC microseconds when temporal_mode=as_of."
                 },
-                "branch": git_scope::branch_schema("Optional git branch filter: only LCM snippets from sessions active on this branch (via the session-git correlation index)."),
-                "worktree": git_scope::worktree_schema("Optional git worktree root path filter: only LCM snippets from sessions active in this worktree (via the session-git correlation index)."),
-                "commit": git_scope::commit_schema("Optional commit sha filter (full or >=6-char hex prefix): only LCM snippets from sessions attributed to this commit (via the session-git correlation index).")
+                "branch": string_property("Optional git branch filter: only LCM snippets from sessions active on this branch (via the session-git correlation index)."),
+                "worktree": string_property("Optional git worktree root path filter: only LCM snippets from sessions active in this worktree (via the session-git correlation index)."),
+                "commit": string_property("Optional commit sha filter (full or >=6-char hex prefix): only LCM snippets from sessions attributed to this commit (via the session-git correlation index).")
             },
             "required": ["query"]
         }),

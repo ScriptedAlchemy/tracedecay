@@ -13,7 +13,7 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{BindingId, SchemaId};
 
 use crate::ToolResult;
-use crate::handlers::support::unknown_tool_error;
+use crate::handlers::support::{json_result, unknown_tool_error};
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_daemon_protocol::{
     DaemonInvocationExecutor, InvocationCancellationPolicy, invocation_now_micros,
@@ -23,13 +23,6 @@ use tracedecay_daemon_protocol::{
     DaemonInvocationResponse,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
-
-fn json_result(value: &Value) -> ToolResult {
-    ToolResult::new(
-        json!({ "content": [{ "type": "text", "text": value.to_string() }] }),
-        Vec::new(),
-    )
-}
 
 const DEFAULT_DEADLINE_MICROS: i64 = 30_000_000;
 
