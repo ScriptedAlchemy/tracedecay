@@ -428,8 +428,6 @@ const fn count_if(value: bool) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use std::fmt::Debug;
-
     use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
     use tracedecay_store::{StoreAuthorityEpochV1, StoreIncarnationV1, StoreShardIdV1};
 

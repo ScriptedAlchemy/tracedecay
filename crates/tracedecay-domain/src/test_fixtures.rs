@@ -24,6 +24,16 @@ pub fn digest(digit: char) -> ManifestDigest {
     ManifestDigest::new(repeated_sha256_text(digit)).expect("fixture digest is canonical")
 }
 
+/// Absolute fixture root. Work and registry contracts require
+/// `Path::is_absolute`, and a bare `/...` literal is not absolute on Windows.
+pub fn fixture_abs_root(posix: &str) -> String {
+    if cfg!(windows) {
+        format!("C:{}", posix.replace('/', "\\"))
+    } else {
+        posix.to_owned()
+    }
+}
+
 /// Parses a fixture identity. The value must already be canonical for `T`.
 pub fn id<T>(value: &str) -> T
 where
@@ -52,5 +62,11 @@ mod tests {
     fn fixture_id_accepts_a_canonical_project_id() {
         let project: crate::ProjectId = id("project.fixture");
         assert_eq!(project.as_str(), "project.fixture");
+    }
+
+    #[test]
+    fn fixture_abs_root_is_absolute_on_this_host() {
+        let root = super::fixture_abs_root("/workspace/fixture");
+        assert!(std::path::Path::new(&root).is_absolute(), "{root}");
     }
 }

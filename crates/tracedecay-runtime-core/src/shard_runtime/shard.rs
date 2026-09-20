@@ -1043,7 +1043,6 @@ impl Drop for ShardRuntimeQueuedWork<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::fmt::Debug;
     use std::sync::Barrier;
 
     use tracedecay_domain::{BrainId, ProjectId, UserProfileId};

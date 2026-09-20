@@ -1,4 +1,3 @@
-use std::fmt::Debug;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,14 +17,9 @@ use super::super::*;
 pub(super) use tracedecay_domain::test_fixtures::id;
 
 /// Host-absolute fixture path: store locators require `Path::is_absolute`,
-/// which a bare `/...` literal fails on Windows, where the same fixture is
-/// spelled `C:\...`.
+/// which a bare `/...` literal fails on Windows.
 pub(super) fn absolute_fixture_path(posix: &str) -> PathBuf {
-    if cfg!(windows) {
-        PathBuf::from(format!("C:{}", posix.replace('/', "\\")))
-    } else {
-        PathBuf::from(posix)
-    }
+    PathBuf::from(tracedecay_domain::test_fixtures::fixture_abs_root(posix))
 }
 
 pub(super) fn incarnation() -> StoreIncarnationV1 {

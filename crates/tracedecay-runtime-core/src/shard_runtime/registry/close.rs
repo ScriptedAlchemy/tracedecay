@@ -414,7 +414,6 @@ impl StoreRuntimeRegistry {
 
 #[cfg(test)]
 mod tests {
-    use std::fmt::Debug;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;

@@ -99,16 +99,7 @@ fn execution_snapshot() -> WorkExecutionSnapshot {
     .unwrap()
 }
 
-/// `WorkExecutionEnvelopeV1` requires `Path::is_absolute`, which is
-/// host-specific: a bare `/tmp/...` literal is not absolute on Windows, where
-/// an absolute path needs a drive or a UNC prefix.
-fn absolute_root(posix: &str) -> String {
-    if cfg!(windows) {
-        format!("C:{}", posix.replace('/', "\\"))
-    } else {
-        posix.to_owned()
-    }
-}
+use tracedecay_domain::test_fixtures::fixture_abs_root as absolute_root;
 
 fn execution(
     attempt_identity: WorkAttemptIdentityV1,
