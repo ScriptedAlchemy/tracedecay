@@ -17,6 +17,7 @@ pub mod lcm;
 pub mod profile;
 pub mod session;
 pub mod session_refresh;
+mod wire;
 
 pub use lcm::DirectRetainedLcmPortV1;
 pub use profile::{
