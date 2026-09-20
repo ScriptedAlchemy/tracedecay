@@ -8,7 +8,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use super::runner::ServicePlatform;
 use super::{
     DaemonServiceSpec, LAUNCHD_PLIST_NAME, SERVICE_TEMP_SEQUENCE, home_for_service_env,
-    plist_xml_escape, plist_xml_unescape, windows_task,
+    windows_task, xml_escape, xml_unescape,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -374,7 +374,7 @@ pub(super) fn launchd_plist_env_value(plist: &str, name: &str) -> Option<String>
     let dict_end = after_dict_start.find("</dict>")?;
     let dict_text = &after_dict_start[..dict_end];
 
-    let key_tag = format!("<key>{}</key>", plist_xml_escape(name));
+    let key_tag = format!("<key>{}</key>", xml_escape(name));
     let key_end = dict_text.find(&key_tag)? + key_tag.len();
     plist_string_values(&dict_text[key_end..])
         .into_iter()
@@ -390,7 +390,7 @@ fn plist_string_values(text: &str) -> Vec<String> {
         let Some(end) = after_start.find("</string>") else {
             break;
         };
-        values.push(plist_xml_unescape(&after_start[..end]));
+        values.push(xml_unescape(&after_start[..end]));
         remaining = &after_start[end + "</string>".len()..];
     }
     values

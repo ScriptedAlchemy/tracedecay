@@ -578,8 +578,8 @@ impl DaemonServiceSpec {
             let _ = write!(
                 environment,
                 "    <key>{}</key>\n    <string>{}</string>\n",
-                plist_xml_escape(&key),
-                plist_xml_escape(&value)
+                xml_escape(&key),
+                xml_escape(&value)
             );
         }
 
@@ -591,12 +591,12 @@ impl DaemonServiceSpec {
                  <string>{}</string>\n\
                  <string>--remote-tls-key</string>\n\
                  <string>{}</string>\n",
-                plist_xml_escape(&config.listen().to_string()),
-                plist_xml_escape(managed_remote_tls_path_text(
+                xml_escape(&config.listen().to_string()),
+                xml_escape(managed_remote_tls_path_text(
                     "certificate chain",
                     config.certificate_chain(),
                 )?),
-                plist_xml_escape(managed_remote_tls_path_text(
+                xml_escape(managed_remote_tls_path_text(
                     "private key",
                     config.private_key(),
                 )?),
@@ -656,12 +656,12 @@ impl DaemonServiceSpec {
                <string>{stderr}</string>\n\
              </dict>\n\
              </plist>\n",
-            label = plist_xml_escape(LAUNCHD_LABEL),
-            bin = plist_xml_escape(&self.tracedecay_bin.display().to_string()),
-            socket = plist_xml_escape(&self.socket_path.display().to_string()),
+            label = xml_escape(LAUNCHD_LABEL),
+            bin = xml_escape(&self.tracedecay_bin.display().to_string()),
+            socket = xml_escape(&self.socket_path.display().to_string()),
             open_file_limit = DAEMON_OPEN_FILE_LIMIT,
-            stdout = plist_xml_escape(&data_dir.join("daemon.out.log").display().to_string()),
-            stderr = plist_xml_escape(&data_dir.join("daemon.err.log").display().to_string()),
+            stdout = xml_escape(&data_dir.join("daemon.out.log").display().to_string()),
+            stderr = xml_escape(&data_dir.join("daemon.err.log").display().to_string()),
         ))
     }
 
@@ -798,7 +798,7 @@ fn systemd_escape_env_value(value: &str) -> String {
         .replace('%', "%%")
 }
 
-fn plist_xml_escape(value: &str) -> String {
+fn xml_escape(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for ch in value.chars() {
         match ch {
@@ -813,7 +813,7 @@ fn plist_xml_escape(value: &str) -> String {
     escaped
 }
 
-fn plist_xml_unescape(value: &str) -> String {
+fn xml_unescape(value: &str) -> String {
     value
         .replace("&quot;", "\"")
         .replace("&apos;", "'")
