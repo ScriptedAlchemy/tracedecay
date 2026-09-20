@@ -3105,7 +3105,8 @@ async fn rewind_source_cursor(
 /// against the earlier receipt, and treating that as a permanent collision is
 /// what wedges retained ingest. The durable cursor already sits exactly at
 /// `next_cursor`, so the coverage is applied and the replay is a duplicate.
-/// A conflict that leaves the cursor somewhere else is still a collision.
+/// A conflict whose ledger already records this coverage restores the cursor.
+/// A missing ledger row stays a collision.
 #[tokio::test]
 async fn already_positioned_cursor_replay_with_new_command_bytes_is_a_duplicate() {
     const FILE_IDENTITY: u64 = 41;
@@ -3186,15 +3187,20 @@ async fn already_positioned_cursor_replay_with_new_command_bytes_is_a_duplicate(
     );
 
     rewind_source_cursor(&runtime, &cursor_at(5, 11)).await;
-    assert!(
-        matches!(
-            store
-                .advance_source_cursor(advance_over(Some(cursor_at(5, 11)), (5, 10), 44))
-                .await
-                .unwrap_err(),
-            ObservationStoreError::CursorAdvanceCollision
-        ),
-        "a conflicting replay that does not leave the cursor at next stays a collision"
+    assert_eq!(
+        store
+            .advance_source_cursor(advance_over(Some(cursor_at(5, 11)), (5, 10), 44))
+            .await
+            .unwrap(),
+        CursorAdvanceOutcome::Committed,
+        "a coverage the ledger already admitted must restore the cursor"
+    );
+    assert_eq!(
+        store
+            .get_source_cursor(&source, &ObservationScopeV1::Profile)
+            .await
+            .unwrap(),
+        Some(cursor_at(10, 44))
     );
 }
 

@@ -449,6 +449,36 @@ pub(super) struct ProjectionOutputState {
     pub(super) owner_count: u64,
 }
 
+async fn projection_cache_tokens(conn: &impl Executor) -> ProjectionStoreResult<(i64, i64)> {
+    let mut version_rows = conn
+        .query("PRAGMA data_version", ())
+        .await
+        .map_err(|error| storage("read projection cache data version", error))?;
+    let data_version = version_rows
+        .next()
+        .await
+        .map_err(|error| storage("read projection cache data version", error))?
+        .ok_or_else(|| storage_message("read projection cache data version", "no row"))?
+        .get::<i64>(0)
+        .map_err(|error| storage("read projection cache data version", error))?;
+    drop(version_rows);
+    let mut rowid_rows = conn
+        .query(
+            "SELECT COALESCE(MAX(rowid), 0) FROM observation_projection_provenance",
+            (),
+        )
+        .await
+        .map_err(|error| storage("read projection cache provenance rowid", error))?;
+    let provenance_rowid = rowid_rows
+        .next()
+        .await
+        .map_err(|error| storage("read projection cache provenance rowid", error))?
+        .ok_or_else(|| storage_message("read projection cache provenance rowid", "no row"))?
+        .get::<i64>(0)
+        .map_err(|error| storage("read projection cache provenance rowid", error))?;
+    Ok((data_version, provenance_rowid))
+}
+
 pub(super) async fn ensure_projection_output_state_cache(
     conn: &impl Executor,
 ) -> ProjectionStoreResult<()> {
@@ -466,39 +496,55 @@ pub(super) async fn ensure_projection_output_state_cache(
         ) WITHOUT ROWID;
         CREATE TEMP TABLE IF NOT EXISTS observation_projection_output_state_meta (
             initialized INTEGER PRIMARY KEY CHECK(initialized = 1),
-            data_version INTEGER NOT NULL CHECK(data_version >= 0)
+            data_version INTEGER NOT NULL CHECK(data_version >= 0),
+            provenance_rowid INTEGER NOT NULL CHECK(provenance_rowid >= 0)
         ) WITHOUT ROWID;",
     )
     .await
     .map_err(|error| storage("create projection output state cache", error))?;
-    let mut version_rows = conn
-        .query("PRAGMA data_version", ())
-        .await
-        .map_err(|error| storage("read projection cache data version", error))?;
-    let data_version = version_rows
-        .next()
-        .await
-        .map_err(|error| storage("read projection cache data version", error))?
-        .ok_or_else(|| storage_message("read projection cache data version", "no row"))?
-        .get::<i64>(0)
-        .map_err(|error| storage("read projection cache data version", error))?;
-    drop(version_rows);
+    let (data_version, provenance_rowid) = projection_cache_tokens(conn).await?;
 
     let mut rows = conn
         .query(
-            "SELECT 1 FROM temp.observation_projection_output_state_meta
-             WHERE initialized = 1 AND data_version = ?1",
-            params![data_version],
+            "SELECT data_version, provenance_rowid
+             FROM temp.observation_projection_output_state_meta
+             WHERE initialized = 1",
+            (),
         )
         .await
         .map_err(|error| storage("read projection output state cache", error))?;
-    let initialized = rows
+    let cached = rows
         .next()
         .await
         .map_err(|error| storage("read projection output state cache", error))?
-        .is_some();
+        .map(|row| -> ProjectionStoreResult<(i64, i64)> {
+            Ok((
+                row.get(0)
+                    .map_err(|error| storage("read projection output state cache", error))?,
+                row.get(1)
+                    .map_err(|error| storage("read projection output state cache", error))?,
+            ))
+        })
+        .transpose()?;
     drop(rows);
-    if initialized {
+    if let Some((stored_version, stored_rowid)) = cached
+        && (stored_rowid == provenance_rowid || stored_version == data_version)
+    {
+        // `data_version` moves when any other connection commits, including
+        // session rows that do not touch provenance. Rebuilding here scans the
+        // whole ownership table once per queued observation. This writer keeps
+        // the temp rows current itself; a foreign provenance insert changes
+        // `MAX(rowid)` and still rebuilds.
+        if stored_version != data_version || stored_rowid != provenance_rowid {
+            conn.execute(
+                "UPDATE temp.observation_projection_output_state_meta
+                 SET data_version = ?1, provenance_rowid = ?2
+                 WHERE initialized = 1",
+                params![data_version, provenance_rowid],
+            )
+            .await
+            .map_err(|error| storage("refresh projection cache token", error))?;
+        }
         return Ok(());
     }
 
@@ -512,9 +558,10 @@ pub(super) async fn ensure_projection_output_state_cache(
         .await
         .map_err(|error| storage("initialize projection output state cache", error))?;
     conn.execute(
-        "INSERT INTO temp.observation_projection_output_state_meta(initialized, data_version)
-         VALUES (1, ?1)",
-        params![data_version],
+        "INSERT INTO temp.observation_projection_output_state_meta(
+            initialized, data_version, provenance_rowid
+         ) VALUES (1, ?1, ?2)",
+        params![data_version, provenance_rowid],
     )
     .await
     .map_err(|error| storage("record projection cache data version", error))?;
@@ -1240,11 +1287,14 @@ fn reconcile_metadata(
             }
             Some(actual_value) if *actual_value == expected_value => {}
             Some(actual_value) if key == "usage" => {
-                *actual_value = reconcile_usage(actual_value, &expected_value)
-                    .ok_or(SessionReconcileConflict("metadata_json"))?;
+                if let Some(merged) = reconcile_usage(actual_value, &expected_value) {
+                    *actual_value = merged;
+                }
             }
-            Some(_) if key == "source" => {}
-            Some(_) => return Err(SessionReconcileConflict("metadata_json")),
+            // Host ingest keeps the first annotation (`merge_session_metadata`).
+            // A later observation's source, cwd, or hook label is not a different
+            // session. Session identity stays on provider and session id.
+            Some(_) => {}
         }
     }
     serde_json::to_string(&actual)
@@ -1607,5 +1657,42 @@ mod reconcile_tests {
             .expect_err("different transcript identities must not merge");
 
         assert_eq!(conflict.field(), "transcript_path");
+    }
+
+    #[test]
+    fn session_metadata_keeps_stored_annotations_and_merges_usage() {
+        let mut stored = record("/project");
+        stored.metadata_json = Some(
+            r#"{"source":"cursor_transcript","cursor_session_cwd":"/project","cursor_session_worktree":"/project-wt","usage":{"input_tokens":1}}"#
+                .to_owned(),
+        );
+        let mut projected = record("/project");
+        projected.metadata_json = Some(
+            r#"{"source":"cursor_composer","cursor_session_cwd":"/project","cursor_session_worktree":"/project","usage":{"input_tokens":4},"cursor_source":"cursor"}"#
+                .to_owned(),
+        );
+
+        let merged = reconcile_session_rows_detailed(&stored, &projected)
+            .expect("annotation disagreement must not be a session collision");
+        let value: serde_json::Value =
+            serde_json::from_str(merged.metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(value["source"], "cursor_transcript");
+        assert_eq!(value["cursor_session_worktree"], "/project-wt");
+        assert_eq!(value["cursor_source"], "cursor");
+        assert_eq!(value["usage"]["input_tokens"], 4);
+    }
+
+    #[test]
+    fn unmergeable_usage_keeps_the_stored_counter() {
+        let mut stored = record("/project");
+        stored.metadata_json = Some(r#"{"usage":{"input_tokens":1}}"#.to_owned());
+        let mut projected = record("/project");
+        projected.metadata_json = Some(r#"{"usage":"not-a-counter"}"#.to_owned());
+
+        let merged = reconcile_session_rows_detailed(&stored, &projected)
+            .expect("an unmergeable counter must not block the session");
+        let value: serde_json::Value =
+            serde_json::from_str(merged.metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(value["usage"]["input_tokens"], 1);
     }
 }

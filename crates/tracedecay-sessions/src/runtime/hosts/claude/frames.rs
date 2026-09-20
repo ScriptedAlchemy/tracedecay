@@ -7,7 +7,8 @@ use tracedecay_domain::{ObservationOrderingDomainV1, ObservationSourceRangeV1};
 use crate::runtime::shared::StoredCursor;
 use crate::runtime::source::{
     JsonlFrameDeferral, JsonlResumeState, RawJsonlSkippedReason, TranscriptCursorCheckpoint,
-    TranscriptCursorKey, TranscriptIngestResult, try_stream_new_jsonl_raw_strict_with_resume,
+    TranscriptCursorKey, TranscriptIngestError, TranscriptIngestResult,
+    try_stream_new_jsonl_raw_strict_with_resume,
 };
 use tracedecay_privacy::{
     MAX_OBSERVATION_RECORD_BYTES, ParsedClaudeRecordV1, SanitizedClaudeRecordV1,
@@ -193,13 +194,22 @@ pub fn try_scan_claude_source_frames_with_resume(
     max_new_bytes: Option<u64>,
     resume_state: Option<JsonlResumeState>,
 ) -> TranscriptIngestResult<Option<ClaudeSourceFrameScan>> {
-    let mut raw = try_stream_new_jsonl_raw_strict_with_resume(
+    let mut raw = match try_stream_new_jsonl_raw_strict_with_resume(
         &identity.source_path,
         previous,
         max_new_bytes,
         MAX_OBSERVATION_RECORD_BYTES,
         resume_state,
-    )?;
+    ) {
+        // Discovery lists the symlink. A removed target is not a retry: the
+        // next pass would fail the provider on the same missing file.
+        Err(TranscriptIngestError::ScanIo { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            return Ok(None);
+        }
+        other => other?,
+    };
     let mut frames = Vec::new();
     let mut skipped_frames = raw
         .skipped

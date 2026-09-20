@@ -2232,13 +2232,6 @@ async fn activate_rebuild_sessions(
                      OR json_valid(json_extract(staged.session_json, '$.metadata_json')) = 0
                      OR json_type(active.metadata_json) <> 'object'
                      OR json_type(json_extract(staged.session_json, '$.metadata_json')) <> 'object'
-                     OR EXISTS (
-                       SELECT 1
-                       FROM json_each(json_extract(staged.session_json, '$.metadata_json')) AS expected
-                       JOIN json_each(active.metadata_json) AS actual USING (key)
-                       WHERE expected.key NOT IN ('source', 'usage')
-                         AND actual.value IS NOT expected.value
-                     )
                    ))
                )
              LIMIT 1",
