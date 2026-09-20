@@ -5,6 +5,7 @@ use std::sync::Arc;
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
+use crate::projection::check_cancelled;
 use crate::schema::{
     ENTITY_ID_PROPERTY, ENTITY_LABEL, RELATION_ID_PROPERTY, RELATION_LABEL,
     entity_projection_label, relation_projection_label,
@@ -468,14 +469,6 @@ fn validate_optional_page_limit(limit: usize) -> Result<(), GraphDbError> {
             GraphBudgetKind::Read,
             MAX_PROJECTION_PAGE_ITEMS,
         ))
-    } else {
-        Ok(())
-    }
-}
-
-fn check_cancelled(cancellation: &dyn GraphCancellation) -> Result<(), GraphDbError> {
-    if cancellation.is_cancelled() {
-        Err(GraphDbError::Cancelled)
     } else {
         Ok(())
     }

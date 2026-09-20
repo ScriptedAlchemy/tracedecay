@@ -255,8 +255,8 @@ pub(super) fn verified_graph_error_options<'a>(
     let mut options = verified_graph_options(cg, options);
     options.code_graph_projection_read_port =
         Some(Arc::new(FailingFixtureCodeGraphProjection { error }));
-    options.verified_graph_query_port =
-        Some(tracedecay_graph_query::admitted_verified_graph_query_port(
+    options.verified_graph_query_port = Some(
+        tracedecay_graph_query::admitted_verified_graph_query_port_with_source(
             options
                 .code_graph_read_admission_port
                 .clone()
@@ -265,7 +265,9 @@ pub(super) fn verified_graph_error_options<'a>(
                 .code_graph_projection_read_port
                 .clone()
                 .expect("graph fixture projection"),
-        ));
+            None,
+        ),
+    );
     options
 }
 
