@@ -356,7 +356,6 @@ libc = "0.2"
 tree-sitter = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
-sha2 = "0.11"
 hex = "0.4"
 regex = "1.12.3"
 filetime = "0.2"
