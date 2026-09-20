@@ -2991,6 +2991,11 @@ async fn a_disproving_exact_source_probe_withdraws_the_busy_read_witness() {
     // Hold the worker at its dequeue point so every observation below is the
     // read path's own answer and never a pass that raced it.
     let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
+    // The permit and the pass counter leave the graph tail of the settled
+    // pass free to re-verify source once the drift below lands, and that
+    // re-verification withdraws the witness on its own (see
+    // `hold_scheduler_for_root`). Fence it until the read path has answered.
+    let scheduler = hold_scheduler_for_root(&registry, fixture.path()).await;
 
     std::fs::write(
         fixture.path().join("src/main.rs"),
@@ -3043,6 +3048,7 @@ async fn a_disproving_exact_source_probe_withdraws_the_busy_read_witness() {
 
     // Release the worker: its pass re-derives the sealed digests, observes the
     // drift, and the witness stops naming the disproved generation.
+    scheduler.release().await;
     drop(admission);
     let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     while witness
