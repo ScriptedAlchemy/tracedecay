@@ -23,6 +23,8 @@ mod context_relevance_eval_test;
 mod fixture;
 mod git_correlation_test;
 mod health_read_behavior;
+#[cfg(feature = "test-transport")]
+mod insert_at_symbol_behavior_test;
 mod mcp_cli_parity_test;
 mod mcp_cli_serve_test;
 mod mcp_dashboard_tool_test;
