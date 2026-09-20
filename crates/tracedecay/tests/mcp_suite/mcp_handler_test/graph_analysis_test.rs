@@ -1,5 +1,6 @@
 #![cfg(feature = "test-transport")]
 
+mod diff_context_behavior;
 mod gini;
 mod graph_readiness;
 mod hotspots;
@@ -12,6 +13,7 @@ use serde_json::{Value, json};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::project::TraceDecay;
 use tracedecay_domain::errors::{Result as TraceDecayResult, TraceDecayError};
@@ -1128,17 +1130,305 @@ async fn commit_context_clean_worktree_returns_json() {
     .await
     .unwrap();
 
-    let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
-    assert_eq!(output["summary"].as_str(), Some("No changes detected."));
-    assert_eq!(output["changed_files"].as_array().map(Vec::len), Some(0));
+    let output = commit_context_json(&result.value);
+    assert_eq!(result.value.get("isError"), None);
     assert_eq!(
-        output["symbols_by_role"]
-            .as_object()
-            .map(serde_json::Map::len),
-        Some(0)
+        output,
+        json!({
+            "changed_files": [],
+            "symbols_by_role": {},
+            "suggested_category": null,
+            "recent_commits": ["init"],
+            "summary": "No changes detected.",
+        })
     );
-    assert!(output["recent_commits"].as_array().is_some());
+}
+
+/// Staged source and test files are what an agent sees when drafting a
+/// commit: file roles, the symbols in those files, and the category that
+/// follows from those roles.
+#[tokio::test]
+async fn commit_context_staged_source_and_test_reports_symbols() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
+    seed_commit(
+        project,
+        &[
+            ("Cargo.toml", BILLING_MANIFEST),
+            ("src/lib.rs", "pub fn baseline() -> i64 { 0 }\n"),
+            ("tests/invoice_test.rs", "fn baseline_check() {}\n"),
+        ],
+        "seed context",
+    );
+    write_project_file(
+        project,
+        "src/lib.rs",
+        "pub fn billed_total() -> i64 {\n    1\n}\n",
+    );
+    write_project_file(
+        project,
+        "tests/invoice_test.rs",
+        "fn covers_billed_total() {}\n",
+    );
+    git_run(project, &["add", "src/lib.rs", "tests/invoice_test.rs"]);
+
+    let (host, _env) = init_test_project(project).await;
+    let result = handle_tool_call(
+        &host,
+        "tracedecay_commit_context",
+        json!({"format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    close_test_graph(host).await;
+
+    assert_eq!(result.value.get("isError"), None);
+    assert_eq!(
+        commit_context_json(&result.value),
+        json!({
+            "changed_files": [
+                {"file": "src/lib.rs", "role": "source", "symbols": 1},
+                {"file": "tests/invoice_test.rs", "role": "test", "symbols": 1}
+            ],
+            "symbols_by_role": {
+                "source": [{
+                    "name": "billed_total",
+                    "kind": "function",
+                    "file": "src/lib.rs",
+                    "line": 0
+                }],
+                "test": [{
+                    "name": "covers_billed_total",
+                    "kind": "function",
+                    "file": "tests/invoice_test.rs",
+                    "line": 0
+                }]
+            },
+            "suggested_category": "feature/fix (source + tests)",
+            "recent_commits": ["seed context"],
+            "summary": "2 file(s) changed, 2 symbol(s) affected",
+        })
+    );
+}
+
+/// Config and docs changes are not source work. Config files collapse to one
+/// summary entry instead of one symbol per key.
+#[tokio::test]
+async fn commit_context_config_and_docs_report_chore() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
+    seed_commit(
+        project,
+        &[
+            ("Cargo.toml", BILLING_MANIFEST),
+            ("src/lib.rs", "pub fn untouched() {}\n"),
+            ("billing.cfg", "timeout=1\n"),
+            ("notes.txt", "committed note\n"),
+        ],
+        "seed context",
+    );
+    write_project_file(project, "billing.cfg", "timeout=9\n");
+    write_project_file(project, "notes.txt", "Ship the invoice total.\n");
+    git_run(project, &["add", "billing.cfg", "notes.txt"]);
+
+    let (host, _env) = init_test_project(project).await;
+    let result = handle_tool_call(
+        &host,
+        "tracedecay_commit_context",
+        json!({"format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    close_test_graph(host).await;
+
+    assert_eq!(result.value.get("isError"), None);
+    assert_eq!(
+        commit_context_json(&result.value),
+        json!({
+            "changed_files": [
+                {"file": "billing.cfg", "role": "config", "symbols": 0},
+                {"file": "notes.txt", "role": "docs", "symbols": 0}
+            ],
+            "symbols_by_role": {
+                "config": [{
+                    "file": "billing.cfg",
+                    "kind": "config_summary",
+                    "config_keys": 0
+                }]
+            },
+            "suggested_category": "chore/docs/config",
+            "recent_commits": ["seed context"],
+            "summary": "2 file(s) changed, 1 symbol(s) affected",
+        })
+    );
+}
+
+/// `staged_only` is the difference between "what will this commit contain"
+/// and "what is dirty". An unstaged docs edit must appear only when the
+/// caller asks for every uncommitted change.
+#[tokio::test]
+async fn commit_context_staged_only_excludes_unstaged_file() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
+    seed_commit(
+        project,
+        &[
+            ("Cargo.toml", BILLING_MANIFEST),
+            ("src/lib.rs", "pub fn baseline() -> i64 { 0 }\n"),
+            ("notes.txt", "committed note\n"),
+        ],
+        "seed context",
+    );
+    // gix compares the working-tree mtime, in whole seconds, with the index
+    // stat. A write in the same second as `git commit` is invisible, so the
+    // unstaged edit has to land in a later second.
+    std::thread::sleep(Duration::from_secs(2));
+    write_project_file(project, "notes.txt", "unstaged note\n");
+    write_project_file(
+        project,
+        "src/lib.rs",
+        "pub fn staged_total() -> i64 {\n    1\n}\n",
+    );
+    git_run(project, &["add", "src/lib.rs"]);
+
+    let (host, _env) = init_test_project(project).await;
+    let staged = handle_tool_call(
+        &host,
+        "tracedecay_commit_context",
+        json!({"format": "json", "staged_only": true}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let everything = handle_tool_call(
+        &host,
+        "tracedecay_commit_context",
+        json!({"format": "json", "staged_only": false}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    close_test_graph(host).await;
+
+    assert_eq!(staged.value.get("isError"), None);
+    assert_eq!(
+        commit_context_json(&staged.value),
+        json!({
+            "changed_files": [
+                {"file": "src/lib.rs", "role": "source", "symbols": 1}
+            ],
+            "symbols_by_role": {
+                "source": [{
+                    "name": "staged_total",
+                    "kind": "function",
+                    "file": "src/lib.rs",
+                    "line": 0
+                }]
+            },
+            "suggested_category": "feature/fix/refactor",
+            "recent_commits": ["seed context"],
+            "summary": "1 file(s) changed, 1 symbol(s) affected",
+        })
+    );
+    assert_eq!(everything.value.get("isError"), None);
+    assert_eq!(
+        commit_context_json(&everything.value),
+        json!({
+            "changed_files": [
+                {"file": "notes.txt", "role": "docs", "symbols": 0},
+                {"file": "src/lib.rs", "role": "source", "symbols": 1}
+            ],
+            "symbols_by_role": {
+                "source": [{
+                    "name": "staged_total",
+                    "kind": "function",
+                    "file": "src/lib.rs",
+                    "line": 0
+                }]
+            },
+            "suggested_category": "feature/fix/refactor",
+            "recent_commits": ["seed context"],
+            "summary": "2 file(s) changed, 1 symbol(s) affected",
+        })
+    );
+}
+
+/// A repository whose HEAD does not name a commit cannot describe a commit.
+/// The tool reports that as a git status failure, not an empty success.
+#[tokio::test]
+async fn commit_context_unborn_head_is_git_status_error() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
+    seed_commit(
+        project,
+        &[("src/lib.rs", "pub fn baseline() {}\n")],
+        "seed context",
+    );
+    let (host, _env) = init_test_project(project).await;
+    git_run(project, &["symbolic-ref", "HEAD", "refs/heads/unborn"]);
+
+    let result = handle_tool_call(
+        &host,
+        "tracedecay_commit_context",
+        json!({"format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    close_test_graph(host).await;
+
+    assert_eq!(result.value.get("isError"), Some(&json!(true)));
+    assert_eq!(
+        commit_context_json(&result.value),
+        json!({
+            "error": {
+                "kind": "git",
+                "operation": "status",
+                "message": "cannot peel HEAD to commit: Branch 'refs/heads/unborn' does not have any commits",
+            }
+        })
+    );
+}
+
+const BILLING_MANIFEST: &str =
+    "[package]\nname = \"billing\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+
+fn seed_commit(project: &Path, files: &[(&str, &str)], message: &str) {
+    fs::create_dir_all(project).unwrap();
+    for (path, body) in files {
+        write_project_file(project, path, body);
+    }
+    git_run(project, &["init"]);
+    git_run(project, &["add", "."]);
+    git_run(project, &["commit", "-m", message]);
+}
+
+fn write_project_file(project: &Path, path: &str, body: &str) {
+    let full = project.join(path);
+    if let Some(parent) = full.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(full, body).unwrap();
+}
+
+fn commit_context_json(value: &Value) -> Value {
+    serde_json::from_str(extract_text(value)).unwrap_or_else(|error| {
+        panic!(
+            "tracedecay_commit_context did not return JSON: {error}\n{}",
+            extract_text(value)
+        )
+    })
 }
 
 #[tokio::test]
@@ -1249,61 +1539,274 @@ async fn test_health_detailed_includes_raw_signals() {
     assert!(dims["redundancy"].get("dead_count").is_some());
 }
 
-#[tokio::test]
-async fn test_dsm_stats() {
-    let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_dsm",
-        json!({ "shape": "stats" }),
-        None,
-        None,
+/// Five Rust files. The calls a reader can see are `src/ui.rs` calling
+/// `panel::draw` in `src/ui/panel.rs` and `crate::core::store::load` in
+/// `src/core/store.rs`. `mod` declarations are not themselves calls.
+fn write_dsm_coupling_sources(project: &Path) {
+    fs::create_dir_all(project.join("src/ui")).unwrap();
+    fs::create_dir_all(project.join("src/core")).unwrap();
+    fs::write(project.join("src/lib.rs"), "mod ui;\nmod core;\n").unwrap();
+    fs::write(
+        project.join("src/ui.rs"),
+        "mod panel;\nuse crate::core::store::load;\n\n\
+         pub fn render() -> i32 {\n    panel::draw() + load()\n}\n",
     )
-    .await
     .unwrap();
-    let text = extract_text(&result.value);
-    assert!(text.starts_with("## Design Structure Matrix"));
-    assert!(
-        text.contains("**files:**"),
-        "files field should exist, got: {}",
-        text
-    );
-    assert!(
-        text.contains("**density:**"),
-        "density field should exist, got: {}",
-        text
-    );
-    assert!(
-        text.contains("### Top Clusters"),
-        "default DSM markdown should include top clusters, got: {}",
-        text
-    );
+    fs::write(
+        project.join("src/ui/panel.rs"),
+        "pub fn draw() -> i32 { 1 }\n",
+    )
+    .unwrap();
+    fs::write(project.join("src/core.rs"), "pub mod store;\n").unwrap();
+    fs::write(
+        project.join("src/core/store.rs"),
+        "pub fn load() -> i32 { 4 }\n",
+    )
+    .unwrap();
+}
+
+async fn call_dsm(host: &ProductionCompositionFixture, args: Value) -> String {
+    let result = handle_tool_call(host, "tracedecay_dsm", args, None, None)
+        .await
+        .unwrap_or_else(|error| panic!("tracedecay_dsm failed over production MCP: {error}"));
+    extract_text(&result.value).to_owned()
+}
+
+fn parse_dsm_json(text: &str) -> Value {
+    serde_json::from_str(text)
+        .unwrap_or_else(|error| panic!("tracedecay_dsm did not return JSON: {error}\n{text}"))
+}
+
+fn coupling_stats() -> Value {
+    json!({
+        "files": 5,
+        "edges": 2,
+        "density": 0.1,
+        "clusters": 3,
+        "largest_cluster": 3
+    })
+}
+
+fn coupling_clusters() -> Value {
+    json!([
+        {
+            "directory": "src",
+            "file_count": 3,
+            "internal_edges": 0,
+            "outgoing_edges": 2,
+            "incoming_edges": 0,
+            "boundary_edges": 2
+        },
+        {
+            "directory": "src/core",
+            "file_count": 1,
+            "internal_edges": 0,
+            "outgoing_edges": 0,
+            "incoming_edges": 1,
+            "boundary_edges": 1
+        },
+        {
+            "directory": "src/ui",
+            "file_count": 1,
+            "internal_edges": 0,
+            "outgoing_edges": 0,
+            "incoming_edges": 1,
+            "boundary_edges": 1
+        }
+    ])
+}
+
+/// Dependency pairs in the matrix, independent of the tie order among files
+/// that share an edge count. The matrix sort is stable over a `HashMap`, so
+/// tied rows are not a stable literal.
+fn matrix_edges(matrix: &Value) -> Vec<(String, String)> {
+    let files = matrix["files"]
+        .as_array()
+        .expect("matrix.files")
+        .iter()
+        .map(|file| file.as_str().expect("matrix file name").to_owned())
+        .collect::<Vec<_>>();
+    let rows = matrix["matrix"].as_array().expect("matrix.matrix");
+    assert_eq!(rows.len(), files.len(), "matrix is not square: {matrix}");
+    let mut edges = Vec::new();
+    for (row_index, row) in rows.iter().enumerate() {
+        let cells = row.as_array().expect("matrix row");
+        assert_eq!(cells.len(), files.len(), "matrix row {row_index}: {matrix}");
+        for (column_index, cell) in cells.iter().enumerate() {
+            let present = cell
+                .as_u64()
+                .unwrap_or_else(|| panic!("matrix cell is not 0 or 1: {cell} in {matrix}"));
+            if row_index == column_index {
+                assert_eq!(
+                    present, 0,
+                    "DSM matrix has a self-edge at {}",
+                    files[row_index]
+                );
+            }
+            match present {
+                0 => {}
+                1 => edges.push((files[row_index].clone(), files[column_index].clone())),
+                other => panic!("matrix cell {other} is not 0 or 1 in {matrix}"),
+            }
+        }
+    }
+    edges.sort();
+    edges
 }
 
 #[tokio::test]
-async fn test_dsm_json_returns_stats_shape() {
-    let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_dsm",
-        json!({ "format": "json" }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
-    assert!(
-        parsed["stats"].get("files").is_some(),
-        "files field should exist, got: {}",
-        text
+async fn test_dsm_reports_authored_file_dependencies() {
+    let host = production_composition_fixture_with_sources(write_dsm_coupling_sources).await;
+    wait_for_current_graph(&host).await;
+
+    let stats_markdown = call_dsm(&host, json!({})).await;
+    // Density is a JSON number. The markdown renderer reads it with
+    // `field_str`, which only accepts strings, so the default line is
+    // `**density:** ` with an empty value. The JSON assertion below is the
+    // one that checks the rounded number.
+    assert_eq!(
+        stats_markdown,
+        "\
+## Design Structure Matrix
+**shape:** stats
+**files:** 5
+**edges:** 2
+**density:** 
+**clusters:** 3
+**largest_cluster:** 3
+
+### Top Clusters
+- src: 3 files; 0 internal; 2 boundary (2 out, 0 in)
+- src/core: 1 files; 0 internal; 1 boundary (0 out, 1 in)
+- src/ui: 1 files; 0 internal; 1 boundary (0 out, 1 in)
+"
     );
-    assert!(
-        parsed["stats"].get("density").is_some(),
-        "density field should exist"
+
+    let stats = parse_dsm_json(&call_dsm(&host, json!({ "format": "json" })).await);
+    assert_eq!(
+        stats,
+        json!({
+            "shape": "stats",
+            "stats": coupling_stats(),
+            "clusters": coupling_clusters(),
+        })
     );
-    assert_eq!(parsed["shape"], "stats");
+
+    let named_stats =
+        parse_dsm_json(&call_dsm(&host, json!({ "format": "json", "shape": "stats" })).await);
+    assert_eq!(
+        named_stats,
+        json!({
+            "shape": "stats",
+            "stats": coupling_stats(),
+            "clusters": coupling_clusters(),
+        })
+    );
+
+    let clusters =
+        parse_dsm_json(&call_dsm(&host, json!({ "format": "json", "shape": "clusters" })).await);
+    assert_eq!(
+        clusters,
+        json!({
+            "shape": "clusters",
+            "stats": coupling_stats(),
+            "clusters": coupling_clusters(),
+        })
+    );
+
+    // An unrecognized shape is the stats report, not an empty success.
+    let unknown =
+        parse_dsm_json(&call_dsm(&host, json!({ "format": "json", "shape": "layers" })).await);
+    assert_eq!(
+        unknown,
+        json!({
+            "shape": "stats",
+            "stats": coupling_stats(),
+            "clusters": coupling_clusters(),
+        })
+    );
+
+    let matrix =
+        parse_dsm_json(&call_dsm(&host, json!({ "format": "json", "shape": "matrix" })).await);
+    assert_eq!(matrix["shape"], "matrix");
+    assert_eq!(matrix["stats"], coupling_stats());
+    assert_eq!(matrix["clusters"], coupling_clusters());
+    let mut files = matrix["matrix"]["files"]
+        .as_array()
+        .expect("matrix files")
+        .iter()
+        .map(|file| file.as_str().expect("short name").to_owned())
+        .collect::<Vec<_>>();
+    files.sort();
+    assert_eq!(
+        files,
+        ["core.rs", "lib.rs", "panel.rs", "store.rs", "ui.rs"]
+    );
+    assert_eq!(matrix["matrix"]["note"], "Top 5 files by edge count shown");
+    assert_eq!(
+        matrix_edges(&matrix["matrix"]),
+        vec![
+            ("ui.rs".to_owned(), "panel.rs".to_owned()),
+            ("ui.rs".to_owned(), "store.rs".to_owned()),
+        ]
+    );
+
+    let top_file = parse_dsm_json(
+        &call_dsm(
+            &host,
+            json!({ "format": "json", "shape": "matrix", "max_files": 1 }),
+        )
+        .await,
+    );
+    assert_eq!(
+        top_file["matrix"],
+        json!({
+            "files": ["ui.rs"],
+            "matrix": [[0]],
+            "note": "Top 1 files by edge count shown"
+        })
+    );
+
+    let ui_only =
+        parse_dsm_json(&call_dsm(&host, json!({ "format": "json", "path": "src/ui" })).await);
+    assert_eq!(
+        ui_only,
+        json!({
+            "shape": "stats",
+            "stats": {
+                "files": 1,
+                "edges": 0,
+                "density": 0.0,
+                "clusters": 1,
+                "largest_cluster": 1
+            },
+            "clusters": [{
+                "directory": "src/ui",
+                "file_count": 1,
+                "internal_edges": 0,
+                "outgoing_edges": 0,
+                "incoming_edges": 0,
+                "boundary_edges": 0
+            }]
+        })
+    );
+
+    let missing = call_dsm(&host, json!({ "path": "src/missing" })).await;
+    assert_eq!(
+        missing,
+        "\
+## Design Structure Matrix
+**shape:** stats
+**files:** 0
+**edges:** 0
+**density:** 
+**clusters:** 0
+**largest_cluster:** 0
+
+### Top Clusters
+_No dependency clusters found._
+"
+    );
 }
 
 #[tokio::test]

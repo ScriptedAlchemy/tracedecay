@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -25,12 +26,29 @@ pub const MAX_AUTOMATIC_CLONE_BODY_BYTES_V1: u64 = 64 * 1024;
 /// streams under 1.5 MB, and is far past anything clone detection can act on.
 pub const MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1: u32 = 4096;
 
+/// A clone-token syntax kind.
+///
+/// Every kind an extractor emits is a grammar-owned `&'static str`, drawn from
+/// a vocabulary of a few hundred names, while one repository pass emits tens of
+/// millions of tokens. Owning the name per token made the grammar table's
+/// static strings the largest single allocation source of the pre-progress
+/// extraction window; borrowing it keeps the wire shape and pays nothing.
+/// Deserialized pages still own their names.
+pub type CloneSyntaxKindV1 = Cow<'static, str>;
+
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Hash)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ConservativeCloneTokenV1 {
-    StructureStart { syntax_kind: String },
-    Syntax { syntax_kind: String, text: String },
-    StructureEnd { syntax_kind: String },
+    StructureStart {
+        syntax_kind: CloneSyntaxKindV1,
+    },
+    Syntax {
+        syntax_kind: CloneSyntaxKindV1,
+        text: String,
+    },
+    StructureEnd {
+        syntax_kind: CloneSyntaxKindV1,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -370,7 +388,7 @@ impl<'a> TokenEmitter<'a> {
 
         if node.is_named() {
             self.tokens.push(ConservativeCloneTokenV1::StructureStart {
-                syntax_kind: node.kind().to_owned(),
+                syntax_kind: Cow::Borrowed(node.kind()),
             });
         }
         let mut cursor = node.walk();
@@ -384,7 +402,7 @@ impl<'a> TokenEmitter<'a> {
         }
         if node.is_named() {
             self.tokens.push(ConservativeCloneTokenV1::StructureEnd {
-                syntax_kind: node.kind().to_owned(),
+                syntax_kind: Cow::Borrowed(node.kind()),
             });
         }
     }
@@ -402,7 +420,7 @@ impl<'a> TokenEmitter<'a> {
             return;
         }
         self.tokens.push(ConservativeCloneTokenV1::Syntax {
-            syntax_kind: node.kind().to_owned(),
+            syntax_kind: Cow::Borrowed(node.kind()),
             text: self
                 .replacements
                 .and_then(|replacements| replacements.get(&(node.start_byte(), node.end_byte())))

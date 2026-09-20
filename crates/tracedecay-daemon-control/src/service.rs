@@ -26,7 +26,7 @@ mod tests;
 #[allow(clippy::expect_used)]
 mod update_restore_tests;
 
-pub use probe::{DaemonProcessProofV1, daemon_reachable};
+pub use probe::{DaemonProcessProofV1, daemon_reachable, daemon_socket_connectable};
 pub use unit_file::installed_service_socket_path;
 
 use probe::{

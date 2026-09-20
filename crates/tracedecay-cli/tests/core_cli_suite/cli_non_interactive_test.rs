@@ -747,6 +747,30 @@ fn explicit_kimi_install_fails_with_interactive_remediation() {
     assert!(!kimi_home.join("plugins/installed.json").exists());
 }
 
+#[test]
+fn install_without_any_detected_agent_succeeds_with_a_notice() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let mut install = tracedecay_command_without_daemon(home.path(), project.path());
+    let _shim = add_tracedecay_path_shim(&mut install, home.path());
+    install.arg("install");
+
+    let output = run_with_timeout(install, cli_timeout());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "the first command a user runs, before any agent exists, is not a failure\nstderr:\n{stderr}"
+    );
+    assert!(stderr.contains("No supported agents detected"), "{stderr}");
+    assert!(stderr.contains("Claude Code"), "{stderr}");
+    assert!(stderr.contains("Cursor"), "{stderr}");
+    assert!(
+        stderr.contains("run `tracedecay install` again"),
+        "{stderr}"
+    );
+}
+
 fn run_codex_automation_install(home: &TempDir, project_root: &Path) -> Output {
     let home_path = canonical_temp_path(home.path());
 

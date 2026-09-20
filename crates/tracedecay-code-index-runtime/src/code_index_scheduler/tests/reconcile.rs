@@ -2991,6 +2991,11 @@ async fn a_disproving_exact_source_probe_withdraws_the_busy_read_witness() {
     // Hold the worker at its dequeue point so every observation below is the
     // read path's own answer and never a pass that raced it.
     let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
+    // The permit and the pass counter leave the graph tail of the settled
+    // pass free to re-verify source once the drift below lands, and that
+    // re-verification withdraws the witness on its own (see
+    // `hold_scheduler_for_root`). Fence it until the read path has answered.
+    let scheduler = hold_scheduler_for_root(&registry, fixture.path()).await;
 
     std::fs::write(
         fixture.path().join("src/main.rs"),
@@ -3043,6 +3048,7 @@ async fn a_disproving_exact_source_probe_withdraws_the_busy_read_witness() {
 
     // Release the worker: its pass re-derives the sealed digests, observes the
     // drift, and the witness stops naming the disproved generation.
+    scheduler.release().await;
     drop(admission);
     let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     while witness
@@ -5215,24 +5221,36 @@ async fn shutdown_signals_code_index_worker_without_taking_busy_scheduler_lock()
         .await
         .expect("scheduler handle");
     let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
     let lock_thread = std::thread::spawn(move || {
         let _guard = scheduler
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         held_tx.send(()).expect("signal scheduler lock held");
-        std::thread::sleep(Duration::from_millis(750));
+        release_rx.recv().expect("release scheduler lock");
     });
     held_rx.recv().expect("scheduler lock acquired");
 
-    let started = std::time::Instant::now();
+    // The contract is that shutdown never takes this mutex on its own behalf:
+    // it sets `shutting_down`, wakes the worker, and joins it, while the worker
+    // polls `try_lock` and returns cancelled the moment that flag is set. So
+    // shutdown must return while this thread still owns the mutex, and the
+    // proof is program order: the release below has not been sent yet.
+    //
+    // Wall time cannot state that. The worker's cancellation-observation
+    // latency is unbounded by design (it may be mid-slice in a blocking
+    // decode), so a clock-based budget measures host CPU, not the lock. A
+    // regression that makes shutdown wait on the mutex deadlocks here instead
+    // of failing, and the harness reports it as a timeout.
     registry.shutdown().await;
-    let elapsed = started.elapsed();
-    lock_thread.join().expect("scheduler lock holder joins");
 
     assert!(
-        elapsed < Duration::from_millis(250),
-        "shutdown waited {elapsed:?} for a synchronous scheduler lock instead of signalling its cooperative cancellation token"
+        !lock_thread.is_finished(),
+        "shutdown returned only after the scheduler lock holder let go, so it waited for a \
+         synchronous scheduler lock instead of signalling its cooperative cancellation token"
     );
+    release_tx.send(()).expect("release scheduler lock");
+    lock_thread.join().expect("scheduler lock holder joins");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -10188,7 +10206,20 @@ async fn blocked_observability_store_does_not_hold_reconcile_readiness() {
         .await
         .expect("release observability writer");
     registry.shutdown().await;
-    producer.shutdown().await.expect("flush producer");
+    // The writer held above is this store's only one, and it is held across a
+    // whole reconcile, so the producer's own bounded persistence budget can
+    // expire against it on a slow host: the lane then drops that batch and
+    // latches the denial for its whole life, which `shutdown` reports even
+    // after the writer is released. That denial is the arrangement this test
+    // builds, not a defect. The contract is the readiness loop above, which
+    // converged while the store was blocked; any other fault here is a real
+    // producer defect.
+    match producer.shutdown().await {
+        Ok(_) => {}
+        Err(tracedecay_contracts::ApplicationContractError::Domain(domain))
+            if domain == "observability_persistence_deadline" => {}
+        Err(error) => panic!("flush producer: {error:?}"),
+    }
 }
 
 /// The installed observability lane must persist one canonical index

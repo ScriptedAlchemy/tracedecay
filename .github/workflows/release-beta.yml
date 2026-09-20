@@ -461,7 +461,12 @@ jobs:
           test "${#archives[@]}" -gt 0
           mapfile -t bundles < <(find mcpbs -maxdepth 1 -type f -name '*.mcpb' -print | sort)
           test "${#bundles[@]}" -gt 0
-          release_assets=("${archives[@]}" "${bundles[@]}" SHA256SUMS)
+          # `install.sh` ships with the prerelease as it does with a stable
+          # release. README tells users to curl the installer from a release,
+          # and only release.yml published one, so the hardened script on
+          # master reached nobody following the beta line. The checkout is
+          # pinned to the tag's source sha, so this is that tag's installer.
+          release_assets=("${archives[@]}" "${bundles[@]}" SHA256SUMS install.sh)
           gh api "repos/${{ github.repository }}/releases/tags/${RELEASE_TAG}" \
             --jq '.assets[].name' > remote-asset-names
           for release_asset in "${release_assets[@]}"; do
