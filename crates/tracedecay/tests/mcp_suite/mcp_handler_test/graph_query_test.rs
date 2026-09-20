@@ -104,6 +104,10 @@ pub struct PlainValue;
     .await
 }
 
+fn clone_family_lane_still_publishing(error: &str) -> bool {
+    error.contains("generation_unverified")
+}
+
 async fn shutdown_graph_fixture(fixture: GraphQueryFixture) {
     fixture.production.harness.shutdown().await;
 }
@@ -1069,6 +1073,37 @@ async fn affected_central_daemon_fixture_preserves_set_and_ranks_near_tests_over
         payload["ranking_metadata"]["strategy"],
         "dependency_distance_then_path"
     );
+
+    // A changed-file list is a git diff, so it routinely names paths this
+    // generation never published: a new file, a deleted one, a rename's old
+    // path, a manifest. Such a path has no symbols, so the traversal reaches
+    // adjacency with an empty seed list, and adjacency refuses that by
+    // contract. The refusal used to surface as a non-retryable
+    // `code-graph-invalid-request` that failed the whole call, so one
+    // unindexed entry cost the caller every other file's answer.
+    let unpublished = harness
+        .call_tool(
+            &project,
+            "tracedecay_affected",
+            json!({"files": ["src/never_published.rs"], "depth": 5, "format": "json"}),
+        )
+        .await
+        .expect("production invocation succeeds")
+        .result
+        .expect("an unpublished path is answerable, not an invalid request");
+    let unpublished: Value = serde_json::from_str(
+        unpublished["content"][0]["text"]
+            .as_str()
+            .expect("affected JSON text"),
+    )
+    .expect("affected JSON payload");
+    assert_eq!(
+        unpublished["affected_tests"],
+        json!([]),
+        "a path this generation never published has no dependents, not an error"
+    );
+    assert_eq!(unpublished["ranked_tests"], json!([]));
+    assert_eq!(unpublished["recommended_tests"], json!([]));
 }
 
 #[cfg(feature = "test-transport")]
@@ -1577,28 +1612,57 @@ async fn redundancy_pull_request_scope_shares_one_budget_and_resumes_changed_fam
         .server(fixture.project_root())
         .expect("production graph-query server");
     warm_code_index_search(&server, "generation_bump").await;
-    let stale = call_production_tool(
-        &fixture,
-        "tracedecay_redundancy",
-        json!({
-            "project_id": project_id,
-            "repository_id": repository_id,
-            "match_classes": ["conservative_exact"],
-            "scope": scope,
-            "include_generated_paths": true,
-            "family_limit": 10,
-            "member_limit": 10,
-            "work_limit": 4,
-            "cursor": stale_cursor,
-        }),
-        None,
-        None,
-    )
-    .await
-    .expect_err("a prior-generation pull-request cursor must be stale");
+    let stale_args = json!({
+        "project_id": project_id,
+        "repository_id": repository_id,
+        "match_classes": ["conservative_exact"],
+        "scope": scope,
+        "include_generated_paths": true,
+        "family_limit": 10,
+        "member_limit": 10,
+        "work_limit": 4,
+        "cursor": stale_cursor,
+    });
+    // Search lane coverage can seal while clone-family publication is still
+    // retiring the previous generation. That window answers `search_failed`
+    // or `generation_unverified`; the stale cursor's terminal is
+    // `generation_unavailable` once the successor artifact can be read.
+    let mut last = String::new();
+    for _ in 0..40 {
+        match call_production_tool(
+            &fixture,
+            "tracedecay_redundancy",
+            stale_args.clone(),
+            None,
+            None,
+        )
+        .await
+        {
+            Err(error) => {
+                let rendered = error.to_string();
+                if rendered.contains("generation_unavailable") {
+                    last = rendered;
+                    break;
+                }
+                if clone_family_lane_still_publishing(&rendered) {
+                    last = rendered;
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    continue;
+                }
+                panic!("stale pull-request cursor failed closed: {rendered}");
+            }
+            Ok(value) => {
+                last = format!(
+                    "successor still served the prior cursor: {}",
+                    extract_text(&value.value)
+                );
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+    }
     assert!(
-        stale.to_string().contains("generation_unavailable"),
-        "{stale}"
+        last.contains("generation_unavailable"),
+        "prior-generation pull-request cursor must be stale, last={last}"
     );
 
     shutdown_graph_fixture(fixture).await;
@@ -2110,120 +2174,6 @@ async fn test_body_unknown_symbol() {
         text.contains("No symbol named"),
         "should report no match, got: {text}"
     );
-}
-
-#[tokio::test]
-async fn test_callers_for_returns_caller_set_per_id() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-
-    // Look up two distinct targets in one call.
-    let helper_id = graph_node_id(&cg, "helper").await;
-    let format_id = graph_node_id(&cg, "format_greeting").await;
-
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_callers_for",
-        json!({"node_ids": [helper_id.clone(), format_id.clone()]}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
-
-    // Response shape: { callers: { id: [...], id2: [...] }, truncated: bool, max_per_item: N }
-    assert_eq!(output["truncated"], json!(false));
-    assert!(output["max_per_item"].as_u64().unwrap() > 0);
-
-    let callers = &output["callers"];
-    let helper_callers = callers[&helper_id].as_array().unwrap();
-    let format_callers = callers[&format_id].as_array().unwrap();
-
-    // helper is called from main; format_greeting is called from helper.
-    assert!(
-        !helper_callers.is_empty(),
-        "expected helper to have at least one caller"
-    );
-    assert!(
-        !format_callers.is_empty(),
-        "expected format_greeting to have at least one caller"
-    );
-}
-
-#[tokio::test]
-async fn test_callers_for_includes_unmatched_ids_as_empty() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let helper_id = graph_node_id(&cg, "helper").await;
-    let bogus_id = "function:0000000000000000000000000000ffff".to_string();
-
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_callers_for",
-        json!({"node_ids": [helper_id.clone(), bogus_id.clone()]}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-    let callers = &output["callers"];
-    assert!(callers[&bogus_id].as_array().unwrap().is_empty());
-    assert!(!callers[&helper_id].as_array().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn test_callers_for_respects_max_per_item() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let helper_id = graph_node_id(&cg, "helper").await;
-    // Cap at 0, every caller should be marked truncated.
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_callers_for",
-        json!({"node_ids": [helper_id.clone()], "max_per_item": 0}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-    assert_eq!(output["truncated"], json!(true));
-    assert!(output["callers"][&helper_id].as_array().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn test_callers_for_rejects_empty_input() {
-    let (cg, _env, _dir) = production_empty_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_callers_for",
-        json!({"node_ids": []}),
-        None,
-        None,
-    )
-    .await;
-    let Err(err) = result else {
-        panic!("expected error for empty node_ids");
-    };
-    assert!(format!("{err}").contains("non-empty"));
-}
-
-#[tokio::test]
-async fn test_callers_for_rejects_unknown_kind() {
-    let (cg, _env, _dir) = production_empty_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_callers_for",
-        json!({"node_ids": ["function:0000000000000000000000000000ffff"], "kind": "not_a_real_kind"}),
-        None,
-        None,
-    )
-    .await;
-    let Err(err) = result else {
-        panic!("expected error for unknown edge kind");
-    };
-    assert!(format!("{err}").contains("unknown edge kind"));
-    shutdown_graph_fixture(cg).await;
 }
 
 /// Occurrence ids hash the fixture's temporary git directory, so they change

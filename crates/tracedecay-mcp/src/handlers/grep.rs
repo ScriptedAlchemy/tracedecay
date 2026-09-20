@@ -144,13 +144,15 @@ pub async fn handle_grep(
     let truncated = scan.truncated || hits.len() > max_results;
     hits.truncate(max_results);
 
-    let graph_error = match graph {
-        Ok(graph) => {
-            enrich_hits_from_graph(graph, &mut hits)?;
-            None
-        }
-        Err(error) => Some(error),
+    // Enrichment is the same optional accelerator as the open itself: a
+    // published occurrence graph still refuses catalog-backed lookups while
+    // its interactive catalog warms, and that refusal is retryable state the
+    // one-shot caller never re-sends. Report it beside the lexical answer.
+    let enrichment_error = match graph {
+        Ok(graph) => enrich_hits_from_graph(graph, &mut hits).err(),
+        Err(_) => None,
     };
+    let graph_error = enrichment_error.as_ref().or_else(|| graph.err());
     let touched_files = unique_file_paths(hits.iter().map(|hit| hit.file.as_str()));
     let mut output_value = build_output_value(
         &hits,
@@ -796,6 +798,265 @@ mod tests {
         assert!(
             markdown.contains("2 source candidates were unavailable"),
             "{markdown}"
+        );
+    }
+
+    const ENRICHMENT_TOKEN: &str = "GREP_ENRICHMENT_REFUSAL_TOKEN";
+    const ENRICHED_FILE: &str = "src/lib.rs";
+    const ENRICHED_LINE: u32 = 2;
+    const ENRICHED_TEXT: &str = "    let _ = \"GREP_ENRICHMENT_REFUSAL_TOKEN\";";
+    const ENRICHED_SOURCE: &str =
+        "pub fn greet() {\n    let _ = \"GREP_ENRICHMENT_REFUSAL_TOKEN\";\n}\n";
+    const ENRICHED_SYMBOL: &str = "greet";
+    const ENRICHED_OCCURRENCE: &str = "symbol.grep-enrichment.greet";
+
+    fn fixture_id<T>(value: &str) -> T
+    where
+        T: TryFrom<String>,
+        T::Error: std::fmt::Debug,
+    {
+        T::try_from(value.to_owned()).expect("valid fixture identity")
+    }
+
+    fn fixture_digest<T>(fill: char) -> T
+    where
+        T: TryFrom<String>,
+        T::Error: std::fmt::Debug,
+    {
+        fixture_id(&format!("sha256:{}", String::from(fill).repeat(64)))
+    }
+
+    /// A request context whose deadline the caller chooses. A deadline already
+    /// in the past is the retryable refusal a published-but-warming graph
+    /// answers catalog-backed lookups with.
+    fn fixture_request_context(
+        cancellation: &tracedecay_contracts::CancellationSignal,
+        expires_at: tracedecay_domain::UtcMicros,
+    ) -> tracedecay_contracts::RequestContext {
+        use tracedecay_contracts::{
+            CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestContext,
+            RequestId, ResolvedScope,
+        };
+        use tracedecay_domain::{ActorId, ProjectId, RefId, RepositoryId, UtcMicros, WorktreeId};
+
+        let scope = ResolvedScope::new(
+            fixture_id::<ProjectId>("project.grep-enrichment.fixture"),
+            fixture_id::<RepositoryId>("repository.grep-enrichment.fixture"),
+            fixture_id::<WorktreeId>("worktree.grep-enrichment.fixture"),
+            Some(fixture_id::<RefId>("refs/heads/grep-enrichment-fixture")),
+        )
+        .expect("fixture resolved scope");
+        let grant = CapabilityGrantSnapshot::new(
+            fixture_id::<CapabilityGrantId>("grant.grep-enrichment.fixture"),
+            1,
+            fixture_digest('a'),
+            fixture_id::<ActorId>("actor.grep-enrichment-fixture.issuer"),
+            UtcMicros(1),
+            UtcMicros(i64::MAX),
+            scope.clone(),
+            std::collections::BTreeSet::from([
+                fixture_id::<tracedecay_tool_catalog::CapabilityId>(
+                    "capability.grep-enrichment.fixture",
+                ),
+            ]),
+            std::collections::BTreeSet::from([fixture_id::<tracedecay_tool_catalog::UseCaseId>(
+                "use-case.grep-enrichment.fixture",
+            )]),
+            DisclosureClass::Evidence,
+        )
+        .expect("fixture capability grant");
+        RequestContext::new(
+            fixture_id::<ActorId>("actor.grep-enrichment-fixture.requester"),
+            scope,
+            grant,
+            fixture_id::<RequestId>("request.grep-enrichment.fixture"),
+            Deadline::new(expires_at).expect("fixture deadline"),
+            cancellation.context(),
+        )
+        .expect("fixture request context")
+    }
+
+    /// One published generation holding `greet`, whose line span covers the
+    /// token line in [`ENRICHED_SOURCE`].
+    fn fixture_graph(
+        cancellation: &tracedecay_contracts::CancellationSignal,
+        expires_at: tracedecay_domain::UtcMicros,
+    ) -> tracedecay_graph_query::VerifiedGraphQuery {
+        use std::sync::Arc;
+        use tracedecay_code_index::graph_projection::HermeticCodeGraphProjectionStore;
+        use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
+        use tracedecay_domain::{
+            BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
+            CodeSearchChunkGrainV1, CodeSearchChunkV1, ComplexityAnalysisV1, ContentDigest,
+            FileOccurrenceId, LanguageDescriptorRevision, LanguageId, PolicyRevisionId,
+            SanitizedCodeFileV1, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
+            SnapshotFileDispositionV1, SourceSpan, SymbolOccurrenceId,
+        };
+
+        let generation = fixture_id::<CodeGenerationId>("generation.grep-enrichment.1");
+        let file = fixture_id::<FileOccurrenceId>("file.grep-enrichment.lib");
+        let occurrence = fixture_id::<SymbolOccurrenceId>(ENRICHED_OCCURRENCE);
+        let files = [SanitizedCodeFileV1 {
+            file_occurrence_id: file.clone(),
+            logical_path: ENRICHED_FILE.to_owned(),
+            language: Some(LanguageId::new("rust").expect("fixture language")),
+            content_digest: fixture_digest('b'),
+            disposition: SnapshotFileDispositionV1::Present,
+        }];
+        let symbols = vec![Arc::new(LineageSymbolRecordV1 {
+            occurrence: occurrence.clone(),
+            identity: fixture_digest('c'),
+            qualified_name: ENRICHED_SYMBOL.to_owned(),
+            simple_name: ENRICHED_SYMBOL.to_owned(),
+            kind: "function".to_owned(),
+            visibility: "public".to_owned(),
+            branches: 0,
+            loops: 0,
+            max_nesting: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
+            // `start_line` is zero-based, so this spans source lines 1 to 3.
+            line_span: 3,
+            start_line: 0,
+            signature: None,
+            docstring: None,
+            is_async: false,
+            derives: Vec::new(),
+            skip_test_coverage: false,
+            file_identity: fixture_digest('d'),
+            content_digest: fixture_digest('e'),
+        })];
+        let chunks = [Arc::new(CodeSearchChunkV1 {
+            id: fixture_id("chunk.grep-enrichment.greet"),
+            anchor: CodeSearchChunkAnchorV1 {
+                generation_id: generation.clone(),
+                file_occurrence_id: file,
+                symbol_occurrence_id: Some(occurrence),
+                parent_chunk_id: None,
+                source_span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: ENRICHED_SOURCE.len() as u64,
+                },
+                grain: CodeSearchChunkGrainV1::SymbolBody,
+                ordinal: 0,
+            },
+            content_digest: fixture_digest::<ContentDigest>('f'),
+            language_descriptor_revision: fixture_id::<LanguageDescriptorRevision>(
+                "language.rust.grep-enrichment.v1",
+            ),
+            chunker_revision: fixture_id::<ChunkerRevision>("chunker.grep-enrichment.v1"),
+            sanitizer_revision: fixture_id::<SanitizerRevision>("sanitizer.grep-enrichment.v1"),
+            sensitivity: SensitivityDecision {
+                level: SensitivityLevelV1::Public,
+                policy_revision: fixture_id::<PolicyRevisionId>("policy.grep-enrichment.v1"),
+            },
+            exact_terms: Vec::new(),
+            subtokens: Vec::new(),
+            sanitized_text: BoundedSanitizedText::new(ENRICHED_SOURCE)
+                .expect("bounded fixture text"),
+        })];
+        let symbols = GenerationSymbolIndexV1::new(generation.clone(), symbols)
+            .expect("valid fixture symbol index");
+
+        let store =
+            HermeticCodeGraphProjectionStore::memory(cancellation).expect("fixture projection");
+        store
+            .publish_indexed_with_cancellation(
+                &generation,
+                &[],
+                &chunks,
+                &files,
+                &symbols,
+                Arc::new(tracedecay_graph_db::NeverCancelled),
+            )
+            .expect("publish fixture generation");
+        let graph_cancellation =
+            tracedecay_graph_query::application_graph_cancellation(cancellation);
+        let reader = store
+            .verified_store(&generation)
+            .expect("open verified fixture generation")
+            .interactive_reader_with_cancellation(&generation, Arc::clone(&graph_cancellation))
+            .expect("open generation-pinned fixture reader");
+        tracedecay_graph_query::VerifiedGraphQuery::from_fixture_reader(
+            reader,
+            graph_cancellation,
+            fixture_request_context(cancellation, expires_at),
+        )
+    }
+
+    async fn grep_token(
+        project: &Path,
+        graph: &tracedecay_graph_query::VerifiedGraphQuery,
+    ) -> Value {
+        let result = handle_grep(
+            project,
+            Ok(graph),
+            json!({"pattern": ENRICHMENT_TOKEN, "fixed_strings": true, "format": "json"}),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("grep answers lexically whatever the graph says");
+        let text = result.value["content"][0]["text"]
+            .as_str()
+            .expect("grep json text");
+        serde_json::from_str(text).expect("grep payload is JSON")
+    }
+
+    #[tokio::test]
+    async fn grep_keeps_lexical_hits_when_graph_enrichment_refuses() {
+        use tracedecay_domain::UtcMicros;
+
+        let project = tempfile::tempdir().expect("temp project");
+        std::fs::create_dir_all(project.path().join("src")).expect("source fixture directory");
+        std::fs::write(project.path().join(ENRICHED_FILE), ENRICHED_SOURCE)
+            .expect("source fixture");
+        let cancellation = tracedecay_contracts::CancellationSignal::active(
+            "cancellation.grep-enrichment.fixture",
+        )
+        .expect("fixture cancellation");
+        let lexical_hit = json!({
+            "file": ENRICHED_FILE,
+            "line": ENRICHED_LINE,
+            "text": ENRICHED_TEXT,
+        });
+
+        let serving = fixture_graph(&cancellation, UtcMicros(i64::MAX));
+        let enriched = grep_token(project.path(), &serving).await;
+        assert_eq!(
+            enriched["results"],
+            json!([{
+                "file": ENRICHED_FILE,
+                "line": ENRICHED_LINE,
+                "text": ENRICHED_TEXT,
+                "symbol": ENRICHED_SYMBOL,
+                "node_id": ENRICHED_OCCURRENCE,
+            }]),
+            "the same fixture generation does enrich this hit when it answers"
+        );
+        assert_eq!(
+            enriched["graph_enrichment"],
+            json!({"status": "complete", "enriched": 1, "returned": 1})
+        );
+
+        // The generation is published, but the catalog-backed page refuses.
+        let refusing = fixture_graph(&cancellation, UtcMicros(1));
+        let refused = grep_token(project.path(), &refusing).await;
+        assert_eq!(
+            refused["results"],
+            json!([lexical_hit]),
+            "the lexical answer survives the refusal, and claims no symbol"
+        );
+        assert_eq!(refused["match_count"], 1);
+        assert_eq!(
+            refused["graph_enrichment"],
+            json!({
+                "status": "unavailable",
+                "reason_code": "code-graph-timed-out",
+                "retryable": true,
+                "detail": "the code-graph read timed out",
+            }),
+            "the refusal is reported beside the hits rather than replacing them"
         );
     }
 }

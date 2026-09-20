@@ -219,24 +219,17 @@ jobs:
           python3 scripts/test-check-dev-skill-mirrors.py
           python3 scripts/check-dev-skill-mirrors.py check
 
-      - name: Validate pushed commit messages
-        if: github.event_name == 'push'
+      # Dispatch admits an integration branch. Judge the commits a merge onto
+      # the default branch would introduce, with the same linter a push uses.
+      # A push still uses the before SHA, so published history is not rejudged.
+      - name: Validate commit messages
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         env:
+          EVENT_NAME: ${{ github.event_name }}
           BEFORE_SHA: ${{ github.event.before }}
           HEAD_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
-            if git rev-parse "${HEAD_SHA}^" >/dev/null 2>&1; then
-              base_sha="${HEAD_SHA}^"
-            else
-              git show --no-patch --format=%B "$HEAD_SHA" | npm run lint:commit --
-              exit 0
-            fi
-          else
-            base_sha="$BEFORE_SHA"
-          fi
-          node scripts/lint-commit-range.mjs --repository "$PWD" "$base_sha" "$HEAD_SHA"
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: scripts/lint-ci-commits.sh
 
   macos-test-partition:
     name: Test macOS ${{ matrix.group }}
@@ -431,10 +424,14 @@ jobs:
   # `--lib` / `--test <name>` / `--bins` decide what compiles, and a filterset
   # would compile everything and skip at run time. The three root partitions
   # share one package selection (`tracedecay`, `tracedecay-cli`,
-  # `tracedecay-search-eval`) with the root fixture feature, so they resolve
-  # one identical dependency graph and every cargo invocation inside a job
-  # (the test build, the executables the suites spawn) is a cache hit against
-  # it. `scripts/linux-test-partitions.py check` proves, from `cargo
+  # `tracedecay-search-eval`) with the root fixture feature. Journeys also
+  # enable `tracedecay/search-eval`, the only link from the root crate to the
+  # evaluator library. It stays off every other partition: an unconditional
+  # dependency unifies `tracedecay-query/search-eval` into every test
+  # target of the package, and the transport suites then compile the eval-only
+  # lexical projection. Every cargo invocation inside a job (the test build,
+  # the executables the suites spawn) is a cache hit against that job's
+  # resolution. `scripts/linux-test-partitions.py check` proves, from `cargo
   # metadata`, that every test target in the workspace is selected by exactly
   # one partition or listed under `not_run` with a reason, so a new crate or
   # suite cannot fall out of the lane silently; `scope-gate` derives the
@@ -737,7 +734,12 @@ jobs:
           shared-key: ci-test-full-windows-msvc-lld
           cache-on-failure: true
 
-      # Acceptance tests execute the ordinary evaluator binaries. Match the
+      # Acceptance tests execute the ordinary evaluator binaries, and
+      # `tracedecay/search-eval` is what compiles the suites that check the
+      # CLI receipt against the library. This lane builds `--workspace`, so
+      # the evaluator and `tracedecay-query/search-eval` already resolve here
+      # and the feature adds no compilation; the Linux partitions split the
+      # package selection, which is why it is per-partition there. Match the
       # archive's features and perf profile to reuse dependency artifacts;
       # nextest's archive.include carries the executables to every shard.
       # `--tests` keeps the binaries in the dev-dependency graph the archive
@@ -746,14 +748,14 @@ jobs:
       # lane).
       - name: Build workspace binaries and tests for the Windows test lane
         shell: pwsh
-        run: cargo build --workspace --bins --tests --locked --profile perf --features tracedecay/test-helpers
+        run: cargo build --workspace --bins --tests --locked --profile perf --features tracedecay/test-helpers,tracedecay/search-eval
 
       # `--workspace`, not `-p tracedecay-cli`: the package selection decides
       # feature unification, and the narrower one recompiles the code-index
       # and extraction crates in a second configuration (see the Linux lane).
       - name: Build Windows host-CLI test fixture
         shell: pwsh
-        run: cargo build --workspace --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers
+        run: cargo build --workspace --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers,tracedecay/search-eval
 
       # The controlled-workload Hotpath parity helpers are provisioned and
       # verified by the `hotpath-parity` job. Building them here would put a
@@ -764,7 +766,7 @@ jobs:
       # archive alias, so the arguments are spelled out here once.
       - name: Build nextest archive
         shell: pwsh
-        run: cargo nextest archive --workspace --profile ci --locked --features tracedecay/test-helpers --cargo-profile perf --timings --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
+        run: cargo nextest archive --workspace --profile ci --locked --features tracedecay/test-helpers,tracedecay/search-eval --cargo-profile perf --timings --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
 
       - name: Upload Windows archive build timings
         if: always()
@@ -1040,6 +1042,100 @@ jobs:
         run: |
           cargo check --workspace --all-targets --features test-transport --locked
           cargo check --workspace --all-targets --features hotpath,hotpath-mcp --locked
+          # Lights the hotpath backend without any crate's own hotpath feature.
+          # The two lines above keep them in sync, which hides a type that
+          # forks on the local feature while hotpath::io! expands on the backend.
+          cargo check --workspace --all-targets --features hotpath/hotpath --locked
+
+  # The configuration users actually receive. `scripts/resolve-release-source-profile.py`
+  # resolves the release build to `--no-default-features --features production`
+  # on the release profile, and nothing on a push compiled it: `debug-cli` is a
+  # dev-profile binary built only for the stock host integrations, and every
+  # other lane runs the default feature graph. A break confined to the
+  # `production` graph (the mimalloc allocator, the embedded dashboard, the
+  # release profile itself) therefore first appeared while a release was being
+  # cut, which is the most expensive place to find it.
+  #
+  # Compile plus a smoke run, on one target. The packaging battery that sits on
+  # top of this binary (`cargo package`, the extracted-crate rebuild, MCPB, the
+  # MCP stdio checks) stays in distribution-acceptance.yml, which is
+  # dispatch-only and explicitly not a ship gate. This job does not repeat any
+  # of it, and that workflow keeps its own cache lineage.
+  shipped-cli:
+    name: Shipped CLI build (x86_64-linux)
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      TARGET: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      # `production` embeds the dashboard, so the bundle has to exist before
+      # cargo runs. Handing build.rs the digest of this bundle keeps the build
+      # script from shelling out to npm a second time.
+      - name: Build the embedded dashboard bundle
+        working-directory: dashboard
+        run: |
+          npm ci
+          npm run build
+
+      - name: Pin the embedded bundle for the skip-mode build
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest="$(python3 scripts/check-dashboard-bundle.py dashboard/app-dist --print-digest)"
+          echo "TRACEDECAY_SKIP_DASHBOARD_BUILD=1" >> "$GITHUB_ENV"
+          echo "TRACEDECAY_DASHBOARD_BUNDLE_SHA256=${digest}" >> "$GITHUB_ENV"
+
+      # rust-toolchain.toml, not floating stable: the release workflows build
+      # this configuration with the pinned compiler, so a push gate on a
+      # different one is not evidence about the same artifact.
+      - name: Resolve pinned toolchain
+        id: pin
+        shell: bash
+        run: |
+          python3 -c 'import pathlib, tomllib; print("toolchain=" + tomllib.loads(pathlib.Path("rust-toolchain.toml").read_text(encoding="utf-8"))["toolchain"]["channel"])' >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # 1.97.1 pin
+        with:
+          toolchain: ${{ steps.pin.outputs.toolchain }}
+          targets: ${{ env.TARGET }}
+
+      - uses: ./.github/actions/setup-linux-mold
+
+      # Dependencies only. The workspace crates are what a push changes, so
+      # caching their release artifacts would re-save the tree every run for a
+      # restore that hits nothing, against the repository's 10 GB budget that
+      # the test lanes' caches are already evicted from.
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-shipped-cli-${{ env.TARGET }}
+          cache-workspace-crates: "false"
+          cache-on-failure: true
+
+      - name: Build the shipped binary
+        shell: bash
+        run: |
+          cargo build --package tracedecay-cli --bin tracedecay --release \
+            --target "$TARGET" --no-default-features --features production --locked
+
+      - name: Smoke-run the shipped binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="target/${TARGET}/release/tracedecay"
+          test -x "$binary"
+          "$binary" --version
+          "$binary" --help >/dev/null
 
   dashboard:
     name: Dashboard

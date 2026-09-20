@@ -2648,3 +2648,58 @@ fn publication_pointer_memo_follows_bytes_when_size_and_mtime_stay_put() {
         "equal size and mtime must not reuse the previous pointer"
     );
 }
+
+#[test]
+fn stale_pointer_commit_does_not_replace_a_changed_active_pointer() {
+    let store = TempDir::new().expect("store root");
+    let project = TempDir::new().expect("project root");
+    let publication = super::super::DaemonCodeIndexPublicationStoreV1::new(
+        store.path(),
+        project.path(),
+        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+            .expect("sanitizer revision"),
+    )
+    .expect("open publication store");
+    let pointer_path = store.path().join("active-code-generation-v1.json");
+    let observed = same_length_publication_pointer("generation.observed", 0x31);
+    let observed_bytes = serde_json::to_vec(&observed).expect("encode observed pointer");
+    let replacement = same_length_publication_pointer("generation.replacement", 0x32);
+    let replacement_bytes = serde_json::to_vec(&replacement).expect("encode replacement pointer");
+    std::fs::write(&pointer_path, &observed_bytes).expect("write observed pointer");
+    let store_lock = acquire_code_generation_store_lock(store.path()).expect("store lock");
+
+    publication
+        .commit_observed_pointer(
+            &store_lock,
+            Some(&observed_bytes),
+            &replacement,
+            &replacement_bytes,
+        )
+        .expect("matching observation publishes");
+    assert_eq!(
+        std::fs::read(&pointer_path).expect("published pointer"),
+        replacement_bytes
+    );
+
+    std::fs::write(&pointer_path, b"{").expect("truncate active pointer");
+    let error = publication
+        .commit_observed_pointer(
+            &store_lock,
+            Some(&replacement_bytes),
+            &observed,
+            &observed_bytes,
+        )
+        .expect_err("a stale observation must not publish");
+    assert!(
+        matches!(
+            error,
+            CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_)
+        ),
+        "corrupt pointer is a closed publication failure, not a rewrite: {error:?}"
+    );
+    assert_eq!(
+        std::fs::read(&pointer_path).expect("faulted pointer remains"),
+        b"{",
+        "the truncated pointer must still be the file"
+    );
+}

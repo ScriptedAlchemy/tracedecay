@@ -674,6 +674,39 @@ async fn production_codex_hook_ingest_survives_message_search_reopen() {
         expanded["expansion"]["raw_message"]["message_id"], message_id,
         "{expanded}"
     );
+    let described = call_production_tool(
+        &harness,
+        &project,
+        "tracedecay_lcm_describe",
+        json!({
+            "provider": "codex",
+            "session_id": session_id,
+            "target": {"kind": "session"},
+            "format": "json"
+        }),
+    )
+    .await;
+    let captured = "Find the cobalt orchard scheduler migration";
+    let overview = described["description"]["raw_messages"]
+        .as_array()
+        .and_then(|messages| {
+            messages
+                .iter()
+                .find(|message| message["message_id"] == message_id)
+        })
+        .unwrap_or_else(|| panic!("describe omitted the captured prompt: {described}"));
+    assert_eq!(
+        overview["content_range"]["total_chars"],
+        captured.chars().count() as u64,
+        "{overview}"
+    );
+    let preview = overview["content_preview"]
+        .as_str()
+        .unwrap_or_else(|| panic!("describe preview missing: {overview}"));
+    assert!(
+        preview.contains("cobalt orchard"),
+        "describe preview was empty: {preview:?}"
+    );
 
     harness.shutdown().await;
 

@@ -352,7 +352,7 @@ impl GlobalDbObservationStore {
         drop(cursor_rows);
         if durable_cursor
             .as_ref()
-            .is_some_and(|cursor| admitted_cursor_covers(cursor, advance.next_cursor()))
+            .is_some_and(|cursor| cursor.reached(advance.next_cursor()))
         {
             transaction
                 .rollback()
@@ -1601,8 +1601,15 @@ impl ObservationStore for GlobalDbObservationStore {
             advance.next_cursor().source(),
             advance.next_cursor().scope(),
         )?;
-        let existed_at_next = actual_cursor.as_ref() == Some(advance.next_cursor());
-        if !existed_at_next && actual_cursor.as_ref() != advance.expected_cursor() {
+        // One owner per frontier. A cursor that already reached `next` has
+        // recorded the range; a second reason must not become a permanent
+        // collision that both ingest owners then warn on forever. The
+        // command still goes to the writer so the current authority epoch
+        // receipts the replay; only its outcome is reported as a duplicate.
+        let reached_frontier = actual_cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.reached(advance.next_cursor()));
+        if !reached_frontier && actual_cursor.as_ref() != advance.expected_cursor() {
             return Err(ObservationStoreError::CursorConflict {
                 expected: Box::new(advance.expected_cursor().cloned()),
                 actual: Box::new(actual_cursor),
@@ -1634,7 +1641,7 @@ impl ObservationStore for GlobalDbObservationStore {
         match outcome? {
             RuntimeSubmitOutcomeV1::Committed { .. }
             | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
-                if existed_at_next =>
+                if reached_frontier =>
             {
                 Ok(CursorAdvanceOutcome::ExactDuplicate)
             }
@@ -1647,13 +1654,12 @@ impl ObservationStore for GlobalDbObservationStore {
             // command, so a re-scan of already-admitted history reuses the key
             // with different bytes (a fresh `expected_cursor` or resume
             // checkpoint) and the writer reports a conflict against the earlier
-            // committed receipt. When the durable cursor already covers
-            // `next_cursor`, that earlier commit is this advance. When the
-            // ledger row matches but the cursor was left behind, restore it.
-            // A missing or different ledger row stays a collision.
-            RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } if existed_at_next => {
-                Ok(CursorAdvanceOutcome::ExactDuplicate)
-            }
+            // committed receipt. The other owner may also have committed this
+            // key between the pre-check and the writer lookup. Re-read the
+            // durable cursor under one write transaction: an owner that already
+            // reached `next_cursor` holds the range, a matching ledger row whose
+            // commit left the cursor behind gets that cursor restored, and a
+            // missing or different ledger row stays a collision.
             RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } => {
                 self.restore_admitted_cursor_coverage(&replay).await
             }
@@ -2411,15 +2417,6 @@ fn canonical_runtime_digest(value: &serde_json::Value) -> ObservationStoreResult
         runtime_storage_error("derive observation runtime identity", error.to_string())
     })?;
     runtime_digest_suffix(&digest).map(str::to_owned)
-}
-
-fn admitted_cursor_covers(
-    actual: &ObservationSourceCursorV1,
-    next: &ObservationSourceCursorV1,
-) -> bool {
-    actual.generation() == next.generation()
-        && actual.ordering_domain() == next.ordering_domain()
-        && actual.byte_offset() >= next.byte_offset()
 }
 
 fn runtime_digest_suffix(digest: &ManifestDigest) -> ObservationStoreResult<&str> {

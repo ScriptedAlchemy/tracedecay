@@ -58,6 +58,15 @@ impl Fixture {
                 // to use the extended-length form. A no-op elsewhere.
                 "-c",
                 "core.longpaths=true",
+                // Git 2.47+ detaches `maintenance run --auto` after a commit
+                // and holds `.git/objects/maintenance.lock` while it runs,
+                // which lands in a git-dir snapshot and vanishes before the
+                // next one. The tests snapshot the git dir to prove the
+                // authority writes nothing, so the fixture must not either.
+                "-c",
+                "maintenance.auto=false",
+                "-c",
+                "gc.auto=0",
             ])
             .args(plain_git_args(args))
             .current_dir(plain_host_path(self.path()))
@@ -79,6 +88,7 @@ impl Fixture {
 
     fn import_linear_history(&self, commits: usize) {
         let mut child = Command::new("git")
+            .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
             .arg("fast-import")
             .arg("--quiet")
             .current_dir(plain_host_path(self.path()))

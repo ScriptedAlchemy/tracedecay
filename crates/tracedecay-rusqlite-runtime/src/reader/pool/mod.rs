@@ -21,8 +21,8 @@ use tracedecay_store::{
 use super::{ExistingReaderLocator, ReaderQueryExecutor, ReaderStartError, worker};
 use crate::checkpoint::CheckpointBlockerSource;
 use crate::exact_sql::{
-    ExactSqlError, ExactSqlReadSnapshot, ExactSqlRows, ExactSqlStatement, MemoryReleaseNoOpReason,
-    MemoryReleaseOutcome,
+    ExactSqlError, ExactSqlReadSnapshot, ExactSqlReaderRefusalV1, ExactSqlRows, ExactSqlStatement,
+    MemoryReleaseNoOpReason, MemoryReleaseOutcome,
 };
 use crate::telemetry::{ReaderAdmissionRecorder, ReaderAdmissionSnapshot};
 use crate::{CheckpointBlocker, CheckpointBlockers, CheckpointPressure};
@@ -33,6 +33,27 @@ mod outcome;
 pub use lease::{ReaderLease, SnapshotLease};
 pub use outcome::{ReaderAcquireError, ReaderPoolSnapshot, ReaderPoolState};
 use outcome::{interruption, validate_probe};
+
+/// Classifies a lane acquisition failure for the exact-SQL entry points.
+///
+/// `acquire_lane` answers two different kinds of question. The lane can
+/// decline to admit this request, which says nothing about the store, or a
+/// reader can fail, which says the store cannot be read here. Reporting both
+/// as [`ExactSqlError::ReaderUnavailable`] left the difference legible only in
+/// the `Display` text, so a caller that wanted to route a declined request
+/// onto another lane had to either match that text or route around every
+/// failure, including a reader that had actually broken.
+fn map_reader_acquire_error(error: ReaderAcquireError) -> ExactSqlError {
+    match error {
+        ReaderAcquireError::Saturated { .. } => {
+            ExactSqlError::ReaderRefused(ExactSqlReaderRefusalV1::Saturated)
+        }
+        ReaderAcquireError::Interrupted {
+            reason: UnavailableReasonV1::Draining,
+        } => ExactSqlError::ReaderRefused(ExactSqlReaderRefusalV1::Draining),
+        error => ExactSqlError::ReaderUnavailable(error.to_string()),
+    }
+}
 
 pub(super) const ACQUISITION_POLL_QUANTUM: Duration = Duration::from_millis(5);
 pub(super) const SNAPSHOT_END_GRACE: Duration = Duration::from_millis(5);
@@ -489,7 +510,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
     ) -> Result<ExactSqlRows, ExactSqlError> {
         let mut lease = self
             .acquire_lane(LaneAdmission::for_priority(priority), max_wait, || None)
-            .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
+            .map_err(map_reader_acquire_error)?;
         lease.execute_exact_sql_query(statement)
     }
 
@@ -500,7 +521,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
     ) -> Result<ExactSqlReadSnapshot, ExactSqlError> {
         let mut lease = self
             .acquire_lane(LaneAdmission::for_priority(priority), max_wait, || None)
-            .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
+            .map_err(map_reader_acquire_error)?;
         lease.begin_exact_sql_snapshot()?;
         self.record_snapshot_admission();
         Ok(ExactSqlReadSnapshot::new(move |statement| {
@@ -518,7 +539,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                 max_wait,
                 || None,
             )
-            .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
+            .map_err(map_reader_acquire_error)?;
         lease.retire_after_snapshot();
         lease.begin_exact_sql_snapshot()?;
         self.record_snapshot_admission();

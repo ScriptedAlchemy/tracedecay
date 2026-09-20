@@ -15,7 +15,7 @@ use super::memory_fact_assertions::assert_fact_list;
 /// the removed direct broad-action handler.
 pub(super) struct FactStoreMcpFixture {
     production: ProductionCompositionFixture,
-    server: Arc<tracedecay::mcp::McpServer>,
+    pub(super) server: Arc<tracedecay::mcp::McpServer>,
 }
 
 async fn fact_store_mcp_fixture() -> FactStoreMcpFixture {
@@ -52,7 +52,7 @@ pub(super) async fn invoke_production_tool_response(
 
 /// Invoke an exact MCP operation through the production daemon executor and
 /// project its typed operation payload for focused behavioral assertions.
-async fn invoke_exact_tool(
+pub(super) async fn invoke_exact_tool(
     server: &tracedecay::mcp::McpServer,
     tool_name: &str,
     arguments: Value,
@@ -107,6 +107,10 @@ pub(super) async fn invoke_production_tool(
     invoke_exact_tool(&fixture.server, tool_name, arguments).await
 }
 
+pub(super) fn fact_store_server(fixture: &FactStoreMcpFixture) -> &tracedecay::mcp::McpServer {
+    &fixture.server
+}
+
 pub(super) async fn close_test_graph(fixture: FactStoreMcpFixture) {
     fixture.production.harness.shutdown().await;
 }
@@ -127,12 +131,18 @@ fn committed_add_result(payload: &Value) -> &Value {
     result
 }
 
-struct FactStoreCrossProjectFixture {
-    harness: tracedecay::daemon::ProductionProjectCompositionHarnessV1,
+pub(super) struct FactStoreCrossProjectFixture {
+    pub(super) harness: tracedecay::daemon::ProductionProjectCompositionHarnessV1,
     target_root: std::path::PathBuf,
-    active_server: Arc<tracedecay::mcp::McpServer>,
-    target_server: Arc<tracedecay::mcp::McpServer>,
+    pub(super) active_server: Arc<tracedecay::mcp::McpServer>,
+    pub(super) target_server: Arc<tracedecay::mcp::McpServer>,
     _isolation: TestTempDir,
+}
+
+impl FactStoreCrossProjectFixture {
+    pub(super) async fn shutdown(self) {
+        self.harness.shutdown().await;
+    }
 }
 
 fn initialize_production_fact_project(root: &Path) {
@@ -166,7 +176,7 @@ fn initialize_production_fact_project(root: &Path) {
     assert!(commit.success(), "git commit should succeed");
 }
 
-async fn fact_store_cross_project_fixture() -> FactStoreCrossProjectFixture {
+pub(super) async fn fact_store_cross_project_fixture() -> FactStoreCrossProjectFixture {
     let isolation = test_temp_dir();
     let active_root = isolation.path().join("active");
     let target_root = isolation.path().join("target");
@@ -1099,20 +1109,6 @@ async fn memory_status_reports_canonical_similarity_projection_shape() {
             .as_u64()
             .is_some_and(|capacity| capacity > 0)
     );
-    close_test_graph(cg).await;
-}
-
-#[tokio::test]
-async fn fact_store_reason_requires_an_entity_selection() {
-    let cg = setup_project().await;
-
-    for args in [json!({}), json!({"entities": ["same", "same"]})] {
-        let result = invoke_production_tool(&cg, "tracedecay_fact_store_reason", args).await;
-        assert!(
-            result.is_err(),
-            "the exact reason route must reject empty or duplicate entity selections"
-        );
-    }
     close_test_graph(cg).await;
 }
 

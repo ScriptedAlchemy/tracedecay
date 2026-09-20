@@ -3,6 +3,8 @@
 //! Split into per-domain modules under `mcp_handler_test/`; shared
 //! fixtures and helpers live in the suite-level `support` module.
 
+#[cfg(feature = "test-transport")]
+mod active_project_test;
 mod admin_test;
 #[cfg(feature = "test-transport")]
 mod affected_tests_behavior_test;
@@ -10,30 +12,55 @@ mod affected_tests_behavior_test;
 mod affected_tests_test;
 #[cfg(feature = "test-transport")]
 mod ast_grep_rewrite_behavior_test;
+mod ast_grep_search_test;
 mod automation_run_list_behavior_test;
 mod automation_runs_test;
+#[cfg(feature = "test-transport")]
+mod body_behavior_test;
 mod bounded_analysis_test;
 mod branch_diff_behavior_test;
 #[cfg(feature = "test-transport")]
 mod branch_search_test;
 #[cfg(feature = "test-transport")]
 mod branch_sensitivity_test;
+mod callees_behavior_test;
+mod callers_behavior_test;
+mod callers_for_test;
 mod circular_behavior_test;
+#[cfg(feature = "test-transport")]
+mod complexity_test;
+#[cfg(feature = "test-transport")]
+mod config_behavior_test;
 #[cfg(feature = "test-transport")]
 mod configuration_unset_test;
 #[cfg(feature = "test-transport")]
 mod constructors_behavior_test;
 mod context_behavior_test;
 mod context_test;
+mod coupling_test;
+#[cfg(feature = "test-transport")]
+mod dead_code_behavior_test;
 mod dependency_depth_test;
 mod dependency_hint_test;
 mod derives_test;
 mod diagnose_test;
 #[cfg(feature = "test-transport")]
+mod diagnostics_test;
+mod distribution_test;
+#[cfg(feature = "test-transport")]
 mod edit_test;
 #[cfg(feature = "test-transport")]
 mod expand_query_behavior;
+mod fact_feedback_behavior_test;
+mod fact_store_add_behavior_test;
+#[cfg(feature = "test-transport")]
+mod fact_store_curate_test;
+mod fact_store_get_test;
+mod fact_store_list_test;
+#[cfg(feature = "test-transport")]
+mod fact_store_related_test;
 mod fact_store_remove_behavior_test;
+mod fact_store_search_behavior_test;
 #[cfg(feature = "test-transport")]
 mod fact_store_update_behavior_test;
 mod feedback_diagnostics_test;
@@ -65,11 +92,16 @@ mod lcm_doctor_test;
 mod lcm_expand_behavior_test;
 #[cfg(feature = "test-transport")]
 mod lcm_grep_behavior_test;
+#[cfg(feature = "test-transport")]
+mod lcm_load_session_behavior;
 mod lcm_test;
 #[cfg(feature = "test-transport")]
 mod memory_contradiction_contract_test;
 #[cfg(feature = "test-transport")]
 mod memory_fact_assertions;
+mod memory_fact_probe_test;
+#[cfg(feature = "test-transport")]
+mod memory_fact_store_reason_test;
 #[cfg(feature = "test-transport")]
 mod memory_fact_supersede_test;
 mod memory_facts_test;
@@ -84,6 +116,8 @@ mod multi_str_replace_behavior_test;
 mod mutate_graph_test;
 mod node_behavior_test;
 #[cfg(feature = "test-transport")]
+mod outline_behavior_test;
+#[cfg(feature = "test-transport")]
 mod port_order_test;
 mod port_status_test;
 #[cfg(feature = "test-transport")]
@@ -93,14 +127,17 @@ mod project_list_test;
 #[cfg(feature = "test-transport")]
 mod project_search_behavior_test;
 mod rank_behavior_test;
+mod redundancy_test;
 #[cfg(all(feature = "test-transport", unix))]
 mod release_placement_test;
+mod remote_status_test;
 mod rename_preview_test;
 #[cfg(feature = "test-transport")]
 mod rename_symbol_test;
 #[cfg(feature = "test-transport")]
 mod replace_symbol_test;
 mod retrieve_truncation_test;
+mod runtime_behavior_test;
 mod schema_test;
 mod search_behavior_test;
 mod session_refresh_begin_test;
@@ -138,6 +175,9 @@ mod work_resume_attempts_test;
 mod work_test;
 #[cfg(feature = "test-transport")]
 mod workflow_activate_definition_test;
+#[cfg(feature = "test-transport")]
+mod workflow_get_definition_test;
+mod workflow_list_test;
 #[cfg(all(feature = "test-transport", unix))]
 mod workflow_register_definition_test;
 

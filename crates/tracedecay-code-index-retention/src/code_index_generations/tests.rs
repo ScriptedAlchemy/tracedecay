@@ -3118,3 +3118,47 @@ fn recovery_completes_a_committed_rewrite_that_never_reached_the_pointer() {
     plan_code_generation_retention(fixture.store.path(), &BTreeSet::new())
         .expect("a recovered store must stay plannable");
 }
+
+/// The census opens every name `read_dir` just returned. Publication can
+/// unlink that name first. `NotFound` is the same deferral as a held writer,
+/// not a storage failure. Any other open failure stays storage.
+#[test]
+fn vanished_listed_generation_open_defers_instead_of_storage_loss() {
+    let root = tempfile::tempdir().expect("census root");
+    let missing = root.path().join(format!("generation-{:064x}.json", 1));
+    let error = super::generation_scan::read_generation_format_revision(&missing, &|| false)
+        .expect_err("a vanished listed generation defers the census");
+    assert!(
+        matches!(error, CodeGenerationRetentionErrorV1::GenerationStoreBusy),
+        "a missing listed generation is a publisher race, not a storage failure: {error:?}"
+    );
+
+    let directory = root.path().join("not-a-generation-file");
+    std::fs::create_dir(&directory).expect("directory where a file was listed");
+    let storage_error =
+        super::generation_scan::read_generation_format_revision(&directory, &|| false)
+            .expect_err("a directory is not a vanished file");
+    assert!(
+        matches!(storage_error, CodeGenerationRetentionErrorV1::Storage(_)),
+        "non-NotFound census I/O stays a storage failure: {storage_error:?}"
+    );
+}
+
+#[test]
+fn missing_store_is_an_unpublished_plan_not_a_storage_failure() {
+    let missing = std::env::temp_dir().join(format!(
+        "tracedecay-missing-code-store-{}",
+        std::process::id()
+    ));
+    assert!(!missing.exists());
+    let plan = prepare_next_code_generation_retention_cancellable(
+        &missing,
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect("a store that has not been opened is unpublished");
+    assert_eq!(plan.active_generation_id, None);
+    assert!(plan.collectable_generations.is_empty());
+    assert!(!plan.has_collectable_work());
+}

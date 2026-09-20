@@ -68,7 +68,8 @@
         "example:tracedecay-host-cli-fixture"
       ],
       "features": [
-        "tracedecay/test-helpers"
+        "tracedecay/test-helpers",
+        "tracedecay/search-eval"
       ]
     },
     {
@@ -193,6 +194,7 @@
         "tracedecay-framing",
         "tracedecay-hooks",
         "tracedecay-host-integration",
+        "tracedecay-hotpath-guard",
         "tracedecay-mcp-catalog",
         "tracedecay-policy",
         "tracedecay-privacy",
@@ -236,6 +238,7 @@
     }
   ],
   "not_run": {
-    "tracedecay-global-db::schema_convergence_hotpath": "requires hotpath-alloc, which no test lane enables; the hotpath workflows own it"
+    "tracedecay-global-db::schema_convergence_hotpath": "requires hotpath-alloc, which no test lane enables; the hotpath workflows own it",
+    "tracedecay-hotpath-guard::functions_limit_live": "requires hotpath and hotpath-mcp to start a live MCP server, which no test lane enables; the hotpath graph check compiles it"
   }
 }

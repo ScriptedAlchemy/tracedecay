@@ -227,6 +227,38 @@ const PROJECTION_AUDIT_INVALIDATION: &[Trigger] = &[
                 WHERE audit_name = 'observation-authority';
             END",
     },
+    // The message-row triggers above do not see the LCM raw twin. A twin can
+    // drift (content, session identity) while the message row and the current
+    // provenance digest stay put, and the trusted checkpoint would then skip
+    // it forever. Invalidate on the same ownership predicate.
+    Trigger {
+        name: "projection_raw_audit_invalidate_update_v1",
+        table: "lcm_raw_messages",
+        create_sql: "CREATE TRIGGER projection_raw_audit_invalidate_update_v1
+            AFTER UPDATE ON lcm_raw_messages
+            WHEN EXISTS (
+                SELECT 1 FROM observation_projection_provenance
+                WHERE output_provider = OLD.provider
+                  AND output_message_id = OLD.message_id
+            ) BEGIN
+                DELETE FROM authority_audit_checkpoints
+                WHERE audit_name = 'observation-authority';
+            END",
+    },
+    Trigger {
+        name: "projection_raw_audit_invalidate_delete_v1",
+        table: "lcm_raw_messages",
+        create_sql: "CREATE TRIGGER projection_raw_audit_invalidate_delete_v1
+            AFTER DELETE ON lcm_raw_messages
+            WHEN EXISTS (
+                SELECT 1 FROM observation_projection_provenance
+                WHERE output_provider = OLD.provider
+                  AND output_message_id = OLD.message_id
+            ) BEGIN
+                DELETE FROM authority_audit_checkpoints
+                WHERE audit_name = 'observation-authority';
+            END",
+    },
     Trigger {
         name: "projection_checkpoint_audit_invalidate_regression_v1",
         table: "observation_projection_checkpoints",
@@ -1650,6 +1682,15 @@ struct ReleasedV3TriggerDrift {
     released: &'static str,
 }
 
+/// Triggers added after the v3 inventory. A released store is admitted on the
+/// published bodies, then schema convergence installs these and the missing
+/// contract forces the exhaustive repair pass. Requiring them at admission
+/// would reset every beta.25–beta.37 profile.
+const POST_RELEASED_V3_TRIGGERS: &[&str] = &[
+    "projection_raw_audit_invalidate_update_v1",
+    "projection_raw_audit_invalidate_delete_v1",
+];
+
 const RELEASED_V3_TRIGGER_DRIFT: &[ReleasedV3TriggerDrift] = &[
     ReleasedV3TriggerDrift {
         trigger: "session_refresh_progress_insert_guard_v1",
@@ -1721,6 +1762,9 @@ pub async fn released_v3_invariant_triggers_intact(
     let released = released_v3_trigger_contracts()?;
     for invariant in INVARIANTS {
         for trigger in invariant.triggers {
+            if POST_RELEASED_V3_TRIGGERS.contains(&trigger.name) {
+                continue;
+            }
             let expected = released
                 .iter()
                 .find(|(name, _)| *name == trigger.name)

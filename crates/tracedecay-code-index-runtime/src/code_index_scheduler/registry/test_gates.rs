@@ -554,6 +554,21 @@ impl CodeIndexSchedulerRegistryV1 {
             .map(|worktree| Arc::clone(&worktree.serving_source_witness))
     }
 
+    /// One mounted root's scheduler mutex, the lock every step that renews the
+    /// source proof must hold, so a test can age that proof and read it back
+    /// without a pass tail re-proving it in between.
+    #[cfg(test)]
+    pub(crate) async fn scheduler_for_root(
+        &self,
+        project_root: &Path,
+    ) -> Option<Arc<std::sync::Mutex<super::super::CodeIndexWorktreeSchedulerV1>>> {
+        let project_root = project_root.canonicalize().ok()?;
+        let mounted = self.mounted.lock().await;
+        mounted
+            .get(&project_root)
+            .map(|worktree| Arc::clone(&worktree.scheduler))
+    }
+
     /// The shared source-freshness fence for one mounted root, so tests can
     /// age its bounded proof instead of waiting the bound out in wall clock.
     #[cfg(test)]

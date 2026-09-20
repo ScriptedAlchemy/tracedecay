@@ -1265,6 +1265,55 @@ async fn drain_clone_backfill(registry: &CodeIndexSchedulerRegistryV1, path: &Pa
     }
 }
 
+/// Hold one mounted root's scheduler mutex until released, so no worker step
+/// can renew the source proof meanwhile.
+///
+/// The admission permit and the pass counter cannot fence this. The worker
+/// releases the permit after source reconciliation and drops its pass guard
+/// before the graph tail, whose renewing steps
+/// (`reconcile_retained_text_generation_with` and the serving swap's
+/// `currency_witness_for_sealed_snapshot`) take a guard only once a blocking
+/// thread reaches their closure. Both signals read idle in that gap while a
+/// renewal is already committed to run. Every renewing step takes this mutex
+/// and no read does.
+struct HeldSchedulerV1 {
+    release: Option<tokio::sync::oneshot::Sender<()>>,
+    held: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl HeldSchedulerV1 {
+    async fn release(mut self) {
+        drop(self.release.take());
+        if let Some(held) = self.held.take() {
+            held.await.expect("scheduler holder task");
+        }
+    }
+}
+
+async fn hold_scheduler_for_root(
+    registry: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
+) -> HeldSchedulerV1 {
+    let scheduler = registry
+        .scheduler_for_root(project_root)
+        .await
+        .expect("mounted scheduler");
+    let (release, released) = tokio::sync::oneshot::channel();
+    let (acquired, holding) = tokio::sync::oneshot::channel();
+    let held = tokio::task::spawn_blocking(move || {
+        let _scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        acquired.send(()).expect("report the held scheduler");
+        let _ = released.blocking_recv();
+    });
+    holding.await.expect("acquire the scheduler mutex");
+    HeldSchedulerV1 {
+        release: Some(release),
+        held: Some(held),
+    }
+}
+
 /// Hold the background worker out of a new pass, then wait for the in-flight
 /// pass to finish, and keep the admission permit.
 ///
@@ -1338,14 +1387,11 @@ async fn settled_owner_with_idle_admission(
 /// done disturbing it.
 ///
 /// The caller must already hold the single background admission, so no further
-/// pass can start. One pass can still be finishing: the worker releases that
-/// admission halfway through its body and drops its `reconcile_pass` guard
-/// before the branches that call `note_worker_continuation`, so both
-/// `reconcile_in_progress` and the slot read quiet while the tail is still
-/// about to stamp `BusyFollowUp` into it. [`wait_for_settled_owner`] samples
-/// exactly those two, so it cannot see that tail. With the admission held the
-/// tail is finite and unrepeatable, so clearing until the slot survives a quiet
-/// window is the proof the settle cannot give.
+/// pass can start. A pass stamps `BusyFollowUp` before it drops
+/// `reconcile_in_progress`, but a notify already banked by that pass can still
+/// be claimed the moment the permit is released. Clearing until the slot
+/// survives a quiet window is the proof the settle cannot give once that
+/// release is the next thing that happens.
 async fn clear_pending_wake_until_quiet(
     registry: &CodeIndexSchedulerRegistryV1,
     scope: &tracedecay_contracts::ResolvedScope,
@@ -1625,7 +1671,14 @@ async fn wait_for_dashboard_ready(registry: &CodeIndexSchedulerRegistryV1, path:
                             && freshness.coverage
                                 == tracedecay_contracts::code_index_freshness::CodeIndexFreshnessCoverageV1::Complete
                     });
-                if still_ready && !registry.reconcile_in_progress_for_test(path).await {
+                // A seat can leave a continuation queued (the clone-fingerprint
+                // successor runs on a later pass), and the ladder reports
+                // Verifying for as long as that pass runs. Ready means no pass
+                // is running and none is pending.
+                if still_ready
+                    && !registry.reconcile_in_progress_for_test(path).await
+                    && registry.pending_wake_micros_for_root(path).await == Some(0)
+                {
                     break;
                 }
                 continue;
