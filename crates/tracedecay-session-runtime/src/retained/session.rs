@@ -38,7 +38,6 @@ use tracedecay_sessions::runtime::{
 use tracedecay_temporal_query::context::ContextBudget;
 use tracedecay_temporal_query::ports::{
     TemporalCandidateFilterV1, TemporalCandidatePopulationCount, TemporalMessageTypeFilterV1,
-    TemporalSessionScopeFilterV1,
 };
 use tracedecay_temporal_query::ranking::DiversityLimits;
 
@@ -500,11 +499,8 @@ impl MessageSearchInput {
                 )
             })?;
         let include_subagents = request.include_subagents.unwrap_or(true);
-        let mut scope = match request.scope.unwrap_or(MessageRelationshipScopeV1::All) {
-            MessageRelationshipScopeV1::All => SessionSearchScope::All,
-            MessageRelationshipScopeV1::ParentsOnly => SessionSearchScope::ParentsOnly,
-            MessageRelationshipScopeV1::SubagentsOnly => SessionSearchScope::SubagentsOnly,
-        };
+        let mut scope =
+            SessionSearchScope::from(request.scope.unwrap_or(MessageRelationshipScopeV1::All));
         if !include_subagents && scope == SessionSearchScope::SubagentsOnly {
             return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
         }
@@ -564,11 +560,7 @@ impl MessageSearchInput {
             parent_session_id: self.parent_session_id.clone(),
             source: None,
             include_summaries: false,
-            session_scope: match self.scope {
-                SessionSearchScope::All => TemporalSessionScopeFilterV1::All,
-                SessionSearchScope::ParentsOnly => TemporalSessionScopeFilterV1::ParentsOnly,
-                SessionSearchScope::SubagentsOnly => TemporalSessionScopeFilterV1::SubagentsOnly,
-            },
+            session_scope: crate::session_retrieval::temporal_session_scope(self.scope),
             message_type: match self.message_type {
                 SessionMessageType::All => TemporalMessageTypeFilterV1::All,
                 SessionMessageType::DirectUser => TemporalMessageTypeFilterV1::DirectUser,

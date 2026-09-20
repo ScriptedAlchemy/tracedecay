@@ -69,6 +69,16 @@ impl SessionRetrievalCommand {
     }
 }
 
+pub(crate) const fn temporal_session_scope(
+    scope: SessionSearchScope,
+) -> TemporalSessionScopeFilterV1 {
+    match scope {
+        SessionSearchScope::All => TemporalSessionScopeFilterV1::All,
+        SessionSearchScope::ParentsOnly => TemporalSessionScopeFilterV1::ParentsOnly,
+        SessionSearchScope::SubagentsOnly => TemporalSessionScopeFilterV1::SubagentsOnly,
+    }
+}
+
 fn temporal_candidate_filter(
     filters: &SessionRetrievalFilters,
     goals: bool,
@@ -81,11 +91,7 @@ fn temporal_candidate_filter(
         parent_session_id: filters.parent_session_id.clone(),
         source: filters.source.clone(),
         include_summaries: filters.include_summaries,
-        session_scope: match filters.scope {
-            SessionSearchScope::All => TemporalSessionScopeFilterV1::All,
-            SessionSearchScope::ParentsOnly => TemporalSessionScopeFilterV1::ParentsOnly,
-            SessionSearchScope::SubagentsOnly => TemporalSessionScopeFilterV1::SubagentsOnly,
-        },
+        session_scope: temporal_session_scope(filters.scope),
         message_type: match filters.message_type {
             SessionMessageType::All => TemporalMessageTypeFilterV1::All,
             SessionMessageType::DirectUser => TemporalMessageTypeFilterV1::DirectUser,
@@ -513,4 +519,25 @@ pub enum SessionRetrievalServiceOutcome {
     },
     TimedOut,
     Cancelled,
+}
+
+#[cfg(test)]
+mod temporal_scope_wire_tests {
+    use serde_json::json;
+
+    use super::{SessionSearchScope, temporal_session_scope};
+
+    #[test]
+    fn temporal_scope_keeps_the_session_wire_label() {
+        for scope in [
+            SessionSearchScope::All,
+            SessionSearchScope::ParentsOnly,
+            SessionSearchScope::SubagentsOnly,
+        ] {
+            assert_eq!(
+                serde_json::to_value(temporal_session_scope(scope)).expect("scope serializes"),
+                json!(scope.as_str())
+            );
+        }
+    }
 }

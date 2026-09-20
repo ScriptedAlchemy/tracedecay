@@ -998,11 +998,7 @@ pub(super) fn temporal_mode(
 }
 
 pub(super) fn relationship_scope(value: Option<MessageRelationshipScopeV1>) -> SessionSearchScope {
-    match value.unwrap_or(MessageRelationshipScopeV1::All) {
-        MessageRelationshipScopeV1::All => SessionSearchScope::All,
-        MessageRelationshipScopeV1::ParentsOnly => SessionSearchScope::ParentsOnly,
-        MessageRelationshipScopeV1::SubagentsOnly => SessionSearchScope::SubagentsOnly,
-    }
+    SessionSearchScope::from(value.unwrap_or(MessageRelationshipScopeV1::All))
 }
 
 pub(super) fn message_type(value: Option<MessageTypeFilterV1>) -> SessionMessageType {

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum, builder::PossibleValuesParser};
+use tracedecay_contracts::retained_surfaces::MessageRelationshipScopeV1;
 
 mod automation;
 pub mod dispatch;
@@ -1104,7 +1105,11 @@ pub(crate) struct SessionsSearchArgs {
     #[arg(long)]
     pub(crate) provider: Option<String>,
     /// Relationship scope: all, parents_only, or subagents_only
-    #[arg(long, default_value = "all", value_parser = ["all", "parents_only", "subagents_only"])]
+    #[arg(
+        long,
+        default_value = "all",
+        value_parser = PossibleValuesParser::new(MessageRelationshipScopeV1::WIRE)
+    )]
     pub(crate) scope: String,
     /// Semantic message type: all, direct_user, or tool_result
     #[arg(long, default_value = "all", value_parser = ["all", "direct_user", "tool_result"])]

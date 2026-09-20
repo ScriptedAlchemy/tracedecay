@@ -1,7 +1,7 @@
 //! LCM session-store and session health-baseline tool definitions.
 
 use serde_json::json;
-use tracedecay_contracts::retained_surfaces::LcmRoleV1;
+use tracedecay_contracts::retained_surfaces::{LcmRoleV1, MessageRelationshipScopeV1};
 
 use super::{def, git_scope};
 use crate::ToolDefinition;
@@ -140,7 +140,7 @@ pub(super) fn def_lcm_grep() -> ToolDefinition {
                 },
                 "relationship_scope": {
                     "type": "string",
-                    "enum": ["all", "parents_only", "subagents_only"],
+                    "enum": MessageRelationshipScopeV1::WIRE,
                     "description": "Optional parent/subagent relationship filter across sessions. Default: all."
                 },
                 "message_type": {

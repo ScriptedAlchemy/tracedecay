@@ -105,6 +105,7 @@ pub use contract::{
     SessionRetrievalFilters, SessionRetrievalOmissionView, SessionRetrievalPageView,
     SessionRetrievalServiceOutcome, SessionRetrievalStoreScope, SessionRetrievalUnavailable,
     SessionRetrievalUnavailableReason, SessionTemporalMetadataView, SessionTemporalWatermarksView,
+    temporal_session_scope,
 };
 pub use primitive::DaemonSessionLookupPrimitiveV1;
 
