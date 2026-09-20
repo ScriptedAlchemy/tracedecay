@@ -10,6 +10,7 @@ const allowedTypes = [
   "revert",
   "style",
   "test",
+  "simplify",
 ];
 
 module.exports = {
