@@ -32,6 +32,8 @@ mod dependency_hint_test;
 mod derives_test;
 mod diagnose_test;
 #[cfg(feature = "test-transport")]
+mod distribution_test;
+#[cfg(feature = "test-transport")]
 mod edit_test;
 #[cfg(feature = "test-transport")]
 mod expand_query_behavior;
