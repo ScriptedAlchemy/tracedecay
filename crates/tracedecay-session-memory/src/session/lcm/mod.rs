@@ -1,14 +1,14 @@
-//! Application ownership of the DB-free LCM compatibility surface.
+//! Application ownership of the LCM authority boundary.
 //!
 //! `contracts` holds the retrieval value types and their containment rules;
 //! `compression_policy` holds provider-neutral token, overflow, and atomic
-//! chunk-selection rules; `render` holds the truncation and typed-omission
-//! shaping applied after canonical hydration. The LCM engine crate owns the
-//! contract and policy surfaces, and the registered temporal adapters depend
-//! on them directly, so neither side has to reach through the other.
+//! chunk-selection rules. Hydration shaping lives in
+//! `tracedecay-session-temporal-store` and is not re-exported here. The LCM
+//! engine crate owns the contract and policy surfaces, and the registered
+//! temporal adapters depend on them directly, so neither side has to reach
+//! through the other.
 
 pub mod authority;
-pub mod render;
 pub use tracedecay_lcm::compression_policy;
 pub use tracedecay_lcm::contracts;
 
