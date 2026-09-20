@@ -83,6 +83,8 @@ mod memory_contradiction_contract_test;
 mod memory_fact_assertions;
 mod memory_fact_probe_test;
 #[cfg(feature = "test-transport")]
+mod memory_fact_store_reason_test;
+#[cfg(feature = "test-transport")]
 mod memory_fact_supersede_test;
 mod memory_facts_test;
 mod memory_feedback_test;
