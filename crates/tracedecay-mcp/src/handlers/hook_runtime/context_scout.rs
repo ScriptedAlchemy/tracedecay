@@ -130,7 +130,7 @@ pub(super) async fn admit_native_context_scout_lifecycle(
             Err(_) => return false,
         };
     let binding = sessions.binding();
-    let authorities = HostAdmissionAuthorities::registered_for_project(
+    let authorities = HostAdmissionAuthorities::for_project(
         binding.shard_id.brain_id.clone(),
         binding.shard_id.profile_id.clone(),
         project_id,

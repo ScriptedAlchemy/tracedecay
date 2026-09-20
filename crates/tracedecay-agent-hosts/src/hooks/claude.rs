@@ -87,57 +87,7 @@ pub(super) fn is_code_research_prompt(prompt: &str) -> bool {
 /// Claude Code `SessionStart` hook handler.
 #[hotpath::measure(future = true, label = "hosts.hooks.claude.session_start")]
 pub async fn hook_claude_session_start(runtime: &HookRuntimeV1) -> i32 {
-    let started = Instant::now();
-    let event = read_hook_event!();
-    let (root, output) = claude_session_start_response(runtime, &event, started).await;
-    if !super::write_hook_output(
-        root.as_deref(),
-        tracedecay_hooks::HookHostV1::ClaudeCode,
-        &event,
-        &output,
-    )
-    .await
-    {
-        return 1;
-    }
-    0
-}
-
-/// Returns the identity-resolved root alongside the response so the handler
-/// does not repeat the registry-probing resolution for output delivery.
-async fn claude_session_start_response(
-    runtime: &HookRuntimeV1,
-    event: &str,
-    started: Instant,
-) -> (Option<PathBuf>, String) {
-    let parsed = serde_json::from_str::<Value>(event).unwrap_or(Value::Null);
-    // Resolve the project root the same identity-aware way the printed context
-    // does, including global-only stores and fresh harness-created worktrees.
-    let root = event_project_root_with_identity(runtime, &parsed).await;
-    let hook_telemetry = record_hook_invoked_parsed(
-        runtime,
-        root.as_deref(),
-        HintAgent::Claude,
-        "SessionStart",
-        event,
-        &parsed,
-    );
-    let output = super::dispatch::dispatch_for_scope(
-        runtime,
-        tracedecay_hooks::HookHostV1::ClaudeCode,
-        event,
-        root.as_deref(),
-        Some(&hook_telemetry),
-        started,
-    )
-    .await
-    .into_recorded_guidance(&hook_telemetry)
-    .flatten()
-    .map_or_else(
-        || serde_json::json!({}).to_string(),
-        |guidance| additional_context_json("SessionStart", &guidance),
-    );
-    (root, output)
+    claude_guidance_hook(runtime, "SessionStart").await
 }
 
 /// Claude Code `PostCompact` hook handler.
@@ -238,9 +188,39 @@ async fn claude_post_tool_use_response(
 /// `Stop` hook handler: submits the native turn boundary to the daemon.
 #[hotpath::measure(future = true, label = "hosts.hooks.claude.stop")]
 pub async fn hook_stop(runtime: &HookRuntimeV1) -> i32 {
+    claude_guidance_hook(runtime, "Stop").await
+}
+
+/// SessionStart and Stop share one guidance envelope. The project root is
+/// resolved once and reused for both dispatch and stdout delivery.
+async fn claude_guidance_hook(runtime: &HookRuntimeV1, hook_name: &'static str) -> i32 {
     let started = Instant::now();
     let event = read_hook_event!();
-    let (root, output) = claude_stop_response_for_event(runtime, &event, started).await;
+    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let root = event_project_root_with_identity(runtime, &parsed).await;
+    let hook_telemetry = record_hook_invoked_parsed(
+        runtime,
+        root.as_deref(),
+        HintAgent::Claude,
+        hook_name,
+        &event,
+        &parsed,
+    );
+    let output = super::dispatch::dispatch_for_scope(
+        runtime,
+        tracedecay_hooks::HookHostV1::ClaudeCode,
+        &event,
+        root.as_deref(),
+        Some(&hook_telemetry),
+        started,
+    )
+    .await
+    .into_recorded_guidance(&hook_telemetry)
+    .flatten()
+    .map_or_else(
+        || serde_json::json!({}).to_string(),
+        |guidance| additional_context_json(hook_name, &guidance),
+    );
     if !super::write_hook_output(
         root.as_deref(),
         tracedecay_hooks::HookHostV1::ClaudeCode,
@@ -252,39 +232,4 @@ pub async fn hook_stop(runtime: &HookRuntimeV1) -> i32 {
         return 1;
     }
     0
-}
-
-/// Returns the identity-resolved root alongside the response so the handler
-/// does not repeat the registry-probing resolution for output delivery.
-async fn claude_stop_response_for_event(
-    runtime: &HookRuntimeV1,
-    event: &str,
-    started: Instant,
-) -> (Option<PathBuf>, String) {
-    let parsed = serde_json::from_str::<Value>(event).unwrap_or(Value::Null);
-    let root = event_project_root_with_identity(runtime, &parsed).await;
-    let hook_telemetry = record_hook_invoked_parsed(
-        runtime,
-        root.as_deref(),
-        HintAgent::Claude,
-        "Stop",
-        event,
-        &parsed,
-    );
-    let output = super::dispatch::dispatch_for_scope(
-        runtime,
-        tracedecay_hooks::HookHostV1::ClaudeCode,
-        event,
-        root.as_deref(),
-        Some(&hook_telemetry),
-        started,
-    )
-    .await
-    .into_recorded_guidance(&hook_telemetry)
-    .flatten()
-    .map_or_else(
-        || serde_json::json!({}).to_string(),
-        |guidance| additional_context_json("Stop", &guidance),
-    );
-    (root, output)
 }

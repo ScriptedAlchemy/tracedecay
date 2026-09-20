@@ -23,7 +23,7 @@ pub struct HostAdmissionAuthorities<'a> {
 }
 
 impl<'a> HostAdmissionAuthorities<'a> {
-    pub fn registered_for_project(
+    pub fn for_project(
         brain_id: BrainId,
         profile_id: UserProfileId,
         project_id: ProjectId,
@@ -40,7 +40,7 @@ impl<'a> HostAdmissionAuthorities<'a> {
         }
     }
 
-    pub(crate) fn registered_for_profile(
+    pub fn for_profile(
         brain_id: BrainId,
         profile_id: UserProfileId,
         registered: &'a RegisteredGlobalDb,
@@ -62,23 +62,6 @@ impl<'a> HostAdmissionAuthorities<'a> {
     pub fn with_background_cpu(mut self, background_cpu: Arc<ProcessBackgroundCpuV1>) -> Self {
         self.background_cpu = Some(background_cpu);
         self
-    }
-
-    pub fn for_project(
-        brain_id: BrainId,
-        profile_id: UserProfileId,
-        project_id: ProjectId,
-        registered: &'a RegisteredGlobalDb,
-    ) -> Self {
-        Self::registered_for_project(brain_id, profile_id, project_id, registered)
-    }
-
-    pub fn for_profile(
-        brain_id: BrainId,
-        profile_id: UserProfileId,
-        registered: &'a RegisteredGlobalDb,
-    ) -> Self {
-        Self::registered_for_profile(brain_id, profile_id, registered)
     }
 
     /// Adds the registered profile-session authority to project admission.

@@ -122,7 +122,8 @@ pub async fn hook_codex_user_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
         // Keep recall current, but wait for the native Stop receipt before
         // reflection so one completed turn schedules one review rather than a
         // prompt-only review followed immediately by a final-turn review.
-        let _ = ingest_user_codex_session(runtime, session_id, Some(&hook_telemetry)).await;
+        let _ =
+            super::ingest_user_session(runtime, "Codex", session_id, Some(&hook_telemetry)).await;
     }
     let context = Box::pin(codex_user_prompt_submit_context_with_root(
         &parsed,
@@ -528,14 +529,6 @@ async fn codex_post_compact(
     if let Err(error) = super::daemon_hook_action(runtime, Some(&root), args, telemetry).await {
         tracing::warn!(%error, "Codex PostCompact daemon call failed");
     }
-}
-
-async fn ingest_user_codex_session(
-    runtime: &HookRuntimeV1,
-    session_id: Option<String>,
-    telemetry: Option<&super::analytics::HookTimingSpan>,
-) -> bool {
-    super::ingest_user_session(runtime, "Codex", session_id, telemetry).await
 }
 
 fn deduped_codex_hint(parsed: &Value, hint_id: &str, hint: ToolHint) -> Option<ToolHint> {
