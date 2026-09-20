@@ -3997,7 +3997,7 @@ fn derive_clone_fingerprint_postings(
         .map_err(sqlite_error)
 }
 
-fn derive_clone_fingerprint_counts(
+pub(super) fn derive_clone_fingerprint_counts(
     transaction: &Transaction<'_>,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     transaction
