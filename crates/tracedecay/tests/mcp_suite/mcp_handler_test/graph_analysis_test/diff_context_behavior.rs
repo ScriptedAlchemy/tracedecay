@@ -155,9 +155,9 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
         vec![json!({"name": "tier_b", "kind": "function", "file": "src/tier_b.rs", "line": 2}),]
     );
 
-    // A path with no indexed symbols still enters the affected-test walk.
-    // That walk asks for file adjacency and refuses an empty seed set rather
-    // than inventing an empty success.
+    // A path this generation never published carries no symbols, so the
+    // affected-test walk has no seeds and answers empty and complete rather
+    // than turning "no such file here" into an invalid request.
     let absent = handle_tool_call(
         &host,
         "tracedecay_diff_context",
@@ -165,12 +165,18 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
         None,
         None,
     )
-    .await;
+    .await
+    .expect("unpublished-path diff_context");
     assert_eq!(
-        absent
-            .expect_err("a path with no symbols must be refused")
-            .to_string(),
-        "config error: tracedecay_diff_context failed over production MCP: tool project route failed: reason_code=code-graph-invalid-request retryable=false: the code-graph read request is invalid: code graph adjacency requires at least one seed"
+        extract_json(&absent.value),
+        json!({
+            "changed_files": ["src/not_in_repo.rs"],
+            "modified_symbols": [],
+            "impacted_symbols_count": 0,
+            "impacted_symbols": [],
+            "impact_complete": true,
+            "affected_tests": []
+        })
     );
 
     let empty_files = handle_tool_call(
