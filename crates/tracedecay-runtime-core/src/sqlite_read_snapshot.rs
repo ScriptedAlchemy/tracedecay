@@ -1313,8 +1313,14 @@ fn cleanup_stale_directories(root: &Path) -> io::Result<()> {
             continue;
         }
         let path = entry.path();
-        if !fs::symlink_metadata(&path)?.is_dir() {
-            continue;
+        // An owner releases its directory without the cleanup lock, so an
+        // entry listed above can be gone by now. Gone is the state this
+        // sweep wants; only a failure to reach a present entry is an error.
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
         }
         let removable = match open_private_lock(&path.join(".owner.lock"), false) {
             Ok(lock) => lock.try_lock().map_err(std::io::Error::from).is_ok(),
@@ -1322,7 +1328,11 @@ fn cleanup_stale_directories(root: &Path) -> io::Result<()> {
             Err(error) => return Err(error),
         };
         if removable {
-            fs::remove_dir_all(path)?;
+            match fs::remove_dir_all(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
         }
     }
     Ok(())
@@ -1507,6 +1517,37 @@ mod tests {
 
         fs::write(with_suffix(&path, "-wal"), b"live").unwrap();
         assert!(checkpointed_database_has_any_rows(&path, &["durable"]).is_err());
+    }
+
+    /// A snapshot owner removes its own `read-*` directory without the
+    /// cleanup lock, so a cleanup that listed that directory can find it gone
+    /// by the time it inspects or removes it. That is the state cleanup
+    /// wants; it must not fail the open that ran it.
+    #[test]
+    fn stale_directory_cleanup_survives_a_concurrent_owner_release() {
+        for _ in 0..40 {
+            let temp = TempDir::new().unwrap();
+            let root = temp.path().to_path_buf();
+            let dirs: Vec<PathBuf> = (0..200)
+                .map(|index| root.join(format!("read-owner-{index}")))
+                .collect();
+            for dir in &dirs {
+                fs::create_dir(dir).unwrap();
+            }
+            let releasing = dirs.clone();
+            let owner = std::thread::spawn(move || {
+                for dir in releasing {
+                    let _ = fs::remove_dir_all(dir);
+                }
+            });
+            let cleaned = cleanup_stale_directories(&root);
+            owner.join().unwrap();
+            cleaned.expect("cleanup tolerates directories released under it");
+            assert!(
+                fs::read_dir(&root).unwrap().next().is_none(),
+                "every stale directory is gone afterwards"
+            );
+        }
     }
 
     #[tokio::test]
