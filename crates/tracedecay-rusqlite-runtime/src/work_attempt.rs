@@ -96,32 +96,7 @@ pub(crate) fn insert_attempt_in_transaction(
         )?;
     }
     hotpath::measure_block!("rusqlite.work_attempt.cas.insert", {
-        transaction
-            .execute(
-                exact_sql_statement(
-                    "INSERT INTO work_attempts_v1 (
-                    project_id, repository_id, worktree_id, actor_id, policy_digest,
-                    task_id, run_id, attempt_id, state, lease_id, fence_epoch,
-                    terminal, attempt_payload, evidence_payload
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL)",
-                    authority_params_owned(authority)
-                        .into_iter()
-                        .chain(identity_params(attempt.identity()))
-                        .chain([
-                            ExactSqlValue::Text(state_text(attempt.state())),
-                            ExactSqlValue::Text(attempt.lease().lease_id().as_str().to_owned()),
-                            ExactSqlValue::Integer(
-                                i64::try_from(attempt.lease().epoch().get())
-                                    .map_err(|_| WorkAttemptStorageError::Unavailable)?,
-                            ),
-                            ExactSqlValue::Integer(i64::from(attempt.is_terminal())),
-                            ExactSqlValue::Text(payload),
-                        ])
-                        .collect(),
-                )
-                .map_err(|_| WorkAttemptStorageError::Unavailable)?,
-            )
-            .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+        insert_attempt_row(transaction, authority, attempt, payload)?;
         Ok(WorkAttemptInsertOutcome::Inserted)
     })
 }
@@ -503,32 +478,7 @@ pub(crate) fn insert_synthesis_in_transaction(
         )?;
     }
     hotpath::measure_block!("rusqlite.work_attempt.cas.synthesis", {
-        transaction
-            .execute(
-                exact_sql_statement(
-                    "INSERT INTO work_attempts_v1 (
-                    project_id, repository_id, worktree_id, actor_id, policy_digest,
-                    task_id, run_id, attempt_id, state, lease_id, fence_epoch,
-                    terminal, attempt_payload, evidence_payload
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL)",
-                    authority_params_owned(authority)
-                        .into_iter()
-                        .chain(identity_params(attempt.identity()))
-                        .chain([
-                            ExactSqlValue::Text(state_text(attempt.state())),
-                            ExactSqlValue::Text(attempt.lease().lease_id().as_str().to_owned()),
-                            ExactSqlValue::Integer(
-                                i64::try_from(attempt.lease().epoch().get())
-                                    .map_err(|_| WorkAttemptStorageError::Unavailable)?,
-                            ),
-                            ExactSqlValue::Integer(i64::from(attempt.is_terminal())),
-                            ExactSqlValue::Text(payload),
-                        ])
-                        .collect(),
-                )
-                .map_err(|_| WorkAttemptStorageError::Unavailable)?,
-            )
-            .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+        insert_attempt_row(transaction, authority, attempt, payload)?;
         Ok(WorkSynthesisInsertOutcome::Inserted)
     })
 }
@@ -646,6 +596,41 @@ impl WorkAttemptEvidenceReadPort for WorkSqliteStorage {
             Ok(WorkAttemptEvidencePageV1 { rows, remaining })
         })
     }
+}
+
+fn insert_attempt_row(
+    transaction: &crate::exact_sql::ExactSqlTransaction,
+    authority: &WorkAuthority,
+    attempt: &WorkAttemptV1,
+    payload: String,
+) -> Result<(), WorkAttemptStorageError> {
+    transaction
+        .execute(
+            exact_sql_statement(
+                "INSERT INTO work_attempts_v1 (
+                    project_id, repository_id, worktree_id, actor_id, policy_digest,
+                    task_id, run_id, attempt_id, state, lease_id, fence_epoch,
+                    terminal, attempt_payload, evidence_payload
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL)",
+                authority_params_owned(authority)
+                    .into_iter()
+                    .chain(identity_params(attempt.identity()))
+                    .chain([
+                        ExactSqlValue::Text(state_text(attempt.state())),
+                        ExactSqlValue::Text(attempt.lease().lease_id().as_str().to_owned()),
+                        ExactSqlValue::Integer(
+                            i64::try_from(attempt.lease().epoch().get())
+                                .map_err(|_| WorkAttemptStorageError::Unavailable)?,
+                        ),
+                        ExactSqlValue::Integer(i64::from(attempt.is_terminal())),
+                        ExactSqlValue::Text(payload),
+                    ])
+                    .collect(),
+            )
+            .map_err(|_| WorkAttemptStorageError::Unavailable)?,
+        )
+        .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+    Ok(())
 }
 
 fn load_attempt_payload(
