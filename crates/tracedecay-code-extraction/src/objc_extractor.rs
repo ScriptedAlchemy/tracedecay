@@ -72,10 +72,6 @@ impl<'s> ExtractionState<'s> {
         node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 
-    fn node_str(&self, node: TsNode<'_>) -> &'s str {
-        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
-    }
-
     fn text_before(&self, node: TsNode<'_>, end_byte: usize) -> &str {
         let start = node.start_byte();
         let end = end_byte.min(self.source.len()).max(start);
@@ -329,7 +325,7 @@ impl ObjcExtractor {
                     .to_string()
             })
             .or_else(|| {
-                let text = state.node_str(node);
+                let text = state.node_text(node);
                 text.find('{').map(|pos| text[..pos].trim().to_string())
             });
         let qualified_name = format!("{}::{}", state.qualified_prefix(), enum_name);
@@ -1340,7 +1336,7 @@ impl ObjcExtractor {
                 .trim()
                 .to_string();
         }
-        let text = state.node_str(node);
+        let text = state.node_text(node);
         if let Some(brace_pos) = text.find('{') {
             text[..brace_pos].trim().to_string()
         } else {

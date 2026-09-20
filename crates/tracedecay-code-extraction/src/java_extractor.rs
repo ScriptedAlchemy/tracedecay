@@ -77,10 +77,6 @@ impl<'s> ExtractionState<'s> {
     fn node_text(&self, node: TsNode<'_>) -> &'s str {
         node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
-
-    fn node_str(&self, node: TsNode<'_>) -> &'s str {
-        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
-    }
 }
 
 impl<'s> AnnotationEmitterState for ExtractionState<'s> {
@@ -101,7 +97,7 @@ impl<'s> AnnotationEmitterState for ExtractionState<'s> {
     }
 
     fn node_str(&self, node: TsNode<'_>) -> &str {
-        ExtractionState::node_str(self, node)
+        self.node_text(node)
     }
 
     fn timestamp(&self) -> u64 {

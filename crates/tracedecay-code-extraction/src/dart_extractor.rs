@@ -71,10 +71,6 @@ impl<'s> ExtractionState<'s> {
         node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 
-    fn node_str(&self, node: TsNode<'_>) -> &'s str {
-        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
-    }
-
     fn text_before(&self, node: TsNode<'_>, end_byte: usize) -> &str {
         let start = node.start_byte();
         let end = end_byte.min(self.source.len()).max(start);
@@ -1273,7 +1269,7 @@ impl DartExtractor {
 
         let visibility = Self::dart_visibility(&name);
         let docstring = Self::extract_docstring(state, decl_node);
-        let text = state.node_str(decl_node);
+        let text = state.node_text(decl_node);
         let signature = if let Some(body) = decl_node.child_by_field_name("body") {
             Some(
                 state
@@ -1346,7 +1342,7 @@ impl DartExtractor {
     // ----------------------------------
 
     fn visit_operator(state: &mut ExtractionState, decl_node: TsNode<'_>, _sig_node: TsNode<'_>) {
-        let text = state.node_str(decl_node);
+        let text = state.node_text(decl_node);
         let name = text.find("operator").map_or_else(
             || "operator".to_string(),
             |pos| {
@@ -1701,7 +1697,7 @@ impl DartExtractor {
                 .trim()
                 .to_string();
         }
-        let text = state.node_str(node);
+        let text = state.node_text(node);
         if let Some(brace_pos) = text.find('{') {
             text[..brace_pos].trim().to_string()
         } else {
