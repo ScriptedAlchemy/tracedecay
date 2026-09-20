@@ -20,6 +20,7 @@ mod branch_diff_behavior_test;
 mod branch_search_test;
 #[cfg(feature = "test-transport")]
 mod branch_sensitivity_test;
+mod callers_behavior_test;
 mod callers_for_test;
 mod circular_behavior_test;
 #[cfg(feature = "test-transport")]
