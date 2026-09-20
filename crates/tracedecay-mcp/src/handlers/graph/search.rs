@@ -49,7 +49,7 @@ use super::verified::CODE_SYMBOL_EVIDENCE_PREFIX;
 use super::{
     graph_occurrence_id, graph_symbol_end_line, graph_symbol_paths, graph_symbols_in_scope,
     line_for_byte_offset, node_not_found as node_not_found_result, required_graph_file_path,
-    required_graph_metadata, single_graph_adjacency_batch,
+    required_graph_metadata, single_graph_adjacency_batch, user_line,
 };
 use super::{lexical_routing, search_evidence};
 
@@ -128,10 +128,6 @@ fn coverage_value(coverage: &tracedecay_query::code_search::CodeIndexSearchCover
         "graph": lane(&coverage.graph),
         "recall": if coverage.is_degraded() { "partial" } else { "full" },
     })
-}
-
-fn user_line(line: u32) -> u32 {
-    line.saturating_add(1)
 }
 
 fn rendered_tool_result<F>(

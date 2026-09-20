@@ -28,7 +28,6 @@ mod application_schema;
 pub mod ast_grep;
 mod edit;
 mod git;
-mod git_scope;
 mod graph;
 mod lcm;
 mod memory;
