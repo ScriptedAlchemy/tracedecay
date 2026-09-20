@@ -16,11 +16,11 @@ use super::skill_usage::{
     SkillOverlapCandidate, SkillStaleRecommendation, SkillUsageSummary,
     skill_improvement_recommendations as usage_skill_improvement_recommendations,
 };
-use crate::ports::session_evidence::LcmGrepHit;
 use tracedecay_automation::analytics::ToolFamilySignal;
 use tracedecay_automation::managed_skills::validate_managed_skill_update;
 use tracedecay_automation::text::truncate_chars_for_prompt;
 use tracedecay_domain::errors::Result;
+use tracedecay_lcm::LcmGrepHit;
 
 use super::{config_error, normalized_non_empty};
 
