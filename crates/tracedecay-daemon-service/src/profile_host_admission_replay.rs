@@ -639,9 +639,14 @@ impl ProfileHostAdmissionBootstrapWorker {
                             event = "profile_host_admission_bootstrap_exhausted",
                             reason_code,
                             attempts = consecutive_retryable,
-                            elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+                            elapsed_ms =
+                                tracedecay_runtime_core::tracedecay::saturating_duration_millis(
+                                    elapsed,
+                                ),
                             budget_ms =
-                                u64::try_from(self.retry_budget.as_millis()).unwrap_or(u64::MAX),
+                                tracedecay_runtime_core::tracedecay::saturating_duration_millis(
+                                    self.retry_budget,
+                                ),
                             "profile host admission bootstrap gave up after its retry budget; \
                              it resumes on the next admission or daemon restart"
                         );

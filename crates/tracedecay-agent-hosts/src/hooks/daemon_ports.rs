@@ -123,7 +123,11 @@ struct DaemonAdmissionResponseWireV1 {
 }
 
 pub(crate) fn now_utc() -> UtcMicros {
-    UtcMicros(tracedecay_runtime_core::tracedecay::saturating_utc_now().0.max(1))
+    UtcMicros(
+        tracedecay_runtime_core::tracedecay::saturating_utc_now()
+            .0
+            .max(1),
+    )
 }
 
 #[hotpath::measure(label = "agent_hosts.hook_ports.admission_decode")]

@@ -63,17 +63,36 @@ pub fn saturating_duration_micros(duration: Duration) -> u64 {
     u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
 
+/// Milliseconds in `duration`, saturating to `u64::MAX` on overflow.
+pub fn saturating_duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Unix milliseconds since the epoch. A pre-epoch clock is `0`.
+pub fn unix_millis() -> u64 {
+    saturating_duration_millis(wall_clock_since_epoch())
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use super::saturating_duration_micros;
+    use super::{saturating_duration_micros, saturating_duration_millis};
 
     #[test]
     fn saturating_duration_micros_keeps_small_spans_and_clamps_overflow() {
         assert_eq!(saturating_duration_micros(Duration::from_micros(7)), 7);
         assert_eq!(
             saturating_duration_micros(Duration::from_secs(u64::MAX)),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn saturating_duration_millis_keeps_small_spans_and_clamps_overflow() {
+        assert_eq!(saturating_duration_millis(Duration::from_millis(7)), 7);
+        assert_eq!(
+            saturating_duration_millis(Duration::from_secs(u64::MAX)),
             u64::MAX
         );
     }

@@ -5,7 +5,6 @@
 //! metrics backend, retain global state, or derive identity from a locator.
 
 use std::cmp::Ordering;
-use std::time::Duration;
 
 use tracedecay_store::{
     AdmissionConfigV1, QueueBudgetV1, RuntimeMaintenanceStateV1, StoreRuntimeBindingV1, WalBudgetV1,
@@ -397,7 +396,7 @@ fn project_shard(
         memory_estimate_bytes: entry.physical.memory_estimate_bytes,
         health: health.health,
         pinned_profile: health.pinned_profile,
-        idle_for_ms: duration_millis(entry.eviction.idle_for),
+        idle_for_ms: crate::tracedecay::saturating_duration_millis(entry.eviction.idle_for),
         eviction_eligible: entry.eviction.is_eligible(),
         eviction_blocker_count: bounded_count(entry.eviction.blockers.len()),
     }
@@ -418,10 +417,6 @@ fn sum_complete_sample(total: Option<u64>, sample: Option<u64>) -> Option<u64> {
     Some(total?.saturating_add(sample?))
 }
 
-fn duration_millis(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-}
-
 const fn count_if(value: bool) -> u32 {
     if value { 1 } else { 0 }
 }
@@ -429,6 +424,7 @@ const fn count_if(value: bool) -> u32 {
 #[cfg(test)]
 mod tests {
     use std::fmt::Debug;
+    use std::time::Duration;
 
     use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
     use tracedecay_store::{StoreAuthorityEpochV1, StoreIncarnationV1, StoreShardIdV1};

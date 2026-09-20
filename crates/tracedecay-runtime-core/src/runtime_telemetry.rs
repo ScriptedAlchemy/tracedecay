@@ -640,7 +640,7 @@ impl ProcessSampler {
                 Some(age),
             ) => ProcessTelemetry::Stale {
                 sampled_at: *sampled_at,
-                age_millis: age.as_millis().min(u128::from(u64::MAX)) as u64,
+                age_millis: crate::tracedecay::saturating_duration_millis(age),
                 snapshot: snapshot.clone(),
             },
             (Some(sample), _) => sample.telemetry.clone(),
