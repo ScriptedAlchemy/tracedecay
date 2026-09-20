@@ -213,11 +213,6 @@ jobs:
           "$binary" --version
           "$binary" --help >/dev/null
 
-      - name: Get version
-        id: version
-        shell: bash
-        run: echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
-
       - name: Package MCPB
         shell: bash
         run: |
@@ -230,11 +225,11 @@ jobs:
           python3 scripts/build-mcpb.py build \
             --binary "$binary" \
             --output "$bundle" \
-            --version "${{ steps.version.outputs.version }}" \
+            --version "${RELEASE_TAG#v}" \
             --platform "${{ matrix.name }}"
           python3 scripts/build-mcpb.py verify \
             --bundle "$bundle" \
-            --version "${{ steps.version.outputs.version }}" \
+            --version "${RELEASE_TAG#v}" \
             --platform "${{ matrix.name }}"
 
       - name: Verify MCPB runtime (unix)

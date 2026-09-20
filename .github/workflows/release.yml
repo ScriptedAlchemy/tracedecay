@@ -113,12 +113,6 @@ jobs:
         with:
           ref: ${{ needs.validate-release.outputs.source_sha }}
 
-      - name: Checkout release automation
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.validate-release.outputs.source_sha }}
-          path: .release-automation
-
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
@@ -134,7 +128,7 @@ jobs:
         run: npm run build
 
       - name: Validate dashboard bundle
-        run: python3 .release-automation/scripts/check-dashboard-bundle.py dashboard/app-dist
+        run: python3 scripts/check-dashboard-bundle.py dashboard/app-dist
 
       - name: Upload dashboard artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -255,13 +249,6 @@ jobs:
           "$binary" --version
           "$binary" --help >/dev/null
 
-      - name: Get version
-        id: version
-        shell: bash
-        run: |
-          echo "tag=${{ needs.validate-release.outputs.tag }}" >> "$GITHUB_OUTPUT"
-          echo "version=${{ needs.validate-release.outputs.version }}" >> "$GITHUB_OUTPUT"
-
       # --- MCP Registry bundle (all platforms) ---
 
       - name: Package MCPB
@@ -272,16 +259,16 @@ jobs:
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             binary="${binary}.exe"
           fi
-          bundle="tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.mcpb"
+          bundle="tracedecay-${{ needs.validate-release.outputs.tag }}-${{ matrix.name }}.mcpb"
           python3 scripts/build-mcpb.py build \
             --binary "$binary" \
             --output "$bundle" \
-            --version "${{ steps.version.outputs.version }}" \
+            --version "${{ needs.validate-release.outputs.version }}" \
             --platform "${{ matrix.name }}"
           test -s "$bundle"
           python3 scripts/build-mcpb.py verify \
             --bundle "$bundle" \
-            --version "${{ steps.version.outputs.version }}" \
+            --version "${{ needs.validate-release.outputs.version }}" \
             --platform "${{ matrix.name }}"
 
       - name: Verify MCPB runtime (unix)
@@ -289,7 +276,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bundle="tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.mcpb"
+          bundle="tracedecay-${{ needs.validate-release.outputs.tag }}-${{ matrix.name }}.mcpb"
           rm -rf verify-mcpb
           # unzip applies the mode bits build-mcpb.py records in the archive,
           # which is what an MCPB host does. `python3 -m zipfile -e` drops
@@ -303,7 +290,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mcpb-${{ matrix.name }}
-          path: tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.mcpb
+          path: tracedecay-${{ needs.validate-release.outputs.tag }}-${{ matrix.name }}.mcpb
           if-no-files-found: error
 
       # --- Binary archive (all platforms) ---
@@ -320,7 +307,7 @@ jobs:
           fi
           python3 scripts/package-release-archive.py \
             --binary "$binary" \
-            --output "tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }}" \
+            --output "tracedecay-${{ needs.validate-release.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }}" \
             --format "${{ matrix.archive }}" \
             --entry-name "$entry_name" \
             --epoch "${{ needs.validate-release.outputs.source_epoch }}"
@@ -330,7 +317,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          archive="tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.tar.gz"
+          archive="tracedecay-${{ needs.validate-release.outputs.tag }}-${{ matrix.name }}.tar.gz"
           rm -rf verify-binary
           mkdir verify-binary
           tar xzf "$archive" -C verify-binary
@@ -342,7 +329,7 @@ jobs:
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          $archive = "tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.zip"
+          $archive = "tracedecay-${{ needs.validate-release.outputs.tag }}-${{ matrix.name }}.zip"
           Remove-Item verify-binary -Recurse -Force -ErrorAction SilentlyContinue
           Expand-Archive -Path $archive -DestinationPath verify-binary
           & "./verify-binary/tracedecay.exe" --version
@@ -354,7 +341,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: binary-${{ matrix.name }}
-          path: tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }}
+          path: tracedecay-${{ needs.validate-release.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }}
           if-no-files-found: error
 
   verify-release:
@@ -428,21 +415,10 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - name: Checkout release automation
+      - name: Checkout release source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.validate-release.outputs.source_sha }}
-          path: .release-automation
-          persist-credentials: false
-
-      - name: Get release tag
-        id: release
-        run: |
-          echo "tag=${{ needs.validate-release.outputs.tag }}" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ steps.release.outputs.tag }}
           persist-credentials: false
 
       - name: Download newly built binary artifacts
@@ -467,20 +443,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${{ steps.release.outputs.tag }}"
+          TAG="${{ needs.validate-release.outputs.tag }}"
           SOURCE_SHA="${{ needs.validate-release.outputs.source_sha }}"
           VERSION="${TAG#v}"
           mkdir binaries mcpbs retained-assets
           gh api "repos/${{ github.repository }}/releases/tags/${TAG}" \
             --jq '.assets[].name' > remote-asset-names
-          python3 .release-automation/scripts/plan-release-recovery.py \
-            --manifest .release-automation/.github/release-targets.json \
+          python3 scripts/plan-release-recovery.py \
+            --manifest .github/release-targets.json \
             --tag "$TAG" \
             --profile stable \
             --asset-names remote-asset-names \
             --retained-output retained-asset-names \
             --github-output planner-output
-          .release-automation/scripts/verify-retained-release-assets.sh \
+          scripts/verify-retained-release-assets.sh \
             --tag "$TAG" \
             --repo "${{ github.repository }}" \
             --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \
@@ -509,8 +485,8 @@ jobs:
             done
             shopt -u nullglob
           fi
-          python3 .release-automation/scripts/check-release-artifacts.py \
-            --manifest .release-automation/.github/release-targets.json \
+          python3 scripts/check-release-artifacts.py \
+            --manifest .github/release-targets.json \
             --tag "$TAG" \
             --binaries binaries \
             --mcpbs mcpbs \
@@ -518,7 +494,7 @@ jobs:
           for bundle in mcpbs/*.mcpb; do
             platform="${bundle#mcpbs/tracedecay-"${TAG}"-}"
             platform="${platform%.mcpb}"
-            python3 .release-automation/scripts/build-mcpb.py verify \
+            python3 scripts/build-mcpb.py verify \
               --bundle "$bundle" \
               --version "$VERSION" \
               --platform "$platform"
@@ -563,10 +539,10 @@ jobs:
             sha256sum -- *.mcpb
           ) >> SHA256SUMS
           assets+=(SHA256SUMS install.sh)
-          TAG="${{ steps.release.outputs.tag }}"
+          TAG="${{ needs.validate-release.outputs.tag }}"
           SOURCE_SHA="${{ needs.validate-release.outputs.source_sha }}"
-          git -C .release-automation fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
-          test "$(git -C .release-automation rev-list -n 1 "$TAG")" = "$SOURCE_SHA"
+          git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          test "$(git rev-list -n 1 "$TAG")" = "$SOURCE_SHA"
 
           gh api "repos/${{ github.repository }}/releases/tags/${TAG}" \
             --jq '.assets[].name' > remote-asset-names
@@ -634,13 +610,13 @@ jobs:
                   --pattern "$name" --dir remote-assets/binaries ;;
             esac
           done < remote-asset-names
-          python3 .release-automation/scripts/check-release-artifacts.py \
-            --manifest .release-automation/.github/release-targets.json \
+          python3 scripts/check-release-artifacts.py \
+            --manifest .github/release-targets.json \
             --tag "$TAG" \
             --binaries remote-assets/binaries \
             --mcpbs remote-assets/mcpbs \
             --allow-missing-targets
-          .release-automation/scripts/verify-retained-release-assets.sh \
+          scripts/verify-retained-release-assets.sh \
             --tag "$TAG" \
             --repo "${{ github.repository }}" \
             --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \

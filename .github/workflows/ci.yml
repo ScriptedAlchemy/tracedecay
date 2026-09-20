@@ -762,17 +762,11 @@ jobs:
       # `--tests` keeps the binaries in the dev-dependency graph the archive
       # is built from; a `--bins`-only build resolves 60 dependencies with
       # different features and compiles them a second time (see the Linux
-      # lane).
-      - name: Build workspace binaries and tests for the Windows test lane
+      # lane). The host-CLI example is the same `--workspace` resolution;
+      # a second cargo invocation would re-resolve it.
+      - name: Build workspace binaries, tests, and the host-CLI fixture
         shell: pwsh
-        run: cargo build --workspace --bins --tests --locked --profile perf --features tracedecay/test-helpers,tracedecay/search-eval
-
-      # `--workspace`, not `-p tracedecay-cli`: the package selection decides
-      # feature unification, and the narrower one recompiles the code-index
-      # and extraction crates in a second configuration (see the Linux lane).
-      - name: Build Windows host-CLI test fixture
-        shell: pwsh
-        run: cargo build --workspace --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers,tracedecay/search-eval
+        run: cargo build --workspace --bins --tests --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers,tracedecay/search-eval
 
       # The controlled-workload Hotpath parity helpers are provisioned and
       # verified by the `hotpath-parity` job. Building them here would put a
