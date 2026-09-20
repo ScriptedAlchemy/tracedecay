@@ -1139,7 +1139,7 @@ fn accepted_for_external_source_replay(
 }
 
 fn classify_store_error(error: &ObservationStoreError) -> HostAdmissionOutcome {
-    match error {
+    let reason_code = match error {
         ObservationStoreError::BatchRequiresScalarFallback { cause } => {
             return HostAdmissionOutcome::batch_requires_scalar_fallback(*cause);
         }
@@ -1158,9 +1158,9 @@ fn classify_store_error(error: &ObservationStoreError) -> HostAdmissionOutcome {
                 "observation_retrieval_anchor_alias_collision",
             );
         }
-        _ => {}
-    }
-    let reason_code = match error {
+        ObservationStoreError::CursorConflict { .. } | ObservationStoreError::Storage { .. } => {
+            unreachable!("retryable store failures are classified before static reason mapping")
+        }
         ObservationStoreError::CursorObservationMismatch => "observation_cursor_mismatch",
         ObservationStoreError::CursorCoverageMismatch => "observation_cursor_coverage_mismatch",
         ObservationStoreError::CursorAdvanceCollision => "observation_cursor_advance_collision",
@@ -1169,10 +1169,6 @@ fn classify_store_error(error: &ObservationStoreError) -> HostAdmissionOutcome {
         }
         ObservationStoreError::CursorSanitizationReceiptMismatch => {
             "observation_cursor_sanitization_receipt_mismatch"
-        }
-        ObservationStoreError::ObservationCollision { .. } => "observation_identity_collision",
-        ObservationStoreError::SanitizationReceiptCollision => {
-            "observation_sanitization_receipt_collision"
         }
         ObservationStoreError::RetrievalAnchorObservationMismatch => {
             "observation_retrieval_anchor_observation_mismatch"
@@ -1202,14 +1198,8 @@ fn classify_store_error(error: &ObservationStoreError) -> HostAdmissionOutcome {
         ObservationStoreError::RepositoryProvenanceContract(_) => {
             "observation_repository_provenance_contract_invalid"
         }
-        ObservationStoreError::RetrievalAnchorAliasCollision { .. } => {
-            "observation_retrieval_anchor_alias_collision"
-        }
         ObservationStoreError::InvalidReplayLimit { .. } => "observation_replay_limit_invalid",
         ObservationStoreError::Contract(_) => "observation_store_contract_invalid",
-        ObservationStoreError::CursorConflict { .. } | ObservationStoreError::Storage { .. } => {
-            unreachable!("retryable store failures are classified before static reason mapping")
-        }
         _ => "observation_store_failed",
     };
     admission_outcome(HostAdmissionStatus::Degraded, false, Some(reason_code))
