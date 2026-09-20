@@ -16,6 +16,7 @@ pub(crate) mod support;
 mod unused_imports_test;
 mod workflow_create;
 mod workflow_delete_test;
+mod workflow_update_test;
 
 // Backwards-compatible path for `crate::mcp_server_test::…` consumers.
 pub(crate) use support::run_client_connection_with_messages;
