@@ -729,6 +729,19 @@ impl ApplicationProblem {
         }
     }
 
+    /// Invalid request that must not be retried unchanged. The only legal
+    /// action is `CorrectRequest`.
+    pub fn invalid_request(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::InvalidRequest {
+            diagnostic: SafeDiagnostic {
+                code: code.into(),
+                message: message.into(),
+            },
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::CorrectRequest],
+        }
+    }
+
     pub fn cancelled(stage: CancellationStage) -> Result<Self, ApplicationContractError> {
         let problem = Self::Cancelled {
             stage,

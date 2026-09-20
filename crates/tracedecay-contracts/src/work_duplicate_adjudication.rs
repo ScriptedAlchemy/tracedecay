@@ -14,7 +14,7 @@ use tracedecay_domain::{
 };
 
 use crate::work::work_authority;
-use crate::{ApplicationProblem, LegalAction, RequestContext, RetryDirective, SafeDiagnostic};
+use crate::{ApplicationProblem, RequestContext, RetryDirective, SafeDiagnostic};
 
 pub fn work_duplicate_adjudication_input_digest(
     command: &WorkDuplicateAdjudicationCommandV1,
@@ -400,14 +400,10 @@ fn classify_complete_attempt_relations(
 }
 
 fn invalid_problem() -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: "application.work.duplicate-adjudication.invalid".to_owned(),
-            message: "The duplicate Work adjudication is invalid.".to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
-    }
+    ApplicationProblem::invalid_request(
+        "application.work.duplicate-adjudication.invalid",
+        "The duplicate Work adjudication is invalid.",
+    )
 }
 
 fn storage_problem(error: WorkDuplicateAdjudicationStorageErrorV1) -> ApplicationProblem {

@@ -20,7 +20,7 @@ use super::rollup::{
     canonical_execution_topology_rollup_fragment_bytes,
     project_execution_topology_fragments_with_boundaries,
 };
-use super::support::{invalid_problem, unavailable_model, unavailable_model_with_state_at};
+use super::support::{unavailable_model, unavailable_model_with_state_at};
 use super::{
     EXECUTION_TOPOLOGY_CAPABILITY_ID_V1, EXECUTION_TOPOLOGY_EVENT_KINDS_V1,
     EXECUTION_TOPOLOGY_USE_CASE_ID_V1, ExecutionMetricUnavailableV1,
@@ -227,13 +227,13 @@ where
 
 fn validate_request(request: &ExecutionTopologyMetricsRequestV1) -> Result<(), ApplicationProblem> {
     if request.horizon.until_micros <= request.horizon.since_micros {
-        return Err(invalid_problem(
+        return Err(ApplicationProblem::invalid_request(
             "application.execution-topology-rollup.invalid-horizon",
             "The execution topology metrics horizon must end after it starts.",
         ));
     }
     if request.max_events == 0 || request.max_events > MAX_EXECUTION_TOPOLOGY_EVENTS_V1 {
-        return Err(invalid_problem(
+        return Err(ApplicationProblem::invalid_request(
             "application.execution-topology-rollup.invalid-event-budget",
             "The execution topology metrics event budget must be between 1 and 10000.",
         ));
@@ -243,13 +243,13 @@ fn validate_request(request: &ExecutionTopologyMetricsRequestV1) -> Result<(), A
 
 fn authorize(context: &RequestContext) -> Result<(), ApplicationProblem> {
     let capability = CapabilityId::new(EXECUTION_TOPOLOGY_CAPABILITY_ID_V1).map_err(|_| {
-        invalid_problem(
+        ApplicationProblem::invalid_request(
             "application.execution-topology-rollup.invalid-authority",
             "The execution topology metrics authority is unavailable.",
         )
     })?;
     let use_case = UseCaseId::new(EXECUTION_TOPOLOGY_USE_CASE_ID_V1).map_err(|_| {
-        invalid_problem(
+        ApplicationProblem::invalid_request(
             "application.execution-topology-rollup.invalid-authority",
             "The execution topology metrics authority is unavailable.",
         )

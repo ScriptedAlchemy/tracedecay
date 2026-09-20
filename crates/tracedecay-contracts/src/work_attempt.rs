@@ -34,8 +34,8 @@ pub use capacity::{
     WorkAttemptCapacityVerdictV1,
 };
 use problem::{
-    contract_problem, denied_problem, invalid_problem, list_page_contract_problem,
-    not_found_problem, stale_cursor_problem, storage_problem,
+    contract_problem, denied_problem, list_page_contract_problem, not_found_problem,
+    stale_cursor_problem, storage_problem,
 };
 pub use product_admission::WorkProductAttemptServiceV1;
 pub(crate) use product_admission::{
@@ -299,7 +299,7 @@ pub struct WorkAttemptEvidenceRecordV1 {
 impl WorkAttemptEvidenceRecordV1 {
     pub fn digest(&self) -> Result<ManifestDigest, ApplicationProblem> {
         canonical_sha256(&(WORK_ATTEMPT_EVIDENCE_DOMAIN, self)).map_err(|_| {
-            invalid_problem(
+            ApplicationProblem::invalid_request(
                 "application.work-attempt.invalid-evidence",
                 "The Work attempt evidence record could not be canonicalized.",
             )
@@ -491,7 +491,7 @@ where
         topology: impl FnOnce() -> Result<WorkAttemptTopologyStateV1, ApplicationProblem>,
     ) -> Result<WorkAttemptListV1, ApplicationProblem> {
         if request.page_size == 0 || request.page_size > MAX_WORK_ATTEMPT_LIST_PAGE_SIZE {
-            return Err(invalid_problem(
+            return Err(ApplicationProblem::invalid_request(
                 "application.work-attempt.invalid-page-size",
                 "The Work attempt list page size must be between 1 and 1000.",
             ));

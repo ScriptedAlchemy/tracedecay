@@ -26,11 +26,10 @@ use crate::work_attempt_effect::{
     WorkAttemptEffectResolutionV1, WorkAttemptEffectStorageErrorV1, WorkAttemptEffectStoragePortV1,
 };
 use crate::{
-    ApplicationContractError, ApplicationProblem, LegalAction, RequestContext, RetryDirective,
-    SafeDiagnostic, WorkGraphReadPortV1, WorkProductAttemptAdmissionPortV1,
-    WorkProductAttemptAdmissionV1, WorkProductBindingV1, WorkProductOwnerAuthorizationPortV1,
-    WorkProductRetryAdmissionV1, WorkProductRevisionPinsV1, WorkflowFanOutAttemptBindingV1,
-    WorkflowRunAppendRequest,
+    ApplicationContractError, ApplicationProblem, RequestContext, RetryDirective, SafeDiagnostic,
+    WorkGraphReadPortV1, WorkProductAttemptAdmissionPortV1, WorkProductAttemptAdmissionV1,
+    WorkProductBindingV1, WorkProductOwnerAuthorizationPortV1, WorkProductRetryAdmissionV1,
+    WorkProductRevisionPinsV1, WorkflowFanOutAttemptBindingV1, WorkflowRunAppendRequest,
 };
 
 const RETRY_INPUT_DIGEST_DOMAIN: &str = "tracedecay.application.work-retry-input.v1";
@@ -790,14 +789,10 @@ fn validate_failure(
 }
 
 fn invalid_problem() -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: "application.work-retry.invalid".to_owned(),
-            message: "The Work retry command is invalid.".to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
-    }
+    ApplicationProblem::invalid_request(
+        "application.work-retry.invalid",
+        "The Work retry command is invalid.",
+    )
 }
 
 fn retry_receipt_problem(_error: ApplicationContractError) -> ApplicationProblem {

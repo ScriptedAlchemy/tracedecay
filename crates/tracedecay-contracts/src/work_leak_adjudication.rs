@@ -335,14 +335,10 @@ fn canonical_label(value: &str, maximum: usize) -> bool {
 }
 
 fn invalid_problem() -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: "application.work-leak.invalid".to_owned(),
-            message: "The Work leak adjudication request is invalid.".to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
-    }
+    ApplicationProblem::invalid_request(
+        "application.work-leak.invalid",
+        "The Work leak adjudication request is invalid.",
+    )
 }
 
 fn evidence_problem(error: WorkLeakEvidenceErrorV1) -> ApplicationProblem {
