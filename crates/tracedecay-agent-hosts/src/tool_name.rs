@@ -28,20 +28,11 @@ pub const LEGACY_TOOL_PREFIX: &str = "mcp__tracedecay__";
 /// Single-underscore namespace used by hosts that flatten the MCP separator.
 pub const FLAT_TOOL_PREFIX: &str = "mcp_tracedecay_";
 
-/// Every namespace a tracedecay tool call can arrive under, longest first so a
-/// prefix that contains another is stripped whole.
+/// Every namespace a tracedecay tool call can arrive under, longest first.
+/// Automation classification restates these literals and must stay aligned.
 pub const ALL_TOOL_PREFIXES: [&str; 4] = [
     PRIOR_PLUGIN_TOOL_PREFIX,
     PLUGIN_TOOL_PREFIX,
     LEGACY_TOOL_PREFIX,
     FLAT_TOOL_PREFIX,
 ];
-
-/// Strips the host MCP namespace from a tracedecay tool name, leaving the bare
-/// tool name. Names in no known namespace are returned unchanged.
-pub fn strip_tool_prefix(name: &str) -> &str {
-    ALL_TOOL_PREFIXES
-        .iter()
-        .find_map(|prefix| name.strip_prefix(prefix))
-        .unwrap_or(name)
-}
