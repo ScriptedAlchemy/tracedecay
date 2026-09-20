@@ -20,8 +20,16 @@ fn wall_clock_since_epoch() -> Duration {
 }
 
 /// Returns the current UNIX timestamp in seconds.
+///
+/// Overflow keeps the historical wrapping `as i64` cast. Callers that must
+/// saturate use [`saturating_unix_secs`].
 pub fn current_timestamp() -> i64 {
     wall_clock_since_epoch().as_secs() as i64
+}
+
+/// Unix seconds as `i64`. A pre-epoch clock is `0`; overflow is `i64::MAX`.
+pub fn saturating_unix_secs() -> i64 {
+    i64::try_from(wall_clock_since_epoch().as_secs()).unwrap_or(i64::MAX)
 }
 
 /// Shared saturating wall clock for shard, registry, and fact-runtime stamps.
