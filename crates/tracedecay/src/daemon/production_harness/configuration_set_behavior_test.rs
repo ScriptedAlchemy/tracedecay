@@ -84,7 +84,7 @@ fn boolean_value(value: bool) -> Value {
     json!({"kind": "boolean", "value": value})
 }
 
-fn setting_payload<'a>(answer: &'a McpAnswer) -> &'a Value {
+fn setting_payload(answer: &McpAnswer) -> &Value {
     &answer.payload["outcome"]["value"]["payload"]
 }
 
