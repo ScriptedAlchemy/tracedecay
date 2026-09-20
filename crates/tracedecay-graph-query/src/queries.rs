@@ -28,16 +28,6 @@ const HEALTH_EDGE_KINDS: [RelationEdgeKindV1; 8] = [
     RelationEdgeKindV1::Annotates,
 ];
 
-#[derive(Debug, Clone)]
-pub struct NodeMetrics {
-    pub incoming_edge_count: usize,
-    pub outgoing_edge_count: usize,
-    pub call_count: usize,
-    pub caller_count: usize,
-    pub child_count: usize,
-    pub depth: usize,
-}
-
 #[derive(Debug)]
 pub struct FileAdjacencyScan {
     pub adjacency: HashMap<String, HashSet<String>>,
@@ -287,59 +277,6 @@ impl<'a> GraphQueryManager<'a> {
         Ok(dead)
     }
 
-    #[hotpath::measure(label = "usecases.graph.node_metrics", future = true)]
-    pub async fn get_node_metrics(&self, node_id: &str) -> Result<NodeMetrics> {
-        let occurrence = SymbolOccurrenceId::new(node_id.to_owned()).map_err(|error| {
-            TraceDecayError::Config {
-                message: error.to_string(),
-            }
-        })?;
-        let counts = self
-            .reader
-            .edge_kind_counts(&occurrence, Arc::clone(&self.cancellation))
-            .map_err(|error| {
-                super::map_code_graph_read_runtime_error(map_projection_error(error))
-            })?;
-        let incoming_edge_count =
-            usize::try_from(counts.incoming.values().sum::<u64>()).unwrap_or(usize::MAX);
-        let outgoing_edge_count =
-            usize::try_from(counts.outgoing.values().sum::<u64>()).unwrap_or(usize::MAX);
-        Ok(NodeMetrics {
-            incoming_edge_count,
-            outgoing_edge_count,
-            call_count: usize::try_from(
-                counts
-                    .outgoing
-                    .get(&RelationEdgeKindV1::Calls)
-                    .copied()
-                    .unwrap_or(0),
-            )
-            .unwrap_or(usize::MAX),
-            caller_count: usize::try_from(
-                counts
-                    .incoming
-                    .get(&RelationEdgeKindV1::Calls)
-                    .copied()
-                    .unwrap_or(0),
-            )
-            .unwrap_or(usize::MAX),
-            child_count: usize::try_from(
-                counts
-                    .outgoing
-                    .get(&RelationEdgeKindV1::Contains)
-                    .copied()
-                    .unwrap_or(0),
-            )
-            .unwrap_or(usize::MAX),
-            depth: 0,
-        })
-    }
-
-    #[hotpath::measure(label = "usecases.graph.file_dependencies", future = true)]
-    pub async fn get_file_dependencies(&self, file_path: &str) -> Result<Vec<String>> {
-        self.file_neighbors(file_path, false)
-    }
-
     #[hotpath::measure(label = "usecases.graph.file_dependents", future = true)]
     pub async fn get_file_dependents(&self, file_path: &str) -> Result<Vec<String>> {
         self.file_neighbors(file_path, true)
@@ -576,36 +513,6 @@ impl<'a> GraphQueryManager<'a> {
                 path_prefix,
             ),
         })
-    }
-
-    #[hotpath::measure(label = "usecases.graph.health_file_aggregates", future = true)]
-    pub async fn health_file_aggregates(
-        &self,
-        path_prefix: Option<&str>,
-    ) -> Result<Vec<VerifiedHealthFileAggregateV1>> {
-        let logical_paths = match path_prefix {
-            Some(prefix) => Some(
-                self.reader
-                    .files(MAX_ANALYTICAL_SYMBOLS, Arc::clone(&self.cancellation))
-                    .map_err(|error| {
-                        super::map_code_graph_read_runtime_error(map_projection_error(error))
-                    })?
-                    .into_iter()
-                    .map(|file| file.logical_path)
-                    .filter(|path| path_is_within(path, prefix))
-                    .collect::<HashSet<_>>(),
-            ),
-            None => None,
-        };
-        let (symbols, edges, external_test_markers) =
-            self.health_evidence(logical_paths.as_ref())?;
-        let metadata = health_symbol_metadata(&symbols)?;
-        Ok(fold_health_aggregates(
-            metadata,
-            &edges,
-            external_test_markers,
-            path_prefix,
-        ))
     }
 
     /// Health symbols, the induced edge set, and the test markers only the

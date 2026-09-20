@@ -32,7 +32,7 @@ pub use projection::{
     request_graph_cancellation,
 };
 pub use queries::{
-    FileAdjacencyScan, GraphQueryManager, NodeMetrics, VerifiedHealthFileAggregateV1,
+    FileAdjacencyScan, GraphQueryManager, VerifiedHealthFileAggregateV1,
 };
 #[cfg(any(test, feature = "test-helpers"))]
 pub use verified_query::admitted_verified_graph_query_port;
