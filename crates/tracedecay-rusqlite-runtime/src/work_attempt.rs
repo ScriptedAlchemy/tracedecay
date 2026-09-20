@@ -16,8 +16,8 @@ use tracedecay_domain::{
 
 use crate::exact_sql::ExactSqlValue;
 use crate::work::{
-    WorkSqliteStorage, authority_params_owned, exact_sql_integer, exact_sql_statement,
-    exact_sql_text, registered_work_query,
+    RegisteredWorkQuery, WorkSqliteStorage, authority_params_owned, exact_sql_integer,
+    exact_sql_statement, exact_sql_text, registered_work_query,
 };
 
 mod rooted_evidence;
@@ -76,7 +76,7 @@ pub(crate) fn insert_attempt_in_transaction(
         synthesis: None,
     })
     .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-    if let Some(existing) = load_payload(transaction, authority, attempt.identity())? {
+    if let Some(existing) = load_attempt_payload(transaction, authority, attempt.identity())? {
         return if existing == payload {
             let record: StoredWorkAttemptV1 = serde_json::from_str(&existing)
                 .map_err(|_| WorkAttemptStorageError::Unavailable)?;
@@ -201,24 +201,9 @@ impl WorkAttemptStoragePort for WorkSqliteStorage {
         authority: &WorkAuthority,
         identity: &WorkAttemptIdentityV1,
     ) -> Result<WorkAttemptV1, WorkAttemptStorageError> {
-        let rows = registered_work_query(
-            self.handle(),
-            "SELECT attempt_payload FROM work_attempts_v1
-             WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
-               AND actor_id = ?4 AND policy_digest = ?5
-               AND task_id = ?6 AND run_id = ?7 AND attempt_id = ?8",
-            authority_params_owned(authority)
-                .into_iter()
-                .chain(identity_params(identity))
-                .collect(),
-        )
-        .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-        let payload = rows
-            .rows
-            .first()
-            .and_then(|row| exact_sql_text(&row.values, 0))
+        let payload = load_attempt_payload(self.handle(), authority, identity)?
             .ok_or(WorkAttemptStorageError::NotFoundOrNotAuthorized)?;
-        serde_json::from_str::<StoredWorkAttemptV1>(payload)
+        serde_json::from_str::<StoredWorkAttemptV1>(&payload)
             .map(|record| record.attempt)
             .map_err(|_| WorkAttemptStorageError::Unavailable)
     }
@@ -228,7 +213,7 @@ impl WorkAttemptStoragePort for WorkSqliteStorage {
         authority: &WorkAuthority,
         identity: &WorkAttemptIdentityV1,
     ) -> Result<WorkAttemptAdmissionKind, WorkAttemptStorageError> {
-        let payload = load_payload_from_handle(self.handle(), authority, identity)?
+        let payload = load_attempt_payload(self.handle(), authority, identity)?
             .ok_or(WorkAttemptStorageError::NotFoundOrNotAuthorized)?;
         let record: StoredWorkAttemptV1 =
             serde_json::from_str(&payload).map_err(|_| WorkAttemptStorageError::Unavailable)?;
@@ -256,7 +241,7 @@ impl WorkAttemptStoragePort for WorkSqliteStorage {
                 .handle()
                 .begin_immediate()
                 .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-            let existing = load_payload(&transaction, authority, next.identity())?
+            let existing = load_attempt_payload(&transaction, authority, next.identity())?
                 .ok_or(WorkAttemptStorageError::NotFoundOrNotAuthorized)?;
             let mut record: StoredWorkAttemptV1 = serde_json::from_str(&existing)
                 .map_err(|_| WorkAttemptStorageError::Unavailable)?;
@@ -497,7 +482,7 @@ pub(crate) fn insert_synthesis_in_transaction(
         synthesis: Some(record.clone()),
     })
     .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-    if let Some(existing) = load_payload(transaction, authority, attempt.identity())? {
+    if let Some(existing) = load_attempt_payload(transaction, authority, attempt.identity())? {
         let existing: StoredWorkAttemptV1 =
             serde_json::from_str(&existing).map_err(|_| WorkAttemptStorageError::Unavailable)?;
         return match existing.synthesis {
@@ -571,7 +556,7 @@ impl WorkSynthesisAdmissionStoragePort for WorkSqliteStorage {
         authority: &WorkAuthority,
         identity: &WorkAttemptIdentityV1,
     ) -> Result<WorkSynthesisAdmissionRecordV1, WorkAttemptStorageError> {
-        let payload = load_payload_from_handle(self.handle(), authority, identity)?
+        let payload = load_attempt_payload(self.handle(), authority, identity)?
             .ok_or(WorkAttemptStorageError::NotFoundOrNotAuthorized)?;
         serde_json::from_str::<StoredWorkAttemptV1>(&payload)
             .map_err(|_| WorkAttemptStorageError::Unavailable)?
@@ -663,36 +648,13 @@ impl WorkAttemptEvidenceReadPort for WorkSqliteStorage {
     }
 }
 
-fn load_payload_from_handle(
-    handle: &crate::exact_sql::ExactSqlHandle,
+fn load_attempt_payload(
+    source: &impl RegisteredWorkQuery,
     authority: &WorkAuthority,
     identity: &WorkAttemptIdentityV1,
 ) -> Result<Option<String>, WorkAttemptStorageError> {
     let rows = registered_work_query(
-        handle,
-        "SELECT attempt_payload FROM work_attempts_v1
-         WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
-           AND actor_id = ?4 AND policy_digest = ?5
-           AND task_id = ?6 AND run_id = ?7 AND attempt_id = ?8",
-        authority_params_owned(authority)
-            .into_iter()
-            .chain(identity_params(identity))
-            .collect(),
-    )
-    .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-    Ok(rows
-        .rows
-        .first()
-        .and_then(|row| exact_sql_text(&row.values, 0).map(str::to_owned)))
-}
-
-fn load_payload(
-    transaction: &crate::exact_sql::ExactSqlTransaction,
-    authority: &WorkAuthority,
-    identity: &WorkAttemptIdentityV1,
-) -> Result<Option<String>, WorkAttemptStorageError> {
-    let rows = registered_work_query(
-        transaction,
+        source,
         "SELECT attempt_payload FROM work_attempts_v1
          WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
            AND actor_id = ?4 AND policy_digest = ?5
