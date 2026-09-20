@@ -93,6 +93,8 @@ mod multi_str_replace_behavior_test;
 mod mutate_graph_test;
 mod node_behavior_test;
 #[cfg(feature = "test-transport")]
+mod outline_behavior_test;
+#[cfg(feature = "test-transport")]
 mod port_order_test;
 mod port_status_test;
 #[cfg(feature = "test-transport")]
