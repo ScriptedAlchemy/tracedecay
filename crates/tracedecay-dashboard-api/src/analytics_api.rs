@@ -246,7 +246,7 @@ pub async fn overview(
                     durable_events.as_deref(),
                     Some(&project_id),
                 ),
-                typed_usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()),
+                usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()),
                 typed_diagnostics_summary(&state, durable_events.as_deref()),
             );
             let usage = match usage {
@@ -858,7 +858,7 @@ pub async fn usage(
     hotpath::future!(
         async move {
             let durable_events = durable_analytics_rows_for_state(&state).await;
-            match typed_usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await {
+            match usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await {
                 Ok(payload) if !payload.available => Json(DashboardEnvelopeV1::unavailable(
                     scope_from_state(&state),
                     Some(payload),
@@ -1094,33 +1094,13 @@ pub fn hint_summary_from_events(events: &[AnalyticsEventRecord]) -> AnalyticsHin
 }
 
 pub fn hint_summary_from_counts(counts: &[AnalyticsHintCounts]) -> Value {
-    let mut by_category: BTreeMap<String, HintCounts> = HINT_CATEGORIES
-        .iter()
-        .map(|category| ((*category).to_string(), HintCounts::default()))
-        .collect();
-    for row in counts {
-        by_category.insert(
-            row.category.clone(),
-            HintCounts {
-                emitted: row.emitted,
-                followed: row.followed,
-                ignored: row.ignored,
-                suppressed: row.suppressed,
-            },
-        );
-    }
+    let summary = typed_hint_summary_from_counts(counts);
+    // MCP callers omit `error`. The typed payload keeps it for dashboard
+    // envelopes, including the explicit null when the read succeeded.
     json!({
-        "available": true,
-        "source": "analytics_events",
-        "by_category": by_category.into_iter().map(|(category, counts)| {
-            json!({
-                "category": category,
-                "emitted": counts.emitted,
-                "followed": counts.followed,
-                "ignored": counts.ignored,
-                "suppressed": counts.suppressed,
-            })
-        }).collect::<Vec<_>>(),
+        "available": summary.available,
+        "source": summary.source,
+        "by_category": summary.by_category,
     })
 }
 
@@ -1356,19 +1336,9 @@ fn increment_usage_count(counts: &mut BTreeMap<(String, String), i64>, kind: &st
         .or_default() += 1;
 }
 
-/// The contract form of the usage summary, shared by `GET .../usage` and the
-/// `usage` member of the overview payload.
+/// Shared by `GET .../usage` and the `usage` member of the overview payload.
 ///
-/// Absent `source` / `event_count` stay `None` on the struct so serde writes
-/// them as explicit nulls. The previous JSON literals omitted those keys and
-/// had to round-trip through this type to keep that distinction.
-async fn typed_usage_summary(
-    db: Option<&RegisteredGlobalDb>,
-    durable_events: Option<&[AnalyticsEventRecord]>,
-) -> Result<AnalyticsUsageSummaryV1, String> {
-    usage_summary(db, durable_events).await
-}
-
+/// Absent `source` / `event_count` stay `None` so serde writes explicit nulls.
 async fn usage_summary(
     db: Option<&RegisteredGlobalDb>,
     durable_events: Option<&[AnalyticsEventRecord]>,
