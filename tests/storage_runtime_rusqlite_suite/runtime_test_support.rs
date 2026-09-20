@@ -15,13 +15,13 @@ use tracedecay_rusqlite_runtime::{
     reader::{ExistingReaderLocator, ReaderQueryExecutor},
 };
 use tracedecay_store::{
-    AdmissionConfigV1, CommitSequenceV1, LocatorDigest, RepositoryOperationEnvelopeV1,
-    RepositoryWritePayloadV1, RuntimeBatchCompatibilityV1, RuntimeCancellationIdentityV1,
-    RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeReadCoverageV1, RuntimeReadOutcomeV1,
-    RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestControlV1, RuntimeRequestProbeV1,
-    RuntimeSubmitRequestV1, RuntimeTransactionIdV1, RuntimeTransactionScopeV1, ShardWatermarkV1,
-    StorageRuntimeErrorV1, StoreOperationMetadataV1, StoreRuntimeBindingV1,
-    TransactionalOutboxEntryV1, VerifiedStoreLocatorV1,
+    AdmissionConfigV1, CommitSequenceV1, LocatorDigest, ReaderBudgetV1,
+    RepositoryOperationEnvelopeV1, RepositoryWritePayloadV1, RuntimeBatchCompatibilityV1,
+    RuntimeCancellationIdentityV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeReadCoverageV1,
+    RuntimeReadOutcomeV1, RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestControlV1,
+    RuntimeRequestProbeV1, RuntimeSubmitRequestV1, RuntimeTransactionIdV1,
+    RuntimeTransactionScopeV1, ShardWatermarkV1, StorageRuntimeErrorV1, StoreOperationMetadataV1,
+    StoreRuntimeBindingV1, TransactionalOutboxEntryV1, VerifiedStoreLocatorV1,
 };
 
 pub(crate) struct ReaderRuntimeFixture {
@@ -43,6 +43,38 @@ pub(crate) struct WriterRuntimeFixture {
     pub(crate) effect_id: &'static str,
     pub(crate) ordering_key: &'static str,
     pub(crate) commit_sequences: [u64; 2],
+}
+
+pub(crate) fn seed_acceptance_rows(connection: &Connection, suspend_autocheckpoint: bool) {
+    let autocheckpoint = if suspend_autocheckpoint {
+        "PRAGMA wal_autocheckpoint=0;\n"
+    } else {
+        ""
+    };
+    connection
+        .execute_batch(&format!(
+            "PRAGMA journal_mode=WAL;
+             {autocheckpoint}CREATE TABLE acceptance_rows(value INTEGER NOT NULL);
+             INSERT INTO acceptance_rows(value) VALUES (1);"
+        ))
+        .expect("seed acceptance authority");
+}
+
+pub(crate) fn shard_watermark(binding: &StoreRuntimeBindingV1, sequence: u64) -> ShardWatermarkV1 {
+    ShardWatermarkV1 {
+        shard_id: binding.shard_id.clone(),
+        incarnation: binding.incarnation,
+        authority_epoch: binding.authority_epoch,
+        commit_sequence: CommitSequenceV1(sequence),
+    }
+}
+
+pub(crate) fn acceptance_reader_budget(fixture: &ReaderRuntimeFixture) -> ReaderBudgetV1 {
+    let mut budget = AdmissionConfigV1::default().readers;
+    budget.min_per_hot_shard = fixture.reader_budget.min_per_hot_shard;
+    budget.max_per_hot_shard = fixture.reader_budget.max_per_hot_shard;
+    budget.idle_burst_retire_ms = fixture.reader_budget.idle_burst_retire_ms;
+    budget
 }
 
 pub(crate) fn reader_runtime_fixture() -> ReaderRuntimeFixture {
