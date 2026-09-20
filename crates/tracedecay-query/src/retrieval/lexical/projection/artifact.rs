@@ -21,6 +21,8 @@ mod reader;
 mod row_codec;
 mod schema;
 
+pub(in crate::retrieval::lexical) use postings::pack_byte_ngram;
+
 pub use builder::{
     CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactBuilderV1,
     CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,

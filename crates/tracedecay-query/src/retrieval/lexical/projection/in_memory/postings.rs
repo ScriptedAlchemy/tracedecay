@@ -4,6 +4,8 @@ use std::time::Instant;
 use fst::{IntoStreamer, Set, Streamer, automaton::Levenshtein};
 use roaring::RoaringBitmap;
 
+use super::super::artifact::pack_byte_ngram;
+
 const NGRAM_PAGE_BACKING_BYTES: usize = 1024 * 1024;
 const NGRAM_PAGE_ENTRY_CAPACITY: usize = NGRAM_PAGE_BACKING_BYTES / std::mem::size_of::<u64>();
 const NGRAM_MINIMUM_PAGE_ENTRY_CAPACITY: usize = 1024;
@@ -356,16 +358,6 @@ impl ByteNgramBudget {
             LEXICAL_PROJECTION_NGRAM_MEMORY_BUDGET_EXCEEDED, self.maximum_bytes
         )
     }
-}
-
-fn pack_byte_ngram(bytes: &[u8]) -> u32 {
-    debug_assert!((1..=3).contains(&bytes.len()));
-    bytes
-        .iter()
-        .enumerate()
-        .fold((bytes.len() as u32) << 24, |packed, (index, byte)| {
-            packed | (u32::from(*byte) << (index * 8))
-        })
 }
 
 fn pack_posting(ngram: u32, document: u32) -> u64 {
