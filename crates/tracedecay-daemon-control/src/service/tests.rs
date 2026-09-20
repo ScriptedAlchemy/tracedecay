@@ -693,6 +693,45 @@ fn daemon_reachable_requires_an_initialize_answer() {
 
 #[cfg(unix)]
 #[test]
+fn daemon_socket_connectable_separates_a_slow_daemon_from_no_daemon() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let profile = TempDir::new().expect("profile temp dir");
+
+    let missing = profile.path().join("missing.sock");
+    let missing_guard = EnvVarGuard::set(SOCKET_ENV, &missing);
+    assert!(
+        !super::daemon_socket_connectable(),
+        "a missing socket has no listener to broker through"
+    );
+    drop(missing_guard);
+
+    let stale = profile.path().join("stale.sock");
+    drop(UnixListener::bind(&stale).expect("bind stale socket"));
+    let stale_guard = EnvVarGuard::set(SOCKET_ENV, &stale);
+    assert!(
+        !super::daemon_socket_connectable(),
+        "a socket file whose listener is gone has no listener to broker through"
+    );
+    drop(stale_guard);
+
+    // The cold-start case: a daemon is accepting but has not answered
+    // initialize inside the one-second reachability probe.
+    let silent = profile.path().join("silent.sock");
+    let _listener = UnixListener::bind(&silent).expect("bind silent socket");
+    let silent_guard = EnvVarGuard::set(SOCKET_ENV, &silent);
+    assert!(
+        !super::daemon_reachable(),
+        "the identity proof is still absent while the daemon is starting"
+    );
+    assert!(
+        super::daemon_socket_connectable(),
+        "a daemon that has not answered initialize yet is still a running daemon"
+    );
+    drop(silent_guard);
+}
+
+#[cfg(unix)]
+#[test]
 fn daemon_status_reports_the_initialize_proof_not_only_the_socket() {
     let _env_lock = lock_user_data_dir_test_env();
     let profile = TempDir::new().expect("profile temp dir");

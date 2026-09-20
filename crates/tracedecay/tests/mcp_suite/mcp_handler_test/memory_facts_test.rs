@@ -15,7 +15,7 @@ use super::memory_fact_assertions::assert_fact_list;
 /// the removed direct broad-action handler.
 pub(super) struct FactStoreMcpFixture {
     production: ProductionCompositionFixture,
-    server: Arc<tracedecay::mcp::McpServer>,
+    pub(super) server: Arc<tracedecay::mcp::McpServer>,
 }
 
 async fn fact_store_mcp_fixture() -> FactStoreMcpFixture {
@@ -131,12 +131,18 @@ fn committed_add_result(payload: &Value) -> &Value {
     result
 }
 
-struct FactStoreCrossProjectFixture {
+pub(super) struct FactStoreCrossProjectFixture {
     harness: tracedecay::daemon::ProductionProjectCompositionHarnessV1,
     target_root: std::path::PathBuf,
-    active_server: Arc<tracedecay::mcp::McpServer>,
-    target_server: Arc<tracedecay::mcp::McpServer>,
+    pub(super) active_server: Arc<tracedecay::mcp::McpServer>,
+    pub(super) target_server: Arc<tracedecay::mcp::McpServer>,
     _isolation: TestTempDir,
+}
+
+impl FactStoreCrossProjectFixture {
+    pub(super) async fn shutdown(self) {
+        self.harness.shutdown().await;
+    }
 }
 
 fn initialize_production_fact_project(root: &Path) {
@@ -170,7 +176,7 @@ fn initialize_production_fact_project(root: &Path) {
     assert!(commit.success(), "git commit should succeed");
 }
 
-async fn fact_store_cross_project_fixture() -> FactStoreCrossProjectFixture {
+pub(super) async fn fact_store_cross_project_fixture() -> FactStoreCrossProjectFixture {
     let isolation = test_temp_dir();
     let active_root = isolation.path().join("active");
     let target_root = isolation.path().join("target");

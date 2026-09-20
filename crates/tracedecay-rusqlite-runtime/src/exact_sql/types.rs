@@ -307,6 +307,21 @@ impl fmt::Display for MemoryReleaseNoOpReason {
     }
 }
 
+/// Why the reader lane declined to admit a request, when nothing failed.
+///
+/// A refusal is an answer about this lane, not about the store. Both variants
+/// leave the request servable by another lane, which is what separates them
+/// from [`ExactSqlError::ReaderUnavailable`], where a reader itself failed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExactSqlReaderRefusalV1 {
+    /// Every lease was taken for the whole admission budget. Waiting longer
+    /// can still succeed.
+    Saturated,
+    /// The pool is draining and will admit nothing further. Waiting cannot
+    /// succeed.
+    Draining,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExactSqlError {
     AuthorityMismatch,
@@ -319,6 +334,11 @@ pub enum ExactSqlError {
     QueryLimitExceeded,
     Busy,
     WriterUnavailable,
+    /// The reader lane declined to admit the request. A caller that can reach
+    /// the data another way may do so; nothing has failed.
+    ReaderRefused(ExactSqlReaderRefusalV1),
+    /// A reader failed, or the pool is gone. A caller must not route around
+    /// this, because the answer it would get elsewhere hides a broken reader.
     ReaderUnavailable(String),
     TransactionClosed,
     TransactionExpired,
@@ -355,6 +375,12 @@ impl fmt::Display for ExactSqlError {
             }
             Self::Busy => formatter.write_str("exact SQL channel is busy"),
             Self::WriterUnavailable => formatter.write_str("exact SQL writer is unavailable"),
+            Self::ReaderRefused(ExactSqlReaderRefusalV1::Saturated) => {
+                formatter.write_str("exact SQL reader lane is saturated")
+            }
+            Self::ReaderRefused(ExactSqlReaderRefusalV1::Draining) => {
+                formatter.write_str("exact SQL reader lane is draining")
+            }
             Self::ReaderUnavailable(message) => {
                 write!(formatter, "exact SQL reader is unavailable: {message}")
             }

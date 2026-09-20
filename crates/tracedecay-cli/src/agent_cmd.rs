@@ -1232,7 +1232,6 @@ pub(crate) async fn handle_install_command(
     let mut user_cfg = load_host_lifecycle_user_config()?;
 
     let mut installed_names: Vec<String> = Vec::new();
-    let mut removed_names: Vec<String> = Vec::new();
     // Ids this pass actually (re)installed at the current binary version. The
     // tail uses this to decide whether the pass covered every tracked agent
     // and may disarm the startup silent reinstall.
@@ -1277,25 +1276,24 @@ pub(crate) async fn handle_install_command(
                 message: format!("failed to save user config: {err}"),
             })?;
     } else {
-        let (to_install, to_uninstall) =
-            tracedecay_agent_hosts::agents::select_detected_integrations(
-                &home,
-                &user_cfg.installed_agents,
-            )?;
+        // Nothing to configure is an ordinary first-run state, not a failure:
+        // this is the command a user runs before any agent exists. An explicit
+        // `--agent` that cannot be satisfied still fails, above.
+        let Some(to_install) = tracedecay_agent_hosts::agents::select_detected_integrations(
+            &home,
+            &user_cfg.installed_agents,
+        ) else {
+            eprintln!();
+            eprintln!(
+                "{}",
+                tracedecay_agent_hosts::agents::no_detected_integrations_notice(&home)
+            );
+            if git_hook {
+                install_requested_git_hook()?;
+            }
+            return Ok(());
+        };
 
-        for id in &to_uninstall {
-            let ag = tracedecay_agent_hosts::agents::get_integration(id)?;
-            apply_default_canonical_component_set(
-                id,
-                HostBundleCliOperation::Uninstall,
-                &home,
-                true,
-                false,
-            )?;
-            removed_names.push(ag.name().to_string());
-            user_cfg.installed_agents.retain(|a| a != id);
-            user_cfg.agent_dashboard_enabled.remove(id);
-        }
         for id in &to_install {
             let ag = tracedecay_agent_hosts::agents::get_integration(id)?;
             let context = tracedecay_agent_hosts::agents::InstallContext {
@@ -1330,14 +1328,11 @@ pub(crate) async fn handle_install_command(
     }
 
     eprintln!();
-    if installed_names.is_empty() && removed_names.is_empty() {
+    if installed_names.is_empty() {
         eprintln!("No changes.");
     } else {
         for name in &installed_names {
             eprintln!("\x1b[32m+\x1b[0m {name}");
-        }
-        for name in &removed_names {
-            eprintln!("\x1b[31m-\x1b[0m {name}");
         }
     }
 
