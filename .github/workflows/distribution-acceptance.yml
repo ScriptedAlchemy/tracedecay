@@ -5,7 +5,7 @@
 # rebuilds, nextest, and MCP inspector dogfood prove the unpublished crate
 # graph, not those assets. Beta.40 run 35271070760 spent ~24m of the aarch64
 # ship job on that battery and then failed before MCPB. This workflow runs
-# the battery once a day on one free ubuntu-latest runner.
+# the battery on one free ubuntu-latest runner when someone dispatches it.
 name: Distribution acceptance
 
 # On demand only. Nothing in this repository runs on a timer: a scheduled
