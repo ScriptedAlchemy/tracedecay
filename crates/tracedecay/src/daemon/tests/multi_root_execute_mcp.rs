@@ -6,9 +6,6 @@
 
 #![cfg(unix)]
 
-use std::path::Path;
-use std::process::Command;
-
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_contracts::{
@@ -33,30 +30,20 @@ const SCOPE_SET_ID: &str = "scope-set.mcp-execute-proof";
 const ALPHA_NAME: &str = "alpha_marker";
 const BETA_NAME: &str = "beta_marker";
 
-fn git(root: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .status()
-        .expect("run Git fixture command");
-    assert!(status.success(), "git {args:?}");
-}
-
 fn repository(source: &str) -> TempDir {
     let repository = TempDir::new().expect("repository");
-    git(repository.path(), &["init", "--quiet"]);
-    git(
+    super::git(repository.path(), &["init", "--quiet"]);
+    super::git(
         repository.path(),
         &["config", "user.name", "TraceDecay Test"],
     );
-    git(
+    super::git(
         repository.path(),
         &["config", "user.email", "tracedecay@example.com"],
     );
     std::fs::write(repository.path().join("lib.rs"), source).expect("source");
-    git(repository.path(), &["add", "."]);
-    git(repository.path(), &["commit", "--quiet", "-m", "base"]);
+    super::git(repository.path(), &["add", "."]);
+    super::git(repository.path(), &["commit", "--quiet", "-m", "base"]);
     repository
 }
 

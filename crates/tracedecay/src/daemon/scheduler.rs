@@ -29,10 +29,9 @@ use effect_admission::{
 };
 use host_receipt_review::run_host_receipt_review;
 
-pub(super) fn scheduler_task_log_fields(
+fn scheduler_project_task_fields(
     project_path: &Path,
-    task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
-    outcome: &str,
+    task: AgentTaskKind,
 ) -> Vec<(&'static str, String)> {
     vec![
         ("project", project_path.display().to_string()),
@@ -40,8 +39,17 @@ pub(super) fn scheduler_task_log_fields(
             "task",
             tracedecay_automation_runtime::automation::backend::task_key(task).to_string(),
         ),
-        ("outcome", outcome.to_string()),
     ]
+}
+
+pub(super) fn scheduler_task_log_fields(
+    project_path: &Path,
+    task: AgentTaskKind,
+    outcome: &str,
+) -> Vec<(&'static str, String)> {
+    let mut fields = scheduler_project_task_fields(project_path, task);
+    fields.push(("outcome", outcome.to_string()));
+    fields
 }
 
 fn log_scheduler_task_start(
@@ -56,17 +64,12 @@ fn log_scheduler_task_start(
 
 fn scheduler_task_error_log_fields(
     project_path: &Path,
-    task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
+    task: AgentTaskKind,
     error: &impl std::fmt::Display,
 ) -> Vec<(&'static str, String)> {
-    vec![
-        ("project", project_path.display().to_string()),
-        (
-            "task",
-            tracedecay_automation_runtime::automation::backend::task_key(task).to_string(),
-        ),
-        ("error", error.to_string()),
-    ]
+    let mut fields = scheduler_project_task_fields(project_path, task);
+    fields.push(("error", error.to_string()));
+    fields
 }
 
 fn log_scheduler_task_error(
@@ -85,40 +88,28 @@ fn log_scheduler_automation_replay(
     task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
     terminal: &tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledTerminal,
 ) {
-    log_daemon_event(
-        "scheduler_task_application_replay",
-        &[
-            ("project", project_path.display().to_string()),
-            (
-                "task",
-                tracedecay_automation_runtime::automation::backend::task_key(task).to_owned(),
-            ),
-            (
-                "terminal",
-                if terminal.is_completed() {
-                    "completed"
-                } else if terminal.problem().is_some() {
-                    "problem"
-                } else {
-                    "skipped"
-                }
-                .to_owned(),
-            ),
-        ],
-    );
+    let mut fields = scheduler_project_task_fields(project_path, task);
+    fields.push((
+        "terminal",
+        if terminal.is_completed() {
+            "completed"
+        } else if terminal.problem().is_some() {
+            "problem"
+        } else {
+            "skipped"
+        }
+        .to_owned(),
+    ));
+    log_daemon_event("scheduler_task_application_replay", &fields);
 }
 
 pub(super) fn scheduler_application_problem_log_fields(
     project_path: &Path,
-    task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
+    task: AgentTaskKind,
     problem: &tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledProblem,
 ) -> Vec<(&'static str, String)> {
-    vec![
-        ("project", project_path.display().to_string()),
-        (
-            "task",
-            tracedecay_automation_runtime::automation::backend::task_key(task).to_owned(),
-        ),
+    let mut fields = scheduler_project_task_fields(project_path, task);
+    fields.extend([
         ("request_id", problem.problem.request_id.as_str().to_owned()),
         ("run_id", problem.run_id.as_str().to_owned()),
         (
@@ -130,7 +121,8 @@ pub(super) fn scheduler_application_problem_log_fields(
             "committed_receipt_count",
             problem.committed_receipts.len().to_string(),
         ),
-    ]
+    ]);
+    fields
 }
 
 fn scheduler_run_observer(
