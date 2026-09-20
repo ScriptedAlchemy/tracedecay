@@ -404,7 +404,7 @@ fn load_requested_relations(
         if index % 256 == 0 && batch.cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
-        if let Some(relation) = load_relation_cached(database, namespace, identity, &mut endpoints)?
+        if let Some(relation) = load_relation_by_key(database, namespace, identity, &mut endpoints)?
         {
             loaded.insert(key, relation);
         }
@@ -442,21 +442,12 @@ pub(crate) fn load_relation(
     namespace: &GraphNamespace,
     identity: &GraphRelationId,
 ) -> Result<Option<StoredRelation>, GraphDbError> {
-    load_relation_cached(
+    load_relation_by_key(
         database,
         namespace,
         identity,
         &mut EndpointIdentityCache::default(),
     )
-}
-
-pub(crate) fn load_relation_cached(
-    database: &GrafeoDB,
-    namespace: &GraphNamespace,
-    identity: &GraphRelationId,
-    cache: &mut EndpointIdentityCache,
-) -> Result<Option<StoredRelation>, GraphDbError> {
-    load_relation_by_key(database, namespace, identity, cache)
 }
 
 pub(crate) fn load_relation_by_edge(

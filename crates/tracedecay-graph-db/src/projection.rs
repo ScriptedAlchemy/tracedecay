@@ -33,6 +33,14 @@ impl GraphCancellation for NeverCancelled {
     }
 }
 
+pub(crate) fn check_cancelled(cancellation: &dyn GraphCancellation) -> Result<(), GraphDbError> {
+    if cancellation.is_cancelled() {
+        Err(GraphDbError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
 macro_rules! opaque_id {
     ($name:ident) => {
         #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
