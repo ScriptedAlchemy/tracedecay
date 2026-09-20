@@ -151,6 +151,8 @@ mod work_resume_attempts_test;
 mod work_test;
 #[cfg(feature = "test-transport")]
 mod workflow_activate_definition_test;
+#[cfg(feature = "test-transport")]
+mod workflow_get_definition_test;
 #[cfg(all(feature = "test-transport", unix))]
 mod workflow_register_definition_test;
 
