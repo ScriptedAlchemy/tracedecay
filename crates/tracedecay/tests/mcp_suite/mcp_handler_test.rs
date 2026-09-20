@@ -10,6 +10,7 @@ mod affected_tests_behavior_test;
 mod affected_tests_test;
 #[cfg(feature = "test-transport")]
 mod ast_grep_rewrite_behavior_test;
+mod ast_grep_search_test;
 mod automation_run_list_behavior_test;
 mod automation_runs_test;
 #[cfg(feature = "test-transport")]
@@ -21,6 +22,10 @@ mod branch_search_test;
 #[cfg(feature = "test-transport")]
 mod branch_sensitivity_test;
 mod circular_behavior_test;
+#[cfg(feature = "test-transport")]
+mod complexity_test;
+#[cfg(feature = "test-transport")]
+mod config_behavior_test;
 #[cfg(feature = "test-transport")]
 mod configuration_unset_test;
 #[cfg(feature = "test-transport")]
@@ -38,11 +43,15 @@ mod distribution_test;
 mod edit_test;
 #[cfg(feature = "test-transport")]
 mod expand_query_behavior;
+mod fact_feedback_behavior_test;
+mod fact_store_add_behavior_test;
 #[cfg(feature = "test-transport")]
 mod fact_store_get_test;
+mod fact_store_list_test;
 #[cfg(feature = "test-transport")]
 mod fact_store_related_test;
 mod fact_store_remove_behavior_test;
+mod fact_store_search_behavior_test;
 #[cfg(feature = "test-transport")]
 mod fact_store_update_behavior_test;
 mod feedback_diagnostics_test;
@@ -74,6 +83,8 @@ mod lcm_doctor_test;
 mod lcm_expand_behavior_test;
 #[cfg(feature = "test-transport")]
 mod lcm_grep_behavior_test;
+#[cfg(feature = "test-transport")]
+mod lcm_load_session_behavior;
 mod lcm_test;
 #[cfg(feature = "test-transport")]
 mod memory_contradiction_contract_test;
@@ -104,6 +115,7 @@ mod project_list_test;
 #[cfg(feature = "test-transport")]
 mod project_search_behavior_test;
 mod rank_behavior_test;
+mod redundancy_test;
 #[cfg(all(feature = "test-transport", unix))]
 mod release_placement_test;
 mod remote_status_test;
