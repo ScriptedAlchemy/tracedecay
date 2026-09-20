@@ -181,6 +181,18 @@ pub enum CodeSearchChunkGrainV1 {
     FileWindow,
 }
 
+impl CodeSearchChunkGrainV1 {
+    /// Row-codec grain ordinal. Append new grains; reordering changes sealed
+    /// artifact bytes. Capability emission sorts a filtered copy of this list.
+    pub const ORDER: [Self; 5] = [
+        Self::SymbolSignature,
+        Self::SymbolBody,
+        Self::SymbolMember,
+        Self::FilePreamble,
+        Self::FileWindow,
+    ];
+}
+
 /// Where one chunk lives inside one generation.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -245,6 +257,26 @@ pub enum ExactTechnicalTermKindV1 {
     ToolName,
     ConfigurationKey,
     CommitIdentifier,
+}
+
+impl ExactTechnicalTermKindV1 {
+    /// Lexical row-codec ordinal and the capability manifest's kind set.
+    ///
+    /// The codec stores the index in this array. Append new kinds; reordering
+    /// changes sealed artifact bytes.
+    pub const ORDER: [Self; 11] = [
+        Self::WholeSymbol,
+        Self::QualifiedName,
+        Self::Path,
+        Self::CompilerErrorCode,
+        Self::CompilerErrorText,
+        Self::RuntimeErrorCode,
+        Self::RuntimeErrorText,
+        Self::CliFlag,
+        Self::ToolName,
+        Self::ConfigurationKey,
+        Self::CommitIdentifier,
+    ];
 }
 
 /// One whole exact technical term extracted as evidence. Extraction

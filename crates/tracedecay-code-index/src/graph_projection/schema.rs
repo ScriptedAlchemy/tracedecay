@@ -1,8 +1,8 @@
 //! Durable labels, properties, and identities for the code-graph projection.
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tracedecay_domain::FileOccurrenceId;
+pub(super) use tracedecay_graph_db::graph_stable_identity as stable_identity;
 use tracedecay_graph_db::{
     GraphEntity, GraphEntityId, GraphProperty, GraphPropertyName, GraphRelationId,
 };
@@ -17,14 +17,6 @@ pub(super) const SYMBOL_LABEL: &str = "CodeSymbol";
 pub(super) const FILE_LABEL: &str = "CodeFile";
 pub(super) const IMPORT_LABEL: &str = "CodeImport";
 pub(super) const FILE_IMPORT_EDGE_KIND: &str = "CodeFileContainsImport";
-
-pub(super) fn stable_identity(kind: &str, value: &str) -> String {
-    let mut digest = Sha256::new();
-    digest.update(kind.as_bytes());
-    digest.update([0]);
-    digest.update(value.as_bytes());
-    format!("{kind}:{}", hex::encode(digest.finalize()))
-}
 
 pub(super) fn file_entity_id(
     file: &FileOccurrenceId,

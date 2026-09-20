@@ -42,7 +42,7 @@ pub mod workflow_receipt;
 pub mod workflow_run;
 
 pub use automation::{SESSION_EVIDENCE_BUDGET_EXHAUSTED, SESSION_EVIDENCE_BUDGET_SUPPRESSED};
-pub use canonical_text::{encode_lowercase_hex, sha256_hex_suffix};
+pub use canonical_text::{encode_lowercase_hex, nonnegative_sha256_prefix, sha256_hex_suffix};
 pub use code_intelligence::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChangedCodeChunkSetV1, ChangedCodeChunkV1,
     ChunkLogicalIdentityV1, ChunkerRevision, CodeChunkProjectionReceiptV1, CodeGenerationId,

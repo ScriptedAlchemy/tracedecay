@@ -43,20 +43,9 @@ pub const GENERATION_SEAL_SEPARATOR: &str = "tracedecay.code-generation-seal.v1"
 /// The chunk schema revision pinned by this implementation.
 pub const CHUNK_SCHEMA_REVISION_V1: &str = "code-search-chunk.v1";
 
-/// The exact-term kinds the query chunker emits.
-pub const BASE_EXACT_TERM_KINDS: &[ExactTechnicalTermKindV1] = &[
-    ExactTechnicalTermKindV1::WholeSymbol,
-    ExactTechnicalTermKindV1::QualifiedName,
-    ExactTechnicalTermKindV1::Path,
-    ExactTechnicalTermKindV1::CompilerErrorCode,
-    ExactTechnicalTermKindV1::CompilerErrorText,
-    ExactTechnicalTermKindV1::RuntimeErrorCode,
-    ExactTechnicalTermKindV1::RuntimeErrorText,
-    ExactTechnicalTermKindV1::CliFlag,
-    ExactTechnicalTermKindV1::ToolName,
-    ExactTechnicalTermKindV1::ConfigurationKey,
-    ExactTechnicalTermKindV1::CommitIdentifier,
-];
+/// The exact-term kinds the query chunker emits, in codec ordinal order.
+pub const BASE_EXACT_TERM_KINDS: &[ExactTechnicalTermKindV1] =
+    ExactTechnicalTermKindV1::ORDER.as_slice();
 
 /// The edge-authority classes query tree-sitter extraction declares: edges
 /// derived purely from syntax are `SyntaxExact`; unresolved constructs are
@@ -241,18 +230,13 @@ impl<R: LanguageRegistry> BaseCapabilityEmitter<R> {
             .iter()
             .map(|descriptor| descriptor.descriptor_revision.clone())
             .collect();
-        let mut available_grains = vec![
-            CodeSearchChunkGrainV1::SymbolSignature,
-            CodeSearchChunkGrainV1::SymbolBody,
-            CodeSearchChunkGrainV1::FilePreamble,
-            CodeSearchChunkGrainV1::FileWindow,
-        ];
-        if descriptors
+        let admit_members = descriptors
             .iter()
-            .any(|descriptor| descriptor.stable_member_spans)
-        {
-            available_grains.push(CodeSearchChunkGrainV1::SymbolMember);
-        }
+            .any(|descriptor| descriptor.stable_member_spans);
+        let mut available_grains: Vec<CodeSearchChunkGrainV1> = CodeSearchChunkGrainV1::ORDER
+            .into_iter()
+            .filter(|grain| *grain != CodeSearchChunkGrainV1::SymbolMember || admit_members)
+            .collect();
         available_grains.sort();
         available_grains.dedup();
 

@@ -7,7 +7,7 @@ use super::super::LexicalFieldV1;
 use super::prepared::PreparedCodeLexicalArtifactPageV1;
 use super::{CodeLexicalArtifactErrorV1, checkpoint};
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
-use tracedecay_domain::ExactFieldV1;
+use tracedecay_domain::{ExactFieldV1, nonnegative_sha256_prefix};
 
 /// Revision 10 is the last TEXT-term posting layout. Revision 11 interns
 /// terms, stores integer field codes, drops redundant serving indexes, and
@@ -351,23 +351,24 @@ pub(super) fn exact_field_code_from_encoded(
 /// batch order, so one-page and multi-page commits of the same source would
 /// disagree on `vocabulary` / `term_stats` section receipts.
 pub(super) fn stable_term_id(term: &str) -> i64 {
-    let mut hasher = Sha256::new();
-    hasher.update(b"tracedecay.code-lexical-artifact.term-id.v11\0");
-    hasher.update(term.as_bytes());
-    let digest = hasher.finalize();
-    let mut prefix = [0u8; 8];
-    prefix.copy_from_slice(&digest[..8]);
-    (u64::from_be_bytes(prefix) & i64::MAX as u64) as i64
+    stable_prefixed_id(
+        b"tracedecay.code-lexical-artifact.term-id.v11\0",
+        term.as_bytes(),
+    )
 }
 
 pub(super) fn stable_exact_term_id(term: &[u8]) -> i64 {
+    stable_prefixed_id(
+        b"tracedecay.code-lexical-artifact.exact-term-id.v12\0",
+        term,
+    )
+}
+
+fn stable_prefixed_id(domain: &[u8], payload: &[u8]) -> i64 {
     let mut hasher = Sha256::new();
-    hasher.update(b"tracedecay.code-lexical-artifact.exact-term-id.v12\0");
-    hasher.update(term);
-    let digest = hasher.finalize();
-    let mut prefix = [0u8; 8];
-    prefix.copy_from_slice(&digest[..8]);
-    (u64::from_be_bytes(prefix) & i64::MAX as u64) as i64
+    hasher.update(domain);
+    hasher.update(payload);
+    nonnegative_sha256_prefix(hasher.finalize().as_slice()) as i64
 }
 
 /// Content-addressed `row_dictionary` key over the encoded entry. Pages are
@@ -375,13 +376,10 @@ pub(super) fn stable_exact_term_id(term: &[u8]) -> i64 {
 /// boundaries; a digest of the entry does, and lets a reader verify each
 /// resolved entry against the id its row referenced.
 pub(super) fn stable_row_dictionary_id(entry: &[u8]) -> i64 {
-    let mut hasher = Sha256::new();
-    hasher.update(b"tracedecay.code-lexical-artifact.row-dictionary-id.v14\0");
-    hasher.update(entry);
-    let digest = hasher.finalize();
-    let mut prefix = [0u8; 8];
-    prefix.copy_from_slice(&digest[..8]);
-    (u64::from_be_bytes(prefix) & i64::MAX as u64) as i64
+    stable_prefixed_id(
+        b"tracedecay.code-lexical-artifact.row-dictionary-id.v14\0",
+        entry,
+    )
 }
 
 /// Stage every dictionary entry the batch references under its page ordinal.
