@@ -27,15 +27,16 @@
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
-#[path = "artifact_bench.rs"]
+#[path = "../bench_support.rs"]
 mod artifact_bench;
 
 use artifact_bench::{
     ActiveControl, AdmittedFile, ApplyingProjectionSink, MemoryPublicationStore, SealedDrainBounds,
-    default_corpus_root, drain_pages, identity, millis, peak_rss_bytes, percentile, replicate,
-    sealed_state_digest,
+    default_corpus_root, drain_pages, identity, load_corpus, millis, peak_rss_bytes, percentile,
+    replicate, sealed_state_digest,
 };
 use std::collections::BTreeSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -59,7 +60,8 @@ use tracedecay_domain::{
     SourceNamespace, TemporalModeV1, TreeId, UtcMicros, VectorWatermark,
 };
 use tracedecay_query::retrieval::exact::{
-    CentralExactAdmissionAuthorityV1, ExactLane, ExactLaneRequest, ExactLaneRetriever,
+    CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
+    ExactLaneRetriever,
 };
 use tracedecay_query::retrieval::lexical::{
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,

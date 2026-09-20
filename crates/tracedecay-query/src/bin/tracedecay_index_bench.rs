@@ -49,13 +49,13 @@
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
-#[path = "artifact_bench.rs"]
+#[path = "../bench_support.rs"]
 mod artifact_bench;
 
 use artifact_bench::{
     ActiveControl, AdmittedFile, ApplyingProjectionSink, MemoryPublicationStore, SealedDrainBounds,
-    default_corpus_root, drain_pages, identity, millis, peak_rss_bytes, percentile, replicate,
-    sealed_state_digest,
+    default_corpus_root, drain_pages, identity, load_corpus, millis, peak_rss_bytes, percentile,
+    replicate, sealed_state_digest,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
@@ -70,8 +70,7 @@ use tracedecay_code_index::production::{
     CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexExecutionControlV1,
     CodeIndexProductionConfigV1, CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1,
     CodeIndexRepositoryParseIdentityV1, PhysicalCodeArtifactPoolStatsV1,
-    VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
-    VerifiedSealedLexicalSourceReceiptV1,
+    VerifiedSealedLexicalPageV1, VerifiedSealedLexicalSourceReceiptV1,
 };
 use tracedecay_domain::{
     ChunkerRevision, ComponentRevision, ContentDigest, FileOccurrenceId, FreshnessCompatibilityV1,

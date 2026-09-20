@@ -111,7 +111,7 @@ pub(super) fn query_ngrams(bytes: &[u8]) -> BTreeSet<u32> {
     bytes.windows(width).map(pack_byte_ngram).collect()
 }
 
-pub(super) fn pack_byte_ngram(bytes: &[u8]) -> u32 {
+pub(in crate::retrieval::lexical) fn pack_byte_ngram(bytes: &[u8]) -> u32 {
     debug_assert!((1..=3).contains(&bytes.len()));
     bytes
         .iter()

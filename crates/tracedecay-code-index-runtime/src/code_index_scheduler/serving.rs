@@ -2039,11 +2039,6 @@ impl LatestCompleteCodeIndexV1 {
     pub fn graph_edges(&self) -> &[tracedecay_domain::CanonicalRelationEdgeV1] {
         self.generation.edges()
     }
-
-    #[cfg(test)]
-    pub fn graph_abstentions(&self) -> &[crate::code_index::chunks::CodeIndexEdgeAbstentionV1] {
-        self.generation.edge_abstentions()
-    }
 }
 
 impl LatestCodeTextGenerationV1 {
